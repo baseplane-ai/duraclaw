@@ -19,6 +19,14 @@ class_name = "SessionRegistry"
 tag = "v1"
 new_classes = ["SessionAgent", "SessionRegistry"]
 
+# D1 database for auth
+[[d1_databases]]
+binding = "AUTH_DB"
+database_name = "duraclaw-auth"
+database_id = "placeholder-create-with-wrangler-d1-create"
+
 # Environment variables (set via wrangler secret)
 # CC_GATEWAY_URL     — VPS executor WebSocket URL
 # CC_GATEWAY_SECRET  — Bearer token for VPS auth
+# BETTER_AUTH_SECRET  — Secret for Better Auth session signing
+# BETTER_AUTH_URL     — Base URL for auth (e.g. https://your-domain.com)

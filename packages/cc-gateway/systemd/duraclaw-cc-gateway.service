@@ -1,5 +1,5 @@
 [Unit]
-Description=Baseplane CC Gateway - Claude Code API Gateway
+Description=Duraclaw CC Gateway - Claude Code API Gateway
 After=network.target
 Wants=network.target
 
@@ -7,15 +7,15 @@ Wants=network.target
 Type=simple
 User=ubuntu
 Group=ubuntu
-WorkingDirectory=/data/projects/baseplane-infra
-ExecStart=/usr/local/bin/node --import=tsx packages/cc-gateway/src/server.ts
+WorkingDirectory=/data/projects/duraclaw
+ExecStart=/usr/local/bin/bun run packages/cc-gateway/src/server.ts
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
 
 # Environment
-EnvironmentFile=/data/projects/baseplane-infra/.env
+EnvironmentFile=/data/projects/duraclaw/.env
 Environment=NODE_ENV=production
 Environment=CC_GATEWAY_PORT=9877
 Environment=CLAUDE_CODE_ENABLE_TASKS=true

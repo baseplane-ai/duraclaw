@@ -1,43 +1,37 @@
-import type { IncomingMessage, ServerResponse } from "node:http";
-import { timingSafeEqual } from "node:crypto";
-
-const token = process.env.CC_GATEWAY_API_TOKEN;
+import { timingSafeEqual } from 'node:crypto'
 
 function timingSafeCompare(a: string, b: string): boolean {
-  const bufA = Buffer.from(a);
-  const bufB = Buffer.from(b);
+  const bufA = Buffer.from(a)
+  const bufB = Buffer.from(b)
   if (bufA.length !== bufB.length) {
     // Compare against self to burn constant time, then return false
-    timingSafeEqual(bufA, bufA);
-    return false;
+    timingSafeEqual(bufA, bufA)
+    return false
   }
-  return timingSafeEqual(bufA, bufB);
+  return timingSafeEqual(bufA, bufB)
 }
 
 /**
- * Validates Bearer token from Authorization header.
- * Returns true if authorized, false if response was already sent with 401.
+ * Verify auth token from a Bun Request.
+ * Checks Authorization header (Bearer) and query param `token`.
  * If no CC_GATEWAY_API_TOKEN is configured, all requests pass through.
  */
-export function requireAuth(
-  req: IncomingMessage,
-  res: ServerResponse,
-): boolean {
-  if (!token) return true;
+export function verifyToken(req: Request): boolean {
+  const token = process.env.CC_GATEWAY_API_TOKEN
+  if (!token) return true // no token configured = open
 
-  const auth = req.headers.authorization;
-  if (!auth || !auth.startsWith("Bearer ")) {
-    res.writeHead(401, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "Missing or invalid Authorization header" }));
-    return false;
+  // Check Authorization header
+  const auth = req.headers.get('authorization')
+  if (auth?.startsWith('Bearer ')) {
+    return timingSafeCompare(auth.slice(7), token)
   }
 
-  const provided = auth.slice(7);
-  if (!timingSafeCompare(provided, token)) {
-    res.writeHead(401, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "Invalid API token" }));
-    return false;
+  // Check query param for WS upgrade
+  const url = new URL(req.url)
+  const qToken = url.searchParams.get('token')
+  if (qToken) {
+    return timingSafeCompare(qToken, token)
   }
 
-  return true;
+  return false
 }

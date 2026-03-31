@@ -1,0 +1,438 @@
+import { describe, it, expect, beforeEach, afterEach } from 'bun:test'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import * as os from 'node:os'
+
+function makeTmpDir(): string {
+  const dir = join(os.tmpdir(), `wm-hook-test-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+  mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+/**
+ * Helper: capture stdout output from a handler call
+ */
+async function captureStdout(fn: () => Promise<void>): Promise<string> {
+  let captured = ''
+  const origWrite = process.stdout.write
+  process.stdout.write = (chunk: string | Uint8Array): boolean => {
+    captured += typeof chunk === 'string' ? chunk : new TextDecoder().decode(chunk)
+    return true
+  }
+  try {
+    await fn()
+  } finally {
+    process.stdout.write = origWrite
+  }
+  return captured
+}
+
+/**
+ * Helper: capture stderr output from a function call
+ */
+async function captureStderr(fn: () => Promise<void>): Promise<string> {
+  let captured = ''
+  const origWrite = process.stderr.write
+  process.stderr.write = (chunk: string | Uint8Array): boolean => {
+    captured += typeof chunk === 'string' ? chunk : new TextDecoder().decode(chunk)
+    return true
+  }
+  try {
+    await fn()
+  } finally {
+    process.stderr.write = origWrite
+  }
+  return captured
+}
+
+/** Write a minimal session state.json */
+function writeSessionState(
+  tmpDir: string,
+  sessionId: string,
+  overrides: Record<string, unknown> = {},
+): void {
+  const sessionDir = join(tmpDir, '.claude', 'sessions', sessionId)
+  mkdirSync(sessionDir, { recursive: true })
+  writeFileSync(
+    join(sessionDir, 'state.json'),
+    JSON.stringify({
+      sessionId,
+      sessionType: 'default',
+      currentMode: 'default',
+      completedPhases: [],
+      phases: [],
+      modeHistory: [],
+      modeState: {},
+      beadsCreated: [],
+      editedFiles: [],
+      ...overrides,
+    }),
+  )
+}
+
+/** Parse hook log entries from hooks.log.jsonl */
+function readHookLog(tmpDir: string, sessionId: string): Array<Record<string, unknown>> {
+  const logPath = join(tmpDir, '.claude', 'sessions', sessionId, 'hooks.log.jsonl')
+  if (!existsSync(logPath)) return []
+  return readFileSync(logPath, 'utf-8')
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+}
+
+describe('hook dispatch', () => {
+  let tmpDir: string
+  const origEnv = process.env.CLAUDE_PROJECT_DIR
+
+  beforeEach(() => {
+    tmpDir = makeTmpDir()
+    mkdirSync(join(tmpDir, '.claude', 'sessions'), { recursive: true })
+    mkdirSync(join(tmpDir, '.claude', 'workflows'), { recursive: true })
+    process.env.CLAUDE_PROJECT_DIR = tmpDir
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+    if (origEnv !== undefined) {
+      process.env.CLAUDE_PROJECT_DIR = origEnv
+    } else {
+      delete process.env.CLAUDE_PROJECT_DIR
+    }
+    process.exitCode = undefined
+  })
+
+  it('unknown hook name sets exit code 1', async () => {
+    const { hook } = await import('./hook.js')
+    const stderr = await captureStderr(() => hook(['nonexistent-hook']))
+    expect(process.exitCode).toBe(1)
+    expect(stderr).toContain('Unknown hook')
+  })
+
+  it('no hook name sets exit code 1', async () => {
+    const { hook } = await import('./hook.js')
+    const stderr = await captureStderr(() => hook([]))
+    expect(process.exitCode).toBe(1)
+    expect(stderr).toContain('Usage: kata hook <name>')
+  })
+})
+
+describe('handleModeGate', () => {
+  let tmpDir: string
+  const sessionId = '00000000-0000-0000-0000-000000000001'
+  const origEnv = process.env.CLAUDE_PROJECT_DIR
+
+  beforeEach(() => {
+    tmpDir = makeTmpDir()
+    mkdirSync(join(tmpDir, '.claude', 'sessions'), { recursive: true })
+    mkdirSync(join(tmpDir, '.claude', 'workflows'), { recursive: true })
+    process.env.CLAUDE_PROJECT_DIR = tmpDir
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+    if (origEnv !== undefined) {
+      process.env.CLAUDE_PROJECT_DIR = origEnv
+    } else {
+      delete process.env.CLAUDE_PROJECT_DIR
+    }
+  })
+
+  it('denies Write tool when in default mode', async () => {
+    writeSessionState(tmpDir, sessionId, { currentMode: 'default' })
+    const { handleModeGate } = await import('./hook.js')
+
+    const output = await captureStdout(() =>
+      handleModeGate({ session_id: sessionId, tool_name: 'Write', tool_input: {} }),
+    )
+    const parsed = JSON.parse(output.trim())
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe('deny')
+    expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain('Enter a mode first')
+  })
+
+  it('denies Edit tool when in default mode', async () => {
+    writeSessionState(tmpDir, sessionId, { currentMode: 'default' })
+    const { handleModeGate } = await import('./hook.js')
+
+    const output = await captureStdout(() =>
+      handleModeGate({ session_id: sessionId, tool_name: 'Edit', tool_input: {} }),
+    )
+    const parsed = JSON.parse(output.trim())
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe('deny')
+  })
+
+  it('denies MultiEdit tool when in default mode', async () => {
+    writeSessionState(tmpDir, sessionId, { currentMode: 'default' })
+    const { handleModeGate } = await import('./hook.js')
+
+    const output = await captureStdout(() =>
+      handleModeGate({ session_id: sessionId, tool_name: 'MultiEdit', tool_input: {} }),
+    )
+    const parsed = JSON.parse(output.trim())
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe('deny')
+  })
+
+  it('allows Write tool when mode is active', async () => {
+    writeSessionState(tmpDir, sessionId, { currentMode: 'task', sessionType: 'task' })
+    const { handleModeGate } = await import('./hook.js')
+
+    const output = await captureStdout(() =>
+      handleModeGate({ session_id: sessionId, tool_name: 'Write', tool_input: {} }),
+    )
+    const parsed = JSON.parse(output.trim())
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe('allow')
+  })
+
+  it('allows Read tool even in default mode', async () => {
+    writeSessionState(tmpDir, sessionId, { currentMode: 'default' })
+    const { handleModeGate } = await import('./hook.js')
+
+    const output = await captureStdout(() =>
+      handleModeGate({ session_id: sessionId, tool_name: 'Read', tool_input: {} }),
+    )
+    const parsed = JSON.parse(output.trim())
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe('allow')
+  })
+
+  it('allows Glob/Grep in default mode', async () => {
+    writeSessionState(tmpDir, sessionId, { currentMode: 'default' })
+    const { handleModeGate } = await import('./hook.js')
+
+    const output = await captureStdout(() =>
+      handleModeGate({ session_id: sessionId, tool_name: 'Glob', tool_input: {} }),
+    )
+    const parsed = JSON.parse(output.trim())
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe('allow')
+  })
+
+  it('allows when no session state exists', async () => {
+    const { handleModeGate } = await import('./hook.js')
+
+    const output = await captureStdout(() =>
+      handleModeGate({ session_id: 'nonexistent-session', tool_name: 'Write', tool_input: {} }),
+    )
+    const parsed = JSON.parse(output.trim())
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe('allow')
+  })
+
+  it('injects --session into kata bash commands', async () => {
+    const { handleModeGate } = await import('./hook.js')
+
+    const output = await captureStdout(() =>
+      handleModeGate({
+        session_id: sessionId,
+        tool_name: 'Bash',
+        tool_input: { command: 'kata enter task' },
+      }),
+    )
+    const parsed = JSON.parse(output.trim())
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe('allow')
+    expect(parsed.hookSpecificOutput.updatedInput.command).toContain(`--session=${sessionId}`)
+  })
+
+  it('does not inject --session into non-kata bash commands', async () => {
+    writeSessionState(tmpDir, sessionId, { currentMode: 'task' })
+    const { handleModeGate } = await import('./hook.js')
+
+    const output = await captureStdout(() =>
+      handleModeGate({
+        session_id: sessionId,
+        tool_name: 'Bash',
+        tool_input: { command: 'npm run build' },
+      }),
+    )
+    const parsed = JSON.parse(output.trim())
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe('allow')
+    expect(parsed.hookSpecificOutput.updatedInput).toBeUndefined()
+  })
+
+  it('does not inject --session into kata hook commands', async () => {
+    const { handleModeGate } = await import('./hook.js')
+
+    const output = await captureStdout(() =>
+      handleModeGate({
+        session_id: sessionId,
+        tool_name: 'Bash',
+        tool_input: { command: 'kata hook mode-gate' },
+      }),
+    )
+    const parsed = JSON.parse(output.trim())
+    // kata hook commands should not get session injected (avoid recursion)
+    expect(parsed.hookSpecificOutput.updatedInput).toBeUndefined()
+  })
+
+  it('logs deny decision to hooks.log.jsonl', async () => {
+    writeSessionState(tmpDir, sessionId, { currentMode: 'default' })
+    const { handleModeGate } = await import('./hook.js')
+
+    await captureStdout(() =>
+      handleModeGate({ session_id: sessionId, tool_name: 'Write', tool_input: {} }),
+    )
+
+    const log = readHookLog(tmpDir, sessionId)
+    const denyEntry = log.find((e) => e.hook === 'mode-gate' && e.decision === 'deny')
+    expect(denyEntry).toBeDefined()
+    expect(denyEntry!.tool).toBe('Write')
+  })
+
+  it('logs allow decision to hooks.log.jsonl', async () => {
+    writeSessionState(tmpDir, sessionId, { currentMode: 'task' })
+    const { handleModeGate } = await import('./hook.js')
+
+    await captureStdout(() =>
+      handleModeGate({ session_id: sessionId, tool_name: 'Read', tool_input: {} }),
+    )
+
+    const log = readHookLog(tmpDir, sessionId)
+    const allowEntry = log.find((e) => e.hook === 'mode-gate' && e.decision === 'allow')
+    expect(allowEntry).toBeDefined()
+    expect(allowEntry!.tool).toBe('Read')
+  })
+})
+
+describe('handleTaskEvidence', () => {
+  let tmpDir: string
+  const sessionId = '00000000-0000-0000-0000-000000000002'
+  const origEnv = process.env.CLAUDE_PROJECT_DIR
+
+  beforeEach(() => {
+    tmpDir = makeTmpDir()
+    mkdirSync(join(tmpDir, '.claude', 'sessions'), { recursive: true })
+    mkdirSync(join(tmpDir, '.claude', 'workflows'), { recursive: true })
+    process.env.CLAUDE_PROJECT_DIR = tmpDir
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+    if (origEnv !== undefined) {
+      process.env.CLAUDE_PROJECT_DIR = origEnv
+    } else {
+      delete process.env.CLAUDE_PROJECT_DIR
+    }
+  })
+
+  it('always allows (advisory only)', async () => {
+    const { handleTaskEvidence } = await import('./hook.js')
+
+    const output = await captureStdout(() => handleTaskEvidence({ session_id: sessionId }))
+    const parsed = JSON.parse(output.trim())
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe('allow')
+  })
+
+  it('logs to hooks.log.jsonl', async () => {
+    writeSessionState(tmpDir, sessionId)
+    const { handleTaskEvidence } = await import('./hook.js')
+
+    await captureStdout(() => handleTaskEvidence({ session_id: sessionId }))
+
+    const log = readHookLog(tmpDir, sessionId)
+    const entry = log.find((e) => e.hook === 'task-evidence')
+    expect(entry).toBeDefined()
+    expect(entry!.decision).toBe('allow')
+  })
+})
+
+describe('handleTaskDeps', () => {
+  let tmpDir: string
+  const sessionId = '00000000-0000-0000-0000-000000000003'
+  const origEnv = process.env.CLAUDE_PROJECT_DIR
+
+  beforeEach(() => {
+    tmpDir = makeTmpDir()
+    mkdirSync(join(tmpDir, '.claude', 'sessions'), { recursive: true })
+    mkdirSync(join(tmpDir, '.claude', 'workflows'), { recursive: true })
+    process.env.CLAUDE_PROJECT_DIR = tmpDir
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+    if (origEnv !== undefined) {
+      process.env.CLAUDE_PROJECT_DIR = origEnv
+    } else {
+      delete process.env.CLAUDE_PROJECT_DIR
+    }
+  })
+
+  it('allows when status is not completed', async () => {
+    const { handleTaskDeps } = await import('./hook.js')
+
+    const output = await captureStdout(() =>
+      handleTaskDeps({
+        session_id: sessionId,
+        tool_input: { taskId: '1', status: 'in_progress' },
+      }),
+    )
+    const parsed = JSON.parse(output.trim())
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe('allow')
+  })
+
+  it('allows when no session state exists', async () => {
+    const { handleTaskDeps } = await import('./hook.js')
+
+    const output = await captureStdout(() =>
+      handleTaskDeps({
+        session_id: sessionId,
+        tool_input: { taskId: '1', status: 'completed' },
+      }),
+    )
+    const parsed = JSON.parse(output.trim())
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe('allow')
+  })
+
+  it('allows when no taskId provided', async () => {
+    const { handleTaskDeps } = await import('./hook.js')
+
+    const output = await captureStdout(() =>
+      handleTaskDeps({ session_id: sessionId, tool_input: {} }),
+    )
+    const parsed = JSON.parse(output.trim())
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe('allow')
+  })
+})
+
+describe('logHook', () => {
+  let tmpDir: string
+  const sessionId = '00000000-0000-0000-0000-000000000004'
+  const origEnv = process.env.CLAUDE_PROJECT_DIR
+
+  beforeEach(() => {
+    tmpDir = makeTmpDir()
+    mkdirSync(join(tmpDir, '.claude', 'sessions'), { recursive: true })
+    mkdirSync(join(tmpDir, '.claude', 'workflows'), { recursive: true })
+    process.env.CLAUDE_PROJECT_DIR = tmpDir
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+    if (origEnv !== undefined) {
+      process.env.CLAUDE_PROJECT_DIR = origEnv
+    } else {
+      delete process.env.CLAUDE_PROJECT_DIR
+    }
+  })
+
+  it('creates hooks.log.jsonl with structured entry', async () => {
+    const { logHook } = await import('./hook.js')
+
+    logHook(sessionId, { hook: 'test-hook', decision: 'allow', note: 'test entry' })
+
+    const log = readHookLog(tmpDir, sessionId)
+    expect(log).toHaveLength(1)
+    expect(log[0].hook).toBe('test-hook')
+    expect(log[0].decision).toBe('allow')
+    expect(log[0].note).toBe('test entry')
+    expect(log[0].ts).toBeDefined()
+  })
+
+  it('appends multiple entries', async () => {
+    const { logHook } = await import('./hook.js')
+
+    logHook(sessionId, { hook: 'hook-1', decision: 'allow' })
+    logHook(sessionId, { hook: 'hook-2', decision: 'deny' })
+    logHook(sessionId, { hook: 'hook-3', decision: 'block' })
+
+    const log = readHookLog(tmpDir, sessionId)
+    expect(log).toHaveLength(3)
+    expect(log.map((e) => e.hook)).toEqual(['hook-1', 'hook-2', 'hook-3'])
+  })
+})

@@ -23,17 +23,42 @@ export interface SessionState {
 // ── VPS Executor Messages ───────────────────────────────────────────
 
 export type VpsCommand =
-  | { type: 'execute'; worktree: string; prompt: string; model?: string; system_prompt?: string; allowed_tools?: string[]; max_turns?: number; max_budget_usd?: number }
+  | {
+      type: 'execute'
+      worktree: string
+      prompt: string
+      model?: string
+      system_prompt?: string
+      allowed_tools?: string[]
+      max_turns?: number
+      max_budget_usd?: number
+    }
   | { type: 'resume'; worktree: string; prompt: string; sdk_session_id: string }
   | { type: 'abort'; session_id: string }
   | { type: 'answer'; session_id: string; answers: Record<string, string> }
 
 export type VpsEvent =
-  | { type: 'session.init'; session_id: string; sdk_session_id: string | null; worktree: string; model: string | null; tools: string[] }
+  | {
+      type: 'session.init'
+      session_id: string
+      sdk_session_id: string | null
+      worktree: string
+      model: string | null
+      tools: string[]
+    }
   | { type: 'assistant'; session_id: string; uuid: string; content: unknown[] }
   | { type: 'tool_result'; session_id: string; uuid: string; content: unknown[] }
   | { type: 'user_question'; session_id: string; questions: unknown[] }
-  | { type: 'result'; session_id: string; subtype: string; duration_ms: number; total_cost_usd: number | null; result: string | null; num_turns: number | null; is_error: boolean }
+  | {
+      type: 'result'
+      session_id: string
+      subtype: string
+      duration_ms: number
+      total_cost_usd: number | null
+      result: string | null
+      num_turns: number | null
+      is_error: boolean
+    }
   | { type: 'error'; session_id: string | null; error: string }
 
 // ── Registry ────────────────────────────────────────────────────────
@@ -58,4 +83,7 @@ export interface Env {
   SESSION_REGISTRY: DurableObjectNamespace
   CC_GATEWAY_URL?: string
   CC_GATEWAY_SECRET?: string
+  AUTH_DB: D1Database
+  BETTER_AUTH_SECRET: string
+  BETTER_AUTH_URL?: string
 }

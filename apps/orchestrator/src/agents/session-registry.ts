@@ -33,8 +33,22 @@ export class SessionRegistry extends Agent<Env, RegistryState> {
   // ── Scheduled Callbacks ───────────────────────────────────────
 
   async cleanupStaleLocks() {
-    // TODO: Check if locked worktrees still have running sessions
     console.log('[SessionRegistry] cleanupStaleLocks')
+    const locks = this.state.worktree_locks
+    for (const [worktree, sessionId] of Object.entries(locks)) {
+      try {
+        const stub = this.env.SESSION_AGENT.get(this.env.SESSION_AGENT.idFromString(sessionId))
+        // Call getSessionState via RPC - the Agents SDK supports this
+        const state = await (stub as any).getSessionState()
+        if (state.status !== 'running') {
+          await this.releaseWorktree(worktree)
+          await this.updateSessionStatus(sessionId, state.status)
+        }
+      } catch {
+        // Session DO might not exist anymore - release the lock
+        await this.releaseWorktree(worktree)
+      }
+    }
   }
 
   // ── Worktree Locking ──────────────────────────────────────────
@@ -79,6 +93,7 @@ export class SessionRegistry extends Agent<Env, RegistryState> {
   }
 
   async listActiveSessions(): Promise<SessionSummary[]> {
-    return this.sql<SessionSummary>`SELECT * FROM sessions WHERE status = 'running' ORDER BY created_at DESC`
+    return this
+      .sql<SessionSummary>`SELECT * FROM sessions WHERE status = 'running' ORDER BY created_at DESC`
   }
 }

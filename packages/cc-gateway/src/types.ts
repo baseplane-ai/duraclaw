@@ -1,84 +1,72 @@
-// ── Session ──────────────────────────────────────────────────────────
+// ── VPS Executor Messages ───────────────────────────────────────────
 
-export type SessionStatus = "running" | "completed" | "failed" | "aborted";
+export type VpsCommand =
+  | {
+      type: 'execute'
+      worktree: string
+      prompt: string
+      model?: string
+      system_prompt?: string
+      allowed_tools?: string[]
+      max_turns?: number
+      max_budget_usd?: number
+    }
+  | { type: 'resume'; worktree: string; prompt: string; sdk_session_id: string }
+  | { type: 'abort'; session_id: string }
+  | { type: 'answer'; session_id: string; answers: Record<string, string> }
 
-export interface SessionInfo {
-  id: string;
-  worktree: string;
-  worktree_path: string;
-  branch: string;
-  status: SessionStatus;
-  model: string | null;
-  prompt: string;
-  created_at: string;
-  updated_at: string;
-  duration_ms: number | null;
-  total_cost_usd: number | null;
-  result: string | null;
-  error: string | null;
-  num_turns: number | null;
-  sdk_session_id: string | null;
-}
+export type ExecuteCommand = Extract<VpsCommand, { type: 'execute' }>
+export type ResumeCommand = Extract<VpsCommand, { type: 'resume' }>
+export type AbortCommand = Extract<VpsCommand, { type: 'abort' }>
+export type AnswerCommand = Extract<VpsCommand, { type: 'answer' }>
 
-// ── Gateway State ────────────────────────────────────────────────────
-
-export interface GatewayState {
-  server: {
-    pid: number;
-    started_at: string;
-    port: number;
-    version: string;
-  };
-  sessions: Record<string, SessionInfo>;
-}
+export type VpsEvent =
+  | {
+      type: 'session.init'
+      session_id: string
+      sdk_session_id: string | null
+      worktree: string
+      model: string | null
+      tools: string[]
+    }
+  | { type: 'assistant'; session_id: string; uuid: string; content: unknown[] }
+  | { type: 'tool_result'; session_id: string; uuid: string; content: unknown[] }
+  | { type: 'user_question'; session_id: string; questions: unknown[] }
+  | {
+      type: 'result'
+      session_id: string
+      subtype: string
+      duration_ms: number
+      total_cost_usd: number | null
+      result: string | null
+      num_turns: number | null
+      is_error: boolean
+    }
+  | { type: 'error'; session_id: string | null; error: string }
 
 // ── Worktree ─────────────────────────────────────────────────────────
 
 export interface WorktreeInfo {
-  name: string;
-  path: string;
-  branch: string;
-  active_session: string | null;
+  name: string
+  path: string
+  branch: string
+  active_session: string | null
 }
 
-// ── API Request / Response ───────────────────────────────────────────
+// ── WebSocket Data ──────────────────────────────────────────────────
 
-export interface CreateSessionRequest {
-  worktree: string;
-  prompt: string;
-  model?: string;
-  system_prompt?: string;
-  allowed_tools?: string[];
-  max_turns?: number;
-  max_budget_usd?: number;
+/** Data attached to each WebSocket connection via server.upgrade(). */
+export interface WsData {
+  worktree: string | null
 }
 
-export interface ResumeSessionRequest {
-  prompt: string;
-}
+// ── Session Context ─────────────────────────────────────────────────
 
-export interface AnswerSessionRequest {
-  answers: Record<string, string>;
-}
-
-export interface ErrorResponse {
-  error: string;
-}
-
-export interface HealthResponse {
-  status: "ok";
-  version: string;
-  uptime_ms: number;
-}
-
-export interface StatusResponse {
-  server: GatewayState["server"];
-  sessions: {
-    total: number;
-    running: number;
-    completed: number;
-    failed: number;
-    aborted: number;
-  };
-  worktrees: WorktreeInfo[];
+export interface SessionContext {
+  sessionId: string
+  abortController: AbortController
+  pendingAnswer: {
+    resolve: (answers: Record<string, string>) => void
+    reject: (err: Error) => void
+  } | null
 }

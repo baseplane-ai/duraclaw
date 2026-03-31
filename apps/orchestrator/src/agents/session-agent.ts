@@ -1,5 +1,6 @@
 import { Agent, type Connection } from 'agents'
-import type { Env, SessionState, VpsEvent } from '~/lib/types'
+import type { Env, SessionState, VpsCommand, VpsEvent } from '~/lib/types'
+import { connectToExecutor, parseEvent, sendCommand } from '~/lib/vps-client'
 
 const DEFAULT_STATE: SessionState = {
   id: '',
@@ -31,6 +32,58 @@ const DEFAULT_STATE: SessionState = {
  */
 export class SessionAgent extends Agent<Env, SessionState> {
   initialState = DEFAULT_STATE
+  private vpsWs: WebSocket | null = null
+
+  /** Open a WS to the VPS executor, wire up event handling, and send a command */
+  private connectAndStream(cmd: VpsCommand) {
+    const gatewayUrl = this.env.CC_GATEWAY_URL
+    if (!gatewayUrl) {
+      console.error(`[SessionAgent:${this.ctx.id}] CC_GATEWAY_URL not configured`)
+      this.setState({
+        ...this.state,
+        status: 'failed',
+        error: 'CC_GATEWAY_URL not configured',
+        updated_at: new Date().toISOString(),
+      })
+      return
+    }
+
+    const ws = connectToExecutor(gatewayUrl, this.env.CC_GATEWAY_SECRET)
+
+    ws.addEventListener('message', (event: MessageEvent) => {
+      try {
+        const vpsEvent = parseEvent(event.data)
+        this.handleVpsEvent(vpsEvent)
+      } catch (err) {
+        console.error(`[SessionAgent:${this.ctx.id}] Failed to parse VPS event:`, err)
+      }
+    })
+
+    ws.addEventListener('close', () => {
+      console.log(`[SessionAgent:${this.ctx.id}] VPS WebSocket closed`)
+      this.vpsWs = null
+    })
+
+    ws.addEventListener('error', (event: Event) => {
+      console.error(`[SessionAgent:${this.ctx.id}] VPS WebSocket error:`, event)
+      this.vpsWs = null
+      // Mark session as failed if still running
+      if (this.state.status === 'running') {
+        this.setState({
+          ...this.state,
+          status: 'failed',
+          error: 'VPS executor connection error',
+          updated_at: new Date().toISOString(),
+        })
+      }
+    })
+
+    ws.addEventListener('open', () => {
+      sendCommand(ws, cmd)
+    })
+
+    this.vpsWs = ws
+  }
 
   // ── Lifecycle ───────────────────────────────────────────────────
 
@@ -66,8 +119,25 @@ export class SessionAgent extends Agent<Env, SessionState> {
   // ── Scheduled Callbacks ────────────────────────────────────────
 
   async reconnectVps() {
-    // TODO: Reconnect WebSocket to VPS executor for running session
     console.log(`[SessionAgent:${this.ctx.id}] reconnectVps`)
+    if (this.state.status !== 'running') return
+
+    if (!this.state.sdk_session_id) {
+      this.setState({
+        ...this.state,
+        status: 'failed',
+        error: 'Cannot reconnect: no sdk_session_id',
+        updated_at: new Date().toISOString(),
+      })
+      return
+    }
+
+    this.connectAndStream({
+      type: 'resume',
+      worktree: this.state.worktree,
+      prompt: this.state.prompt,
+      sdk_session_id: this.state.sdk_session_id,
+    })
   }
 
   // ── RPC Methods (callable from any CF worker via binding) ──────
@@ -96,7 +166,16 @@ export class SessionAgent extends Agent<Env, SessionState> {
       updated_at: now,
     })
 
-    // TODO: Open WebSocket to VPS executor and send execute command
+    this.connectAndStream({
+      type: 'execute',
+      worktree: config.worktree,
+      prompt: config.prompt,
+      model: config.model,
+      system_prompt: config.system_prompt,
+      allowed_tools: config.allowed_tools,
+      max_turns: config.max_turns,
+      max_budget_usd: config.max_budget_usd,
+    })
     console.log(`[SessionAgent:${id}] create: ${config.worktree} "${config.prompt}"`)
   }
 
@@ -115,7 +194,12 @@ export class SessionAgent extends Agent<Env, SessionState> {
       updated_at: new Date().toISOString(),
     })
 
-    // TODO: Open WS to VPS executor with resume command
+    this.connectAndStream({
+      type: 'resume',
+      worktree: this.state.worktree,
+      prompt,
+      sdk_session_id: this.state.sdk_session_id as string,
+    })
     console.log(`[SessionAgent:${this.ctx.id}] resume: "${prompt}"`)
   }
 
@@ -130,7 +214,11 @@ export class SessionAgent extends Agent<Env, SessionState> {
       updated_at: new Date().toISOString(),
     })
 
-    // TODO: Send abort to VPS executor
+    if (this.vpsWs) {
+      sendCommand(this.vpsWs, { type: 'abort', session_id: this.state.id })
+      this.vpsWs.close()
+      this.vpsWs = null
+    }
     console.log(`[SessionAgent:${this.ctx.id}] abort`)
   }
 
@@ -145,7 +233,9 @@ export class SessionAgent extends Agent<Env, SessionState> {
       updated_at: new Date().toISOString(),
     })
 
-    // TODO: Forward answers to VPS executor
+    if (this.vpsWs) {
+      sendCommand(this.vpsWs, { type: 'answer', session_id: this.state.id, answers })
+    }
     console.log(`[SessionAgent:${this.ctx.id}] answer:`, answers)
   }
 
