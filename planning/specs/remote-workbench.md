@@ -4,7 +4,7 @@ type: project
 issue_type: feature
 status: approved
 priority: high
-github_issue: null
+github_issue: 1
 created: 2026-03-31
 updated: 2026-03-31
 phases:
@@ -168,7 +168,7 @@ phases:
 
 # Remote Workbench
 
-> GitHub Issue: TBD (no remote configured yet)
+> GitHub Issue: [#1](https://github.com/codevibesmatter/duraclaw/issues/1)
 
 ## Overview
 
