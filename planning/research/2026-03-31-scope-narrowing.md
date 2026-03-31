@@ -116,6 +116,10 @@ The cc-gateway package goes from "SDK executor" to "event bridge + file server":
 - `~/.claude/` home dir stores full session history for all sessions (managed or manual). Gateway can discover and monitor any session on the VPS.
 - Can send messages to any session using its session ID — same mechanism regardless of who started it. No managed/monitored distinction in capabilities, only in who spawned the process. All sessions get full bidirectional chat from the browser.
 
+## Amendment (2026-03-31)
+
+Decision reversed: Duraclaw WILL use the full Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`) on the gateway. The SDK gives us streaming input mode, `canUseTool` interception, `includePartialMessages`, and session management -- all critical for the remote workbench. The "What's Out" list above still applies except for "SDK execution".
+
 ## Next Steps
 
 - Strip cc-gateway down to a status/event reporter
