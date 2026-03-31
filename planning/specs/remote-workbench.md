@@ -2,7 +2,7 @@
 initiative: remote-workbench
 type: project
 issue_type: feature
-status: draft
+status: approved
 priority: high
 github_issue: null
 created: 2026-03-31
