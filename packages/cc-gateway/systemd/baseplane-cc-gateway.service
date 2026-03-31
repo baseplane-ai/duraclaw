@@ -1,0 +1,30 @@
+[Unit]
+Description=Baseplane CC Gateway - Claude Code API Gateway
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/data/projects/baseplane-infra
+ExecStart=/usr/local/bin/node --import=tsx packages/cc-gateway/src/server.ts
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Environment
+EnvironmentFile=/data/projects/baseplane-infra/.env
+Environment=NODE_ENV=production
+Environment=CC_GATEWAY_PORT=9877
+Environment=CLAUDE_CODE_ENABLE_TASKS=true
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=false
+ReadWritePaths=/data/projects /home/ubuntu/.cc-gateway /home/ubuntu/.claude /tmp
+
+[Install]
+WantedBy=multi-user.target

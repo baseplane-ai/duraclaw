@@ -1,0 +1,24 @@
+name = "nrw-orchestrator"
+compatibility_date = "2026-03-31"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+# Durable Object bindings — session-per-DO model
+[[durable_objects.bindings]]
+name = "SESSION_AGENT"
+class_name = "SessionAgent"
+
+[[durable_objects.bindings]]
+name = "SESSION_REGISTRY"
+class_name = "SessionRegistry"
+
+# DO migrations
+[[migrations]]
+tag = "v1"
+new_classes = ["SessionAgent", "SessionRegistry"]
+
+# Environment variables (set via wrangler secret)
+# CC_GATEWAY_URL     — VPS executor WebSocket URL
+# CC_GATEWAY_SECRET  — Bearer token for VPS auth
