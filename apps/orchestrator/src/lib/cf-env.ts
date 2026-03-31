@@ -4,7 +4,7 @@ let _env: Env | null = null
 
 /**
  * Set the Cloudflare Worker environment bindings.
- * Called from the API route/middleware where env is available.
+ * Called from the server entry wrapper before each request.
  */
 export function setCloudflareEnv(env: Env): void {
   _env = env

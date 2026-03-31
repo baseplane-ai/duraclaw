@@ -9,13 +9,17 @@ export const Route = createRootRoute({
       return
     }
 
-    const session = await getSession()
-
-    if (!session) {
+    try {
+      const session = await getSession()
+      if (!session) {
+        throw redirect({ to: '/login' })
+      }
+      return { session }
+    } catch (err) {
+      // If auth check fails (e.g. env not configured), redirect to login
+      if (err && typeof err === 'object' && 'to' in err) throw err // re-throw redirects
       throw redirect({ to: '/login' })
     }
-
-    return { session }
   },
   component: RootComponent,
 })

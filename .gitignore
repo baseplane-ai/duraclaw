@@ -37,3 +37,4 @@ logs/
 # Claude Code session state
 .claude/sessions/
 .claude/.cleanup-ran
+.dev.vars
