@@ -1,10 +1,16 @@
 import type { ServerWebSocket } from 'bun'
 import { buildCleanEnv } from './env.js'
-import type { ExecuteCommand, ResumeCommand, SessionContext, VpsEvent, WsData } from './types.js'
+import type {
+  ExecuteCommand,
+  GatewayEvent,
+  ResumeCommand,
+  SessionContext,
+  WsData,
+} from './types.js'
 import { resolveWorktree } from './worktrees.js'
 
-/** Send a VpsEvent to the WebSocket client. */
-function send(ws: ServerWebSocket<WsData>, event: VpsEvent): void {
+/** Send a GatewayEvent to the WebSocket client. */
+function send(ws: ServerWebSocket<WsData>, event: GatewayEvent): void {
   try {
     ws.send(JSON.stringify(event))
   } catch {
@@ -12,8 +18,64 @@ function send(ws: ServerWebSocket<WsData>, event: VpsEvent): void {
   }
 }
 
+/** Shape expected by the Claude Agent SDK for streaming user messages. */
+interface SDKUserMsg {
+  type: 'user'
+  message: { role: 'user'; content: string }
+  parent_tool_use_id: string | null
+}
+
 /**
- * Execute a session: run the Claude SDK query() and stream VpsEvent messages
+ * Create an async iterable queue for streaming user messages into a running session.
+ * The queue yields messages as they are pushed, and stops when done() is called.
+ */
+function createMessageQueue() {
+  const pending: Array<{ role: 'user'; content: string }> = []
+  let resolve: (() => void) | null = null
+  let finished = false
+
+  const iterable: AsyncIterable<SDKUserMsg> = {
+    [Symbol.asyncIterator]() {
+      return {
+        async next() {
+          while (true) {
+            if (pending.length > 0) {
+              const msg = pending.shift()!
+              const sdkMsg: SDKUserMsg = {
+                type: 'user',
+                message: { role: 'user', content: msg.content },
+                parent_tool_use_id: null,
+              }
+              return { value: sdkMsg, done: false }
+            }
+            if (finished) {
+              return { value: undefined, done: true as const }
+            }
+            await new Promise<void>((r) => {
+              resolve = r
+            })
+            resolve = null
+          }
+        },
+      }
+    },
+  }
+
+  return {
+    iterable,
+    push(msg: { role: 'user'; content: string }) {
+      pending.push(msg)
+      resolve?.()
+    },
+    done() {
+      finished = true
+      resolve?.()
+    },
+  }
+}
+
+/**
+ * Execute a session: run the Claude SDK query() and stream GatewayEvent messages
  * back over the WebSocket connection. Works for both "execute" and "resume" commands.
  */
 export async function executeSession(
@@ -35,6 +97,10 @@ export async function executeSession(
     return
   }
 
+  // Set up message queue for streaming input
+  const queue = createMessageQueue()
+  ctx.messageQueue = queue
+
   try {
     // Dynamic import — the SDK is ESM-only
     const { query } = await import('@anthropic-ai/claude-agent-sdk')
@@ -43,8 +109,8 @@ export async function executeSession(
       abortController: ac,
       cwd: worktreePath,
       env: buildCleanEnv(),
-      permissionMode: 'bypassPermissions',
-      allowDangerouslySkipPermissions: true,
+      permissionMode: 'default',
+      includePartialMessages: true,
       settingSources: ['user', 'project', 'local'],
     }
 
@@ -59,28 +125,74 @@ export async function executeSession(
       options.resume = cmd.sdk_session_id
     }
 
-    // Intercept AskUserQuestion: send WS event and wait for "answer" command
-    options.canUseTool = async (toolName: string, input: Record<string, unknown>) => {
-      if (toolName !== 'AskUserQuestion') {
-        return { behavior: 'allow' }
+    // Intercept tool calls: AskUserQuestion -> relay questions, others -> permission prompt
+    options.canUseTool = async (
+      toolName: string,
+      input: Record<string, unknown>,
+      toolOptions: { id: string },
+    ) => {
+      if (toolName === 'AskUserQuestion') {
+        // Relay questions to the orchestrator, wait for answers
+        send(ws, {
+          type: 'ask_user',
+          session_id: sessionId,
+          tool_call_id: toolOptions.id,
+          questions: (input as any).questions ?? [],
+        })
+
+        const answers = await new Promise<Record<string, string>>((resolve, reject) => {
+          const timeout = setTimeout(
+            () => {
+              ctx.pendingAnswer = null
+              reject(new Error('AskUserQuestion timed out after 5 minutes'))
+            },
+            5 * 60 * 1000,
+          )
+
+          ctx.pendingAnswer = {
+            resolve: (a) => {
+              clearTimeout(timeout)
+              resolve(a)
+            },
+            reject: (e) => {
+              clearTimeout(timeout)
+              reject(e)
+            },
+          }
+
+          ac.signal.addEventListener(
+            'abort',
+            () => {
+              clearTimeout(timeout)
+              ctx.pendingAnswer = null
+              reject(new Error('Session aborted'))
+            },
+            { once: true },
+          )
+        })
+
+        return { behavior: 'allow', updatedInput: { ...input, answers } }
       }
 
+      // Permission prompt for other tools
       send(ws, {
-        type: 'user_question',
+        type: 'permission_request',
         session_id: sessionId,
-        questions: (input as any).questions ?? [],
+        tool_call_id: toolOptions.id,
+        tool_name: toolName,
+        input,
       })
 
-      const answers = await new Promise<Record<string, string>>((resolve, reject) => {
+      const allowed = await new Promise<boolean>((resolve, reject) => {
         const timeout = setTimeout(
           () => {
-            ctx.pendingAnswer = null
-            reject(new Error('AskUserQuestion timed out after 5 minutes'))
+            ctx.pendingPermission = null
+            reject(new Error('Permission prompt timed out after 5 minutes'))
           },
           5 * 60 * 1000,
         )
 
-        ctx.pendingAnswer = {
+        ctx.pendingPermission = {
           resolve: (a) => {
             clearTimeout(timeout)
             resolve(a)
@@ -95,17 +207,54 @@ export async function executeSession(
           'abort',
           () => {
             clearTimeout(timeout)
-            ctx.pendingAnswer = null
+            ctx.pendingPermission = null
             reject(new Error('Session aborted'))
           },
           { once: true },
         )
       })
 
-      return { behavior: 'allow', updatedInput: { ...input, answers } }
+      return allowed
+        ? { behavior: 'allow', updatedInput: input }
+        : { behavior: 'deny', message: 'User denied permission' }
     }
 
-    const iter = query({ prompt: cmd.prompt, options: options as any })
+    // PostToolUse hook: emit file-changed events for Edit/Write tools
+    options.postToolUse = async (
+      toolName: string,
+      input: Record<string, unknown>,
+      _output: unknown,
+    ) => {
+      if (toolName === 'Edit' || toolName === 'Write') {
+        const filePath = input.file_path as string | undefined
+        if (filePath) {
+          send(ws, {
+            type: 'file_changed',
+            session_id: sessionId,
+            path: filePath,
+            tool: toolName,
+            timestamp: new Date().toISOString(),
+          })
+        }
+      }
+    }
+
+    // Build the streaming prompt: initial prompt + async iterable for follow-up messages
+    async function* messageGenerator(): AsyncGenerator<SDKUserMsg> {
+      yield {
+        type: 'user',
+        message: { role: 'user', content: cmd.prompt },
+        parent_tool_use_id: null,
+      }
+      for await (const msg of queue.iterable) {
+        yield msg
+      }
+    }
+
+    const iter = query({
+      prompt: messageGenerator(),
+      options: options as any,
+    })
 
     for await (const message of iter) {
       if (ac.signal.aborted) break
@@ -122,6 +271,32 @@ export async function executeSession(
           worktree: cmd.worktree,
           model,
           tools,
+        })
+      } else if (message.type === 'assistant' && (message as any).partial) {
+        // Partial assistant message — emit incremental content
+        const content = (message as any).message?.content ?? []
+        const blocks = content.map((block: any) => {
+          if (block.type === 'text') {
+            return { type: 'text', id: block.id ?? '', delta: block.text ?? '' }
+          }
+          if (block.type === 'tool_use') {
+            return {
+              type: 'tool_use',
+              id: block.id ?? '',
+              tool_name: block.name,
+              input_delta:
+                typeof block.input === 'string'
+                  ? block.input
+                  : JSON.stringify(block.input ?? ''),
+            }
+          }
+          return { type: block.type, id: block.id ?? '' }
+        })
+
+        send(ws, {
+          type: 'partial_assistant',
+          session_id: sessionId,
+          content: blocks,
         })
       } else if (message.type === 'assistant') {
         send(ws, {
@@ -160,5 +335,9 @@ export async function executeSession(
     if (!ac.signal.aborted) {
       send(ws, { type: 'error', session_id: sessionId, error: errMsg })
     }
+  } finally {
+    // Clean up the message queue
+    queue.done()
+    ctx.messageQueue = null
   }
 }

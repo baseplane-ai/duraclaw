@@ -24,6 +24,16 @@ async function getBranch(dir: string): Promise<string> {
   }
 }
 
+/** Check if a git working tree has uncommitted changes. */
+async function isDirty(dir: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync('git', ['status', '--porcelain'], { cwd: dir })
+    return stdout.trim().length > 0
+  } catch {
+    return false
+  }
+}
+
 /**
  * Discover all worktrees under /data/projects/ matching WORKTREE_PATTERNS.
  * A valid worktree must have a .git directory/file and a package.json.
@@ -49,10 +59,12 @@ export async function discoverWorktrees(
     }
 
     const branch = await getBranch(fullPath)
+    const dirty = await isDirty(fullPath)
     worktrees.push({
       name: entry.name,
       path: fullPath,
       branch,
+      dirty,
       active_session: activeSessions[fullPath] ?? null,
     })
   }
@@ -62,9 +74,13 @@ export async function discoverWorktrees(
 
 /** Resolve a worktree name to its full path, or null. */
 export async function resolveWorktree(name: string): Promise<string | null> {
+  // Validate name against discovered worktrees to prevent path traversal
+  if (name.includes('/') || name.includes('..')) return null
   const fullPath = path.join(PROJECTS_DIR, name)
   try {
     await fs.access(path.join(fullPath, '.git'))
+    // Verify it matches a known prefix
+    if (!WORKTREE_PREFIXES.some((prefix) => name.startsWith(prefix))) return null
     return fullPath
   } catch {
     return null

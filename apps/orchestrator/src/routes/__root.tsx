@@ -1,5 +1,6 @@
 import { createRootRoute, HeadContent, Outlet, redirect, Scripts } from '@tanstack/react-router'
 import { getSession } from '~/lib/auth.functions'
+import '~/styles.css'
 
 export const Route = createRootRoute({
   beforeLoad: async ({ location }) => {

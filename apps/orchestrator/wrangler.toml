@@ -8,16 +8,20 @@ enabled = true
 # Durable Object bindings — session-per-DO model
 [[durable_objects.bindings]]
 name = "SESSION_AGENT"
-class_name = "SessionAgent"
+class_name = "SessionDO"
 
 [[durable_objects.bindings]]
 name = "SESSION_REGISTRY"
-class_name = "SessionRegistry"
+class_name = "WorktreeRegistry"
 
 # DO migrations
 [[migrations]]
 tag = "v1"
 new_classes = ["SessionAgent", "SessionRegistry"]
+
+[[migrations]]
+tag = "v2"
+renamed_classes = [{from = "SessionAgent", to = "SessionDO"}, {from = "SessionRegistry", to = "WorktreeRegistry"}]
 
 # D1 database for auth
 [[d1_databases]]

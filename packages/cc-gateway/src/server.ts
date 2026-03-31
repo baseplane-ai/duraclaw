@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import type { ServerWebSocket } from 'bun'
 import { verifyToken } from './auth.js'
+import { handleFileContents, handleFileTree, handleGitStatus } from './files.js'
 import { executeSession } from './sessions.js'
-import type { SessionContext, VpsCommand, WsData } from './types.js'
-import { discoverWorktrees } from './worktrees.js'
+import type { GatewayCommand, SessionContext, WsData } from './types.js'
+import { discoverWorktrees, resolveWorktree } from './worktrees.js'
 
 const PORT = Number(process.env.CC_GATEWAY_PORT ?? 9877)
 const startedAt = Date.now()
@@ -27,7 +28,7 @@ const server = Bun.serve<WsData>({
   port: PORT,
   hostname: '127.0.0.1',
 
-  fetch(req, server) {
+  async fetch(req, server) {
     const url = new URL(req.url)
     const path = url.pathname
 
@@ -48,6 +49,32 @@ const server = Bun.serve<WsData>({
     // GET /worktrees
     if (req.method === 'GET' && path === '/worktrees') {
       return discoverWorktrees({}).then((worktrees) => json(200, worktrees))
+    }
+
+    // GET /worktrees/:name/files?depth=1&path=/ — directory listing
+    // GET /worktrees/:name/files/*path — file contents
+    const worktreeFilesMatch = path.match(/^\/worktrees\/([^/]+)\/files(?:\/(.+))?$/)
+    if (req.method === 'GET' && worktreeFilesMatch) {
+      const [, name, filePath] = worktreeFilesMatch
+      const worktreePath = await resolveWorktree(name)
+      if (!worktreePath) {
+        return json(404, { error: `Worktree "${name}" not found` })
+      }
+      if (filePath) {
+        return handleFileContents(worktreePath, filePath)
+      }
+      return handleFileTree(worktreePath, url.searchParams)
+    }
+
+    // GET /worktrees/:name/git-status
+    const gitStatusMatch = path.match(/^\/worktrees\/([^/]+)\/git-status$/)
+    if (req.method === 'GET' && gitStatusMatch) {
+      const [, name] = gitStatusMatch
+      const worktreePath = await resolveWorktree(name)
+      if (!worktreePath) {
+        return json(404, { error: `Worktree "${name}" not found` })
+      }
+      return handleGitStatus(worktreePath)
     }
 
     // WebSocket upgrade
@@ -71,7 +98,7 @@ const server = Bun.serve<WsData>({
     },
 
     async message(ws: ServerWebSocket<WsData>, raw: string | Buffer) {
-      let cmd: VpsCommand
+      let cmd: GatewayCommand
       try {
         cmd = JSON.parse(typeof raw === 'string' ? raw : raw.toString('utf-8'))
       } catch {
@@ -80,8 +107,7 @@ const server = Bun.serve<WsData>({
       }
 
       switch (cmd.type) {
-        case 'execute':
-        case 'resume': {
+        case 'execute': {
           // Only one session per WS connection
           const existing = sessions.get(ws)
           if (existing) {
@@ -95,11 +121,13 @@ const server = Bun.serve<WsData>({
             sessionId,
             abortController: ac,
             pendingAnswer: null,
+            pendingPermission: null,
+            messageQueue: null,
           }
           sessions.set(ws, ctx)
 
           // Run session in background — don't await so we can receive
-          // further messages (abort, answer) on this same WS
+          // further messages (abort, answer, stream-input, etc.) on this same WS
           executeSession(ws, cmd, ctx)
             .catch((err) => {
               console.error(`[cc-gateway] Session ${sessionId} error:`, err)
@@ -107,6 +135,39 @@ const server = Bun.serve<WsData>({
             .finally(() => {
               sessions.delete(ws)
             })
+          break
+        }
+
+        case 'stream-input': {
+          const ctx = sessions.get(ws)
+          if (ctx?.messageQueue) {
+            ctx.messageQueue.push(cmd.message)
+          } else {
+            ws.send(
+              JSON.stringify({
+                type: 'error',
+                session_id: ctx?.sessionId ?? null,
+                error: 'No running session to receive messages',
+              }),
+            )
+          }
+          break
+        }
+
+        case 'permission-response': {
+          const ctx = sessions.get(ws)
+          if (ctx?.pendingPermission) {
+            ctx.pendingPermission.resolve(cmd.allowed)
+            ctx.pendingPermission = null
+          } else {
+            ws.send(
+              JSON.stringify({
+                type: 'error',
+                session_id: ctx?.sessionId ?? null,
+                error: 'No pending permission prompt for this session',
+              }),
+            )
+          }
           break
         }
 
@@ -156,6 +217,10 @@ const server = Bun.serve<WsData>({
           ctx.pendingAnswer.reject(new Error('WebSocket closed'))
           ctx.pendingAnswer = null
         }
+        if (ctx.pendingPermission) {
+          ctx.pendingPermission.reject(new Error('WebSocket closed'))
+          ctx.pendingPermission = null
+        }
         sessions.delete(ws)
       }
     },
@@ -187,6 +252,10 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
       if (ctx.pendingAnswer) {
         ctx.pendingAnswer.reject(new Error('Server shutting down'))
         ctx.pendingAnswer = null
+      }
+      if (ctx.pendingPermission) {
+        ctx.pendingPermission.reject(new Error('Server shutting down'))
+        ctx.pendingPermission = null
       }
       try {
         ws.close()
