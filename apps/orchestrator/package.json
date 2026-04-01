@@ -7,7 +7,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "deploy": "wrangler deploy",
+    "deploy": "set -a && . ../../.env && set +a && wrangler deploy",
     "cf-typegen": "wrangler types"
   },
   "dependencies": {

@@ -23,7 +23,8 @@ export const Route = createFileRoute('/api/worktrees')({
         }
 
         try {
-          const gatewayUrl = new URL('/worktrees', env.CC_GATEWAY_URL)
+          const httpBase = env.CC_GATEWAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+          const gatewayUrl = new URL('/worktrees', httpBase)
           const headers: Record<string, string> = {}
           if (env.CC_GATEWAY_SECRET) {
             headers['Authorization'] = `Bearer ${env.CC_GATEWAY_SECRET}`
