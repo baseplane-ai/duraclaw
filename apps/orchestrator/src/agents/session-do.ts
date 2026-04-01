@@ -147,7 +147,15 @@ export class SessionDO extends Agent<Env, SessionState> {
     }
 
     if (url.pathname === '/abort' && request.method === 'POST') {
-      await this.abort()
+      try {
+        await this.abort()
+      } catch {
+        // Force abort even if state check fails (e.g. zombie sessions)
+        this.updateState({ status: 'aborted', pending_question: null, pending_permission: null })
+        this.vpsWs?.close()
+        this.vpsWs = null
+        this.syncStatusToRegistry()
+      }
       return new Response(JSON.stringify({ ok: true }), {
         headers: { 'Content-Type': 'application/json' },
       })
