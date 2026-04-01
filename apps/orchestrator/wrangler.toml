@@ -38,9 +38,6 @@ deleted_classes = ["SessionDO", "WorktreeRegistry"]
 tag = "v4"
 new_sqlite_classes = ["SessionDO", "ProjectRegistry"]
 
-[[migrations]]
-tag = "v5"
-renamed_classes = [{from = "WorktreeRegistry", to = "ProjectRegistry"}]
 
 # D1 database for auth
 [[d1_databases]]

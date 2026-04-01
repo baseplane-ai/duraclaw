@@ -1,4 +1,5 @@
-import { Agent, type Connection } from 'agents'
+import { Agent, type Connection, type ConnectionContext } from 'agents'
+import type { UIMessageChunk } from 'ai'
 import type {
   BrowserCommand,
   GatewayCommand,
@@ -6,8 +7,19 @@ import type {
   ResumeCommand,
   SessionState,
   StoredMessage,
-  UIStreamChunk,
 } from '~/lib/types'
+
+/**
+ * Extended chunk type: AI SDK UIMessageChunk plus custom types
+ * for history replay and file changes that the SDK doesn't cover.
+ */
+type SessionChunk =
+  | UIMessageChunk
+  | { type: 'history'; messages: StoredMessage[] }
+  | { type: 'turn-complete' }
+  | { type: 'file-changed'; path: string; tool: string; timestamp: string }
+
+type ConnTag = { type: 'chat' } | { type: 'agent' }
 import type { Env } from '~/lib/types'
 import { connectToExecutor, parseEvent, sendCommand } from '~/lib/vps-client'
 
@@ -37,7 +49,7 @@ const DEFAULT_STATE: SessionState = {
  * Implements bidirectional relay:
  *   Browser WS <-> SessionDO <-> Gateway WS
  *
- * Translates GatewayEvent to UIStreamChunk for browser clients.
+ * Translates GatewayEvent to AI SDK UIMessageChunk for browser clients.
  */
 export class SessionDO extends Agent<Env, SessionState> {
   initialState = DEFAULT_STATE
@@ -99,14 +111,17 @@ export class SessionDO extends Agent<Env, SessionState> {
     })
   }
 
-  private broadcastToClients(chunk: UIStreamChunk) {
+  private broadcastToClients(chunk: SessionChunk) {
     const data = JSON.stringify(chunk)
-    // Broadcast to all connected browser clients
+    // Broadcast only to chat connections (not agent/PartySocket connections)
     for (const conn of this.getConnections()) {
-      try {
-        conn.send(data)
-      } catch {
-        // Connection already closed
+      const tag = conn.state as ConnTag | undefined
+      if (tag?.type !== 'agent') {
+        try {
+          conn.send(data)
+        } catch {
+          // Connection already closed
+        }
       }
     }
   }
@@ -202,11 +217,19 @@ export class SessionDO extends Agent<Env, SessionState> {
     }
   }
 
-  onConnect(connection: Connection) {
-    // Send full message history on connect
+  onConnect(connection: Connection, ctx: ConnectionContext) {
+    // Tag connection type based on URL path
+    const url = new URL(ctx.request.url)
+    const isAgent = url.pathname.endsWith('/agent')
+    connection.setState({ type: isAgent ? 'agent' : 'chat' } satisfies ConnTag)
+
+    // Agent (PartySocket) connections only need state sync — handled by Agent base class
+    if (isAgent) return
+
+    // Chat connections get full message history replay
     const messages = this.sql<StoredMessage>`SELECT * FROM messages ORDER BY id ASC`
     connection.send(
-      JSON.stringify({ type: 'history', messages } satisfies UIStreamChunk),
+      JSON.stringify({ type: 'history', messages } satisfies SessionChunk),
     )
 
     // Re-emit pending question if any
@@ -217,7 +240,7 @@ export class SessionDO extends Agent<Env, SessionState> {
           toolCallId: 'pending-question',
           toolName: 'AskUserQuestion',
           input: { questions: this.state.pending_question },
-        } satisfies UIStreamChunk),
+        } satisfies SessionChunk),
       )
     }
 
@@ -225,16 +248,19 @@ export class SessionDO extends Agent<Env, SessionState> {
       const perm = this.state.pending_permission
       connection.send(
         JSON.stringify({
-          type: 'tool-input-available',
+          type: 'tool-approval-request',
+          approvalId: perm.tool_call_id,
           toolCallId: perm.tool_call_id,
-          toolName: perm.tool_name,
-          input: perm.input,
-        } satisfies UIStreamChunk),
+        } satisfies SessionChunk),
       )
     }
   }
 
   onMessage(connection: Connection, data: string | ArrayBuffer) {
+    // Agent (PartySocket) connections use RPC — skip raw message handling
+    const tag = connection.state as ConnTag | undefined
+    if (tag?.type === 'agent') return
+
     try {
       const raw = typeof data === 'string' ? data : new TextDecoder().decode(data)
       const cmd = JSON.parse(raw) as BrowserCommand
@@ -398,11 +424,13 @@ export class SessionDO extends Agent<Env, SessionState> {
     switch (event.type) {
       case 'session.init':
         this.updateState({ sdk_session_id: event.sdk_session_id, model: event.model })
+        // Emit start chunk to frame the assistant turn
+        this.broadcastToClients({ type: 'start' })
         break
 
       case 'partial_assistant': {
-        // Translate and broadcast to browser clients
-        const chunks = translateToUIChunks(event)
+        // Translate to AI SDK UIMessageChunk and broadcast
+        const chunks = gatewayEventToChunks(event)
         for (const chunk of chunks) {
           this.broadcastToClients(chunk)
         }
@@ -412,12 +440,14 @@ export class SessionDO extends Agent<Env, SessionState> {
       case 'assistant':
         // Store complete message (not partials)
         this.sql`INSERT INTO messages (role, type, data) VALUES ('assistant', 'assistant', ${JSON.stringify(event)})`
+        // Emit text-end for any open text parts
+        this.broadcastToClients({ type: 'text-end', id: event.uuid })
         this.updateState({})
         break
 
       case 'tool_result':
         this.sql`INSERT INTO messages (role, type, data) VALUES ('tool', 'tool_result', ${JSON.stringify(event)})`
-        // Broadcast tool output
+        // Broadcast tool output (AI SDK format)
         this.broadcastToClients({
           type: 'tool-output-available',
           toolCallId: event.uuid,
@@ -431,6 +461,7 @@ export class SessionDO extends Agent<Env, SessionState> {
           status: 'waiting_input',
           pending_question: event.questions,
         })
+        // Questions go through tool-input-available with AskUserQuestion name
         this.broadcastToClients({
           type: 'tool-input-available',
           toolCallId: event.tool_call_id,
@@ -448,11 +479,17 @@ export class SessionDO extends Agent<Env, SessionState> {
             input: event.input,
           },
         })
+        // Emit tool-input-available so the client sees the tool, then approval request
         this.broadcastToClients({
           type: 'tool-input-available',
           toolCallId: event.tool_call_id,
           toolName: event.tool_name,
           input: event.input,
+        })
+        this.broadcastToClients({
+          type: 'tool-approval-request',
+          approvalId: event.tool_call_id,
+          toolCallId: event.tool_call_id,
         })
         break
 
@@ -477,6 +514,11 @@ export class SessionDO extends Agent<Env, SessionState> {
         })
         this.vpsWs?.close()
         this.vpsWs = null
+        // Emit AI SDK finish chunk + custom turn-complete
+        this.broadcastToClients({
+          type: 'finish',
+          finishReason: event.is_error ? 'error' : 'stop',
+        })
         this.broadcastToClients({ type: 'turn-complete' })
         this.syncStatusToRegistry()
         this.syncResultToRegistry()
@@ -484,22 +526,52 @@ export class SessionDO extends Agent<Env, SessionState> {
 
       case 'error':
         this.updateState({ status: 'failed', error: event.error })
-        this.broadcastToClients({ type: 'finish' })
+        this.broadcastToClients({ type: 'error', errorText: event.error })
+        this.broadcastToClients({ type: 'finish', finishReason: 'error' })
         this.syncStatusToRegistry()
         break
     }
   }
+
+  // ── RPC Methods for Agent State (called from useAgent client) ──
+
+  async submitToolApproval(args: { toolCallId: string; approved: boolean }) {
+    if (!this.vpsWs || this.state.status !== 'waiting_permission') return
+    sendCommand(this.vpsWs, {
+      type: 'permission-response',
+      session_id: this.state.id,
+      tool_call_id: args.toolCallId,
+      allowed: args.approved,
+    })
+    this.updateState({ status: 'running', pending_permission: null })
+    if (!args.approved) {
+      this.broadcastToClients({ type: 'tool-output-denied', toolCallId: args.toolCallId })
+    }
+  }
+
+  async submitAnswers(args: { toolCallId: string; answers: Record<string, string> }) {
+    if (!this.vpsWs || this.state.status !== 'waiting_input') return
+    sendCommand(this.vpsWs, {
+      type: 'answer',
+      session_id: this.state.id,
+      tool_call_id: args.toolCallId,
+      answers: args.answers,
+    })
+    this.updateState({ status: 'running', pending_question: null })
+  }
 }
 
-// ── Protocol Translation ───────────────────────────────────────────
+// ── Protocol Translation (GatewayEvent → AI SDK UIMessageChunk) ──────
 
-function translateToUIChunks(event: GatewayEvent): UIStreamChunk[] {
+function gatewayEventToChunks(event: GatewayEvent): SessionChunk[] {
   if (event.type !== 'partial_assistant') return []
 
-  const chunks: UIStreamChunk[] = []
+  const chunks: SessionChunk[] = []
   for (const block of event.content) {
-    if (block.type === 'text' && block.delta) {
-      chunks.push({ type: 'text-delta', id: block.id, delta: block.delta })
+    if (block.type === 'text') {
+      if (block.delta) {
+        chunks.push({ type: 'text-delta', id: block.id, delta: block.delta })
+      }
     } else if (block.type === 'tool_use') {
       if (block.tool_name) {
         chunks.push({

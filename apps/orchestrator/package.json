@@ -6,6 +6,7 @@
     "dev": "vite dev",
     "build": "vite build",
     "preview": "vite preview",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "deploy": "set -a && . ../../.env && set +a && wrangler deploy",
     "cf-typegen": "wrangler types"
@@ -25,6 +26,8 @@
     "lucide-react": "^1.7.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "tailwind-merge": "^3.5.0",
     "tailwindcss": "^4.2.2"
   },
@@ -37,6 +40,7 @@
     "drizzle-kit": "^0.31.4",
     "typescript": "~5.8.3",
     "vite": "^7.0.0",
+    "vitest": "^4.1.2",
     "wrangler": "^4.12.0"
   }
 }

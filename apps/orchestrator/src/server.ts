@@ -4,7 +4,7 @@ import { ProjectRegistry } from './agents/project-registry'
 import { setCloudflareEnv } from './lib/cf-env'
 import type { Env } from './lib/types'
 
-const WS_ROUTE = /^\/api\/sessions\/([^/]+)\/ws$/
+const WS_ROUTE = /^\/api\/sessions\/([^/]+)\/(ws|agent)$/
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {

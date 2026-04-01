@@ -1,209 +1,81 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useChat } from '@ai-sdk/react'
+import { useAgent } from 'agents/react'
 import { Badge, Button, Card, CardContent, Input, Skeleton, Textarea } from './ui'
-import { cn } from '~/lib/utils'
-import type { SessionState, StoredMessage, UIStreamChunk } from '~/lib/types'
-import { WebSocketChatTransport } from '~/lib/ws-transport'
+import type { SessionState, StoredMessage } from '~/lib/types'
+import type { UIMessage } from 'ai'
+import { WsChatTransport } from '~/lib/ws-chat-transport'
+import { storedToUIMessages } from '~/lib/stored-to-ui-messages'
+import { TextPart } from './message-parts/text-part'
+import { ToolPart } from './message-parts/tool-part'
+import { ReasoningPart } from './message-parts/reasoning-part'
 
-// -- Message Types for Display -----------------------------------------------
+// ── Message Bubble ──────────────────────────────────────────────────
 
-interface DisplayMessage {
-  id: string
-  role: 'user' | 'assistant' | 'tool'
-  content: string
-  toolName?: string
-  toolCallId?: string
-  toolInput?: string
-  toolOutput?: string
-  isStreaming?: boolean
-}
-
-// -- Chat Messages Component -------------------------------------------------
-
-function ChatMessages({
-  messages,
-  streamingText,
-  streamingTools,
+function MessageBubble({
+  message,
+  onToolApprove,
+  onToolDeny,
 }: {
-  messages: DisplayMessage[]
-  streamingText: string
-  streamingTools: Map<string, { name: string; input: string; output?: string }>
+  message: UIMessage
+  onToolApprove: (toolCallId: string) => void
+  onToolDeny: (toolCallId: string) => void
 }) {
-  const scrollRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    const el = scrollRef.current as unknown as { scrollTop: number; scrollHeight: number } | null
-    if (el) {
-      el.scrollTop = el.scrollHeight
-    }
-  }, [messages, streamingText, streamingTools])
-
-  return (
-    <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4">
-      {messages.map((msg) => (
-        <MessageBubble key={msg.id} message={msg} />
-      ))}
-
-      {/* Streaming text */}
-      {streamingText && (
-        <div className="rounded-lg bg-card border border-border p-4">
-          <div className="text-xs font-medium text-muted-foreground mb-2">Assistant</div>
-          <div className="text-sm whitespace-pre-wrap">{streamingText}</div>
-          <span className="inline-block w-2 h-4 bg-foreground animate-pulse ml-0.5" />
-        </div>
-      )}
-
-      {/* Streaming tool calls */}
-      {Array.from(streamingTools.entries()).map(([id, tool]) => (
-        <ToolCallBlock
-          key={id}
-          toolCallId={id}
-          toolName={tool.name}
-          input={tool.input}
-          output={tool.output}
-        />
-      ))}
-    </div>
-  )
-}
-
-function MessageBubble({ message }: { message: DisplayMessage }) {
   if (message.role === 'user') {
     return (
       <div className="flex justify-end">
         <div className="max-w-[80%] rounded-lg bg-primary text-primary-foreground p-3">
-          <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+          {message.parts.map((part, i) => {
+            if (part.type === 'text') return <p key={i} className="text-sm whitespace-pre-wrap">{part.text}</p>
+            return null
+          })}
         </div>
       </div>
-    )
-  }
-
-  if (message.role === 'tool') {
-    return (
-      <ToolCallBlock
-        toolCallId={message.toolCallId ?? ''}
-        toolName={message.toolName ?? 'Tool'}
-        input={message.toolInput ?? ''}
-        output={message.toolOutput}
-      />
     )
   }
 
   return (
     <div className="rounded-lg bg-card border border-border p-4">
       <div className="text-xs font-medium text-muted-foreground mb-2">Assistant</div>
-      <div className="text-sm whitespace-pre-wrap">{message.content}</div>
+      <div className="space-y-3">
+        {message.parts.map((part, i) => {
+          if (part.type === 'text') {
+            return <TextPart key={i} text={part.text} streaming={part.state === 'streaming'} />
+          }
+          if (part.type === 'reasoning') {
+            return <ReasoningPart key={i} text={part.text} streaming={part.state === 'streaming'} />
+          }
+          if ('toolCallId' in part && 'toolName' in part) {
+            const p = part as any
+            return (
+              <ToolPart
+                key={i}
+                toolName={p.toolName}
+                toolCallId={p.toolCallId}
+                state={p.state}
+                input={p.input}
+                output={p.output}
+                errorText={p.errorText}
+                onApprove={onToolApprove}
+                onDeny={onToolDeny}
+              />
+            )
+          }
+          return null
+        })}
+      </div>
     </div>
   )
 }
 
-function ToolCallBlock({
-  toolCallId: _toolCallId,
-  toolName,
-  input,
-  output,
-}: {
-  toolCallId: string
-  toolName: string
-  input: string
-  output?: string
-}) {
-  const [expanded, setExpanded] = useState(false)
+// ── Question Prompt ─────────────────────────────────────────────────
 
-  return (
-    <div className="rounded-lg border border-border overflow-hidden">
-      <button
-        type="button"
-        onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium bg-muted/50 hover:bg-muted transition-colors"
-      >
-        <span className={cn('transition-transform', expanded && 'rotate-90')}>
-          &#9654;
-        </span>
-        <Badge variant="outline" className="text-xs">
-          {toolName}
-        </Badge>
-        {output ? (
-          <span className="text-success">completed</span>
-        ) : (
-          <span className="text-warning animate-pulse">running...</span>
-        )}
-      </button>
-      {expanded && (
-        <div className="p-3 space-y-2">
-          {input && (
-            <div>
-              <div className="text-xs font-medium text-muted-foreground mb-1">Input</div>
-              <pre className="text-xs bg-muted/30 rounded p-2 overflow-x-auto max-h-40 overflow-y-auto">
-                {input}
-              </pre>
-            </div>
-          )}
-          {output && (
-            <div>
-              <div className="text-xs font-medium text-muted-foreground mb-1">Output</div>
-              <pre className="text-xs bg-muted/30 rounded p-2 overflow-x-auto max-h-40 overflow-y-auto">
-                {typeof output === 'string' ? output : JSON.stringify(output, null, 2)}
-              </pre>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// -- Permission/Question UI --------------------------------------------------
-
-function PermissionPrompt({
-  toolCallId,
-  toolName,
-  input,
-  onRespond,
-}: {
-  toolCallId: string
-  toolName: string
-  input: Record<string, unknown>
-  onRespond: (toolCallId: string, approved: boolean) => void
-}) {
-  return (
-    <Card className="border-warning/50">
-      <CardContent className="p-4">
-        <div className="flex items-center gap-2 mb-3">
-          <Badge variant="warning">Permission Required</Badge>
-          <span className="text-sm font-medium">{toolName}</span>
-        </div>
-        <pre className="text-xs bg-muted/30 rounded p-2 mb-3 overflow-x-auto">
-          {JSON.stringify(input, null, 2)}
-        </pre>
-        <div className="flex gap-2">
-          <Button
-            size="sm"
-            onClick={() => onRespond(toolCallId, true)}
-            className="bg-success hover:bg-success/90 text-white"
-          >
-            Allow
-          </Button>
-          <Button
-            size="sm"
-            variant="destructive"
-            onClick={() => onRespond(toolCallId, false)}
-          >
-            Deny
-          </Button>
-        </div>
-      </CardContent>
-    </Card>
-  )
-}
-
-function AskUserPrompt({
-  toolCallId,
+function QuestionPrompt({
   questions,
   onSubmit,
 }: {
-  toolCallId: string
   questions: Array<{ id: string; text: string }>
-  onSubmit: (toolCallId: string, answers: Record<string, string>) => void
+  onSubmit: (answers: Record<string, string>) => void
 }) {
   const [answers, setAnswers] = useState<Record<string, string>>({})
 
@@ -230,11 +102,7 @@ function AskUserPrompt({
             </div>
           ))}
         </div>
-        <Button
-          size="sm"
-          className="mt-3"
-          onClick={() => onSubmit(toolCallId, answers)}
-        >
+        <Button size="sm" className="mt-3" onClick={() => onSubmit(answers)}>
           Submit Answers
         </Button>
       </CardContent>
@@ -242,7 +110,7 @@ function AskUserPrompt({
   )
 }
 
-// -- Prompt Input ------------------------------------------------------------
+// ── Prompt Input ────────────────────────────────────────────────────
 
 function PromptInput({
   onSend,
@@ -297,7 +165,7 @@ function PromptInput({
   )
 }
 
-// -- Session Header ----------------------------------------------------------
+// ── Session Header ──────────────────────────────────────────────────
 
 function SessionHeader({
   session,
@@ -385,233 +253,65 @@ function formatDuration(ms: number): string {
   return `${mins}m ${remainSecs}s`
 }
 
-// -- Main Chat View ----------------------------------------------------------
+// ── Main Chat View ──────────────────────────────────────────────────
 
 export function ChatView({ sessionId }: { sessionId: string }) {
+  // Connection 1: Real-time state sync via PartySocket
   const [session, setSession] = useState<SessionState | null>(null)
-  const [messages, setMessages] = useState<DisplayMessage[]>([])
-  const [streamingText, setStreamingText] = useState('')
-  const [streamingTools, setStreamingTools] = useState<
-    Map<string, { name: string; input: string; output?: string }>
-  >(new Map())
-  const [pendingPermission, setPendingPermission] = useState<{
-    toolCallId: string
-    toolName: string
-    input: Record<string, unknown>
-  } | null>(null)
-  const [pendingQuestion, setPendingQuestion] = useState<{
-    toolCallId: string
-    questions: Array<{ id: string; text: string }>
-  } | null>(null)
-  const [connectionState, setConnectionState] = useState<
-    'connecting' | 'connected' | 'disconnected'
-  >('disconnected')
-  const transportRef = useRef<WebSocketChatTransport | null>(null)
+  const agent = useAgent<SessionState>({
+    agent: 'session-do',
+    name: sessionId,
+    basePath: `/api/sessions/${sessionId}/agent`,
+    onStateUpdate: (state) => setSession(state),
+  })
 
-  // Load session state
+  // Connection 2: Chat message streaming via AI SDK
+  const transport = useMemo(() => new WsChatTransport(sessionId), [sessionId])
+  const {
+    messages,
+    sendMessage,
+    status: chatStatus,
+    setMessages,
+    addToolApprovalResponse,
+  } = useChat({
+    id: sessionId,
+    transport,
+  })
+
+  // Load stored message history on mount
   useEffect(() => {
-    fetch(`/api/sessions/${sessionId}`)
+    fetch(`/api/sessions/${sessionId}/messages`)
       .then((r) => r.json())
-      .then((data: unknown) =>
-        setSession((data as { session: SessionState }).session),
-      )
-      .catch(() => {})
-
-    // Poll session state
-    const interval = setInterval(() => {
-      fetch(`/api/sessions/${sessionId}`)
-        .then((r) => r.json())
-        .then((data: unknown) =>
-          setSession((data as { session: SessionState }).session),
-        )
-        .catch(() => {})
-    }, 3000)
-    return () => clearInterval(interval)
-  }, [sessionId])
-
-  // Connect WebSocket transport
-  useEffect(() => {
-    const transport = new WebSocketChatTransport(sessionId)
-    transportRef.current = transport
-
-    transport.onStateChange(setConnectionState)
-
-    transport.onChunk((chunk: UIStreamChunk) => {
-      switch (chunk.type) {
-        case 'history': {
-          // Load message history
-          const msgs: DisplayMessage[] = (chunk.messages ?? []).map(
-            (m: StoredMessage, i: number) => {
-              const data = JSON.parse(m.data)
-              if (m.role === 'user') {
-                return {
-                  id: `hist-${i}`,
-                  role: 'user' as const,
-                  content: (data as { content?: string }).content ?? '',
-                }
-              }
-              if (m.type === 'tool_result') {
-                return {
-                  id: `hist-${i}`,
-                  role: 'tool' as const,
-                  content: '',
-                  toolCallId: (data as { uuid?: string }).uuid,
-                  toolOutput: JSON.stringify(
-                    (data as { content?: unknown }).content,
-                    null,
-                    2,
-                  ),
-                }
-              }
-              // assistant
-              const blocks = (data as { content?: unknown[] }).content ?? []
-              const textContent = blocks
-                .filter(
-                  (b: unknown) =>
-                    (b as { type: string }).type === 'text',
-                )
-                .map((b: unknown) => (b as { text: string }).text)
-                .join('\n')
-              return {
-                id: `hist-${i}`,
-                role: 'assistant' as const,
-                content: textContent,
-              }
-            },
-          )
-          setMessages(msgs)
-          break
+      .then((data: unknown) => {
+        const stored = (data as { messages?: StoredMessage[] }).messages ?? []
+        const uiMessages = storedToUIMessages(stored)
+        if (uiMessages.length > 0) {
+          setMessages(uiMessages)
         }
+      })
+      .catch(() => {})
+  }, [sessionId, setMessages])
 
-        case 'text-delta':
-          setStreamingText((prev) => prev + chunk.delta)
-          break
+  // Tool approval handler — goes through both useChat (local) and agent RPC (server)
+  const handleToolApproval = useCallback(
+    (toolCallId: string, approved: boolean) => {
+      // Update local UI state (AI SDK uses 'id' for the approval ID)
+      addToolApprovalResponse({ id: toolCallId, approved })
+      // Send to server via agent RPC
+      agent.call('submitToolApproval', [{ toolCallId, approved }])
+    },
+    [addToolApprovalResponse, agent],
+  )
 
-        case 'text-start':
-          setStreamingText('')
-          break
-
-        case 'text-end':
-          // Finalize streaming text into a message
-          setStreamingText((prev) => {
-            if (prev) {
-              setMessages((msgs) => [
-                ...msgs,
-                {
-                  id: `msg-${Date.now()}`,
-                  role: 'assistant',
-                  content: prev,
-                },
-              ])
-            }
-            return ''
-          })
-          break
-
-        case 'tool-input-start':
-          setStreamingTools((prev) => {
-            const next = new Map(prev)
-            next.set(chunk.toolCallId, { name: chunk.toolName, input: '' })
-            return next
-          })
-          break
-
-        case 'tool-input-delta':
-          setStreamingTools((prev) => {
-            const next = new Map(prev)
-            const tool = next.get(chunk.toolCallId)
-            if (tool) {
-              next.set(chunk.toolCallId, {
-                ...tool,
-                input: tool.input + chunk.inputTextDelta,
-              })
-            }
-            return next
-          })
-          break
-
-        case 'tool-input-available':
-          if (chunk.toolName === 'AskUserQuestion') {
-            setPendingQuestion({
-              toolCallId: chunk.toolCallId,
-              questions: (
-                chunk.input as {
-                  questions?: Array<{ id: string; text: string }>
-                }
-              ).questions ?? [],
-            })
-          } else {
-            setPendingPermission({
-              toolCallId: chunk.toolCallId,
-              toolName: chunk.toolName,
-              input: chunk.input,
-            })
-          }
-          break
-
-        case 'tool-output-available':
-          setStreamingTools((prev) => {
-            const next = new Map(prev)
-            const tool = next.get(chunk.toolCallId)
-            if (tool) {
-              setMessages((msgs) => [
-                ...msgs,
-                {
-                  id: `tool-${chunk.toolCallId}`,
-                  role: 'tool',
-                  content: '',
-                  toolCallId: chunk.toolCallId,
-                  toolName: tool.name,
-                  toolInput: tool.input,
-                  toolOutput:
-                    typeof chunk.output === 'string'
-                      ? chunk.output
-                      : JSON.stringify(chunk.output, null, 2),
-                },
-              ])
-              next.delete(chunk.toolCallId)
-            }
-            return next
-          })
-          break
-
-        case 'file-changed':
-          // Could show notification - for now just log
-          break
-
-        case 'finish':
-          setStreamingText('')
-          setStreamingTools(new Map())
-          break
-
-        case 'turn-complete':
-          setStreamingText('')
-          setStreamingTools(new Map())
-          // Session state will update via polling (3s interval)
-          break
-      }
-    })
-
-    transport.connect()
-
-    return () => {
-      transport.disconnect()
-      transportRef.current = null
-    }
-  }, [sessionId])
-
-  const handleSendMessage = useCallback((content: string) => {
-    // Add user message optimistically
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: `user-${Date.now()}`,
-        role: 'user',
-        content,
-      },
-    ])
-    transportRef.current?.sendMessage(content)
-  }, [])
+  // Question answer handler — via agent RPC
+  const handleQuestionAnswer = useCallback(
+    (answers: Record<string, string>) => {
+      if (!session?.pending_question) return
+      // The toolCallId for pending questions is stored in state
+      agent.call('submitAnswers', [{ toolCallId: 'pending-question', answers }])
+    },
+    [agent, session?.pending_question],
+  )
 
   const handleAbort = useCallback(() => {
     if ((globalThis as unknown as { confirm: (msg: string) => boolean }).confirm('Are you sure you want to abort this session?')) {
@@ -621,66 +321,44 @@ export function ChatView({ sessionId }: { sessionId: string }) {
     }
   }, [sessionId])
 
-  const handlePermissionResponse = useCallback(
-    (toolCallId: string, approved: boolean) => {
-      transportRef.current?.sendToolApproval(toolCallId, approved)
-      setPendingPermission(null)
-    },
-    [],
-  )
-
-  const handleQuestionAnswer = useCallback(
-    (toolCallId: string, answers: Record<string, string>) => {
-      transportRef.current?.sendToolApproval(toolCallId, true, answers)
-      setPendingQuestion(null)
-    },
-    [],
-  )
-
   const isActive = session
     ? ['running', 'waiting_input', 'idle'].includes(session.status)
     : false
+
+  const isStreaming = chatStatus === 'streaming' || chatStatus === 'submitted'
 
   return (
     <div className="flex h-screen flex-col">
       <SessionHeader session={session} onAbort={handleAbort} />
 
-      {/* Connection status */}
-      {connectionState === 'disconnected' && (
-        <div className="bg-destructive/10 border-b border-destructive/20 px-4 py-2 text-xs text-destructive">
-          Disconnected from session. Attempting to reconnect...
-        </div>
-      )}
-
-      <ChatMessages
-        messages={messages}
-        streamingText={streamingText}
-        streamingTools={streamingTools}
-      />
-
-      {/* Permission / Question prompts */}
-      {pendingPermission && (
-        <div className="px-4 pb-2">
-          <PermissionPrompt
-            toolCallId={pendingPermission.toolCallId}
-            toolName={pendingPermission.toolName}
-            input={pendingPermission.input}
-            onRespond={handlePermissionResponse}
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        {messages.map((msg) => (
+          <MessageBubble
+            key={msg.id}
+            message={msg}
+            onToolApprove={(id) => handleToolApproval(id, true)}
+            onToolDeny={(id) => handleToolApproval(id, false)}
           />
-        </div>
-      )}
+        ))}
+      </div>
 
-      {pendingQuestion && (
+      {/* Pending question from agent state */}
+      {session?.pending_question && session.status === 'waiting_input' && (
         <div className="px-4 pb-2">
-          <AskUserPrompt
-            toolCallId={pendingQuestion.toolCallId}
-            questions={pendingQuestion.questions}
+          <QuestionPrompt
+            questions={
+              session.pending_question as Array<{ id: string; text: string }>
+            }
             onSubmit={handleQuestionAnswer}
           />
         </div>
       )}
 
-      <PromptInput onSend={handleSendMessage} disabled={!isActive} />
+      <PromptInput
+        onSend={(text) => sendMessage({ text })}
+        disabled={!isActive || isStreaming}
+      />
     </div>
   )
 }
