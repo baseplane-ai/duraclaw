@@ -108,6 +108,7 @@ const server = Bun.serve<WsData>({
       }
 
       switch (cmd.type) {
+        case 'resume':
         case 'execute': {
           // Only one session per WS connection
           const existing = sessions.get(ws)
