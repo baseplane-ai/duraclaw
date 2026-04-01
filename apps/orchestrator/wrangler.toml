@@ -24,6 +24,14 @@ new_classes = ["SessionAgent", "SessionRegistry"]
 tag = "v2"
 renamed_classes = [{from = "SessionAgent", to = "SessionDO"}, {from = "SessionRegistry", to = "WorktreeRegistry"}]
 
+[[migrations]]
+tag = "v3"
+deleted_classes = ["SessionDO", "WorktreeRegistry"]
+
+[[migrations]]
+tag = "v4"
+new_sqlite_classes = ["SessionDO", "WorktreeRegistry"]
+
 # D1 database for auth
 [[d1_databases]]
 binding = "AUTH_DB"
