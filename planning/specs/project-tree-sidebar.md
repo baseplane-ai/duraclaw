@@ -4,7 +4,7 @@ type: project
 issue_type: feature
 status: approved
 priority: high
-github_issue: null
+github_issue: 3
 created: 2026-04-01
 updated: 2026-04-01
 phases:
@@ -77,7 +77,7 @@ phases:
 
 # Project Tree Sidebar with SDK Summaries
 
-> GitHub Issue: TBD
+> GitHub Issue: [#3](https://github.com/codevibesmatter/duraclaw/issues/3)
 
 ## Overview
 
