@@ -19,6 +19,8 @@ EnvironmentFile=/data/projects/duraclaw/.env
 Environment=NODE_ENV=production
 Environment=CC_GATEWAY_PORT=9877
 Environment=CLAUDE_CODE_ENABLE_TASKS=true
+Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/home/ubuntu
 
 # Security hardening
 NoNewPrivileges=true

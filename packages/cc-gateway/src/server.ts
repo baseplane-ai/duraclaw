@@ -98,6 +98,7 @@ const server = Bun.serve<WsData>({
     },
 
     async message(ws: ServerWebSocket<WsData>, raw: string | Buffer) {
+      console.log(`[cc-gateway] WS message received: ${String(raw).substring(0, 100)}`)
       let cmd: GatewayCommand
       try {
         cmd = JSON.parse(typeof raw === 'string' ? raw : raw.toString('utf-8'))
@@ -128,7 +129,11 @@ const server = Bun.serve<WsData>({
 
           // Run session in background — don't await so we can receive
           // further messages (abort, answer, stream-input, etc.) on this same WS
+          console.log(`[cc-gateway] Starting session ${sessionId} for worktree=${cmd.worktree}`)
           executeSession(ws, cmd, ctx)
+            .then(() => {
+              console.log(`[cc-gateway] Session ${sessionId} completed`)
+            })
             .catch((err) => {
               console.error(`[cc-gateway] Session ${sessionId} error:`, err)
             })

@@ -85,9 +85,11 @@ export async function executeSession(
 ): Promise<void> {
   const { sessionId, abortController: ac } = ctx
   const startTime = Date.now()
+  console.log(`[cc-gateway] executeSession: resolving worktree=${cmd.worktree}`)
 
   // Resolve worktree path
   const worktreePath = await resolveWorktree(cmd.worktree)
+  console.log(`[cc-gateway] executeSession: worktreePath=${worktreePath}`)
   if (!worktreePath) {
     send(ws, {
       type: 'error',
@@ -251,12 +253,15 @@ export async function executeSession(
       }
     }
 
+    console.log(`[cc-gateway] executeSession: calling query() for ${cmd.worktree}`)
     const iter = query({
       prompt: messageGenerator(),
       options: options as any,
     })
+    console.log(`[cc-gateway] executeSession: got iterator, starting loop`)
 
     for await (const message of iter) {
+      console.log(`[cc-gateway] executeSession: message type=${message.type}`)
       if (ac.signal.aborted) break
 
       if (message.type === 'system' && (message as any).subtype === 'init') {
