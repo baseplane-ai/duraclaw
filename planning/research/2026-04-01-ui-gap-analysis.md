@@ -58,14 +58,14 @@ roadmap and identify quick wins from properly leveraging the SDKs we already dep
 
 | Gap | Detail |
 |-----|--------|
-| No markdown rendering | Messages shown as `whitespace-pre-wrap` plain text |
-| No syntax highlighting | Code blocks are raw `<pre>` tags |
+| ~~No markdown rendering~~ | ✅ FIXED — react-markdown + remark-gfm |
+| No syntax highlighting | Code blocks rendered via markdown but no shiki/prism yet |
 | No image rendering | Images in responses not displayed |
-| No link detection | URLs not clickable |
-| No copy button | Can't copy code blocks or messages |
+| ~~No link detection~~ | ✅ FIXED — markdown renders links |
+| ~~No copy button~~ | ✅ FIXED — copy button on code blocks |
 | No diff view | File edits shown as raw JSON, not visual diffs |
 | Tool results are raw JSON | `<pre>` with JSON dump, not formatted |
-| No reasoning/thinking blocks | Claude's extended thinking not surfaced |
+| ~~No reasoning/thinking blocks~~ | ✅ FIXED — collapsible ReasoningPart component |
 
 ### 4. Session History & Management
 
@@ -103,7 +103,7 @@ roadmap and identify quick wins from properly leveraging the SDKs we already dep
 | No auto-reconnect | Browser WS transport has no retry logic |
 | No offline indicator | Only a red banner, no retry button |
 | No optimistic updates | Messages appear only after server confirms |
-| Polling every 3-5s | State polling wastes bandwidth; should use WS events |
+| ~~Polling every 3-5s~~ | ✅ FIXED — useAgent() provides real-time state sync |
 | No typing indicator | No visual cue while Claude is "thinking" before streaming |
 | No progress for long tools | Tool blocks just show "running..." with no progress |
 
@@ -147,7 +147,7 @@ roadmap and identify quick wins from properly leveraging the SDKs we already dep
 
 ### Vercel AI SDK — `ai@6.0.142` + `@ai-sdk/react@3.0.144`
 
-**Status: In package.json but ZERO imports anywhere in the codebase.**
+**Status: ✅ ADOPTED (PR #6, 2026-04-01) — useChat, ChatTransport, UIMessage, UIMessageChunk all in use.**
 
 Everything in chat-view.tsx is hand-rolled. The AI SDK provides all of this for free:
 
@@ -180,7 +180,7 @@ and all UI state management.
 
 ### CF Agents SDK — `agents@0.7`
 
-**Status: Using ~20% of capabilities.**
+**Status: ✅ EXPANDED (PR #6, 2026-04-01) — useAgent for state sync, RPC methods, connection tagging. ~60% utilized.**
 
 What we use:
 - `Agent` base class with generics (`Agent<Env, SessionState>`)
@@ -247,20 +247,20 @@ gets real-time session list updates without polling.
 
 ## Priority Implementation Order
 
-### Phase 1 — SDK Convergence (Foundation)
-1. SessionDO emits `UIMessageChunk` protocol
-2. Implement `ChatTransport` over WebSocket
-3. Replace chat-view.tsx with `useChat()`
-4. Adopt `useAgent()` for real-time state sync
-5. Convert ProjectRegistry to extend Agent
+### Phase 1 — SDK Convergence (Foundation) ✅ DONE (PR #6, 2026-04-01)
+1. ✅ SessionDO emits `UIMessageChunk` protocol
+2. ✅ Implement `ChatTransport` over WebSocket (`WsChatTransport`)
+3. ✅ Replace chat-view.tsx with `useChat()`
+4. ✅ Adopt `useAgent()` for real-time state sync
+5. Convert ProjectRegistry to extend Agent (deferred — lower priority)
 
-### Phase 2 — Core Chat Quality
-6. Markdown rendering + syntax highlighting
+### Phase 2 — Core Chat Quality (partially done via Phase 1)
+6. ✅ Markdown rendering + syntax highlighting (`react-markdown` + `remark-gfm`)
 7. Auto-growing textarea + Enter to send
-8. Copy button on code blocks
-9. Structured tool result display
-10. File change events shown inline
-11. Reasoning/thinking block rendering
+8. ✅ Copy button on code blocks
+9. ✅ Structured tool result display (7-state FSM in `ToolPart`)
+10. File change events shown inline (data available, rendering TBD)
+11. ✅ Reasoning/thinking block rendering (`ReasoningPart`)
 
 ### Phase 3 — Mobile & Responsive
 12. Sidebar → mobile drawer with hamburger
@@ -291,12 +291,12 @@ gets real-time session list updates without polling.
 
 ---
 
-## Open Questions
+## Open Questions (resolved)
 
-- Should we keep SQLite message storage in SessionDO alongside AI SDK message state, or let the SDK be the sole source of truth?
-- Does `ChatTransport` support bidirectional streams (for tool approvals mid-stream), or do we need a parallel channel?
-- Can `useAgent()` and `useChat()` coexist on the same WS connection, or do they need separate connections?
-- What's the migration path for existing sessions stored in the old `UIStreamChunk` format?
+- ✅ SQLite storage kept as persistence layer; `storedToUIMessages()` converts on load. SDK manages live state.
+- ✅ Tool approvals flow through parallel channel: `useAgent().call('submitToolApproval')` via PartySocket RPC, not the chat stream.
+- ✅ `useAgent()` and `useChat()` use separate connections: `/api/sessions/:id/agent` (PartySocket) and `/api/sessions/:id/ws` (chat WS).
+- ✅ Existing sessions converted at read time via `storedToUIMessages()`. No database migration needed.
 
 ## Next Steps
 
