@@ -12,6 +12,13 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as SessionIdRouteImport } from './routes/session.$id'
+import { Route as ApiWorktreesRouteImport } from './routes/api/worktrees'
+import { Route as ApiSessionsIndexRouteImport } from './routes/api/sessions/index'
+import { Route as ApiSessionsActiveRouteImport } from './routes/api/sessions/active'
+import { Route as ApiSessionsIdRouteImport } from './routes/api/sessions/$id'
+import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
+import { Route as ApiSessionsIdMessagesRouteImport } from './routes/api/sessions/$id.messages'
+import { Route as ApiSessionsIdAbortRouteImport } from './routes/api/sessions/$id.abort'
 
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
@@ -28,35 +35,127 @@ const SessionIdRoute = SessionIdRouteImport.update({
   path: '/session/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiWorktreesRoute = ApiWorktreesRouteImport.update({
+  id: '/api/worktrees',
+  path: '/api/worktrees',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiSessionsIndexRoute = ApiSessionsIndexRouteImport.update({
+  id: '/api/sessions/',
+  path: '/api/sessions/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiSessionsActiveRoute = ApiSessionsActiveRouteImport.update({
+  id: '/api/sessions/active',
+  path: '/api/sessions/active',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiSessionsIdRoute = ApiSessionsIdRouteImport.update({
+  id: '/api/sessions/$id',
+  path: '/api/sessions/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiAuthSplatRoute = ApiAuthSplatRouteImport.update({
+  id: '/api/auth/$',
+  path: '/api/auth/$',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiSessionsIdMessagesRoute = ApiSessionsIdMessagesRouteImport.update({
+  id: '/messages',
+  path: '/messages',
+  getParentRoute: () => ApiSessionsIdRoute,
+} as any)
+const ApiSessionsIdAbortRoute = ApiSessionsIdAbortRouteImport.update({
+  id: '/abort',
+  path: '/abort',
+  getParentRoute: () => ApiSessionsIdRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
+  '/api/worktrees': typeof ApiWorktreesRoute
   '/session/$id': typeof SessionIdRoute
+  '/api/auth/$': typeof ApiAuthSplatRoute
+  '/api/sessions/$id': typeof ApiSessionsIdRouteWithChildren
+  '/api/sessions/active': typeof ApiSessionsActiveRoute
+  '/api/sessions/': typeof ApiSessionsIndexRoute
+  '/api/sessions/$id/abort': typeof ApiSessionsIdAbortRoute
+  '/api/sessions/$id/messages': typeof ApiSessionsIdMessagesRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
+  '/api/worktrees': typeof ApiWorktreesRoute
   '/session/$id': typeof SessionIdRoute
+  '/api/auth/$': typeof ApiAuthSplatRoute
+  '/api/sessions/$id': typeof ApiSessionsIdRouteWithChildren
+  '/api/sessions/active': typeof ApiSessionsActiveRoute
+  '/api/sessions': typeof ApiSessionsIndexRoute
+  '/api/sessions/$id/abort': typeof ApiSessionsIdAbortRoute
+  '/api/sessions/$id/messages': typeof ApiSessionsIdMessagesRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
+  '/api/worktrees': typeof ApiWorktreesRoute
   '/session/$id': typeof SessionIdRoute
+  '/api/auth/$': typeof ApiAuthSplatRoute
+  '/api/sessions/$id': typeof ApiSessionsIdRouteWithChildren
+  '/api/sessions/active': typeof ApiSessionsActiveRoute
+  '/api/sessions/': typeof ApiSessionsIndexRoute
+  '/api/sessions/$id/abort': typeof ApiSessionsIdAbortRoute
+  '/api/sessions/$id/messages': typeof ApiSessionsIdMessagesRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/login' | '/session/$id'
+  fullPaths:
+    | '/'
+    | '/login'
+    | '/api/worktrees'
+    | '/session/$id'
+    | '/api/auth/$'
+    | '/api/sessions/$id'
+    | '/api/sessions/active'
+    | '/api/sessions/'
+    | '/api/sessions/$id/abort'
+    | '/api/sessions/$id/messages'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/login' | '/session/$id'
-  id: '__root__' | '/' | '/login' | '/session/$id'
+  to:
+    | '/'
+    | '/login'
+    | '/api/worktrees'
+    | '/session/$id'
+    | '/api/auth/$'
+    | '/api/sessions/$id'
+    | '/api/sessions/active'
+    | '/api/sessions'
+    | '/api/sessions/$id/abort'
+    | '/api/sessions/$id/messages'
+  id:
+    | '__root__'
+    | '/'
+    | '/login'
+    | '/api/worktrees'
+    | '/session/$id'
+    | '/api/auth/$'
+    | '/api/sessions/$id'
+    | '/api/sessions/active'
+    | '/api/sessions/'
+    | '/api/sessions/$id/abort'
+    | '/api/sessions/$id/messages'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   LoginRoute: typeof LoginRoute
+  ApiWorktreesRoute: typeof ApiWorktreesRoute
   SessionIdRoute: typeof SessionIdRoute
+  ApiAuthSplatRoute: typeof ApiAuthSplatRoute
+  ApiSessionsIdRoute: typeof ApiSessionsIdRouteWithChildren
+  ApiSessionsActiveRoute: typeof ApiSessionsActiveRoute
+  ApiSessionsIndexRoute: typeof ApiSessionsIndexRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -82,13 +181,81 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SessionIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/worktrees': {
+      id: '/api/worktrees'
+      path: '/api/worktrees'
+      fullPath: '/api/worktrees'
+      preLoaderRoute: typeof ApiWorktreesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/sessions/': {
+      id: '/api/sessions/'
+      path: '/api/sessions'
+      fullPath: '/api/sessions/'
+      preLoaderRoute: typeof ApiSessionsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/sessions/active': {
+      id: '/api/sessions/active'
+      path: '/api/sessions/active'
+      fullPath: '/api/sessions/active'
+      preLoaderRoute: typeof ApiSessionsActiveRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/sessions/$id': {
+      id: '/api/sessions/$id'
+      path: '/api/sessions/$id'
+      fullPath: '/api/sessions/$id'
+      preLoaderRoute: typeof ApiSessionsIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/auth/$': {
+      id: '/api/auth/$'
+      path: '/api/auth/$'
+      fullPath: '/api/auth/$'
+      preLoaderRoute: typeof ApiAuthSplatRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/sessions/$id/messages': {
+      id: '/api/sessions/$id/messages'
+      path: '/messages'
+      fullPath: '/api/sessions/$id/messages'
+      preLoaderRoute: typeof ApiSessionsIdMessagesRouteImport
+      parentRoute: typeof ApiSessionsIdRoute
+    }
+    '/api/sessions/$id/abort': {
+      id: '/api/sessions/$id/abort'
+      path: '/abort'
+      fullPath: '/api/sessions/$id/abort'
+      preLoaderRoute: typeof ApiSessionsIdAbortRouteImport
+      parentRoute: typeof ApiSessionsIdRoute
+    }
   }
 }
+
+interface ApiSessionsIdRouteChildren {
+  ApiSessionsIdAbortRoute: typeof ApiSessionsIdAbortRoute
+  ApiSessionsIdMessagesRoute: typeof ApiSessionsIdMessagesRoute
+}
+
+const ApiSessionsIdRouteChildren: ApiSessionsIdRouteChildren = {
+  ApiSessionsIdAbortRoute: ApiSessionsIdAbortRoute,
+  ApiSessionsIdMessagesRoute: ApiSessionsIdMessagesRoute,
+}
+
+const ApiSessionsIdRouteWithChildren = ApiSessionsIdRoute._addFileChildren(
+  ApiSessionsIdRouteChildren,
+)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   LoginRoute: LoginRoute,
+  ApiWorktreesRoute: ApiWorktreesRoute,
   SessionIdRoute: SessionIdRoute,
+  ApiAuthSplatRoute: ApiAuthSplatRoute,
+  ApiSessionsIdRoute: ApiSessionsIdRouteWithChildren,
+  ApiSessionsActiveRoute: ApiSessionsActiveRoute,
+  ApiSessionsIndexRoute: ApiSessionsIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

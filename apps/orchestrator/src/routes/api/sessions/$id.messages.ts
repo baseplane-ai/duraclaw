@@ -1,4 +1,4 @@
-import { createAPIFileRoute } from '@tanstack/react-start/api'
+import { createFileRoute } from '@tanstack/react-router'
 import { getCloudflareEnv } from '~/lib/cf-env'
 
 function json(status: number, body: unknown) {
@@ -8,16 +8,20 @@ function json(status: number, body: unknown) {
   })
 }
 
-export const APIRoute = createAPIFileRoute('/api/sessions/$id/messages')({
-  GET: async ({ params }) => {
-    const env = getCloudflareEnv()
-    try {
-      const doId = env.SESSION_AGENT.idFromString(params.id)
-      const sessionDO = env.SESSION_AGENT.get(doId) as any
-      const messages = await sessionDO.getMessages()
-      return json(200, { messages })
-    } catch {
-      return json(404, { error: 'Session not found' })
-    }
+export const Route = createFileRoute('/api/sessions/$id/messages')({
+  server: {
+    handlers: {
+      GET: async ({ params }) => {
+        const env = getCloudflareEnv()
+        try {
+          const doId = env.SESSION_AGENT.idFromString(params.id)
+          const sessionDO = env.SESSION_AGENT.get(doId) as any
+          const messages = await sessionDO.getMessages()
+          return json(200, { messages })
+        } catch {
+          return json(404, { error: 'Session not found' })
+        }
+      },
+    },
   },
 })

@@ -7,7 +7,7 @@ import type { Env } from './lib/types'
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     setCloudflareEnv(env)
-    return handler.fetch(request, env, ctx)
+    return (handler.fetch as Function)(request, env, ctx)
   },
 }
 

@@ -42,7 +42,7 @@ function LoginPage() {
             type="email"
             placeholder="Email"
             value={email}
-            onChange={(e) => setEmail(e.target.value)}
+            onChange={(e) => setEmail((e.target as unknown as { value: string }).value)}
             required
             style={{ width: '100%', padding: 8 }}
           />
@@ -52,7 +52,7 @@ function LoginPage() {
             type="password"
             placeholder="Password"
             value={password}
-            onChange={(e) => setPassword(e.target.value)}
+            onChange={(e) => setPassword((e.target as unknown as { value: string }).value)}
             required
             minLength={8}
             style={{ width: '100%', padding: 8 }}

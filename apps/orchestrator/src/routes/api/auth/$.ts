@@ -1,16 +1,20 @@
-import { createAPIFileRoute } from '@tanstack/react-start/api'
+import { createFileRoute } from '@tanstack/react-router'
 import { createAuth } from '~/lib/auth'
 import { getCloudflareEnv } from '~/lib/cf-env'
 
-export const APIRoute = createAPIFileRoute('/api/auth/$')({
-  GET: async ({ request }) => {
-    const env = getCloudflareEnv()
-    const auth = createAuth(env)
-    return auth.handler(request)
-  },
-  POST: async ({ request }) => {
-    const env = getCloudflareEnv()
-    const auth = createAuth(env)
-    return auth.handler(request)
+export const Route = createFileRoute('/api/auth/$')({
+  server: {
+    handlers: {
+      GET: async ({ request }) => {
+        const env = getCloudflareEnv()
+        const auth = createAuth(env)
+        return auth.handler(request)
+      },
+      POST: async ({ request }) => {
+        const env = getCloudflareEnv()
+        const auth = createAuth(env)
+        return auth.handler(request)
+      },
+    },
   },
 })
