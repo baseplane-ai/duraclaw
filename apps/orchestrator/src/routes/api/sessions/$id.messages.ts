@@ -15,8 +15,11 @@ export const Route = createFileRoute('/api/sessions/$id/messages')({
         const env = getCloudflareEnv()
         try {
           const doId = env.SESSION_AGENT.idFromString(params.id)
-          const sessionDO = env.SESSION_AGENT.get(doId) as any
-          const messages = await sessionDO.getMessages()
+          const sessionDO = env.SESSION_AGENT.get(doId)
+          const resp = await sessionDO.fetch(new Request('https://session/messages', {
+            headers: { 'x-partykit-room': params.id },
+          }))
+          const messages = await resp.json()
           return json(200, { messages })
         } catch {
           return json(404, { error: 'Session not found' })

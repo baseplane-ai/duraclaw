@@ -15,8 +15,17 @@ export const Route = createFileRoute('/api/sessions/$id/abort')({
         const env = getCloudflareEnv()
         try {
           const doId = env.SESSION_AGENT.idFromString(params.id)
-          const sessionDO = env.SESSION_AGENT.get(doId) as any
-          await sessionDO.abort()
+          const sessionDO = env.SESSION_AGENT.get(doId)
+          const resp = await sessionDO.fetch(
+            new Request('https://session/abort', {
+              method: 'POST',
+              headers: { 'x-partykit-room': params.id },
+            }),
+          )
+          if (!resp.ok) {
+            const err = await resp.json() as { error?: string }
+            return json(400, { error: err.error ?? 'Abort failed' })
+          }
           return json(200, { status: 'aborted' })
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : 'Unknown error'

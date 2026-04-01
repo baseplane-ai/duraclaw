@@ -18,7 +18,15 @@ export default {
       try {
         const doId = env.SESSION_AGENT.idFromString(sessionId)
         const stub = env.SESSION_AGENT.get(doId)
-        return stub.fetch(request)
+        // Agent SDK requires x-partykit-room header
+        const headers = new Headers(request.headers)
+        headers.set('x-partykit-room', sessionId)
+        const wsRequest = new Request(request.url, {
+          method: request.method,
+          headers,
+          body: request.body,
+        })
+        return stub.fetch(wsRequest)
       } catch {
         return new Response('Invalid session ID', { status: 400 })
       }

@@ -121,6 +121,42 @@ export class SessionDO extends Agent<Env, SessionState> {
     }
   }
 
+  // ── HTTP Request Handler (for non-WS calls) ────────────────────
+
+  async onRequest(request: Request): Promise<Response> {
+    const url = new URL(request.url)
+
+    if (url.pathname === '/create' && request.method === 'POST') {
+      const config = await request.json() as Parameters<SessionDO['create']>[0]
+      await this.create(config)
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+
+    if (url.pathname === '/state' && request.method === 'GET') {
+      return new Response(JSON.stringify(this.state), {
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+
+    if (url.pathname === '/messages' && request.method === 'GET') {
+      const messages = this.sql<StoredMessage>`SELECT * FROM messages ORDER BY id ASC`
+      return new Response(JSON.stringify(messages), {
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+
+    if (url.pathname === '/abort' && request.method === 'POST') {
+      await this.abort()
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+
+    return new Response('Not found', { status: 404 })
+  }
+
   // ── Lifecycle ──────────────────────────────────────────────────
 
   async onStart() {

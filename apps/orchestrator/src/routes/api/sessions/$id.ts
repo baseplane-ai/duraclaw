@@ -15,8 +15,11 @@ export const Route = createFileRoute('/api/sessions/$id')({
         const env = getCloudflareEnv()
         try {
           const doId = env.SESSION_AGENT.idFromString(params.id)
-          const sessionDO = env.SESSION_AGENT.get(doId) as any
-          const state = await sessionDO.getSessionState()
+          const sessionDO = env.SESSION_AGENT.get(doId)
+          const resp = await sessionDO.fetch(new Request('https://session/state', {
+            headers: { 'x-partykit-room': params.id },
+          }))
+          const state = await resp.json()
           return json(200, { session: state })
         } catch {
           return json(404, { error: 'Session not found' })
