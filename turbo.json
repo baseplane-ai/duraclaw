@@ -9,6 +9,10 @@
     },
     "lint": {},
     "lint:errors": {},
+    "deploy": {
+      "dependsOn": ["build"],
+      "cache": false
+    },
     "dev": {
       "cache": false,
       "persistent": true

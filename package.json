@@ -7,7 +7,10 @@
     "typecheck": "turbo typecheck",
     "lint": "turbo lint",
     "lint:errors": "turbo lint:errors",
-    "dev": "turbo dev"
+    "dev": "turbo dev",
+    "ship": "turbo deploy",
+    "ship:worker": "turbo deploy --filter=@duraclaw/orchestrator",
+    "ship:gateway": "turbo deploy --filter=@duraclaw/cc-gateway"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.7",
