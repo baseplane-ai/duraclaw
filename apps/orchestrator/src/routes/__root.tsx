@@ -1,4 +1,4 @@
-import { createRootRoute, HeadContent, Outlet, redirect, Scripts } from '@tanstack/react-router'
+import { createRootRoute, HeadContent, Outlet, redirect, Scripts, useLocation } from '@tanstack/react-router'
 import { useState } from 'react'
 import { getSession } from '~/lib/auth.functions'
 import { ProjectSidebar } from '~/lib/components/project-sidebar'
@@ -29,7 +29,6 @@ export const Route = createRootRoute({
 type BrowserGlobal = typeof globalThis & {
   window?: unknown
   localStorage?: { getItem(key: string): string | null; setItem(key: string, value: string): void }
-  location?: { pathname: string }
 }
 
 const browserGlobal = globalThis as BrowserGlobal
@@ -68,8 +67,11 @@ function AppLayout({ children }: { children: React.ReactNode }) {
 }
 
 function RootComponent() {
-  const pathname = isBrowser ? (browserGlobal.location?.pathname ?? '') : ''
-  const isLogin = pathname === '/login'
+  // Use TanStack Router's useLocation for SSR-safe pathname detection.
+  // This produces consistent output on both server and client, avoiding
+  // hydration mismatches that caused the sidebar to disappear.
+  const location = useLocation()
+  const isLogin = location.pathname === '/login'
 
   return (
     <html lang="en">
