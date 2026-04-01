@@ -28,7 +28,7 @@ renamed_classes = [{from = "SessionAgent", to = "SessionDO"}, {from = "SessionRe
 [[d1_databases]]
 binding = "AUTH_DB"
 database_name = "duraclaw-auth"
-database_id = "placeholder-create-with-wrangler-d1-create"
+database_id = "7f7a3c5e-0609-4527-904e-740ca140538d"
 
 # Environment variables (set via wrangler secret)
 # CC_GATEWAY_URL     — VPS executor WebSocket URL
