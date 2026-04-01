@@ -17,11 +17,11 @@ export type {
   FileChangedEvent,
   ResultEvent,
   ErrorEvent,
-  WorktreeInfo,
+  ProjectInfo,
   SessionContext,
 } from '@duraclaw/shared-types'
 
 /** Data attached to each WebSocket connection via server.upgrade(). */
 export interface WsData {
-  worktree: string | null
+  project: string | null
 }

@@ -7,7 +7,7 @@ import type {
   SessionContext,
   WsData,
 } from './types.js'
-import { resolveWorktree } from './worktrees.js'
+import { resolveProject } from './projects.js'
 
 /** Send a GatewayEvent to the WebSocket client. */
 function send(ws: ServerWebSocket<WsData>, event: GatewayEvent): void {
@@ -85,16 +85,16 @@ export async function executeSession(
 ): Promise<void> {
   const { sessionId, abortController: ac } = ctx
   const startTime = Date.now()
-  console.log(`[cc-gateway] executeSession: resolving worktree=${cmd.worktree}`)
+  console.log(`[cc-gateway] executeSession: resolving project=${cmd.project}`)
 
-  // Resolve worktree path
-  const worktreePath = await resolveWorktree(cmd.worktree)
-  console.log(`[cc-gateway] executeSession: worktreePath=${worktreePath}`)
-  if (!worktreePath) {
+  // Resolve project path
+  const projectPath = await resolveProject(cmd.project)
+  console.log(`[cc-gateway] executeSession: projectPath=${projectPath}`)
+  if (!projectPath) {
     send(ws, {
       type: 'error',
       session_id: sessionId,
-      error: `Worktree "${cmd.worktree}" not found`,
+      error: `Project "${cmd.project}" not found`,
     })
     return
   }
@@ -103,13 +103,15 @@ export async function executeSession(
   const queue = createMessageQueue()
   ctx.messageQueue = queue
 
+  let sdkSessionId: string | null = null
+
   try {
     // Dynamic import — the SDK is ESM-only
     const { query } = await import('@anthropic-ai/claude-agent-sdk')
 
     const options: Record<string, unknown> = {
       abortController: ac,
-      cwd: worktreePath,
+      cwd: projectPath,
       env: buildCleanEnv(),
       permissionMode: 'default',
       includePartialMessages: true,
@@ -253,7 +255,7 @@ export async function executeSession(
       }
     }
 
-    console.log(`[cc-gateway] executeSession: calling query() for ${cmd.worktree}`)
+    console.log(`[cc-gateway] executeSession: calling query() for ${cmd.project}`)
     const iter = query({
       prompt: messageGenerator(),
       options: options as any,
@@ -265,7 +267,7 @@ export async function executeSession(
       if (ac.signal.aborted) break
 
       if (message.type === 'system' && (message as any).subtype === 'init') {
-        const sdkSessionId = (message as any).session_id as string | undefined
+        sdkSessionId = (message as any).session_id ?? null
         const model = (message as any).model ?? null
         const tools = (message as any).tools ?? []
 
@@ -273,7 +275,7 @@ export async function executeSession(
           type: 'session.init',
           session_id: sessionId,
           sdk_session_id: sdkSessionId ?? null,
-          worktree: cmd.worktree,
+          project: cmd.project,
           model,
           tools,
         })
@@ -321,6 +323,18 @@ export async function executeSession(
         const result = message as any
         const duration = Date.now() - startTime
 
+        // Fetch SDK session summary (best-effort)
+        let sdkSummary: string | null = null
+        if (sdkSessionId) {
+          try {
+            const { getSessionInfo } = await import('@anthropic-ai/claude-agent-sdk')
+            const info = await getSessionInfo(sdkSessionId, { dir: projectPath })
+            sdkSummary = info?.summary ?? null
+          } catch {
+            // Non-fatal — summary is best-effort
+          }
+        }
+
         send(ws, {
           type: 'result',
           session_id: sessionId,
@@ -330,6 +344,7 @@ export async function executeSession(
           result: result.result ?? null,
           num_turns: result.num_turns ?? null,
           is_error: result.subtype !== 'success',
+          sdk_summary: sdkSummary,
         })
       }
     }

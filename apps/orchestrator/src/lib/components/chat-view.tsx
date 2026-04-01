@@ -322,7 +322,7 @@ function SessionHeader({
           &larr; Dashboard
         </a>
         <span className="text-muted-foreground">/</span>
-        <span className="font-medium">{session.worktree}</span>
+        <span className="font-medium">{session.project}</span>
         <StatusBadge status={session.status} />
         {session.model && (
           <Badge variant="outline" className="text-xs">

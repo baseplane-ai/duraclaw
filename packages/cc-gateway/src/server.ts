@@ -4,7 +4,7 @@ import { verifyToken } from './auth.js'
 import { handleFileContents, handleFileTree, handleGitStatus } from './files.js'
 import { executeSession } from './sessions.js'
 import type { GatewayCommand, SessionContext, WsData } from './types.js'
-import { discoverWorktrees, resolveWorktree } from './worktrees.js'
+import { discoverProjects, resolveProject } from './projects.js'
 
 const PORT = Number(process.env.CC_GATEWAY_PORT ?? 9877)
 const startedAt = Date.now()
@@ -46,42 +46,42 @@ const server = Bun.serve<WsData>({
       return json(401, { error: 'Unauthorized' })
     }
 
-    // GET /worktrees
-    if (req.method === 'GET' && path === '/worktrees') {
-      return discoverWorktrees({}).then((worktrees) => json(200, worktrees))
+    // GET /projects
+    if (req.method === 'GET' && path === '/projects') {
+      return discoverProjects({}).then((projects) => json(200, projects))
     }
 
-    // GET /worktrees/:name/files?depth=1&path=/ — directory listing
-    // GET /worktrees/:name/files/*path — file contents
-    const worktreeFilesMatch = path.match(/^\/worktrees\/([^/]+)\/files(?:\/(.+))?$/)
-    if (req.method === 'GET' && worktreeFilesMatch) {
-      const [, name, filePath] = worktreeFilesMatch
-      const worktreePath = await resolveWorktree(name)
-      if (!worktreePath) {
-        return json(404, { error: `Worktree "${name}" not found` })
+    // GET /projects/:name/files?depth=1&path=/ — directory listing
+    // GET /projects/:name/files/*path — file contents
+    const projectFilesMatch = path.match(/^\/projects\/([^/]+)\/files(?:\/(.+))?$/)
+    if (req.method === 'GET' && projectFilesMatch) {
+      const [, name, filePath] = projectFilesMatch
+      const projectPath = await resolveProject(name)
+      if (!projectPath) {
+        return json(404, { error: `Project "${name}" not found` })
       }
       if (filePath) {
-        return handleFileContents(worktreePath, filePath)
+        return handleFileContents(projectPath, filePath)
       }
-      return handleFileTree(worktreePath, url.searchParams)
+      return handleFileTree(projectPath, url.searchParams)
     }
 
-    // GET /worktrees/:name/git-status
-    const gitStatusMatch = path.match(/^\/worktrees\/([^/]+)\/git-status$/)
+    // GET /projects/:name/git-status
+    const gitStatusMatch = path.match(/^\/projects\/([^/]+)\/git-status$/)
     if (req.method === 'GET' && gitStatusMatch) {
       const [, name] = gitStatusMatch
-      const worktreePath = await resolveWorktree(name)
-      if (!worktreePath) {
-        return json(404, { error: `Worktree "${name}" not found` })
+      const projectPath = await resolveProject(name)
+      if (!projectPath) {
+        return json(404, { error: `Project "${name}" not found` })
       }
-      return handleGitStatus(worktreePath)
+      return handleGitStatus(projectPath)
     }
 
     // WebSocket upgrade
     if (req.headers.get('upgrade')?.toLowerCase() === 'websocket') {
-      const worktree = url.searchParams.get('worktree') ?? null
+      const project = url.searchParams.get('project') ?? null
       const upgraded = server.upgrade(req, {
-        data: { worktree } satisfies WsData,
+        data: { project } satisfies WsData,
       })
       if (upgraded) {
         return undefined // Bun handles the rest
@@ -94,7 +94,7 @@ const server = Bun.serve<WsData>({
 
   websocket: {
     open(ws: ServerWebSocket<WsData>) {
-      console.log(`[cc-gateway] WS connected (worktree=${ws.data.worktree ?? 'none'})`)
+      console.log(`[cc-gateway] WS connected (project=${ws.data.project ?? 'none'})`)
     },
 
     async message(ws: ServerWebSocket<WsData>, raw: string | Buffer) {
@@ -130,7 +130,7 @@ const server = Bun.serve<WsData>({
 
           // Run session in background — don't await so we can receive
           // further messages (abort, answer, stream-input, etc.) on this same WS
-          console.log(`[cc-gateway] Starting session ${sessionId} for worktree=${cmd.worktree}`)
+          console.log(`[cc-gateway] Starting session ${sessionId} for project=${cmd.project}`)
           executeSession(ws, cmd, ctx)
             .then(() => {
               console.log(`[cc-gateway] Session ${sessionId} completed`)
@@ -237,9 +237,9 @@ const server = Bun.serve<WsData>({
 
 console.log(`[cc-gateway] Initializing on port ${PORT} (pid ${process.pid})`)
 
-discoverWorktrees({}).then((worktrees) => {
-  console.log(`[cc-gateway] Discovered ${worktrees.length} worktrees:`)
-  for (const wt of worktrees) {
+discoverProjects({}).then((projects) => {
+  console.log(`[cc-gateway] Discovered ${projects.length} projects:`)
+  for (const wt of projects) {
     console.log(`  ${wt.name} (${wt.branch}) → ${wt.path}`)
   }
 })

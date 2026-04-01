@@ -1,6 +1,6 @@
 import handler from '@tanstack/react-start/server-entry'
 import { SessionDO } from './agents/session-do'
-import { WorktreeRegistry } from './agents/worktree-registry'
+import { ProjectRegistry } from './agents/project-registry'
 import { setCloudflareEnv } from './lib/cf-env'
 import type { Env } from './lib/types'
 
@@ -36,4 +36,4 @@ export default {
   },
 }
 
-export { SessionDO, WorktreeRegistry }
+export { SessionDO, ProjectRegistry }

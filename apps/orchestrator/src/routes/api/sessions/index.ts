@@ -23,14 +23,14 @@ export const Route = createFileRoute('/api/sessions/')({
         try {
         const env = getCloudflareEnv()
         const body = (await request.json()) as {
-          worktree: string
+          project: string
           prompt: string
           model?: string
           system_prompt?: string
         }
 
-        if (!body.worktree || !body.prompt) {
-          return json(400, { error: 'Missing required fields: worktree, prompt' })
+        if (!body.project || !body.prompt) {
+          return json(400, { error: 'Missing required fields: project, prompt' })
         }
 
         const registryId = env.SESSION_REGISTRY.idFromName('default')
@@ -39,28 +39,28 @@ export const Route = createFileRoute('/api/sessions/')({
         const doId = env.SESSION_AGENT.newUniqueId()
         const sessionId = doId.toString()
 
-        // Resolve worktree path from gateway
-        let worktreePath = ''
+        // Resolve project path from gateway
+        let projectPath = ''
         if (env.CC_GATEWAY_URL) {
           try {
             const httpBase = env.CC_GATEWAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
-            const gatewayUrl = new URL('/worktrees', httpBase)
+            const gatewayUrl = new URL('/projects', httpBase)
             const headers: Record<string, string> = {}
             if (env.CC_GATEWAY_SECRET) {
               headers['Authorization'] = `Bearer ${env.CC_GATEWAY_SECRET}`
             }
             const resp = await fetch(gatewayUrl.toString(), { headers })
             if (resp.ok) {
-              const worktrees = (await resp.json()) as any[]
-              const wt = worktrees.find((w: any) => w.name === body.worktree)
-              if (wt) worktreePath = wt.path
+              const projects = (await resp.json()) as any[]
+              const wt = projects.find((w: any) => w.name === body.project)
+              if (wt) projectPath = wt.path
             }
           } catch {
             // Fall back to convention
           }
         }
-        if (!worktreePath) {
-          worktreePath = `/data/projects/${body.worktree}`
+        if (!projectPath) {
+          projectPath = `/data/projects/${body.project}`
         }
 
         // Create SessionDO via fetch (Agent SDK doesn't support RPC)
@@ -73,8 +73,8 @@ export const Route = createFileRoute('/api/sessions/')({
               'x-partykit-room': sessionId,
             },
             body: JSON.stringify({
-              worktree: body.worktree,
-              worktree_path: worktreePath,
+              project: body.project,
+              project_path: projectPath,
               prompt: body.prompt,
               model: body.model,
               system_prompt: body.system_prompt,
@@ -90,7 +90,7 @@ export const Route = createFileRoute('/api/sessions/')({
         const now = new Date().toISOString()
         await registry.registerSession({
           id: sessionId,
-          worktree: body.worktree,
+          project: body.project,
           status: 'running',
           model: body.model ?? null,
           created_at: now,

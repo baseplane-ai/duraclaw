@@ -12,7 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as SessionIdRouteImport } from './routes/session.$id'
-import { Route as ApiWorktreesRouteImport } from './routes/api/worktrees'
+import { Route as ApiProjectsRouteImport } from './routes/api/projects'
 import { Route as ApiSessionsIndexRouteImport } from './routes/api/sessions/index'
 import { Route as ApiSessionsActiveRouteImport } from './routes/api/sessions/active'
 import { Route as ApiSessionsIdRouteImport } from './routes/api/sessions/$id'
@@ -35,9 +35,9 @@ const SessionIdRoute = SessionIdRouteImport.update({
   path: '/session/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ApiWorktreesRoute = ApiWorktreesRouteImport.update({
-  id: '/api/worktrees',
-  path: '/api/worktrees',
+const ApiProjectsRoute = ApiProjectsRouteImport.update({
+  id: '/api/projects',
+  path: '/api/projects',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiSessionsIndexRoute = ApiSessionsIndexRouteImport.update({
@@ -74,7 +74,7 @@ const ApiSessionsIdAbortRoute = ApiSessionsIdAbortRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
-  '/api/worktrees': typeof ApiWorktreesRoute
+  '/api/projects': typeof ApiProjectsRoute
   '/session/$id': typeof SessionIdRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
   '/api/sessions/$id': typeof ApiSessionsIdRouteWithChildren
@@ -86,7 +86,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
-  '/api/worktrees': typeof ApiWorktreesRoute
+  '/api/projects': typeof ApiProjectsRoute
   '/session/$id': typeof SessionIdRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
   '/api/sessions/$id': typeof ApiSessionsIdRouteWithChildren
@@ -99,7 +99,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
-  '/api/worktrees': typeof ApiWorktreesRoute
+  '/api/projects': typeof ApiProjectsRoute
   '/session/$id': typeof SessionIdRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
   '/api/sessions/$id': typeof ApiSessionsIdRouteWithChildren
@@ -113,7 +113,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/login'
-    | '/api/worktrees'
+    | '/api/projects'
     | '/session/$id'
     | '/api/auth/$'
     | '/api/sessions/$id'
@@ -125,7 +125,7 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/login'
-    | '/api/worktrees'
+    | '/api/projects'
     | '/session/$id'
     | '/api/auth/$'
     | '/api/sessions/$id'
@@ -137,7 +137,7 @@ export interface FileRouteTypes {
     | '__root__'
     | '/'
     | '/login'
-    | '/api/worktrees'
+    | '/api/projects'
     | '/session/$id'
     | '/api/auth/$'
     | '/api/sessions/$id'
@@ -150,7 +150,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   LoginRoute: typeof LoginRoute
-  ApiWorktreesRoute: typeof ApiWorktreesRoute
+  ApiProjectsRoute: typeof ApiProjectsRoute
   SessionIdRoute: typeof SessionIdRoute
   ApiAuthSplatRoute: typeof ApiAuthSplatRoute
   ApiSessionsIdRoute: typeof ApiSessionsIdRouteWithChildren
@@ -181,11 +181,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SessionIdRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/api/worktrees': {
-      id: '/api/worktrees'
-      path: '/api/worktrees'
-      fullPath: '/api/worktrees'
-      preLoaderRoute: typeof ApiWorktreesRouteImport
+    '/api/projects': {
+      id: '/api/projects'
+      path: '/api/projects'
+      fullPath: '/api/projects'
+      preLoaderRoute: typeof ApiProjectsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/sessions/': {
@@ -250,7 +250,7 @@ const ApiSessionsIdRouteWithChildren = ApiSessionsIdRoute._addFileChildren(
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   LoginRoute: LoginRoute,
-  ApiWorktreesRoute: ApiWorktreesRoute,
+  ApiProjectsRoute: ApiProjectsRoute,
   SessionIdRoute: SessionIdRoute,
   ApiAuthSplatRoute: ApiAuthSplatRoute,
   ApiSessionsIdRoute: ApiSessionsIdRouteWithChildren,

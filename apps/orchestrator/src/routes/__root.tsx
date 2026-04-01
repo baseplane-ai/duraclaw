@@ -1,5 +1,7 @@
 import { createRootRoute, HeadContent, Outlet, redirect, Scripts } from '@tanstack/react-router'
+import { useState } from 'react'
 import { getSession } from '~/lib/auth.functions'
+import { ProjectSidebar } from '~/lib/components/project-sidebar'
 import '~/styles.css'
 
 export const Route = createRootRoute({
@@ -24,7 +26,51 @@ export const Route = createRootRoute({
   component: RootComponent,
 })
 
+type BrowserGlobal = typeof globalThis & {
+  window?: unknown
+  localStorage?: { getItem(key: string): string | null; setItem(key: string, value: string): void }
+  location?: { pathname: string }
+}
+
+const browserGlobal = globalThis as BrowserGlobal
+const isBrowser = typeof browserGlobal.window !== 'undefined'
+
+function AppLayout({ children }: { children: React.ReactNode }) {
+  const [collapsed, setCollapsed] = useState(() => {
+    if (!isBrowser) return false
+    return browserGlobal.localStorage?.getItem('sidebar-collapsed') === 'true'
+  })
+
+  function toggleCollapse() {
+    const next = !collapsed
+    setCollapsed(next)
+    if (isBrowser) browserGlobal.localStorage?.setItem('sidebar-collapsed', String(next))
+  }
+
+  return (
+    <div className="flex h-screen">
+      <ProjectSidebar collapsed={collapsed} onToggleCollapse={toggleCollapse} />
+      <div className="relative flex-1 overflow-auto">
+        {collapsed && (
+          <button
+            type="button"
+            onClick={toggleCollapse}
+            className="absolute left-3 top-3 z-10 rounded-md border border-border bg-card p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+            title="Open sidebar"
+          >
+            {'\u2630'}
+          </button>
+        )}
+        {children}
+      </div>
+    </div>
+  )
+}
+
 function RootComponent() {
+  const pathname = isBrowser ? (browserGlobal.location?.pathname ?? '') : ''
+  const isLogin = pathname === '/login'
+
   return (
     <html lang="en">
       <head>
@@ -34,7 +80,13 @@ function RootComponent() {
         <HeadContent />
       </head>
       <body>
-        <Outlet />
+        {isLogin ? (
+          <Outlet />
+        ) : (
+          <AppLayout>
+            <Outlet />
+          </AppLayout>
+        )}
         <Scripts />
       </body>
     </html>

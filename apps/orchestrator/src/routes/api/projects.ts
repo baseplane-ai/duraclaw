@@ -8,7 +8,7 @@ function json(status: number, body: unknown) {
   })
 }
 
-export const Route = createFileRoute('/api/worktrees')({
+export const Route = createFileRoute('/api/projects')({
   server: {
     handlers: {
       GET: async () => {
@@ -17,14 +17,14 @@ export const Route = createFileRoute('/api/worktrees')({
         const registryId = env.SESSION_REGISTRY.idFromName('default')
         const registry = env.SESSION_REGISTRY.get(registryId) as any
 
-        // Fetch worktrees from gateway
+        // Fetch projects from gateway
         if (!env.CC_GATEWAY_URL) {
           return json(502, { error: 'CC_GATEWAY_URL not configured' })
         }
 
         try {
           const httpBase = env.CC_GATEWAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
-          const gatewayUrl = new URL('/worktrees', httpBase)
+          const gatewayUrl = new URL('/projects', httpBase)
           const headers: Record<string, string> = {}
           if (env.CC_GATEWAY_SECRET) {
             headers['Authorization'] = `Bearer ${env.CC_GATEWAY_SECRET}`
@@ -34,16 +34,16 @@ export const Route = createFileRoute('/api/worktrees')({
             return json(502, { error: 'Gateway returned error' })
           }
 
-          const worktrees = (await resp.json()) as any[]
-          // Attach sessions for each worktree
+          const projects = (await resp.json()) as any[]
+          // Attach sessions for each project
           const merged = await Promise.all(
-            worktrees.map(async (wt: any) => ({
+            projects.map(async (wt: any) => ({
               ...wt,
-              sessions: await registry.listSessionsByWorktree(wt.name),
+              sessions: await registry.listSessionsByProject(wt.name),
             })),
           )
 
-          return json(200, { worktrees: merged })
+          return json(200, { projects: merged })
         } catch {
           return json(502, { error: 'Gateway unreachable' })
         }

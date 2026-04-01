@@ -2,6 +2,7 @@
 
 export type GatewayCommand =
   | ExecuteCommand
+  | ResumeCommand
   | StreamInputCommand
   | PermissionResponseCommand
   | AbortCommand
@@ -9,7 +10,7 @@ export type GatewayCommand =
 
 export interface ExecuteCommand {
   type: 'execute'
-  worktree: string
+  project: string
   prompt: string
   model?: string
   system_prompt?: string
@@ -46,7 +47,7 @@ export interface AnswerCommand {
 // Legacy resume command (kept for session recovery)
 export interface ResumeCommand {
   type: 'resume'
-  worktree: string
+  project: string
   prompt: string
   sdk_session_id: string
 }
@@ -68,7 +69,7 @@ export interface SessionInitEvent {
   type: 'session.init'
   session_id: string
   sdk_session_id: string | null
-  worktree: string
+  project: string
   model: string | null
   tools: string[]
 }
@@ -136,6 +137,7 @@ export interface ResultEvent {
   result: string | null
   num_turns: number | null
   is_error: boolean
+  sdk_summary: string | null
 }
 
 export interface ErrorEvent {
@@ -166,9 +168,9 @@ export type BrowserCommand =
   | { type: 'user-message'; content: string }
   | { type: 'tool-approval'; toolCallId: string; approved: boolean; answers?: Record<string, string> }
 
-// ── Worktree ─────────────────────────────────────────────────────────
+// ── Project ──────────────────────────────────────────────────────────
 
-export interface WorktreeInfo {
+export interface ProjectInfo {
   name: string
   path: string
   branch: string
@@ -203,8 +205,8 @@ export type SessionStatus =
 
 export interface SessionState {
   id: string
-  worktree: string
-  worktree_path: string
+  project: string
+  project_path: string
   status: SessionStatus
   model: string | null
   prompt: string
@@ -216,6 +218,7 @@ export interface SessionState {
   error: string | null
   num_turns: number | null
   sdk_session_id: string | null
+  summary: string | null
   pending_question: unknown[] | null
   pending_permission: {
     tool_call_id: string
@@ -226,7 +229,7 @@ export interface SessionState {
 
 export interface SessionSummary {
   id: string
-  worktree: string
+  project: string
   status: SessionStatus
   model: string | null
   created_at: string
@@ -235,6 +238,7 @@ export interface SessionSummary {
   total_cost_usd?: number | null
   num_turns?: number | null
   prompt?: string
+  summary?: string
 }
 
 // ── Stored Message (for SQLite persistence) ─────────────────────────

@@ -13,8 +13,8 @@ import { connectToExecutor, parseEvent, sendCommand } from '~/lib/vps-client'
 
 const DEFAULT_STATE: SessionState = {
   id: '',
-  worktree: '',
-  worktree_path: '',
+  project: '',
+  project_path: '',
   status: 'idle',
   model: null,
   prompt: '',
@@ -28,6 +28,7 @@ const DEFAULT_STATE: SessionState = {
   sdk_session_id: null,
   pending_question: null,
   pending_permission: null,
+  summary: null,
 }
 
 /**
@@ -117,6 +118,21 @@ export class SessionDO extends Agent<Env, SessionState> {
       await registry.updateSessionStatus(this.state.id, this.state.status)
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to sync status to registry:`, err)
+    }
+  }
+
+  private async syncResultToRegistry() {
+    try {
+      const registryId = this.env.SESSION_REGISTRY.idFromName('default')
+      const registry = this.env.SESSION_REGISTRY.get(registryId) as any
+      await registry.updateSessionResult(this.state.id, {
+        summary: this.state.summary,
+        duration_ms: this.state.duration_ms,
+        total_cost_usd: this.state.total_cost_usd,
+        num_turns: this.state.num_turns,
+      })
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Failed to sync result to registry:`, err)
     }
   }
 
@@ -234,7 +250,7 @@ export class SessionDO extends Agent<Env, SessionState> {
             this.broadcastToClients({ type: 'status', status: 'running' } as any)
             this.connectAndStream({
               type: 'resume',
-              worktree: this.state.worktree,
+              project: this.state.project,
               prompt: cmd.content,
               sdk_session_id: this.state.sdk_session_id,
             })
@@ -296,7 +312,7 @@ export class SessionDO extends Agent<Env, SessionState> {
 
     this.connectAndStream({
       type: 'resume',
-      worktree: this.state.worktree,
+      project: this.state.project,
       prompt: this.state.prompt,
       sdk_session_id: this.state.sdk_session_id,
     })
@@ -305,8 +321,8 @@ export class SessionDO extends Agent<Env, SessionState> {
   // ── RPC Methods ────────────────────────────────────────────────
 
   async create(config: {
-    worktree: string
-    worktree_path: string
+    project: string
+    project_path: string
     prompt: string
     model?: string
     system_prompt?: string
@@ -319,8 +335,8 @@ export class SessionDO extends Agent<Env, SessionState> {
     this.setState({
       ...DEFAULT_STATE,
       id,
-      worktree: config.worktree,
-      worktree_path: config.worktree_path,
+      project: config.project,
+      project_path: config.project_path,
       status: 'running',
       model: config.model ?? null,
       prompt: config.prompt,
@@ -333,7 +349,7 @@ export class SessionDO extends Agent<Env, SessionState> {
 
     this.connectAndStream({
       type: 'execute',
-      worktree: config.worktree,
+      project: config.project,
       prompt: config.prompt,
       model: config.model,
       system_prompt: config.system_prompt,
@@ -341,7 +357,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       max_turns: config.max_turns,
       max_budget_usd: config.max_budget_usd,
     })
-    console.log(`[SessionDO:${id}] create: ${config.worktree} "${config.prompt}"`)
+    console.log(`[SessionDO:${id}] create: ${config.project} "${config.prompt}"`)
   }
 
   async abort() {
@@ -457,11 +473,13 @@ export class SessionDO extends Agent<Env, SessionState> {
           total_cost_usd: (this.state.total_cost_usd ?? 0) + (event.total_cost_usd ?? 0),
           num_turns: (this.state.num_turns ?? 0) + (event.num_turns ?? 0),
           error: event.is_error ? event.result : null,
+          summary: event.sdk_summary ?? this.state.summary,
         })
         this.vpsWs?.close()
         this.vpsWs = null
         this.broadcastToClients({ type: 'turn-complete' })
         this.syncStatusToRegistry()
+        this.syncResultToRegistry()
         break
 
       case 'error':

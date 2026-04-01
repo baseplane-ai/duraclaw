@@ -9,7 +9,7 @@ export type {
   UIStreamChunk,
   BrowserCommand,
   StoredMessage,
-  WorktreeInfo,
+  ProjectInfo,
 } from '@duraclaw/shared-types'
 
 // ── CF-specific types ──────────────────────────────────────────────

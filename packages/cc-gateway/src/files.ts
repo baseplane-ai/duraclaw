@@ -30,35 +30,35 @@ const MIME_TYPES: Record<string, string> = {
 }
 
 /**
- * Validate that a file path does not escape the worktree root.
+ * Validate that a file path does not escape the project root.
  * Returns the resolved absolute path or null if invalid.
  */
-function safePath(worktreePath: string, relativePath: string): string | null {
+function safePath(projectPath: string, relativePath: string): string | null {
   // Reject paths with .. segments
   if (relativePath.includes('..')) return null
-  const resolved = path.resolve(worktreePath, relativePath)
-  if (!resolved.startsWith(worktreePath + '/') && resolved !== worktreePath) return null
+  const resolved = path.resolve(projectPath, relativePath)
+  if (!resolved.startsWith(projectPath + '/') && resolved !== projectPath) return null
   return resolved
 }
 
 /**
- * GET /worktrees/:name/files?depth=1&path=/
+ * GET /projects/:name/files?depth=1&path=/
  * Returns directory entries at the given path with optional depth.
  */
 export async function handleFileTree(
-  worktreePath: string,
+  projectPath: string,
   searchParams: URLSearchParams,
 ): Promise<Response> {
   const subPath = searchParams.get('path') ?? '/'
   const depth = Math.min(Number(searchParams.get('depth') ?? '1'), 5)
 
-  const resolved = safePath(worktreePath, subPath === '/' ? '.' : subPath)
+  const resolved = safePath(projectPath, subPath === '/' ? '.' : subPath)
   if (!resolved) {
     return json(400, { error: 'Path traversal not allowed' })
   }
 
   try {
-    const entries = await listEntries(resolved, worktreePath, depth)
+    const entries = await listEntries(resolved, projectPath, depth)
     return json(200, { entries })
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -70,7 +70,7 @@ export async function handleFileTree(
 
 async function listEntries(
   dirPath: string,
-  worktreeRoot: string,
+  projectRoot: string,
   depth: number,
 ): Promise<FileEntry[]> {
   if (depth <= 0) return []
@@ -85,7 +85,7 @@ async function listEntries(
       continue
 
     const fullPath = path.join(dirPath, dirent.name)
-    const relativePath = path.relative(worktreeRoot, fullPath)
+    const relativePath = path.relative(projectRoot, fullPath)
 
     if (dirent.isDirectory()) {
       entries.push({ name: dirent.name, path: relativePath, type: 'dir' })
@@ -103,14 +103,14 @@ async function listEntries(
 }
 
 /**
- * GET /worktrees/:name/files/*path
+ * GET /projects/:name/files/*path
  * Returns raw file contents.
  */
 export async function handleFileContents(
-  worktreePath: string,
+  projectPath: string,
   filePath: string,
 ): Promise<Response> {
-  const resolved = safePath(worktreePath, filePath)
+  const resolved = safePath(projectPath, filePath)
   if (!resolved) {
     return json(400, { error: 'Path traversal not allowed' })
   }
@@ -143,13 +143,13 @@ export async function handleFileContents(
 }
 
 /**
- * GET /worktrees/:name/git-status
- * Returns per-file git status for the worktree.
+ * GET /projects/:name/git-status
+ * Returns per-file git status for the project.
  */
-export async function handleGitStatus(worktreePath: string): Promise<Response> {
+export async function handleGitStatus(projectPath: string): Promise<Response> {
   try {
     const { stdout } = await execFileAsync('git', ['status', '--porcelain'], {
-      cwd: worktreePath,
+      cwd: projectPath,
     })
 
     const files: GitFileStatus[] = stdout

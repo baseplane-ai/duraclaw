@@ -14,7 +14,7 @@ import {
   Textarea,
 } from './ui'
 import { cn } from '~/lib/utils'
-import type { SessionSummary, WorktreeInfo } from '~/lib/types'
+import type { SessionSummary, ProjectInfo } from '~/lib/types'
 
 // ── Status Badge ────────────────────────────────────────────────────
 
@@ -38,19 +38,19 @@ function StatusBadge({ status }: { status: string }) {
   return <Badge variant={v.variant}>{v.label}</Badge>
 }
 
-// ── Worktree Grid ───────────────────────────────────────────────────
+// ── Project Grid ────────────────────────────────────────────────────
 
 const ACTIVE_STATUSES = new Set(['running', 'waiting_input', 'waiting_permission'])
 
-interface WorktreeWithSessions extends WorktreeInfo {
+interface ProjectWithSessions extends ProjectInfo {
   sessions?: SessionSummary[]
 }
 
-function WorktreeGrid({
-  worktrees,
+function ProjectGrid({
+  projects,
   loading,
 }: {
-  worktrees: WorktreeWithSessions[]
+  projects: ProjectWithSessions[]
   loading: boolean
 }) {
   if (loading) {
@@ -65,7 +65,7 @@ function WorktreeGrid({
 
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-      {worktrees.map((wt) => {
+      {projects.map((wt) => {
         const activeSessions = (wt.sessions ?? []).filter((s) => ACTIVE_STATUSES.has(s.status))
         const hasActive = activeSessions.length > 0
         return (
@@ -144,7 +144,7 @@ function SessionList({
         >
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
-              <span className="text-sm font-medium truncate">{s.worktree}</span>
+              <span className="text-sm font-medium truncate">{s.project}</span>
               <StatusBadge status={s.status} />
             </div>
             {s.prompt && (
@@ -179,26 +179,26 @@ function formatRelativeTime(iso: string): string {
 function NewSessionDialog({
   open,
   onClose,
-  worktrees,
+  projects,
   onSubmit,
 }: {
   open: boolean
   onClose: () => void
-  worktrees: WorktreeWithSessions[]
-  onSubmit: (data: { worktree: string; prompt: string; model: string }) => void
+  projects: ProjectWithSessions[]
+  onSubmit: (data: { project: string; prompt: string; model: string }) => void
 }) {
-  const [worktree, setWorktree] = useState('')
+  const [project, setProject] = useState('')
   const [prompt, setPrompt] = useState('')
   const [model, setModel] = useState('claude-sonnet-4-6')
   const [submitting, setSubmitting] = useState(false)
 
-  const canSubmit = worktree && prompt.trim() && !submitting
+  const canSubmit = project && prompt.trim() && !submitting
 
   function handleSubmit() {
     if (!canSubmit) return
     setSubmitting(true)
     try {
-      onSubmit({ worktree, prompt, model })
+      onSubmit({ project, prompt, model })
     } finally {
       setSubmitting(false)
     }
@@ -211,10 +211,10 @@ function NewSessionDialog({
       </DialogHeader>
       <div className="space-y-4">
         <div>
-          <label className="mb-1.5 block text-sm font-medium">Worktree</label>
-          <Select value={worktree} onValueChange={setWorktree}>
-            <option value="">Select a worktree...</option>
-            {worktrees.map((wt) => {
+          <label className="mb-1.5 block text-sm font-medium">Project</label>
+          <Select value={project} onValueChange={setProject}>
+            <option value="">Select a project...</option>
+            {projects.map((wt) => {
               const active = (wt.sessions ?? []).filter((s) => ACTIVE_STATUSES.has(s.status))
               return (
                 <option key={wt.name} value={wt.name}>
@@ -257,7 +257,7 @@ function NewSessionDialog({
 // ── Dashboard ───────────────────────────────────────────────────────
 
 export function Dashboard() {
-  const [worktrees, setWorktrees] = useState<WorktreeWithSessions[]>([])
+  const [projects, setProjects] = useState<ProjectWithSessions[]>([])
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [activeSessions, setActiveSessions] = useState<SessionSummary[]>([])
   const [loading, setLoading] = useState(true)
@@ -273,13 +273,13 @@ export function Dashboard() {
   async function loadData() {
     try {
       const [wtRes, sessRes, activeRes] = await Promise.all([
-        fetch('/api/worktrees'),
+        fetch('/api/projects'),
         fetch('/api/sessions'),
         fetch('/api/sessions/active'),
       ])
       if (wtRes.ok) {
-        const data = (await wtRes.json()) as { worktrees?: WorktreeWithSessions[] }
-        setWorktrees(data.worktrees ?? [])
+        const data = (await wtRes.json()) as { projects?: ProjectWithSessions[] }
+        setProjects(data.projects ?? [])
       }
       if (sessRes.ok) {
         const data = (await sessRes.json()) as { sessions?: SessionSummary[] }
@@ -296,7 +296,7 @@ export function Dashboard() {
     }
   }
 
-  function handleNewSession(data: { worktree: string; prompt: string; model: string }) {
+  function handleNewSession(data: { project: string; prompt: string; model: string }) {
     fetch('/api/sessions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -331,12 +331,12 @@ export function Dashboard() {
       <div className="flex">
         {/* Main Content */}
         <main className="flex-1 p-6">
-          {/* Worktree Grid */}
+          {/* Project Grid */}
           <section className="mb-8">
             <h2 className="mb-3 text-sm font-semibold text-muted-foreground uppercase tracking-wider">
-              Worktrees
+              Projects
             </h2>
-            <WorktreeGrid worktrees={worktrees} loading={loading} />
+            <ProjectGrid projects={projects} loading={loading} />
           </section>
 
           {/* Sessions */}
@@ -388,7 +388,7 @@ export function Dashboard() {
       <NewSessionDialog
         open={showNewSession}
         onClose={() => setShowNewSession(false)}
-        worktrees={worktrees}
+        projects={projects}
         onSubmit={handleNewSession}
       />
     </div>
