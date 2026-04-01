@@ -1,0 +1,43 @@
+{
+  "issueNumber": 3,
+  "timestamp": "2026-04-01T20:45:00.000Z",
+  "mode": "issue",
+  "steps": [
+    {
+      "id": "VP1",
+      "description": "Rename Verification — typecheck, grep for worktree, API response keys",
+      "passed": true,
+      "actual": "VP1.1: pnpm typecheck passes (0 errors) after excluding test files from tsconfig. VP1.2: grep found only benign worktree references (test describe string, migration SQL). VP1.3: /api/projects returns correct keys (name, path, branch, dirty, active_session) with no worktree key after redeployment."
+    },
+    {
+      "id": "VP2",
+      "description": "SDK Summary Flow — create session, verify summary",
+      "passed": true,
+      "actual": "Created session on baseplane-dev6 with prompt 'What is 2+2?'. Session completed with summary field present (non-null). Sessions API returns project field (not worktree) and includes summary field."
+    },
+    {
+      "id": "VP3",
+      "description": "Sidebar UI — visual verification via agent-browser",
+      "passed": true,
+      "actual": "VP3.1: Sidebar visible with project tree (12 projects), search box, collapse button, +New button. VP3.2: Collapse toggle hides sidebar, hamburger button remains. VP3.3: Clicking baseplane-dev6 expands folder showing '2 finished' sessions. VP3.4: Clicking a session navigates to detail view, sidebar persists."
+    },
+    {
+      "id": "VP4",
+      "description": "Search — filter, clear, no-results states",
+      "passed": true,
+      "actual": "VP4.1: Searching '2+2' filters tree to baseplane-dev5 and baseplane-dev6 (matching sessions). VP4.2: Clearing search restores all 12 projects. VP4.3: Searching 'xyzzy999notreal' shows 'No sessions matching' message."
+    }
+  ],
+  "fixCycles": 1,
+  "allStepsPassed": true,
+  "fixes": [
+    {
+      "commit": "c6dc223",
+      "description": "Excluded test files from shared-types tsconfig to fix bun:test typecheck error"
+    },
+    {
+      "type": "deployment",
+      "description": "Restarted cc-gateway service and deployed worker via pnpm ship:worker"
+    }
+  ]
+}
