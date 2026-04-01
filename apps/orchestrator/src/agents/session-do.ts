@@ -218,11 +218,21 @@ export class SessionDO extends Agent<Env, SessionState> {
 
       switch (cmd.type) {
         case 'user-message': {
-          if (this.state.status !== 'running') break
           // Store user message
           this.sql`INSERT INTO messages (role, type, data) VALUES ('user', 'user-message', ${JSON.stringify({ content: cmd.content })})`
-          // Relay to gateway as stream-input
-          if (this.vpsWs) {
+
+          if (this.state.status === 'idle' && this.state.sdk_session_id) {
+            // Resume session with follow-up message
+            this.updateState({ status: 'running' })
+            this.broadcastToClients({ type: 'status', status: 'running' } as any)
+            this.connectAndStream({
+              type: 'resume',
+              worktree: this.state.worktree,
+              prompt: cmd.content,
+              sdk_session_id: this.state.sdk_session_id,
+            })
+          } else if (this.state.status === 'running' && this.vpsWs) {
+            // Relay to running gateway session as stream-input
             sendCommand(this.vpsWs, {
               type: 'stream-input',
               session_id: this.state.id,
@@ -434,15 +444,19 @@ export class SessionDO extends Agent<Env, SessionState> {
 
       case 'result':
         this.updateState({
-          status: event.is_error ? 'failed' : 'completed',
+          status: event.is_error ? 'failed' : 'idle',
           result: event.result,
-          duration_ms: event.duration_ms,
-          total_cost_usd: event.total_cost_usd,
-          num_turns: event.num_turns,
+          duration_ms: (this.state.duration_ms ?? 0) + (event.duration_ms ?? 0),
+          total_cost_usd: (this.state.total_cost_usd ?? 0) + (event.total_cost_usd ?? 0),
+          num_turns: (this.state.num_turns ?? 0) + (event.num_turns ?? 0),
           error: event.is_error ? event.result : null,
         })
-        this.broadcastToClients({ type: 'finish' })
-        this.releaseWorktreeLock()
+        this.vpsWs?.close()
+        this.vpsWs = null
+        this.broadcastToClients({ type: 'turn-complete' })
+        if (event.is_error) {
+          this.releaseWorktreeLock()
+        }
         break
 
       case 'error':

@@ -156,6 +156,7 @@ export type UIStreamChunk =
   | { type: 'tool-input-available'; toolCallId: string; toolName: string; input: Record<string, unknown> }
   | { type: 'tool-output-available'; toolCallId: string; output: unknown }
   | { type: 'finish' }
+  | { type: 'turn-complete' }
   | { type: 'history'; messages: StoredMessage[] }
   | { type: 'file-changed'; path: string; tool: string; timestamp: string }
 

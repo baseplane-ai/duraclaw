@@ -583,6 +583,12 @@ export function ChatView({ sessionId }: { sessionId: string }) {
           setStreamingText('')
           setStreamingTools(new Map())
           break
+
+        case 'turn-complete':
+          setStreamingText('')
+          setStreamingTools(new Map())
+          // Session state will update via polling (3s interval)
+          break
       }
     })
 
@@ -632,7 +638,7 @@ export function ChatView({ sessionId }: { sessionId: string }) {
   )
 
   const isActive = session
-    ? ['running', 'waiting_input'].includes(session.status)
+    ? ['running', 'waiting_input', 'idle'].includes(session.status)
     : false
 
   return (
