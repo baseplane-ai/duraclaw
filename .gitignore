@@ -14,6 +14,10 @@ dist
 .turbo
 .wrangler
 
+# Tool state
+.claude/
+.tanstack/
+
 # IDE and editor files
 .idea
 .vscode
