@@ -77,7 +77,7 @@ export class SessionDO extends Agent<Env, SessionState> {
         this.state.status === 'waiting_permission'
       ) {
         this.updateState({ status: 'failed', error: 'Gateway connection error' })
-        this.releaseWorktreeLock()
+        this.syncStatusToRegistry()
       }
     })
 
@@ -110,14 +110,13 @@ export class SessionDO extends Agent<Env, SessionState> {
     }
   }
 
-  private async releaseWorktreeLock() {
+  private async syncStatusToRegistry() {
     try {
       const registryId = this.env.SESSION_REGISTRY.idFromName('default')
       const registry = this.env.SESSION_REGISTRY.get(registryId) as any
-      await registry.releaseWorktree(this.state.worktree)
       await registry.updateSessionStatus(this.state.id, this.state.status)
     } catch (err) {
-      console.error(`[SessionDO:${this.ctx.id}] Failed to release worktree lock:`, err)
+      console.error(`[SessionDO:${this.ctx.id}] Failed to sync status to registry:`, err)
     }
   }
 
@@ -283,7 +282,7 @@ export class SessionDO extends Agent<Env, SessionState> {
 
     if (!this.state.sdk_session_id) {
       this.updateState({ status: 'failed', error: 'Cannot reconnect: no sdk_session_id' })
-      this.releaseWorktreeLock()
+      this.syncStatusToRegistry()
       return
     }
 
@@ -351,7 +350,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       this.vpsWs = null
     }
 
-    this.releaseWorktreeLock()
+    this.syncStatusToRegistry()
     this.broadcastToClients({ type: 'finish' })
     console.log(`[SessionDO:${this.ctx.id}] abort`)
   }
@@ -454,15 +453,13 @@ export class SessionDO extends Agent<Env, SessionState> {
         this.vpsWs?.close()
         this.vpsWs = null
         this.broadcastToClients({ type: 'turn-complete' })
-        if (event.is_error) {
-          this.releaseWorktreeLock()
-        }
+        this.syncStatusToRegistry()
         break
 
       case 'error':
         this.updateState({ status: 'failed', error: event.error })
         this.broadcastToClients({ type: 'finish' })
-        this.releaseWorktreeLock()
+        this.syncStatusToRegistry()
         break
     }
   }

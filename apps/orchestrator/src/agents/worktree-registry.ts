@@ -1,21 +1,12 @@
 import { DurableObject } from 'cloudflare:workers'
 import type { Env, SessionSummary } from '~/lib/types'
 
-interface RegistryState {
-  worktree_locks: Record<string, string>
-}
-
 export class WorktreeRegistry extends DurableObject<Env> {
-  private _state: RegistryState = { worktree_locks: {} }
   private initialized = false
 
   private async ensureInit() {
     if (this.initialized) return
     this.initialized = true
-
-    // Load persisted state
-    const stored = await this.ctx.storage.get<RegistryState>('state')
-    if (stored) this._state = stored
 
     // Create sessions table
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS sessions (
@@ -30,30 +21,9 @@ export class WorktreeRegistry extends DurableObject<Env> {
       num_turns INTEGER,
       prompt TEXT
     )`)
-  }
 
-  private async persist() {
-    await this.ctx.storage.put('state', this._state)
-  }
-
-  async acquireWorktree(worktree: string, sessionId: string): Promise<boolean> {
-    await this.ensureInit()
-    const existing = this._state.worktree_locks[worktree]
-    if (existing) return false
-    this._state.worktree_locks[worktree] = sessionId
-    await this.persist()
-    return true
-  }
-
-  async releaseWorktree(worktree: string): Promise<void> {
-    await this.ensureInit()
-    delete this._state.worktree_locks[worktree]
-    await this.persist()
-  }
-
-  async getWorktreeLocks(): Promise<Record<string, string>> {
-    await this.ensureInit()
-    return this._state.worktree_locks
+    // Clean up legacy lock state
+    await this.ctx.storage.delete('state')
   }
 
   async registerSession(session: SessionSummary): Promise<void> {

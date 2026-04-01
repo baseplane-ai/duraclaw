@@ -14,10 +14,8 @@ export const Route = createFileRoute('/api/worktrees')({
       GET: async () => {
         const env = getCloudflareEnv()
 
-        // Get worktree locks from registry
         const registryId = env.SESSION_REGISTRY.idFromName('default')
         const registry = env.SESSION_REGISTRY.get(registryId) as any
-        const locks = (await registry.getWorktreeLocks()) as Record<string, string>
 
         // Fetch worktrees from gateway
         if (!env.CC_GATEWAY_URL) {
@@ -36,11 +34,13 @@ export const Route = createFileRoute('/api/worktrees')({
           }
 
           const worktrees = (await resp.json()) as any[]
-          // Merge lock info
-          const merged = worktrees.map((wt: any) => ({
-            ...wt,
-            locked_by_session: locks[wt.name] ?? null,
-          }))
+          // Attach sessions for each worktree
+          const merged = await Promise.all(
+            worktrees.map(async (wt: any) => ({
+              ...wt,
+              sessions: await registry.listSessionsByWorktree(wt.name),
+            })),
+          )
 
           return json(200, { worktrees: merged })
         } catch {

@@ -14,10 +14,6 @@ export type {
 
 // ── CF-specific types ──────────────────────────────────────────────
 
-export interface RegistryState {
-  worktree_locks: Record<string, string> // worktree_name → session_id
-}
-
 export interface Env {
   SESSION_AGENT: DurableObjectNamespace
   SESSION_REGISTRY: DurableObjectNamespace

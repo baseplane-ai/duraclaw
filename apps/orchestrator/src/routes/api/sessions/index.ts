@@ -33,16 +33,11 @@ export const Route = createFileRoute('/api/sessions/')({
           return json(400, { error: 'Missing required fields: worktree, prompt' })
         }
 
-        // Acquire worktree lock
         const registryId = env.SESSION_REGISTRY.idFromName('default')
         const registry = env.SESSION_REGISTRY.get(registryId) as any
 
         const doId = env.SESSION_AGENT.newUniqueId()
         const sessionId = doId.toString()
-        const locked = await registry.acquireWorktree(body.worktree, sessionId)
-        if (!locked) {
-          return json(409, { error: 'Worktree is already in use by another session' })
-        }
 
         // Resolve worktree path from gateway
         let worktreePath = ''
@@ -87,7 +82,6 @@ export const Route = createFileRoute('/api/sessions/')({
         )
         if (!createResp.ok) {
           const errBody = await createResp.text()
-          await registry.releaseWorktree(body.worktree)
           return json(500, { error: 'Failed to create session DO', status: createResp.status, body: errBody })
         }
 

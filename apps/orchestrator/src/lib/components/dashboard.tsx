@@ -40,15 +40,17 @@ function StatusBadge({ status }: { status: string }) {
 
 // ── Worktree Grid ───────────────────────────────────────────────────
 
-interface WorktreeWithLock extends WorktreeInfo {
-  locked_by_session?: string | null
+const ACTIVE_STATUSES = new Set(['running', 'waiting_input', 'waiting_permission'])
+
+interface WorktreeWithSessions extends WorktreeInfo {
+  sessions?: SessionSummary[]
 }
 
 function WorktreeGrid({
   worktrees,
   loading,
 }: {
-  worktrees: WorktreeWithLock[]
+  worktrees: WorktreeWithSessions[]
   loading: boolean
 }) {
   if (loading) {
@@ -63,40 +65,51 @@ function WorktreeGrid({
 
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-      {worktrees.map((wt) => (
-        <Card key={wt.name}>
-          <CardHeader className="pb-2">
-            <div className="flex items-center justify-between">
-              <CardTitle>{wt.name}</CardTitle>
-              <div className="flex items-center gap-1.5">
-                {wt.dirty && (
-                  <span
-                    className="h-2 w-2 rounded-full bg-warning"
-                    title="Uncommitted changes"
-                  />
-                )}
-                <span
-                  className={cn(
-                    'h-2 w-2 rounded-full',
-                    wt.locked_by_session ? 'bg-destructive' : 'bg-success',
+      {worktrees.map((wt) => {
+        const activeSessions = (wt.sessions ?? []).filter((s) => ACTIVE_STATUSES.has(s.status))
+        const hasActive = activeSessions.length > 0
+        return (
+          <Card key={wt.name}>
+            <CardHeader className="pb-2">
+              <div className="flex items-center justify-between">
+                <CardTitle>{wt.name}</CardTitle>
+                <div className="flex items-center gap-1.5">
+                  {wt.dirty && (
+                    <span
+                      className="h-2 w-2 rounded-full bg-warning"
+                      title="Uncommitted changes"
+                    />
                   )}
-                  title={wt.locked_by_session ? 'Locked by session' : 'Free'}
-                />
+                  <span
+                    className={cn(
+                      'h-2 w-2 rounded-full',
+                      hasActive ? 'bg-success' : 'bg-muted-foreground/30',
+                    )}
+                    title={hasActive ? `${activeSessions.length} active session(s)` : 'No active sessions'}
+                  />
+                </div>
               </div>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <Badge variant="outline" className="text-xs">
-                {wt.branch}
-              </Badge>
-              {wt.locked_by_session && (
-                <span className="text-xs text-destructive">In use</span>
-              )}
-            </div>
-          </CardContent>
-        </Card>
-      ))}
+            </CardHeader>
+            <CardContent>
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Badge variant="outline" className="text-xs">
+                  {wt.branch}
+                </Badge>
+                {hasActive && (
+                  <span className="text-xs text-success">
+                    {activeSessions.length} active
+                  </span>
+                )}
+                {(wt.sessions ?? []).length > 0 && !hasActive && (
+                  <span className="text-xs">
+                    {(wt.sessions ?? []).length} session(s)
+                  </span>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        )
+      })}
     </div>
   )
 }
@@ -171,7 +184,7 @@ function NewSessionDialog({
 }: {
   open: boolean
   onClose: () => void
-  worktrees: WorktreeWithLock[]
+  worktrees: WorktreeWithSessions[]
   onSubmit: (data: { worktree: string; prompt: string; model: string }) => void
 }) {
   const [worktree, setWorktree] = useState('')
@@ -179,7 +192,6 @@ function NewSessionDialog({
   const [model, setModel] = useState('claude-sonnet-4-6')
   const [submitting, setSubmitting] = useState(false)
 
-  const freeWorktrees = worktrees.filter((w) => !w.locked_by_session)
   const canSubmit = worktree && prompt.trim() && !submitting
 
   function handleSubmit() {
@@ -202,18 +214,14 @@ function NewSessionDialog({
           <label className="mb-1.5 block text-sm font-medium">Worktree</label>
           <Select value={worktree} onValueChange={setWorktree}>
             <option value="">Select a worktree...</option>
-            {freeWorktrees.map((wt) => (
-              <option key={wt.name} value={wt.name}>
-                {wt.name} ({wt.branch})
-              </option>
-            ))}
-            {worktrees
-              .filter((w) => w.locked_by_session)
-              .map((wt) => (
-                <option key={wt.name} value={wt.name} disabled>
-                  {wt.name} (in use)
+            {worktrees.map((wt) => {
+              const active = (wt.sessions ?? []).filter((s) => ACTIVE_STATUSES.has(s.status))
+              return (
+                <option key={wt.name} value={wt.name}>
+                  {wt.name} ({wt.branch}){active.length > 0 ? ` - ${active.length} active` : ''}
                 </option>
-              ))}
+              )
+            })}
           </Select>
         </div>
         <div>
@@ -249,7 +257,7 @@ function NewSessionDialog({
 // ── Dashboard ───────────────────────────────────────────────────────
 
 export function Dashboard() {
-  const [worktrees, setWorktrees] = useState<WorktreeWithLock[]>([])
+  const [worktrees, setWorktrees] = useState<WorktreeWithSessions[]>([])
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [activeSessions, setActiveSessions] = useState<SessionSummary[]>([])
   const [loading, setLoading] = useState(true)
@@ -270,7 +278,7 @@ export function Dashboard() {
         fetch('/api/sessions/active'),
       ])
       if (wtRes.ok) {
-        const data = (await wtRes.json()) as { worktrees?: WorktreeWithLock[] }
+        const data = (await wtRes.json()) as { worktrees?: WorktreeWithSessions[] }
         setWorktrees(data.worktrees ?? [])
       }
       if (sessRes.ok) {
