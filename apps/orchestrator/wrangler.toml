@@ -3,6 +3,12 @@ main = "src/server.ts"
 compatibility_date = "2026-03-31"
 compatibility_flags = ["nodejs_compat"]
 
+workers_dev = true
+
+[[routes]]
+pattern = "duraclaw.codevibesmatter.com"
+custom_domain = true
+
 [observability]
 enabled = true
 
