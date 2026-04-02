@@ -111,13 +111,15 @@ See `planning/reviews/roadmap-v2-critical-review.md` for full analysis.
 - [ ] **Ownership checks on DO endpoints** — verify userId on `onConnect`, `onRequest`, all RPC methods
 - [ ] **Registry user-scoping** — filter session list by userId in SessionRegistry
 
-### 0.1c SPA Commitment (P0) _(moved from Phase 8)_
+### 0.1c Drop TanStack Start → Plain SPA (P0) _(moved from Phase 8)_
 
-Commit to SPA-only architecture now. Single-user, auth-gated, no SEO — SSR has no benefit and creates a Capacitor migration cost later.
+Drop TanStack Start entirely in favor of a plain Vite 8 + TanStack Router SPA. Single-user, auth-gated, no SEO — SSR has no benefit, and Start's Vinxi/Nitro layer has been a source of deployment friction on CF Workers. Better Auth has native SPA patterns for client-side token flows.
 
-- [ ] **Set `ssr: false`** in TanStack Start config
-- [ ] **Rearchitect auth flow** — move from server-side session cookies to client-side token exchange
-- [ ] **Remove server function dependencies** — replace `createServerFn` / `server.handlers` with direct API calls
+- [ ] **Upgrade to Vite 8** — drop Vinxi/Nitro, use plain Vite with TanStack Router plugin
+- [ ] **Remove TanStack Start** — replace `createFileRoute` server handlers with direct API/RPC calls
+- [ ] **SPA auth flow** — switch to Better Auth SPA mode (cross-domain token exchange, no server-side session cookies)
+- [ ] **Move `/api/auth/*`** — serve Better Auth from a Worker route or DO endpoint instead of Start server routes
+- [ ] **Static asset deployment** — serve SPA via Workers Sites or Pages, no SSR handler
 - [ ] **Verify all routes work client-side** — no `getRequest()`, no server-only code paths
 
 ### 0.1d CI Pipeline (P0)
@@ -133,7 +135,7 @@ Commit to SPA-only architecture now. Single-user, auth-gated, no SEO — SSR has
 
 ### 0.2 Dependency Upgrades (P0)
 
-- [ ] TanStack Start ^1.121 → ~1.167 (breaking: validator→inputValidator, getWebRequest→getRequest)
+- [ ] **Drop TanStack Start → TanStack Router SPA** (pure Vite 8 + TanStack Router plugin, no Vinxi/Nitro)
 - [ ] Agents SDK ^0.7 → 0.9 (reactive state, typed RPC via stub proxy, Zod v4)
 - [ ] Better Auth ^1.2 → 1.5.6 (native D1 — drop Drizzle adapter entirely)
 - [ ] Claude Agent SDK → 0.2.89 (session mgmt APIs, forkSession, taskBudget, startup())
