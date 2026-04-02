@@ -108,6 +108,12 @@ bun run src/server.ts   # Run executor locally
 6. `cd apps/orchestrator && pnpm deploy` — deploy to CF Workers
 7. Verify CF tunnel routes to VPS executor
 
+## Progress Tracking
+
+- **Roadmap:** `planning/specs/roadmap-v2-full-vision.md` — full vision with all detail
+- **Progress:** `planning/progress.md` — phase/subphase status tracker
+- **Specs:** `planning/specs/` — individual feature specs (linked from progress tracker)
+
 ## Conventions
 
 - Commit messages: `type(scope): description` (feat, fix, chore, refactor, docs, test)
