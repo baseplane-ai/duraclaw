@@ -1,0 +1,136 @@
+# Subphase patterns define what tasks get created inside container phases.
+# Templates reference patterns by name via `subphase_pattern: "impl-verify"`.
+
+subphase_patterns:
+  impl-test-verify:
+    description: "Implement, test process gates, then verify against real services"
+    steps:
+      - id_suffix: impl
+        title_template: "IMPL - {task_summary}"
+        todo_template: "Implement {task_summary}"
+        active_form: "Implementing {phase_name}"
+        labels: [impl]
+        instruction: |
+          Task(subagent_type="impl-agent", prompt="
+            SPEC PHASE: {phase_name}
+            TASK: {task_summary}
+            Do NOT complete tasks - return results to orchestrator.
+          ")
+
+          After the agent returns, verify its work:
+          ```bash
+          git diff --stat   # Review what changed
+          git status        # Confirm changes exist
+          ```
+
+          Then: Mark this task completed via TaskUpdate
+      - id_suffix: test
+        title_template: "TEST - {phase_name}"
+        todo_template: "Test {phase_name} implementation"
+        active_form: "Testing {phase_name}"
+        labels: [test]
+        depends_on_previous: true
+        instruction: |
+          If the spec phase has `test_cases:` and tests don't exist yet, spawn test-agent first:
+          Task(subagent_type="test-agent", prompt="
+            SPEC PHASE: {phase_name}
+            Write tests for any spec test_cases not yet covered.
+            Return: test files written, pass/fail results.
+          ")
+
+          Then run the process gate:
+          kata check-phase {phase_label} --issue={issue}
+      - id_suffix: verify
+        title_template: "VERIFY - {phase_name}"
+        todo_template: "Verify {phase_name} against real services"
+        active_form: "Verifying {phase_name}"
+        labels: [verify, agent-verify]
+        depends_on_previous: true
+        instruction: |
+          Spawn a FRESH verification agent to execute the spec's Verification Plan.
+          The agent should have NO knowledge of the implementation - only the VP steps.
+
+          Before executing, read the project's verification tools config:
+          - `.kata/verification-tools.md` (or `.claude/workflows/verification-tools.md`)
+
+          ## Verification Plan
+
+          {verification_plan}
+
+  impl-test:
+    description: "Implement then run process gates (build, typecheck, tests)"
+    steps:
+      - id_suffix: impl
+        title_template: "IMPL - {task_summary}"
+        todo_template: "Implement {task_summary}"
+        active_form: "Implementing {phase_name}"
+        labels: [impl]
+        instruction: |
+          Task(subagent_type="impl-agent", prompt="
+            SPEC PHASE: {phase_name}
+            TASK: {task_summary}
+            Do NOT complete tasks - return results to orchestrator.
+          ")
+
+          After the agent returns, verify its work:
+          ```bash
+          git diff --stat   # Review what changed
+          git status        # Confirm changes exist
+          ```
+
+          Then: Mark this task completed via TaskUpdate
+      - id_suffix: test
+        title_template: "TEST - {phase_name}"
+        todo_template: "Test {phase_name} implementation"
+        active_form: "Testing {phase_name}"
+        labels: [test]
+        depends_on_previous: true
+        instruction: |
+          If the spec phase has `test_cases:` and tests don't exist yet, spawn test-agent first:
+          Task(subagent_type="test-agent", prompt="
+            SPEC PHASE: {phase_name}
+            Write tests for any spec test_cases not yet covered.
+            Return: test files written, pass/fail results.
+          ")
+
+          Then run the process gate:
+          kata check-phase {phase_label} --issue={issue}
+
+  impl-verify:
+    description: "Implement then verify each spec phase"
+    steps:
+      - id_suffix: impl
+        title_template: "IMPL - {task_summary}"
+        todo_template: "Implement {task_summary}"
+        active_form: "Implementing {phase_name}"
+        labels: [impl]
+        instruction: |
+          Task(subagent_type="impl-agent", prompt="
+            SPEC PHASE: {phase_name}
+            TASK: {task_summary}
+            Do NOT complete tasks - return results to orchestrator.
+          ")
+
+          After the agent returns, verify its work:
+          ```bash
+          git diff --stat   # Review what changed
+          git status        # Confirm changes exist
+          ```
+
+          Then: Mark this task completed via TaskUpdate
+      - id_suffix: check
+        title_template: "CHECK - {phase_name}"
+        todo_template: "Check {phase_name} implementation"
+        active_form: "Checking {phase_name}"
+        labels: [check]
+        depends_on_previous: true
+        instruction: |
+          If the spec phase has `test_cases:` and tests don't exist yet, spawn test-agent first:
+          Task(subagent_type="test-agent", prompt="
+            SPEC PHASE: {phase_name}
+            Write tests for any spec test_cases not yet covered.
+            Return: test files written, pass/fail results.
+          ")
+
+          Then run the process gate:
+          kata check-phase {phase_label} --issue={issue}

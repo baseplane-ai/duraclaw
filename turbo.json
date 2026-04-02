@@ -2,13 +2,24 @@
   "$schema": "https://turbo.build/schema.json",
   "tasks": {
     "build": {
-      "outputs": ["dist/**", ".output/**"]
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", ".output/**"],
+      "cache": true
     },
     "typecheck": {
-      "dependsOn": ["^build"]
+      "dependsOn": ["^build"],
+      "cache": true
     },
-    "lint": {},
-    "lint:errors": {},
+    "lint": {
+      "cache": true
+    },
+    "lint:errors": {
+      "cache": true
+    },
+    "test": {
+      "dependsOn": ["build"],
+      "cache": true
+    },
     "deploy": {
       "dependsOn": ["build"],
       "cache": false
@@ -17,5 +28,6 @@
       "cache": false,
       "persistent": true
     }
-  }
+  },
+  "globalDependencies": ["tsconfig.base.json", "biome.json"]
 }
