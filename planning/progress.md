@@ -11,14 +11,14 @@
 
 | Sub | Name | Status | Spec |
 |-----|------|--------|------|
-| 0.1 | Bug Fixes | not-started | — |
-| 0.1b | Session Ownership | not-started | — |
-| 0.1c | Drop Start → SPA | not-started | — |
-| 0.1d | CI Pipeline | not-started | — |
-| 0.1e | DO SQLite Schema Versioning | not-started | — |
-| 0.2 | Dependency Upgrades | not-started | — |
-| 0.3 | Mobile-First Layout | not-started | — |
-| 0.4 | CLI Parity — Core | not-started | — |
+| 0.1 | Bug Fixes | spec | [p0-foundation.md](specs/p0-foundation.md) |
+| 0.1b | Session Ownership | spec | [p0-foundation.md](specs/p0-foundation.md) |
+| 0.1c | Drop Start → SPA | spec | [p0-foundation.md](specs/p0-foundation.md) |
+| 0.1d | CI Pipeline | spec | [p0-foundation.md](specs/p0-foundation.md) |
+| 0.1e | DO SQLite Schema Versioning | spec | [p0-foundation.md](specs/p0-foundation.md) |
+| 0.2 | Dependency Upgrades | spec | [p0-foundation.md](specs/p0-foundation.md) |
+| 0.3 | Mobile-First Layout | spec | [p0-foundation.md](specs/p0-foundation.md) |
+| 0.4 | CLI Parity — Core | spec | [p0-foundation.md](specs/p0-foundation.md) |
 
 ## Phase 1: Chat Quality + Mobile Chat
 
