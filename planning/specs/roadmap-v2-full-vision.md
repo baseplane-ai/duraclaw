@@ -51,6 +51,27 @@ These answers shape every design decision in the roadmap:
 
 ---
 
+## Review Decisions (2026-04-01)
+
+Critical review conducted with 3 parallel research agents (dependency chain, tech risk, market gaps). Interview results:
+
+| Finding | Decision |
+|---|---|
+| Session ownership in P9 | **Moved to P0** — add userId + ownership checks immediately |
+| SPA migration in P8 | **Moved to P0** — commit SPA-only now, avoid 7-phase SSR rework |
+| No testing story | **CI (typecheck + lint) in P0**, tests per-phase |
+| No schema versioning | **Version DO SQLite schemas from P0** |
+| Executor abstraction (P5) after rollback (P3) | **Accept rework** — ship rollback fast in P3, refactor in P5 |
+| Push prefs need settings storage (P6) | **Pull user prefs storage into P4** |
+| Rate limiting backend unspecified | **Separate spike** with blocker note on P1 |
+| Compaction deferred to P10 | **Moved to P3** — session lifecycle operation |
+| TanStack DB OPFS cross-tab bug | **Not a real issue** — single-tab dashboard, DO sync is source of truth |
+| Missing: MCP/plugins, a11y, quality gates | **Skip** — personal tool, not needed now |
+
+See `planning/reviews/roadmap-v2-critical-review.md` for full analysis.
+
+---
+
 ## What Exists Today (Shipped)
 
 | Capability | Status |
@@ -73,7 +94,7 @@ These answers shape every design decision in the roadmap:
 
 ## Phase 0: Foundation (Pre-requisite)
 
-> Fix bugs, upgrade deps, establish mobile-first layout. Everything else builds on this.
+> Fix bugs, upgrade deps, establish mobile-first layout, commit to SPA, add session ownership. Everything else builds on this.
 
 ### 0.1 Bug Fixes (P0)
 
@@ -82,6 +103,33 @@ These answers shape every design decision in the roadmap:
 - [ ] Fix tool approval sync — await RPC before updating AI SDK state
 - [ ] Wire existing dashboard.tsx to `/` route
 - [ ] Add logout button to sidebar
+- [ ] **Input sanitization** — sanitize rendered markdown/HTML to prevent XSS (moved from Phase 9)
+
+### 0.1b Session Ownership (P0) _(moved from Phase 9)_
+
+- [ ] **Add `userId` to `SessionState`** — set from auth context on session creation
+- [ ] **Ownership checks on DO endpoints** — verify userId on `onConnect`, `onRequest`, all RPC methods
+- [ ] **Registry user-scoping** — filter session list by userId in SessionRegistry
+
+### 0.1c SPA Commitment (P0) _(moved from Phase 8)_
+
+Commit to SPA-only architecture now. Single-user, auth-gated, no SEO — SSR has no benefit and creates a Capacitor migration cost later.
+
+- [ ] **Set `ssr: false`** in TanStack Start config
+- [ ] **Rearchitect auth flow** — move from server-side session cookies to client-side token exchange
+- [ ] **Remove server function dependencies** — replace `createServerFn` / `server.handlers` with direct API calls
+- [ ] **Verify all routes work client-side** — no `getRequest()`, no server-only code paths
+
+### 0.1d CI Pipeline (P0)
+
+- [ ] **GitHub Actions workflow** — typecheck + Biome lint on push/PR
+- [ ] Add tests per-phase as features ship (no upfront test suite)
+
+### 0.1e DO SQLite Schema Versioning (P0)
+
+- [ ] **Schema version tracking** — version number in DO SQLite, checked on DO init
+- [ ] **Forward-compatible columns** — plan nullable columns for known future needs (rollback metadata, user prefs)
+- [ ] **Migration runner** — simple sequential migration function in SessionDO constructor
 
 ### 0.2 Dependency Upgrades (P0)
 
@@ -153,6 +201,8 @@ Since full mobile sessions is the dream feature, chat must work perfectly on pho
   - Position: top-center on desktop, bottom on mobile (above input)
 - [ ] **Auto-reconnect** — exponential backoff on WS disconnect (1s, 2s, 4s, 8s, max 30s)
 - [ ] **Connection status indicator** — banner when disconnected, auto-retry with manual retry button
+- [ ] **Rate limiting** — per-user on session creation and API endpoints (moved from Phase 9)
+  - ⚠️ **BLOCKER: needs spike** — choose backend (DO-based vs KV with eventual consistency) before implementing. See rate-limiting spike.
 
 ---
 
@@ -174,6 +224,11 @@ Since full mobile sessions is the dream feature, chat must work perfectly on pho
   - "Needs attention" badge for permission/question
 - [ ] **Click/tap tile to expand** — full session view slides in
 - [ ] **Quick-return** — back button or swipe to return to dashboard without losing place
+- [ ] **Streaming backpressure** — performance rules for 6+ concurrent tiles:
+  - Only stream to visible tiles (IntersectionObserver), pause off-screen
+  - Mobile: stream active tile only, poll status for others
+  - Degrade to polling on slow connections (navigator.connection API)
+  - Virtualize tile list if >6 sessions
 
 ### 2.2 Attention Queue
 
@@ -211,13 +266,14 @@ Layered notification model (toasts → attention queue → full context):
 - [ ] **Running total** — sum of all active session costs in dashboard header
 - [ ] **Weekly usage** — simple weekly total in settings or dashboard
 - [ ] **Session budget limit** — set max cost per session, auto-abort when reached
-- [ ] **Weekly budget limit** — alert (toast + notification) when weekly spend crosses threshold
+- [ ] **Weekly budget limit** — alert (toast + notification) when weekly spend crosses threshold _(depends: Phase 4 notification system for push alerts)_
+- [ ] **Audit logging** — log all permission approvals and session operations (moved from Phase 9)
 
 ---
 
 ## Phase 3: Session Management
 
-> Full lifecycle control for sessions.
+> Full lifecycle control for sessions, including compaction for long-running sessions.
 
 ### 3.1 Session Operations
 
@@ -233,14 +289,24 @@ This is a priority feature. Message-level rollback with optional code state reve
 - [ ] **Message-level rewind** — right-click/long-press any message → "Rewind to here"
   - Everything after that message is discarded
   - Session continues from that point
-  - Uses SDK session snapshot/restore if available
+  - Uses SDK `forkSession(sessionId, { upToMessageId })` to branch conversation
 - [ ] **Rewind options:**
-  - "Rewind conversation only" — rolls back chat, code stays as-is
-  - "Rewind conversation + code" — rolls back chat AND reverts file changes to their state at that message
-  - Code rewind requires: tracking git state (commit SHA) at each message boundary
-  - Gateway command: `git stash` current changes, `git checkout <sha>` to restore state
+  - "Rewind conversation only" — `forkSession` to branch, code stays as-is
+  - "Rewind conversation + code" — SDK `rewindFiles(userMessageId)` within the same session (requires `enableFileCheckpointing: true`)
+  - Note: conversation fork + code rewind cannot be combined (forked sessions lose file-history snapshots). Code rewind only works within the current session.
+  - Gateway must enable `enableFileCheckpointing: true` on all sessions
 - [ ] **Rewind confirmation** — show what will be lost: "Discard 5 messages and 3 file changes?"
 - [ ] **Undo rewind** — keep a reference to the rewound state so you can un-rewind within the same session
+
+### 3.2b Context Compaction _(moved from Phase 10)_
+
+Long sessions hitting context limits is a daily pain point. Manual compaction independent of AI SDK v7:
+
+- [ ] **Manual compaction trigger** — button in session header: "Summarize & Continue"
+  - Summarizes conversation so far, starts fresh context with summary as system prompt
+  - Uses existing SDK capabilities (no AI SDK v7 dependency)
+- [ ] **Context usage warning** — alert when context window is >80% full
+- [ ] **Auto-suggest compaction** — toast: "Session is getting long — summarize and continue?"
 
 ### 3.3 Session History
 
@@ -262,6 +328,19 @@ This is a priority feature. Message-level rollback with optional code state reve
 - [ ] **Quick start** — sidebar "+" button per project → new session with defaults
 
 Note: System prompt editor and tool allowlist are lower priority — Claude Code configs live in-project (CLAUDE.md), managed by Claude Code itself. No need to duplicate that in the UI.
+
+### 3.5 Image Paste + File Upload (Moved from Phase 7)
+
+Common dev workflow — paste screenshot of error, attach log file. Too important to defer.
+
+- [ ] **Paste image** — Cmd/Ctrl+V to paste screenshots into chat
+  - Convert to FileUIPart, display preview in input area
+  - Upload to gateway on send
+- [ ] **File upload** — click attach button or drag-drop files onto chat
+  - File picker dialog (filtered by useful types: code, text, images)
+  - Progress indicator for upload
+  - Display file preview in input area before sending
+- [ ] **Image rendering in responses** — display base64 and URL images inline
 
 ---
 
@@ -286,8 +365,9 @@ Note: System prompt editor and tool allowlist are lower priority — Claude Code
   - Questions: "Open" button to jump to session and type answer
 - [ ] **Backend: DO → Push service:**
   - SessionDO detects pending_permission / pending_question / result state transitions
-  - Sends push via Web Push protocol (need push subscription storage in D1)
-  - CF Workers supports Web Push via `fetch()` to push endpoint
+  - Sends push via `@pushforge/builder` (zero-dep, TS-first, supports CF Workers VAPID signing)
+  - Push subscriptions stored in DO SQLite or D1
+  - Workers Web Crypto API fully supports required algorithms (ECDSA P-256, ECDH P-256, AES-GCM)
 
 ### 4.2 In-App Notification System
 
@@ -295,7 +375,8 @@ Note: System prompt editor and tool allowlist are lower priority — Claude Code
 - [ ] **Notification drawer** — slide-out panel (right side desktop, bottom sheet mobile)
   - Chronological list of all notifications
   - Mark as read, dismiss individual, clear all
-- [ ] **Notification preferences page** — in settings:
+- [ ] **User preferences storage** — minimal prefs table in D1 (user_id, key, value). Consumed by Phase 6 settings page later.
+- [ ] **Notification preferences** — stored in user prefs table:
   - Toggle per event type (blocked/completed/error)
   - Sound on/off
   - Push on/off
@@ -310,13 +391,7 @@ Note: System prompt editor and tool allowlist are lower priority — Claude Code
 - [ ] **Offline indicator** — banner when disconnected with retry button
 - [ ] **App shortcuts** — long-press icon: "New Session", "Dashboard"
 
-### 4.4 Capacitor Native Shell (Later)
-
-- [ ] **Capacitor project setup** — wrap web app in native iOS/Android container
-- [ ] **Local SQLite** — Capacitor SQLite plugin for offline session cache
-- [ ] **Native push notifications** — Firebase Cloud Messaging (Android) + APNs (iOS)
-- [ ] **Native share sheet** — share session content via native OS share
-- [ ] **Biometric auth** — Face ID / Touch ID for app access
+~~### 4.4 Capacitor Native Shell~~ → moved to Phase 8.3
 
 ---
 
@@ -360,6 +435,33 @@ Note: System prompt editor and tool allowlist are lower priority — Claude Code
   - Gateway endpoint: `GET /projects/{name}/kata-state`
   - Returns: mode, phase, tasks array
 - [ ] **Refresh:** poll on session reconnect, or subscribe to file_changed events on `.kata/` files
+
+### 5.4 Executor Abstraction Layer (Moved from Phase 10)
+
+Define the provider-agnostic interface early to validate the design before multi-provider work:
+
+- [ ] **Abstract executor interface:**
+  ```typescript
+  interface AgentExecutor {
+    execute(config: SessionConfig): AsyncIterable<AgentEvent>
+    resume(sessionId: string, options?: ResumeOptions): AsyncIterable<AgentEvent>
+    abort(sessionId: string): void
+    answer(sessionId: string, answer: string): void
+    approvePermission(sessionId: string, toolCallId: string, allowed: boolean): void
+    forkSession(sessionId: string, options: ForkOptions): Promise<string>
+    rewindFiles(sessionId: string, messageId: string): Promise<RewindResult>
+    switchModel(sessionId: string, model: string): void
+    attachFiles(sessionId: string, files: FileAttachment[]): void
+    getCapabilities(): ExecutorCapabilities
+  }
+  ```
+- [ ] **Claude Code executor** — refactor current cc-gateway `executeSession` to implement interface
+- [ ] **Capability flags** — `ExecutorCapabilities` declares what each provider supports:
+  - `toolPermissions` — can approve/deny individual tool calls (Claude: yes, Codex: no)
+  - `fileCheckpointing` — can rewind file state (Claude: yes)
+  - `sessionFork` — can branch conversation at a message (Claude: yes)
+  - `modelSwitching` — can change model mid-session (Claude: TBD)
+  - `fileAttachments` — can receive file/image uploads (Claude: yes)
 
 ---
 
@@ -412,7 +514,7 @@ Better Auth supports all of these via plugins:
 - [ ] **Dark mode** — current default, polish and complete
 - [ ] **Light mode** — full light theme (all components)
 - [ ] **System auto** — `prefers-color-scheme` media query, auto-switch
-- [ ] **Persistence** — save preference in D1 user settings, apply on load via cookie/SSR
+- [ ] **Persistence** — save preference in D1 user settings, apply on load via LocalStorage + blocking `<script>` in `index.html` to prevent theme flash (SPA-only — no server cookies)
 
 ---
 
@@ -422,23 +524,18 @@ Better Auth supports all of these via plugins:
 
 ### 7.1 Image Paste + File Upload
 
-- [ ] **Paste image** — Cmd/Ctrl+V to paste screenshots into chat
-  - Convert to FileUIPart, display preview in input area
-  - Upload to gateway on send
-- [ ] **File upload** — click attach button or drag-drop files onto chat
-  - File picker dialog (filtered by useful types: code, text, images)
-  - Progress indicator for upload
-  - Display file preview in input area before sending
-- [ ] **Image rendering in responses** — display base64 and URL images inline
+> **Moved to Phase 3.5** — common dev workflow (paste screenshot, attach log file).
+
+- ~~See Phase 3.5 for details~~
 
 ### 7.2 Slash Commands
 
 - [ ] **Command autocomplete** — type `/` to trigger popup with fuzzy search
 - [ ] **Built-in commands:**
-  - `/model <name>` — switch model mid-session
+  - `/model <name>` — switch model mid-session _(depends: Phase 10.4 model switching)_
   - `/abort` — abort current session
   - `/clear` — clear display (not session history)
-  - `/compact` — trigger context compaction
+  - `/compact` — trigger context compaction _(manual flow in Phase 3.2b; AI SDK v7 native compaction in Phase 10.1)_
   - `/cost` — show session cost breakdown
   - `/help` — show available commands
 - [ ] **Interception:** commands handled in ChatTransport.sendMessages() before reaching server
@@ -487,6 +584,17 @@ Architecture: **server-primary, local cache** — DO is source of truth, client 
 - [ ] **Sync on reconnect** — replay queued actions when connection restored
 - [ ] **Staleness indicators** — show "last synced: 5m ago" when serving from cache
 
+### 8.3 Capacitor Native Shell (Moved from Phase 4)
+
+> **Pre-requisite:** SPA mode committed in Phase 0.1c. Same static build serves both web and Capacitor.
+
+- [ ] ~~**SPA mode migration**~~ → done in Phase 0.1c
+- [ ] **Capacitor project setup** — wrap SPA build in native iOS/Android container
+- [ ] **Local SQLite** — Capacitor SQLite plugin for offline session cache (pairs with 8.1 TanStack DB)
+- [ ] **Native push notifications** — Firebase Cloud Messaging (Android) + APNs (iOS)
+- [ ] **Native share sheet** — share session content via native OS share
+- [ ] **Biometric auth** — Face ID / Touch ID for app access
+
 ---
 
 ## Phase 9: Backend Hardening
@@ -501,16 +609,16 @@ Architecture: **server-primary, local cache** — DO is source of truth, client 
 
 ### 9.2 Lifecycle & Cleanup
 
-- [ ] **Session pruning alarm** — DO alarm to prune sessions >30 days (configurable)
+- ~~Session pruning alarm~~ — removed. DO SQLite has 10GB limit per DO, more than enough for all session history. No pruning needed.
 - [ ] **Graceful DO eviction recovery** — re-establish gateway WS on DO restart
 - [ ] **Connection cleanup** — detect and close zombie WS connections
 
 ### 9.3 Security
 
-- [ ] **Session ownership** — enforce creator-only access (prep for multi-user)
-- [ ] **Input sanitization** — prevent XSS in rendered markdown/HTML
-- [ ] **Rate limiting** — per-user on session creation and API endpoints
-- [ ] **Audit logging** — log all permission approvals and session operations
+- ~~Session ownership~~ → moved to Phase 0.1b
+- ~~Input sanitization~~ → moved to Phase 0.1
+- ~~Rate limiting~~ → moved to Phase 1.4
+- ~~Audit logging~~ → moved to Phase 2.4
 
 ---
 
@@ -539,21 +647,12 @@ Architecture: **server-primary, local cache** — DO is source of truth, client 
 
 ### 10.3 Executor Abstraction Layer
 
-Prep for multi-provider future:
+> **Moved earlier:** Interface definition and Claude executor adapter ship in Phase 5-6. Multi-provider routing stays in Phase 10.
 
-- [ ] **Abstract executor interface:**
-  ```typescript
-  interface AgentExecutor {
-    execute(config: SessionConfig): AsyncIterable<AgentEvent>
-    resume(sessionId: string): AsyncIterable<AgentEvent>
-    abort(sessionId: string): void
-    answer(sessionId: string, answer: string): void
-    getCapabilities(): ExecutorCapabilities
-  }
-  ```
-- [ ] **Claude Code executor** — current cc-gateway, implements interface
-- [ ] **Future executors:** Codex, Gemini Code Assist, custom agents
-- [ ] **Executor registry** — configure multiple executors, route sessions by model/capability
+- [ ] ~~**Abstract executor interface**~~ → moved to Phase 5-6
+- [ ] ~~**Claude Code executor adapter**~~ → moved to Phase 5-6
+- [ ] **Future executors:** Codex, Gemini Code Assist, custom agents (Phase 10)
+- [ ] **Executor registry** — configure multiple executors, route sessions by model/capability (Phase 10)
 
 ### 10.4 Multi-Model Support
 
@@ -610,45 +709,57 @@ The explicit build order based on interview decisions:
 
 ```
 Phase 0: Foundation
-  Bug fixes + dep upgrades + mobile-first layout + CLI parity
+  Bug fixes + dep upgrades + mobile-first layout + CLI parity + XSS sanitization
+  + session ownership + SPA commitment + CI pipeline + schema versioning
   ↓
 Phase 1: Chat Quality + Mobile Chat (parallel)
-  Input fundamentals + file change display + mobile chat UX + error handling
+  Input fundamentals + file change display + mobile chat UX + error handling + rate limiting (spike first)
   ↓
 Phase 2: Multi-Session Dashboard (THE differentiator)
-  Grid view with live streaming tiles + attention queue + cost tracking
+  Grid view with live streaming tiles + attention queue + cost tracking + audit logging
   ↓
 Phase 3: Session Management
-  Rename/delete/tag + ROLLBACK/REWIND + history + search
+  Rename/delete/tag + ROLLBACK/REWIND + COMPACTION + history + search + image paste/file upload
   ↓
 Phase 4: Push Notifications + PWA
-  Web Push + in-app notifications + PWA manifest + service worker
+  Web Push + in-app notifications + user prefs storage + PWA manifest + service worker
   ↓
-Phase 5: File Viewer + Integrations
-  Inline file viewer with diffs + GitHub issue/PR + kata state
+Phase 5: File Viewer + Integrations + Executor Abstraction
+  Inline file viewer with diffs + GitHub issue/PR + kata state + AgentExecutor interface
+  (rollback in P3 will be refactored behind this abstraction — accepted rework)
   ↓
 Phase 6: Settings + Auth + Theming
-  Dedicated settings page + full auth suite + dark/light/system
+  Dedicated settings page (consumes P4 prefs storage) + full auth suite + dark/light/system
   ↓
 Phase 7: Advanced Chat (phased CLI parity)
-  Image paste + file upload + slash commands + input history + Cmd+K
+  Slash commands + input history + Cmd+K
   ↓
-Phase 8: Data Layer + Offline
-  TanStack DB local cache + offline session browsing + Capacitor native
+Phase 8: Data Layer + Offline + Capacitor
+  TanStack DB local cache + offline session browsing + Capacitor native (SPA already done in P0)
   ↓
 Phase 9: Backend Hardening
-  Observability + lifecycle + security
+  Observability + lifecycle (session ownership already done in P0)
   ↓
 Phase 10: Platform Evolution
-  AI SDK v7 + Dynamic Workers + executor abstraction + multi-model + multi-agent
+  AI SDK v7 + Dynamic Workers + multi-model + multi-agent
 ```
 
 **Key sequencing decisions:**
 - Mobile-first layout is in Phase 0, not Phase 6 — everything is responsive from the start
+- **SPA commitment in Phase 0** — no SSR, avoids 7-phase rework. Simplifies Capacitor later.
+- **Session ownership in Phase 0** — userId + auth checks from day 1, avoids cross-cutting retrofit
+- **CI pipeline in Phase 0** — typecheck + lint on push. Tests added per-phase.
+- **Schema versioning in Phase 0** — DO SQLite version tracking + migration runner from the start
+- Security pulled forward — XSS (Phase 0), rate limiting (Phase 1), audit logging (Phase 2) instead of all in Phase 9
 - Dashboard (Phase 2) before session management (Phase 3) — manual parallel control first
+- **Compaction moved to Phase 3** — context window management is a session lifecycle operation
+- Image paste/file upload moved to Phase 3 (from Phase 7) — core dev workflow, too important to defer
 - Notifications (Phase 4) before file viewer (Phase 5) — never miss blocked sessions
-- Advanced chat features (Phase 7) are later — basics first, CLI parity phased in over time
+- **User prefs storage in Phase 4** — notification preferences need persistent storage before Phase 6 settings page
+- Executor abstraction stays in Phase 5 — P3 rollback builds against raw SDK, accepted rework in P5
+- Capacitor moved to Phase 8 (from Phase 4) — pairs naturally with data layer/offline work
 - Orchestration/automation is Phase 10 — manual parallel first, automation last
+- **Rate limiting needs a spike** — choose DO-based vs KV backend before P1 implementation
 
 ---
 
@@ -664,13 +775,23 @@ Phase 10: Platform Evolution
 8. Tooltip on StatusDot (title attr)
 9. Typing indicator (pulsing dots)
 10. Message timestamps
+11. First-run empty states — "No sessions yet — create one" guidance on dashboard and sidebar
 
 ---
 
-## Open Technical Questions
+## Technical Questions (Resolved 2026-04-01)
 
-1. **SDK snapshot/rollback capability** — Does Claude Agent SDK support session state snapshots? Need to verify before designing Phase 3.2 rollback feature. May need to build on top of git commits per turn.
-2. **Web Push from CF Workers** — Can Durable Objects send Web Push notifications? Need to verify crypto APIs available in Workers for VAPID signing.
-3. **TanStack DB maturity** — TanStack DB is brand new. Research spike needed before committing to Phase 8 architecture. Fallback: plain IndexedDB with custom sync.
-4. **Capacitor + TanStack Start** — Does Capacitor work with SSR frameworks? May need SPA mode for native builds.
-5. **Executor abstraction cost** — How much abstraction is needed now vs when the second provider actually arrives? Risk of premature abstraction.
+1. **SDK snapshot/rollback capability** — **Resolved: SDK file checkpointing.**
+   The SDK supports `forkSession(sessionId, { upToMessageId })` for conversation branching and `rewindFiles(userMessageId)` with `enableFileCheckpointing: true` for file revert. Forked sessions lose file-history snapshots, so conversation rewind (fork) and code rewind cannot be combined in a single operation. Phase 3.2 design: conversation rewind via `forkSession`, code rewind via SDK `rewindFiles()` within the same session. No git commits per turn.
+
+2. **Web Push from CF Workers** — **Resolved: Fully supported, use `@pushforge/builder`.**
+   Workers have all required crypto APIs (ECDSA P-256, ECDH P-256, AES-GCM). The standard `web-push` npm library doesn't work (Node-specific crypto), but `@pushforge/builder` is zero-dependency, TypeScript-first, and explicitly targets CF Workers. DOs can store push subscriptions in SQLite and send push notifications directly via `fetch()`.
+
+3. **TanStack DB maturity** — **Resolved: Bet on TanStack DB, spike before full commitment.**
+   TanStack DB is beta v0.6 with alpha-stage persistence (SQLite via OPFS). No production deployments documented yet, cross-tab OPFS bugs still open. Decision: commit to TanStack DB for Phase 8 but run a validation spike before building on it. If the spike reveals blockers, fall back to IndexedDB with custom sync.
+
+4. **Capacitor + TanStack Start** — **Resolved: SPA-only everywhere.**
+   Capacitor requires SPA mode (no server in a WebView). Rather than maintaining dual build targets (SSR for web, SPA for native), switch to SPA-only for both web and Capacitor builds. SSR benefits (SEO, initial load) are irrelevant for a single-user auth-gated app. TanStack Start's `ssr: false` mode produces static assets that work for both CF Workers (static site) and Capacitor. Simplifies the entire build pipeline.
+
+5. **Executor abstraction cost** — **Resolved: Build in Phase 5-6 timeframe.**
+   The current gateway protocol (`GatewayCommand`/`GatewayEvent`) is already provider-agnostic in shape. SDK coupling is isolated to one function (`executeSession`). Rather than waiting for Phase 10, build the `AgentExecutor` interface in the Phase 5-6 timeframe to validate the abstraction design earlier. Note: Codex (async/polling) and Gemini (no tool permission hooks) have fundamentally different session models, so the interface must account for capability differences via `getCapabilities()`.
