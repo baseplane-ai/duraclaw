@@ -1,9 +1,20 @@
-import { useEffect, useState } from 'react'
-import { Button, Dialog, DialogHeader, DialogTitle, Input, Select, Textarea } from './ui'
+import { useCallback, useEffect, useState } from 'react'
+import { signOut } from '~/lib/auth-client'
+import type { ProjectInfo, SessionSummary } from '~/lib/types'
 import { cn } from '~/lib/utils'
-import type { SessionSummary, ProjectInfo } from '~/lib/types'
-
-// ── Browser Helpers ────────────────────────────────────────────────
+import {
+  Button,
+  Dialog,
+  DialogHeader,
+  DialogTitle,
+  Input,
+  Select,
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+  Textarea,
+} from './ui'
 
 type BrowserGlobal = typeof globalThis & {
   window?: unknown
@@ -22,18 +33,16 @@ function storageSet(key: string, value: string): void {
   if (isBrowser) browserGlobal.localStorage?.setItem(key, value)
 }
 
-// ── Constants ──────────────────────────────────────────────────────
-
 const ACTIVE_STATUSES = new Set(['running', 'waiting_input', 'waiting_permission'])
 const FINISHED_STATUSES = new Set(['idle', 'completed', 'failed', 'aborted'])
-
-// ── Types ──────────────────────────────────────────────────────────
 
 interface ProjectWithSessions extends ProjectInfo {
   sessions: SessionSummary[]
 }
 
-// ── Status Icon ────────────────────────────────────────────────────
+function navigateTo(path: string) {
+  ;(self as unknown as { location: { href: string } }).location.href = path
+}
 
 function StatusDot({ status }: { status: string }) {
   const colors: Record<string, string> = {
@@ -45,16 +54,26 @@ function StatusDot({ status }: { status: string }) {
     failed: 'bg-destructive',
     aborted: 'bg-muted-foreground',
   }
+
   return (
     <span
-      className={cn('inline-block h-2 w-2 shrink-0 rounded-full', colors[status] ?? 'bg-muted-foreground')}
+      className={cn(
+        'inline-block h-2 w-2 shrink-0 rounded-full',
+        colors[status] ?? 'bg-muted-foreground',
+      )}
     />
   )
 }
 
-// ── Session Item ───────────────────────────────────────────────────
-
-function SessionItem({ session, selected }: { session: SessionSummary; selected: boolean }) {
+function SessionItem({
+  session,
+  selected,
+  onSelect,
+}: {
+  session: SessionSummary
+  selected: boolean
+  onSelect: (id: string) => void
+}) {
   const label = session.summary
     ? session.summary
     : session.prompt
@@ -63,19 +82,15 @@ function SessionItem({ session, selected }: { session: SessionSummary; selected:
         : session.prompt
       : session.id.slice(0, 8)
 
-  function handleClick() {
-    ;(self as unknown as { location: { href: string } }).location.href = `/session/${session.id}`
-  }
-
   return (
     <button
       type="button"
-      onClick={handleClick}
+      onClick={() => onSelect(session.id)}
       className={cn(
-        'flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm transition-colors',
+        'flex min-h-11 w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm transition-colors',
         selected
           ? 'bg-accent text-accent-foreground'
-          : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground',
+          : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground',
       )}
     >
       <StatusDot status={session.status} />
@@ -84,14 +99,14 @@ function SessionItem({ session, selected }: { session: SessionSummary; selected:
   )
 }
 
-// ── Finished Sessions Expander ─────────────────────────────────────
-
 function FinishedSessionsExpander({
   sessions,
   selectedId,
+  onSelect,
 }: {
   sessions: SessionSummary[]
   selectedId: string | null
+  onSelect: (id: string) => void
 }) {
   const [expanded, setExpanded] = useState(false)
 
@@ -101,16 +116,21 @@ function FinishedSessionsExpander({
     <div>
       <button
         type="button"
-        onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-1 px-3 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+        onClick={() => setExpanded((current) => !current)}
+        className="flex min-h-11 w-full items-center gap-2 rounded-xl px-3 py-2 text-xs text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground"
       >
         <span className="text-[10px]">{expanded ? '\u25BC' : '\u25B6'}</span>
         <span>{sessions.length} finished</span>
       </button>
       {expanded && (
-        <div className="space-y-0.5">
-          {sessions.map((s) => (
-            <SessionItem key={s.id} session={s} selected={s.id === selectedId} />
+        <div className="space-y-1">
+          {sessions.map((session) => (
+            <SessionItem
+              key={session.id}
+              onSelect={onSelect}
+              selected={session.id === selectedId}
+              session={session}
+            />
           ))}
         </div>
       )}
@@ -118,60 +138,72 @@ function FinishedSessionsExpander({
   )
 }
 
-// ── Project Folder ─────────────────────────────────────────────────
-
 function ProjectFolder({
   project,
   selectedSessionId,
+  onSelectSession,
 }: {
   project: ProjectWithSessions
   selectedSessionId: string | null
+  onSelectSession: (id: string) => void
 }) {
-  const activeSessions = project.sessions.filter((s) => ACTIVE_STATUSES.has(s.status))
-  const finishedSessions = project.sessions.filter((s) => FINISHED_STATUSES.has(s.status))
-  const hasActive = activeSessions.length > 0
-
+  const activeSessions = project.sessions.filter((session) => ACTIVE_STATUSES.has(session.status))
+  const finishedSessions = project.sessions.filter((session) =>
+    FINISHED_STATUSES.has(session.status),
+  )
   const storageKey = `project-expanded-${project.name}`
+
   const [expanded, setExpanded] = useState(() => {
     const stored = storageGet(storageKey)
     if (stored !== null) return stored === 'true'
-    return hasActive
+    return activeSessions.length > 0
   })
 
   function toggleExpanded() {
-    const next = !expanded
-    setExpanded(next)
-    storageSet(storageKey, String(next))
+    setExpanded((current) => {
+      const next = !current
+      storageSet(storageKey, String(next))
+      return next
+    })
   }
 
   return (
-    <div>
+    <div className="space-y-1">
       <button
         type="button"
         onClick={toggleExpanded}
-        className="flex w-full items-center justify-between px-3 py-1.5 text-sm font-medium hover:bg-accent/50 rounded-md transition-colors"
+        className="flex min-h-11 w-full items-center justify-between rounded-xl px-3 py-2 text-sm font-medium transition-colors hover:bg-accent/50"
       >
-        <div className="flex items-center gap-1.5">
-          <span className="text-[10px] text-muted-foreground">{expanded ? '\u25BC' : '\u25B6'}</span>
+        <span className="flex items-center gap-2">
+          <span className="text-[10px] text-muted-foreground">
+            {expanded ? '\u25BC' : '\u25B6'}
+          </span>
           <span>{project.name}</span>
-        </div>
+        </span>
         {activeSessions.length > 0 && (
           <span className="text-xs text-muted-foreground">({activeSessions.length})</span>
         )}
       </button>
       {expanded && (
-        <div className="ml-2 space-y-0.5 mt-0.5">
-          {activeSessions.map((s) => (
-            <SessionItem key={s.id} session={s} selected={s.id === selectedSessionId} />
+        <div className="space-y-1 pl-2">
+          {activeSessions.map((session) => (
+            <SessionItem
+              key={session.id}
+              onSelect={onSelectSession}
+              selected={session.id === selectedSessionId}
+              session={session}
+            />
           ))}
-          <FinishedSessionsExpander sessions={finishedSessions} selectedId={selectedSessionId} />
+          <FinishedSessionsExpander
+            onSelect={onSelectSession}
+            selectedId={selectedSessionId}
+            sessions={finishedSessions}
+          />
         </div>
       )}
     </div>
   )
 }
-
-// ── New Session Dialog ─────────────────────────────────────────────
 
 function NewSessionDialog({
   open,
@@ -202,47 +234,58 @@ function NewSessionDialog({
   }
 
   return (
-    <Dialog open={open} onClose={onClose}>
+    <Dialog onClose={onClose} open={open}>
       <DialogHeader>
         <DialogTitle>New Session</DialogTitle>
       </DialogHeader>
       <div className="space-y-4">
         <div>
-          <label className="mb-1.5 block text-sm font-medium">Project</label>
-          <Select value={project} onValueChange={setProject}>
+          <label className="mb-1.5 block text-sm font-medium" htmlFor="sidebar-session-project">
+            Project
+          </label>
+          <Select id="sidebar-session-project" value={project} onValueChange={setProject}>
             <option value="">Select a project...</option>
-            {projects.map((p) => {
-              const active = p.sessions.filter((s) => ACTIVE_STATUSES.has(s.status))
+            {projects.map((projectInfo) => {
+              const active = projectInfo.sessions.filter((session) =>
+                ACTIVE_STATUSES.has(session.status),
+              )
               return (
-                <option key={p.name} value={p.name}>
-                  {p.name} ({p.branch}){active.length > 0 ? ` - ${active.length} active` : ''}
+                <option key={projectInfo.name} value={projectInfo.name}>
+                  {projectInfo.name} ({projectInfo.branch})
+                  {active.length > 0 ? ` - ${active.length} active` : ''}
                 </option>
               )
             })}
           </Select>
         </div>
         <div>
-          <label className="mb-1.5 block text-sm font-medium">Prompt</label>
+          <label className="mb-1.5 block text-sm font-medium" htmlFor="sidebar-session-prompt">
+            Prompt
+          </label>
           <Textarea
-            value={prompt}
-            onChange={(e) => setPrompt((e.target as unknown as { value: string }).value)}
+            className="min-h-[108px]"
+            id="sidebar-session-prompt"
+            onChange={(event) => setPrompt((event.target as unknown as { value: string }).value)}
             placeholder="What should Claude do?"
             rows={4}
+            value={prompt}
           />
         </div>
         <div>
-          <label className="mb-1.5 block text-sm font-medium">Model</label>
-          <Select value={model} onValueChange={setModel}>
+          <label className="mb-1.5 block text-sm font-medium" htmlFor="sidebar-session-model">
+            Model
+          </label>
+          <Select id="sidebar-session-model" value={model} onValueChange={setModel}>
             <option value="claude-sonnet-4-6">Claude Sonnet 4.6</option>
             <option value="claude-opus-4-6">Claude Opus 4.6</option>
             <option value="claude-haiku-4-5">Claude Haiku 4.5</option>
           </Select>
         </div>
-        <div className="flex justify-end gap-2">
-          <Button variant="outline" onClick={onClose}>
+        <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <Button className="min-h-11" onClick={onClose} variant="outline">
             Cancel
           </Button>
-          <Button disabled={!canSubmit} onClick={handleSubmit}>
+          <Button className="min-h-11" disabled={!canSubmit} onClick={handleSubmit}>
             {submitting ? 'Launching...' : 'Launch'}
           </Button>
         </div>
@@ -251,57 +294,174 @@ function NewSessionDialog({
   )
 }
 
-// ── Project Sidebar ────────────────────────────────────────────────
+function SidebarContent({
+  currentSessionId,
+  onCloseMobile,
+  onOpenNewSession,
+  onSelectSession,
+  onSignOut,
+  onToggleCollapse,
+  projects,
+  searchQuery,
+  setSearchQuery,
+  showCollapseToggle,
+  showMobileClose,
+}: {
+  currentSessionId: string | null
+  onCloseMobile?: () => void
+  onOpenNewSession: () => void
+  onSelectSession: (id: string) => void
+  onSignOut: () => void
+  onToggleCollapse?: () => void
+  projects: ProjectWithSessions[]
+  searchQuery: string
+  setSearchQuery: (value: string) => void
+  showCollapseToggle: boolean
+  showMobileClose: boolean
+}) {
+  return (
+    <div className="flex h-full flex-col">
+      <div className="border-b border-border px-4 py-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-muted-foreground">
+              Sessions
+            </p>
+            <p className="mt-1 text-lg font-semibold">Duraclaw</p>
+          </div>
+          <div className="flex items-center gap-2">
+            {showCollapseToggle && onToggleCollapse && (
+              <button
+                type="button"
+                className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-border text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                onClick={onToggleCollapse}
+                title="Collapse sidebar"
+              >
+                {'\u00AB'}
+              </button>
+            )}
+            {showMobileClose && onCloseMobile && (
+              <button
+                type="button"
+                className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-border text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                data-testid="mobile-drawer-close"
+                onClick={onCloseMobile}
+                title="Close sessions"
+              >
+                {'\u2715'}
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="px-3 py-3">
+        <Input
+          className="min-h-11 text-sm"
+          data-testid="sidebar-search"
+          onChange={(event) => setSearchQuery((event.target as unknown as { value: string }).value)}
+          placeholder="Search sessions..."
+          value={searchQuery}
+        />
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-2 pb-3">
+        {projects.length === 0 && searchQuery.trim() ? (
+          <div className="rounded-xl border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
+            No sessions matching &apos;{searchQuery}&apos;
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {projects.map((project) => (
+              <ProjectFolder
+                key={project.name}
+                onSelectSession={onSelectSession}
+                project={project}
+                selectedSessionId={currentSessionId}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="border-t border-border px-3 py-3">
+        <div className="grid gap-2">
+          <Button className="min-h-11 w-full" onClick={onOpenNewSession} variant="outline">
+            + New Session
+          </Button>
+          <Button
+            className="min-h-11 w-full text-muted-foreground"
+            onClick={onSignOut}
+            variant="ghost"
+          >
+            Sign Out
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 export function ProjectSidebar({
   collapsed,
+  mobileOpen,
+  onMobileOpenChange,
   onToggleCollapse,
 }: {
   collapsed: boolean
+  mobileOpen: boolean
+  onMobileOpenChange: (open: boolean) => void
   onToggleCollapse: () => void
 }) {
   const [projects, setProjects] = useState<ProjectWithSessions[]>([])
   const [searchQuery, setSearchQuery] = useState('')
   const [showNewSession, setShowNewSession] = useState(false)
 
-  useEffect(() => {
-    loadData()
-    const interval = setInterval(loadData, 5000)
-    return () => clearInterval(interval)
-  }, [])
-
-  async function loadData() {
+  const loadData = useCallback(async () => {
     try {
-      const [projRes, sessRes] = await Promise.all([
+      const [projectResponse, sessionResponse] = await Promise.all([
         fetch('/api/projects'),
         fetch('/api/sessions'),
       ])
+
       let projectList: ProjectInfo[] = []
       let sessionList: SessionSummary[] = []
-      if (projRes.ok) {
-        const data = (await projRes.json()) as { projects?: ProjectInfo[] }
+
+      if (projectResponse.ok) {
+        const data = (await projectResponse.json()) as { projects?: ProjectInfo[] }
         projectList = data.projects ?? []
       }
-      if (sessRes.ok) {
-        const data = (await sessRes.json()) as { sessions?: SessionSummary[] }
+
+      if (sessionResponse.ok) {
+        const data = (await sessionResponse.json()) as { sessions?: SessionSummary[] }
         sessionList = data.sessions ?? []
       }
-      // Group sessions by project
+
       const sessionsByProject = new Map<string, SessionSummary[]>()
-      for (const s of sessionList) {
-        const arr = sessionsByProject.get(s.project) ?? []
-        arr.push(s)
-        sessionsByProject.set(s.project, arr)
+      for (const session of sessionList) {
+        const list = sessionsByProject.get(session.project) ?? []
+        list.push(session)
+        sessionsByProject.set(session.project, list)
       }
-      const merged: ProjectWithSessions[] = projectList.map((p) => ({
-        ...p,
-        sessions: sessionsByProject.get(p.name) ?? [],
-      }))
-      setProjects(merged)
+
+      setProjects(
+        projectList.map((project) => ({
+          ...project,
+          sessions: sessionsByProject.get(project.name) ?? [],
+        })),
+      )
     } catch {
-      // Silently handle fetch errors
+      // Ignore sidebar refresh errors; the next poll or navigation can recover.
     }
-  }
+  }, [])
+
+  useEffect(() => {
+    void loadData()
+    const interval = setInterval(() => {
+      void loadData()
+    }, 5000)
+    return () => clearInterval(interval)
+  }, [loadData])
 
   function handleNewSession(data: { project: string; prompt: string; model: string }) {
     fetch('/api/sessions', {
@@ -309,105 +469,101 @@ export function ProjectSidebar({
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
     })
-      .then((res) => res.json())
+      .then((response) => response.json())
       .then((result: unknown) => {
-        const r = result as { session_id?: string }
-        if (r.session_id) {
+        const payload = result as { session_id?: string }
+        if (payload.session_id) {
           setShowNewSession(false)
-          ;(self as unknown as { location: { href: string } }).location.href =
-            `/session/${r.session_id}`
+          onMobileOpenChange(false)
+          navigateTo(`/session/${payload.session_id}`)
         }
       })
       .catch(() => {})
   }
 
-  // Get current session ID from URL
   const currentSessionId = isBrowser
     ? (browserGlobal.location?.pathname.match(/^\/session\/(.+)/)?.[1] ?? null)
     : null
 
-  // Filter projects and sessions by search query
   const filteredProjects = searchQuery.trim()
     ? projects
-        .map((p) => {
-          const q = searchQuery.toLowerCase()
-          const matchingSessions = p.sessions.filter(
-            (s) =>
-              (s.summary && s.summary.toLowerCase().includes(q)) ||
-              (s.prompt && s.prompt.toLowerCase().includes(q)),
+        .map((project) => {
+          const query = searchQuery.toLowerCase()
+          const projectMatch = project.name.toLowerCase().includes(query)
+          const matchingSessions = project.sessions.filter(
+            (session) =>
+              session.summary?.toLowerCase().includes(query) ||
+              session.prompt?.toLowerCase().includes(query),
           )
-          const projectNameMatches = p.name.toLowerCase().includes(q)
-          if (projectNameMatches) return p
-          if (matchingSessions.length > 0) return { ...p, sessions: matchingSessions }
+
+          if (projectMatch) return project
+          if (matchingSessions.length > 0) {
+            return { ...project, sessions: matchingSessions }
+          }
+
           return null
         })
-        .filter((p): p is ProjectWithSessions => p !== null)
+        .filter((project): project is ProjectWithSessions => project !== null)
     : projects
 
-  if (collapsed) return null
+  function handleSelectSession(id: string) {
+    onMobileOpenChange(false)
+    navigateTo(`/session/${id}`)
+  }
+
+  function handleSignOut() {
+    signOut().finally(() => {
+      navigateTo('/login')
+    })
+  }
 
   return (
     <>
-      <aside className="flex h-full w-70 shrink-0 flex-col border-r border-border bg-card">
-        {/* Header */}
-        <div className="flex items-center justify-between border-b border-border px-4 py-3">
-          <span className="text-sm font-bold">Duraclaw</span>
-          <button
-            type="button"
-            onClick={onToggleCollapse}
-            className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
-            title="Collapse sidebar"
-          >
-            {'\u00AB'}
-          </button>
-        </div>
-
-        {/* Search */}
-        <div className="px-3 py-2">
-          <Input
-            placeholder="Search sessions..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery((e.target as unknown as { value: string }).value)}
-            className="h-8 text-xs"
+      {!collapsed && (
+        <aside
+          className="hidden h-dvh w-72 shrink-0 border-r border-border bg-card/80 backdrop-blur lg:flex"
+          data-testid="project-sidebar"
+        >
+          <SidebarContent
+            currentSessionId={currentSessionId}
+            onOpenNewSession={() => setShowNewSession(true)}
+            onSelectSession={handleSelectSession}
+            onSignOut={handleSignOut}
+            onToggleCollapse={onToggleCollapse}
+            projects={filteredProjects}
+            searchQuery={searchQuery}
+            setSearchQuery={setSearchQuery}
+            showCollapseToggle
+            showMobileClose={false}
           />
-        </div>
+        </aside>
+      )}
 
-        {/* Project Tree */}
-        <div className="flex-1 overflow-y-auto px-1 py-1">
-          {filteredProjects.length === 0 && searchQuery.trim() ? (
-            <div className="px-3 py-4 text-center text-xs text-muted-foreground">
-              No sessions matching &apos;{searchQuery}&apos;
-            </div>
-          ) : (
-            <div className="space-y-1">
-              {filteredProjects.map((p) => (
-                <ProjectFolder
-                  key={p.name}
-                  project={p}
-                  selectedSessionId={currentSessionId}
-                />
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* New Session Button */}
-        <div className="border-t border-border p-3">
-          <Button
-            variant="outline"
-            className="w-full text-sm"
-            onClick={() => setShowNewSession(true)}
-          >
-            + New
-          </Button>
-        </div>
-      </aside>
+      <Sheet onClose={() => onMobileOpenChange(false)} open={mobileOpen}>
+        <SheetContent className="lg:hidden" data-testid="mobile-session-drawer" side="left">
+          <SheetHeader className="sr-only">
+            <SheetTitle>Sessions</SheetTitle>
+          </SheetHeader>
+          <SidebarContent
+            currentSessionId={currentSessionId}
+            onCloseMobile={() => onMobileOpenChange(false)}
+            onOpenNewSession={() => setShowNewSession(true)}
+            onSelectSession={handleSelectSession}
+            onSignOut={handleSignOut}
+            projects={filteredProjects}
+            searchQuery={searchQuery}
+            setSearchQuery={setSearchQuery}
+            showCollapseToggle={false}
+            showMobileClose
+          />
+        </SheetContent>
+      </Sheet>
 
       <NewSessionDialog
-        open={showNewSession}
         onClose={() => setShowNewSession(false)}
-        projects={projects}
         onSubmit={handleNewSession}
+        open={showNewSession}
+        projects={projects}
       />
     </>
   )

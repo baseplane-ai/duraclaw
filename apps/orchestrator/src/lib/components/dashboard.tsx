@@ -1,4 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
+import type { ProjectInfo, SessionSummary } from '~/lib/types'
+import { cn } from '~/lib/utils'
 import {
   Badge,
   Button,
@@ -13,17 +15,13 @@ import {
   Skeleton,
   Textarea,
 } from './ui'
-import { cn } from '~/lib/utils'
-import type { SessionSummary, ProjectInfo } from '~/lib/types'
-
-// ── Status Badge ────────────────────────────────────────────────────
 
 function StatusBadge({ status }: { status: string }) {
   const variants: Record<
     string,
     {
-      variant: 'default' | 'success' | 'warning' | 'destructive' | 'secondary' | 'outline'
       label: string
+      variant: 'default' | 'success' | 'warning' | 'destructive' | 'secondary' | 'outline'
     }
   > = {
     running: { variant: 'success', label: 'Running' },
@@ -34,11 +32,10 @@ function StatusBadge({ status }: { status: string }) {
     aborted: { variant: 'outline', label: 'Aborted' },
     idle: { variant: 'outline', label: 'Idle' },
   }
-  const v = variants[status] ?? { variant: 'outline' as const, label: status }
-  return <Badge variant={v.variant}>{v.label}</Badge>
-}
 
-// ── Project Grid ────────────────────────────────────────────────────
+  const value = variants[status] ?? { variant: 'outline' as const, label: status }
+  return <Badge variant={value.variant}>{value.label}</Badge>
+}
 
 const ACTIVE_STATUSES = new Set(['running', 'waiting_input', 'waiting_permission'])
 
@@ -46,64 +43,75 @@ interface ProjectWithSessions extends ProjectInfo {
   sessions?: SessionSummary[]
 }
 
-function ProjectGrid({
-  projects,
-  loading,
-}: {
-  projects: ProjectWithSessions[]
-  loading: boolean
-}) {
+function formatRelativeTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime()
+  const minutes = Math.floor(diff / 60000)
+  if (minutes < 1) return 'just now'
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  return `${Math.floor(hours / 24)}d ago`
+}
+
+function ProjectGrid({ loading, projects }: { loading: boolean; projects: ProjectWithSessions[] }) {
   if (loading) {
+    const skeletonIds = [
+      'dashboard-skeleton-1',
+      'dashboard-skeleton-2',
+      'dashboard-skeleton-3',
+      'dashboard-skeleton-4',
+      'dashboard-skeleton-5',
+      'dashboard-skeleton-6',
+    ]
+
     return (
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        {Array.from({ length: 6 }, (_, i) => (
-          <Skeleton key={i} className="h-24" />
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {skeletonIds.map((skeletonId) => (
+          <Skeleton key={skeletonId} className="h-28 rounded-2xl" />
         ))}
       </div>
     )
   }
 
   return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-      {projects.map((wt) => {
-        const activeSessions = (wt.sessions ?? []).filter((s) => ACTIVE_STATUSES.has(s.status))
-        const hasActive = activeSessions.length > 0
+    <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+      {projects.map((project) => {
+        const activeSessions = (project.sessions ?? []).filter((session) =>
+          ACTIVE_STATUSES.has(session.status),
+        )
+
         return (
-          <Card key={wt.name}>
+          <Card key={project.name} className="rounded-2xl border-border/80 bg-card/80">
             <CardHeader className="pb-2">
-              <div className="flex items-center justify-between">
-                <CardTitle>{wt.name}</CardTitle>
-                <div className="flex items-center gap-1.5">
-                  {wt.dirty && (
-                    <span
-                      className="h-2 w-2 rounded-full bg-warning"
-                      title="Uncommitted changes"
-                    />
-                  )}
-                  <span
-                    className={cn(
-                      'h-2 w-2 rounded-full',
-                      hasActive ? 'bg-success' : 'bg-muted-foreground/30',
-                    )}
-                    title={hasActive ? `${activeSessions.length} active session(s)` : 'No active sessions'}
-                  />
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 space-y-2">
+                  <CardTitle className="truncate">{project.name}</CardTitle>
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                    <Badge className="max-w-full truncate text-xs" variant="outline">
+                      {project.branch}
+                    </Badge>
+                    {project.dirty && <span className="text-warning">Uncommitted changes</span>}
+                  </div>
                 </div>
+                <span
+                  className={cn(
+                    'mt-1 h-2.5 w-2.5 rounded-full',
+                    activeSessions.length > 0 ? 'bg-success' : 'bg-muted-foreground/30',
+                  )}
+                  title={
+                    activeSessions.length > 0
+                      ? `${activeSessions.length} active session(s)`
+                      : 'No active sessions'
+                  }
+                />
               </div>
             </CardHeader>
             <CardContent>
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <Badge variant="outline" className="text-xs">
-                  {wt.branch}
-                </Badge>
-                {hasActive && (
-                  <span className="text-xs text-success">
-                    {activeSessions.length} active
-                  </span>
-                )}
-                {(wt.sessions ?? []).length > 0 && !hasActive && (
-                  <span className="text-xs">
-                    {(wt.sessions ?? []).length} session(s)
-                  </span>
+              <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                {activeSessions.length > 0 ? (
+                  <span className="text-success">{activeSessions.length} active</span>
+                ) : (
+                  <span>{(project.sessions ?? []).length} session(s)</span>
                 )}
               </div>
             </CardContent>
@@ -114,20 +122,18 @@ function ProjectGrid({
   )
 }
 
-// ── Session List ────────────────────────────────────────────────────
-
 function SessionList({
+  onSelect,
   sessions,
   title,
-  onSelect,
 }: {
+  onSelect: (id: string) => void
   sessions: SessionSummary[]
   title: string
-  onSelect: (id: string) => void
 }) {
   if (sessions.length === 0) {
     return (
-      <div className="py-4 text-center text-sm text-muted-foreground">
+      <div className="rounded-2xl border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
         No {title.toLowerCase()}
       </div>
     )
@@ -135,27 +141,27 @@ function SessionList({
 
   return (
     <div className="space-y-2">
-      {sessions.map((s) => (
+      {sessions.map((session) => (
         <button
-          key={s.id}
+          key={session.id}
+          className="flex min-h-11 w-full items-start justify-between gap-3 rounded-2xl border border-border bg-card/70 px-4 py-3 text-left transition-colors hover:bg-accent/40"
+          onClick={() => onSelect(session.id)}
           type="button"
-          onClick={() => onSelect(s.id)}
-          className="flex w-full items-center justify-between rounded-md border border-border p-3 text-left hover:bg-accent transition-colors"
         >
           <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium truncate">{s.project}</span>
-              <StatusBadge status={s.status} />
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="truncate text-sm font-medium">{session.project}</span>
+              <StatusBadge status={session.status} />
             </div>
-            {s.prompt && (
+            {session.prompt && (
               <p className="mt-1 truncate text-xs text-muted-foreground">
-                {s.prompt.slice(0, 80)}
-                {s.prompt.length > 80 ? '...' : ''}
+                {session.prompt.slice(0, 90)}
+                {session.prompt.length > 90 ? '...' : ''}
               </p>
             )}
           </div>
-          <span className="ml-2 text-xs text-muted-foreground whitespace-nowrap">
-            {formatRelativeTime(s.created_at)}
+          <span className="shrink-0 text-xs text-muted-foreground">
+            {formatRelativeTime(session.created_at)}
           </span>
         </button>
       ))}
@@ -163,29 +169,16 @@ function SessionList({
   )
 }
 
-function formatRelativeTime(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime()
-  const mins = Math.floor(diff / 60000)
-  if (mins < 1) return 'just now'
-  if (mins < 60) return `${mins}m ago`
-  const hours = Math.floor(mins / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  return `${days}d ago`
-}
-
-// ── New Session Dialog ──────────────────────────────────────────────
-
 function NewSessionDialog({
-  open,
   onClose,
-  projects,
   onSubmit,
+  open,
+  projects,
 }: {
-  open: boolean
   onClose: () => void
+  onSubmit: (data: { model: string; project: string; prompt: string }) => void
+  open: boolean
   projects: ProjectWithSessions[]
-  onSubmit: (data: { project: string; prompt: string; model: string }) => void
 }) {
   const [project, setProject] = useState('')
   const [prompt, setPrompt] = useState('')
@@ -205,47 +198,52 @@ function NewSessionDialog({
   }
 
   return (
-    <Dialog open={open} onClose={onClose}>
+    <Dialog onClose={onClose} open={open}>
       <DialogHeader>
         <DialogTitle>New Session</DialogTitle>
       </DialogHeader>
       <div className="space-y-4">
         <div>
-          <label className="mb-1.5 block text-sm font-medium">Project</label>
-          <Select value={project} onValueChange={setProject}>
+          <label className="mb-1.5 block text-sm font-medium" htmlFor="dashboard-session-project">
+            Project
+          </label>
+          <Select id="dashboard-session-project" value={project} onValueChange={setProject}>
             <option value="">Select a project...</option>
-            {projects.map((wt) => {
-              const active = (wt.sessions ?? []).filter((s) => ACTIVE_STATUSES.has(s.status))
-              return (
-                <option key={wt.name} value={wt.name}>
-                  {wt.name} ({wt.branch}){active.length > 0 ? ` - ${active.length} active` : ''}
-                </option>
-              )
-            })}
+            {projects.map((projectInfo) => (
+              <option key={projectInfo.name} value={projectInfo.name}>
+                {projectInfo.name} ({projectInfo.branch})
+              </option>
+            ))}
           </Select>
         </div>
         <div>
-          <label className="mb-1.5 block text-sm font-medium">Prompt</label>
+          <label className="mb-1.5 block text-sm font-medium" htmlFor="dashboard-session-prompt">
+            Prompt
+          </label>
           <Textarea
-            value={prompt}
-            onChange={(e) => setPrompt((e.target as unknown as { value: string }).value)}
+            className="min-h-[108px]"
+            id="dashboard-session-prompt"
+            onChange={(event) => setPrompt((event.target as unknown as { value: string }).value)}
             placeholder="What should Claude do?"
             rows={4}
+            value={prompt}
           />
         </div>
         <div>
-          <label className="mb-1.5 block text-sm font-medium">Model</label>
-          <Select value={model} onValueChange={setModel}>
+          <label className="mb-1.5 block text-sm font-medium" htmlFor="dashboard-session-model">
+            Model
+          </label>
+          <Select id="dashboard-session-model" value={model} onValueChange={setModel}>
             <option value="claude-sonnet-4-6">Claude Sonnet 4.6</option>
             <option value="claude-opus-4-6">Claude Opus 4.6</option>
             <option value="claude-haiku-4-5">Claude Haiku 4.5</option>
           </Select>
         </div>
-        <div className="flex justify-end gap-2">
-          <Button variant="outline" onClick={onClose}>
+        <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <Button className="min-h-11" onClick={onClose} variant="outline">
             Cancel
           </Button>
-          <Button disabled={!canSubmit} onClick={handleSubmit}>
+          <Button className="min-h-11" disabled={!canSubmit} onClick={handleSubmit}>
             {submitting ? 'Launching...' : 'Launch'}
           </Button>
         </div>
@@ -253,8 +251,6 @@ function NewSessionDialog({
     </Dialog>
   )
 }
-
-// ── Dashboard ───────────────────────────────────────────────────────
 
 export function Dashboard() {
   const [projects, setProjects] = useState<ProjectWithSessions[]>([])
@@ -264,133 +260,135 @@ export function Dashboard() {
   const [showNewSession, setShowNewSession] = useState(false)
   const [tab, setTab] = useState<'active' | 'history'>('active')
 
-  useEffect(() => {
-    loadData()
-    const interval = setInterval(loadData, 5000)
-    return () => clearInterval(interval)
-  }, [])
-
-  async function loadData() {
+  const loadData = useCallback(async () => {
     try {
-      const [wtRes, sessRes, activeRes] = await Promise.all([
+      const [projectResponse, sessionResponse, activeResponse] = await Promise.all([
         fetch('/api/projects'),
         fetch('/api/sessions'),
         fetch('/api/sessions/active'),
       ])
-      if (wtRes.ok) {
-        const data = (await wtRes.json()) as { projects?: ProjectWithSessions[] }
+
+      if (projectResponse.ok) {
+        const data = (await projectResponse.json()) as { projects?: ProjectWithSessions[] }
         setProjects(data.projects ?? [])
       }
-      if (sessRes.ok) {
-        const data = (await sessRes.json()) as { sessions?: SessionSummary[] }
+
+      if (sessionResponse.ok) {
+        const data = (await sessionResponse.json()) as { sessions?: SessionSummary[] }
         setSessions(data.sessions ?? [])
       }
-      if (activeRes.ok) {
-        const data = (await activeRes.json()) as { sessions?: SessionSummary[] }
+
+      if (activeResponse.ok) {
+        const data = (await activeResponse.json()) as { sessions?: SessionSummary[] }
         setActiveSessions(data.sessions ?? [])
       }
     } catch {
-      // Silently handle fetch errors
+      // Ignore transient dashboard refresh failures; the next poll can recover.
     } finally {
       setLoading(false)
     }
-  }
+  }, [])
 
-  function handleNewSession(data: { project: string; prompt: string; model: string }) {
+  useEffect(() => {
+    void loadData()
+    const interval = setInterval(() => {
+      void loadData()
+    }, 5000)
+    return () => clearInterval(interval)
+  }, [loadData])
+
+  function handleNewSession(data: { model: string; project: string; prompt: string }) {
     fetch('/api/sessions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
     })
-      .then((res) => res.json())
+      .then((response) => response.json())
       .then((result: unknown) => {
-        const r = result as { session_id?: string }
-        if (r.session_id) {
+        const payload = result as { session_id?: string }
+        if (payload.session_id) {
           setShowNewSession(false)
           ;(self as unknown as { location: { href: string } }).location.href =
-            `/session/${r.session_id}`
+            `/session/${payload.session_id}`
         }
       })
       .catch(() => {})
   }
 
-  function handleSelectSession(id: string) {
-    ;(self as unknown as { location: { href: string } }).location.href = `/session/${id}`
-  }
-
   return (
-    <div className="min-h-screen">
-      {/* Header */}
-      <header className="border-b border-border px-6 py-4">
-        <div className="flex items-center justify-between">
-          <h1 className="text-xl font-bold">Duraclaw</h1>
-          <Button onClick={() => setShowNewSession(true)}>New Session</Button>
-        </div>
-      </header>
+    <main className="min-h-dvh px-4 pb-24 pt-20 sm:px-6 sm:pb-8 lg:px-10 lg:pt-8">
+      <div className="mx-auto max-w-6xl space-y-8">
+        <header className="flex flex-col gap-4 rounded-[28px] border border-border/70 bg-card/75 p-5 shadow-sm backdrop-blur sm:flex-row sm:items-end sm:justify-between sm:p-6">
+          <div className="space-y-2">
+            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-muted-foreground">
+              Workspace
+            </p>
+            <h1 className="text-3xl font-semibold tracking-tight">Projects</h1>
+            <p className="max-w-2xl text-sm text-muted-foreground">
+              Start a new session, pick up an active thread, or scan recent history from the same
+              shell the mobile navigation uses.
+            </p>
+          </div>
+          <Button className="min-h-11 sm:min-w-40" onClick={() => setShowNewSession(true)}>
+            New Session
+          </Button>
+        </header>
 
-      <div className="flex">
-        {/* Main Content */}
-        <main className="flex-1 p-6">
-          {/* Project Grid */}
-          <section className="mb-8">
-            <h2 className="mb-3 text-sm font-semibold text-muted-foreground uppercase tracking-wider">
+        <section className="space-y-3" data-testid="dashboard-projects">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-sm font-semibold uppercase tracking-[0.2em] text-muted-foreground">
               Projects
             </h2>
-            <ProjectGrid projects={projects} loading={loading} />
-          </section>
+            <span className="text-xs text-muted-foreground">{projects.length} discovered</span>
+          </div>
+          <ProjectGrid loading={loading} projects={projects} />
+        </section>
 
-          {/* Sessions */}
-          <section>
-            <div className="mb-3 flex items-center gap-4">
-              <button
-                type="button"
-                onClick={() => setTab('active')}
-                className={cn(
-                  'text-sm font-semibold uppercase tracking-wider',
-                  tab === 'active'
-                    ? 'text-foreground'
-                    : 'text-muted-foreground hover:text-foreground',
-                )}
-              >
-                Active ({activeSessions.length})
-              </button>
-              <button
-                type="button"
-                onClick={() => setTab('history')}
-                className={cn(
-                  'text-sm font-semibold uppercase tracking-wider',
-                  tab === 'history'
-                    ? 'text-foreground'
-                    : 'text-muted-foreground hover:text-foreground',
-                )}
-              >
-                History
-              </button>
-            </div>
-
-            {tab === 'active' ? (
-              <SessionList
-                sessions={activeSessions}
-                title="active sessions"
-                onSelect={handleSelectSession}
-              />
-            ) : (
-              <SessionList
-                sessions={sessions}
-                title="sessions"
-                onSelect={handleSelectSession}
-              />
-            )}
-          </section>
-        </main>
+        <section className="space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              className="min-h-11"
+              onClick={() => setTab('active')}
+              variant={tab === 'active' ? 'default' : 'ghost'}
+            >
+              Active ({activeSessions.length})
+            </Button>
+            <Button
+              className="min-h-11"
+              onClick={() => setTab('history')}
+              variant={tab === 'history' ? 'default' : 'ghost'}
+            >
+              History
+            </Button>
+          </div>
+          {tab === 'active' ? (
+            <SessionList
+              onSelect={(id) => {
+                ;(self as unknown as { location: { href: string } }).location.href =
+                  `/session/${id}`
+              }}
+              sessions={activeSessions}
+              title="active sessions"
+            />
+          ) : (
+            <SessionList
+              onSelect={(id) => {
+                ;(self as unknown as { location: { href: string } }).location.href =
+                  `/session/${id}`
+              }}
+              sessions={sessions}
+              title="sessions"
+            />
+          )}
+        </section>
       </div>
 
       <NewSessionDialog
-        open={showNewSession}
         onClose={() => setShowNewSession(false)}
-        projects={projects}
         onSubmit={handleNewSession}
+        open={showNewSession}
+        projects={projects}
       />
-    </div>
+    </main>
   )
 }

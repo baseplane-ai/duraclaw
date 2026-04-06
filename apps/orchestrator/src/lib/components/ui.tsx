@@ -1,4 +1,10 @@
-import { type ButtonHTMLAttributes, type HTMLAttributes, type InputHTMLAttributes, type TextareaHTMLAttributes, forwardRef } from 'react'
+import {
+  type ButtonHTMLAttributes,
+  forwardRef,
+  type HTMLAttributes,
+  type InputHTMLAttributes,
+  type TextareaHTMLAttributes,
+} from 'react'
 import { cn } from '~/lib/utils'
 
 // ── Button ──────────────────────────────────────────────────────────
@@ -47,7 +53,12 @@ Button.displayName = 'Button'
 // ── Card ────────────────────────────────────────────────────────────
 
 export function Card({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn('rounded-lg border border-border bg-card text-card-foreground', className)} {...props} />
+  return (
+    <div
+      className={cn('rounded-lg border border-border bg-card text-card-foreground', className)}
+      {...props}
+    />
+  )
 }
 
 export function CardHeader({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
@@ -55,7 +66,9 @@ export function CardHeader({ className, ...props }: HTMLAttributes<HTMLDivElemen
 }
 
 export function CardTitle({ className, ...props }: HTMLAttributes<HTMLHeadingElement>) {
-  return <h3 className={cn('text-sm font-semibold leading-none tracking-tight', className)} {...props} />
+  return (
+    <h3 className={cn('text-sm font-semibold leading-none tracking-tight', className)} {...props} />
+  )
 }
 
 export function CardContent({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
@@ -112,20 +125,21 @@ Input.displayName = 'Input'
 
 // ── Textarea ────────────────────────────────────────────────────────
 
-export const Textarea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<HTMLTextAreaElement>>(
-  ({ className, ...props }, ref) => (
-    <textarea
-      ref={ref}
-      className={cn(
-        'flex min-h-[80px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm',
-        'placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-        'disabled:cursor-not-allowed disabled:opacity-50',
-        className,
-      )}
-      {...props}
-    />
-  ),
-)
+export const Textarea = forwardRef<
+  HTMLTextAreaElement,
+  TextareaHTMLAttributes<HTMLTextAreaElement>
+>(({ className, ...props }, ref) => (
+  <textarea
+    ref={ref}
+    className={cn(
+      'flex min-h-[80px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm',
+      'placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+      'disabled:cursor-not-allowed disabled:opacity-50',
+      className,
+    )}
+    {...props}
+  />
+))
 Textarea.displayName = 'Textarea'
 
 // ── Select ──────────────────────────────────────────────────────────
@@ -165,9 +179,14 @@ interface DialogProps {
 export function Dialog({ open, onClose, children }: DialogProps) {
   if (!open) return null
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="fixed inset-0 bg-black/80" onClick={onClose} />
-      <div className="relative z-50 w-full max-w-lg rounded-lg border border-border bg-card p-6 shadow-lg">
+    <div className="fixed inset-0 z-50 flex items-center justify-center px-4 py-6">
+      <button
+        aria-label="Close dialog"
+        className="fixed inset-0 bg-black/80"
+        onClick={onClose}
+        type="button"
+      />
+      <div className="relative z-50 w-full max-w-lg rounded-lg border border-border bg-card p-4 shadow-lg sm:p-6">
         {children}
       </div>
     </div>
@@ -179,7 +198,70 @@ export function DialogHeader({ className, ...props }: HTMLAttributes<HTMLDivElem
 }
 
 export function DialogTitle({ className, ...props }: HTMLAttributes<HTMLHeadingElement>) {
-  return <h2 className={cn('text-lg font-semibold leading-none tracking-tight', className)} {...props} />
+  return (
+    <h2 className={cn('text-lg font-semibold leading-none tracking-tight', className)} {...props} />
+  )
+}
+
+// ── Sheet ───────────────────────────────────────────────────────────
+
+type SheetSide = 'left' | 'right' | 'bottom'
+
+interface SheetProps {
+  open: boolean
+  onClose: () => void
+  children: React.ReactNode
+}
+
+export function Sheet({ open, onClose, children }: SheetProps) {
+  if (!open) return null
+  return (
+    <div className="fixed inset-0 z-50" aria-modal="true" role="dialog">
+      <button
+        aria-label="Close sheet"
+        className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+        onClick={onClose}
+        type="button"
+      />
+      {children}
+    </div>
+  )
+}
+
+export function SheetContent({
+  side = 'left',
+  className,
+  ...props
+}: HTMLAttributes<HTMLDivElement> & { side?: SheetSide }) {
+  const sideClasses: Record<SheetSide, string> = {
+    left: 'inset-y-0 left-0 h-full w-[min(88vw,24rem)] border-r',
+    right: 'inset-y-0 right-0 h-full w-[min(88vw,24rem)] border-l',
+    bottom: 'inset-x-0 bottom-0 max-h-[85dvh] rounded-t-2xl border-t',
+  }
+
+  return (
+    <div
+      className={cn(
+        'absolute bg-card text-card-foreground shadow-2xl',
+        sideClasses[side],
+        className,
+      )}
+      {...props}
+    />
+  )
+}
+
+export function SheetHeader({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
+  return <div className={cn('flex items-center justify-between gap-3', className)} {...props} />
+}
+
+export function SheetTitle({ className, ...props }: HTMLAttributes<HTMLHeadingElement>) {
+  return (
+    <h2
+      className={cn('text-base font-semibold leading-none tracking-tight', className)}
+      {...props}
+    />
+  )
 }
 
 // ── Skeleton ────────────────────────────────────────────────────────

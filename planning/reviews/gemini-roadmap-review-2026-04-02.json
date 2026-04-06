@@ -1,0 +1,8 @@
+{
+  "provider": "gemini",
+  "prompt": "__custom__",
+  "score": 94,
+  "passed": true,
+  "createdAt": "2026-04-02T00:38:52.102Z",
+  "reviewPath": "/data/projects/duraclaw/planning/reviews/gemini-roadmap-review-2026-04-02.md"
+}

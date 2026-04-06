@@ -5,20 +5,34 @@
 
 **Status key:** `not-started` | `spec` | `in-progress` | `done`
 
+## Verification Tracking Rule
+
+- `done` means the implementation plus the needed verification updates for that roadmap item have landed.
+- `pnpm verify:smoke` is the shared baseline only. Each subphase should add or extend targeted verification as new behavior ships.
+- The implementing agent should wire those checks into `scripts/verify/` and root `pnpm verify:*` commands, then save evidence under `.kata/verification-evidence/` before changing status to `done`.
+- If a roadmap item is difficult to automate immediately, record the blocker explicitly and add the closest real API/browser proof available instead of silently skipping verification.
+
 ---
 
 ## Phase 0: Foundation
 
 | Sub | Name | Status | Spec |
 |-----|------|--------|------|
-| 0.1 | Bug Fixes | spec | [p0-foundation.md](specs/p0-foundation.md) |
-| 0.1b | Session Ownership | spec | [p0-foundation.md](specs/p0-foundation.md) |
-| 0.1c | Drop Start → SPA | spec | [p0-foundation.md](specs/p0-foundation.md) |
-| 0.1d | CI Pipeline | spec | [p0-foundation.md](specs/p0-foundation.md) |
-| 0.1e | DO SQLite Schema Versioning | spec | [p0-foundation.md](specs/p0-foundation.md) |
-| 0.2 | Dependency Upgrades | spec | [p0-foundation.md](specs/p0-foundation.md) |
-| 0.3 | Mobile-First Layout | spec | [p0-foundation.md](specs/p0-foundation.md) |
-| 0.4 | CLI Parity — Core | spec | [p0-foundation.md](specs/p0-foundation.md) |
+| 0.1 | Bug Fixes | done | [p0-foundation.md](specs/p0-foundation.md) |
+| 0.1b | Session Ownership | done | [p0-foundation.md](specs/p0-foundation.md) |
+| 0.1c | Drop Start → SPA | done | [p0-foundation.md](specs/p0-foundation.md) |
+| 0.1d | CI Pipeline | done | [p0-foundation.md](specs/p0-foundation.md) |
+| 0.1e | DO SQLite Schema Versioning | done | [p0-foundation.md](specs/p0-foundation.md) |
+| 0.2 | Dependency Upgrades | done | [p0-foundation.md](specs/p0-foundation.md) |
+| 0.3 | Mobile-First Layout | done | [p0-foundation.md](specs/p0-foundation.md) |
+| 0.4 | CLI Parity — Core | done | [p0-foundation.md](specs/p0-foundation.md) |
+
+> 2026-04-03: `0.1`, `0.1b`, `0.1c`, and `0.1e` landed with real verification via `pnpm verify:smoke` plus `pnpm verify:session:ownership`. Evidence: `.kata/verification-evidence/phase-p0-foundation-2026-04-03.md`.
+> 2026-04-03: `0.1d` landed with a repo-managed pre-commit gate (`.git-hooks/pre-commit` + `pnpm precommit`) and targeted verification via `pnpm verify:ci`. Evidence: `.kata/verification-evidence/phase-p0-foundation-2026-04-03.md`.
+> 2026-04-03: `0.2` completed with the orchestrator on `agents@^0.9.0`, `vite@^8.0.3`, `@cloudflare/vite-plugin@^1.31.0`, current React/Better Auth/Wrangler pins, and green build/test/smoke verification. Evidence: `.kata/verification-evidence/phase-p0-foundation-2026-04-03.md`.
+> 2026-04-03: `0.3` completed with the responsive shell, bottom tabs, mobile sessions drawer, safe-area spacing, touch-target sizing, and no-overflow `320px` browser coverage via `pnpm verify:mobile-shell`. Evidence: `.kata/verification-evidence/phase-p0-foundation-2026-04-03.md`.
+> 2026-04-03: `0.4` completed with typed AskUserQuestion controls, richer tool detail rendering, session header metadata, and authenticated HTTP-backed interaction actions verified via `pnpm verify:session:interaction`. Evidence: `.kata/verification-evidence/phase-p0-foundation-2026-04-03.md`.
+> Phase 0 is complete. Remaining roadmap work begins at Phase 1.
 
 ## Phase 1: Chat Quality + Mobile Chat
 
@@ -113,8 +127,8 @@
 
 | # | Name | Status |
 |---|------|--------|
-| 1 | Wire dashboard.tsx to `/` route | not-started |
-| 2 | Add logout button | not-started |
+| 1 | Wire dashboard.tsx to `/` route | done |
+| 2 | Add logout button | done |
 | 3 | Enter-to-send in textarea | not-started |
 | 4 | Auto-scroll to bottom | not-started |
 | 5 | Empty state for "no sessions" | not-started |

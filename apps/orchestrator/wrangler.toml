@@ -12,6 +12,10 @@ custom_domain = true
 [observability]
 enabled = true
 
+[assets]
+binding = "ASSETS"
+directory = "./dist/client"
+
 # Durable Object bindings — session-per-DO model
 [[durable_objects.bindings]]
 name = "SESSION_AGENT"
@@ -37,10 +41,6 @@ deleted_classes = ["SessionDO", "WorktreeRegistry"]
 [[migrations]]
 tag = "v4"
 new_sqlite_classes = ["SessionDO", "ProjectRegistry"]
-
-[[migrations]]
-tag = "v5"
-renamed_classes = [{from = "WorktreeRegistry", to = "ProjectRegistry"}]
 
 # D1 database for auth
 [[d1_databases]]

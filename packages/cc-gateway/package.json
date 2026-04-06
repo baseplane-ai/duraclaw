@@ -18,7 +18,7 @@
     "deploy": "sudo systemctl restart duraclaw-cc-gateway"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.42",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.91",
     "@duraclaw/shared-types": "workspace:*"
   },
   "devDependencies": {

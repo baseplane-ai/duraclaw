@@ -1,4 +1,5 @@
 import type { ChatTransport, UIMessage, UIMessageChunk } from 'ai'
+import type { StoredMessage } from './types'
 
 // Browser WebSocket interface (CF Workers types override the global WebSocket)
 interface BrowserWebSocket {
@@ -30,6 +31,46 @@ export class WsChatTransport implements ChatTransport<UIMessage> {
     this.sessionId = sessionId
   }
 
+  private getSocketUrl() {
+    const loc = window.location
+    const protocol = loc.protocol === 'https:' ? 'wss:' : 'ws:'
+    return `${protocol}//${loc.host}/api/sessions/${this.sessionId}/ws`
+  }
+
+  async loadHistory(): Promise<StoredMessage[]> {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(this.getSocketUrl()) as BrowserWebSocket
+      let settled = false
+
+      ws.onmessage = (event) => {
+        try {
+          const chunk = JSON.parse(event.data as string) as Record<string, unknown>
+          if (chunk.type === 'history') {
+            settled = true
+            ws.close()
+            resolve((chunk.messages as StoredMessage[] | undefined) ?? [])
+          }
+        } catch (error) {
+          settled = true
+          ws.close()
+          reject(error)
+        }
+      }
+
+      ws.onclose = () => {
+        if (!settled) {
+          resolve([])
+        }
+      }
+
+      ws.onerror = () => {
+        if (!settled) {
+          reject(new Error('WebSocket connection error'))
+        }
+      }
+    })
+  }
+
   async sendMessages(options: {
     trigger: 'submit-message' | 'regenerate-message'
     chatId: string
@@ -46,12 +87,7 @@ export class WsChatTransport implements ChatTransport<UIMessage> {
 
     return new ReadableStream<UIMessageChunk>({
       start: (controller) => {
-        // @ts-expect-error — browser-only: window.location and WebSocket
-        const loc = window.location
-        const protocol = loc.protocol === 'https:' ? 'wss:' : 'ws:'
-        const url = `${protocol}//${loc.host}/api/sessions/${this.sessionId}/ws`
-        // @ts-expect-error — browser-only: native WebSocket constructor
-        const ws = new WebSocket(url) as BrowserWebSocket
+        const ws = new WebSocket(this.getSocketUrl()) as BrowserWebSocket
 
         ws.onopen = () => {
           ws.send(JSON.stringify({ type: 'user-message', content }))
@@ -96,12 +132,7 @@ export class WsChatTransport implements ChatTransport<UIMessage> {
     // Returns null-like empty stream if no active turn — useChat handles this gracefully.
     return new ReadableStream<UIMessageChunk>({
       start: (controller) => {
-        // @ts-expect-error — browser-only
-        const loc = window.location
-        const protocol = loc.protocol === 'https:' ? 'wss:' : 'ws:'
-        const url = `${protocol}//${loc.host}/api/sessions/${this.sessionId}/ws`
-        // @ts-expect-error — browser-only
-        const ws = new WebSocket(url) as BrowserWebSocket
+        const ws = new WebSocket(this.getSocketUrl()) as BrowserWebSocket
 
         ws.onmessage = (event) => {
           try {

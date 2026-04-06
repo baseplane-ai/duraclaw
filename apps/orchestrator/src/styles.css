@@ -23,8 +23,26 @@
   --radius: 0.5rem;
 }
 
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body,
+  #root {
+    min-height: 100dvh;
+  }
+}
+
 body {
+  margin: 0;
   background-color: var(--color-background);
   color: var(--color-foreground);
-  font-family: system-ui, -apple-system, sans-serif;
+  font-family: 'Avenir Next', 'Segoe UI', sans-serif;
+  text-rendering: optimizeLegibility;
 }

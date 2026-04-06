@@ -13,6 +13,19 @@ export function createAuth(env: {
   BETTER_AUTH_URL?: string
 }) {
   const db = drizzle(env.AUTH_DB, { schema })
+  const isLocalDev =
+    !env.BETTER_AUTH_URL ||
+    env.BETTER_AUTH_URL.includes('localhost') ||
+    env.BETTER_AUTH_URL.includes('127.0.0.1')
+  const trustedOrigins = isLocalDev
+    ? Array.from(
+        new Set(
+          [env.BETTER_AUTH_URL, 'http://localhost:*', 'http://127.0.0.1:*', 'http://[::1]:*'].filter(
+            (origin): origin is string => Boolean(origin),
+          ),
+        ),
+      )
+    : undefined
 
   return betterAuth({
     database: drizzleAdapter(db, {
@@ -26,6 +39,7 @@ export function createAuth(env: {
     }),
     secret: env.BETTER_AUTH_SECRET,
     baseURL: env.BETTER_AUTH_URL,
+    trustedOrigins,
     emailAndPassword: {
       enabled: true,
     },

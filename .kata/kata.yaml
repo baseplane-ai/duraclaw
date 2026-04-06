@@ -1,5 +1,6 @@
 project:
   name: duraclaw
+  test_command: turbo test
   ci: null
 spec_path: planning/specs
 research_path: planning/research

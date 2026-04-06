@@ -42,3 +42,5 @@ logs/
 .claude/sessions/
 .claude/.cleanup-ran
 .dev.vars
+.kata/sessions/
+.kata/.cleanup-ran

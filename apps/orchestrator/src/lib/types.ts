@@ -17,6 +17,7 @@ export type {
 export interface Env {
   SESSION_AGENT: DurableObjectNamespace
   SESSION_REGISTRY: DurableObjectNamespace
+  ASSETS: Fetcher
   CC_GATEWAY_URL?: string
   CC_GATEWAY_SECRET?: string
   AUTH_DB: D1Database

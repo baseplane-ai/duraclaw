@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import Markdown from 'react-markdown'
+import rehypeSanitize from 'rehype-sanitize'
 import remarkGfm from 'remark-gfm'
 
 export function TextPart({ text, streaming }: { text: string; streaming?: boolean }) {
@@ -7,6 +8,7 @@ export function TextPart({ text, streaming }: { text: string; streaming?: boolea
     <div className="text-sm prose prose-sm prose-invert max-w-none">
       <Markdown
         remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeSanitize]}
         components={{
           pre: ({ children }) => (
             <div className="relative group">

@@ -4,6 +4,7 @@
     "jsx": "react-jsx",
     "outDir": "./dist",
     "rootDir": "./src",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "types": ["@cloudflare/workers-types"],
     "paths": {
       "~/*": ["./src/*"]

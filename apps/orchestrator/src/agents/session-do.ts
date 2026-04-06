@@ -1,5 +1,6 @@
 import { Agent, type Connection, type ConnectionContext } from 'agents'
 import type { UIMessageChunk } from 'ai'
+import { runMigrations } from '~/lib/do-migrations'
 import type {
   BrowserCommand,
   GatewayCommand,
@@ -8,6 +9,7 @@ import type {
   SessionState,
   StoredMessage,
 } from '~/lib/types'
+import { SESSION_DO_MIGRATIONS } from './session-do-migrations'
 
 /**
  * Extended chunk type: AI SDK UIMessageChunk plus custom types
@@ -20,11 +22,13 @@ type SessionChunk =
   | { type: 'file-changed'; path: string; tool: string; timestamp: string }
 
 type ConnTag = { type: 'chat' } | { type: 'agent' }
+
 import type { Env } from '~/lib/types'
 import { connectToExecutor, parseEvent, sendCommand } from '~/lib/vps-client'
 
 const DEFAULT_STATE: SessionState = {
   id: '',
+  userId: null,
   project: '',
   project_path: '',
   status: 'idle',
@@ -155,9 +159,26 @@ export class SessionDO extends Agent<Env, SessionState> {
 
   async onRequest(request: Request): Promise<Response> {
     const url = new URL(request.url)
+    const requestUserId = request.headers.get('x-user-id')
+
+    if (url.pathname !== '/create') {
+      if (!requestUserId) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+
+      if (this.state.userId && requestUserId !== this.state.userId) {
+        return new Response(JSON.stringify({ error: 'Forbidden' }), {
+          status: 403,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+    }
 
     if (url.pathname === '/create' && request.method === 'POST') {
-      const config = await request.json() as Parameters<SessionDO['create']>[0]
+      const config = (await request.json()) as Parameters<SessionDO['create']>[0]
       await this.create(config)
       return new Response(JSON.stringify({ ok: true }), {
         headers: { 'Content-Type': 'application/json' },
@@ -192,20 +213,56 @@ export class SessionDO extends Agent<Env, SessionState> {
       })
     }
 
+    if (url.pathname === '/tool-approval' && request.method === 'POST') {
+      const payload = (await request.json()) as { approved?: boolean; toolCallId?: string }
+      if (typeof payload.toolCallId !== 'string' || typeof payload.approved !== 'boolean') {
+        return new Response(JSON.stringify({ error: 'Invalid tool approval payload' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+
+      await this.submitToolApproval({
+        approved: payload.approved,
+        toolCallId: payload.toolCallId,
+      })
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+
+    if (url.pathname === '/answers' && request.method === 'POST') {
+      const payload = (await request.json()) as {
+        answers?: Record<string, string>
+        toolCallId?: string
+      }
+      const toolCallId =
+        typeof payload.toolCallId === 'string'
+          ? payload.toolCallId
+          : this.state.pending_question?.tool_call_id
+      if (!toolCallId || !payload.answers || typeof payload.answers !== 'object') {
+        return new Response(JSON.stringify({ error: 'Invalid answers payload' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+
+      await this.submitAnswers({
+        answers: payload.answers,
+        toolCallId,
+      })
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+
     return new Response('Not found', { status: 404 })
   }
 
   // ── Lifecycle ──────────────────────────────────────────────────
 
   async onStart() {
-    // Create messages table with role column (idempotent)
-    this.sql`CREATE TABLE IF NOT EXISTS messages (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      role TEXT NOT NULL DEFAULT 'assistant',
-      type TEXT NOT NULL,
-      data TEXT NOT NULL,
-      created_at TEXT DEFAULT (datetime('now'))
-    )`
+    runMigrations(this.ctx.storage.sql, SESSION_DO_MIGRATIONS)
 
     // If session was running when DO was evicted, schedule reconnect
     if (
@@ -213,11 +270,17 @@ export class SessionDO extends Agent<Env, SessionState> {
       this.state.status === 'waiting_input' ||
       this.state.status === 'waiting_permission'
     ) {
-      await this.schedule(5, 'reconnectVps')
+      await this.schedule(5, 'reconnectVps', undefined, { idempotent: true })
     }
   }
 
   onConnect(connection: Connection, ctx: ConnectionContext) {
+    const requestUserId = ctx.request.headers.get('x-user-id')
+    if (!requestUserId || (this.state.userId && requestUserId !== this.state.userId)) {
+      void connection.close()
+      return
+    }
+
     // Tag connection type based on URL path
     const url = new URL(ctx.request.url)
     const isAgent = url.pathname.endsWith('/agent')
@@ -228,18 +291,16 @@ export class SessionDO extends Agent<Env, SessionState> {
 
     // Chat connections get full message history replay
     const messages = this.sql<StoredMessage>`SELECT * FROM messages ORDER BY id ASC`
-    connection.send(
-      JSON.stringify({ type: 'history', messages } satisfies SessionChunk),
-    )
+    connection.send(JSON.stringify({ type: 'history', messages } satisfies SessionChunk))
 
     // Re-emit pending question if any
     if (this.state.pending_question && this.state.status === 'waiting_input') {
       connection.send(
         JSON.stringify({
           type: 'tool-input-available',
-          toolCallId: 'pending-question',
+          toolCallId: this.state.pending_question.tool_call_id,
           toolName: 'AskUserQuestion',
-          input: { questions: this.state.pending_question },
+          input: { questions: this.state.pending_question.questions },
         } satisfies SessionChunk),
       )
     }
@@ -268,7 +329,8 @@ export class SessionDO extends Agent<Env, SessionState> {
       switch (cmd.type) {
         case 'user-message': {
           // Store user message
-          this.sql`INSERT INTO messages (role, type, data) VALUES ('user', 'user-message', ${JSON.stringify({ content: cmd.content })})`
+          this
+            .sql`INSERT INTO messages (role, type, data) VALUES ('user', 'user-message', ${JSON.stringify({ content: cmd.content })})`
 
           if (this.state.status === 'idle' && this.state.sdk_session_id) {
             // Resume session with follow-up message
@@ -347,6 +409,7 @@ export class SessionDO extends Agent<Env, SessionState> {
   // ── RPC Methods ────────────────────────────────────────────────
 
   async create(config: {
+    userId: string
     project: string
     project_path: string
     prompt: string
@@ -361,6 +424,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     this.setState({
       ...DEFAULT_STATE,
       id,
+      userId: config.userId,
       project: config.project,
       project_path: config.project_path,
       status: 'running',
@@ -371,7 +435,8 @@ export class SessionDO extends Agent<Env, SessionState> {
     })
 
     // Store initial user message
-    this.sql`INSERT INTO messages (role, type, data) VALUES ('user', 'user-message', ${JSON.stringify({ content: config.prompt })})`
+    this
+      .sql`INSERT INTO messages (role, type, data) VALUES ('user', 'user-message', ${JSON.stringify({ content: config.prompt })})`
 
     this.connectAndStream({
       type: 'execute',
@@ -439,14 +504,16 @@ export class SessionDO extends Agent<Env, SessionState> {
 
       case 'assistant':
         // Store complete message (not partials)
-        this.sql`INSERT INTO messages (role, type, data) VALUES ('assistant', 'assistant', ${JSON.stringify(event)})`
+        this
+          .sql`INSERT INTO messages (role, type, data) VALUES ('assistant', 'assistant', ${JSON.stringify(event)})`
         // Emit text-end for any open text parts
         this.broadcastToClients({ type: 'text-end', id: event.uuid })
         this.updateState({})
         break
 
       case 'tool_result':
-        this.sql`INSERT INTO messages (role, type, data) VALUES ('tool', 'tool_result', ${JSON.stringify(event)})`
+        this
+          .sql`INSERT INTO messages (role, type, data) VALUES ('tool', 'tool_result', ${JSON.stringify(event)})`
         // Broadcast tool output (AI SDK format)
         this.broadcastToClients({
           type: 'tool-output-available',
@@ -459,7 +526,10 @@ export class SessionDO extends Agent<Env, SessionState> {
       case 'ask_user':
         this.updateState({
           status: 'waiting_input',
-          pending_question: event.questions,
+          pending_question: {
+            tool_call_id: event.tool_call_id,
+            questions: event.questions,
+          },
         })
         // Questions go through tool-input-available with AskUserQuestion name
         this.broadcastToClients({

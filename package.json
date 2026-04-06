@@ -5,17 +5,33 @@
   "scripts": {
     "build": "turbo build",
     "typecheck": "turbo typecheck",
-    "lint": "turbo lint",
-    "lint:errors": "turbo lint:errors",
+    "lint": "bash ./scripts/precommit.sh --lint-only",
+    "lint:errors": "pnpm lint",
+    "precommit": "pnpm lint:errors && pnpm typecheck",
+    "prepare": "node ./scripts/setup-git-hooks.mjs",
     "dev": "turbo dev",
+    "kata": "./packages/kata/kata",
+    "verify:dev:up": "bash ./scripts/verify/dev-up.sh",
+    "verify:dev:down": "bash ./scripts/verify/dev-down.sh",
+    "verify:ci": "bash ./scripts/verify/ci-precommit.sh",
+    "verify:mobile-shell": "bash ./scripts/verify/mobile-shell.sh",
+    "verify:preflight": "bash ./scripts/verify/preflight.sh",
+    "verify:auth": "bash ./scripts/verify/auth.sh",
+    "verify:gateway": "bash ./scripts/verify/gateway-smoke.sh",
+    "verify:session": "bash ./scripts/verify/session-smoke.sh",
+    "verify:session:interaction": "bash ./scripts/verify/session-interaction.sh",
+    "verify:session:ownership": "bash ./scripts/verify/session-ownership.sh",
+    "verify:browser": "bash ./scripts/verify/browser-login-smoke.sh",
+    "verify:browser:session": "bash ./scripts/verify/browser-session-smoke.sh",
+    "verify:smoke": "pnpm run verify:preflight && pnpm run verify:auth && pnpm run verify:gateway && pnpm run verify:session && pnpm run verify:browser && pnpm run verify:browser:session",
     "ship": "turbo deploy",
     "ship:worker": "turbo deploy --filter=@duraclaw/orchestrator",
     "ship:gateway": "turbo deploy --filter=@duraclaw/cc-gateway",
     "test": "turbo test"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.3.7",
-    "turbo": "^2.6.3",
+    "@biomejs/biome": "^2.4.10",
+    "turbo": "^2.9.3",
     "typescript": "~5.8.3"
   }
 }
