@@ -1,13 +1,13 @@
-import { describe, test, expect } from 'bun:test'
+import { describe, expect, test } from 'bun:test'
 import type {
-  ProjectInfo,
-  SessionSummary,
-  SessionState,
-  ResultEvent,
   ExecuteCommand,
+  GatewayCommand,
+  ProjectInfo,
+  ResultEvent,
   ResumeCommand,
   SessionInitEvent,
-  GatewayCommand,
+  SessionState,
+  SessionSummary,
 } from './index'
 
 describe('shared-types rename: worktree→project', () => {
@@ -62,6 +62,7 @@ describe('shared-types rename: worktree→project', () => {
   test('SessionState uses project and project_path fields', () => {
     const state: SessionState = {
       id: '123',
+      userId: 'user-1',
       project: 'dev1',
       project_path: '/data/projects/dev1',
       status: 'idle',
@@ -79,13 +80,33 @@ describe('shared-types rename: worktree→project', () => {
       pending_question: null,
       pending_permission: null,
     }
+    expect(state.userId).toBe('user-1')
     expect(state.project).toBe('dev1')
     expect(state.project_path).toBe('/data/projects/dev1')
+  })
+
+  test('ExecuteCommand accepts optional org_id and user_id', () => {
+    const cmd: ExecuteCommand = {
+      type: 'execute',
+      project: 'dev1',
+      prompt: 'hello',
+      org_id: 'org-123',
+      user_id: 'user-456',
+    }
+    expect(cmd.org_id).toBe('org-123')
+    expect(cmd.user_id).toBe('user-456')
+  })
+
+  test('ExecuteCommand works without org_id and user_id (backwards compatible)', () => {
+    const cmd: ExecuteCommand = { type: 'execute', project: 'dev1', prompt: 'hello' }
+    expect(cmd.org_id).toBeUndefined()
+    expect(cmd.user_id).toBeUndefined()
   })
 
   test('SessionSummary uses project field and has optional summary', () => {
     const summary: SessionSummary = {
       id: '123',
+      userId: 'user-1',
       project: 'dev1',
       status: 'idle',
       model: null,
@@ -132,6 +153,7 @@ describe('shared-types: SDK summary fields', () => {
   test('SessionState includes summary field', () => {
     const state: SessionState = {
       id: '123',
+      userId: 'user-1',
       project: 'dev1',
       project_path: '/data/projects/dev1',
       status: 'idle',
