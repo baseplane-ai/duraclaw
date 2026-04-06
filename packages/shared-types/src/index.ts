@@ -17,6 +17,10 @@ export interface ExecuteCommand {
   allowed_tools?: string[]
   max_turns?: number
   max_budget_usd?: number
+  /** Baseplane organization ID (gateway-level metadata, not passed to Claude SDK) */
+  org_id?: string
+  /** Baseplane user ID (gateway-level metadata, not passed to Claude SDK) */
+  user_id?: string
 }
 
 export interface StreamInputCommand {
@@ -155,7 +159,12 @@ export type UIStreamChunk =
   | { type: 'text-end'; id: string }
   | { type: 'tool-input-start'; toolCallId: string; toolName: string }
   | { type: 'tool-input-delta'; toolCallId: string; inputTextDelta: string }
-  | { type: 'tool-input-available'; toolCallId: string; toolName: string; input: Record<string, unknown> }
+  | {
+      type: 'tool-input-available'
+      toolCallId: string
+      toolName: string
+      input: Record<string, unknown>
+    }
   | { type: 'tool-output-available'; toolCallId: string; output: unknown }
   | { type: 'finish' }
   | { type: 'turn-complete' }
@@ -166,7 +175,12 @@ export type UIStreamChunk =
 
 export type BrowserCommand =
   | { type: 'user-message'; content: string }
-  | { type: 'tool-approval'; toolCallId: string; approved: boolean; answers?: Record<string, string> }
+  | {
+      type: 'tool-approval'
+      toolCallId: string
+      approved: boolean
+      answers?: Record<string, string>
+    }
 
 // ── Project ──────────────────────────────────────────────────────────
 
@@ -205,6 +219,7 @@ export type SessionStatus =
 
 export interface SessionState {
   id: string
+  userId: string | null
   project: string
   project_path: string
   status: SessionStatus
@@ -219,7 +234,10 @@ export interface SessionState {
   num_turns: number | null
   sdk_session_id: string | null
   summary: string | null
-  pending_question: unknown[] | null
+  pending_question: {
+    tool_call_id: string
+    questions: unknown[]
+  } | null
   pending_permission: {
     tool_call_id: string
     tool_name: string
@@ -229,6 +247,7 @@ export interface SessionState {
 
 export interface SessionSummary {
   id: string
+  userId: string | null
   project: string
   status: SessionStatus
   model: string | null
@@ -255,6 +274,10 @@ export interface StoredMessage {
 
 export interface SessionContext {
   sessionId: string
+  /** Baseplane organization ID (gateway-level tracking) */
+  orgId: string | null
+  /** Baseplane user ID (gateway-level tracking) */
+  userId: string | null
   abortController: AbortController
   pendingAnswer: {
     resolve: (answers: Record<string, string>) => void

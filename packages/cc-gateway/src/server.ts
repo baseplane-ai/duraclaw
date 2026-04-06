@@ -2,9 +2,9 @@ import { randomUUID } from 'node:crypto'
 import type { ServerWebSocket } from 'bun'
 import { verifyToken } from './auth.js'
 import { handleFileContents, handleFileTree, handleGitStatus } from './files.js'
+import { discoverProjects, resolveProject } from './projects.js'
 import { executeSession } from './sessions.js'
 import type { GatewayCommand, SessionContext, WsData } from './types.js'
-import { discoverProjects, resolveProject } from './projects.js'
 
 const PORT = Number(process.env.CC_GATEWAY_PORT ?? 9877)
 const startedAt = Date.now()
@@ -121,6 +121,8 @@ const server = Bun.serve<WsData>({
           const ac = new AbortController()
           const ctx: SessionContext = {
             sessionId,
+            orgId: cmd.type === 'execute' ? (cmd.org_id ?? null) : null,
+            userId: cmd.type === 'execute' ? (cmd.user_id ?? null) : null,
             abortController: ac,
             pendingAnswer: null,
             pendingPermission: null,
