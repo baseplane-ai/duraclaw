@@ -5,6 +5,7 @@ import type { ServerWebSocket } from 'bun'
 import { verifyToken } from './auth.js'
 import { handleFileContents, handleFileTree, handleGitStatus } from './files.js'
 import { findLatestKataState } from './kata.js'
+import { spec as openapiSpec } from './openapi.js'
 import { discoverProjects, resolveProject } from './projects.js'
 import { executeSession } from './sessions.js'
 import type { GatewayCommand, SessionContext, WsData } from './types.js'
@@ -47,6 +48,11 @@ const server = Bun.serve<WsData>({
         version: '0.1.0',
         uptime_ms: Date.now() - startedAt,
       })
+    }
+
+    // GET /openapi.json — no auth
+    if (req.method === 'GET' && path === '/openapi.json') {
+      return json(200, openapiSpec)
     }
 
     // All other routes require auth
