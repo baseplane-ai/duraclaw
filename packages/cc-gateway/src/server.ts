@@ -1,7 +1,10 @@
 import { randomUUID } from 'node:crypto'
+import { type FSWatcher, watch } from 'node:fs'
+import * as nodePath from 'node:path'
 import type { ServerWebSocket } from 'bun'
 import { verifyToken } from './auth.js'
 import { handleFileContents, handleFileTree, handleGitStatus } from './files.js'
+import { findLatestKataState } from './kata.js'
 import { discoverProjects, resolveProject } from './projects.js'
 import { executeSession } from './sessions.js'
 import type { GatewayCommand, SessionContext, WsData } from './types.js'
@@ -12,6 +15,11 @@ const startedAt = Date.now()
 // ── Per-Connection Session Tracking ─────────────────────────────────
 
 const sessions = new Map<ServerWebSocket<WsData>, SessionContext>()
+
+// ── Per-Connection Kata File Watchers ──────────────────────────────
+
+const kataWatchers = new Map<ServerWebSocket<WsData>, FSWatcher>()
+const kataDebounceTimers = new Map<ServerWebSocket<WsData>, ReturnType<typeof setTimeout>>()
 
 // ── HTTP Helpers ────────────────────────────────────────────────────
 
@@ -77,6 +85,18 @@ const server = Bun.serve<WsData>({
       return handleGitStatus(projectPath)
     }
 
+    // GET /projects/:name/kata-status
+    const kataStatusMatch = path.match(/^\/projects\/([^/]+)\/kata-status$/)
+    if (req.method === 'GET' && kataStatusMatch) {
+      const [, name] = kataStatusMatch
+      const projectPath = await resolveProject(name)
+      if (!projectPath) {
+        return json(404, { error: `Project "${name}" not found` })
+      }
+      const kataState = await findLatestKataState(projectPath)
+      return json(200, { kata_state: kataState })
+    }
+
     // WebSocket upgrade
     if (req.headers.get('upgrade')?.toLowerCase() === 'websocket') {
       const project = url.searchParams.get('project') ?? null
@@ -95,6 +115,44 @@ const server = Bun.serve<WsData>({
   websocket: {
     open(ws: ServerWebSocket<WsData>) {
       console.log(`[cc-gateway] WS connected (project=${ws.data.project ?? 'none'})`)
+
+      // Start watching kata state for this project
+      if (ws.data.project) {
+        const projectPath = nodePath.join('/data/projects', ws.data.project)
+        const sessionsDir = nodePath.join(projectPath, '.kata', 'sessions')
+        try {
+          const watcher = watch(sessionsDir, { recursive: true }, (_event, filename) => {
+            if (!filename?.endsWith('state.json')) return
+
+            // Debounce to avoid duplicate events from editor write patterns
+            const existing = kataDebounceTimers.get(ws)
+            if (existing) clearTimeout(existing)
+            kataDebounceTimers.set(
+              ws,
+              setTimeout(() => {
+                kataDebounceTimers.delete(ws)
+                findLatestKataState(projectPath).then((state) => {
+                  try {
+                    ws.send(
+                      JSON.stringify({
+                        type: 'kata_state',
+                        session_id: sessions.get(ws)?.sessionId ?? null,
+                        project: ws.data.project,
+                        kata_state: state,
+                      }),
+                    )
+                  } catch {
+                    // WS may have closed between debounce and send
+                  }
+                })
+              }, 150),
+            )
+          })
+          kataWatchers.set(ws, watcher)
+        } catch {
+          // No .kata/sessions/ dir — skip watching
+        }
+      }
     },
 
     async message(ws: ServerWebSocket<WsData>, raw: string | Buffer) {
@@ -218,6 +276,19 @@ const server = Bun.serve<WsData>({
 
     close(ws: ServerWebSocket<WsData>) {
       console.log('[cc-gateway] WS disconnected')
+
+      // Clean up kata file watcher
+      const watcher = kataWatchers.get(ws)
+      if (watcher) {
+        watcher.close()
+        kataWatchers.delete(ws)
+      }
+      const timer = kataDebounceTimers.get(ws)
+      if (timer) {
+        clearTimeout(timer)
+        kataDebounceTimers.delete(ws)
+      }
+
       const ctx = sessions.get(ws)
       if (ctx) {
         ctx.abortController.abort()
@@ -253,6 +324,16 @@ console.log(`[cc-gateway] Listening on http://127.0.0.1:${PORT}`)
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.on(signal, () => {
     console.log(`\n[cc-gateway] Received ${signal}, shutting down...`)
+
+    // Close all kata file watchers
+    for (const [, watcher] of kataWatchers) {
+      watcher.close()
+    }
+    kataWatchers.clear()
+    for (const [, timer] of kataDebounceTimers) {
+      clearTimeout(timer)
+    }
+    kataDebounceTimers.clear()
 
     // Abort all running sessions and close WebSocket connections
     for (const [ws, ctx] of sessions) {

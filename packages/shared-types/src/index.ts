@@ -68,6 +68,7 @@ export type GatewayEvent =
   | FileChangedEvent
   | ResultEvent
   | ErrorEvent
+  | KataStateEvent
 
 export interface SessionInitEvent {
   type: 'session.init'
@@ -204,6 +205,32 @@ export interface FileEntry {
 export interface GitFileStatus {
   path: string
   status: 'modified' | 'staged' | 'untracked' | 'clean'
+}
+
+// ── Kata Session State ──────────────────────────────────────────────
+
+export interface KataSessionState {
+  sessionId: string
+  workflowId: string | null
+  issueNumber: number | null
+  sessionType: string | null
+  currentMode: string | null
+  currentPhase: string | null
+  completedPhases: string[]
+  template: string | null
+  phases: string[]
+  modeHistory: Array<{ mode: string; enteredAt: string }>
+  modeState: Record<string, { status: string; enteredAt: string }>
+  updatedAt: string
+  beadsCreated: string[]
+  editedFiles: string[]
+}
+
+export interface KataStateEvent {
+  type: 'kata_state'
+  session_id: string | null
+  project: string
+  kata_state: KataSessionState | null
 }
 
 // ── Session State ────────────────────────────────────────────────────

@@ -1,0 +1,39 @@
+{
+  "issueNumber": 10,
+  "timestamp": "2026-04-07T13:35:00.000Z",
+  "mode": "issue",
+  "steps": [
+    {
+      "id": "VP1",
+      "description": "HTTP endpoint returns kata state for project with active kata session",
+      "passed": true,
+      "actual": "200 response with kata_state object containing currentMode=housekeeping, currentPhase=p0, completedPhases=[], updatedAt fields"
+    },
+    {
+      "id": "VP2",
+      "description": "HTTP endpoint returns null for project without kata state",
+      "passed": true,
+      "actual": "200 response with {\"kata_state\": null} for temporary project without .kata/ directory"
+    },
+    {
+      "id": "VP3",
+      "description": "HTTP endpoint returns 404 for unknown project",
+      "passed": true,
+      "actual": "404 response with {\"error\":\"Project \\\"nonexistent\\\" not found\"}"
+    },
+    {
+      "id": "VP4",
+      "description": "Corrupt state.json returns null gracefully",
+      "passed": true,
+      "actual": "200 response with {\"kata_state\": null} when latest state.json contained invalid JSON"
+    },
+    {
+      "id": "VP5",
+      "description": "WebSocket receives kata_state event on state.json change",
+      "passed": true,
+      "actual": "Received {\"type\":\"kata_state\",\"project\":\"baseplane-dev1\",\"kata_state\":{...}} via WebSocket after writing state.json content"
+    }
+  ],
+  "fixCycles": 0,
+  "allStepsPassed": true
+}
