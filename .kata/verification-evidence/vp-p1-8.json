@@ -1,0 +1,51 @@
+{
+  "issueNumber": 8,
+  "timestamp": "2026-04-07T12:58:00.000Z",
+  "mode": "issue",
+  "steps": [
+    {
+      "id": "VP1",
+      "description": "ExecuteCommand has optional org_id and user_id fields",
+      "passed": true,
+      "actual": "org_id?: string and user_id?: string present at index.ts:21-23 with JSDoc"
+    },
+    {
+      "id": "VP2",
+      "description": "SessionContext has orgId and userId fields",
+      "passed": true,
+      "actual": "orgId: string | null and userId: string | null present at index.ts:278-281"
+    },
+    {
+      "id": "VP3",
+      "description": "Gateway wires org_id/user_id into SessionContext",
+      "passed": true,
+      "actual": "server.ts:124-125 maps cmd.org_id/user_id to ctx.orgId/userId, defaults to null"
+    },
+    {
+      "id": "VP4",
+      "description": "Fields are NOT passed to Claude SDK",
+      "passed": true,
+      "actual": "No references to org_id/user_id/orgId/userId in sessions.ts"
+    },
+    {
+      "id": "VP5",
+      "description": "Backwards compatibility — commands without org/user work",
+      "passed": true,
+      "actual": "Test 'ExecuteCommand works without org_id and user_id (backwards compatible)' passes"
+    },
+    {
+      "id": "VP6",
+      "description": "Typecheck passes across all packages",
+      "passed": true,
+      "actual": "pnpm typecheck: 4 successful, 4 total (FULL TURBO)"
+    },
+    {
+      "id": "VP7",
+      "description": "All shared-types tests pass",
+      "passed": true,
+      "actual": "12 pass, 0 fail, 17 expect() calls across 1 file"
+    }
+  ],
+  "fixCycles": 0,
+  "allStepsPassed": true
+}
