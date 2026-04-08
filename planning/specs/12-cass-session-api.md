@@ -9,56 +9,45 @@ created: 2026-04-08
 updated: 2026-04-08
 phases:
   - id: p1
-    name: "Gateway cass subprocess foundation"
+    name: "Cass subprocess wrapper and search endpoint"
     tasks:
       - "Create cass.ts handler with Bun.spawn subprocess wrapper"
-      - "Implement cass health and capabilities endpoints"
-      - "Add cass binary detection and error handling"
+      - "Implement GET /cass/search with query param passthrough"
+      - "Add cass binary detection and exit code mapping"
       - "Update OpenAPI spec with cass endpoints"
     test_cases:
-      - id: "gw-cass-health"
-        description: "GET /cass/health returns cass health status"
+      - id: "gw-cass-search"
+        description: "GET /cass/search returns JSON results from cass search"
         type: "integration"
       - id: "gw-cass-missing"
         description: "Endpoints return 503 when cass binary not found"
         type: "integration"
   - id: p2
-    name: "Gateway search, timeline, and stats endpoints"
+    name: "Sync contract and push endpoint"
     tasks:
-      - "Implement GET /cass/search with query param passthrough"
-      - "Implement GET /cass/timeline with date filtering"
-      - "Implement GET /cass/stats"
-      - "Implement GET /cass/index trigger endpoint"
+      - "Define CassSessionRecord schema in shared-types"
+      - "Implement POST /cass/sync — extract new rows, push to configured endpoint"
+      - "Add cursor/watermark tracking for incremental sync"
+      - "Implement configurable remote ingest endpoint (env var)"
     test_cases:
-      - id: "gw-cass-search"
-        description: "GET /cass/search returns JSON results from cass search"
+      - id: "gw-cass-sync"
+        description: "POST /cass/sync extracts new sessions and pushes to remote endpoint"
         type: "integration"
-      - id: "gw-cass-timeline"
-        description: "GET /cass/timeline returns grouped session activity"
+      - id: "gw-cass-sync-incremental"
+        description: "Subsequent syncs only push new rows since last watermark"
         type: "integration"
   - id: p3
-    name: "Gateway export, context, and diag endpoints"
-    tasks:
-      - "Implement GET /cass/sessions/export with path query param"
-      - "Implement GET /cass/sessions/context with path query param"
-      - "Implement GET /cass/diag"
-      - "Implement freshness-triggered auto-indexing"
-    test_cases:
-      - id: "gw-cass-export"
-        description: "GET /cass/sessions/:path/export returns conversation JSON"
-        type: "integration"
-      - id: "gw-cass-context"
-        description: "GET /cass/sessions/:path/context returns related sessions"
-        type: "integration"
-  - id: p4
-    name: "Orchestrator proxy routes"
+    name: "Orchestrator proxy and index trigger"
     tasks:
       - "Add /api/cass/* proxy routes in orchestrator"
-      - "Forward auth headers to gateway"
-      - "Integration tests for proxy end-to-end"
+      - "Implement POST /cass/index to trigger re-indexing"
+      - "Wire session completion hook to trigger sync"
     test_cases:
       - id: "orch-cass-proxy"
         description: "Orchestrator /api/cass/* routes proxy to gateway and return results"
+        type: "integration"
+      - id: "gw-cass-index"
+        description: "POST /cass/index triggers cass re-indexing"
         type: "integration"
 ---
 
@@ -66,106 +55,44 @@ phases:
 
 ## Overview
 
-The VPS has 21k+ Claude Code sessions indexed by the `cass` CLI, but there is no programmatic way to search, browse, or analyze them from the orchestrator or any external client. This spec adds HTTP endpoints to cc-gateway that wrap every `cass` machine-readable command as a subprocess call, plus orchestrator proxy routes to forward those endpoints through Cloudflare Workers. This unlocks historical session search, timeline browsing, analytics, and conversation export for future UI and data pipeline work.
+The VPS has 21k+ coding agent sessions indexed by the `cass` CLI, but this data is trapped on the local machine. This spec adds two capabilities to cc-gateway: (1) a search endpoint for ad-hoc local queries, and (2) a sync mechanism that pushes cass session records to a configurable remote ingest endpoint. The remote system (currently baseplane's dataforge) handles enrichment, summarization, analytics, and serving the session list UI. Cass is the extraction layer, not the query layer.
 
 ## Feature Behaviors
 
-### B1: Cass Health Check
-
-**Core:**
-- **ID:** cass-health
-- **Trigger:** `GET /cass/health` request to cc-gateway
-- **Expected:** Gateway spawns `cass health --json`, returns the JSON output with `healthy`, `latency_ms`, and `state` fields. Returns 503 if cass reports unhealthy or binary is missing.
-- **Verify:** curl the endpoint and confirm `healthy: true` with sub-second latency.
-
-#### UI Layer
-N/A (backend only)
-
-#### API Layer
-- **Endpoint:** `GET /cass/health`
-- **Auth:** Bearer token (same as all gateway endpoints)
-- **Response 200:**
-```json
-{
-  "healthy": true,
-  "latency_ms": 12,
-  "state": { "db": "ok", "index": "fresh" }
-}
-```
-- **Response 503:** `{ "error": "cass unhealthy", "details": { ... } }`
-
-#### Data Layer
-N/A -- reads from cass subprocess (`cass health --json`)
-
----
-
-### B2: Cass Capabilities
-
-**Core:**
-- **ID:** cass-capabilities
-- **Trigger:** `GET /cass/capabilities` request to cc-gateway
-- **Expected:** Gateway spawns `cass capabilities --json`, returns the JSON output with `features`, `limits`, and `connectors` fields.
-- **Verify:** curl the endpoint and confirm `limits.max_limit` is a positive integer.
-
-#### UI Layer
-N/A (backend only)
-
-#### API Layer
-- **Endpoint:** `GET /cass/capabilities`
-- **Auth:** Bearer token
-- **Response 200:**
-```json
-{
-  "features": ["search", "timeline", "export", "context"],
-  "limits": {
-    "max_limit": 100,
-    "max_content_length": 50000,
-    "max_fields": 20,
-    "max_agg_buckets": 50
-  },
-  "connectors": ["claude-code"]
-}
-```
-
-#### Data Layer
-N/A -- reads from cass subprocess (`cass capabilities --json`)
-
----
-
-### B3: Session Search
+### B1: Session Search
 
 **Core:**
 - **ID:** cass-search
 - **Trigger:** `GET /cass/search?q=<query>` request to cc-gateway
-- **Expected:** Gateway spawns `cass search <query> --json` with all supported query params forwarded as CLI flags. Returns search results array.
-- **Verify:** Search for a known term and confirm results contain matching conversation excerpts.
+- **Expected:** Gateway spawns `cass search <query> --json` with all supported query params forwarded as CLI flags. Returns cass JSON output verbatim.
+- **Verify:** Search for a known term and confirm results contain matching conversation hits.
 
 #### UI Layer
 N/A (backend only)
 
 #### API Layer
 - **Endpoint:** `GET /cass/search`
-- **Auth:** Bearer token
+- **Auth:** Bearer token (same as all gateway endpoints)
 - **Query params (all optional except `q`):**
   - `q` (required) -- search query string
   - `workspace` -- filter by workspace path
-  - `agent` -- filter by agent name
-  - `limit` -- max results (default cass default)
+  - `agent` -- filter by agent name (claude_code, codex, gemini)
+  - `limit` -- max results (default 10)
   - `offset` -- pagination offset
-  - `cursor` -- cursor-based pagination
+  - `cursor` -- cursor-based pagination (from previous `_meta.next_cursor`)
   - `days` -- limit to last N days
   - `since` -- ISO date lower bound
   - `until` -- ISO date upper bound
   - `mode` -- `lexical`, `semantic`, or `hybrid`
   - `highlight` -- boolean, include match highlights
-  - `fields` -- comma-separated field list
-  - `max_content_length` -- truncation limit
-  - `timeout` -- timeout in milliseconds (maps to `--timeout`)
-- **Note:** Gateway passes through cass JSON output verbatim. Field names match cass output: `source_path` (not `session_id`), `snippet` (not `excerpt`), `score`, `agent`, `workspace`, etc. The response shape shown is the native cass format.
-- **Response 200:**
+  - `fields` -- comma-separated field list or preset (`minimal`, `summary`)
+  - `max_content_length` -- truncation limit in characters
+  - `timeout` -- timeout in milliseconds
+- **Response 200:** Gateway passes through cass JSON output verbatim. Field names match cass output:
 ```json
 {
   "count": 10,
+  "total_matches": 42,
   "hits": [
     {
       "source_path": "/home/ubuntu/.claude/projects/.../session.jsonl",
@@ -173,14 +100,22 @@ N/A (backend only)
       "agent": "claude_code",
       "title": "Fix auth token validation",
       "snippet": "...matched text...",
+      "content": "full message text",
       "score": 24.5,
       "line_number": 1,
-      "created_at": 1775645446287
+      "match_type": "exact",
+      "created_at": 1775645446287,
+      "source_id": "local",
+      "origin_kind": "local"
     }
   ],
-  "total_matches": 42,
   "cursor": "next-page-token",
-  "_meta": { "elapsed_ms": 45 }
+  "hits_clamped": false,
+  "_meta": {
+    "elapsed_ms": 45,
+    "search_mode": "lexical",
+    "index_freshness": { "fresh": true, "stale": false }
+  }
 }
 ```
 - **Response 400:** `{ "error": "Missing required query parameter: q" }`
@@ -190,205 +125,126 @@ N/A -- reads from cass subprocess (`cass search <q> --json [flags]`)
 
 ---
 
-### B4: Activity Timeline
+### B2: Sync Contract — CassSessionRecord Schema
 
 **Core:**
-- **ID:** cass-timeline
-- **Trigger:** `GET /cass/timeline` request to cc-gateway
-- **Expected:** Gateway spawns `cass timeline --json` with supported date/grouping params forwarded as CLI flags. Returns grouped activity data.
-- **Verify:** curl the endpoint and confirm response contains grouped entries with timestamps and counts.
+- **ID:** cass-sync-schema
+- **Trigger:** Defined at build time in `packages/shared-types/src/index.ts`
+- **Expected:** A `CassSessionRecord` type defines the shape of each row pushed to the remote ingest endpoint. This is the contract between the gateway (producer) and any remote consumer.
+- **Verify:** Type is exported from shared-types and used by both the sync handler and documented in the spec.
 
 #### UI Layer
-N/A (backend only)
+N/A
 
 #### API Layer
-- **Endpoint:** `GET /cass/timeline`
-- **Auth:** Bearer token
-- **Query params (all optional):**
-  - `group_by` -- `hour`, `day`, or `none` (maps to `--group-by`)
-  - `since` -- ISO date lower bound
-  - `until` -- ISO date upper bound
-  - `today` -- boolean, shortcut for today only
-  - `agent` -- filter by agent name
-- **Response 200:**
-```json
-{
-  "groups": {
-    "2026-04-07": {
-      "count": 15,
-      "sessions": [
-        { "session_id": "abc-123", "workspace": "/data/projects/baseplane-dev1", "started_at": "2026-04-07T09:00:00Z" }
-      ]
-    }
-  },
-  "range": {
-    "start": 1775539200000,
-    "end": 1775625600000
-  }
+The sync contract schema — each record pushed to the remote endpoint:
+```typescript
+interface CassSessionRecord {
+  /** cass internal row ID */
+  id: number
+  /** Agent type: claude_code, codex, gemini, etc. */
+  agent: string
+  /** Path to raw session JSONL file */
+  source_path: string
+  /** Working directory the session ran in */
+  workspace: string
+  /** First user message, truncated (cass-generated) */
+  title: string
+  /** Session start time (epoch ms) */
+  started_at: number
+  /** Session end time (epoch ms) */
+  ended_at: number
+  /** Duration in seconds */
+  duration_seconds: number
+  /** Total messages in conversation */
+  message_count: number
+  /** Source identifier */
+  source_id: string
+  /** local or remote */
+  origin_kind: string
+  /** Remote hostname if applicable */
+  origin_host: string | null
 }
 ```
 
+This maps 1:1 to the fields cass returns from `cass timeline --json --group-by none`.
+
 #### Data Layer
-N/A -- reads from cass subprocess (`cass timeline --json [flags]`)
+Type definition only -- no storage. Shared between gateway (sync producer) and remote consumer.
 
 ---
 
-### B5: Index Statistics
+### B3: Sync Push
 
 **Core:**
-- **ID:** cass-stats
-- **Trigger:** `GET /cass/stats` request to cc-gateway
-- **Expected:** Gateway spawns `cass stats --json`, returns conversation/message counts, per-agent breakdown, top workspaces, and date range.
-- **Verify:** curl the endpoint and confirm `conversations` count is > 0 and `by_agent` is a non-empty array.
+- **ID:** cass-sync-push
+- **Trigger:** `POST /cass/sync` request to cc-gateway, or automatically after session completion
+- **Expected:** Gateway runs `cass timeline --json --group-by none --since <watermark>` to extract sessions newer than the last sync. Converts each entry to a `CassSessionRecord`. POSTs the batch to the configured remote ingest endpoint (`CASS_SYNC_ENDPOINT` env var). Updates the local watermark on success.
+- **Verify:** Trigger sync, confirm remote endpoint received the batch, confirm subsequent sync only sends newer rows.
 
 #### UI Layer
 N/A (backend only)
 
 #### API Layer
-- **Endpoint:** `GET /cass/stats`
+- **Gateway endpoint:** `POST /cass/sync`
 - **Auth:** Bearer token
 - **Response 200:**
 ```json
 {
-  "conversations": 21432,
-  "messages": 184000,
-  "by_agent": [
-    { "agent": "claude_code", "count": 21432 }
+  "synced": 15,
+  "watermark": "2026-04-08T12:00:00Z",
+  "remote_status": 200
+}
+```
+- **Response 200 (nothing to sync):**
+```json
+{
+  "synced": 0,
+  "watermark": "2026-04-08T12:00:00Z"
+}
+```
+- **Response 503:** `{ "error": "CASS_SYNC_ENDPOINT not configured" }` if env var not set
+- **Response 502:** `{ "error": "Remote ingest failed", "remote_status": 500, "details": "..." }` if remote endpoint returns non-2xx
+
+**Remote ingest contract (what the gateway POSTs):**
+- **Method:** `POST`
+- **URL:** `${CASS_SYNC_ENDPOINT}/ingest`
+- **Headers:**
+  - `Content-Type: application/json`
+  - `Authorization: Bearer ${CASS_SYNC_TOKEN}` (if `CASS_SYNC_TOKEN` env var is set)
+- **Body:**
+```json
+{
+  "source": "duraclaw-gateway",
+  "batch": [
+    { /* CassSessionRecord */ },
+    { /* CassSessionRecord */ }
   ],
-  "top_workspaces": [
-    { "workspace": "/data/projects/baseplane-dev1", "count": 5000 }
-  ],
-  "date_range": {
-    "oldest": 1748736000000,
-    "newest": 1775908800000
-  }
+  "watermark": "2026-04-08T12:00:00Z",
+  "total": 15
 }
 ```
+- **Expected response:** HTTP 2xx. Body is opaque to the gateway (logged but not parsed).
+
+**Watermark tracking:**
+- Stored as a file at `~/.local/share/duraclaw/cass-sync-watermark.json`
+- Contains `{ "last_sync": "ISO-date", "last_id": 21045 }`
+- On first sync (no watermark), syncs all sessions from the last 30 days
+- Watermark advances to the most recent `ended_at` timestamp in the batch on successful push
 
 #### Data Layer
-N/A -- reads from cass subprocess (`cass stats --json`)
+- Watermark file: `~/.local/share/duraclaw/cass-sync-watermark.json`
+- No database -- watermark is a single JSON file
 
 ---
 
-### B6: Session Export
-
-**Core:**
-- **ID:** cass-export
-- **Trigger:** `GET /cass/sessions/export?path=<session_path>` request to cc-gateway
-- **Expected:** Gateway spawns `cass export <path> --format json`, optionally with `--include-tools`. Returns the full conversation JSON.
-- **Verify:** Export a known session path and confirm response contains messages array with role/content fields.
-
-#### UI Layer
-N/A (backend only)
-
-#### API Layer
-- **Endpoint:** `GET /cass/sessions/export`
-- **Auth:** Bearer token
-- **Query params:**
-  - `path` (required) -- session storage path
-  - `include_tools` -- boolean, include tool call details (maps to `--include-tools`)
-- **Response 200:**
-```json
-{
-  "path": "/home/ubuntu/.claude/projects/.../session-abc",
-  "messages": [
-    { "role": "user", "content": "Fix the bug in auth.ts" },
-    { "role": "assistant", "content": "I'll look at the auth module..." }
-  ],
-  "metadata": {
-    "agent": "claude",
-    "workspace": "/data/projects/baseplane-dev1",
-    "started_at": "2026-04-07T14:30:00Z"
-  }
-}
-```
-- **Response 400:** `{ "error": "Missing required query parameter: path" }`
-- **Response 404:** `{ "error": "Session not found at path" }` (cass exit code 3)
-
-#### Data Layer
-N/A -- reads from cass subprocess (`cass export <path> --format json`)
-
----
-
-### B7: Session Context
-
-**Core:**
-- **ID:** cass-context
-- **Trigger:** `GET /cass/sessions/context?path=<source_path>` request to cc-gateway
-- **Expected:** Gateway spawns `cass context <path> --json` with optional `--limit`. Returns related sessions for the given session file path.
-- **Verify:** Query with a known session file path and confirm response contains related session entries.
-
-#### UI Layer
-N/A (backend only)
-
-#### API Layer
-- **Endpoint:** `GET /cass/sessions/context`
-- **Auth:** Bearer token
-- **Query params:**
-  - `path` (required) -- path to session source file (.jsonl)
-  - `limit` -- max results
-- **Response 200:**
-```json
-{
-  "path": "/home/ubuntu/.claude/projects/-data-projects-baseplane-dev1/abc-123.jsonl",
-  "related": [
-    {
-      "session_id": "abc-123",
-      "workspace": "/data/projects/baseplane-dev1",
-      "relevance": 0.85,
-      "excerpt": "Modified auth.ts to fix token validation..."
-    }
-  ]
-}
-```
-- **Response 400:** `{ "error": "Missing required query parameter: path" }`
-
-#### Data Layer
-N/A -- reads from cass subprocess (`cass context <path> --json`)
-
----
-
-### B8: Diagnostics
-
-**Core:**
-- **ID:** cass-diag
-- **Trigger:** `GET /cass/diag` request to cc-gateway
-- **Expected:** Gateway spawns `cass diag --json`, returns connector info, database size, index size, paths, platform, and version.
-- **Verify:** curl the endpoint and confirm response contains `database_size` and `version` fields.
-
-#### UI Layer
-N/A (backend only)
-
-#### API Layer
-- **Endpoint:** `GET /cass/diag`
-- **Auth:** Bearer token
-- **Response 200:**
-```json
-{
-  "connectors": ["claude-code"],
-  "database_size": "3.1 GB",
-  "index_size": "450 MB",
-  "paths": {
-    "database": "/home/ubuntu/.local/share/coding-agent-search/agent_search.db",
-    "index": "/home/ubuntu/.local/share/coding-agent-search/index"
-  },
-  "platform": "linux-x64",
-  "version": "0.8.2"
-}
-```
-
-#### Data Layer
-N/A -- reads from cass subprocess (`cass diag --json`)
-
----
-
-### B9: Trigger Index
+### B4: Trigger Index
 
 **Core:**
 - **ID:** cass-index-trigger
 - **Trigger:** `POST /cass/index` request to cc-gateway
-- **Expected:** Gateway spawns `cass index --json`, returns indexing results with conversations/messages indexed and elapsed time. Returns 409 Conflict if cass exit code is 7 (lock/busy from concurrent index).
-- **Verify:** POST to the endpoint and confirm response contains `conversations_indexed` and `elapsed_ms`.
+- **Expected:** Gateway spawns `cass index --json`, returns indexing results. Returns 409 Conflict if cass exit code is 7 (lock/busy from concurrent index).
+- **Verify:** POST to the endpoint and confirm response contains indexing stats.
 
 #### UI Layer
 N/A (backend only)
@@ -399,8 +255,9 @@ N/A (backend only)
 - **Response 200:**
 ```json
 {
-  "conversations_indexed": 150,
-  "messages_indexed": 1200,
+  "success": true,
+  "conversations": 21110,
+  "messages": 742986,
   "elapsed_ms": 3400
 }
 ```
@@ -411,12 +268,39 @@ N/A -- reads from cass subprocess (`cass index --json`)
 
 ---
 
-### B10: Orchestrator Proxy
+### B5: Cass Binary Detection and Exit Code Mapping
+
+**Core:**
+- **ID:** cass-binary-detection
+- **Trigger:** Any `/cass/*` endpoint is called
+- **Expected:** All cass endpoints share centralized subprocess execution with binary detection and exit code mapping. If the cass binary is not found, returns 503. Exit codes map to appropriate HTTP status codes.
+- **Verify:** Call any cass endpoint with cass unavailable, confirm 503 with clear error.
+
+#### UI Layer
+N/A (backend only)
+
+#### API Layer
+- **All `/cass/*` endpoints** use shared exit code mapping:
+  - Exit 0: success, return parsed JSON with 200
+  - Exit 1: unhealthy/general failure, return 503 with `{ "error": "cass unhealthy", "details": "<stderr>" }`
+  - Exit 2: usage error (bad params), return 400 with `{ "error": "Invalid parameters", "details": "<stderr>" }`
+  - Exit 3: resource not found, return 404 with `{ "error": "Not found", "details": "<stderr>" }`
+  - Exit 7: lock/busy, return 409 with `{ "error": "Index operation already in progress" }`
+  - Exit 8: partial results, return 200 with parsed JSON plus `{ "_warning": "partial_results" }`
+  - Other non-zero: return 500 with `{ "error": "cass command failed", "exit_code": N, "details": "<stderr>" }`
+- **Binary not found:** return 503 with `{ "error": "cass binary not found or not executable" }`
+
+#### Data Layer
+N/A
+
+---
+
+### B6: Orchestrator Proxy
 
 **Core:**
 - **ID:** orch-cass-proxy
 - **Trigger:** Any `GET /api/cass/*` or `POST /api/cass/*` request to the orchestrator
-- **Expected:** Orchestrator forwards the request to the cc-gateway at `CC_GATEWAY_URL` (converted to HTTP), preserving path suffix, query params, method, and injecting the `CC_GATEWAY_SECRET` as Bearer auth. Returns the gateway response body and status code.
+- **Expected:** Orchestrator forwards the request to the cc-gateway at `CC_GATEWAY_URL`, preserving path suffix, query params, method, and injecting `CC_GATEWAY_SECRET` as Bearer auth. Returns the gateway response body and status code.
 - **Verify:** Hit an orchestrator cass proxy route and confirm response matches direct gateway output.
 
 #### UI Layer
@@ -424,9 +308,9 @@ N/A (backend only)
 
 #### API Layer
 - **Endpoint:** `/api/cass/*` (wildcard proxy)
-- **Auth:** Orchestrator auth middleware (Better Auth session cookie or token), then forwards with gateway Bearer token
-- **Proxy mapping:** `/api/cass/health` -> `GET {CC_GATEWAY_URL}/cass/health`, `/api/cass/search?q=foo` -> `GET {CC_GATEWAY_URL}/cass/search?q=foo`, etc.
-- **Implementation:** Add a Hono wildcard route in `apps/orchestrator/src/api/index.ts` that uses `fetchGatewayProjects`-style HTTP forwarding pattern (convert wss:// to https://, inject Bearer header).
+- **Auth:** Orchestrator auth middleware (Better Auth session), then forwards with gateway Bearer token
+- **Proxy mapping:** `/api/cass/search?q=foo` -> `GET {CC_GATEWAY_URL}/cass/search?q=foo`, `/api/cass/sync` -> `POST {CC_GATEWAY_URL}/cass/sync`, etc.
+- **Implementation:** Wildcard route in `apps/orchestrator/src/api/index.ts` using existing HTTP forwarding pattern (convert wss:// to https://, inject Bearer header). Must be registered after the auth middleware `use()` call.
 - **Response:** Pass-through from gateway (same status code and JSON body).
 - **Response 502:** `{ "error": "Gateway unreachable" }` if fetch to gateway fails.
 
@@ -435,257 +319,134 @@ N/A -- proxies to gateway
 
 ---
 
-### B11: Cass Binary Detection and Error Handling
+### B7: Session Completion Sync Hook
 
 **Core:**
-- **ID:** cass-binary-detection
-- **Trigger:** Any `/cass/*` endpoint is called but the `cass` binary is not installed or not in PATH
-- **Expected:** Gateway catches the spawn error (ENOENT or similar), returns 503 with a descriptive error message indicating cass is not available. All cass endpoints share this detection logic.
-- **Verify:** Temporarily rename the cass binary, call any cass endpoint, confirm 503 response with clear error message.
+- **ID:** cass-completion-hook
+- **Trigger:** A Claude Code session completes (result event received on WebSocket)
+- **Expected:** After a session completes, the gateway triggers `cass index` (to pick up the new session) then `POST /cass/sync` (to push it to the remote endpoint). Both are fire-and-forget (non-blocking, don't delay the result event).
+- **Verify:** Complete a session, wait a few seconds, confirm the new session appears in the remote endpoint.
 
 #### UI Layer
 N/A (backend only)
 
 #### API Layer
-- **All `/cass/*` endpoints** return:
-- **Response 503:** `{ "error": "cass binary not found or not executable" }`
-- **Exit code mapping:**
-  - Exit 0: success, return parsed JSON with 200
-  - Exit 1: unhealthy/general failure, return 503 with `{ "error": "cass unhealthy", "details": "<stderr>" }`
-  - Exit 2: usage error (bad params), return 400 with `{ "error": "Invalid parameters", "details": "<stderr>" }`
-  - Exit 3: resource not found, return 404 with `{ "error": "Not found", "details": "<stderr>" }`
-  - Exit 7: lock/busy, return 409 with `{ "error": "Index operation already in progress" }`
-  - Exit 8: partial results, return 200 with parsed JSON plus `{ "_warning": "partial_results" }`
-  - Other non-zero: return 500 with `{ "error": "cass command failed", "exit_code": N, "details": "<stderr>" }`
+No new endpoint -- internal gateway logic triggered as a side effect of session completion in the WebSocket `result` event handler in `packages/cc-gateway/src/server.ts`.
+
+Sequence:
+1. Session result event received
+2. Fire-and-forget: `cass index --json` (subprocess, no await)
+3. After index completes: `POST /cass/sync` (internal call, no await on the HTTP response to the session)
 
 #### Data Layer
 N/A
 
----
-
-### B12: Auto-Index on Staleness
-
-**Core:**
-- **ID:** cass-auto-index
-- **Trigger:** Any `/cass/search`, `/cass/timeline`, or `/cass/stats` request when the last known index time is older than a configurable threshold (default: 5 minutes)
-- **Expected:** Gateway checks index freshness via `cass status --json` (cached for 60 seconds). If `recommended_action` indicates re-indexing is needed, spawns `cass index --json` in the background (fire-and-forget, non-blocking) before returning the query results from the current index. Does not block or delay the user's request.
-- **Verify:** Wait for index to become stale, make a search request, then check gateway logs for background index trigger.
-
-#### UI Layer
-N/A (backend only)
-
-#### API Layer
-- No separate endpoint -- this is internal gateway logic triggered as a side effect of B3, B4, and B5 endpoints.
-- The response from the query endpoint is unchanged; the index refresh happens asynchronously.
-- A `_index_triggered` boolean field is added to responses when auto-indexing was kicked off:
-```json
-{
-  "results": [...],
-  "_index_triggered": true
-}
-```
-
-#### Data Layer
-N/A -- gateway-internal caching of `cass status --json` output, refreshed at most once per 60 seconds.
-
----
-
-### B13: Cass Status
-
-**Core:**
-- **ID:** cass-status
-- **Trigger:** `GET /cass/status` request to cc-gateway
-- **Expected:** Gateway spawns `cass status --json`, returns database stats, index freshness, pending sessions, and recommended action.
-- **Verify:** curl the endpoint and confirm response contains `pending_sessions` and `recommended_action` fields.
-
-#### UI Layer
-N/A (backend only)
-
-#### API Layer
-- **Endpoint:** `GET /cass/status`
-- **Auth:** Bearer token
-- **Response 200:**
-```json
-{
-  "database_stats": {
-    "conversations": 21432,
-    "messages": 184000
-  },
-  "index_freshness": {
-    "last_indexed_at": 1775908800000,
-    "stale": false
-  },
-  "pending_sessions": 3,
-  "recommended_action": "none"
-}
-```
-
-#### Data Layer
-N/A -- reads from cass subprocess (`cass status --json`)
-
 ## Non-Goals
 
-- **No React UI** -- frontend for browsing cass sessions is a separate spec.
-- **No direct SQLite access** -- all data access goes through the cass CLI subprocess, never by reading `~/.local/share/coding-agent-search/agent_search.db` directly.
-- **No user-scoping** -- the VPS is single-user; all sessions belong to the same operator. No multi-tenant filtering.
-- **No replacing existing session endpoints** -- the existing `GET /api/sessions` and `GET /api/projects/{name}/sessions` routes backed by Durable Object SQLite remain unchanged. Cass endpoints are complementary.
+- **No wrapping every cass command** -- only search, index, and sync are exposed. Timeline, stats, diag, capabilities, health, export, context are not needed as HTTP endpoints. Use `cass` CLI directly for those.
+- **No React UI** -- frontend for browsing sessions is a separate spec, built against the remote DB.
+- **No direct SQLite access** -- all cass data access goes through the CLI subprocess.
+- **No session list endpoint** -- the remote DB (dataforge) serves the session list. The gateway is a sync pump, not a query layer.
+- **No enrichment on the gateway** -- cost, model, summary, structured tags are added by the remote system, not the gateway.
 
 ## Implementation Phases
 
-**Phase P1: Gateway cass subprocess foundation** -- Create the `cass.ts` handler file in `packages/cc-gateway/src/` with the `Bun.spawn` subprocess wrapper, implement `/cass/health` and `/cass/capabilities` endpoints, add cass binary detection with proper error responses, and update the OpenAPI spec in `packages/cc-gateway/src/openapi.ts`.
+**Phase P1: Cass subprocess wrapper and search endpoint** -- Create `packages/cc-gateway/src/cass.ts` with the `Bun.spawn` wrapper, exit code mapping, and binary detection. Implement `GET /cass/search` with full query param passthrough. Update `packages/cc-gateway/src/openapi.ts`.
 
-**Phase P2: Gateway search, timeline, and stats endpoints** -- Implement `GET /cass/search` with full query param passthrough, `GET /cass/timeline` with date filtering and grouping, `GET /cass/stats`, and `POST /cass/index` trigger endpoint. Wire up exit code mapping for all new endpoints.
+**Phase P2: Sync contract and push endpoint** -- Define `CassSessionRecord` in `packages/shared-types/src/index.ts`. Implement `POST /cass/sync` with watermark tracking, `cass timeline` extraction, and HTTP push to `CASS_SYNC_ENDPOINT`. Implement `POST /cass/index`.
 
-**Phase P3: Gateway export, context, and diag endpoints** -- Implement `GET /cass/sessions/export`, `GET /cass/sessions/context`, `GET /cass/diag`, and the auto-index freshness check logic (B12).
-
-**Phase P4: Orchestrator proxy routes** -- Add `/api/cass/*` wildcard proxy route in `apps/orchestrator/src/api/index.ts` using the existing `fetchGatewayProjects`-style HTTP forwarding pattern, forward auth headers, and write integration tests for end-to-end proxy behavior.
+**Phase P3: Orchestrator proxy and completion hook** -- Add `/api/cass/*` wildcard proxy in `apps/orchestrator/src/api/index.ts`. Wire session completion in the WebSocket handler to trigger index + sync as fire-and-forget.
 
 ## Verification Strategy
 
 ### Test Infrastructure
-Integration tests using `bun:test` in `packages/cc-gateway/src/__tests__/`. Tests call real gateway endpoints at `http://127.0.0.1:9877` with real cass data. The gateway must be running and cass must be installed on the VPS. Tests use the `CC_GATEWAY_API_TOKEN` env var for auth if configured.
+Integration tests using `bun:test` in `packages/cc-gateway/src/__tests__/`. Tests call real gateway endpoints at `http://127.0.0.1:9877` with real cass data. The gateway must be running and cass must be installed on the VPS.
 
 ### Build Verification
-`pnpm typecheck` from repo root must pass with no errors. `pnpm build` from repo root must complete successfully. New types added to `packages/shared-types/src/index.ts` must not break existing consumers.
+`pnpm typecheck` from repo root must pass. `pnpm build` must complete. New types in `packages/shared-types/src/index.ts` must not break existing consumers.
 
 ## Verification Plan
 
-All commands assume the gateway is running at `http://127.0.0.1:9877`. Replace `$TOKEN` with the value of `CC_GATEWAY_API_TOKEN` if auth is configured, or omit the `-H` header if the gateway is running in open mode.
+All commands assume gateway at `http://127.0.0.1:9877`. Replace `$TOKEN` with `CC_GATEWAY_API_TOKEN` value.
 
-### VP1: Health and Capabilities
-
-**Step 1 -- Cass health:**
-```bash
-curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9877/cass/health | jq .
-```
-**Expected:** HTTP 200. Response contains `"healthy": true`, `"latency_ms"` as a number, and `"state"` as an object.
-
-**Step 2 -- Cass capabilities:**
-```bash
-curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9877/cass/capabilities | jq .
-```
-**Expected:** HTTP 200. Response contains `"features"` as an array, `"limits"` with `"max_limit"` as a positive integer, and `"connectors"` as an array.
-
-**Step 3 -- Unauthorized access:**
-```bash
-curl -s -w "\n%{http_code}" http://127.0.0.1:9877/cass/health
-```
-**Expected:** HTTP 401 with `{ "error": "Unauthorized" }` (when `CC_GATEWAY_API_TOKEN` is set).
-
-### VP2: Search Endpoint
+### VP1: Search Endpoint
 
 **Step 1 -- Basic search:**
 ```bash
 curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:9877/cass/search?q=auth" | jq .
 ```
-**Expected:** HTTP 200. Response contains `"hits"` as an array with at least one entry containing `"source_path"` and `"snippet"` fields.
+**Expected:** HTTP 200. Response contains `"hits"` as an array with at least one entry containing `"source_path"`, `"snippet"`, and `"score"` fields.
 
 **Step 2 -- Search with filters:**
 ```bash
 curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:9877/cass/search?q=auth&limit=5&days=30&mode=lexical" | jq .
 ```
-**Expected:** HTTP 200. Response `"hits"` array has at most 5 entries.
+**Expected:** HTTP 200. `"hits"` array has at most 5 entries.
 
 **Step 3 -- Missing query parameter:**
 ```bash
-curl -s -w "\n%{http_code}" -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:9877/cass/search" 
+curl -s -w "\n%{http_code}" -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:9877/cass/search"
 ```
 **Expected:** HTTP 400 with `{ "error": "Missing required query parameter: q" }`.
 
-### VP3: Timeline Endpoint
+### VP2: Sync Endpoint
 
-**Step 1 -- Default timeline:**
+**Step 1 -- Trigger sync (no endpoint configured):**
 ```bash
-curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:9877/cass/timeline" | jq .
+curl -s -X POST -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:9877/cass/sync" | jq .
 ```
-**Expected:** HTTP 200. Response contains `"groups"` as an object keyed by period string and `"range"` with `"start"`/`"end"` timestamps.
+**Expected:** HTTP 503 with `{ "error": "CASS_SYNC_ENDPOINT not configured" }`.
 
-**Step 2 -- Timeline with date filter:**
+**Step 2 -- Trigger sync (with endpoint configured):**
 ```bash
-curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:9877/cass/timeline?group_by=day&today=true" | jq .
+# Start a local HTTP server to receive the sync payload
+python3 -c "
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import json
+class H(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers['Content-Length'])
+        body = json.loads(self.rfile.read(length))
+        print(json.dumps(body, indent=2)[:500])
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'ok')
+HTTPServer(('127.0.0.1', 9999), H).handle_request()
+" &
+sleep 1
+CASS_SYNC_ENDPOINT=http://127.0.0.1:9999 curl -s -X POST -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:9877/cass/sync" | jq .
 ```
-**Expected:** HTTP 200. Response `"groups"` object contains keys for today only.
+**Expected:** HTTP 200. Response contains `"synced"` as a positive integer and `"watermark"` as an ISO date. The local server prints a JSON body with `"source"`, `"batch"` (array of CassSessionRecord), and `"total"`.
 
-### VP4: Stats Endpoint
-
-**Step 1 -- Get stats:**
-```bash
-curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:9877/cass/stats" | jq .
-```
-**Expected:** HTTP 200. Response contains `"conversations"` as a positive integer, `"messages"` as a positive integer, `"by_agent"` as a non-empty array, and `"date_range"` object.
-
-### VP5: Export Endpoint
-
-**Step 1 -- Export a session:**
-```bash
-SESSION_PATH=$(curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:9877/cass/search?q=auth&limit=1" | jq -r '.hits[0].source_path // empty')
-curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:9877/cass/sessions/export?path=$SESSION_PATH" | jq .
-```
-**Expected:** HTTP 200. Response contains `"messages"` as a non-empty array and `"metadata"` object.
-
-**Step 2 -- Export with missing path:**
-```bash
-curl -s -w "\n%{http_code}" -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:9877/cass/sessions/export"
-```
-**Expected:** HTTP 400 with `{ "error": "Missing required query parameter: path" }`.
-
-### VP6: Index Trigger
+### VP3: Index Trigger
 
 **Step 1 -- Trigger index:**
 ```bash
 curl -s -X POST -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:9877/cass/index" | jq .
 ```
-**Expected:** HTTP 200. Response contains `"conversations_indexed"` and `"elapsed_ms"` as numbers.
+**Expected:** HTTP 200. Response contains `"success": true`, `"conversations"` as a positive integer, and `"elapsed_ms"`.
 
-**Step 2 -- Diagnostics:**
-```bash
-curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:9877/cass/diag" | jq .
-```
-**Expected:** HTTP 200. Response contains `"version"` as a string and `"database_size"` as a string.
+### VP4: Orchestrator Proxy
 
-**Step 3 -- Context lookup:**
-```bash
-curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:9877/cass/sessions/context?path=/home/ubuntu/.claude/projects/-data-projects-baseplane-dev1/abc-123.jsonl" | jq .
-```
-**Expected:** HTTP 200. Response contains `"related"` as an array.
-
-**Step 4 -- Cass status:**
-```bash
-curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:9877/cass/status" | jq .
-```
-**Expected:** HTTP 200. Response contains `"pending_sessions"` and `"recommended_action"` fields.
-
-### VP7: Orchestrator Proxy
-
-**Step 1 -- Proxy health through orchestrator:**
-```bash
-curl -s -b cookies.txt "https://duraclaw.bfreeed.workers.dev/api/cass/health" | jq .
-```
-**Expected:** HTTP 200. Same response shape as direct gateway `/cass/health`.
-
-**Step 2 -- Proxy search through orchestrator:**
+**Step 1 -- Proxy search through orchestrator:**
 ```bash
 curl -s -b cookies.txt "https://duraclaw.bfreeed.workers.dev/api/cass/search?q=auth&limit=3" | jq .
 ```
 **Expected:** HTTP 200. Same response shape as direct gateway `/cass/search`.
 
-**Step 3 -- Proxy index trigger through orchestrator:**
-```bash
-curl -s -X POST -b cookies.txt "https://duraclaw.bfreeed.workers.dev/api/cass/index" | jq .
-```
-**Expected:** HTTP 200. Same response shape as direct gateway `/cass/index`.
-
 ## Implementation Hints
 
-- **Subprocess wrapper location:** Create `packages/cc-gateway/src/cass.ts` as the handler file. Follow the pattern of `packages/cc-gateway/src/files.ts` and `packages/cc-gateway/src/kata.ts` -- export handler functions that return `Promise<Response>`.
-- **Key imports:** `Bun.spawn` from the Bun runtime for subprocess execution, `verifyToken` from `./auth.js` (already used in `packages/cc-gateway/src/server.ts`).
-- **Route registration:** Add new route blocks in the `fetch()` handler of `packages/cc-gateway/src/server.ts`, after the auth check (`if (!verifyToken(req))`) and before the WebSocket upgrade block. Match paths with `path.startsWith('/cass/')` or individual route matching.
-- **Subprocess pattern:** Use `Bun.spawn(['cass', subcommand, '--json', ...flags])` with `stdout: 'pipe'` and `stderr: 'pipe'`. Collect output via `new Response(proc.stdout).text()`. Set `env: { ...process.env, CODING_AGENT_SEARCH_NO_UPDATE_PROMPT: '1' }` to suppress interactive update prompts.
-- **JSON helper:** Reuse the existing `json(status, body)` helper already defined in `packages/cc-gateway/src/server.ts` -- either export it or pass it to handler functions.
-- **Exit code 7 (lock/busy):** Cass uses a lock file for index operations. If `cass index --json` exits with code 7, return HTTP 409 Conflict with an appropriate error message. Do not retry.
-- **Exit code 8 (partial results):** Still return HTTP 200, but add `"_warning": "partial_results"` to the response body so callers know the data may be incomplete.
-- **Exit code 3 (not found):** Return HTTP 404. This covers cases like exporting a non-existent session path.
-- **OpenAPI update:** Add all new endpoints to the `paths` object in `packages/cc-gateway/src/openapi.ts` following the existing pattern for `/projects/{name}/kata-status`.
-- **Orchestrator proxy:** Add a catch-all route in `apps/orchestrator/src/api/index.ts` using `app.all('/api/cass/*', ...)`. Convert `CC_GATEWAY_URL` from wss:// to https:// (same pattern as `fetchGatewayProjects`), build the target URL from the wildcard path suffix and query string, inject `Authorization: Bearer ${env.CC_GATEWAY_SECRET}`, and return the fetch response.
-- **Auto-index caching:** Store the last `cass status --json` result and timestamp in a module-level variable in `cass.ts`. Check staleness before query endpoints. If stale, fire `Bun.spawn(['cass', 'index', '--json'])` without awaiting -- let it complete in the background.
-- **Shared types:** Add `CassHealthResponse`, `CassCapabilitiesResponse`, `CassSearchResult`, etc. to `packages/shared-types/src/index.ts` for type-safe proxy responses in the orchestrator.
+- **Subprocess wrapper location:** Create `packages/cc-gateway/src/cass.ts`. Follow the pattern of `packages/cc-gateway/src/files.ts` -- export handler functions that return `Promise<Response>`.
+- **Key imports:** `Bun.spawn` for subprocess execution, `verifyToken` from `./auth.js` (already used in `packages/cc-gateway/src/server.ts`).
+- **Route registration:** Add route blocks in the `fetch()` handler of `packages/cc-gateway/src/server.ts` after the auth check. Match with `path.startsWith('/cass/')`.
+- **Subprocess pattern:** `Bun.spawn(['cass', subcommand, '--json', ...flags], { stdout: 'pipe', stderr: 'pipe', env: { ...process.env, CODING_AGENT_SEARCH_NO_UPDATE_PROMPT: '1' } })`. Collect output via `new Response(proc.stdout).text()`.
+- **JSON helper:** Reuse the existing `json(status, body)` helper from `packages/cc-gateway/src/server.ts`.
+- **Watermark file:** Use `Bun.file()` and `Bun.write()` for reading/writing `~/.local/share/duraclaw/cass-sync-watermark.json`. Create parent directory if needed.
+- **Sync endpoint env vars:** `CASS_SYNC_ENDPOINT` (required for sync, URL base), `CASS_SYNC_TOKEN` (optional, Bearer token for remote auth).
+- **Orchestrator proxy:** Wildcard route in `apps/orchestrator/src/api/index.ts` using `fetchGatewayProjects`-style pattern (convert wss:// to https://, inject Bearer header). Register after auth middleware.
+- **Completion hook:** In the WebSocket `result` event handler in `packages/cc-gateway/src/server.ts`, add a fire-and-forget call: spawn `cass index`, then on completion call the sync handler internally.
+- **OpenAPI:** Add `/cass/search`, `/cass/sync`, `/cass/index` to `packages/cc-gateway/src/openapi.ts`.
+
+### Reference Docs
+- [Bun.spawn API](https://bun.sh/docs/api/spawn) -- subprocess execution in Bun
+- [cass robot-docs](run `cass robot-docs commands` locally) -- machine-readable CLI docs
