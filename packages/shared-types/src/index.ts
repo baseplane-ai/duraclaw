@@ -13,7 +13,7 @@ export type GatewayCommand =
 export interface ExecuteCommand {
   type: 'execute'
   project: string
-  prompt: string
+  prompt: string | ContentBlock[]
   model?: string
   system_prompt?: string
   allowed_tools?: string[]
@@ -78,11 +78,11 @@ export interface AnswerCommand {
   answers: Record<string, string>
 }
 
-// Legacy resume command (kept for session recovery)
+// Resume command (session recovery with follow-up prompt)
 export interface ResumeCommand {
   type: 'resume'
   project: string
-  prompt: string
+  prompt: string | ContentBlock[]
   sdk_session_id: string
 }
 
