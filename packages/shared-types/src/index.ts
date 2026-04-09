@@ -6,7 +6,9 @@ export type GatewayCommand =
   | StreamInputCommand
   | PermissionResponseCommand
   | AbortCommand
+  | StopCommand
   | AnswerCommand
+  | RewindCommand
 
 export interface ExecuteCommand {
   type: 'execute'
@@ -23,10 +25,27 @@ export interface ExecuteCommand {
   user_id?: string
 }
 
+// Content block types matching Anthropic API format
+export interface TextContentBlock {
+  type: 'text'
+  text: string
+}
+
+export interface ImageContentBlock {
+  type: 'image'
+  source: {
+    type: 'base64'
+    media_type: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'
+    data: string
+  }
+}
+
+export type ContentBlock = TextContentBlock | ImageContentBlock
+
 export interface StreamInputCommand {
   type: 'stream-input'
   session_id: string
-  message: { role: 'user'; content: string }
+  message: { role: 'user'; content: string | ContentBlock[] }
 }
 
 export interface PermissionResponseCommand {
@@ -39,6 +58,17 @@ export interface PermissionResponseCommand {
 export interface AbortCommand {
   type: 'abort'
   session_id: string
+}
+
+export interface StopCommand {
+  type: 'stop'
+  session_id: string
+}
+
+export interface RewindCommand {
+  type: 'rewind'
+  session_id: string
+  message_id: string
 }
 
 export interface AnswerCommand {
@@ -69,6 +99,13 @@ export type GatewayEvent =
   | ResultEvent
   | ErrorEvent
   | KataStateEvent
+  | StoppedEvent
+
+export interface StoppedEvent {
+  type: 'stopped'
+  session_id: string
+  sdk_session_id: string | null
+}
 
 export interface SessionInitEvent {
   type: 'session.init'
@@ -243,6 +280,7 @@ export type SessionStatus =
   | 'completed'
   | 'failed'
   | 'aborted'
+  | 'stopped'
 
 export interface SessionState {
   id: string
@@ -316,7 +354,7 @@ export interface SessionContext {
   } | null
   /** Queue for streaming user messages into a running session */
   messageQueue: {
-    push: (msg: { role: 'user'; content: string }) => void
+    push: (msg: { role: 'user'; content: string | ContentBlock[] }) => void
     done: () => void
   } | null
 }

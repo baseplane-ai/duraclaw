@@ -252,6 +252,47 @@ const server = Bun.serve<WsData>({
           break
         }
 
+        case 'stop': {
+          const ctx = sessions.get(ws)
+          if (ctx) {
+            // Graceful stop: signal abort but send stopped event (session is resumable)
+            const sdkSessionId = ctx.sessionId
+            ctx.abortController.abort()
+            ws.send(
+              JSON.stringify({
+                type: 'stopped',
+                session_id: ctx.sessionId,
+                sdk_session_id: sdkSessionId,
+              }),
+            )
+            sessions.delete(ws)
+          }
+          break
+        }
+
+        case 'rewind': {
+          const ctx = sessions.get(ws)
+          if (ctx) {
+            ws.send(
+              JSON.stringify({
+                type: 'error',
+                session_id: ctx.sessionId,
+                error:
+                  'Rewind not yet implemented by SDK — use stop + re-execute with trimmed history',
+              }),
+            )
+          } else {
+            ws.send(
+              JSON.stringify({
+                type: 'error',
+                session_id: null,
+                error: 'No active session to rewind',
+              }),
+            )
+          }
+          break
+        }
+
         case 'answer': {
           const ctx = sessions.get(ws)
           if (ctx?.pendingAnswer) {

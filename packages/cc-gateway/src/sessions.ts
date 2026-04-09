@@ -1,13 +1,14 @@
 import type { ServerWebSocket } from 'bun'
 import { buildCleanEnv } from './env.js'
+import { resolveProject } from './projects.js'
 import type {
+  ContentBlock,
   ExecuteCommand,
   GatewayEvent,
   ResumeCommand,
   SessionContext,
   WsData,
 } from './types.js'
-import { resolveProject } from './projects.js'
 
 /** Send a GatewayEvent to the WebSocket client. */
 function send(ws: ServerWebSocket<WsData>, event: GatewayEvent): void {
@@ -21,7 +22,7 @@ function send(ws: ServerWebSocket<WsData>, event: GatewayEvent): void {
 /** Shape expected by the Claude Agent SDK for streaming user messages. */
 interface SDKUserMsg {
   type: 'user'
-  message: { role: 'user'; content: string }
+  message: { role: 'user'; content: string | ContentBlock[] }
   parent_tool_use_id: string | null
 }
 
@@ -30,7 +31,7 @@ interface SDKUserMsg {
  * The queue yields messages as they are pushed, and stops when done() is called.
  */
 function createMessageQueue() {
-  const pending: Array<{ role: 'user'; content: string }> = []
+  const pending: Array<{ role: 'user'; content: string | ContentBlock[] }> = []
   let resolve: (() => void) | null = null
   let finished = false
 
@@ -40,7 +41,7 @@ function createMessageQueue() {
         async next() {
           while (true) {
             if (pending.length > 0) {
-              const msg = pending.shift()!
+              const msg = pending.shift() as { role: 'user'; content: string | ContentBlock[] }
               const sdkMsg: SDKUserMsg = {
                 type: 'user',
                 message: { role: 'user', content: msg.content },
@@ -63,7 +64,7 @@ function createMessageQueue() {
 
   return {
     iterable,
-    push(msg: { role: 'user'; content: string }) {
+    push(msg: { role: 'user'; content: string | ContentBlock[] }) {
       pending.push(msg)
       resolve?.()
     },
@@ -292,9 +293,7 @@ export async function executeSession(
               id: block.id ?? '',
               tool_name: block.name,
               input_delta:
-                typeof block.input === 'string'
-                  ? block.input
-                  : JSON.stringify(block.input ?? ''),
+                typeof block.input === 'string' ? block.input : JSON.stringify(block.input ?? ''),
             }
           }
           return { type: block.type, id: block.id ?? '' }

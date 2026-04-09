@@ -470,6 +470,24 @@ export class SessionDO extends Agent<Env, SessionState> {
     console.log(`[SessionDO:${this.ctx.id}] abort`)
   }
 
+  async stop() {
+    const activeStates = ['running', 'waiting_input', 'waiting_permission']
+    if (!activeStates.includes(this.state.status)) {
+      throw new Error('Session is not in a stoppable state')
+    }
+
+    if (this.vpsWs) {
+      sendCommand(this.vpsWs, { type: 'stop', session_id: this.state.id })
+      // State update happens when we receive the 'stopped' event back from gateway
+    } else {
+      // No gateway connection — transition directly
+      this.updateState({ status: 'stopped', pending_question: null, pending_permission: null })
+      this.broadcastToClients({ type: 'finish', finishReason: 'stop' })
+      this.syncStatusToRegistry()
+    }
+    console.log(`[SessionDO:${this.ctx.id}] stop`)
+  }
+
   async getSessionState(): Promise<SessionState> {
     return this.state
   }
@@ -592,6 +610,19 @@ export class SessionDO extends Agent<Env, SessionState> {
         this.broadcastToClients({ type: 'turn-complete' })
         this.syncStatusToRegistry()
         this.syncResultToRegistry()
+        break
+
+      case 'stopped':
+        this.updateState({
+          status: 'stopped',
+          pending_question: null,
+          pending_permission: null,
+        })
+        this.vpsWs?.close()
+        this.vpsWs = null
+        this.broadcastToClients({ type: 'finish', finishReason: 'stop' })
+        this.broadcastToClients({ type: 'turn-complete' })
+        this.syncStatusToRegistry()
         break
 
       case 'error':
