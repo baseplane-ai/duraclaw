@@ -117,6 +117,21 @@ const server = Bun.serve<WsData>({
       return json(200, { sessions })
     }
 
+    // GET /projects/:name/sessions/latest
+    const latestSessionMatch = path.match(/^\/projects\/([^/]+)\/sessions\/latest$/)
+    if (req.method === 'GET' && latestSessionMatch) {
+      const [, name] = latestSessionMatch
+      const projectPath = await resolveProject(name)
+      if (!projectPath) {
+        return json(404, { error: `Project "${name}" not found` })
+      }
+      const sessions = await listSdkSessions(projectPath, 1)
+      if (sessions.length === 0) {
+        return json(404, { error: 'No sessions found' })
+      }
+      return json(200, sessions[0])
+    }
+
     // WebSocket upgrade
     if (req.headers.get('upgrade')?.toLowerCase() === 'websocket') {
       const project = url.searchParams.get('project') ?? null
