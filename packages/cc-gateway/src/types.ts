@@ -19,6 +19,7 @@ export type {
   ResultEvent,
   ResumeCommand,
   RewindCommand,
+  SdkSessionInfo,
   SessionContext,
   SessionInitEvent,
   StopCommand,

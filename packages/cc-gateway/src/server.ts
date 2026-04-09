@@ -8,6 +8,7 @@ import { findLatestKataState } from './kata.js'
 import { spec as openapiSpec } from './openapi.js'
 import { discoverProjects, resolveProject } from './projects.js'
 import { executeSession } from './sessions.js'
+import { listSdkSessions } from './sessions-list.js'
 import type { GatewayCommand, SessionContext, WsData } from './types.js'
 
 const PORT = Number(process.env.CC_GATEWAY_PORT ?? 9877)
@@ -101,6 +102,19 @@ const server = Bun.serve<WsData>({
       }
       const kataState = await findLatestKataState(projectPath)
       return json(200, { kata_state: kataState })
+    }
+
+    // GET /projects/:name/sessions
+    const sessionsMatch = path.match(/^\/projects\/([^/]+)\/sessions$/)
+    if (req.method === 'GET' && sessionsMatch) {
+      const [, name] = sessionsMatch
+      const projectPath = await resolveProject(name)
+      if (!projectPath) {
+        return json(404, { error: `Project "${name}" not found` })
+      }
+      const limit = Number(url.searchParams.get('limit') ?? 20)
+      const sessions = await listSdkSessions(projectPath, limit)
+      return json(200, { sessions })
     }
 
     // WebSocket upgrade

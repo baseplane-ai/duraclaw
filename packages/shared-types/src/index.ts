@@ -230,6 +230,18 @@ export interface ProjectInfo {
   active_session: string | null
 }
 
+// ── SDK Session Info (on-disk session metadata) ─────────────────────
+
+export interface SdkSessionInfo {
+  session_id: string
+  user: string
+  branch: string
+  project_dir: string
+  workflow_id: string
+  started_at: string
+  last_activity: string
+}
+
 // ── File API ─────────────────────────────────────────────────────────
 
 export interface FileEntry {
