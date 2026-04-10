@@ -1,7 +1,9 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useState } from 'react'
+import { Button } from '~/components/ui/button'
+import { Card, CardContent, CardHeader, CardTitle } from '~/components/ui/card'
+import { Input } from '~/components/ui/input'
 import { authClient } from '~/lib/auth-client'
-import { Button, Card, CardContent, CardHeader, CardTitle, Input } from '~/lib/components/ui'
 
 export const Route = createFileRoute('/login')({
   component: LoginPage,

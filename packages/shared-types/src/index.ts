@@ -402,37 +402,62 @@ export type SessionStatus =
   | 'running'
   | 'waiting_input'
   | 'waiting_permission'
+  | 'waiting_gate'
   | 'completed'
   | 'failed'
   | 'aborted'
   | 'stopped'
 
 export interface SessionState {
-  id: string
-  userId: string | null
+  status: SessionStatus
+  session_id: string | null
   project: string
   project_path: string
-  status: SessionStatus
   model: string | null
   prompt: string
+  userId: string | null
+  started_at: string | null
+  completed_at: string | null
+  num_turns: number
+  total_cost_usd: number | null
+  duration_ms: number | null
+  gate: {
+    id: string
+    type: 'permission_request' | 'ask_user'
+    detail: unknown
+  } | null
   created_at: string
   updated_at: string
-  duration_ms: number | null
-  total_cost_usd: number | null
   result: string | null
   error: string | null
-  num_turns: number | null
-  sdk_session_id: string | null
   summary: string | null
-  pending_question: {
+  sdk_session_id: string | null
+  /** @deprecated Use gate instead */
+  pending_question?: {
     tool_call_id: string
     questions: unknown[]
   } | null
-  pending_permission: {
+  /** @deprecated Use gate instead */
+  pending_permission?: {
     tool_call_id: string
     tool_name: string
     input: Record<string, unknown>
   } | null
+}
+
+export interface SpawnConfig {
+  project: string
+  prompt: string
+  model?: string
+  system_prompt?: string
+  allowed_tools?: string[]
+  max_turns?: number
+  max_budget_usd?: number
+}
+
+export interface GateResponse {
+  approved?: boolean
+  answer?: string
 }
 
 export interface SessionSummary {

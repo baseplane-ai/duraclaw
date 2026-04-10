@@ -1,0 +1,47 @@
+{
+  "name": "@duraclaw/ai-elements",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "dependencies": {
+    "ai": "^6.0.142",
+    "streamdown": "*",
+    "shiki": "*",
+    "lucide-react": "*",
+    "@base-ui/react": "*",
+    "class-variance-authority": "*",
+    "cmdk": "1.1.1",
+    "embla-carousel-react": "*",
+    "use-stick-to-bottom": "*",
+    "motion": "*",
+    "nanoid": "*",
+    "clsx": "*",
+    "tailwind-merge": "*",
+    "tokenlens": "*",
+    "@xyflow/react": "*"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "~5.8.3",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "vitest": "^4.1.2"
+  }
+}

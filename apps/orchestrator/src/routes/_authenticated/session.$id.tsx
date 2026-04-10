@@ -1,7 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { ChatView } from '~/lib/components/chat-view'
 
-export const Route = createFileRoute('/session/$id')({
+export const Route = createFileRoute('/_authenticated/session/$id')({
   component: SessionPage,
 })
 

@@ -1,15 +1,18 @@
 // Re-export shared types
 export type {
+  BrowserCommand,
+  ContentBlock,
+  GateResponse,
+  GatewayCommand,
+  GatewayEvent,
+  ProjectInfo,
+  ResumeCommand,
   SessionState,
   SessionStatus,
   SessionSummary,
-  GatewayCommand,
-  GatewayEvent,
-  ResumeCommand,
-  UIStreamChunk,
-  BrowserCommand,
+  SpawnConfig,
   StoredMessage,
-  ProjectInfo,
+  UIStreamChunk,
 } from '@duraclaw/shared-types'
 
 // ── CF-specific types ──────────────────────────────────────────────

@@ -59,13 +59,14 @@ describe('SessionHeader', () => {
   it('renders model, turns, duration, and cost', () => {
     const session: SessionState = {
       created_at: '2026-04-03T00:00:00.000Z',
+      completed_at: null,
+      started_at: '2026-04-03T00:00:00.000Z',
       duration_ms: 65000,
       error: null,
-      id: 'session-1',
+      session_id: 'session-1',
       model: 'claude-sonnet-4-6',
       num_turns: 3,
-      pending_permission: null,
-      pending_question: null,
+      gate: null,
       project: 'baseplane',
       project_path: '/data/projects/baseplane',
       prompt: 'test',

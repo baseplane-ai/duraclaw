@@ -31,4 +31,20 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 3,
+    description: 'Add events and kv tables for raw event persistence and kata state',
+    up: (sql) => {
+      sql.exec(`CREATE TABLE IF NOT EXISTS events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type TEXT NOT NULL,
+        data TEXT,
+        ts INTEGER
+      )`)
+      sql.exec(`CREATE TABLE IF NOT EXISTS kv (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      )`)
+    },
+  },
 ]

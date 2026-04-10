@@ -1,50 +1,37 @@
-import { Agent, type Connection, type ConnectionContext } from 'agents'
-import type { UIMessageChunk } from 'ai'
+import { Agent, type Connection, type ConnectionContext, callable } from 'agents'
 import { runMigrations } from '~/lib/do-migrations'
 import type {
-  BrowserCommand,
+  ContentBlock,
+  Env,
+  GateResponse,
   GatewayCommand,
   GatewayEvent,
-  ResumeCommand,
   SessionState,
-  StoredMessage,
+  SpawnConfig,
 } from '~/lib/types'
+import { connectToExecutor, parseEvent, sendCommand } from '~/lib/vps-client'
 import { SESSION_DO_MIGRATIONS } from './session-do-migrations'
 
-/**
- * Extended chunk type: AI SDK UIMessageChunk plus custom types
- * for history replay and file changes that the SDK doesn't cover.
- */
-type SessionChunk =
-  | UIMessageChunk
-  | { type: 'history'; messages: StoredMessage[] }
-  | { type: 'turn-complete' }
-  | { type: 'file-changed'; path: string; tool: string; timestamp: string }
-
-type ConnTag = { type: 'chat' } | { type: 'agent' }
-
-import type { Env } from '~/lib/types'
-import { connectToExecutor, parseEvent, sendCommand } from '~/lib/vps-client'
-
 const DEFAULT_STATE: SessionState = {
-  id: '',
-  userId: null,
+  status: 'idle',
+  session_id: null,
   project: '',
   project_path: '',
-  status: 'idle',
   model: null,
   prompt: '',
+  userId: null,
+  started_at: null,
+  completed_at: null,
+  num_turns: 0,
+  total_cost_usd: null,
+  duration_ms: null,
+  gate: null,
   created_at: '',
   updated_at: '',
-  duration_ms: null,
-  total_cost_usd: null,
   result: null,
   error: null,
-  num_turns: null,
-  sdk_session_id: null,
-  pending_question: null,
-  pending_permission: null,
   summary: null,
+  sdk_session_id: null,
 }
 
 /**
@@ -53,15 +40,59 @@ const DEFAULT_STATE: SessionState = {
  * Implements bidirectional relay:
  *   Browser WS <-> SessionDO <-> Gateway WS
  *
- * Translates GatewayEvent to AI SDK UIMessageChunk for browser clients.
+ * Broadcasts raw GatewayEvents to connected clients.
+ * Uses @callable RPC methods for spawn, resolveGate, sendMessage, etc.
  */
 export class SessionDO extends Agent<Env, SessionState> {
   initialState = DEFAULT_STATE
   private vpsWs: WebSocket | null = null
 
+  // ── Lifecycle ──────────────────────────────────────────────────
+
+  async onStart() {
+    runMigrations(this.ctx.storage.sql, SESSION_DO_MIGRATIONS)
+  }
+
+  onConnect(connection: Connection, ctx: ConnectionContext) {
+    const requestUserId = ctx.request.headers.get('x-user-id')
+    if (!requestUserId || (this.state.userId && requestUserId !== this.state.userId)) {
+      void connection.close()
+      return
+    }
+
+    // Replay recent events from DO SQLite for reconnecting clients
+    const events = this.sql<{ data: string }>`SELECT data FROM events ORDER BY id DESC LIMIT 50`
+    for (const row of [...events].reverse()) {
+      try {
+        connection.send(JSON.stringify({ type: 'gateway_event', event: JSON.parse(row.data) }))
+      } catch {
+        // Skip malformed events
+      }
+    }
+
+    // Re-emit gate if session is waiting
+    if (this.state.gate && this.state.status === 'waiting_gate') {
+      connection.send(
+        JSON.stringify({
+          type: 'gateway_event',
+          event: {
+            type: this.state.gate.type,
+            tool_call_id: this.state.gate.id,
+            ...(this.state.gate.detail as Record<string, unknown>),
+          },
+        }),
+      )
+    }
+  }
+
+  onMessage(_connection: Connection, _data: string | ArrayBuffer) {
+    // All client communication goes through @callable RPC methods.
+    // Raw WebSocket messages are not processed.
+  }
+
   // ── Gateway Connection ─────────────────────────────────────────
 
-  private connectAndStream(cmd: GatewayCommand | ResumeCommand) {
+  private connectAndStream(cmd: GatewayCommand) {
     const gatewayUrl = this.env.CC_GATEWAY_URL
     if (!gatewayUrl) {
       console.error(`[SessionDO:${this.ctx.id}] CC_GATEWAY_URL not configured`)
@@ -88,11 +119,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     ws.addEventListener('error', (event: Event) => {
       console.error(`[SessionDO:${this.ctx.id}] Gateway WS error:`, event)
       this.vpsWs = null
-      if (
-        this.state.status === 'running' ||
-        this.state.status === 'waiting_input' ||
-        this.state.status === 'waiting_permission'
-      ) {
+      if (this.state.status === 'running' || this.state.status === 'waiting_gate') {
         this.updateState({ status: 'failed', error: 'Gateway connection error' })
         this.syncStatusToRegistry()
       }
@@ -115,18 +142,26 @@ export class SessionDO extends Agent<Env, SessionState> {
     })
   }
 
-  private broadcastToClients(chunk: SessionChunk) {
-    const data = JSON.stringify(chunk)
-    // Broadcast only to chat connections (not agent/PartySocket connections)
+  private broadcastToClients(data: string) {
     for (const conn of this.getConnections()) {
-      const tag = conn.state as ConnTag | undefined
-      if (tag?.type !== 'agent') {
-        try {
-          conn.send(data)
-        } catch {
-          // Connection already closed
-        }
+      try {
+        conn.send(data)
+      } catch {
+        // Connection already closed
       }
+    }
+  }
+
+  private broadcastGatewayEvent(event: GatewayEvent) {
+    this.broadcastToClients(JSON.stringify({ type: 'gateway_event', event }))
+  }
+
+  private persistEvent(event: GatewayEvent) {
+    try {
+      this
+        .sql`INSERT INTO events (type, data, ts) VALUES (${event.type}, ${JSON.stringify(event)}, ${Date.now()})`
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Failed to persist event:`, err)
     }
   }
 
@@ -134,7 +169,10 @@ export class SessionDO extends Agent<Env, SessionState> {
     try {
       const registryId = this.env.SESSION_REGISTRY.idFromName('default')
       const registry = this.env.SESSION_REGISTRY.get(registryId) as any
-      await registry.updateSessionStatus(this.state.id, this.state.status)
+      await registry.updateSessionStatus(
+        this.state.session_id ?? this.ctx.id.toString(),
+        this.state.status,
+      )
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to sync status to registry:`, err)
     }
@@ -144,7 +182,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     try {
       const registryId = this.env.SESSION_REGISTRY.idFromName('default')
       const registry = this.env.SESSION_REGISTRY.get(registryId) as any
-      await registry.updateSessionResult(this.state.id, {
+      await registry.updateSessionResult(this.state.session_id ?? this.ctx.id.toString(), {
         summary: this.state.summary,
         duration_ms: this.state.duration_ms,
         total_cost_usd: this.state.total_cost_usd,
@@ -155,288 +193,38 @@ export class SessionDO extends Agent<Env, SessionState> {
     }
   }
 
-  // ── HTTP Request Handler (for non-WS calls) ────────────────────
-
-  async onRequest(request: Request): Promise<Response> {
-    const url = new URL(request.url)
-    const requestUserId = request.headers.get('x-user-id')
-
-    if (url.pathname !== '/create') {
-      if (!requestUserId) {
-        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-          status: 401,
-          headers: { 'Content-Type': 'application/json' },
-        })
-      }
-
-      if (this.state.userId && requestUserId !== this.state.userId) {
-        return new Response(JSON.stringify({ error: 'Forbidden' }), {
-          status: 403,
-          headers: { 'Content-Type': 'application/json' },
-        })
-      }
-    }
-
-    if (url.pathname === '/create' && request.method === 'POST') {
-      const config = (await request.json()) as Parameters<SessionDO['create']>[0]
-      await this.create(config)
-      return new Response(JSON.stringify({ ok: true }), {
-        headers: { 'Content-Type': 'application/json' },
-      })
-    }
-
-    if (url.pathname === '/state' && request.method === 'GET') {
-      return new Response(JSON.stringify(this.state), {
-        headers: { 'Content-Type': 'application/json' },
-      })
-    }
-
-    if (url.pathname === '/messages' && request.method === 'GET') {
-      const messages = this.sql<StoredMessage>`SELECT * FROM messages ORDER BY id ASC`
-      return new Response(JSON.stringify(messages), {
-        headers: { 'Content-Type': 'application/json' },
-      })
-    }
-
-    if (url.pathname === '/abort' && request.method === 'POST') {
-      try {
-        await this.abort()
-      } catch {
-        // Force abort even if state check fails (e.g. zombie sessions)
-        this.updateState({ status: 'aborted', pending_question: null, pending_permission: null })
-        this.vpsWs?.close()
-        this.vpsWs = null
-        this.syncStatusToRegistry()
-      }
-      return new Response(JSON.stringify({ ok: true }), {
-        headers: { 'Content-Type': 'application/json' },
-      })
-    }
-
-    if (url.pathname === '/tool-approval' && request.method === 'POST') {
-      const payload = (await request.json()) as { approved?: boolean; toolCallId?: string }
-      if (typeof payload.toolCallId !== 'string' || typeof payload.approved !== 'boolean') {
-        return new Response(JSON.stringify({ error: 'Invalid tool approval payload' }), {
-          status: 400,
-          headers: { 'Content-Type': 'application/json' },
-        })
-      }
-
-      await this.submitToolApproval({
-        approved: payload.approved,
-        toolCallId: payload.toolCallId,
-      })
-      return new Response(JSON.stringify({ ok: true }), {
-        headers: { 'Content-Type': 'application/json' },
-      })
-    }
-
-    if (url.pathname === '/answers' && request.method === 'POST') {
-      const payload = (await request.json()) as {
-        answers?: Record<string, string>
-        toolCallId?: string
-      }
-      const toolCallId =
-        typeof payload.toolCallId === 'string'
-          ? payload.toolCallId
-          : this.state.pending_question?.tool_call_id
-      if (!toolCallId || !payload.answers || typeof payload.answers !== 'object') {
-        return new Response(JSON.stringify({ error: 'Invalid answers payload' }), {
-          status: 400,
-          headers: { 'Content-Type': 'application/json' },
-        })
-      }
-
-      await this.submitAnswers({
-        answers: payload.answers,
-        toolCallId,
-      })
-      return new Response(JSON.stringify({ ok: true }), {
-        headers: { 'Content-Type': 'application/json' },
-      })
-    }
-
-    return new Response('Not found', { status: 404 })
-  }
-
-  // ── Lifecycle ──────────────────────────────────────────────────
-
-  async onStart() {
-    runMigrations(this.ctx.storage.sql, SESSION_DO_MIGRATIONS)
-
-    // If session was running when DO was evicted, schedule reconnect
-    if (
-      this.state.status === 'running' ||
-      this.state.status === 'waiting_input' ||
-      this.state.status === 'waiting_permission'
-    ) {
-      await this.schedule(5, 'reconnectVps', undefined, { idempotent: true })
+  private sendToGateway(cmd: GatewayCommand) {
+    if (this.vpsWs) {
+      sendCommand(this.vpsWs, cmd)
+    } else {
+      console.error(`[SessionDO:${this.ctx.id}] Cannot send to gateway: no active connection`)
     }
   }
 
-  onConnect(connection: Connection, ctx: ConnectionContext) {
-    const requestUserId = ctx.request.headers.get('x-user-id')
-    if (!requestUserId || (this.state.userId && requestUserId !== this.state.userId)) {
-      void connection.close()
-      return
+  // ── @callable RPC Methods ─────────────────────────────────────
+
+  @callable()
+  async spawn(config: SpawnConfig): Promise<{ ok: boolean; session_id?: string; error?: string }> {
+    if (this.state.status === 'running' || this.state.status === 'waiting_gate') {
+      return { ok: false, error: 'Session already active' }
     }
 
-    // Tag connection type based on URL path
-    const url = new URL(ctx.request.url)
-    const isAgent = url.pathname.endsWith('/agent')
-    connection.setState({ type: isAgent ? 'agent' : 'chat' } satisfies ConnTag)
-
-    // Agent (PartySocket) connections only need state sync — handled by Agent base class
-    if (isAgent) return
-
-    // Chat connections get full message history replay
-    const messages = this.sql<StoredMessage>`SELECT * FROM messages ORDER BY id ASC`
-    connection.send(JSON.stringify({ type: 'history', messages } satisfies SessionChunk))
-
-    // Re-emit pending question if any
-    if (this.state.pending_question && this.state.status === 'waiting_input') {
-      connection.send(
-        JSON.stringify({
-          type: 'tool-input-available',
-          toolCallId: this.state.pending_question.tool_call_id,
-          toolName: 'AskUserQuestion',
-          input: { questions: this.state.pending_question.questions },
-        } satisfies SessionChunk),
-      )
-    }
-
-    if (this.state.pending_permission && this.state.status === 'waiting_permission') {
-      const perm = this.state.pending_permission
-      connection.send(
-        JSON.stringify({
-          type: 'tool-approval-request',
-          approvalId: perm.tool_call_id,
-          toolCallId: perm.tool_call_id,
-        } satisfies SessionChunk),
-      )
-    }
-  }
-
-  onMessage(connection: Connection, data: string | ArrayBuffer) {
-    // Agent (PartySocket) connections use RPC — skip raw message handling
-    const tag = connection.state as ConnTag | undefined
-    if (tag?.type === 'agent') return
-
-    try {
-      const raw = typeof data === 'string' ? data : new TextDecoder().decode(data)
-      const cmd = JSON.parse(raw) as BrowserCommand
-
-      switch (cmd.type) {
-        case 'user-message': {
-          // Store user message
-          this
-            .sql`INSERT INTO messages (role, type, data) VALUES ('user', 'user-message', ${JSON.stringify({ content: cmd.content })})`
-
-          if (this.state.status === 'idle' && this.state.sdk_session_id) {
-            // Resume session with follow-up message
-            this.updateState({ status: 'running' })
-            this.broadcastToClients({ type: 'status', status: 'running' } as any)
-            this.connectAndStream({
-              type: 'resume',
-              project: this.state.project,
-              prompt: cmd.content,
-              sdk_session_id: this.state.sdk_session_id,
-            })
-          } else if (this.state.status === 'running' && this.vpsWs) {
-            // Relay to running gateway session as stream-input
-            sendCommand(this.vpsWs, {
-              type: 'stream-input',
-              session_id: this.state.id,
-              message: { role: 'user', content: cmd.content },
-            })
-          }
-          break
-        }
-
-        case 'tool-approval': {
-          if (cmd.answers) {
-            // AskUserQuestion answer
-            if (this.vpsWs && this.state.status === 'waiting_input') {
-              sendCommand(this.vpsWs, {
-                type: 'answer',
-                session_id: this.state.id,
-                tool_call_id: cmd.toolCallId,
-                answers: cmd.answers,
-              })
-              this.updateState({ status: 'running', pending_question: null })
-            }
-          } else {
-            // Permission response
-            if (this.vpsWs && this.state.status === 'waiting_permission') {
-              sendCommand(this.vpsWs, {
-                type: 'permission-response',
-                session_id: this.state.id,
-                tool_call_id: cmd.toolCallId,
-                allowed: cmd.approved,
-              })
-              this.updateState({ status: 'running', pending_permission: null })
-            }
-          }
-          break
-        }
-      }
-    } catch (err) {
-      console.error(`[SessionDO:${this.ctx.id}] Failed to handle browser message:`, err)
-    }
-  }
-
-  // ── Scheduled Callbacks ────────────────────────────────────────
-
-  async reconnectVps() {
-    console.log(`[SessionDO:${this.ctx.id}] reconnectVps`)
-    const activeStates = ['running', 'waiting_input', 'waiting_permission']
-    if (!activeStates.includes(this.state.status)) return
-
-    if (!this.state.sdk_session_id) {
-      this.updateState({ status: 'failed', error: 'Cannot reconnect: no sdk_session_id' })
-      this.syncStatusToRegistry()
-      return
-    }
-
-    this.connectAndStream({
-      type: 'resume',
-      project: this.state.project,
-      prompt: this.state.prompt,
-      sdk_session_id: this.state.sdk_session_id,
-    })
-  }
-
-  // ── RPC Methods ────────────────────────────────────────────────
-
-  async create(config: {
-    userId: string
-    project: string
-    project_path: string
-    prompt: string
-    model?: string
-    system_prompt?: string
-    allowed_tools?: string[]
-    max_turns?: number
-    max_budget_usd?: number
-  }) {
     const now = new Date().toISOString()
     const id = this.ctx.id.toString()
+
     this.setState({
       ...DEFAULT_STATE,
-      id,
-      userId: config.userId,
-      project: config.project,
-      project_path: config.project_path,
       status: 'running',
+      session_id: id,
+      userId: this.state.userId,
+      project: config.project,
+      project_path: config.project,
       model: config.model ?? null,
-      prompt: config.prompt,
-      created_at: now,
+      prompt: typeof config.prompt === 'string' ? config.prompt : JSON.stringify(config.prompt),
+      started_at: now,
+      created_at: this.state.created_at || now,
       updated_at: now,
     })
-
-    // Store initial user message
-    this
-      .sql`INSERT INTO messages (role, type, data) VALUES ('user', 'user-message', ${JSON.stringify({ content: config.prompt })})`
 
     this.connectAndStream({
       type: 'execute',
@@ -448,166 +236,238 @@ export class SessionDO extends Agent<Env, SessionState> {
       max_turns: config.max_turns,
       max_budget_usd: config.max_budget_usd,
     })
-    console.log(`[SessionDO:${id}] create: ${config.project} "${config.prompt}"`)
+
+    console.log(
+      `[SessionDO:${id}] spawn: ${config.project} "${typeof config.prompt === 'string' ? config.prompt.slice(0, 80) : '[content blocks]'}"`,
+    )
+    return { ok: true, session_id: id }
   }
 
-  async abort() {
-    const activeStates = ['running', 'waiting_input', 'waiting_permission']
-    if (!activeStates.includes(this.state.status)) {
-      throw new Error('Session is not in an abortable state')
+  @callable()
+  async stop(reason?: string): Promise<{ ok: boolean; error?: string }> {
+    if (this.state.status !== 'running' && this.state.status !== 'waiting_gate') {
+      return { ok: false, error: `Cannot stop: status is '${this.state.status}'` }
     }
 
-    this.updateState({ status: 'aborted', pending_question: null, pending_permission: null })
+    if (this.vpsWs) {
+      sendCommand(this.vpsWs, { type: 'stop', session_id: this.state.session_id ?? '' })
+    } else {
+      this.updateState({ status: 'stopped', gate: null })
+      this.syncStatusToRegistry()
+    }
+
+    console.log(`[SessionDO:${this.ctx.id}] stop: ${reason ?? 'user request'}`)
+    return { ok: true }
+  }
+
+  @callable()
+  async abort(reason?: string): Promise<{ ok: boolean; error?: string }> {
+    if (this.state.status !== 'running' && this.state.status !== 'waiting_gate') {
+      return { ok: false, error: `Cannot abort: status is '${this.state.status}'` }
+    }
+
+    this.updateState({ status: 'aborted', gate: null, error: reason ?? 'Aborted by user' })
 
     if (this.vpsWs) {
-      sendCommand(this.vpsWs, { type: 'abort', session_id: this.state.id })
+      sendCommand(this.vpsWs, { type: 'abort', session_id: this.state.session_id ?? '' })
       this.vpsWs.close()
       this.vpsWs = null
     }
 
     this.syncStatusToRegistry()
-    this.broadcastToClients({ type: 'finish' })
-    console.log(`[SessionDO:${this.ctx.id}] abort`)
+    console.log(`[SessionDO:${this.ctx.id}] abort: ${reason ?? 'user request'}`)
+    return { ok: true }
   }
 
-  async stop() {
-    const activeStates = ['running', 'waiting_input', 'waiting_permission']
-    if (!activeStates.includes(this.state.status)) {
-      throw new Error('Session is not in a stoppable state')
+  @callable()
+  async resolveGate(
+    gateId: string,
+    response: GateResponse,
+  ): Promise<{ ok: boolean; error?: string }> {
+    if (this.state.status !== 'waiting_gate') {
+      return {
+        ok: false,
+        error: `Cannot resolve gate: status is '${this.state.status}', expected 'waiting_gate'`,
+      }
     }
 
-    if (this.vpsWs) {
-      sendCommand(this.vpsWs, { type: 'stop', session_id: this.state.id })
-      // State update happens when we receive the 'stopped' event back from gateway
+    if (!this.state.gate || this.state.gate.id !== gateId) {
+      return {
+        ok: false,
+        error: `Stale gate ID: expected '${this.state.gate?.id}', got '${gateId}'`,
+      }
+    }
+
+    const gate = this.state.gate
+
+    if (gate.type === 'permission_request' && response.approved !== undefined) {
+      this.sendToGateway({
+        type: 'permission-response',
+        session_id: this.state.session_id ?? '',
+        tool_call_id: gateId,
+        allowed: response.approved,
+      })
+    } else if (gate.type === 'ask_user' && response.answer !== undefined) {
+      this.sendToGateway({
+        type: 'answer',
+        session_id: this.state.session_id ?? '',
+        tool_call_id: gateId,
+        answers: { answer: response.answer },
+      })
     } else {
-      // No gateway connection — transition directly
-      this.updateState({ status: 'stopped', pending_question: null, pending_permission: null })
-      this.broadcastToClients({ type: 'finish', finishReason: 'stop' })
-      this.syncStatusToRegistry()
+      return { ok: false, error: 'Invalid response for gate type' }
     }
-    console.log(`[SessionDO:${this.ctx.id}] stop`)
+
+    this.updateState({ status: 'running', gate: null })
+    return { ok: true }
   }
 
-  async getSessionState(): Promise<SessionState> {
-    return this.state
+  @callable()
+  async sendMessage(content: string | ContentBlock[]): Promise<{ ok: boolean; error?: string }> {
+    const { status } = this.state
+    const isActive = status === 'running' || status === 'waiting_gate'
+    const isResumable =
+      (status === 'idle' || status === 'completed' || status === 'stopped') &&
+      this.state.sdk_session_id
+
+    if (!isActive && !isResumable) {
+      return { ok: false, error: `Cannot send message: status is '${status}'` }
+    }
+
+    if (isActive && this.vpsWs) {
+      sendCommand(this.vpsWs, {
+        type: 'stream-input',
+        session_id: this.state.session_id ?? '',
+        message: { role: 'user', content },
+      })
+    } else if (isResumable) {
+      this.updateState({ status: 'running', gate: null, error: null })
+      this.connectAndStream({
+        type: 'resume',
+        project: this.state.project,
+        prompt: content,
+        sdk_session_id: this.state.sdk_session_id ?? '',
+      })
+    }
+
+    return { ok: true }
   }
 
-  async getMessages(): Promise<StoredMessage[]> {
-    return this.sql<StoredMessage>`SELECT * FROM messages ORDER BY id ASC`
+  @callable()
+  async rewind(messageId: string): Promise<{ ok: boolean; error?: string }> {
+    if (this.vpsWs) {
+      sendCommand(this.vpsWs, {
+        type: 'rewind',
+        session_id: this.state.session_id ?? '',
+        message_id: messageId,
+      })
+    }
+    return { ok: true }
   }
 
-  async cleanup() {
-    this.sql`DROP TABLE IF EXISTS messages`
-    await this.ctx.storage.deleteAll()
+  @callable()
+  async getMessages(opts?: { offset?: number; limit?: number }) {
+    const limit = opts?.limit ?? 200
+    const offset = opts?.offset ?? 0
+    const rows = this.sql<{
+      id: number
+      role: string
+      type: string
+      content: string
+      created_at: string
+    }>`SELECT id, role, type, content, created_at FROM messages ORDER BY id ASC LIMIT ${limit} OFFSET ${offset}`
+    return [...rows]
+  }
+
+  @callable()
+  async getStatus() {
+    const rows = this.sql<{
+      id: number
+      ts: string
+      type: string
+      data: string | null
+    }>`SELECT id, ts, type, data FROM events ORDER BY id DESC LIMIT 50`
+    return {
+      state: this.state,
+      recent_events: [...rows],
+    }
+  }
+
+  @callable()
+  async getKataStatus() {
+    const rows = this.sql<{ value: string }>`SELECT value FROM kv WHERE key = 'kata_state'`
+    const arr = [...rows]
+    if (arr.length === 0) return null
+    try {
+      return JSON.parse(arr[0].value)
+    } catch {
+      return null
+    }
   }
 
   // ── Gateway Event Handling ─────────────────────────────────────
 
   handleGatewayEvent(event: GatewayEvent) {
+    // Persist every event for audit/replay
+    this.persistEvent(event)
+
+    // Broadcast raw event to all connected clients
+    this.broadcastGatewayEvent(event)
+
+    // Update state based on event type
     switch (event.type) {
       case 'session.init':
         this.updateState({ sdk_session_id: event.sdk_session_id, model: event.model })
-        // Emit start chunk to frame the assistant turn
-        this.broadcastToClients({ type: 'start' })
         break
 
-      case 'partial_assistant': {
-        // Translate to AI SDK UIMessageChunk and broadcast
-        const chunks = gatewayEventToChunks(event)
-        for (const chunk of chunks) {
-          this.broadcastToClients(chunk)
-        }
+      case 'partial_assistant':
+        // No state change needed — event is broadcast to clients
         break
-      }
 
       case 'assistant':
-        // Store complete message (not partials)
-        this
-          .sql`INSERT INTO messages (role, type, data) VALUES ('assistant', 'assistant', ${JSON.stringify(event)})`
-        // Emit text-end for any open text parts
-        this.broadcastToClients({ type: 'text-end', id: event.uuid })
-        this.updateState({})
+        this.updateState({ num_turns: this.state.num_turns + 1 })
         break
 
       case 'tool_result':
-        this
-          .sql`INSERT INTO messages (role, type, data) VALUES ('tool', 'tool_result', ${JSON.stringify(event)})`
-        // Broadcast tool output (AI SDK format)
-        this.broadcastToClients({
-          type: 'tool-output-available',
-          toolCallId: event.uuid,
-          output: event.content,
-        })
-        this.updateState({})
+        // No state change needed
         break
 
       case 'ask_user':
         this.updateState({
-          status: 'waiting_input',
-          pending_question: {
-            tool_call_id: event.tool_call_id,
-            questions: event.questions,
+          status: 'waiting_gate',
+          gate: {
+            id: event.tool_call_id,
+            type: 'ask_user',
+            detail: { questions: event.questions },
           },
-        })
-        // Questions go through tool-input-available with AskUserQuestion name
-        this.broadcastToClients({
-          type: 'tool-input-available',
-          toolCallId: event.tool_call_id,
-          toolName: 'AskUserQuestion',
-          input: { questions: event.questions },
         })
         break
 
       case 'permission_request':
         this.updateState({
-          status: 'waiting_permission',
-          pending_permission: {
-            tool_call_id: event.tool_call_id,
-            tool_name: event.tool_name,
-            input: event.input,
+          status: 'waiting_gate',
+          gate: {
+            id: event.tool_call_id,
+            type: 'permission_request',
+            detail: { tool_name: event.tool_name, input: event.input },
           },
-        })
-        // Emit tool-input-available so the client sees the tool, then approval request
-        this.broadcastToClients({
-          type: 'tool-input-available',
-          toolCallId: event.tool_call_id,
-          toolName: event.tool_name,
-          input: event.input,
-        })
-        this.broadcastToClients({
-          type: 'tool-approval-request',
-          approvalId: event.tool_call_id,
-          toolCallId: event.tool_call_id,
-        })
-        break
-
-      case 'file_changed':
-        this.broadcastToClients({
-          type: 'file-changed',
-          path: event.path,
-          tool: event.tool,
-          timestamp: event.timestamp,
         })
         break
 
       case 'result':
         this.updateState({
-          status: event.is_error ? 'failed' : 'idle',
+          status: event.is_error ? 'failed' : 'completed',
+          completed_at: new Date().toISOString(),
           result: event.result,
           duration_ms: (this.state.duration_ms ?? 0) + (event.duration_ms ?? 0),
           total_cost_usd: (this.state.total_cost_usd ?? 0) + (event.total_cost_usd ?? 0),
-          num_turns: (this.state.num_turns ?? 0) + (event.num_turns ?? 0),
+          num_turns: this.state.num_turns + (event.num_turns ?? 0),
           error: event.is_error ? event.result : null,
           summary: event.sdk_summary ?? this.state.summary,
+          gate: null,
         })
         this.vpsWs?.close()
         this.vpsWs = null
-        // Emit AI SDK finish chunk + custom turn-complete
-        this.broadcastToClients({
-          type: 'finish',
-          finishReason: event.is_error ? 'error' : 'stop',
-        })
-        this.broadcastToClients({ type: 'turn-complete' })
         this.syncStatusToRegistry()
         this.syncResultToRegistry()
         break
@@ -615,80 +475,18 @@ export class SessionDO extends Agent<Env, SessionState> {
       case 'stopped':
         this.updateState({
           status: 'stopped',
-          pending_question: null,
-          pending_permission: null,
+          gate: null,
+          completed_at: new Date().toISOString(),
         })
         this.vpsWs?.close()
         this.vpsWs = null
-        this.broadcastToClients({ type: 'finish', finishReason: 'stop' })
-        this.broadcastToClients({ type: 'turn-complete' })
         this.syncStatusToRegistry()
         break
 
       case 'error':
         this.updateState({ status: 'failed', error: event.error })
-        this.broadcastToClients({ type: 'error', errorText: event.error })
-        this.broadcastToClients({ type: 'finish', finishReason: 'error' })
         this.syncStatusToRegistry()
         break
     }
   }
-
-  // ── RPC Methods for Agent State (called from useAgent client) ──
-
-  async submitToolApproval(args: { toolCallId: string; approved: boolean }) {
-    if (!this.vpsWs || this.state.status !== 'waiting_permission') return
-    sendCommand(this.vpsWs, {
-      type: 'permission-response',
-      session_id: this.state.id,
-      tool_call_id: args.toolCallId,
-      allowed: args.approved,
-    })
-    this.updateState({ status: 'running', pending_permission: null })
-    if (!args.approved) {
-      this.broadcastToClients({ type: 'tool-output-denied', toolCallId: args.toolCallId })
-    }
-  }
-
-  async submitAnswers(args: { toolCallId: string; answers: Record<string, string> }) {
-    if (!this.vpsWs || this.state.status !== 'waiting_input') return
-    sendCommand(this.vpsWs, {
-      type: 'answer',
-      session_id: this.state.id,
-      tool_call_id: args.toolCallId,
-      answers: args.answers,
-    })
-    this.updateState({ status: 'running', pending_question: null })
-  }
-}
-
-// ── Protocol Translation (GatewayEvent → AI SDK UIMessageChunk) ──────
-
-function gatewayEventToChunks(event: GatewayEvent): SessionChunk[] {
-  if (event.type !== 'partial_assistant') return []
-
-  const chunks: SessionChunk[] = []
-  for (const block of event.content) {
-    if (block.type === 'text') {
-      if (block.delta) {
-        chunks.push({ type: 'text-delta', id: block.id, delta: block.delta })
-      }
-    } else if (block.type === 'tool_use') {
-      if (block.tool_name) {
-        chunks.push({
-          type: 'tool-input-start',
-          toolCallId: block.id,
-          toolName: block.tool_name,
-        })
-      }
-      if (block.input_delta) {
-        chunks.push({
-          type: 'tool-input-delta',
-          toolCallId: block.id,
-          inputTextDelta: block.input_delta,
-        })
-      }
-    }
-  }
-  return chunks
 }

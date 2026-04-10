@@ -40,6 +40,36 @@
   },
   "overrides": [
     {
+      "includes": [
+        "apps/orchestrator/src/components/ui/**",
+        "apps/orchestrator/src/components/command-menu.tsx",
+        "apps/orchestrator/src/assets/**",
+        "apps/orchestrator/src/lib/cookies.ts",
+        "packages/ai-elements/src/**"
+      ],
+      "linter": {
+        "rules": {
+          "a11y": {
+            "noSvgWithoutTitle": "off",
+            "useAriaPropsForRole": "off",
+            "useFocusableInteractive": "off",
+            "useSemanticElements": "off",
+            "useAnchorContent": "off"
+          },
+          "complexity": {
+            "useOptionalChain": "off"
+          },
+          "suspicious": {
+            "noDocumentCookie": "off",
+            "noArrayIndexKey": "off"
+          },
+          "correctness": {
+            "useExhaustiveDependencies": "off"
+          }
+        }
+      }
+    },
+    {
       "includes": ["**/*.{ts,tsx}"],
       "linter": {
         "rules": {
