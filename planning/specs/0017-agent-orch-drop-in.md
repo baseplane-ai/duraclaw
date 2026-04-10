@@ -9,6 +9,27 @@ created: 2026-04-10
 updated: 2026-04-10
 phases:
   - id: p1
+    name: "App shell — shadcn-admin scaffold"
+    tasks:
+      - "Clone satnaing/shadcn-admin into apps/orchestrator/src/ as the new app shell"
+      - "Strip Clerk auth — replace with existing Better Auth integration"
+      - "Configure TanStack Router routes: / (dashboard), /session/$id (chat), /settings"
+      - "Wire sidebar navigation: Sessions, Dashboard, Settings"
+      - "Verify dark/light theme toggle works"
+      - "Verify command palette (Cmd+K) works"
+      - "Verify responsive mobile layout with hamburger menu"
+      - "Delete old layout components (__root.tsx shell, bottom-tabs, mobile-drawer)"
+    test_cases:
+      - id: "shell-renders"
+        description: "App shell renders with sidebar, theme toggle, and command palette"
+        type: "integration"
+      - id: "shell-responsive"
+        description: "Mobile layout collapses sidebar to hamburger menu"
+        type: "integration"
+      - id: "shell-auth"
+        description: "Unauthenticated users redirect to /login, authenticated users see dashboard"
+        type: "integration"
+  - id: p2
     name: "Extract ai-elements package"
     tasks:
       - "Create packages/ai-elements/ with package.json and tsconfig"
@@ -28,7 +49,7 @@ phases:
       - id: "ai-elements-render"
         description: "Key components (Conversation, Message, ToolCallList) render without crashing in isolation"
         type: "unit"
-  - id: p2
+  - id: p3
     name: "Migrate SessionDO to AIChatAgent + raw event relay"
     tasks:
       - "Add @cloudflare/ai-chat dependency to orchestrator"
@@ -53,8 +74,8 @@ phases:
       - id: "reconnect-resume"
         description: "Disconnected client reconnects and receives buffered events"
         type: "integration"
-  - id: p3
-    name: "Port agent-orch UI components"
+  - id: p4
+    name: "Port agent-orch UI components into shell"
     tasks:
       - "Delete existing chat-view.tsx, dashboard.tsx, project-sidebar.tsx, message-parts/"
       - "Copy GREEN components: GateResolver, ChatThread, KataStatePanel, SessionMetadataHeader, SessionListItem, StreamingText"
@@ -74,7 +95,7 @@ phases:
       - id: "spawn-form"
         description: "SpawnAgentForm lists projects from gateway and creates a session"
         type: "integration"
-  - id: p4
+  - id: p5
     name: "Rewrite data hooks for duraclaw"
     tasks:
       - "Implement useAgentOrchSessions hook backed by ProjectRegistry DO"
@@ -106,6 +127,39 @@ Duraclaw's orchestrator UI has been frozen since Phase 0 while the cc-gateway ev
 The work breaks into four phases: extract the ai-elements component library as a shared package, migrate SessionDO from base Agent to AIChatAgent with raw GatewayEvent relay, port the UI components, and rewrite the data hooks for duraclaw's session management.
 
 ## Feature Behaviors
+
+### B0: shadcn-admin App Shell
+
+**Core:**
+- **ID:** app-shell
+- **Trigger:** User navigates to any route in the orchestrator
+- **Expected:** The app renders inside a shadcn-admin shell with: collapsible sidebar navigation (Sessions, Dashboard, Settings), dark/light/system theme toggle, command palette (Cmd+K) for quick actions, responsive mobile layout with hamburger menu, and auth-gated routes. The existing Better Auth integration handles login/logout. The shell replaces duraclaw's current hand-rolled layout (`__root.tsx`, `AppLayout`, `BottomTabs`, mobile drawer).
+- **Verify:** Open the app. See sidebar with navigation. Toggle theme. Press Cmd+K — command palette opens. Resize to mobile — sidebar collapses to hamburger. Navigate to `/login` when unauthenticated — sign-in page renders.
+- **Source:** [satnaing/shadcn-admin](https://github.com/satnaing/shadcn-admin)
+
+#### UI Layer
+
+Shell provides:
+
+| Component | Purpose | Roadmap Phase |
+|-----------|---------|---------------|
+| Sidebar | Collapsible navigation with session list | Phase 2.1 |
+| Theme toggle | Dark/light/system | Phase 6.3 |
+| Command palette | Cmd+K quick actions | Phase 7.4 |
+| Settings page | Tabbed layout skeleton | Phase 6.1 |
+| Auth pages | Sign-in/sign-up forms | Phase 6.2 |
+| Error pages | 404, 500 | Phase 1.4 |
+| Responsive layout | Mobile hamburger, desktop sidebar | Phase 0.3 (done, but better) |
+
+#### API Layer
+
+N/A — shell is layout only. Routes wire to existing auth + session APIs.
+
+#### Data Layer
+
+N/A.
+
+---
 
 ### B1: ai-elements Shared Package
 
@@ -335,6 +389,7 @@ N/A.
 - Pluggable gateway (#16) — ships independently
 - SDK expansion (#13) — dependency, ships first
 - Baseplane-side adoption PR — separate work in baseplane repo
+- Customizing shadcn-admin beyond auth swap and route wiring — use the template as-is for the shell
 - Multi-session live streaming dashboard (Phase 2 tiles) — this ports the sidebar + single-session view, not the full grid dashboard
 - Session rollback/rewind UI — depends on #13 shipping the rewind command
 - Push notifications — Phase 4, separate spec
@@ -344,13 +399,15 @@ N/A.
 
 See YAML frontmatter `phases:` above. Phases are sequential — each depends on the previous.
 
-**Phase 1 (P1): Extract ai-elements package** — Create `packages/ai-elements/` in the duraclaw monorepo. Copy 32 components + utilities from baseplane. Add package.json with external deps. Configure tsup build. Verify all exports resolve from the orchestrator.
+**Phase 1 (P1): App shell — shadcn-admin scaffold** — Clone shadcn-admin into the orchestrator. Strip Clerk auth, wire Better Auth. Configure TanStack Router routes. Verify sidebar, theme toggle, command palette, responsive layout. Delete old layout components. This gives us Phase 6.1 (settings), 6.3 (theming), 7.4 (command palette) essentially for free.
 
-**Phase 2 (P2): Migrate SessionDO to AIChatAgent** — Add `@cloudflare/ai-chat` to orchestrator. Refactor SessionDO to extend AIChatAgent. Override `onChatMessage()` for gateway relay with raw GatewayEvent broadcast. Remove custom message persistence, broadcast, and transport code. Unify gate handling. Normalize status enum.
+**Phase 2 (P2): Extract ai-elements package** — Create `packages/ai-elements/` in the duraclaw monorepo. Copy 32 components + utilities from baseplane. Add package.json with external deps. Configure tsup build. Verify all exports resolve from the orchestrator.
 
-**Phase 3 (P3): Port agent-orch UI components** — Delete existing chat-view, dashboard, sidebar, message-parts. Copy 11 agent-orch components from baseplane. Update imports to `@duraclaw/ai-elements`. Wire `useCodingAgent` hook to SessionDO. Update router.
+**Phase 3 (P3): Migrate SessionDO to AIChatAgent** — Add `@cloudflare/ai-chat` to orchestrator. Refactor SessionDO to extend AIChatAgent. Override `onChatMessage()` for gateway relay with raw GatewayEvent broadcast. Remove custom message persistence, broadcast, and transport code. Unify gate handling. Normalize status enum.
 
-**Phase 4 (P4): Rewrite data hooks** — Implement `useAgentOrchSessions` backed by ProjectRegistry DO. Add search, archive, session record columns. Rewrite AgentOrchPage for duraclaw's router and data layer.
+**Phase 4 (P4): Port agent-orch UI components into shell** — Delete existing chat-view, dashboard, message-parts. Copy 11 agent-orch components from baseplane. Update imports to `@duraclaw/ai-elements`. Wire `useCodingAgent` hook to SessionDO. Mount components inside the shadcn-admin shell routes.
+
+**Phase 5 (P5): Rewrite data hooks** — Implement `useAgentOrchSessions` backed by ProjectRegistry DO. Add search, archive, session record columns. Rewrite AgentOrchPage for duraclaw's router and data layer.
 
 ## Test Infrastructure
 
