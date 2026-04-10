@@ -543,19 +543,19 @@ The existing cc-gateway protocol is already a good foundation. Normalize all age
 
 ### Key Design Decisions
 
-1. **Claude SDK stays in-process** — it's a library, wrapping it in a subprocess would add unnecessary overhead and lose the rich callback API (canUseTool, hooks)
+1. **SDK-first adapters where available** — Claude, Codex, Gemini, and Pi all have TypeScript SDKs that run in-process. This is preferred over subprocess spawning — better type safety, event streaming, and lifecycle control. Reserve subprocess adapters for tools without SDKs.
 
-2. **Codex, Cursor, Cline via subprocess** — spawn with `--json` flags, parse JSONL/NDJSON, normalize to gateway events. Process lifecycle = session lifecycle.
+2. **Full-auto by default** — all agents run with auto-approve permissions (`bypassPermissions`, `--full-auto`, `--yolo`, `--yes`). The permission interception in cc-gateway (`canUseTool`) is unnecessary overhead for the target use case. This eliminates the permission model gap as a concern.
 
-3. **Cline gRPC is a stretch goal** — if/when proto definitions stabilize, a gRPC client adapter would give richer control than subprocess
+3. **Subprocess adapters for CLI-only tools** — Cursor, Cline (if gRPC unavailable), Aider, OpenCode. Spawn with JSON flags, parse events, normalize.
 
-4. **Aider is lowest priority** — no structured output means text parsing, no session resume, limited automation story
+4. **Cline gRPC is a stretch goal** — if/when proto definitions stabilize, a gRPC client adapter would give richer control than subprocess
 
-5. **Permission model gap** — only Claude SDK supports per-tool approval callbacks. All others are all-or-nothing (auto-approve or interactive). For remote orchestration, this means:
-   - Claude: full permission relay to orchestrator UI
-   - Others: must run in auto-approve mode (security trade-off)
+5. **Aider is lowest priority** — no structured output means text parsing, no session resume, limited automation story
 
-6. **Session resume** — Claude, Codex, and Cline support it. Cursor and Aider don't. The gateway should track session IDs per-adapter and handle resume where supported.
+6. **Session resume** — Claude, Codex, Pi, and Cline support it. Cursor and Aider don't. The gateway should track session IDs per-adapter and handle resume where supported.
+
+7. **Multi-model is a feature, not a constraint** — Pi, Hermes, OpenCode, and Gemini support 75-200+ models. The gateway should pass model selection through to adapters that support it, enabling model routing at the orchestrator level.
 
 ### Subprocess Manager Requirements
 
@@ -587,10 +587,218 @@ For subprocess-based adapters, the gateway needs:
 - [Goose GitHub](https://github.com/block/goose)
 - [Continue.dev](https://www.continue.dev/)
 - [Amazon Q Developer CLI (GitHub)](https://github.com/aws/amazon-q-developer-cli)
+- [Codex TypeScript SDK README](https://github.com/openai/codex/blob/main/sdk/typescript/README.md)
+- [Gemini CLI SDK & Programmatic API (DeepWiki)](https://deepwiki.com/google-gemini/gemini-cli/5.9-sdk-and-programmatic-api)
+- [Gemini CLI Headless Mode](https://google-gemini.github.io/gemini-cli/docs/cli/headless.html)
+- [Gemini CLI GitHub](https://github.com/google-gemini/gemini-cli)
+- [Pi Coding Agent README](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/README.md)
+- [Pi Coding Agent (DeepWiki)](https://deepwiki.com/badlogic/pi-mono/4-pi-coding-agent:-coding-agent-cli)
+- [OpenCode GitHub](https://github.com/opencode-ai/opencode)
+- [OpenCode (InfoQ)](https://www.infoq.com/news/2026/02/opencode-coding-agent/)
+- [Hermes Agent GitHub](https://github.com/nousresearch/hermes-agent)
+- [Hermes Agent Docs](https://hermes-agent.nousresearch.com/docs/)
+- [Oh My Pi GitHub](https://github.com/can1357/oh-my-pi)
 
 ---
 
-## 8. Current cc-gateway Coupling Analysis
+## 8. Gemini CLI
+
+**Package:** `@google/gemini-cli` (npm), `@google/gemini-cli-sdk` (programmatic SDK)
+**Language:** TypeScript
+**Stars:** 50k+ (open-sourced by Google)
+
+### Invocation — CLI
+
+```bash
+# Interactive
+gemini
+
+# Headless (non-interactive)
+gemini --prompt "fix the bug in auth.py"
+gemini -p "fix the bug" --output-format json
+echo "review this" | gemini
+
+# Auto-approve
+gemini -p "fix linting" --yolo
+gemini -p "refactor" --approval-mode auto_edit
+```
+
+**Key flags:**
+- `-p` / `--prompt` — headless mode
+- `--output-format json` — structured JSON output with response + stats
+- `--yolo` / `-y` — auto-approve all actions
+- `--approval-mode auto_edit` — auto-approve edits only
+- `-m` / `--model` — model selection (e.g. `gemini-2.5-flash`)
+
+### Invocation — TypeScript SDK
+
+```typescript
+import { GeminiCliAgent, GeminiCliSession } from "@google/gemini-cli-sdk";
+
+// Agent definition specifies model, tools, system instructions
+const agent = new GeminiCliAgent(agentDefinition);
+// Session manages conversation history and tool context
+const session = new GeminiCliSession(config);
+```
+
+**SDK architecture:**
+- `GeminiCliAgent` — primary autonomous loop entity
+- `GeminiCliSession` — stateful conversation + tool registry
+- `LocalAgentDefinition` — model, tools, system instructions config
+- Zod-based typed I/O schemas
+- `ToolRegistry` per agent instance (isolated for parallel execution)
+- Tool confirmation via `MessageBus` (`TOOL_CONFIRMATION_REQUEST` events)
+- Streaming callbacks for real-time monitoring
+- Termination modes: `GOAL` (called `complete_task`), `MAX_TURNS` (default 30), `TIMEOUT` (default 10m)
+
+### Remote Access
+
+`@google/gemini-cli-a2a-server` exposes Agent-to-Agent (A2A) protocol over HTTP for remote/browser-based access. Implements `@a2a-js/sdk`.
+
+### Session Lifecycle
+
+- **Start:** `gemini -p "prompt"` or SDK agent creation
+- **Resume:** Not documented in headless mode
+- **Abort:** Kill process or timeout
+
+### Gateway Fit: GOOD (via SDK or subprocess)
+Two approaches:
+1. **SDK:** Use `@google/gemini-cli-sdk` directly — in-process like Claude SDK, with typed events and tool confirmation callbacks
+2. **Subprocess:** Spawn `gemini -p --output-format json --yolo`, parse JSON output
+3. **A2A server:** Remote HTTP-based execution via A2A protocol
+
+SDK approach is strongest — parallel agent instances, tool registry isolation, streaming callbacks.
+
+---
+
+## 9. Pi (pi-coding-agent)
+
+**Package:** `@mariozechner/pi-coding-agent` (npm)
+**Language:** TypeScript
+**Architecture:** Modular stack: `pi-ai` (LLM) → `pi-agent-core` (tool loop) → `pi-coding-agent` (coding agent) → `pi-tui` (terminal UI)
+
+### Four Operating Modes
+
+1. **Interactive** — full TUI with message history
+2. **Print** — single-shot CLI output (`-p` flag)
+3. **RPC** — JSON-RPC protocol over stdio (ideal for gateway integration)
+4. **SDK** — programmatic TypeScript embedding
+
+### Invocation — SDK
+
+```typescript
+import { createAgentSession, SessionManager, AuthStorage, ModelRegistry }
+  from "@mariozechner/pi-coding-agent";
+
+const { session } = await createAgentSession({
+  sessionManager: SessionManager.inMemory(),
+  authStorage: AuthStorage.create(),
+  modelRegistry: ModelRegistry.create(authStorage),
+});
+
+await session.prompt("What files are in the current directory?");
+```
+
+### Invocation — RPC Mode
+
+JSON-RPC over stdio — structured bidirectional protocol. Enables remote process control without text parsing.
+
+### Session Management
+
+- JSONL session files with tree structure (branching via `id`/`parentId`)
+- `/fork` creates branches from existing sessions
+- Steering messages (queued during agent work) and follow-up messages
+- Multi-session runtime via `createAgentSessionRuntime()`
+
+### Tool System
+
+- Core tools: `read`, `write`, `edit`, `bash`
+- Extensions API for custom tools (can replace built-ins)
+- 75+ model support (Anthropic, OpenAI, Google, Ollama, etc.)
+
+### Gateway Fit: EXCELLENT (via SDK or RPC)
+Pi's architecture is ideal for gateway integration:
+1. **SDK:** In-process like Claude — `createAgentSession()` + `session.prompt()`
+2. **RPC mode:** JSON-RPC over stdio — structured protocol, no text parsing
+3. Multi-session runtime built-in
+4. Tree-structured session branching
+
+---
+
+## 10. OpenCode (→ Crush)
+
+**Language:** Go
+**Status:** Archived, continued as "Crush"
+
+### Invocation
+
+```bash
+opencode -p "fix the bug" -f json
+opencode -p "refactor" -f text -q
+```
+
+**Key flags:**
+- `-p` / `--prompt` — non-interactive single prompt
+- `-f` / `--output-format` — `text` or `json`
+- `-q` / `--quiet` — suppress spinner
+- `-c` / `--cwd` — working directory
+
+### I/O Model
+
+- JSON output via `-f json`
+- SQLite session persistence
+- Context compaction when approaching model limits
+- Multi-provider: OpenAI, Anthropic, Gemini, Bedrock, Groq, etc.
+
+### Gateway Fit: MODERATE (subprocess only)
+Go binary — no SDK embedding. Spawn with `-p -f json`, parse JSON output. Session persistence via SQLite.
+
+---
+
+## 11. Hermes Agent
+
+**Package:** `hermes-agent` (Nous Research)
+**Language:** TypeScript
+**Stars:** 33k+ (Feb 2026)
+
+### Key Features
+
+- Self-improving skills system (auto-creates reusable skill docs from completed tasks)
+- 47 built-in tools
+- Persistent cross-session memory
+- Multi-platform: CLI, Telegram, Discord, Slack, WhatsApp, 15+ platforms
+- Subagent spawning for parallel workstreams
+- 200+ model support via OpenRouter
+- Deployment: Docker, SSH, VPS, serverless
+
+### I/O Model
+
+- CLI TUI for interactive use
+- `execute_code` for programmatic tool calling
+- Subagent architecture for parallel execution
+
+### Gateway Fit: MODERATE (NEEDS MORE RESEARCH)
+The multi-platform gateway architecture is interesting — Hermes already acts as a gateway between platforms. The subagent spawning and skill system could map to the adapter pattern, but the CLI doesn't appear to have a documented headless/JSON mode yet.
+
+---
+
+## Updated Comparison Matrix
+
+| Feature | Claude SDK | Codex SDK | Gemini SDK | Pi SDK | Cursor CLI | Cline CLI | Aider | OpenCode | Hermes |
+|---|---|---|---|---|---|---|---|---|---|
+| **Interface** | In-process lib | In-process (wraps CLI) | In-process lib | In-process lib / RPC | Subprocess | Subprocess / gRPC | Subprocess | Subprocess | Multi-platform |
+| **Structured events** | Typed objects | Typed events | Typed + zod | SDK objects / JSON-RPC | NDJSON | JSONL | Plain text | JSON | Unknown |
+| **Streaming** | AsyncIterable | AsyncGenerator | Streaming callbacks | SDK / RPC | stream-json | JSONL stdout | Text | No | Unknown |
+| **Session resume** | Yes | Yes | No (headless) | Yes (tree branching) | No | Yes (task ID) | No | Yes (SQLite) | Yes (memory) |
+| **In-process SDK** | Yes | Yes | Yes | Yes | No | No (gRPC stretch) | No (unsupported) | No (Go) | TBD |
+| **Tool interception** | canUseTool callback | registerTool | MessageBus events | Extensions API | No | No | No | No | TBD |
+| **Auto-approve flag** | bypassPermissions | --full-auto | --yolo | Config | --force | --yolo | --yes | N/A | N/A |
+| **Models** | Claude only | OpenAI only | Gemini (+ others?) | 75+ providers | Cursor models | Multi-provider | Multi-provider | Multi-provider | 200+ via OpenRouter |
+| **Gateway complexity** | Low | Low-Medium | Low-Medium | Low | Medium | Medium | High | Medium | Unknown |
+
+---
+
+## 12. Current cc-gateway Coupling Analysis
 
 ### Claude SDK Coupling Points
 
@@ -661,21 +869,29 @@ The **protocol layer** (shared-types) is actually fairly generic:
 
 ## 9. Recommended Implementation Sequence
 
+**Design principle:** Full-auto by default. No permission interception, no approval callbacks. All agents run autonomously.
+
 1. **Ship Issue #13 first** — SDK feature expansion migrates to hooks API, stores Query object, adds command queue. This reduces the coupling surface and makes extraction cleaner.
 
-2. **Define `AgentAdapter` interface** in shared-types (or a new `packages/agent-adapters/` package). Keep it minimal — `execute`, `resume`, `abort`, `answer`, `approvePermission`, `getCapabilities`.
+2. **Define `AgentAdapter` interface** in shared-types (or a new `packages/agent-adapters/` package). Keep it minimal — `execute`, `resume`, `abort`, `getCapabilities`. No permission/answer methods (full-auto).
 
-3. **Extract `ClaudeAdapter`** — move `executeSession` into a class implementing `AgentAdapter`. The server.ts WebSocket handler becomes adapter-agnostic.
+3. **Extract `ClaudeAdapter`** — move `executeSession` into a class implementing `AgentAdapter`. Strip `canUseTool` / permission interception. Use `bypassPermissions` mode. The server.ts WebSocket handler becomes adapter-agnostic.
 
-4. **Build `SubprocessAdapter` base** — shared infra for JSONL/NDJSON subprocess agents. Handles process lifecycle, stdout parsing, stdin injection.
+4. **SDK-based adapters (parallel, highest value):**
+   - **`CodexAdapter`** — `@openai/codex-sdk`, `startThread()` + `runStreamed()`, event normalization
+   - **`GeminiAdapter`** — `@google/gemini-cli-sdk`, `GeminiCliAgent` + streaming callbacks
+   - **`PiAdapter`** — `@mariozechner/pi-coding-agent`, `createAgentSession()` + `session.prompt()`, or RPC mode
 
-5. **`CodexAdapter` first** — best fit after Claude: structured JSONL, session resume, SDK available. Proves the subprocess pattern works.
+5. **Build `SubprocessAdapter` base** — shared infra for CLI-only tools. JSONL/NDJSON parsing, process lifecycle, stdin injection.
 
-6. **`ClineAdapter` second** — JSONL + task resume + gRPC stretch goal.
+6. **Subprocess adapters:**
+   - **`ClineAdapter`** — `cline --json -y`, JSONL parsing (gRPC stretch goal)
+   - **`CursorAdapter`** — `cursor-agent -p --force --output-format stream-json`, NDJSON parsing
+   - **`AiderAdapter`** — `aider -m "..." --yes --no-stream`, text capture (lowest priority)
 
-7. **`CursorAdapter` third** — NDJSON streaming but no resume, beta stability concerns.
-
-8. **`AiderAdapter` last** — plain text output, no resume, limited automation story.
+7. **Stretch goals:**
+   - **`HermesAdapter`** — when headless JSON mode is documented
+   - **`OpenCodeAdapter`** — if Crush (successor) adds a TS SDK
 
 ---
 
@@ -683,6 +899,7 @@ The **protocol layer** (shared-types) is actually fairly generic:
 
 - **Adapter package location:** New `packages/agent-adapters/` or keep in cc-gateway? If adapters stay in cc-gateway, rename to `packages/agent-gateway/`.
 - **Subprocess resource limits:** How to enforce memory/CPU/timeout per subprocess agent? Bun's `Bun.spawn` vs Node's `child_process`?
-- **Permission model divergence:** Claude has rich per-tool approval. Others are all-or-nothing. Should the orchestrator UI hide approval buttons for non-Claude agents, or show a "this agent auto-approves" banner?
 - **Cost tracking:** Claude SDK reports `total_cost_usd`. Codex has `usage` stats. Others don't report cost. Normalize or leave optional?
 - **Rename cc-gateway?** If it becomes multi-agent, `agent-gateway` or `duraclaw-gateway` is more accurate.
+- **Multi-model routing:** Pi/Hermes/OpenCode support 75-200+ models. Should the gateway expose model selection to the orchestrator, or leave it to per-adapter config?
+- **A2A protocol:** Gemini's A2A server implements Agent-to-Agent protocol. Worth adopting as a standard, or too early?
