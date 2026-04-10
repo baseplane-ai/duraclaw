@@ -1,219 +1,202 @@
 ---
 date: 2026-04-10
-topic: Cloudflare Agents SDK — Think, Voice, and Prebuilt Agent Patterns
+topic: Cloudflare Agents SDK — Think, Voice, AIChatAgent for SessionAgent
 status: complete
 github_issue: null
 ---
 
-# Research: Cloudflare Agents SDK — Think, Voice, AIChatAgent
+# Research: Cloudflare Agents SDK for Duraclaw's SessionAgent
 
 ## Context
 
-Evaluating Cloudflare's agent SDK hierarchy to understand what prebuilt patterns exist and whether duraclaw's SessionAgent or baseplane's CodingAgent should extend a higher-level class.
+Duraclaw's SessionAgent extends base `Agent` and relays to the VPS cc-gateway. Evaluating what the higher-level SDK classes offer for this relay pattern, and whether voice input can serve as an interaction channel.
 
 ## SDK Hierarchy
 
 ```
-Agent (base, agents@0.10.0)          — state, RPC, WebSocket, SQL, scheduling, fibers
+Agent (base, agents@0.10.0)               — state, RPC, WebSocket, SQL, scheduling, fibers
   │
   AIChatAgent (@cloudflare/ai-chat@0.4.0) — + message persistence, resumable streams, tool support
   │
   Think (@cloudflare/think@0.2.0)         — + session trees, branching, FTS5, workspace, sub-agents
 
-  withVoice (@cloudflare/voice@0.0.5)     — mixin: STT/TTS/VAD pipeline over WebRTC
-  withVoiceInput                          — mixin: STT-only
+  withVoiceInput (@cloudflare/voice@0.0.5) — mixin: STT over WebRTC (input channel)
 ```
 
-## @cloudflare/think (v0.2.0)
+---
 
-Full-featured agent class sitting above AIChatAgent. Handles agentic loop, streaming, persistence, client tools, and stream resumption — all DO SQLite-backed.
+## What SessionAgent Does Today (base Agent)
 
-### Key capabilities
+- Extends `Agent<Env, SessionState>`
+- Manual message persistence (custom SQL inserts, `storedToUIMessages` converter)
+- Manual broadcast to WebSocket clients
+- Custom `WsChatTransport` bridging AI SDK's `useChat` to the DO
+- Custom reconnect scheduling (`reconnectVps` via alarm)
+- HTTP endpoints for gate resolution (`/tool-approval`, `/answers`)
 
-| Feature | Description |
-|---------|-------------|
-| **Tree-structured history** | Non-destructive regeneration via branching — fork a conversation instead of overwriting |
-| **FTS5 search** | Full-text search over conversation history |
-| **Context blocks** | Composable, dynamically loadable/unloadable system prompt segments |
-| **Workspace** | Virtual filesystem in DO SQLite with built-in file tools (read, write, edit, list, find, grep, delete) + R2 spillover |
-| **Sub-agent RPC** | `this.subAgent(MyAgent, "thread-id")` for streaming parent→child agent calls |
-| **Compaction** | Built in |
-| **PII redaction** | `sanitizeMessageForPersistence()` hook |
-| **continueLastTurn()** | Extend previous response |
+All of this is hand-rolled code that higher-level SDK classes provide for free.
 
-### Required overrides
+---
 
-- `getModel()` — return AI SDK model instance
-- `getSystemPrompt()` — return system prompt string
-- `getTools()` — return tool definitions
+## AIChatAgent — What SessionAgent Would Gain
 
-### Lifecycle hooks
+| Custom code today | AIChatAgent provides |
+|---|---|
+| Manual SQL message inserts + `storedToUIMessages` converter | Auto message persistence to DO SQLite |
+| Custom broadcast to all WS clients | Multi-client broadcast built in |
+| `WsChatTransport` reconnect logic | Resumable streaming (buffers chunks during disconnect, replays on reconnect) |
+| `/tool-approval` + `/answers` HTTP endpoints | Built-in tool approval pattern (`needsApproval: true`) |
+| `useChat` + custom transport on client | `useAgentChat` React hook (drop-in) |
+| Manual concurrency handling | Configurable strategies: queue, latest, merge, drop, debounce |
 
-`beforeTurn()`, `beforeToolCall()`, `afterToolCall()`, `onChunk()`, `onChatResponse()`, `configureSession()`
+### The relay override
 
-### Peer deps
+AIChatAgent assumes the DO runs inference via `onChatMessage()` returning `streamText().toUIMessageStreamResponse()`. SessionAgent is a relay. The override would:
 
-`agents` SDK, Vercel AI SDK v6, zod 3.25+, `@cloudflare/shell`. Optional: `@cloudflare/codemode` for sandboxed JS execution.
+1. Open WS to cc-gateway
+2. Send `ExecuteCommand` or `ResumeCommand`
+3. Pipe `GatewayEvent` stream back as `UIMessageChunk` stream
+4. Return the stream as a Response
 
-### Relevance
+This is the same relay logic that exists today, just shaped as a Response return instead of manual broadcast. Non-trivial to wire up but eliminates ~300 lines of custom transport/persistence code.
 
-Think assumes the DO **runs inference directly**. Duraclaw's SessionAgent is a **relay** to VPS. Think's tree history, FTS5, and sub-agent RPC are valuable patterns, but the class isn't usable as-is for a proxy agent.
+### Client-side impact
 
-If duraclaw ever runs lightweight inference in the DO (e.g., summarization, routing decisions), Think becomes relevant. For now, the patterns to steal are:
-- Tree history for session fork/rewind
-- FTS5 for session search (roadmap Phase 3.3)
-- Sub-agent RPC for multi-agent orchestration (roadmap Phase 10.5)
+`useAgentChat` replaces `useChat` + `WsChatTransport`. The chat view component simplifies significantly — no custom transport initialization, no manual history loading, no stream reconnection logic.
 
-## @cloudflare/voice (v0.0.5, experimental)
+---
 
-Voice pipeline for Cloudflare Agents.
+## Think — Patterns to Steal (Don't Extend)
 
-### Architecture
+Think requires `getModel()`, `getSystemPrompt()`, `getTools()` — assumes DO-side inference. Not usable for relay agents. But the patterns are directly relevant to roadmap features:
 
-- **WebRTC** audio from client → nearest CF edge (Opus codec, echo cancellation)
-- **Pipeline:** STT → LLM → TTS with interruption detection and turn-taking
+| Think pattern | Roadmap feature | How to adopt |
+|---|---|---|
+| Tree-structured message history | Phase 3.2 Session Rollback/Rewind | Implement branching in DO SQLite — fork at a message instead of truncating |
+| FTS5 full-text search | Phase 3.3 Session History Search | Add FTS5 virtual table over messages table |
+| Sub-agent RPC (`this.subAgent()`) | Phase 10.5 Agent Orchestration | Use for supervisor→worker agent communication |
+| Context blocks | Dynamic system prompts per session | Composable prompt segments loaded/unloaded at runtime |
+| Compaction | Phase 3.2b Context Compaction | Summarize + restart pattern already in roadmap |
 
-### Built-in Workers AI providers (no API keys)
+These can be implemented directly in SessionAgent's DO SQLite without extending Think.
 
-| Type | Model |
-|------|-------|
-| STT (batch) | `@cf/deepgram/nova-3` |
-| STT (streaming) | `@cf/deepgram/nova-3` via WebSocket |
-| TTS | `@cf/deepgram/aura-1` |
-| VAD | `@cf/pipecat-ai/smart-turn-v2` |
+---
 
-### Third-party providers
+## Voice — Input Channel for Session Interaction
 
-- `@cloudflare/voice-deepgram` (alternative streaming STT)
-- `@cloudflare/voice-elevenlabs` (premium TTS)
-- `@cloudflare/voice-twilio` (telephony)
+`@cloudflare/voice` (v0.0.5, experimental) provides STT/TTS/VAD over WebRTC. The relevant piece for coding agents is `withVoiceInput` — STT-only mixin.
 
-### API
+### How it works
 
-**Server mixins:**
-- `withVoice` — full voice agent: buffering, VAD, STT, LLM, TTS streaming, interruption. Override `onTurn(transcript, context)`.
-- `withVoiceInput` — STT-only (dictation/transcription)
+1. **Client:** `useVoiceInput` React hook — tap-to-speak button, streams audio via WebRTC
+2. **Edge:** Audio hits nearest CF edge, transcribed by Workers AI (`@cf/deepgram/nova-3`) — no API keys needed
+3. **DO:** `withVoiceInput` mixin on SessionAgent receives transcribed text
+4. **Action:** Transcribed text feeds into existing `sendMessage()` / `resolveGate()` / `submitAnswers()` path
 
-**Client:**
-- `useVoiceAgent` React hook (status, transcripts, audio metrics, mute, startCall/endCall)
-- `useVoiceInput` for STT-only
-- `VoiceClient` vanilla JS for framework-agnostic use
+No new backend logic. Voice is just another input modality that produces text.
 
-**Hooks:** `onCallStart`, `onCallEnd`, `onInterrupt`, `beforeTranscribe`, `afterTranscribe`, `beforeSynthesize`, `afterSynthesize`
+### Use cases for coding sessions
 
-### Relevance
+| Interaction | Voice command | Existing path |
+|---|---|---|
+| Approve tool | "approve" / "allow" | `resolveGate(gateId, { approved: true })` |
+| Deny tool | "deny" | `resolveGate(gateId, { approved: false })` |
+| Answer question | dictate answer | `submitAnswers(toolCallId, answers)` |
+| Follow-up prompt | speak instruction | `sendMessage(text)` |
+| Abort session | "stop" / "abort" | `abort()` |
 
-Not relevant for coding agents. Relevant if baseplane wants to add voice to ChipAgent — but baseplane currently uses Gemini Live API directly, not CF voice.
+### Why this matters
 
-## @cloudflare/ai-chat / AIChatAgent (v0.4.0)
+The roadmap's north star is "full mobile sessions." Voice input means:
+- Approve gates from your phone without typing
+- Dictate follow-up prompts while looking at code on another screen
+- Hands-free interaction when away from keyboard
 
-Mid-tier chat agent. Extends base Agent, adds persistent chat with streaming.
-
-### What it provides over base Agent
-
-| Feature | Description |
-|---------|-------------|
-| **Auto message persistence** | Messages stored in DO SQLite automatically |
-| **Resumable streaming** | Chunks buffer during disconnect, replay on reconnect |
-| **Multi-client broadcast** | All connected WebSocket clients get updates |
-| **Tool support** | Server-side (auto), client-side (browser APIs), human-in-loop approval |
-| **Concurrency** | Strategies: queue (default), latest, merge, drop, debounce |
-| **Data parts** | Typed JSON alongside text (citations, progress, token usage) |
-
-### Key API
-
-- Override `onChatMessage(onFinish, options)` — return streaming Response
-- `this.messages` — current UIMessage[] array
-- `saveMessages()` — explicit persist
-- `maxPersistedMessages` — cap storage
-- Client: `useAgentChat` React hook
-
-### v0.4.0 changes
-
-- Renamed `durableStreaming` to `unstable_chatRecovery`
-- All 4 chat turn paths wrapped in `runFiber` when enabled
-- Fixed abort controller leaks
-
-### Relevance
-
-**This is the sweet spot for duraclaw's SessionAgent.** If SessionAgent extended AIChatAgent:
-- Message persistence → free (delete custom storedToUIMessages + manual SQL)
-- Resumable streaming → free (delete WsChatTransport reconnect logic)
-- Multi-client broadcast → free (delete custom broadcast code)
-- Tool approval → built in (delete custom tool-approval HTTP endpoints)
-- Client: `useAgentChat` replaces `useChat` + custom `WsChatTransport`
-
-**The catch:** AIChatAgent assumes it runs inference via `onChatMessage()` returning `streamText().toUIMessageStreamResponse()`. SessionAgent is a relay — it proxies to the VPS gateway. The `onChatMessage()` override would need to open a WS to the gateway and pipe GatewayEvents back as UIMessageChunks. This is doable but non-trivial.
-
-## Base Agent (agents@0.10.0) — New Features
-
-### Durable fibers (v0.10.0)
+### Integration point
 
 ```typescript
-await this.runFiber('session-relay', async () => {
-  // Long-running work that survives DO eviction
-  await this.stash({ checkpoint: 'connected' })
-  // ... relay gateway events
+// SessionAgent with voice input mixin
+class SessionAgent extends withVoiceInput(Agent<Env, SessionState>) {
+  // existing relay logic unchanged
+  
+  onTranscript(text: string, connection: Connection) {
+    // Route transcribed text to appropriate action
+    // based on current session state
+    if (this.state.status === 'waiting_permission') {
+      if (text.match(/approve|allow|yes/i)) {
+        this.resolveGate(this.state.pending_permission.tool_call_id, { approved: true })
+      }
+    } else {
+      this.sendMessage(text)
+    }
+  }
+}
+```
+
+Client adds a mic button next to the text input:
+
+```typescript
+const { startListening, stopListening, transcript, isListening } = useVoiceInput({ agent })
+```
+
+### Caveats
+
+- v0.0.5 — experimental, API may change
+- WebRTC requires HTTPS
+- STT accuracy for technical terms (function names, file paths) needs testing
+- No TTS needed — session output is text/code, read on screen
+
+---
+
+## Base Agent v0.10.0 — Features to Adopt Now
+
+### Durable fibers
+
+```typescript
+await this.runFiber('gateway-relay', async () => {
+  const ws = connectToGateway()
+  await this.stash({ connected: true, session_id })
+  for await (const event of ws) {
+    this.broadcastEvent(event)
+  }
 })
 ```
 
-Recovery via `onFiberRecovered(ctx)`. This is directly useful for gateway relay — if the DO hibernates mid-session, the fiber resumes.
+If DO hibernates mid-session, fiber resumes on wake via `onFiberRecovered()`. Replaces the custom `reconnectVps` alarm scheduling.
 
-### Scheduling improvements
+### Scheduling
 
-- `schedule(delaySeconds, callback, payload)` — one-time
-- `scheduleEvery(intervalSeconds, callback, payload)` — recurring (idempotent in onStart)
+- `schedule(delaySec, callback, payload)` — one-time delayed task
+- `scheduleEvery(intervalSec, callback, payload)` — recurring (idempotent in `onStart`)
 - `queue(callback, payload)` — immediate background work
 
-### MCP client integration
+### MCP client
 
 ```typescript
-this.mcp.addServer('tools', 'https://mcp.example.com')
+this.mcp.addServer('gateway', gatewayUrl)
 const tools = await this.mcp.getTools()
 ```
 
-Relevant if duraclaw exposes the gateway's capabilities as MCP tools.
+Relevant if the gateway exposes capabilities as MCP tools (future).
 
-## Current Usage
-
-### Baseplane
-
-- **ChipAgent** extends `Agent` (not AIChatAgent — converged onto AIChatAgent *patterns* but imports base class)
-- **CodingAgent** extends `Agent` — pure relay, doesn't run inference
-- Neither uses Think or Voice packages
-- Voice handled via Gemini Live API directly
-
-### Duraclaw
-
-- **SessionAgent** extends `Agent<Env, SessionState>`
-- Custom message persistence (manual SQL)
-- Custom WsChatTransport for AI SDK integration
-- Custom broadcast logic
-- Scheduled reconnection via Agent's alarm system
+---
 
 ## Recommendations
 
-### For duraclaw's SessionAgent
+### Now
 
-1. **Stay on base Agent for now.** AIChatAgent migration is valuable but not urgent — it requires reworking the gateway relay into `onChatMessage()` return shape. Do this when building Phase 1-2 UI, not before.
+1. **Adopt durable fibers** for the gateway relay. `runFiber()` gives free crash recovery, replacing custom `reconnectVps` scheduling. Low effort, high value.
 
-2. **Use durable fibers for gateway relay.** `runFiber('gateway-session', ...)` gives free crash recovery for the VPS WebSocket connection. This replaces the custom `reconnectVps` scheduling.
+### When building Phase 1-2 UI
 
-3. **Steal Think's patterns without extending Think:**
-   - Tree history → implement in DO SQLite for session fork/rewind
-   - FTS5 → add when building session search (Phase 3.3)
-   - Sub-agent RPC → consider for multi-agent orchestration (Phase 10.5)
+2. **Migrate SessionAgent to AIChatAgent.** This is the right time because you're rewriting the chat UI anyway. The `onChatMessage()` relay override + `useAgentChat` client hook eliminates ~300 lines of custom transport code.
 
-### For baseplane's CodingAgent
+### When building mobile interaction (Phase 1.3 or later)
 
-4. **Consider AIChatAgent migration.** CodingAgent already has message persistence and broadcast — AIChatAgent would simplify that code. The `onChatMessage()` override proxies to cc-gateway the same way SessionAgent would.
+3. **Add `withVoiceInput` mixin** to SessionAgent. Tap-to-speak for gate approvals and prompts. Test STT accuracy for technical vocabulary first.
 
-5. **Voice via CF SDK vs Gemini Live.** ChipAgent currently uses Gemini Live directly. `@cloudflare/voice` is v0.0.5 (experimental) but provides edge-located WebRTC + built-in STT/TTS without API keys. Worth a spike when voice is next on baseplane's roadmap.
+### Patterns to implement in DO SQLite (not via Think)
 
-### For the "drop-in" question
-
-6. **Both DOs should converge on AIChatAgent.** If both SessionAgent and CodingAgent extend AIChatAgent:
-   - Same message format (UIMessage)
-   - Same client hook (useAgentChat)
-   - Same tool approval pattern
-   - The UI components become truly portable between repos
+4. **Tree history** for session fork/rewind (Phase 3.2)
+5. **FTS5** for session search (Phase 3.3)
+6. **Sub-agent RPC pattern** for multi-agent orchestration (Phase 10.5)
