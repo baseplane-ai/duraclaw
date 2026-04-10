@@ -9,6 +9,11 @@ export type GatewayCommand =
   | StopCommand
   | AnswerCommand
   | RewindCommand
+  | InterruptCommand
+  | GetContextUsageCommand
+  | SetModelCommand
+  | SetPermissionModeCommand
+  | StopTaskCommand
 
 export interface ExecuteCommand {
   type: 'execute'
@@ -19,6 +24,11 @@ export interface ExecuteCommand {
   allowed_tools?: string[]
   max_turns?: number
   max_budget_usd?: number
+  thinking?:
+    | { type: 'adaptive'; display?: 'summarized' | 'omitted' }
+    | { type: 'enabled'; budgetTokens?: number; display?: 'summarized' | 'omitted' }
+    | { type: 'disabled' }
+  effort?: 'low' | 'medium' | 'high' | 'max'
   /** Baseplane organization ID (gateway-level metadata, not passed to Claude SDK) */
   org_id?: string
   /** Baseplane user ID (gateway-level metadata, not passed to Claude SDK) */
@@ -69,6 +79,36 @@ export interface RewindCommand {
   type: 'rewind'
   session_id: string
   message_id: string
+  /** If true, preview what would change without modifying files */
+  dry_run?: boolean
+}
+
+export interface InterruptCommand {
+  type: 'interrupt'
+  session_id: string
+}
+
+export interface GetContextUsageCommand {
+  type: 'get-context-usage'
+  session_id: string
+}
+
+export interface SetModelCommand {
+  type: 'set-model'
+  session_id: string
+  model?: string
+}
+
+export interface SetPermissionModeCommand {
+  type: 'set-permission-mode'
+  session_id: string
+  mode: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto'
+}
+
+export interface StopTaskCommand {
+  type: 'stop-task'
+  session_id: string
+  task_id: string
 }
 
 export interface AnswerCommand {
@@ -100,11 +140,84 @@ export type GatewayEvent =
   | ErrorEvent
   | KataStateEvent
   | StoppedEvent
+  | ContextUsageEvent
+  | RewindResultEvent
+  | SessionStateChangedEvent
+  | RateLimitEvent
+  | TaskStartedEvent
+  | TaskProgressEvent
+  | TaskNotificationEvent
 
 export interface StoppedEvent {
   type: 'stopped'
   session_id: string
   sdk_session_id: string | null
+}
+
+export interface ContextUsageEvent {
+  type: 'context_usage'
+  session_id: string
+  /** Full SDK response from query.getContextUsage() */
+  usage: Record<string, unknown>
+}
+
+export interface RewindResultEvent {
+  type: 'rewind_result'
+  session_id: string
+  can_rewind: boolean
+  error?: string
+  files_changed?: string[]
+  insertions?: number
+  deletions?: number
+}
+
+export interface SessionStateChangedEvent {
+  type: 'session_state_changed'
+  session_id: string
+  state: 'idle' | 'running' | 'requires_action'
+}
+
+export interface RateLimitEvent {
+  type: 'rate_limit'
+  session_id: string
+  rate_limit_info: Record<string, unknown>
+}
+
+export interface TaskStartedEvent {
+  type: 'task_started'
+  session_id: string
+  task_id: string
+  description: string
+  task_type?: string
+  prompt?: string
+}
+
+export interface TaskProgressEvent {
+  type: 'task_progress'
+  session_id: string
+  task_id: string
+  description: string
+  usage: {
+    total_tokens: number
+    tool_uses: number
+    duration_ms: number
+  }
+  last_tool_name?: string
+  summary?: string
+}
+
+export interface TaskNotificationEvent {
+  type: 'task_notification'
+  session_id: string
+  task_id: string
+  status: 'completed' | 'failed' | 'stopped'
+  summary: string
+  output_file: string
+  usage?: {
+    total_tokens: number
+    tool_uses: number
+    duration_ms: number
+  }
 }
 
 export interface SessionInitEvent {

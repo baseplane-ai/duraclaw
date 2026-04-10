@@ -3,20 +3,21 @@ import { type FSWatcher, watch } from 'node:fs'
 import * as nodePath from 'node:path'
 import type { ServerWebSocket } from 'bun'
 import { verifyToken } from './auth.js'
+import { handleQueryCommand } from './commands.js'
 import { handleFileContents, handleFileTree, handleGitStatus } from './files.js'
 import { findLatestKataState } from './kata.js'
 import { spec as openapiSpec } from './openapi.js'
 import { discoverProjects, resolveProject } from './projects.js'
 import { executeSession } from './sessions.js'
 import { listSdkSessions } from './sessions-list.js'
-import type { GatewayCommand, SessionContext, WsData } from './types.js'
+import type { GatewayCommand, GatewaySessionContext, WsData } from './types.js'
 
 const PORT = Number(process.env.CC_GATEWAY_PORT ?? 9877)
 const startedAt = Date.now()
 
 // ── Per-Connection Session Tracking ─────────────────────────────────
 
-const sessions = new Map<ServerWebSocket<WsData>, SessionContext>()
+const sessions = new Map<ServerWebSocket<WsData>, GatewaySessionContext>()
 
 // ── Per-Connection Kata File Watchers ──────────────────────────────
 
@@ -132,6 +133,55 @@ const server = Bun.serve<WsData>({
       return json(200, sessions[0])
     }
 
+    // POST /projects/:name/sessions/:id/fork
+    const forkMatch = path.match(/^\/projects\/([^/]+)\/sessions\/([^/]+)\/fork$/)
+    if (req.method === 'POST' && forkMatch) {
+      const [, name, sessionId] = forkMatch
+      const projectPath = await resolveProject(name)
+      if (!projectPath) {
+        return json(404, { error: `Project "${name}" not found` })
+      }
+      try {
+        const body = (await req.json().catch(() => ({}))) as Record<string, unknown>
+        const { forkSession } = await import('@anthropic-ai/claude-agent-sdk')
+        const result = await forkSession(sessionId, {
+          dir: projectPath,
+          upToMessageId: body.up_to_message_id as string | undefined,
+          title: body.title as string | undefined,
+        })
+        return json(200, { session_id: result.sessionId })
+      } catch (err) {
+        return json(500, {
+          error: `Fork failed: ${err instanceof Error ? err.message : String(err)}`,
+        })
+      }
+    }
+
+    // PATCH /projects/:name/sessions/:id
+    const patchSessionMatch = path.match(/^\/projects\/([^/]+)\/sessions\/([^/]+)$/)
+    if (req.method === 'PATCH' && patchSessionMatch) {
+      const [, name, sessionId] = patchSessionMatch
+      const projectPath = await resolveProject(name)
+      if (!projectPath) {
+        return json(404, { error: `Project "${name}" not found` })
+      }
+      try {
+        const body = (await req.json()) as Record<string, unknown>
+        const { renameSession, tagSession } = await import('@anthropic-ai/claude-agent-sdk')
+        if (body.title !== undefined) {
+          await renameSession(sessionId, body.title as string, { dir: projectPath })
+        }
+        if (body.tag !== undefined) {
+          await tagSession(sessionId, body.tag as string | null, { dir: projectPath })
+        }
+        return json(200, { ok: true })
+      } catch (err) {
+        return json(500, {
+          error: `Update failed: ${err instanceof Error ? err.message : String(err)}`,
+        })
+      }
+    }
+
     // WebSocket upgrade
     if (req.headers.get('upgrade')?.toLowerCase() === 'websocket') {
       const project = url.searchParams.get('project') ?? null
@@ -212,7 +262,7 @@ const server = Bun.serve<WsData>({
 
           const sessionId = randomUUID()
           const ac = new AbortController()
-          const ctx: SessionContext = {
+          const ctx: GatewaySessionContext = {
             sessionId,
             orgId: cmd.type === 'execute' ? (cmd.org_id ?? null) : null,
             userId: cmd.type === 'execute' ? (cmd.user_id ?? null) : null,
@@ -220,6 +270,8 @@ const server = Bun.serve<WsData>({
             pendingAnswer: null,
             pendingPermission: null,
             messageQueue: null,
+            query: null,
+            commandQueue: [],
           }
           sessions.set(ws, ctx)
 
@@ -301,21 +353,73 @@ const server = Bun.serve<WsData>({
 
         case 'rewind': {
           const ctx = sessions.get(ws)
-          if (ctx) {
-            ws.send(
-              JSON.stringify({
-                type: 'error',
-                session_id: ctx.sessionId,
-                error:
-                  'Rewind not yet implemented by SDK — use stop + re-execute with trimmed history',
-              }),
-            )
+          if (ctx?.query) {
+            try {
+              const result = await ctx.query.rewindFiles(cmd.message_id, { dryRun: cmd.dry_run })
+              ws.send(
+                JSON.stringify({
+                  type: 'rewind_result',
+                  session_id: ctx.sessionId,
+                  can_rewind: result.canRewind,
+                  error: result.error,
+                  files_changed: result.filesChanged,
+                  insertions: result.insertions,
+                  deletions: result.deletions,
+                }),
+              )
+            } catch (err) {
+              ws.send(
+                JSON.stringify({
+                  type: 'error',
+                  session_id: ctx.sessionId,
+                  error: `Rewind failed: ${err instanceof Error ? err.message : String(err)}`,
+                }),
+              )
+            }
           } else {
             ws.send(
               JSON.stringify({
                 type: 'error',
+                session_id: ctx?.sessionId ?? null,
+                error: 'No active session with Query object to rewind',
+              }),
+            )
+          }
+          break
+        }
+
+        case 'interrupt':
+        case 'get-context-usage':
+        case 'set-model':
+        case 'set-permission-mode': {
+          const ctx = sessions.get(ws)
+          if (!ctx) {
+            ws.send(
+              JSON.stringify({
+                type: 'error',
                 session_id: null,
-                error: 'No active session to rewind',
+                error: `No active session for ${cmd.type}`,
+              }),
+            )
+          } else if (ctx.query) {
+            await handleQueryCommand(ctx, cmd, ws)
+          } else {
+            // Queue for when Query becomes available
+            ctx.commandQueue.push(cmd)
+          }
+          break
+        }
+
+        case 'stop-task': {
+          const ctx = sessions.get(ws)
+          if (ctx?.query) {
+            await ctx.query.stopTask(cmd.task_id)
+          } else {
+            ws.send(
+              JSON.stringify({
+                type: 'error',
+                session_id: ctx?.sessionId ?? null,
+                error: 'No active session with Query object — cannot stop task',
               }),
             )
           }

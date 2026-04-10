@@ -1,12 +1,13 @@
 import type { ServerWebSocket } from 'bun'
+import { handleQueryCommand } from './commands.js'
 import { buildCleanEnv } from './env.js'
 import { resolveProject } from './projects.js'
 import type {
   ContentBlock,
   ExecuteCommand,
   GatewayEvent,
+  GatewaySessionContext,
   ResumeCommand,
-  SessionContext,
   WsData,
 } from './types.js'
 
@@ -82,7 +83,7 @@ function createMessageQueue() {
 export async function executeSession(
   ws: ServerWebSocket<WsData>,
   cmd: ExecuteCommand | ResumeCommand,
-  ctx: SessionContext,
+  ctx: GatewaySessionContext,
 ): Promise<void> {
   const { sessionId, abortController: ac } = ctx
   const startTime = Date.now()
@@ -117,6 +118,7 @@ export async function executeSession(
       permissionMode: 'default',
       includePartialMessages: true,
       settingSources: ['user', 'project', 'local'],
+      enableFileCheckpointing: true,
     }
 
     if (cmd.type === 'execute') {
@@ -125,123 +127,149 @@ export async function executeSession(
       if (cmd.allowed_tools) options.allowedTools = cmd.allowed_tools
       if (cmd.max_turns) options.maxTurns = cmd.max_turns
       if (cmd.max_budget_usd) options.maxBudgetUsd = cmd.max_budget_usd
+      if (cmd.thinking) options.thinking = cmd.thinking
+      if (cmd.effort) options.effort = cmd.effort
     } else {
       // resume
       options.resume = cmd.sdk_session_id
     }
 
-    // Intercept tool calls: AskUserQuestion -> relay questions, others -> permission prompt
-    options.canUseTool = async (
-      toolName: string,
-      input: Record<string, unknown>,
-      toolOptions: { id: string },
-    ) => {
-      if (toolName === 'AskUserQuestion') {
-        // Relay questions to the orchestrator, wait for answers
-        send(ws, {
-          type: 'ask_user',
-          session_id: sessionId,
-          tool_call_id: toolOptions.id,
-          questions: (input as any).questions ?? [],
-        })
+    // SDK hooks: PreToolUse for permission gating + AskUserQuestion relay, PostToolUse for file-changed events
+    options.hooks = {
+      PreToolUse: [
+        {
+          hooks: [
+            async (input: any, toolUseId: string | undefined, _opts: { signal: AbortSignal }) => {
+              const toolName: string = input.tool_name
+              const toolInput: Record<string, unknown> = input.tool_input ?? {}
+              const id = toolUseId ?? input.tool_use_id ?? ''
 
-        const answers = await new Promise<Record<string, string>>((resolve, reject) => {
-          const timeout = setTimeout(
-            () => {
-              ctx.pendingAnswer = null
-              reject(new Error('AskUserQuestion timed out after 5 minutes'))
+              if (toolName === 'AskUserQuestion') {
+                // Relay questions to the orchestrator, wait for answers
+                send(ws, {
+                  type: 'ask_user',
+                  session_id: sessionId,
+                  tool_call_id: id,
+                  questions: (toolInput as any).questions ?? [],
+                })
+
+                const answers = await new Promise<Record<string, string>>((resolve, reject) => {
+                  const timeout = setTimeout(
+                    () => {
+                      ctx.pendingAnswer = null
+                      reject(new Error('AskUserQuestion timed out after 5 minutes'))
+                    },
+                    5 * 60 * 1000,
+                  )
+
+                  ctx.pendingAnswer = {
+                    resolve: (a) => {
+                      clearTimeout(timeout)
+                      resolve(a)
+                    },
+                    reject: (e) => {
+                      clearTimeout(timeout)
+                      reject(e)
+                    },
+                  }
+
+                  ac.signal.addEventListener(
+                    'abort',
+                    () => {
+                      clearTimeout(timeout)
+                      ctx.pendingAnswer = null
+                      reject(new Error('Session aborted'))
+                    },
+                    { once: true },
+                  )
+                })
+
+                return {
+                  continue: true,
+                  hookSpecificOutput: {
+                    hookEventName: 'PreToolUse',
+                    permissionDecision: 'allow' as const,
+                    updatedInput: { ...toolInput, answers },
+                  },
+                }
+              }
+
+              // Permission prompt for other tools
+              send(ws, {
+                type: 'permission_request',
+                session_id: sessionId,
+                tool_call_id: id,
+                tool_name: toolName,
+                input: toolInput,
+              })
+
+              const allowed = await new Promise<boolean>((resolve, reject) => {
+                const timeout = setTimeout(
+                  () => {
+                    ctx.pendingPermission = null
+                    reject(new Error('Permission prompt timed out after 5 minutes'))
+                  },
+                  5 * 60 * 1000,
+                )
+
+                ctx.pendingPermission = {
+                  resolve: (a) => {
+                    clearTimeout(timeout)
+                    resolve(a)
+                  },
+                  reject: (e) => {
+                    clearTimeout(timeout)
+                    reject(e)
+                  },
+                }
+
+                ac.signal.addEventListener(
+                  'abort',
+                  () => {
+                    clearTimeout(timeout)
+                    ctx.pendingPermission = null
+                    reject(new Error('Session aborted'))
+                  },
+                  { once: true },
+                )
+              })
+
+              return {
+                continue: true,
+                hookSpecificOutput: {
+                  hookEventName: 'PreToolUse',
+                  permissionDecision: allowed ? ('allow' as const) : ('deny' as const),
+                },
+              }
             },
-            5 * 60 * 1000,
-          )
+          ],
+        },
+      ],
+      PostToolUse: [
+        {
+          hooks: [
+            async (input: any, _toolUseId: string | undefined, _opts: { signal: AbortSignal }) => {
+              const toolName: string = input.tool_name
+              const toolInput: Record<string, unknown> = input.tool_input ?? {}
 
-          ctx.pendingAnswer = {
-            resolve: (a) => {
-              clearTimeout(timeout)
-              resolve(a)
+              if (toolName === 'Edit' || toolName === 'Write') {
+                const filePath = toolInput.file_path as string | undefined
+                if (filePath) {
+                  send(ws, {
+                    type: 'file_changed',
+                    session_id: sessionId,
+                    path: filePath,
+                    tool: toolName,
+                    timestamp: new Date().toISOString(),
+                  })
+                }
+              }
+
+              return { continue: true }
             },
-            reject: (e) => {
-              clearTimeout(timeout)
-              reject(e)
-            },
-          }
-
-          ac.signal.addEventListener(
-            'abort',
-            () => {
-              clearTimeout(timeout)
-              ctx.pendingAnswer = null
-              reject(new Error('Session aborted'))
-            },
-            { once: true },
-          )
-        })
-
-        return { behavior: 'allow', updatedInput: { ...input, answers } }
-      }
-
-      // Permission prompt for other tools
-      send(ws, {
-        type: 'permission_request',
-        session_id: sessionId,
-        tool_call_id: toolOptions.id,
-        tool_name: toolName,
-        input,
-      })
-
-      const allowed = await new Promise<boolean>((resolve, reject) => {
-        const timeout = setTimeout(
-          () => {
-            ctx.pendingPermission = null
-            reject(new Error('Permission prompt timed out after 5 minutes'))
-          },
-          5 * 60 * 1000,
-        )
-
-        ctx.pendingPermission = {
-          resolve: (a) => {
-            clearTimeout(timeout)
-            resolve(a)
-          },
-          reject: (e) => {
-            clearTimeout(timeout)
-            reject(e)
-          },
-        }
-
-        ac.signal.addEventListener(
-          'abort',
-          () => {
-            clearTimeout(timeout)
-            ctx.pendingPermission = null
-            reject(new Error('Session aborted'))
-          },
-          { once: true },
-        )
-      })
-
-      return allowed
-        ? { behavior: 'allow', updatedInput: input }
-        : { behavior: 'deny', message: 'User denied permission' }
-    }
-
-    // PostToolUse hook: emit file-changed events for Edit/Write tools
-    options.postToolUse = async (
-      toolName: string,
-      input: Record<string, unknown>,
-      _output: unknown,
-    ) => {
-      if (toolName === 'Edit' || toolName === 'Write') {
-        const filePath = input.file_path as string | undefined
-        if (filePath) {
-          send(ws, {
-            type: 'file_changed',
-            session_id: sessionId,
-            path: filePath,
-            tool: toolName,
-            timestamp: new Date().toISOString(),
-          })
-        }
-      }
+          ],
+        },
+      ],
     }
 
     // Build the streaming prompt: initial prompt + async iterable for follow-up messages
@@ -261,6 +289,9 @@ export async function executeSession(
       prompt: messageGenerator(),
       options: options as any,
     })
+
+    // Store Query object on context for mid-session control
+    ctx.query = iter
     console.log(`[cc-gateway] executeSession: got iterator, starting loop`)
 
     for await (const message of iter) {
@@ -280,6 +311,14 @@ export async function executeSession(
           model,
           tools,
         })
+
+        // Drain command queue now that Query is available
+        if (ctx.commandQueue.length > 0) {
+          for (const queuedCmd of ctx.commandQueue) {
+            await handleQueryCommand(ctx, queuedCmd, ws)
+          }
+          ctx.commandQueue = []
+        }
       } else if (message.type === 'assistant' && (message as any).partial) {
         // Partial assistant message — emit incremental content
         const content = (message as any).message?.content ?? []
@@ -318,6 +357,50 @@ export async function executeSession(
           uuid: (message as any).uuid ?? '',
           content: (message as any).content ?? (message as any).results ?? [],
         })
+      } else if (
+        message.type === 'system' &&
+        (message as any).subtype === 'session_state_changed'
+      ) {
+        send(ws, {
+          type: 'session_state_changed',
+          session_id: sessionId,
+          state: (message as any).state,
+        })
+      } else if (message.type === 'rate_limit_event') {
+        send(ws, {
+          type: 'rate_limit',
+          session_id: sessionId,
+          rate_limit_info: (message as any).rate_limit_info,
+        })
+      } else if (message.type === 'system' && (message as any).subtype === 'task_started') {
+        send(ws, {
+          type: 'task_started',
+          session_id: sessionId,
+          task_id: (message as any).task_id,
+          description: (message as any).description ?? '',
+          task_type: (message as any).task_type,
+          prompt: (message as any).prompt,
+        })
+      } else if (message.type === 'system' && (message as any).subtype === 'task_progress') {
+        send(ws, {
+          type: 'task_progress',
+          session_id: sessionId,
+          task_id: (message as any).task_id,
+          description: (message as any).description ?? '',
+          usage: (message as any).usage ?? { total_tokens: 0, tool_uses: 0, duration_ms: 0 },
+          last_tool_name: (message as any).last_tool_name,
+          summary: (message as any).summary,
+        })
+      } else if (message.type === 'system' && (message as any).subtype === 'task_notification') {
+        send(ws, {
+          type: 'task_notification',
+          session_id: sessionId,
+          task_id: (message as any).task_id,
+          status: (message as any).status,
+          summary: (message as any).summary ?? '',
+          output_file: (message as any).output_file ?? '',
+          usage: (message as any).usage,
+        })
       } else if (message.type === 'result') {
         const result = message as any
         const duration = Date.now() - startTime
@@ -355,8 +438,9 @@ export async function executeSession(
       send(ws, { type: 'error', session_id: sessionId, error: errMsg })
     }
   } finally {
-    // Clean up the message queue
+    // Clean up the message queue and query reference
     queue.done()
     ctx.messageQueue = null
+    ctx.query = null
   }
 }
