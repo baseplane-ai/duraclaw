@@ -725,33 +725,118 @@ Pi's architecture is ideal for gateway integration:
 
 ---
 
-## 10. OpenCode (→ Crush)
+## 10. OpenCode (by SST/Anomaly)
 
-**Language:** Go
-**Status:** Archived, continued as "Crush"
+**Package:** `@opencode-ai/sdk` (npm), `opencode` (CLI)
+**Language:** Go (core) + TypeScript SDK
+**Stars:** 120k+ GitHub
+**Architecture:** Headless HTTP server (`opencode serve`) + typed TS SDK client
 
-### Invocation
+### Invocation — CLI
 
 ```bash
-opencode -p "fix the bug" -f json
-opencode -p "refactor" -f text -q
+# Interactive TUI
+opencode
+
+# Non-interactive single prompt
+opencode run "fix the bug in auth.py"
+opencode run "refactor" --format json
+
+# Headless server (API-only, no TUI)
+opencode serve --port 4096
+
+# Web UI server
+opencode web --port 4096
+
+# Attach TUI to running server
+opencode attach http://localhost:4096
+
+# Resume session
+opencode run "follow up" --continue
+opencode run "follow up" --session <id>
+opencode run "branch this" --fork --session <id>
 ```
 
 **Key flags:**
-- `-p` / `--prompt` — non-interactive single prompt
-- `-f` / `--output-format` — `text` or `json`
-- `-q` / `--quiet` — suppress spinner
-- `-c` / `--cwd` — working directory
+- `--format json` — raw JSON events output
+- `-m` / `--model` — model as `provider/model` (e.g. `anthropic/claude-3-5-sonnet`)
+- `-s` / `--session` — resume specific session
+- `-c` / `--continue` — resume last session
+- `--fork` — branch session on continue
+- `--attach` — connect to running server
+- `OPENCODE_SERVER_PASSWORD` — HTTP basic auth for headless server
 
-### I/O Model
+### Invocation — TypeScript SDK
 
-- JSON output via `-f json`
-- SQLite session persistence
-- Context compaction when approaching model limits
-- Multi-provider: OpenAI, Anthropic, Gemini, Bedrock, Groq, etc.
+```typescript
+import { createOpencode } from "@opencode-ai/sdk"
 
-### Gateway Fit: MODERATE (subprocess only)
-Go binary — no SDK embedding. Spawn with `-p -f json`, parse JSON output. Session persistence via SQLite.
+// Start server + get client
+const { client } = await createOpencode({ port: 4096 })
+
+// Or connect to existing server
+import { createOpencodeClient } from "@opencode-ai/sdk"
+const client = createOpencodeClient({ baseUrl: "http://localhost:4096" })
+
+// Session lifecycle
+const session = await client.session.create({ body: { ... } })
+const result = await client.session.prompt({
+  path: { id: session.id },
+  body: {
+    parts: [{ type: "text", text: "fix the bug" }],
+    model: { providerID: "anthropic", modelID: "claude-3-5-sonnet" }
+  }
+})
+
+// Abort
+await client.session.abort({ path: { id: session.id } })
+
+// List messages
+const messages = await client.session.messages({ path: { id: session.id } })
+
+// Real-time event streaming (SSE)
+const events = await client.event.subscribe()
+for await (const event of events.stream) {
+  console.log(event.type, event.properties)
+}
+```
+
+### SDK API Surface
+
+| Method | Purpose |
+|---|---|
+| `session.create()` | Initialize new session |
+| `session.prompt()` | Send message, get AI response |
+| `session.abort()` | Stop running session |
+| `session.list()` | List all sessions |
+| `session.get()` | Get specific session |
+| `session.delete()` | Remove session |
+| `session.messages()` | List all messages in session |
+| `session.share()` / `unshare()` | Sharing management |
+| `event.subscribe()` | SSE event stream |
+| `find.text()` / `find.files()` / `find.symbols()` | Workspace search |
+| `file.read()` / `file.status()` | File operations |
+| `config.providers()` | Available providers + models |
+| `app.agents()` | List available agents |
+
+### Key Features
+
+- **Headless HTTP server** with OpenAPI spec at `/doc`
+- **SSE event streaming** for real-time updates
+- **Structured output** via JSON Schema validation
+- **Session branching** (`--fork`) for conversation trees
+- **Multi-provider:** 75+ models (Anthropic, OpenAI, Gemini, Bedrock, Groq, Ollama, etc.)
+- **Plan/Build modes** — review strategy vs execute changes
+- **TypeScript types** generated from OpenAPI spec
+- **Auth:** HTTP basic auth via `OPENCODE_SERVER_PASSWORD`
+
+### Gateway Fit: EXCELLENT (via SDK + headless server)
+OpenCode's architecture is ideal for gateway integration:
+1. **SDK client:** `@opencode-ai/sdk` — typed TS client, session CRUD, prompt/abort, SSE streaming
+2. **Headless server:** `opencode serve` runs as a persistent service, multiple clients can attach
+3. **SSE events** map cleanly to gateway WebSocket events
+4. **Session management** built-in (create, resume, fork, list, delete)
+5. **Multi-model** — can proxy any of 75+ models through a single gateway adapter
 
 ---
 
@@ -784,17 +869,18 @@ The multi-platform gateway architecture is interesting — Hermes already acts a
 
 ## Updated Comparison Matrix
 
-| Feature | Claude SDK | Codex SDK | Gemini SDK | Pi SDK | Cursor CLI | Cline CLI | Aider | OpenCode | Hermes |
+| Feature | Claude SDK | Codex SDK | Gemini SDK | OpenCode SDK | Pi SDK | Cursor CLI | Cline CLI | Aider | Hermes |
 |---|---|---|---|---|---|---|---|---|---|
-| **Interface** | In-process lib | In-process (wraps CLI) | In-process lib | In-process lib / RPC | Subprocess | Subprocess / gRPC | Subprocess | Subprocess | Multi-platform |
-| **Structured events** | Typed objects | Typed events | Typed + zod | SDK objects / JSON-RPC | NDJSON | JSONL | Plain text | JSON | Unknown |
-| **Streaming** | AsyncIterable | AsyncGenerator | Streaming callbacks | SDK / RPC | stream-json | JSONL stdout | Text | No | Unknown |
-| **Session resume** | Yes | Yes | No (headless) | Yes (tree branching) | No | Yes (task ID) | No | Yes (SQLite) | Yes (memory) |
-| **In-process SDK** | Yes | Yes | Yes | Yes | No | No (gRPC stretch) | No (unsupported) | No (Go) | TBD |
-| **Tool interception** | canUseTool callback | registerTool | MessageBus events | Extensions API | No | No | No | No | TBD |
-| **Auto-approve flag** | bypassPermissions | --full-auto | --yolo | Config | --force | --yolo | --yes | N/A | N/A |
-| **Models** | Claude only | OpenAI only | Gemini (+ others?) | 75+ providers | Cursor models | Multi-provider | Multi-provider | Multi-provider | 200+ via OpenRouter |
-| **Gateway complexity** | Low | Low-Medium | Low-Medium | Low | Medium | Medium | High | Medium | Unknown |
+| **Interface** | In-process lib | In-process (wraps CLI) | In-process lib | HTTP client + SSE | In-process lib / RPC | Subprocess | Subprocess / gRPC | Subprocess | Multi-platform |
+| **Structured events** | Typed objects | Typed events | Typed + zod | SSE + JSON | SDK objects / JSON-RPC | NDJSON | JSONL | Plain text | Unknown |
+| **Streaming** | AsyncIterable | AsyncGenerator | Streaming callbacks | SSE event stream | SDK / RPC | stream-json | JSONL stdout | Text | Unknown |
+| **Session resume** | Yes | Yes | No (headless) | Yes (session ID + fork) | Yes (tree branching) | No | Yes (task ID) | No | Yes (memory) |
+| **In-process SDK** | Yes | Yes | Yes | Yes (TS client) | Yes | No | No (gRPC stretch) | No (unsupported) | TBD |
+| **Tool interception** | canUseTool callback | registerTool | MessageBus events | No | Extensions API | No | No | No | TBD |
+| **Auto-approve flag** | bypassPermissions | --full-auto | --yolo | N/A (headless) | Config | --force | --yolo | --yes | N/A |
+| **Models** | Claude only | OpenAI only | Gemini (+ others?) | 75+ providers | 75+ providers | Cursor models | Multi-provider | Multi-provider | 200+ via OpenRouter |
+| **Headless server** | No | No | A2A server | Yes (`opencode serve`) | No | No | No | No | No |
+| **Gateway complexity** | Low | Low-Medium | Low-Medium | Low | Low | Medium | Medium | High | Unknown |
 
 ---
 
@@ -879,6 +965,7 @@ The **protocol layer** (shared-types) is actually fairly generic:
 
 4. **SDK-based adapters (parallel, highest value):**
    - **`CodexAdapter`** — `@openai/codex-sdk`, `startThread()` + `runStreamed()`, event normalization
+   - **`OpenCodeAdapter`** — `@opencode-ai/sdk`, headless server + SSE events, session CRUD, 75+ models. Unique: runs as persistent HTTP server, SSE → WebSocket bridge
    - **`GeminiAdapter`** — `@google/gemini-cli-sdk`, `GeminiCliAgent` + streaming callbacks
    - **`PiAdapter`** — `@mariozechner/pi-coding-agent`, `createAgentSession()` + `session.prompt()`, or RPC mode
 
@@ -891,7 +978,6 @@ The **protocol layer** (shared-types) is actually fairly generic:
 
 7. **Stretch goals:**
    - **`HermesAdapter`** — when headless JSON mode is documented
-   - **`OpenCodeAdapter`** — if Crush (successor) adds a TS SDK
 
 ---
 
