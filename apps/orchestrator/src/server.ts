@@ -4,7 +4,7 @@ import { createApiApp } from './api'
 import { getRequestSession } from './api/auth-session'
 import type { Env } from './lib/types'
 
-const WS_ROUTE = /^\/api\/sessions\/([^/]+)\/(ws|agent)$/
+const WS_ROUTE = /^\/(?:api\/sessions|agents\/session-agent)\/([^/]+)(?:\/(ws|agent))?$/
 const apiApp = createApiApp()
 
 export default {

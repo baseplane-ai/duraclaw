@@ -115,9 +115,9 @@ export class SessionDO extends Agent<Env, SessionState> {
     }
   }
 
-  onMessage(_connection: Connection, _data: string | ArrayBuffer) {
-    // All client communication goes through @callable RPC methods.
-    // Raw WebSocket messages are not processed.
+  onMessage(connection: Connection, data: string | ArrayBuffer) {
+    // Delegate to Agent base class for @callable RPC dispatch
+    super.onMessage(connection, data)
   }
 
   // ── Gateway Connection ─────────────────────────────────────────
