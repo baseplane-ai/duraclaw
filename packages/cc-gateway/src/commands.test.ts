@@ -127,3 +127,54 @@ describe('handleQueryCommand', () => {
     expect(sent.length).toBe(0)
   })
 })
+
+describe('command queue drain', () => {
+  it('queued commands execute in order when query becomes available', async () => {
+    const callOrder: string[] = []
+    const { ws } = createMockWs()
+    const ctx = createMockCtx({
+      query: null,
+      commandQueue: [
+        { type: 'set-model', session_id: 's1', model: 'claude-haiku-4-6' },
+        { type: 'interrupt', session_id: 's1' },
+      ],
+    })
+
+    // Simulate query becoming available
+    ctx.query = {
+      setModel: vi.fn().mockImplementation(async () => {
+        callOrder.push('set-model')
+      }),
+      interrupt: vi.fn().mockImplementation(async () => {
+        callOrder.push('interrupt')
+      }),
+    } as any
+
+    // Drain the queue (same pattern as sessions.ts:316-320)
+    for (const queuedCmd of ctx.commandQueue) {
+      await handleQueryCommand(ctx, queuedCmd, ws)
+    }
+    ctx.commandQueue = []
+
+    expect(callOrder).toEqual(['set-model', 'interrupt'])
+    expect(ctx.commandQueue).toEqual([])
+  })
+
+  it('queued commands with null query emit errors', async () => {
+    const { ws, sent } = createMockWs()
+    const ctx = createMockCtx({ query: null })
+
+    const cmds: QueueableCommand[] = [
+      { type: 'interrupt', session_id: 's1' },
+      { type: 'get-context-usage', session_id: 's1' },
+    ]
+
+    for (const cmd of cmds) {
+      await handleQueryCommand(ctx, cmd, ws)
+    }
+
+    expect(sent.length).toBe(2)
+    expect(JSON.parse(sent[0]).type).toBe('error')
+    expect(JSON.parse(sent[1]).type).toBe('error')
+  })
+})

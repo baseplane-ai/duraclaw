@@ -1,6 +1,6 @@
 # Duraclaw v2 — Progress Tracker
 
-> Updated 2026-04-11. Reflects actual execution path — approved specs + agent-orch drop-in alongside the original phase roadmap.
+> Updated 2026-04-11. Reflects actual execution path — approved specs + agent-orch drop-in alongside the original phase roadmap. #13 SDK Expansion landed via PR #18.
 
 **Status key:** `not-started` | `spec` | `in-progress` | `done`
 
@@ -21,7 +21,7 @@
 
 | # | Name | Status | Spec | Blocks |
 |---|------|--------|------|--------|
-| 13 | SDK Feature Expansion | spec | [13-sdk-feature-expansion.md](specs/13-sdk-feature-expansion.md) | #16 pluggable gateway, Phase 3 rollback |
+| 13 | SDK Feature Expansion | done | [13-sdk-feature-expansion.md](specs/13-sdk-feature-expansion.md) | #16 pluggable gateway, Phase 3 rollback |
 | 16 | Pluggable Agent Gateway | spec | [0016-pluggable-agent-gateway.md](specs/0016-pluggable-agent-gateway.md) | Multi-provider support |
 | 15 | Unified Tauri Tray App | spec | [0015-unified-tray-packaging.md](specs/0015-unified-tray-packaging.md) | Distribution/packaging |
 | 12 | Cass Session API | spec | [12-cass-session-api.md](specs/12-cass-session-api.md) | — |
@@ -89,9 +89,9 @@ Port baseplane's agent-orch UI + extract shared ai-elements package. Replaces bu
 
 | Sub | Name | Status | Notes |
 |-----|------|--------|-------|
-| 3.1 | Session Operations | not-started | Depends on #13 (rename, tag endpoints) |
-| 3.2 | Session Rollback / Rewind | not-started | Depends on #13 (rewind command). UI: fork button in A.3 ChatThread. |
-| 3.2b | Context Compaction | not-started | Depends on #13 (interrupt, context usage commands) |
+| 3.1 | Session Operations | not-started | #13 done — rename, tag, fork endpoints ready. Needs UI. |
+| 3.2 | Session Rollback / Rewind | not-started | #13 done — rewind command ready. UI: fork button in A.3 ChatThread. |
+| 3.2b | Context Compaction | not-started | #13 done — interrupt, context usage commands ready. Needs UI. |
 | 3.3 | Session History | not-started | FTS5 pattern from Think — implement in DO SQLite |
 | 3.4 | New Session Dialog | done | Shipped in A.3 — SpawnAgentForm with project list from gateway. |
 | 3.5 | Image Paste + File Upload | done | Shipped in A.3 — MessageInput with paste, file picker, ContentBlock support. |
@@ -111,7 +111,7 @@ Port baseplane's agent-orch UI + extract shared ai-elements package. Replaces bu
 | 5.1 | Inline File Viewer | not-started | — |
 | 5.2 | GitHub Integration | not-started | — |
 | 5.3 | Kata Session State | done | Shipped in A.3 — KataStatePanel shows mode, phase, completed phases. |
-| 5.4 | Executor Abstraction Layer | not-started | Foundation in #13, full abstraction in #16 |
+| 5.4 | Executor Abstraction Layer | not-started | #13 done (foundation). Full abstraction in #16. |
 
 ## Phase 6: Settings + Auth + Theming
 
