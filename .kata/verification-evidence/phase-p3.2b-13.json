@@ -1,0 +1,52 @@
+{
+  "phase": "3.2b",
+  "title": "Context Compaction — Interrupt + Context Usage UI",
+  "spec_issue": 13,
+  "commit": "9897883",
+  "verified_at": "2026-04-11T22:10:00Z",
+  "verdict": "pass",
+  "steps": [
+    {
+      "id": "VP1",
+      "title": "Typecheck passes",
+      "result": "pass",
+      "evidence": "pnpm typecheck: 6/6 tasks successful, 0 errors"
+    },
+    {
+      "id": "VP2",
+      "title": "SessionDO interrupt() method correct",
+      "result": "pass",
+      "evidence": "@callable interrupt() guards status=running, sends {type:'interrupt', session_id} via sendToGateway()"
+    },
+    {
+      "id": "VP3",
+      "title": "SessionDO getContextUsage() method correct",
+      "result": "pass",
+      "evidence": "@callable getContextUsage() guards !vpsWs, sends {type:'get-context-usage', session_id} via sendToGateway()"
+    },
+    {
+      "id": "VP4",
+      "title": "Hook wiring — interrupt, getContextUsage, context_usage event",
+      "result": "pass",
+      "evidence": "interrupt/getContextUsage callbacks wired via connection.call(). context_usage event parsed to ContextUsage state with totalTokens, maxTokens, percentage, model, autoCompact fields."
+    },
+    {
+      "id": "VP5",
+      "title": "UI — Interrupt button renders in header",
+      "result": "pass",
+      "evidence": "Button variant=secondary, aria-label='Interrupt session', guarded by canStop && onInterrupt. Verified via code review (no live DO backend available)."
+    },
+    {
+      "id": "VP6",
+      "title": "UI — Context usage bar renders with color thresholds",
+      "result": "pass",
+      "evidence": "Progress bar: green<70%, yellow 70-90%, red>=90%. Width capped at 100%. Tooltip shows token counts. Percentage text rendered. Verified via code review."
+    }
+  ],
+  "files_changed": [
+    "apps/orchestrator/src/agents/session-do.ts",
+    "apps/orchestrator/src/features/agent-orch/use-coding-agent.ts",
+    "apps/orchestrator/src/features/agent-orch/SessionMetadataHeader.tsx",
+    "apps/orchestrator/src/features/agent-orch/AgentDetailView.tsx"
+  ]
+}
