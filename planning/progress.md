@@ -1,6 +1,6 @@
 # Duraclaw v2 — Progress Tracker
 
-> Updated 2026-04-11. Reflects actual execution path — approved specs + agent-orch drop-in alongside the original phase roadmap. #13 SDK Expansion landed via PR #18.
+> Updated 2026-04-11 (evening). Verification gap debug session closed 8 of 10 gaps. Codex adapter verified working with OAuth. Chat rendering + WS connection fixed.
 
 **Status key:** `not-started` | `spec` | `in-progress` | `done`
 
@@ -22,7 +22,7 @@
 | # | Name | Status | Spec | Blocks |
 |---|------|--------|------|--------|
 | 13 | SDK Feature Expansion | done | [13-sdk-feature-expansion.md](specs/13-sdk-feature-expansion.md) | #16 pluggable gateway, Phase 3 rollback |
-| 16 | Pluggable Agent Gateway | spec | [0016-pluggable-agent-gateway.md](specs/0016-pluggable-agent-gateway.md) | Multi-provider support |
+| 16 | Pluggable Agent Gateway | done | [0016-pluggable-agent-gateway.md](specs/0016-pluggable-agent-gateway.md) | Multi-provider support |
 | 15 | Unified Tauri Tray App | spec | [0015-unified-tray-packaging.md](specs/0015-unified-tray-packaging.md) | Distribution/packaging |
 | 12 | Cass Session API | spec | [12-cass-session-api.md](specs/12-cass-session-api.md) | — |
 
@@ -33,9 +33,9 @@ Port baseplane's agent-orch UI + extract shared ai-elements package. Replaces bu
 | Sub | Name | Status | Notes |
 |-----|------|--------|-------|
 | A.1 | Extract ai-elements package | done | P2 in #17. 32 components in packages/ai-elements. |
-| A.2 | SessionDO gateway relay | done | P3 in #17. Raw GatewayEvent relay, unified gate handling, @callable RPC. |
+| A.2 | SessionDO gateway relay | done | P3 in #17. Raw GatewayEvent relay, unified gate handling, @callable RPC. Fixed: onMessage delegates to super for RPC dispatch; WS route handles /agents/ path. |
 | A.3 | Copy agent-orch UI components | done | P4 in #17. 11 components in features/agent-orch/. |
-| A.4 | Rewrite data hooks | done | P5 in #17. useCodingAgent + useAgentOrchSessions backed by ProjectRegistry DO. |
+| A.4 | Rewrite data hooks | done | P5 in #17. useCodingAgent + useAgentOrchSessions backed by ProjectRegistry DO. Fixed: getMessages derives from events table (messages table was never populated). |
 | A.5 | Voice input (withVoiceInput) | not-started | STT mixin on SessionAgent for mobile gate approval + prompts. |
 | A.6 | Durable fibers for gateway relay | not-started | Replace custom reconnectVps with runFiber() crash recovery. |
 
@@ -89,8 +89,8 @@ Port baseplane's agent-orch UI + extract shared ai-elements package. Replaces bu
 
 | Sub | Name | Status | Notes |
 |-----|------|--------|-------|
-| 3.1 | Session Operations | not-started | #13 done — rename, tag, fork endpoints ready. Needs UI. |
-| 3.2 | Session Rollback / Rewind | not-started | #13 done — rewind command ready. UI: fork button in A.3 ChatThread. |
+| 3.1 | Session Operations | in-progress | #13 done — rename, tag, fork endpoints ready. Listing now includes summary/tag fields. Needs UI. |
+| 3.2 | Session Rollback / Rewind | in-progress | #13 done — rewind command ready. Multi-turn loop keeps session alive between turns. Needs UI controls. |
 | 3.2b | Context Compaction | not-started | #13 done — interrupt, context usage commands ready. Needs UI. |
 | 3.3 | Session History | not-started | FTS5 pattern from Think — implement in DO SQLite |
 | 3.4 | New Session Dialog | done | Shipped in A.3 — SpawnAgentForm with project list from gateway. |
@@ -111,7 +111,7 @@ Port baseplane's agent-orch UI + extract shared ai-elements package. Replaces bu
 | 5.1 | Inline File Viewer | not-started | — |
 | 5.2 | GitHub Integration | not-started | — |
 | 5.3 | Kata Session State | done | Shipped in A.3 — KataStatePanel shows mode, phase, completed phases. |
-| 5.4 | Executor Abstraction Layer | not-started | #13 done (foundation). Full abstraction in #16. |
+| 5.4 | Executor Abstraction Layer | done | #16 adapter registry shipped. Claude, Codex, OpenCode adapters. Codex verified with OAuth. |
 
 ## Phase 6: Settings + Auth + Theming
 
@@ -150,7 +150,7 @@ Port baseplane's agent-orch UI + extract shared ai-elements package. Replaces bu
 |-----|------|--------|-------|
 | 10.1 | AI SDK v7 Migration | not-started | — |
 | 10.2 | Dynamic Workers Research | not-started | — |
-| 10.3 | Executor Registry + Multi-Provider | not-started | #16 ships the gateway adapter layer |
+| 10.3 | Executor Registry + Multi-Provider | done | #16 shipped. Claude + Codex verified live. Spawn form has model selector with agent routing. |
 | 10.4 | Multi-Model Support | not-started | — |
 | 10.5 | Agent Orchestration | not-started | Sub-agent RPC pattern from Think |
 
@@ -173,3 +173,23 @@ Port baseplane's agent-orch UI + extract shared ai-elements package. Replaces bu
 | 11 | First-run empty states | done | Sidebar + conversation empty states |
 
 > Quick wins 3-9, 11 shipped via agent-orch drop-in (A.3).
+
+---
+
+## Verification Gap Debug Session (2026-04-11)
+
+Investigated 10 gaps from `planning/research/2026-04-11-verification-gaps.md`. Results:
+
+| Gap | Description | Result |
+|-----|-------------|--------|
+| G1/G2 | Session lifecycle dies after first result | **Fixed** — multi-turn loop with resume |
+| G3 | session_state_changed not emitted | **Not a bug** — SDK doesn't emit in permissionMode: default |
+| G4 | PostToolUse file_changed | **Verified** — fires correctly, `/tmp/duraclaw-test-g8.txt` path rendered |
+| G5 | Forked sessions not in listing | **Fixed** — SDK listSessions() as primary source |
+| G6 | Listing lacks summary/tag | **Fixed** — fields added to SdkSessionInfo + extraction |
+| G7 | ChatThread shows "No messages" | **Fixed** — getMessages reads events table; WS route + super.onMessage for RPC |
+| G8 | Gate resolution untested | **Verified** — waiting_gate status, Approve/Deny buttons, tool name displayed |
+| G9 | Reconnect untested | **Verified** — completed session renders messages + metadata on reload |
+| G10 | Codex/OpenCode availability | **Fixed + Verified** — OAuth works, capability check updated, gpt-5.4 returns correct answer |
+
+Commits: `3e7db96`, `91d2934`, `bf971e4`, `90ce604`
