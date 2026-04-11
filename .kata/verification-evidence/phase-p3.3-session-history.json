@@ -1,0 +1,69 @@
+{
+  "phase": "3.3",
+  "name": "Session History",
+  "date": "2026-04-11",
+  "commit": "fac271b",
+  "verdict": "PASS",
+  "steps": [
+    {
+      "id": "VP1",
+      "title": "Typecheck passes",
+      "result": "PASS",
+      "evidence": "pnpm typecheck — 6/6 tasks, 0 errors, FULL TURBO cache"
+    },
+    {
+      "id": "VP2",
+      "title": "Tests pass",
+      "result": "PASS",
+      "evidence": "78/78 tests pass (vitest). Fixed pre-existing migration count assertions (4→5) in commit 8790ad9."
+    },
+    {
+      "id": "VP3",
+      "title": "searchSessions includes summary",
+      "result": "PASS",
+      "evidence": "project-registry.ts:219 — WHERE clause includes OR summary LIKE ? with 5 pattern params."
+    },
+    {
+      "id": "VP4",
+      "title": "listSessionsPaginated supports sort/filter/pagination",
+      "result": "PASS",
+      "evidence": "project-registry.ts:231-300 — sortBy, sortDir, status, project, model filters, LIMIT/OFFSET, COUNT(*) for total."
+    },
+    {
+      "id": "VP5",
+      "title": "API endpoints before :id route",
+      "result": "PASS",
+      "evidence": "api/index.ts:119-138 — /search and /history registered after /active (117) and before POST /sessions (140)."
+    },
+    {
+      "id": "VP6",
+      "title": "Date grouping logic correct",
+      "result": "PASS",
+      "evidence": "12 unit tests for getDateGroup + DATE_GROUP_ORDER + grouping logic all pass. Covers Today/Yesterday/This Week/This Month/Older boundaries."
+    },
+    {
+      "id": "VP7",
+      "title": "Sidebar has project/date toggle",
+      "result": "PASS",
+      "evidence": "SessionSidebar.tsx:80 — groupBy state. Lines 224-239 — Project/Date toggle buttons with CalendarIcon/FolderIcon."
+    },
+    {
+      "id": "VP8",
+      "title": "/history route registered",
+      "result": "PASS",
+      "evidence": "routes/_authenticated/history.tsx creates route /_authenticated/history. routeTree.gen.ts includes AuthenticatedHistoryRoute."
+    },
+    {
+      "id": "VP9",
+      "title": "History link in sidebar nav",
+      "result": "PASS",
+      "evidence": "sidebar-data.ts:32-35 — History item with url /history and Clock icon."
+    },
+    {
+      "id": "VP10",
+      "title": "Browser verification — sidebar + history page",
+      "result": "PASS",
+      "evidence": "chrome-devtools-axi: Date toggle shows 'Today 12' + 'This Month 26' groups. History page at /history renders table with 7 columns (Session/Project/Status/Created/Duration/Cost/Turns), 38 sessions, pagination '1 / 2'."
+    }
+  ]
+}
