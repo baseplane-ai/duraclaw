@@ -1,6 +1,6 @@
 # Duraclaw v2 — Progress Tracker
 
-> Updated 2026-04-10. Reflects actual execution path — approved specs + agent-orch drop-in alongside the original phase roadmap.
+> Updated 2026-04-11. Reflects actual execution path — approved specs + agent-orch drop-in alongside the original phase roadmap.
 
 **Status key:** `not-started` | `spec` | `in-progress` | `done`
 
@@ -32,10 +32,10 @@ Port baseplane's agent-orch UI + extract shared ai-elements package. Replaces bu
 
 | Sub | Name | Status | Notes |
 |-----|------|--------|-------|
-| A.1 | Extract ai-elements package | not-started | 5,238 lines from baseplane, zero coupling. Shared between repos. |
-| A.2 | AIChatAgent migration | not-started | SessionAgent extends AIChatAgent. Eliminates ~300 LOC custom transport. |
-| A.3 | Copy agent-orch UI components | not-started | 1,653 lines GREEN+YELLOW from baseplane. GateResolver, ChatThread, Sidebar, etc. |
-| A.4 | Rewrite data hooks | not-started | ~350 lines. Replace DataForge with SessionRegistry DO. |
+| A.1 | Extract ai-elements package | done | P2 in #17. 32 components in packages/ai-elements. |
+| A.2 | SessionDO gateway relay | done | P3 in #17. Raw GatewayEvent relay, unified gate handling, @callable RPC. |
+| A.3 | Copy agent-orch UI components | done | P4 in #17. 11 components in features/agent-orch/. |
+| A.4 | Rewrite data hooks | done | P5 in #17. useCodingAgent + useAgentOrchSessions backed by ProjectRegistry DO. |
 | A.5 | Voice input (withVoiceInput) | not-started | STT mixin on SessionAgent for mobile gate approval + prompts. |
 | A.6 | Durable fibers for gateway relay | not-started | Replace custom reconnectVps with runFiber() crash recovery. |
 
@@ -71,19 +71,19 @@ Port baseplane's agent-orch UI + extract shared ai-elements package. Replaces bu
 
 | Sub | Name | Status | Notes |
 |-----|------|--------|-------|
-| 1.1 | Input Fundamentals | not-started | Covered by A.3 (ai-elements PromptInput) |
-| 1.2 | File Change Display (Inline) | not-started | Covered by A.3 (ChatThread file_changed rendering) |
-| 1.3 | Mobile Chat Experience | not-started | Covered by A.3 (responsive components) + A.5 (voice input) |
-| 1.4 | Error Handling | not-started | Covered by A.2 (AIChatAgent resumable streaming) + A.6 (durable fibers) |
+| 1.1 | Input Fundamentals | done | Shipped in A.3 — PromptInput with enter-to-send, image paste. |
+| 1.2 | File Change Display (Inline) | done | Shipped in A.3 — ChatThread renders file_changed events inline. |
+| 1.3 | Mobile Chat Experience | in-progress | Responsive components shipped in A.3. Voice input (A.5) still pending. |
+| 1.4 | Error Handling | in-progress | SessionDO relay + reconnect shipped in A.2. Durable fibers (A.6) still pending. |
 
 ## Phase 2: Multi-Session Dashboard
 
 | Sub | Name | Status | Notes |
 |-----|------|--------|-------|
-| 2.1 | Dashboard Layout | not-started | Covered by A.3 (SessionSidebar, session list) |
-| 2.2 | Attention Queue | not-started | Gate state visible in sidebar via A.3 |
-| 2.3 | Session Status Indicators | not-started | Covered by A.3 (SessionMetadataHeader, status badges) |
-| 2.4 | Cost Tracking | not-started | Covered by A.3 (cost display in header) |
+| 2.1 | Dashboard Layout | done | Shipped in A.3 — AgentOrchPage with SessionSidebar + session grouping by project. |
+| 2.2 | Attention Queue | done | Shipped in A.3 — Gate state visible in sidebar status badges. |
+| 2.3 | Session Status Indicators | done | Shipped in A.3 — SessionMetadataHeader with status, elapsed timer, WS dot. |
+| 2.4 | Cost Tracking | done | Shipped in A.3 — Cost/duration display in SessionMetadataHeader. |
 
 ## Phase 3: Session Management
 
@@ -93,8 +93,8 @@ Port baseplane's agent-orch UI + extract shared ai-elements package. Replaces bu
 | 3.2 | Session Rollback / Rewind | not-started | Depends on #13 (rewind command). UI: fork button in A.3 ChatThread. |
 | 3.2b | Context Compaction | not-started | Depends on #13 (interrupt, context usage commands) |
 | 3.3 | Session History | not-started | FTS5 pattern from Think — implement in DO SQLite |
-| 3.4 | New Session Dialog | not-started | Covered by A.3 (SpawnAgentForm) |
-| 3.5 | Image Paste + File Upload | not-started | Covered by A.3 (MessageInput with ContentBlock) |
+| 3.4 | New Session Dialog | done | Shipped in A.3 — SpawnAgentForm with project list from gateway. |
+| 3.5 | Image Paste + File Upload | done | Shipped in A.3 — MessageInput with paste, file picker, ContentBlock support. |
 
 ## Phase 4: Push Notifications + PWA
 
@@ -110,7 +110,7 @@ Port baseplane's agent-orch UI + extract shared ai-elements package. Replaces bu
 |-----|------|--------|-------|
 | 5.1 | Inline File Viewer | not-started | — |
 | 5.2 | GitHub Integration | not-started | — |
-| 5.3 | Kata Session State | not-started | Covered by A.3 (KataStatePanel) |
+| 5.3 | Kata Session State | done | Shipped in A.3 — KataStatePanel shows mode, phase, completed phases. |
 | 5.4 | Executor Abstraction Layer | not-started | Foundation in #13, full abstraction in #16 |
 
 ## Phase 6: Settings + Auth + Theming
@@ -162,14 +162,14 @@ Port baseplane's agent-orch UI + extract shared ai-elements package. Replaces bu
 |---|------|--------|
 | 1 | Wire dashboard.tsx to `/` route | done |
 | 2 | Add logout button | done |
-| 3 | Enter-to-send in textarea | not-started |
-| 4 | Auto-scroll to bottom | not-started |
-| 5 | Empty state for "no sessions" | not-started |
-| 6 | File change events in chat | not-started |
-| 7 | Cost/duration in sidebar items | not-started |
-| 8 | Tooltip on StatusDot | not-started |
-| 9 | Typing indicator | not-started |
-| 10 | Message timestamps | not-started |
-| 11 | First-run empty states | not-started |
+| 3 | Enter-to-send in textarea | done | PromptInput from ai-elements |
+| 4 | Auto-scroll to bottom | done | ConversationScrollButton from ai-elements |
+| 5 | Empty state for "no sessions" | done | ConversationEmptyState + sidebar empty state |
+| 6 | File change events in chat | done | ChatThread renders file_changed inline |
+| 7 | Cost/duration in sidebar items | done | SessionMetadataHeader shows cost + duration |
+| 8 | Tooltip on StatusDot | done | WS status dot with title tooltip |
+| 9 | Typing indicator | done | Bounce animation in ChatThread |
+| 10 | Message timestamps | not-started | SessionListItem shows relative time, but not per-message |
+| 11 | First-run empty states | done | Sidebar + conversation empty states |
 
-> Quick wins 3-11 are largely covered by the agent-orch drop-in (A.3) which includes auto-scroll, file change display, cost in sidebar, streaming indicators, and timestamps.
+> Quick wins 3-9, 11 shipped via agent-orch drop-in (A.3).
