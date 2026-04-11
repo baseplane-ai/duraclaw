@@ -25,14 +25,18 @@ interface Project {
 }
 
 const MODEL_OPTIONS = [
-  { value: 'claude-opus-4-6', label: 'claude-opus-4-6' },
-  { value: 'claude-sonnet-4-6', label: 'claude-sonnet-4-6' },
-  { value: 'claude-sonnet-4-5', label: 'claude-sonnet-4-5' },
+  { value: 'claude-opus-4-6', label: 'claude-opus-4-6', agent: 'claude' },
+  { value: 'claude-sonnet-4-6', label: 'claude-sonnet-4-6', agent: 'claude' },
+  { value: 'claude-sonnet-4-5', label: 'claude-sonnet-4-5', agent: 'claude' },
+  { value: '', label: 'codex (default)', agent: 'codex' },
+  { value: 'gpt-5.4', label: 'codex — gpt-5.4', agent: 'codex' },
+  { value: 'gpt-5.4-mini', label: 'codex — gpt-5.4-mini', agent: 'codex' },
 ]
 
 export interface SpawnFormConfig {
   project: string
   model: string
+  agent?: string
   prompt: string
 }
 
@@ -75,9 +79,11 @@ export function SpawnAgentForm({ onSpawn, disabled, inline }: SpawnAgentFormProp
     e.preventDefault()
     if (!prompt.trim()) return
 
+    const selectedModel = MODEL_OPTIONS.find((m) => m.value === model)
     onSpawn({
       project: project || 'default',
       model,
+      agent: selectedModel?.agent,
       prompt: prompt.trim(),
     })
   }

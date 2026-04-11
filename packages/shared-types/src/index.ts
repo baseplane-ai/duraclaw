@@ -455,6 +455,8 @@ export interface SpawnConfig {
   project: string
   prompt: string
   model?: string
+  /** Which agent adapter to use (e.g. 'claude', 'codex'). Defaults to 'claude'. */
+  agent?: string
   system_prompt?: string
   allowed_tools?: string[]
   max_turns?: number

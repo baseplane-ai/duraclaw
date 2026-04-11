@@ -261,6 +261,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       project: config.project,
       prompt: config.prompt,
       model: config.model,
+      agent: config.agent,
       system_prompt: config.system_prompt,
       allowed_tools: config.allowed_tools,
       max_turns: config.max_turns,

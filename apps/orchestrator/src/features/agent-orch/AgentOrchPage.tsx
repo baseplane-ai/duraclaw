@@ -40,6 +40,7 @@ function AgentOrchContent() {
             project: config.project,
             prompt: config.prompt,
             model: config.model,
+            agent: config.agent,
           }),
         })
         if (!resp.ok) return
@@ -52,6 +53,7 @@ function AgentOrchContent() {
           project: config.project,
           prompt: config.prompt,
           model: config.model,
+          agent: config.agent,
         })
         setSelectedSessionId(sessionId)
         navigate({ to: '/', search: { session: sessionId } })

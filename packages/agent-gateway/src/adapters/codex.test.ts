@@ -108,16 +108,12 @@ describe('CodexAdapter', () => {
       expect(caps.description).toBe('OpenAI Codex via codex-sdk')
     })
 
-    it('reports available=true only when SDK is importable and OPENAI_API_KEY is set', async () => {
+    it('reports available=true when SDK is importable (API key or OAuth)', async () => {
       const adapter = new CodexAdapter()
       const caps = await adapter.getCapabilities()
       // SDK is installed in devDependencies, so importable.
-      // Available depends on whether OPENAI_API_KEY is set in the test environment.
-      if (process.env.OPENAI_API_KEY) {
-        expect(caps.available).toBe(true)
-      } else {
-        expect(caps.available).toBe(false)
-      }
+      // Available is true when SDK can be imported (auth via API key or OAuth).
+      expect(caps.available).toBe(true)
     })
   })
 

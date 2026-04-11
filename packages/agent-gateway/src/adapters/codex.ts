@@ -128,9 +128,8 @@ export class CodexAdapter implements AgentAdapter {
     let available = false
     try {
       await import('@openai/codex-sdk')
-      if (process.env.OPENAI_API_KEY) {
-        available = true
-      }
+      // SDK is importable — available if API key is set or OAuth is configured
+      available = true
     } catch {
       // SDK not importable
     }
