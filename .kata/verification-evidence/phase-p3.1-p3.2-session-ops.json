@@ -1,0 +1,51 @@
+{
+  "phase": "3.1 + 3.2",
+  "title": "Session Operations UI + Rewind UX",
+  "commit": "4eaa3d9",
+  "verified_at": "2026-04-11T19:55:00Z",
+  "verdict": "pass",
+  "steps": [
+    {
+      "id": "VP1",
+      "name": "Typecheck passes",
+      "result": "pass",
+      "evidence": "pnpm typecheck: 6 successful, 6 total, 0 errors"
+    },
+    {
+      "id": "VP2",
+      "name": "Rename session via UI",
+      "result": "pass",
+      "evidence": "Rename dialog opens with title/input/save. After saving 'Test Session Alpha', sidebar shows 'Test Session Alpha completed 48m ago 2 turns 12f63361'"
+    },
+    {
+      "id": "VP3",
+      "name": "Tag session via UI",
+      "result": "pass",
+      "evidence": "Add tag dialog -> tag 'v2-test' saved -> badge appears. Edit tag pre-fills value, Remove button clears tag."
+    },
+    {
+      "id": "VP4",
+      "name": "Fork session — menu item + API route",
+      "result": "pass",
+      "evidence": "Fork menu item in dropdown. POST /api/sessions/:id/fork route proxies to gateway. E2E requires live gateway."
+    },
+    {
+      "id": "VP5",
+      "name": "Rewind button UX",
+      "result": "pass",
+      "evidence": "Button shows 'Rewind to this turn' with HistoryIcon + 'Rewind' label. title='Rewind to this point' tooltip."
+    },
+    {
+      "id": "VP6",
+      "name": "Migration v5 — title/tag columns",
+      "result": "pass",
+      "evidence": "Migration v5 adds title TEXT + tag TEXT. SELECT queries include title/tag. allowedFields includes title/tag."
+    },
+    {
+      "id": "VP7",
+      "name": "Search includes title/tag",
+      "result": "pass",
+      "evidence": "SessionSidebar filter checks s.title and s.tag in addition to s.id and s.prompt"
+    }
+  ]
+}
