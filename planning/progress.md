@@ -1,6 +1,6 @@
 # Duraclaw v2 — Progress Tracker
 
-> Updated 2026-04-11 (evening). Verification gap debug session closed 8 of 10 gaps. Codex adapter verified working with OAuth. Chat rendering + WS connection fixed.
+> Updated 2026-04-11 (late). Phase 3.1 + 3.2 session operations UI shipped and verified. Rename/tag/fork in sidebar, rewind button improved.
 
 **Status key:** `not-started` | `spec` | `in-progress` | `done`
 
@@ -89,8 +89,8 @@ Port baseplane's agent-orch UI + extract shared ai-elements package. Replaces bu
 
 | Sub | Name | Status | Notes |
 |-----|------|--------|-------|
-| 3.1 | Session Operations | in-progress | #13 done — rename, tag, fork endpoints ready. Listing now includes summary/tag fields. Needs UI. |
-| 3.2 | Session Rollback / Rewind | in-progress | #13 done — rewind command ready. Multi-turn loop keeps session alive between turns. Needs UI controls. |
+| 3.1 | Session Operations | done | Rename/tag dialogs + fork menu in sidebar. Migration v5 adds title/tag columns. Fork proxies to gateway. VP 7/7 pass. |
+| 3.2 | Session Rollback / Rewind | done | Rewind button on message hover (HistoryIcon + label + tooltip). `useCodingAgent.rewind()` wired. VP verified. |
 | 3.2b | Context Compaction | not-started | #13 done — interrupt, context usage commands ready. Needs UI. |
 | 3.3 | Session History | not-started | FTS5 pattern from Think — implement in DO SQLite |
 | 3.4 | New Session Dialog | done | Shipped in A.3 — SpawnAgentForm with project list from gateway. |
