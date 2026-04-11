@@ -1,6 +1,9 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { Dashboard } from '~/lib/components/dashboard'
+import { AgentOrchPage } from '~/features/agent-orch/AgentOrchPage'
 
 export const Route = createFileRoute('/_authenticated/')({
-  component: Dashboard,
+  component: AgentOrchPage,
+  validateSearch: (search: Record<string, unknown>): { session?: string } => ({
+    session: typeof search.session === 'string' ? search.session : undefined,
+  }),
 })

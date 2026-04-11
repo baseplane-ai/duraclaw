@@ -33,7 +33,7 @@ function LoginPage() {
       return
     }
 
-    navigate({ to: '/' })
+    navigate({ to: '/', search: {} })
   }
 
   return (

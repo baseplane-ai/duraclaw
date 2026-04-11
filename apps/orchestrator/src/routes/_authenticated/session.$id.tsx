@@ -1,11 +1,9 @@
-import { createFileRoute } from '@tanstack/react-router'
-import { ChatView } from '~/lib/components/chat-view'
+import { createFileRoute, redirect } from '@tanstack/react-router'
 
 export const Route = createFileRoute('/_authenticated/session/$id')({
-  component: SessionPage,
+  beforeLoad: ({ params }) => {
+    // Redirect /session/$id to /?session=$id for unified layout
+    throw redirect({ to: '/', search: { session: params.id } })
+  },
+  component: () => null,
 })
-
-function SessionPage() {
-  const { id } = Route.useParams()
-  return <ChatView sessionId={id} />
-}

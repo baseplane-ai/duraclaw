@@ -227,6 +227,32 @@ export function createApiApp() {
     return c.json({ messages })
   })
 
+  app.patch('/api/sessions/:id', async (c) => {
+    const userId = c.get('userId')
+    const ownership = await getOwnedSession(c.env, c.req.param('id'), userId)
+    if (!ownership.ok) {
+      return c.json(
+        { error: ownership.status === 404 ? 'Session not found' : 'Forbidden' },
+        ownership.status,
+      )
+    }
+
+    const body = (await c.req.json()) as Record<string, unknown>
+    const registry = getRegistry(c)
+    await registry.updateSession(ownership.session.id, body)
+    return c.json({ ok: true })
+  })
+
+  app.get('/api/gateway/projects', async (c) => {
+    try {
+      const projects = await fetchGatewayProjects(c.env)
+      return c.json(projects)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Gateway unreachable'
+      return c.json({ error: message }, 502)
+    }
+  })
+
   app.post('/api/sessions/:id/abort', async (c) => {
     const userId = c.get('userId')
     const ownership = await getOwnedSession(c.env, c.req.param('id'), userId)

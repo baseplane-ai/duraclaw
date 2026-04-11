@@ -49,4 +49,15 @@ export const REGISTRY_MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 4,
+    description: 'Add archived column for session archiving',
+    up: (sql) => {
+      try {
+        sql.exec(`ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0`)
+      } catch {
+        // Column already exists.
+      }
+    },
+  },
 ]

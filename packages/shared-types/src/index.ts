@@ -473,6 +473,7 @@ export interface SessionSummary {
   num_turns?: number | null
   prompt?: string
   summary?: string
+  archived?: boolean
 }
 
 // ── Stored Message (for SQLite persistence) ─────────────────────────

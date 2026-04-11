@@ -5,6 +5,7 @@ export type {
   GateResponse,
   GatewayCommand,
   GatewayEvent,
+  KataSessionState,
   ProjectInfo,
   ResumeCommand,
   SessionState,

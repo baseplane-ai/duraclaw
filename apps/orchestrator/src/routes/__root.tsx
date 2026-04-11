@@ -23,7 +23,7 @@ function RootComponent() {
     }
 
     if (session && isLogin) {
-      navigate({ to: '/', replace: true })
+      navigate({ to: '/', search: {}, replace: true })
     }
   }, [isLogin, isPending, navigate, session])
 
