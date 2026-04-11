@@ -2,14 +2,14 @@
   "verification_date": "2026-04-11",
   "workflow_id": "VF-c37c-0411",
   "specs_verified": ["#13", "#16", "#17"],
-  "fix_commits": ["3f5f07d"],
+  "fix_commits": ["3f5f07d", "5f3d7e5"],
   "summary": {
     "total_steps": 21,
     "passed": 8,
     "failed": 6,
-    "partial": 3,
+    "partial": 5,
     "skipped": 2,
-    "blocked": 5
+    "blocked": 3
   },
   "results": {
     "spec_13_sdk_feature_expansion": {
@@ -78,24 +78,24 @@
         "evidence": "Build: dist/index.js 156.72KB, dist/index.d.ts 63.42KB. Typecheck: 6/6 passed, no errors."
       },
       "VP2_session_do_relay": {
-        "result": "BLOCKED",
-        "evidence": "API session creation fixed (agents vite plugin + onRequest /create). Browser login still fails with 'Invalid origin'. API-based creation works post-fix."
+        "result": "PARTIAL",
+        "evidence": "SessionDO relay works: session spawns via UI, runs to completion (status updates in sidebar: running->completed, 2 turns). Gateway events not rendered in ChatThread — shows 'No messages yet'. Relay of status works, content event rendering needs investigation."
       },
       "VP3_gate_resolution": {
         "result": "BLOCKED",
-        "evidence": "Depends on working orchestrator session lifecycle."
+        "evidence": "No gate triggered during test session. Needs a prompt that triggers tool approval."
       },
       "VP4_ui_renders": {
-        "result": "BLOCKED",
-        "evidence": "Browser login fails with 'Invalid origin' despite trustedOrigins config. Better Auth origin validation issue."
+        "result": "PARTIAL",
+        "evidence": "Step 1 PASS: Dashboard with project list (baseplane 28 sessions), sidebar with status/turns/time. Step 2 PASS: SpawnAgentForm with project, model, prompt — session spawns. Step 4 PARTIAL: Session completes but ChatThread shows 'No messages yet' — gateway events not reaching client."
       },
       "VP5_session_persistence": {
         "result": "BLOCKED",
-        "evidence": "Depends on working session creation and UI."
+        "evidence": "Session creation works, sidebar shows sessions. But ChatThread content not rendering — cannot fully verify persistence of message content."
       },
       "VP6_reconnect_resilience": {
         "result": "BLOCKED",
-        "evidence": "Depends on working session lifecycle."
+        "evidence": "Session lifecycle works but content display doesn't — cannot verify reconnect shows resumed content."
       },
       "VP7_deleted_code": {
         "result": "PASS",
@@ -118,6 +118,11 @@
       "file": "apps/orchestrator/.dev.vars",
       "fix": "Changed BETTER_AUTH_URL from 127.0.0.1 to localhost",
       "root_cause": "Origin mismatch between browser (localhost) and auth config (127.0.0.1)"
+    },
+    {
+      "file": "apps/orchestrator/src/lib/auth.ts",
+      "fix": "Function-based trustedOrigins that includes request's rewritten origin header",
+      "root_cause": "wrangler dev rewrites Origin header to [[routes]] custom_domain (duraclaw.codevibesmatter.com), causing Better Auth CSRF rejection even for same-origin requests from localhost"
     }
   ],
   "known_gaps": [
@@ -126,7 +131,7 @@
     "Fork creates session but listing doesn't discover it",
     "PostToolUse hook file_changed event not emitting (may be SDK timing issue)",
     "session_state_changed events not received from SDK in default permission mode",
-    "Browser login 'Invalid origin' persists despite trustedOrigins config",
+    "ChatThread shows 'No messages yet' despite session completing — gateway events not reaching client-side rendering",
     "Missing tests for SessionDO.onRequest() handler"
   ]
 }
