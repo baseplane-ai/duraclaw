@@ -26,6 +26,7 @@ function createMockCtx(overrides?: Partial<GatewaySessionContext>): GatewaySessi
     sessionId: 'test-session',
     orgId: null,
     userId: null,
+    adapterName: null,
     abortController: new AbortController(),
     pendingAnswer: null,
     pendingPermission: null,

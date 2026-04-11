@@ -79,7 +79,7 @@ start_gateway() {
       source ./.env
       set +a
     fi
-    exec bun run packages/cc-gateway/src/server.ts
+    exec bun run packages/agent-gateway/src/server.ts
   " >"$GATEWAY_LOG_FILE" 2>&1 &
 
   echo $! >"$GATEWAY_PID_FILE"

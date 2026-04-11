@@ -1,7 +1,7 @@
 /**
  * SpawnAgentForm — Form for spawning a new session.
  *
- * Fetches available projects from cc-gateway and collects spawn config.
+ * Fetches available projects from agent-gateway and collects spawn config.
  * Adapted from baseplane: replaced Picker with Select, removed org_id.
  */
 

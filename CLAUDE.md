@@ -24,7 +24,7 @@ Worktrees (baseplane-dev1..dev6)
 apps/
   orchestrator/          # CF Workers + TanStack Start (React 19, Vite 7)
 packages/
-  cc-gateway/            # VPS executor (Bun WebSocket server)
+  agent-gateway/         # VPS executor (Bun WebSocket server)
   kata/                  # Workflow management CLI
 planning/
   spec-templates/        # Feature, bug, epic spec templates
@@ -52,7 +52,7 @@ pnpm dev                # Local dev (Vite + miniflare)
 pnpm deploy             # Build + wrangler deploy
 
 # Executor
-cd packages/cc-gateway
+cd packages/agent-gateway
 bun run src/server.ts   # Run executor locally
 ```
 
@@ -66,14 +66,14 @@ bun run src/server.ts   # Run executor locally
 - **D1 Database**: `duraclaw-auth` (placeholder ID in wrangler.toml — needs `wrangler d1 create`)
 - **Entry point**: `src/server.ts` exports DO classes + TanStack Start default handler
 
-### packages/cc-gateway (VPS Executor)
+### packages/agent-gateway (VPS Executor)
 
 - **Transport**: Bun WebSocket server on `127.0.0.1:9877`
 - **Protocol**: Receives `VpsCommand` JSON messages, streams back `VpsEvent` messages. Each WS = one session.
 - **Auth**: Bearer token on WS upgrade (timing-safe compare). Optional — open if `CC_GATEWAY_API_TOKEN` not set.
 - **HTTP endpoints**: `GET /health` (no auth), `GET /worktrees` (auth required)
 - **Worktree discovery**: Configurable via `WORKTREE_PATTERNS` env var (comma-separated prefixes, default: `baseplane`)
-- **Systemd**: `duraclaw-cc-gateway.service`, install via `./packages/cc-gateway/systemd/install.sh`
+- **Systemd**: `duraclaw-agent-gateway.service`, install via `./packages/agent-gateway/systemd/install.sh`
 - **SDK mode**: `bypassPermissions`, strips `CLAUDECODE*` env vars to prevent nested sessions
 
 ### packages/kata (Workflow CLI)
@@ -104,7 +104,7 @@ bun run src/server.ts   # Run executor locally
 2. `wrangler secret put CC_GATEWAY_URL` / `CC_GATEWAY_SECRET` / `BETTER_AUTH_SECRET`
 3. `wrangler d1 migrations apply duraclaw-auth` — create auth tables
 4. Install Bun on VPS if needed
-5. `./packages/cc-gateway/systemd/install.sh` — deploy executor service
+5. `./packages/agent-gateway/systemd/install.sh` — deploy executor service
 6. `cd apps/orchestrator && pnpm deploy` — deploy to CF Workers
 7. Verify CF tunnel routes to VPS executor
 

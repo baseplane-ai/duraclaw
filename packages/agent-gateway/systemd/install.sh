@@ -2,8 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SERVICE_NAME="duraclaw-cc-gateway"
-OLD_SERVICE_NAME="baseplane-cc-gateway"
+SERVICE_NAME="duraclaw-agent-gateway"
+OLD_SERVICE_NAME="duraclaw-cc-gateway"
 
 echo "Installing ${SERVICE_NAME} systemd service..."
 

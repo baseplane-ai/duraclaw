@@ -33,6 +33,8 @@ export interface ExecuteCommand {
   org_id?: string
   /** Baseplane user ID (gateway-level metadata, not passed to Claude SDK) */
   user_id?: string
+  /** Which agent to use. Defaults to 'claude' if omitted. */
+  agent?: string
 }
 
 // Content block types matching Anthropic API format
@@ -124,6 +126,8 @@ export interface ResumeCommand {
   project: string
   prompt: string | ContentBlock[]
   sdk_session_id: string
+  /** Which agent to use for resume. Defaults to 'claude' if omitted. */
+  agent?: string
 }
 
 // ── Gateway Events (Gateway → Orchestrator) ────────────────────────────
@@ -486,7 +490,7 @@ export interface StoredMessage {
   created_at: string
 }
 
-// ── Session Context (cc-gateway internal) ───────────────────────────
+// ── Session Context (agent-gateway internal) ─────────────────────────
 
 export interface SessionContext {
   sessionId: string

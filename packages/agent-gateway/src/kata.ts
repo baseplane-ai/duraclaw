@@ -40,7 +40,7 @@ export async function findLatestKataState(projectPath: string): Promise<KataSess
     const content = await fs.readFile(path.join(sessionsDir, latest.id, 'state.json'), 'utf-8')
     return JSON.parse(content) as KataSessionState
   } catch (err) {
-    console.warn(`[cc-gateway] Failed to read kata state for session ${latest.id}:`, err)
+    console.warn(`[agent-gateway] Failed to read kata state for session ${latest.id}:`, err)
     return null
   }
 }

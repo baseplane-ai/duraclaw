@@ -2,15 +2,22 @@ import { randomUUID } from 'node:crypto'
 import { type FSWatcher, watch } from 'node:fs'
 import * as nodePath from 'node:path'
 import type { ServerWebSocket } from 'bun'
+import { AdapterRegistry, ClaudeAdapter, CodexAdapter, OpenCodeAdapter } from './adapters/index.js'
 import { verifyToken } from './auth.js'
 import { handleQueryCommand } from './commands.js'
 import { handleFileContents, handleFileTree, handleGitStatus } from './files.js'
 import { findLatestKataState } from './kata.js'
 import { spec as openapiSpec } from './openapi.js'
 import { discoverProjects, resolveProject } from './projects.js'
-import { executeSession } from './sessions.js'
 import { listSdkSessions } from './sessions-list.js'
 import type { GatewayCommand, GatewaySessionContext, WsData } from './types.js'
+
+// ── Adapter Registry ───────────────────────────────────────────────
+
+export const registry = new AdapterRegistry()
+registry.register(new ClaudeAdapter())
+registry.register(new CodexAdapter())
+registry.register(new OpenCodeAdapter())
 
 const PORT = Number(process.env.CC_GATEWAY_PORT ?? 9877)
 const startedAt = Date.now()
@@ -60,6 +67,12 @@ const server = Bun.serve<WsData>({
     // All other routes require auth
     if (!verifyToken(req)) {
       return json(401, { error: 'Unauthorized' })
+    }
+
+    // GET /capabilities — list available agents
+    if (req.method === 'GET' && path === '/capabilities') {
+      const agents = await registry.listCapabilities()
+      return json(200, { agents })
     }
 
     // GET /projects
@@ -199,7 +212,7 @@ const server = Bun.serve<WsData>({
 
   websocket: {
     open(ws: ServerWebSocket<WsData>) {
-      console.log(`[cc-gateway] WS connected (project=${ws.data.project ?? 'none'})`)
+      console.log(`[agent-gateway] WS connected (project=${ws.data.project ?? 'none'})`)
 
       // Start watching kata state for this project
       if (ws.data.project) {
@@ -241,7 +254,7 @@ const server = Bun.serve<WsData>({
     },
 
     async message(ws: ServerWebSocket<WsData>, raw: string | Buffer) {
-      console.log(`[cc-gateway] WS message received: ${String(raw).substring(0, 100)}`)
+      console.log(`[agent-gateway] WS message received: ${String(raw).substring(0, 100)}`)
       let cmd: GatewayCommand
       try {
         cmd = JSON.parse(typeof raw === 'string' ? raw : raw.toString('utf-8'))
@@ -260,12 +273,27 @@ const server = Bun.serve<WsData>({
             sessions.delete(ws)
           }
 
+          // Resolve adapter
+          const agentName = cmd.agent ?? 'claude'
+          const adapter = registry.get(agentName)
+          if (!adapter) {
+            ws.send(
+              JSON.stringify({
+                type: 'error',
+                session_id: null,
+                error: `Agent "${agentName}" is not available. Available agents: ${registry.listNames().join(', ')}`,
+              }),
+            )
+            return
+          }
+
           const sessionId = randomUUID()
           const ac = new AbortController()
           const ctx: GatewaySessionContext = {
             sessionId,
             orgId: cmd.type === 'execute' ? (cmd.org_id ?? null) : null,
             userId: cmd.type === 'execute' ? (cmd.user_id ?? null) : null,
+            adapterName: agentName,
             abortController: ac,
             pendingAnswer: null,
             pendingPermission: null,
@@ -275,15 +303,20 @@ const server = Bun.serve<WsData>({
           }
           sessions.set(ws, ctx)
 
-          // Run session in background — don't await so we can receive
+          // Run session in background -- don't await so we can receive
           // further messages (abort, answer, stream-input, etc.) on this same WS
-          console.log(`[cc-gateway] Starting session ${sessionId} for project=${cmd.project}`)
-          executeSession(ws, cmd, ctx)
+          console.log(
+            `[agent-gateway] Starting session ${sessionId} for project=${cmd.project} agent=${agentName}`,
+          )
+          const sessionPromise =
+            cmd.type === 'resume' ? adapter.resume(ws, cmd, ctx) : adapter.execute(ws, cmd, ctx)
+
+          sessionPromise
             .then(() => {
-              console.log(`[cc-gateway] Session ${sessionId} completed`)
+              console.log(`[agent-gateway] Session ${sessionId} completed`)
             })
             .catch((err) => {
-              console.error(`[cc-gateway] Session ${sessionId} error:`, err)
+              console.error(`[agent-gateway] Session ${sessionId} error:`, err)
             })
             .finally(() => {
               sessions.delete(ws)
@@ -455,7 +488,7 @@ const server = Bun.serve<WsData>({
     },
 
     close(ws: ServerWebSocket<WsData>) {
-      console.log('[cc-gateway] WS disconnected')
+      console.log('[agent-gateway] WS disconnected')
 
       // Clean up kata file watcher
       const watcher = kataWatchers.get(ws)
@@ -488,22 +521,22 @@ const server = Bun.serve<WsData>({
 
 // ── Startup ─────────────────────────────────────────────────────────
 
-console.log(`[cc-gateway] Initializing on port ${PORT} (pid ${process.pid})`)
+console.log(`[agent-gateway] Initializing on port ${PORT} (pid ${process.pid})`)
 
 discoverProjects({}).then((projects) => {
-  console.log(`[cc-gateway] Discovered ${projects.length} projects:`)
+  console.log(`[agent-gateway] Discovered ${projects.length} projects:`)
   for (const wt of projects) {
     console.log(`  ${wt.name} (${wt.branch}) → ${wt.path}`)
   }
 })
 
-console.log(`[cc-gateway] Listening on http://127.0.0.1:${PORT}`)
+console.log(`[agent-gateway] Listening on http://127.0.0.1:${PORT}`)
 
 // ── Graceful Shutdown ───────────────────────────────────────────────
 
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.on(signal, () => {
-    console.log(`\n[cc-gateway] Received ${signal}, shutting down...`)
+    console.log(`\n[agent-gateway] Received ${signal}, shutting down...`)
 
     // Close all kata file watchers
     for (const [, watcher] of kataWatchers) {
@@ -535,7 +568,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     sessions.clear()
 
     server.stop()
-    console.log('[cc-gateway] Server closed')
+    console.log('[agent-gateway] Server closed')
     process.exit(0)
   })
 }

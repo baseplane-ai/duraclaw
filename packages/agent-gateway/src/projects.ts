@@ -7,7 +7,11 @@ import type { ProjectInfo } from './types.js'
 const execFileAsync = promisify(execFile)
 
 const PROJECTS_DIR = '/data/projects'
-const PROJECT_PREFIXES = (process.env.PROJECT_PATTERNS ?? process.env.WORKTREE_PATTERNS ?? 'baseplane')
+const PROJECT_PREFIXES = (
+  process.env.PROJECT_PATTERNS ??
+  process.env.WORKTREE_PATTERNS ??
+  'baseplane'
+)
   .split(',')
   .map((p) => p.trim())
   .filter(Boolean)

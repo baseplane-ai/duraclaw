@@ -37,7 +37,7 @@ function safePath(projectPath: string, relativePath: string): string | null {
   // Reject paths with .. segments
   if (relativePath.includes('..')) return null
   const resolved = path.resolve(projectPath, relativePath)
-  if (!resolved.startsWith(projectPath + '/') && resolved !== projectPath) return null
+  if (!resolved.startsWith(`${projectPath}/`) && resolved !== projectPath) return null
   return resolved
 }
 
@@ -106,10 +106,7 @@ async function listEntries(
  * GET /projects/:name/files/*path
  * Returns raw file contents.
  */
-export async function handleFileContents(
-  projectPath: string,
-  filePath: string,
-): Promise<Response> {
+export async function handleFileContents(projectPath: string, filePath: string): Promise<Response> {
   const resolved = safePath(projectPath, filePath)
   if (!resolved) {
     return json(400, { error: 'Path traversal not allowed' })

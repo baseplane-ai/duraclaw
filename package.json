@@ -26,7 +26,7 @@
     "verify:smoke": "pnpm run verify:preflight && pnpm run verify:auth && pnpm run verify:gateway && pnpm run verify:session && pnpm run verify:browser && pnpm run verify:browser:session",
     "ship": "turbo deploy",
     "ship:worker": "turbo deploy --filter=@duraclaw/orchestrator",
-    "ship:gateway": "turbo deploy --filter=@duraclaw/cc-gateway",
+    "ship:gateway": "turbo deploy --filter=@duraclaw/agent-gateway",
     "test": "turbo test"
   },
   "devDependencies": {

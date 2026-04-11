@@ -52,6 +52,8 @@ export interface GatewaySessionContext {
   sessionId: string
   orgId: string | null
   userId: string | null
+  /** Name of the adapter handling this session (e.g. 'claude', 'codex') */
+  adapterName: string | null
   abortController: AbortController
   pendingAnswer: {
     resolve: (answers: Record<string, string>) => void

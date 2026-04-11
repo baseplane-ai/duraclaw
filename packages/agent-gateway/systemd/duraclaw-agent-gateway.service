@@ -1,5 +1,5 @@
 [Unit]
-Description=Duraclaw CC Gateway - Claude Code API Gateway
+Description=Duraclaw Agent Gateway - Multi-Agent API Gateway
 After=network.target
 Wants=network.target
 
@@ -8,7 +8,7 @@ Type=simple
 User=ubuntu
 Group=ubuntu
 WorkingDirectory=/data/projects/duraclaw
-ExecStart=/home/ubuntu/.bun/bin/bun run packages/cc-gateway/src/server.ts
+ExecStart=/home/ubuntu/.bun/bin/bun run packages/agent-gateway/src/server.ts
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
@@ -26,7 +26,7 @@ Environment=HOME=/home/ubuntu
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=false
-ReadWritePaths=/data/projects /home/ubuntu/.cc-gateway /home/ubuntu/.claude /tmp
+ReadWritePaths=/data/projects /home/ubuntu/.agent-gateway /home/ubuntu/.claude /tmp
 
 [Install]
 WantedBy=multi-user.target

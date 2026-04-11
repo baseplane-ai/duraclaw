@@ -1,8 +1,8 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import fs from 'node:fs/promises'
-import path from 'node:path'
 import os from 'node:os'
-import { handleFileTree, handleFileContents, handleGitStatus } from './files.js'
+import path from 'node:path'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { handleFileContents, handleFileTree, handleGitStatus } from './files.js'
 
 let tmpDir: string
 
@@ -49,9 +49,7 @@ describe('handleFileTree', () => {
     const files = data.entries.filter((e: any) => e.type === 'file')
     const firstFileIndex = data.entries.findIndex((e: any) => e.type === 'file')
     const lastDirIndex =
-      data.entries.length -
-      1 -
-      [...data.entries].reverse().findIndex((e: any) => e.type === 'dir')
+      data.entries.length - 1 - [...data.entries].reverse().findIndex((e: any) => e.type === 'dir')
 
     if (dirs.length > 0 && files.length > 0) {
       expect(lastDirIndex).toBeLessThan(firstFileIndex)
