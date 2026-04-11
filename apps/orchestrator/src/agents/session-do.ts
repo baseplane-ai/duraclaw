@@ -385,6 +385,24 @@ export class SessionDO extends Agent<Env, SessionState> {
   }
 
   @callable()
+  async interrupt(): Promise<{ ok: boolean; error?: string }> {
+    if (this.state.status !== 'running') {
+      return { ok: false, error: `Cannot interrupt: status is '${this.state.status}'` }
+    }
+    this.sendToGateway({ type: 'interrupt', session_id: this.state.session_id ?? '' })
+    return { ok: true }
+  }
+
+  @callable()
+  async getContextUsage(): Promise<{ ok: boolean; error?: string }> {
+    if (!this.vpsWs) {
+      return { ok: false, error: 'No active gateway connection' }
+    }
+    this.sendToGateway({ type: 'get-context-usage', session_id: this.state.session_id ?? '' })
+    return { ok: true }
+  }
+
+  @callable()
   async rewind(messageId: string): Promise<{ ok: boolean; error?: string }> {
     if (this.vpsWs) {
       sendCommand(this.vpsWs, {

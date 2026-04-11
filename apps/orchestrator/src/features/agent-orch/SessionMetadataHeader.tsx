@@ -7,6 +7,7 @@ import { Badge } from '~/components/ui/badge'
 import { Button } from '~/components/ui/button'
 import type { SessionState } from '~/lib/types'
 import { cn } from '~/lib/utils'
+import type { ContextUsage } from './use-coding-agent'
 
 const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
   idle: 'outline',
@@ -20,6 +21,8 @@ const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | '
 interface SessionMetadataHeaderProps {
   state: SessionState | null
   onStop: (reason: string) => void
+  onInterrupt?: () => void
+  contextUsage?: ContextUsage | null
   sessionResult?: { total_cost_usd: number; duration_ms: number } | null
   wsReadyState?: number
 }
@@ -35,6 +38,8 @@ function formatDuration(ms: number): string {
 export function SessionMetadataHeader({
   state,
   onStop,
+  onInterrupt,
+  contextUsage,
   sessionResult,
   wsReadyState,
 }: SessionMetadataHeaderProps) {
@@ -98,9 +103,44 @@ export function SessionMetadataHeader({
         <span className="text-muted-foreground">{formatDuration(sessionResult.duration_ms)}</span>
       )}
 
+      {contextUsage && contextUsage.maxTokens > 0 && (
+        <div
+          className="flex items-center gap-1.5"
+          title={`${contextUsage.totalTokens.toLocaleString()} / ${contextUsage.maxTokens.toLocaleString()} tokens (${Math.round(contextUsage.percentage)}%)`}
+          data-testid="context-usage"
+        >
+          <div className="h-2 w-16 overflow-hidden rounded-full bg-muted">
+            <div
+              className={cn(
+                'h-full rounded-full transition-all',
+                contextUsage.percentage >= 90
+                  ? 'bg-red-500'
+                  : contextUsage.percentage >= 70
+                    ? 'bg-yellow-500'
+                    : 'bg-green-500',
+              )}
+              style={{ width: `${Math.min(contextUsage.percentage, 100)}%` }}
+            />
+          </div>
+          <span className="font-mono text-muted-foreground text-xs">
+            {Math.round(contextUsage.percentage)}%
+          </span>
+        </div>
+      )}
+
       {state.error && <span className="text-destructive">Error: {state.error}</span>}
 
-      <div className="ml-auto">
+      <div className="ml-auto flex items-center gap-2">
+        {canStop && onInterrupt && (
+          <Button
+            variant="secondary"
+            size="sm"
+            aria-label="Interrupt session"
+            onClick={onInterrupt}
+          >
+            Interrupt
+          </Button>
+        )}
         {canStop && (
           <Button
             variant="destructive"

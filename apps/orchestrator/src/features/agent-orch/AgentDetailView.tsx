@@ -20,8 +20,10 @@ export function AgentDetailView({ name: _name, agent }: AgentDetailViewProps) {
     streamingContent,
     sessionResult,
     kataState,
+    contextUsage,
     wsReadyState,
     stop,
+    interrupt,
     resolveGate,
     sendMessage,
     rewind,
@@ -38,6 +40,8 @@ export function AgentDetailView({ name: _name, agent }: AgentDetailViewProps) {
       <SessionMetadataHeader
         state={state}
         onStop={stop}
+        onInterrupt={interrupt}
+        contextUsage={contextUsage}
         sessionResult={sessionResult}
         wsReadyState={wsReadyState}
       />

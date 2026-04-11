@@ -25,6 +25,15 @@ export interface GatewayEvent {
   [key: string]: unknown
 }
 
+export interface ContextUsage {
+  totalTokens: number
+  maxTokens: number
+  percentage: number
+  model?: string
+  isAutoCompactEnabled?: boolean
+  autoCompactThreshold?: number
+}
+
 export interface UseCodingAgentResult {
   state: SessionState | null
   events: Array<{ ts: string; type: string; data?: unknown }>
@@ -32,10 +41,13 @@ export interface UseCodingAgentResult {
   streamingContent: string
   sessionResult: { total_cost_usd: number; duration_ms: number } | null
   kataState: KataSessionState | null
+  contextUsage: ContextUsage | null
   wsReadyState: number
   spawn: (config: SpawnConfig) => Promise<unknown>
   stop: (reason?: string) => Promise<unknown>
   abort: (reason?: string) => Promise<unknown>
+  interrupt: () => Promise<unknown>
+  getContextUsage: () => Promise<unknown>
   resolveGate: (gateId: string, response: GateResponse) => Promise<unknown>
   sendMessage: (content: string | ContentBlock[]) => Promise<unknown>
   rewind: (turnIndex: number) => Promise<{ ok: boolean; error?: string }>
@@ -58,6 +70,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     duration_ms: number
   } | null>(null)
   const [kataState, setKataState] = useState<KataSessionState | null>(null)
+  const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null)
   const hydratedRef = useRef(false)
   const knownEventUuidsRef = useRef<Set<string>>(new Set())
   const optimisticIdsRef = useRef<Set<string>>(new Set())
@@ -96,6 +109,19 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           // Capture kata session state
           if (event.type === 'kata_state') {
             setKataState((event as unknown as { kata_state: KataSessionState }).kata_state)
+          }
+
+          // Capture context usage from get-context-usage response
+          if (event.type === 'context_usage') {
+            const usage = (event as unknown as { usage: Record<string, unknown> }).usage
+            setContextUsage({
+              totalTokens: (usage.totalTokens as number) ?? 0,
+              maxTokens: (usage.maxTokens as number) ?? 0,
+              percentage: (usage.percentage as number) ?? 0,
+              model: usage.model as string | undefined,
+              isAutoCompactEnabled: usage.isAutoCompactEnabled as boolean | undefined,
+              autoCompactThreshold: usage.autoCompactThreshold as number | undefined,
+            })
           }
 
           // Capture cost/duration from result event
@@ -255,6 +281,14 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     [connection],
   )
 
+  const interrupt = useCallback(async () => {
+    return connection.call('interrupt', [])
+  }, [connection])
+
+  const getContextUsage = useCallback(async () => {
+    return connection.call('getContextUsage', [])
+  }, [connection])
+
   const resolveGate = useCallback(
     async (gateId: string, response: GateResponse) => {
       return connection.call('resolveGate', [gateId, response])
@@ -323,10 +357,13 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     streamingContent,
     sessionResult,
     kataState,
+    contextUsage,
     wsReadyState,
     spawn,
     stop,
     abort,
+    interrupt,
+    getContextUsage,
     resolveGate,
     sendMessage,
     rewind,
