@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "axi": {
+      "source": "kunchenguid/axi",
+      "sourceType": "github",
+      "computedHash": "b229aa9915629b18e7efac7c99dbe2c8bc893e6e082d87cc954600c88d0b5aa0"
+    }
+  }
+}

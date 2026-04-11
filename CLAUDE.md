@@ -114,6 +114,37 @@ bun run src/server.ts   # Run executor locally
 - **Progress:** `planning/progress.md` — phase/subphase status tracker
 - **Specs:** `planning/specs/` — individual feature specs (linked from progress tracker)
 
+## UI Testing
+
+Use `chrome-devtools-axi` (not curl/WebFetch) for browser verification of UI changes — it handles SPAs, JS rendering, and interaction.
+
+**Test user credentials:**
+- Email: `agent.verify+duraclaw@example.com`
+- Password: `duraclaw-test-password`
+- Name: `agent-verify`
+
+**Common workflow:**
+```bash
+chrome-devtools-axi open <url>          # Navigate to page
+chrome-devtools-axi snapshot            # Get accessibility tree with @refs
+chrome-devtools-axi click @<ref>        # Click an element
+chrome-devtools-axi fill @<ref> <text>  # Fill an input field
+chrome-devtools-axi screenshot          # Visual capture
+chrome-devtools-axi eval <js>           # Run JS in page context
+```
+
+**Login flow example:**
+```bash
+chrome-devtools-axi open http://localhost:43173/login
+chrome-devtools-axi snapshot
+chrome-devtools-axi fill @<email-ref> agent.verify+duraclaw@example.com
+chrome-devtools-axi fill @<password-ref> duraclaw-test-password
+chrome-devtools-axi click @<submit-ref>
+chrome-devtools-axi snapshot            # Verify redirect to dashboard
+```
+
+**GitHub operations:** Use `gh-axi` instead of `gh` for issues, PRs, runs, releases.
+
 ## Conventions
 
 - Commit messages: `type(scope): description` (feat, fix, chore, refactor, docs, test)
