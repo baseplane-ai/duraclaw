@@ -174,22 +174,4 @@ Port baseplane's agent-orch UI + extract shared ai-elements package. Replaces bu
 
 > Quick wins 3-9, 11 shipped via agent-orch drop-in (A.3).
 
----
-
-## Verification Gap Debug Session (2026-04-11)
-
-Investigated 10 gaps from `planning/research/2026-04-11-verification-gaps.md`. Results:
-
-| Gap | Description | Result |
-|-----|-------------|--------|
-| G1/G2 | Session lifecycle dies after first result | **Fixed** — multi-turn loop with resume |
-| G3 | session_state_changed not emitted | **Not a bug** — SDK doesn't emit in permissionMode: default |
-| G4 | PostToolUse file_changed | **Verified** — fires correctly, `/tmp/duraclaw-test-g8.txt` path rendered |
-| G5 | Forked sessions not in listing | **Fixed** — SDK listSessions() as primary source |
-| G6 | Listing lacks summary/tag | **Fixed** — fields added to SdkSessionInfo + extraction |
-| G7 | ChatThread shows "No messages" | **Fixed** — getMessages reads events table; WS route + super.onMessage for RPC |
-| G8 | Gate resolution untested | **Verified** — waiting_gate status, Approve/Deny buttons, tool name displayed |
-| G9 | Reconnect untested | **Verified** — completed session renders messages + metadata on reload |
-| G10 | Codex/OpenCode availability | **Fixed + Verified** — OAuth works, capability check updated, gpt-5.4 returns correct answer |
-
-Commits: `3e7db96`, `91d2934`, `bf971e4`, `90ce604`
+> Verification gap results: see `planning/research/2026-04-11-verification-gaps.md` and commits `3e7db96..b7c9da3`.
