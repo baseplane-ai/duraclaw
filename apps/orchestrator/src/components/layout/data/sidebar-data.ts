@@ -1,4 +1,4 @@
-import { Command, LayoutDashboard, MessagesSquare, Settings } from 'lucide-react'
+import { Clock, Command, LayoutDashboard, MessagesSquare, Settings } from 'lucide-react'
 import type { SidebarData } from '../types'
 
 export const sidebarData: SidebarData = {
@@ -27,6 +27,11 @@ export const sidebarData: SidebarData = {
           title: 'Sessions',
           url: '/',
           icon: MessagesSquare,
+        },
+        {
+          title: 'History',
+          url: '/history',
+          icon: Clock,
         },
         {
           title: 'Settings',

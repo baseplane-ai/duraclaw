@@ -216,15 +216,88 @@ export class ProjectRegistry extends DurableObject<Env> {
          archived
        FROM sessions
        WHERE user_id = ?
-         AND (prompt LIKE ? OR project LIKE ? OR id LIKE ? OR title LIKE ?)
+         AND (prompt LIKE ? OR project LIKE ? OR id LIKE ? OR title LIKE ? OR summary LIKE ?)
        ORDER BY updated_at DESC`,
         userId,
         pattern,
         pattern,
         pattern,
         pattern,
+        pattern,
       )
       .toArray() as unknown as SessionSummary[]
+  }
+
+  async listSessionsPaginated(
+    userId: string,
+    opts: {
+      sortBy?: 'updated_at' | 'created_at' | 'total_cost_usd' | 'duration_ms' | 'num_turns'
+      sortDir?: 'asc' | 'desc'
+      status?: string
+      project?: string
+      model?: string
+      limit?: number
+      offset?: number
+    },
+  ): Promise<{ sessions: SessionSummary[]; total: number }> {
+    await this.ensureInit()
+    const conditions: string[] = ['user_id = ?']
+    const params: unknown[] = [userId]
+
+    if (opts.status) {
+      conditions.push('status = ?')
+      params.push(opts.status)
+    }
+    if (opts.project) {
+      conditions.push('project = ?')
+      params.push(opts.project)
+    }
+    if (opts.model) {
+      conditions.push('model = ?')
+      params.push(opts.model)
+    }
+
+    const where = conditions.join(' AND ')
+    const sortCol = opts.sortBy ?? 'updated_at'
+    const sortDir = opts.sortDir === 'asc' ? 'ASC' : 'DESC'
+    const limit = opts.limit ?? 50
+    const offset = opts.offset ?? 0
+
+    const total = (
+      this.ctx.storage.sql
+        .exec(`SELECT COUNT(*) as cnt FROM sessions WHERE ${where}`, ...params)
+        .toArray()[0] as { cnt: number }
+    ).cnt
+
+    const sessions = this.ctx.storage.sql
+      .exec(
+        `SELECT
+         id,
+         user_id AS userId,
+         project,
+         status,
+         model,
+         created_at,
+         updated_at,
+         duration_ms,
+         total_cost_usd,
+         num_turns,
+         prompt,
+         summary,
+         title,
+         tag,
+         archived
+       FROM sessions
+       WHERE ${where}
+       ORDER BY ${sortCol} ${sortDir}
+       LIMIT ? OFFSET ?`,
+        ...params,
+        limit,
+        offset,
+      )
+      .toArray() as unknown as SessionSummary[]
+
+    return { sessions, total }
   }
 
   async listSessionsByProject(project: string, userId: string): Promise<SessionSummary[]> {

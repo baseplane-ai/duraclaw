@@ -3,6 +3,7 @@
  */
 
 import {
+  CalendarIcon,
   ChevronDownIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
@@ -25,6 +26,26 @@ import { cn } from '~/lib/utils'
 import { SessionListItem } from './SessionListItem'
 import { SpawnAgentForm, type SpawnFormConfig } from './SpawnAgentForm'
 import type { SessionRecord } from './use-agent-orch-sessions'
+
+export function getDateGroup(dateStr: string): string {
+  const date = new Date(dateStr)
+  const now = new Date()
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const yesterday = new Date(today)
+  yesterday.setDate(yesterday.getDate() - 1)
+  const weekAgo = new Date(today)
+  weekAgo.setDate(weekAgo.getDate() - 7)
+  const monthAgo = new Date(today)
+  monthAgo.setMonth(monthAgo.getMonth() - 1)
+
+  if (date >= today) return 'Today'
+  if (date >= yesterday) return 'Yesterday'
+  if (date >= weekAgo) return 'This Week'
+  if (date >= monthAgo) return 'This Month'
+  return 'Older'
+}
+
+export const DATE_GROUP_ORDER = ['Today', 'Yesterday', 'This Week', 'This Month', 'Older']
 
 interface SessionSidebarProps {
   sessions: SessionRecord[]
@@ -56,6 +77,7 @@ export function SessionSidebar({
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [showArchived, setShowArchived] = useState(false)
+  const [groupBy, setGroupBy] = useState<'project' | 'date'>('project')
 
   const filteredSessions = sessions.filter((s) => {
     if (!showArchived && s.archived) return false
@@ -77,10 +99,15 @@ export function SessionSidebar({
 
   const groups = new Map<string, SessionRecord[]>()
   for (const session of filteredSessions) {
-    const project = session.project || 'unknown'
-    if (!groups.has(project)) groups.set(project, [])
-    groups.get(project)?.push(session)
+    const key = groupBy === 'date' ? getDateGroup(session.created_at) : session.project || 'unknown'
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key)?.push(session)
   }
+
+  const sortedGroupKeys =
+    groupBy === 'date'
+      ? DATE_GROUP_ORDER.filter((k) => groups.has(k))
+      : Array.from(groups.keys()).sort()
 
   const toggleGroup = (project: string) => {
     setCollapsedGroups((prev) => {
@@ -191,6 +218,26 @@ export function SessionSidebar({
               />
               Show archived
             </label>
+            <div className="flex gap-1">
+              <Button
+                variant={groupBy === 'project' ? 'secondary' : 'ghost'}
+                size="sm"
+                className="h-6 text-xs"
+                onClick={() => setGroupBy('project')}
+              >
+                <FolderIcon className="mr-1 size-3" />
+                Project
+              </Button>
+              <Button
+                variant={groupBy === 'date' ? 'secondary' : 'ghost'}
+                size="sm"
+                className="h-6 text-xs"
+                onClick={() => setGroupBy('date')}
+              >
+                <CalendarIcon className="mr-1 size-3" />
+                Date
+              </Button>
+            </div>
           </div>
 
           <ScrollArea className="flex-1">
@@ -202,45 +249,48 @@ export function SessionSidebar({
                     : 'No sessions match your search'}
                 </p>
               )}
-              {Array.from(groups.entries()).map(([project, groupSessions]) => (
-                <div key={project} data-testid="session-tree">
-                  <button
-                    type="button"
-                    onClick={() => toggleGroup(project)}
-                    className="flex w-full items-center gap-1 rounded px-2 py-0.5 text-xs font-medium text-muted-foreground hover:bg-accent"
-                  >
-                    {collapsedGroups.has(project) ? (
-                      <>
-                        <ChevronRightIcon className="size-3" />
-                        <FolderIcon className="size-3" />
-                      </>
-                    ) : (
-                      <>
-                        <ChevronDownIcon className="size-3" />
-                        <FolderOpenIcon className="size-3" />
-                      </>
+              {sortedGroupKeys.map((key) => {
+                const groupSessions = groups.get(key) ?? []
+                return (
+                  <div key={key} data-testid="session-tree">
+                    <button
+                      type="button"
+                      onClick={() => toggleGroup(key)}
+                      className="flex w-full items-center gap-1 rounded px-2 py-0.5 text-xs font-medium text-muted-foreground hover:bg-accent"
+                    >
+                      {collapsedGroups.has(key) ? (
+                        <>
+                          <ChevronRightIcon className="size-3" />
+                          <FolderIcon className="size-3" />
+                        </>
+                      ) : (
+                        <>
+                          <ChevronDownIcon className="size-3" />
+                          <FolderOpenIcon className="size-3" />
+                        </>
+                      )}
+                      {key}
+                      <span className="ml-auto">{groupSessions.length}</span>
+                    </button>
+                    {!collapsedGroups.has(key) && (
+                      <div className="ml-2 space-y-1">
+                        {groupSessions.map((session) => (
+                          <SessionListItem
+                            key={session.id}
+                            session={session}
+                            isSelected={selectedSessionId === session.id}
+                            onClick={() => onSelectSession(session.id)}
+                            onArchive={(archived) => onArchiveSession?.(session.id, archived)}
+                            onRename={(title) => onRenameSession?.(session.id, title)}
+                            onTag={(tag) => onTagSession?.(session.id, tag)}
+                            onFork={() => onForkSession?.(session.id)}
+                          />
+                        ))}
+                      </div>
                     )}
-                    {project}
-                    <span className="ml-auto">{groupSessions.length}</span>
-                  </button>
-                  {!collapsedGroups.has(project) && (
-                    <div className="ml-2 space-y-1">
-                      {groupSessions.map((session) => (
-                        <SessionListItem
-                          key={session.id}
-                          session={session}
-                          isSelected={selectedSessionId === session.id}
-                          onClick={() => onSelectSession(session.id)}
-                          onArchive={(archived) => onArchiveSession?.(session.id, archived)}
-                          onRename={(title) => onRenameSession?.(session.id, title)}
-                          onTag={(tag) => onTagSession?.(session.id, tag)}
-                          onFork={() => onForkSession?.(session.id)}
-                        />
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ))}
+                  </div>
+                )
+              })}
             </div>
           </ScrollArea>
         </>

@@ -5,9 +5,10 @@
  */
 
 import { act, renderHook, waitFor } from '@testing-library/react'
-import { afterEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { REGISTRY_MIGRATIONS } from '~/agents/project-registry-migrations'
 import { runMigrations } from '~/lib/do-migrations'
+import { DATE_GROUP_ORDER, getDateGroup } from './SessionSidebar'
 import type { SessionRecord } from './use-agent-orch-sessions'
 import { useAgentOrchSessions } from './use-agent-orch-sessions'
 
@@ -781,5 +782,113 @@ describe('updateSession field filtering', () => {
     const { setClauses } = buildSetClauses({ archived: 1 })
     const sql = `UPDATE sessions SET ${setClauses.join(', ')} WHERE id = ?`
     expect(sql).toBe('UPDATE sessions SET updated_at = ?, archived = ? WHERE id = ?')
+  })
+})
+
+// ── Date grouping tests ─────────────────────────────────────────────
+
+describe('getDateGroup', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    // Pin "now" to 2026-04-11T12:00:00Z so date math is deterministic
+    vi.setSystemTime(new Date('2026-04-11T12:00:00Z'))
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  test('returns Today for a date from today', () => {
+    expect(getDateGroup('2026-04-11T08:00:00Z')).toBe('Today')
+  })
+
+  test('returns Today for the current moment', () => {
+    expect(getDateGroup('2026-04-11T12:00:00Z')).toBe('Today')
+  })
+
+  test('returns Yesterday for a date from yesterday', () => {
+    expect(getDateGroup('2026-04-10T15:00:00Z')).toBe('Yesterday')
+  })
+
+  test('returns This Week for a date 3 days ago', () => {
+    expect(getDateGroup('2026-04-08T10:00:00Z')).toBe('This Week')
+  })
+
+  test('returns This Week for a date exactly 6 days ago (within 7-day window)', () => {
+    expect(getDateGroup('2026-04-05T10:00:00Z')).toBe('This Week')
+  })
+
+  test('returns This Month for a date 2 weeks ago', () => {
+    expect(getDateGroup('2026-03-28T10:00:00Z')).toBe('This Month')
+  })
+
+  test('returns Older for a date more than a month ago', () => {
+    expect(getDateGroup('2026-02-01T00:00:00Z')).toBe('Older')
+  })
+
+  test('returns Older for a very old date', () => {
+    expect(getDateGroup('2024-01-01T00:00:00Z')).toBe('Older')
+  })
+})
+
+describe('DATE_GROUP_ORDER', () => {
+  test('contains exactly 5 groups in chronological order', () => {
+    expect(DATE_GROUP_ORDER).toEqual(['Today', 'Yesterday', 'This Week', 'This Month', 'Older'])
+  })
+})
+
+describe('Session date grouping logic', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-04-11T12:00:00Z'))
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  test('groups sessions by date bucket', () => {
+    const sessions: Pick<SessionRecord, 'id' | 'created_at' | 'project'>[] = [
+      { id: 's1', created_at: '2026-04-11T08:00:00Z', project: 'proj-a' },
+      { id: 's2', created_at: '2026-04-10T15:00:00Z', project: 'proj-a' },
+      { id: 's3', created_at: '2026-04-08T10:00:00Z', project: 'proj-b' },
+      { id: 's4', created_at: '2026-02-01T00:00:00Z', project: 'proj-b' },
+    ]
+
+    const groups = new Map<string, typeof sessions>()
+    for (const session of sessions) {
+      const key = getDateGroup(session.created_at)
+      if (!groups.has(key)) groups.set(key, [])
+      groups.get(key)?.push(session)
+    }
+
+    expect(groups.get('Today')).toHaveLength(1)
+    expect(groups.get('Today')![0].id).toBe('s1')
+    expect(groups.get('Yesterday')).toHaveLength(1)
+    expect(groups.get('Yesterday')![0].id).toBe('s2')
+    expect(groups.get('This Week')).toHaveLength(1)
+    expect(groups.get('This Week')![0].id).toBe('s3')
+    expect(groups.get('Older')).toHaveLength(1)
+    expect(groups.get('Older')![0].id).toBe('s4')
+  })
+
+  test('sortedGroupKeys filters and orders by DATE_GROUP_ORDER', () => {
+    const groups = new Map<string, unknown[]>()
+    groups.set('Older', [{}])
+    groups.set('Today', [{}, {}])
+    // 'Yesterday', 'This Week', 'This Month' are absent
+
+    const sortedGroupKeys = DATE_GROUP_ORDER.filter((k) => groups.has(k))
+    expect(sortedGroupKeys).toEqual(['Today', 'Older'])
+  })
+
+  test('project grouping sorts keys alphabetically', () => {
+    const groups = new Map<string, unknown[]>()
+    groups.set('zeta-project', [{}])
+    groups.set('alpha-project', [{}])
+    groups.set('mid-project', [{}])
+
+    const sortedGroupKeys = Array.from(groups.keys()).sort()
+    expect(sortedGroupKeys).toEqual(['alpha-project', 'mid-project', 'zeta-project'])
   })
 })

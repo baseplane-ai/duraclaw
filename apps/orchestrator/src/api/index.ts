@@ -116,6 +116,27 @@ export function createApiApp() {
     return c.json({ sessions })
   })
 
+  app.get('/api/sessions/search', async (c) => {
+    const q = c.req.query('q')
+    if (!q) return c.json({ sessions: [] })
+    const sessions = (await getRegistry(c).searchSessions(c.get('userId'), q)) as SessionSummary[]
+    return c.json({ sessions })
+  })
+
+  app.get('/api/sessions/history', async (c) => {
+    const registry = getRegistry(c)
+    const result = await registry.listSessionsPaginated(c.get('userId'), {
+      sortBy: (c.req.query('sortBy') as any) || undefined,
+      sortDir: (c.req.query('sortDir') as any) || undefined,
+      status: c.req.query('status') || undefined,
+      project: c.req.query('project') || undefined,
+      model: c.req.query('model') || undefined,
+      limit: c.req.query('limit') ? Number(c.req.query('limit')) : undefined,
+      offset: c.req.query('offset') ? Number(c.req.query('offset')) : undefined,
+    })
+    return c.json(result)
+  })
+
   app.post('/api/sessions', async (c) => {
     const userId = c.get('userId')
     const body = (await c.req.json()) as CreateSessionBody
