@@ -28,7 +28,6 @@ const MODEL_OPTIONS = [
   { value: 'claude-opus-4-6', label: 'claude-opus-4-6', agent: 'claude' },
   { value: 'claude-sonnet-4-6', label: 'claude-sonnet-4-6', agent: 'claude' },
   { value: 'claude-sonnet-4-5', label: 'claude-sonnet-4-5', agent: 'claude' },
-  { value: '', label: 'codex (default)', agent: 'codex' },
   { value: 'gpt-5.4', label: 'codex — gpt-5.4', agent: 'codex' },
   { value: 'gpt-5.4-mini', label: 'codex — gpt-5.4-mini', agent: 'codex' },
 ]
