@@ -1,6 +1,6 @@
 # Duraclaw v2 — Progress Tracker
 
-> Updated 2026-04-11 (late). Phase 3.1 + 3.2 session operations UI shipped and verified. Rename/tag/fork in sidebar, rewind button improved.
+> Updated 2026-04-11 (late). Phase 3.3 session history shipped — date grouping, summary search, history page.
 
 **Status key:** `not-started` | `spec` | `in-progress` | `done`
 
@@ -92,7 +92,7 @@ Port baseplane's agent-orch UI + extract shared ai-elements package. Replaces bu
 | 3.1 | Session Operations | done | Rename/tag dialogs + fork menu in sidebar. Migration v5 adds title/tag columns. Fork proxies to gateway. VP 7/7 pass. |
 | 3.2 | Session Rollback / Rewind | done | Rewind button on message hover (HistoryIcon + label + tooltip). `useCodingAgent.rewind()` wired. VP verified. |
 | 3.2b | Context Compaction | done | Interrupt button + context usage bar in header. DO RPC wired to gateway. VP 6/6 pass. |
-| 3.3 | Session History | not-started | FTS5 pattern from Think — implement in DO SQLite |
+| 3.3 | Session History | done | Date-grouped sidebar, summary search, /history page with sort/filter/pagination. FTS5 deferred. |
 | 3.4 | New Session Dialog | done | Shipped in A.3 — SpawnAgentForm with project list from gateway. |
 | 3.5 | Image Paste + File Upload | done | Shipped in A.3 — MessageInput with paste, file picker, ContentBlock support. |
 
