@@ -1,0 +1,132 @@
+{
+  "verification_date": "2026-04-11",
+  "workflow_id": "VF-c37c-0411",
+  "specs_verified": ["#13", "#16", "#17"],
+  "fix_commits": ["3f5f07d"],
+  "summary": {
+    "total_steps": 21,
+    "passed": 8,
+    "failed": 6,
+    "partial": 3,
+    "skipped": 2,
+    "blocked": 5
+  },
+  "results": {
+    "spec_13_sdk_feature_expansion": {
+      "VP1_interrupt": {
+        "result": "FAIL",
+        "evidence": "SDK returns subtype:error_during_execution on interrupt. VP expects no error and session stays alive."
+      },
+      "VP2_context_usage": {
+        "result": "PASS",
+        "evidence": "totalTokens:30117, maxTokens:1000000, percentage:3, categories array with 10 entries, model:claude-opus-4-6[1m]"
+      },
+      "VP3_set_model": {
+        "result": "PASS",
+        "evidence": "set-model to claude-haiku-4-6 accepted, no error, session completed with subtype:success"
+      },
+      "VP4_rewind_files": {
+        "result": "FAIL",
+        "evidence": "Session completes after first turn (result event, query nulled). Rewind sent after result has no active Query. Multi-turn session pattern not supported."
+      },
+      "VP5_session_state_changed": {
+        "result": "FAIL",
+        "evidence": "No session_state_changed events received despite forwarding code at claude.ts:404-411. SDK may not emit these in default permission mode."
+      },
+      "VP6_fork_session": {
+        "result": "PARTIAL",
+        "evidence": "Fork API returns valid session_id (dcc5c887). But forked session not found in listing. listSdkSessions may not discover forked sessions."
+      },
+      "VP7_rename_tag": {
+        "result": "PARTIAL",
+        "evidence": "PATCH returns {ok:true}. But session list doesn't include summary/tag fields."
+      },
+      "VP8_permission_flow": {
+        "result": "PARTIAL",
+        "evidence": "permission_request received for Write tool. permission-response allow sent, tool executed (result:success). No file_changed event from PostToolUse hook."
+      },
+      "VP9_thinking_effort": {
+        "result": "PASS",
+        "evidence": "Session started with thinking:{type:adaptive} and effort:high. No errors. Session completed with subtype:success."
+      }
+    },
+    "spec_16_pluggable_agent_gateway": {
+      "VP1_claude_e2e": {
+        "result": "PASS",
+        "evidence": "session.init with model claude-opus-4-6[1m] + 58 tools. assistant events received. result subtype:success duration_ms:44480 is_error:false."
+      },
+      "VP2_codex_e2e": {
+        "result": "SKIP",
+        "evidence": "OPENAI_API_KEY not set. Codex CLI installed but cannot run without API key."
+      },
+      "VP3_opencode_e2e": {
+        "result": "SKIP",
+        "evidence": "opencode CLI not installed, sidecar not running."
+      },
+      "VP4_capabilities": {
+        "result": "PASS",
+        "evidence": "3 agents returned: claude (available:true), codex (available:false), opencode (available:false). Correct supportedCommands for each."
+      },
+      "VP5_unknown_agent": {
+        "result": "PASS",
+        "evidence": "Error message matches spec exactly: Agent \"unknown\" is not available. Available agents: claude, codex, opencode"
+      }
+    },
+    "spec_17_agent_orch_drop_in": {
+      "VP1_ai_elements_build": {
+        "result": "PASS",
+        "evidence": "Build: dist/index.js 156.72KB, dist/index.d.ts 63.42KB. Typecheck: 6/6 passed, no errors."
+      },
+      "VP2_session_do_relay": {
+        "result": "BLOCKED",
+        "evidence": "API session creation fixed (agents vite plugin + onRequest /create). Browser login still fails with 'Invalid origin'. API-based creation works post-fix."
+      },
+      "VP3_gate_resolution": {
+        "result": "BLOCKED",
+        "evidence": "Depends on working orchestrator session lifecycle."
+      },
+      "VP4_ui_renders": {
+        "result": "BLOCKED",
+        "evidence": "Browser login fails with 'Invalid origin' despite trustedOrigins config. Better Auth origin validation issue."
+      },
+      "VP5_session_persistence": {
+        "result": "BLOCKED",
+        "evidence": "Depends on working session creation and UI."
+      },
+      "VP6_reconnect_resilience": {
+        "result": "BLOCKED",
+        "evidence": "Depends on working session lifecycle."
+      },
+      "VP7_deleted_code": {
+        "result": "PASS",
+        "evidence": "All 3 files absent: chat-view.tsx, ws-chat-transport.ts, message-parts/. Typecheck passes."
+      }
+    }
+  },
+  "fixes_applied": [
+    {
+      "file": "apps/orchestrator/vite.config.ts",
+      "fix": "Added agents() vite plugin for @callable() decorator transformation",
+      "root_cause": "Wrangler dev bundle emitted raw @callable() decorators as invalid JS syntax"
+    },
+    {
+      "file": "apps/orchestrator/src/agents/session-do.ts",
+      "fix": "Added onRequest() handler for POST /create that delegates to @callable spawn()",
+      "root_cause": "API route fetched /create on DO but no HTTP handler existed (only WS RPC)"
+    },
+    {
+      "file": "apps/orchestrator/.dev.vars",
+      "fix": "Changed BETTER_AUTH_URL from 127.0.0.1 to localhost",
+      "root_cause": "Origin mismatch between browser (localhost) and auth config (127.0.0.1)"
+    }
+  ],
+  "known_gaps": [
+    "Multi-turn session lifecycle: stream-input between turns not implemented; rewind requires active Query",
+    "Session listing doesn't return summary/tag fields from SDK sessions",
+    "Fork creates session but listing doesn't discover it",
+    "PostToolUse hook file_changed event not emitting (may be SDK timing issue)",
+    "session_state_changed events not received from SDK in default permission mode",
+    "Browser login 'Invalid origin' persists despite trustedOrigins config",
+    "Missing tests for SessionDO.onRequest() handler"
+  ]
+}
