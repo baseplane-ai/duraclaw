@@ -93,6 +93,46 @@ function AgentOrchContent() {
     [archiveSession],
   )
 
+  const handleRenameSession = useCallback(
+    (sessionId: string, title: string) => {
+      updateSession(sessionId, { title })
+    },
+    [updateSession],
+  )
+
+  const handleTagSession = useCallback(
+    (sessionId: string, tag: string | null) => {
+      updateSession(sessionId, { tag })
+    },
+    [updateSession],
+  )
+
+  const handleForkSession = useCallback(
+    async (sessionId: string) => {
+      try {
+        const resp = await fetch(`/api/sessions/${sessionId}/fork`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        })
+        if (!resp.ok) {
+          const err = (await resp.json()) as { error?: string }
+          console.error('[AgentOrch] Fork failed:', err.error)
+          return
+        }
+        const data = (await resp.json()) as { session_id: string }
+        // Select the forked session
+        if (data.session_id) {
+          setSelectedSessionId(data.session_id)
+          navigate({ to: '/', search: { session: data.session_id } })
+        }
+      } catch (err) {
+        console.error('[AgentOrch] Fork failed:', err)
+      }
+    },
+    [navigate],
+  )
+
   const handleStateChange = useCallback(
     (sessionId: string, patch: Record<string, unknown>) => {
       updateSession(sessionId, patch)
@@ -111,6 +151,9 @@ function AgentOrchContent() {
             onSelectSession={handleSelectSession}
             onSpawn={handleSpawn}
             onArchiveSession={handleArchiveSession}
+            onRenameSession={handleRenameSession}
+            onTagSession={handleTagSession}
+            onForkSession={handleForkSession}
             collapsed={sidebarCollapsed}
             onToggleCollapse={handleToggleSidebar}
           />

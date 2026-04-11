@@ -32,6 +32,9 @@ interface SessionSidebarProps {
   onSelectSession: (sessionId: string) => void
   onSpawn: (config: SpawnFormConfig) => void
   onArchiveSession?: (sessionId: string, archived: boolean) => void
+  onRenameSession?: (sessionId: string, title: string) => void
+  onTagSession?: (sessionId: string, tag: string | null) => void
+  onForkSession?: (sessionId: string) => void
   collapsed?: boolean
   onToggleCollapse?: () => void
 }
@@ -42,6 +45,9 @@ export function SessionSidebar({
   onSelectSession,
   onSpawn,
   onArchiveSession,
+  onRenameSession,
+  onTagSession,
+  onForkSession,
   collapsed,
   onToggleCollapse,
 }: SessionSidebarProps) {
@@ -55,7 +61,12 @@ export function SessionSidebar({
     if (!showArchived && s.archived) return false
     if (searchQuery) {
       const q = searchQuery.toLowerCase()
-      if (!s.id.toLowerCase().includes(q) && !(s.prompt ?? '').toLowerCase().includes(q))
+      if (
+        !s.id.toLowerCase().includes(q) &&
+        !(s.prompt ?? '').toLowerCase().includes(q) &&
+        !(s.title ?? '').toLowerCase().includes(q) &&
+        !(s.tag ?? '').toLowerCase().includes(q)
+      )
         return false
     }
     if (statusFilter === 'running') return s.status === 'running'
@@ -221,6 +232,9 @@ export function SessionSidebar({
                           isSelected={selectedSessionId === session.id}
                           onClick={() => onSelectSession(session.id)}
                           onArchive={(archived) => onArchiveSession?.(session.id, archived)}
+                          onRename={(title) => onRenameSession?.(session.id, title)}
+                          onTag={(tag) => onTagSession?.(session.id, tag)}
+                          onFork={() => onForkSession?.(session.id)}
                         />
                       ))}
                     </div>

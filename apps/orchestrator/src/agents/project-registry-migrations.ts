@@ -60,4 +60,20 @@ export const REGISTRY_MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 5,
+    description: 'Add title and tag columns for session operations',
+    up: (sql) => {
+      try {
+        sql.exec(`ALTER TABLE sessions ADD COLUMN title TEXT`)
+      } catch {
+        // Column already exists.
+      }
+      try {
+        sql.exec(`ALTER TABLE sessions ADD COLUMN tag TEXT`)
+      } catch {
+        // Column already exists.
+      }
+    },
+  },
 ]

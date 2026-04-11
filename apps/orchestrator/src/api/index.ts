@@ -253,6 +253,73 @@ export function createApiApp() {
     }
   })
 
+  app.post('/api/sessions/:id/fork', async (c) => {
+    const userId = c.get('userId')
+    const ownership = await getOwnedSession(c.env, c.req.param('id'), userId)
+    if (!ownership.ok) {
+      return c.json(
+        { error: ownership.status === 404 ? 'Session not found' : 'Forbidden' },
+        ownership.status,
+      )
+    }
+
+    const body = (await c.req.json()) as { up_to_message_id?: string; title?: string }
+    const projectName = ownership.session.project
+    const httpBase = (c.env.CC_GATEWAY_URL ?? '')
+      .replace(/^wss:/, 'https:')
+      .replace(/^ws:/, 'http:')
+    if (!httpBase) {
+      return c.json({ error: 'Gateway not configured' }, 502)
+    }
+
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (c.env.CC_GATEWAY_SECRET) {
+      headers.Authorization = `Bearer ${c.env.CC_GATEWAY_SECRET}`
+    }
+
+    // Find the SDK session ID from the SessionDO state
+    const doId = c.env.SESSION_AGENT.idFromString(ownership.session.id)
+    const sessionDO = c.env.SESSION_AGENT.get(doId)
+    const stateResp = await sessionDO.fetch(
+      new Request('https://session/state', {
+        headers: {
+          'x-partykit-room': ownership.session.id,
+          'x-user-id': userId,
+        },
+      }),
+    )
+    if (!stateResp.ok) {
+      return c.json({ error: 'Could not read session state' }, 500)
+    }
+    const sessionState = (await stateResp.json()) as { sdk_session_id?: string }
+    const sdkSessionId = sessionState.sdk_session_id
+    if (!sdkSessionId) {
+      return c.json({ error: 'Session has no SDK session ID — cannot fork' }, 400)
+    }
+
+    const gatewayUrl = new URL(
+      `/projects/${encodeURIComponent(projectName)}/sessions/${encodeURIComponent(sdkSessionId)}/fork`,
+      httpBase,
+    )
+
+    const response = await fetch(gatewayUrl.toString(), {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        up_to_message_id: body.up_to_message_id,
+        title: body.title,
+      }),
+    })
+
+    if (!response.ok) {
+      const text = await response.text()
+      return c.json({ error: `Fork failed: ${text}` }, response.status as any)
+    }
+
+    const result = (await response.json()) as { session_id: string }
+    return c.json({ session_id: result.session_id })
+  })
+
   app.post('/api/sessions/:id/abort', async (c) => {
     const userId = c.get('userId')
     const ownership = await getOwnedSession(c.env, c.req.param('id'), userId)

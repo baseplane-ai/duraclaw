@@ -481,6 +481,8 @@ export interface SessionSummary {
   num_turns?: number | null
   prompt?: string
   summary?: string
+  title?: string | null
+  tag?: string | null
   archived?: boolean
 }
 

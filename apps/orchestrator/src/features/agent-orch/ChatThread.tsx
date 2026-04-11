@@ -21,7 +21,7 @@ import {
   ToolCallListContent,
   ToolCallListHeader,
 } from '@duraclaw/ai-elements'
-import { FileIcon, GitForkIcon } from 'lucide-react'
+import { FileIcon, HistoryIcon } from 'lucide-react'
 import type { GateResponse, SessionState } from '~/lib/types'
 import { GateResolver } from './GateResolver'
 import { StreamingText } from './StreamingText'
@@ -69,16 +69,18 @@ export function ChatThread({
           />
         ) : (
           messages.map((msg, turnIndex) => {
-            const forkButton = onRewind ? (
+            const rewindButton = onRewind ? (
               <button
-                key={`fork-${msg.id}`}
+                key={`rewind-${msg.id}`}
                 type="button"
                 onClick={() => onRewind(turnIndex)}
-                aria-label="Fork conversation from this turn"
-                data-testid={`fork-turn-${turnIndex}`}
-                className="absolute right-2 top-2 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground group-hover:opacity-100"
+                aria-label="Rewind to this turn"
+                title="Rewind to this point"
+                data-testid={`rewind-turn-${turnIndex}`}
+                className="absolute right-2 top-2 flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground group-hover:opacity-100"
               >
-                <GitForkIcon className="size-3" />
+                <HistoryIcon className="size-3" />
+                <span>Rewind</span>
               </button>
             ) : null
 
@@ -93,7 +95,7 @@ export function ChatThread({
                     <p className="text-xs text-muted-foreground">{qa?.question || 'Question'}</p>
                     <p className="text-sm">{qa?.answer || ''}</p>
                   </div>
-                  {forkButton}
+                  {rewindButton}
                 </div>
               )
             }
@@ -119,7 +121,7 @@ export function ChatThread({
                       {userContent.text}
                     </MessageContent>
                   </Message>
-                  {forkButton}
+                  {rewindButton}
                 </div>
               )
             }
@@ -189,7 +191,7 @@ export function ChatThread({
                       </ToolCallList>
                     )}
                   </div>
-                  {forkButton}
+                  {rewindButton}
                 </div>
               )
             }
@@ -206,7 +208,7 @@ export function ChatThread({
                         <code className="rounded bg-muted px-1">{data?.path || 'unknown'}</code>
                       </span>
                     </div>
-                    {forkButton}
+                    {rewindButton}
                   </div>
                 )
               }

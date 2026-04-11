@@ -85,7 +85,9 @@ export class ProjectRegistry extends DurableObject<Env> {
          total_cost_usd,
          num_turns,
          prompt,
-         summary
+         summary,
+         title,
+         tag
        FROM sessions
        WHERE id = ?
        LIMIT 1`,
@@ -112,6 +114,8 @@ export class ProjectRegistry extends DurableObject<Env> {
          num_turns,
          prompt,
          summary,
+         title,
+         tag,
          archived
        FROM sessions
        WHERE user_id = ?
@@ -158,6 +162,8 @@ export class ProjectRegistry extends DurableObject<Env> {
       'model',
       'prompt',
       'summary',
+      'title',
+      'tag',
       'duration_ms',
       'total_cost_usd',
       'num_turns',
@@ -205,12 +211,15 @@ export class ProjectRegistry extends DurableObject<Env> {
          num_turns,
          prompt,
          summary,
+         title,
+         tag,
          archived
        FROM sessions
        WHERE user_id = ?
-         AND (prompt LIKE ? OR project LIKE ? OR id LIKE ?)
+         AND (prompt LIKE ? OR project LIKE ? OR id LIKE ? OR title LIKE ?)
        ORDER BY updated_at DESC`,
         userId,
+        pattern,
         pattern,
         pattern,
         pattern,
