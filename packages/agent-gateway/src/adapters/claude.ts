@@ -34,6 +34,7 @@ interface SDKUserMsg {
 function createMessageQueue() {
   const pending: Array<{ role: 'user'; content: string | ContentBlock[] }> = []
   let resolve: (() => void) | null = null
+  let waitResolve: (() => void) | null = null
   let finished = false
 
   const iterable: AsyncIterable<SDKUserMsg> = {
@@ -68,10 +69,30 @@ function createMessageQueue() {
     push(msg: { role: 'user'; content: string | ContentBlock[] }) {
       pending.push(msg)
       resolve?.()
+      waitResolve?.()
+    },
+    /** Block until the next message is pushed, returning it as an SDKUserMsg. Returns null if done(). */
+    async waitForNext(): Promise<SDKUserMsg | null> {
+      while (true) {
+        if (pending.length > 0) {
+          const msg = pending.shift() as { role: 'user'; content: string | ContentBlock[] }
+          return {
+            type: 'user',
+            message: { role: 'user', content: msg.content },
+            parent_tool_use_id: null,
+          }
+        }
+        if (finished) return null
+        await new Promise<void>((r) => {
+          waitResolve = r
+        })
+        waitResolve = null
+      }
     },
     done() {
       finished = true
       resolve?.()
+      waitResolve?.()
     },
   }
 }
@@ -130,9 +151,9 @@ export class ClaudeAdapter implements AgentAdapter {
     console.log(`[agent-gateway] executeSession: resolving project=${cmd.project}`)
 
     // Resolve project path
-    const projectPath = await resolveProject(cmd.project)
-    console.log(`[agent-gateway] executeSession: projectPath=${projectPath}`)
-    if (!projectPath) {
+    const resolvedPath = await resolveProject(cmd.project)
+    console.log(`[agent-gateway] executeSession: projectPath=${resolvedPath}`)
+    if (!resolvedPath) {
       send(ws, {
         type: 'error',
         session_id: sessionId,
@@ -140,6 +161,7 @@ export class ClaudeAdapter implements AgentAdapter {
       })
       return
     }
+    const projectPath: string = resolvedPath
 
     // Set up message queue for streaming input
     const queue = createMessageQueue()
@@ -316,163 +338,190 @@ export class ClaudeAdapter implements AgentAdapter {
         ],
       }
 
-      // Build the streaming prompt: initial prompt + async iterable for follow-up messages
-      async function* messageGenerator(): AsyncGenerator<SDKUserMsg> {
+      /** Process all messages from a single SDK query() call. */
+      async function processQueryMessages(iter: any) {
+        ctx.query = iter
+
+        for await (const message of iter) {
+          console.log(`[agent-gateway] executeSession: message type=${message.type}`)
+          if (ac.signal.aborted) break
+
+          if (message.type === 'system' && (message as any).subtype === 'init') {
+            sdkSessionId = (message as any).session_id ?? null
+            const model = (message as any).model ?? null
+            const tools = (message as any).tools ?? []
+
+            send(ws, {
+              type: 'session.init',
+              session_id: sessionId,
+              sdk_session_id: sdkSessionId ?? null,
+              project: cmd.project,
+              model,
+              tools,
+            })
+
+            // Drain command queue now that Query is available
+            if (ctx.commandQueue.length > 0) {
+              for (const queuedCmd of ctx.commandQueue) {
+                await handleQueryCommand(ctx, queuedCmd, ws)
+              }
+              ctx.commandQueue = []
+            }
+          } else if (message.type === 'assistant' && (message as any).partial) {
+            // Partial assistant message -- emit incremental content
+            const content = (message as any).message?.content ?? []
+            const blocks = content.map((block: any) => {
+              if (block.type === 'text') {
+                return { type: 'text', id: block.id ?? '', delta: block.text ?? '' }
+              }
+              if (block.type === 'tool_use') {
+                return {
+                  type: 'tool_use',
+                  id: block.id ?? '',
+                  tool_name: block.name,
+                  input_delta:
+                    typeof block.input === 'string'
+                      ? block.input
+                      : JSON.stringify(block.input ?? ''),
+                }
+              }
+              return { type: block.type, id: block.id ?? '' }
+            })
+
+            send(ws, {
+              type: 'partial_assistant',
+              session_id: sessionId,
+              content: blocks,
+            })
+          } else if (message.type === 'assistant') {
+            send(ws, {
+              type: 'assistant',
+              session_id: sessionId,
+              uuid: (message as any).uuid,
+              content: (message as any).message?.content ?? [],
+            })
+          } else if (message.type === 'tool_use_summary') {
+            send(ws, {
+              type: 'tool_result',
+              session_id: sessionId,
+              uuid: (message as any).uuid ?? '',
+              content: (message as any).content ?? (message as any).results ?? [],
+            })
+          } else if (
+            message.type === 'system' &&
+            (message as any).subtype === 'session_state_changed'
+          ) {
+            send(ws, {
+              type: 'session_state_changed',
+              session_id: sessionId,
+              state: (message as any).state,
+            })
+          } else if (message.type === 'rate_limit_event') {
+            send(ws, {
+              type: 'rate_limit',
+              session_id: sessionId,
+              rate_limit_info: (message as any).rate_limit_info,
+            })
+          } else if (message.type === 'system' && (message as any).subtype === 'task_started') {
+            send(ws, {
+              type: 'task_started',
+              session_id: sessionId,
+              task_id: (message as any).task_id,
+              description: (message as any).description ?? '',
+              task_type: (message as any).task_type,
+              prompt: (message as any).prompt,
+            })
+          } else if (message.type === 'system' && (message as any).subtype === 'task_progress') {
+            send(ws, {
+              type: 'task_progress',
+              session_id: sessionId,
+              task_id: (message as any).task_id,
+              description: (message as any).description ?? '',
+              usage: (message as any).usage ?? { total_tokens: 0, tool_uses: 0, duration_ms: 0 },
+              last_tool_name: (message as any).last_tool_name,
+              summary: (message as any).summary,
+            })
+          } else if (
+            message.type === 'system' &&
+            (message as any).subtype === 'task_notification'
+          ) {
+            send(ws, {
+              type: 'task_notification',
+              session_id: sessionId,
+              task_id: (message as any).task_id,
+              status: (message as any).status,
+              summary: (message as any).summary ?? '',
+              output_file: (message as any).output_file ?? '',
+              usage: (message as any).usage,
+            })
+          } else if (message.type === 'result') {
+            const result = message as any
+            const duration = Date.now() - startTime
+
+            // Fetch SDK session summary (best-effort)
+            let sdkSummary: string | null = null
+            if (sdkSessionId) {
+              try {
+                const { getSessionInfo } = await import('@anthropic-ai/claude-agent-sdk')
+                const info = await getSessionInfo(sdkSessionId, { dir: projectPath })
+                sdkSummary = info?.summary ?? null
+              } catch {
+                // Non-fatal -- summary is best-effort
+              }
+            }
+
+            send(ws, {
+              type: 'result',
+              session_id: sessionId,
+              subtype: result.subtype,
+              duration_ms: duration,
+              total_cost_usd: result.total_cost_usd ?? null,
+              result: result.result ?? null,
+              num_turns: result.num_turns ?? null,
+              is_error: result.subtype !== 'success',
+              sdk_summary: sdkSummary,
+            })
+          }
+        }
+      }
+
+      // --- Initial turn ---
+      // Build the streaming prompt: initial prompt only (no queue — each turn gets its own query)
+      async function* initialPrompt(): AsyncGenerator<SDKUserMsg> {
         yield {
           type: 'user',
           message: { role: 'user', content: cmd.prompt },
           parent_tool_use_id: null,
         }
-        for await (const msg of queue.iterable) {
-          yield msg
-        }
       }
 
       console.log(`[agent-gateway] executeSession: calling query() for ${cmd.project}`)
       const iter = query({
-        prompt: messageGenerator(),
+        prompt: initialPrompt(),
         options: options as any,
       })
+      await processQueryMessages(iter)
 
-      // Store Query object on context for mid-session control
-      ctx.query = iter
-      console.log(`[agent-gateway] executeSession: got iterator, starting loop`)
+      // --- Multi-turn loop: wait for follow-up messages and resume ---
+      // After each turn's result, keep the session alive by waiting for the next
+      // stream-input message. When one arrives, start a new query() with resume.
+      while (!ac.signal.aborted && sdkSessionId) {
+        // Wait for the next message from the queue (blocks until stream-input arrives)
+        const nextMsg = await queue.waitForNext()
+        if (!nextMsg) break // queue.done() was called — session is closing
 
-      for await (const message of iter) {
-        console.log(`[agent-gateway] executeSession: message type=${message.type}`)
-        if (ac.signal.aborted) break
-
-        if (message.type === 'system' && (message as any).subtype === 'init') {
-          sdkSessionId = (message as any).session_id ?? null
-          const model = (message as any).model ?? null
-          const tools = (message as any).tools ?? []
-
-          send(ws, {
-            type: 'session.init',
-            session_id: sessionId,
-            sdk_session_id: sdkSessionId ?? null,
-            project: cmd.project,
-            model,
-            tools,
-          })
-
-          // Drain command queue now that Query is available
-          if (ctx.commandQueue.length > 0) {
-            for (const queuedCmd of ctx.commandQueue) {
-              await handleQueryCommand(ctx, queuedCmd, ws)
-            }
-            ctx.commandQueue = []
-          }
-        } else if (message.type === 'assistant' && (message as any).partial) {
-          // Partial assistant message -- emit incremental content
-          const content = (message as any).message?.content ?? []
-          const blocks = content.map((block: any) => {
-            if (block.type === 'text') {
-              return { type: 'text', id: block.id ?? '', delta: block.text ?? '' }
-            }
-            if (block.type === 'tool_use') {
-              return {
-                type: 'tool_use',
-                id: block.id ?? '',
-                tool_name: block.name,
-                input_delta:
-                  typeof block.input === 'string' ? block.input : JSON.stringify(block.input ?? ''),
-              }
-            }
-            return { type: block.type, id: block.id ?? '' }
-          })
-
-          send(ws, {
-            type: 'partial_assistant',
-            session_id: sessionId,
-            content: blocks,
-          })
-        } else if (message.type === 'assistant') {
-          send(ws, {
-            type: 'assistant',
-            session_id: sessionId,
-            uuid: (message as any).uuid,
-            content: (message as any).message?.content ?? [],
-          })
-        } else if (message.type === 'tool_use_summary') {
-          send(ws, {
-            type: 'tool_result',
-            session_id: sessionId,
-            uuid: (message as any).uuid ?? '',
-            content: (message as any).content ?? (message as any).results ?? [],
-          })
-        } else if (
-          message.type === 'system' &&
-          (message as any).subtype === 'session_state_changed'
-        ) {
-          send(ws, {
-            type: 'session_state_changed',
-            session_id: sessionId,
-            state: (message as any).state,
-          })
-        } else if (message.type === 'rate_limit_event') {
-          send(ws, {
-            type: 'rate_limit',
-            session_id: sessionId,
-            rate_limit_info: (message as any).rate_limit_info,
-          })
-        } else if (message.type === 'system' && (message as any).subtype === 'task_started') {
-          send(ws, {
-            type: 'task_started',
-            session_id: sessionId,
-            task_id: (message as any).task_id,
-            description: (message as any).description ?? '',
-            task_type: (message as any).task_type,
-            prompt: (message as any).prompt,
-          })
-        } else if (message.type === 'system' && (message as any).subtype === 'task_progress') {
-          send(ws, {
-            type: 'task_progress',
-            session_id: sessionId,
-            task_id: (message as any).task_id,
-            description: (message as any).description ?? '',
-            usage: (message as any).usage ?? { total_tokens: 0, tool_uses: 0, duration_ms: 0 },
-            last_tool_name: (message as any).last_tool_name,
-            summary: (message as any).summary,
-          })
-        } else if (message.type === 'system' && (message as any).subtype === 'task_notification') {
-          send(ws, {
-            type: 'task_notification',
-            session_id: sessionId,
-            task_id: (message as any).task_id,
-            status: (message as any).status,
-            summary: (message as any).summary ?? '',
-            output_file: (message as any).output_file ?? '',
-            usage: (message as any).usage,
-          })
-        } else if (message.type === 'result') {
-          const result = message as any
-          const duration = Date.now() - startTime
-
-          // Fetch SDK session summary (best-effort)
-          let sdkSummary: string | null = null
-          if (sdkSessionId) {
-            try {
-              const { getSessionInfo } = await import('@anthropic-ai/claude-agent-sdk')
-              const info = await getSessionInfo(sdkSessionId, { dir: projectPath })
-              sdkSummary = info?.summary ?? null
-            } catch {
-              // Non-fatal -- summary is best-effort
-            }
-          }
-
-          send(ws, {
-            type: 'result',
-            session_id: sessionId,
-            subtype: result.subtype,
-            duration_ms: duration,
-            total_cost_usd: result.total_cost_usd ?? null,
-            result: result.result ?? null,
-            num_turns: result.num_turns ?? null,
-            is_error: result.subtype !== 'success',
-            sdk_summary: sdkSummary,
-          })
+        const msg = nextMsg // capture for generator closure
+        async function* followUpPrompt(): AsyncGenerator<SDKUserMsg> {
+          yield msg
         }
+
+        console.log(`[agent-gateway] executeSession: resuming for follow-up turn`)
+        const resumeOpts = { ...options, resume: sdkSessionId }
+        const resumeIter = query({
+          prompt: followUpPrompt(),
+          options: resumeOpts as any,
+        })
+        await processQueryMessages(resumeIter)
       }
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : String(err)

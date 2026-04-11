@@ -357,6 +357,8 @@ export interface SdkSessionInfo {
   workflow_id: string
   started_at: string
   last_activity: string
+  summary: string
+  tag: string | null
 }
 
 // ── File API ─────────────────────────────────────────────────────────

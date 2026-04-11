@@ -399,14 +399,53 @@ export class SessionDO extends Agent<Env, SessionState> {
   async getMessages(opts?: { offset?: number; limit?: number }) {
     const limit = opts?.limit ?? 200
     const offset = opts?.offset ?? 0
+
+    // Derive ChatMessage objects from the events table.
+    // The messages table was never populated — events is the source of truth.
     const rows = this.sql<{
       id: number
+      type: string
+      data: string
+      ts: number
+    }>`SELECT id, type, data, ts FROM events WHERE type IN ('assistant', 'tool_result') ORDER BY id ASC LIMIT ${limit} OFFSET ${offset}`
+
+    const messages: Array<{
+      id: number | string
       role: string
       type: string
       content: string
+      event_uuid: string | null
       created_at: string
-    }>`SELECT id, role, type, content, created_at FROM messages ORDER BY id ASC LIMIT ${limit} OFFSET ${offset}`
-    return [...rows]
+    }> = []
+
+    for (const row of rows) {
+      try {
+        const event = JSON.parse(row.data)
+        if (row.type === 'assistant') {
+          messages.push({
+            id: event.uuid ?? row.id,
+            role: 'assistant',
+            type: 'text',
+            content: JSON.stringify(event.content ?? []),
+            event_uuid: event.uuid ?? null,
+            created_at: new Date(row.ts).toISOString(),
+          })
+        } else if (row.type === 'tool_result') {
+          messages.push({
+            id: `tool-${event.uuid ?? row.id}`,
+            role: 'tool',
+            type: 'tool_result',
+            content: JSON.stringify(event.content ?? []),
+            event_uuid: event.uuid ?? null,
+            created_at: new Date(row.ts).toISOString(),
+          })
+        }
+      } catch {
+        // Skip malformed event rows
+      }
+    }
+
+    return messages
   }
 
   @callable()

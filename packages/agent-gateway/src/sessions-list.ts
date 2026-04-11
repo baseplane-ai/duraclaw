@@ -9,13 +9,39 @@ interface SessionInfoFile {
   project_dir: string
   workflow_id: string
   started_at: string
+  summary?: string
+  tag?: string | null
 }
 
 /**
  * List SDK sessions found on disk for a project.
- * Scans .claude/sessions/* /session-info.json and returns them sorted by last activity (newest first).
+ * Uses the SDK's listSessions first (catches forked sessions), with disk scan as fallback.
  */
 export async function listSdkSessions(projectPath: string, limit = 20): Promise<SdkSessionInfo[]> {
+  // Try SDK listSessions first — it handles forked sessions and internal session storage
+  try {
+    const { listSessions } = await import('@anthropic-ai/claude-agent-sdk')
+    const sdkSessions = await listSessions({ dir: projectPath })
+    if (Array.isArray(sdkSessions) && sdkSessions.length > 0) {
+      const results: SdkSessionInfo[] = sdkSessions.map((s: any) => ({
+        session_id: s.sessionId ?? s.session_id ?? '',
+        user: s.user ?? '',
+        branch: s.branch ?? '',
+        project_dir: s.projectDir ?? s.project_dir ?? projectPath,
+        workflow_id: s.workflowId ?? s.workflow_id ?? '',
+        started_at: s.startedAt ?? s.started_at ?? '',
+        last_activity: s.lastActivity ?? s.last_activity ?? s.startedAt ?? '',
+        summary: s.summary ?? '',
+        tag: s.tag ?? null,
+      }))
+      results.sort((a, b) => (b.last_activity > a.last_activity ? 1 : -1))
+      return results.slice(0, limit)
+    }
+  } catch {
+    // SDK listSessions not available — fall back to disk scan
+  }
+
+  // Fallback: scan .claude/sessions/*/session-info.json
   const sessionsDir = nodePath.join(projectPath, '.claude', 'sessions')
   const glob = new Bun.Glob('*/session-info.json')
   const results: SdkSessionInfo[] = []
@@ -35,6 +61,8 @@ export async function listSdkSessions(projectPath: string, limit = 20): Promise<
         workflow_id: info.workflow_id ?? '',
         started_at: info.started_at ?? '',
         last_activity: dirStat.mtime.toISOString(),
+        summary: info.summary ?? '',
+        tag: info.tag ?? null,
       })
     } catch {
       // Skip malformed or unreadable entries

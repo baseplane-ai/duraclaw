@@ -68,6 +68,11 @@ export interface GatewaySessionContext {
       role: 'user'
       content: string | import('@duraclaw/shared-types').ContentBlock[]
     }) => void
+    waitForNext: () => Promise<{
+      type: 'user'
+      message: { role: 'user'; content: string | import('@duraclaw/shared-types').ContentBlock[] }
+      parent_tool_use_id: string | null
+    } | null>
     done: () => void
   } | null
   /** SDK Query object — available after session.init, null before */
