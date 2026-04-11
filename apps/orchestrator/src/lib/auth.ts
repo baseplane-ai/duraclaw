@@ -17,14 +17,22 @@ export function createAuth(env: {
     !env.BETTER_AUTH_URL ||
     env.BETTER_AUTH_URL.includes('localhost') ||
     env.BETTER_AUTH_URL.includes('127.0.0.1')
+  // In local dev, wrangler rewrites request URLs to the [[routes]] custom_domain
+  // (e.g. http://duraclaw.codevibesmatter.com) even though the browser is on localhost.
+  // Use a function-based trustedOrigins to also trust the request's rewritten origin.
+  const staticOrigins = [
+    env.BETTER_AUTH_URL,
+    'http://localhost:*',
+    'http://127.0.0.1:*',
+    'http://[::1]:*',
+  ].filter((origin): origin is string => Boolean(origin))
+
   const trustedOrigins = isLocalDev
-    ? Array.from(
-        new Set(
-          [env.BETTER_AUTH_URL, 'http://localhost:*', 'http://127.0.0.1:*', 'http://[::1]:*'].filter(
-            (origin): origin is string => Boolean(origin),
-          ),
-        ),
-      )
+    ? (request?: Request) => {
+        const reqOrigin = request?.headers.get('origin')
+        const extras = reqOrigin ? [reqOrigin] : []
+        return [...new Set([...staticOrigins, ...extras])]
+      }
     : undefined
 
   return betterAuth({
