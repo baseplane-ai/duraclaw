@@ -53,6 +53,36 @@ export class SessionDO extends Agent<Env, SessionState> {
     runMigrations(this.ctx.storage.sql, SESSION_DO_MIGRATIONS)
   }
 
+  /**
+   * Handle HTTP requests to the DO. The API route sends POST /create
+   * to initialize and spawn a session without requiring a WS connection.
+   */
+  async onRequest(request: Request): Promise<Response> {
+    const url = new URL(request.url)
+    if (request.method === 'POST' && url.pathname === '/create') {
+      try {
+        const body = (await request.json()) as SpawnConfig & { userId?: string }
+        const userId = request.headers.get('x-user-id') ?? body.userId ?? null
+        if (userId) {
+          this.updateState({ userId })
+        }
+        const result = await this.spawn(body)
+        return new Response(JSON.stringify(result), {
+          status: result.ok ? 200 : 400,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      } catch (err) {
+        return new Response(
+          JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+    }
+
+    // Delegate to Agent base class for WS upgrades and other routes
+    return super.onRequest(request)
+  }
+
   onConnect(connection: Connection, ctx: ConnectionContext) {
     const requestUserId = ctx.request.headers.get('x-user-id')
     if (!requestUserId || (this.state.userId && requestUserId !== this.state.userId)) {
