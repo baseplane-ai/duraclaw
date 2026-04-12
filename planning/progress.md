@@ -1,6 +1,6 @@
 # Duraclaw v2 — Progress Tracker
 
-> Updated 2026-04-11 (late). Phase 3.3 session history shipped — date grouping, summary search, history page.
+> Updated 2026-04-12 (late). Issue #24 UX ergonomics shipped — chat-native session orchestration, status bar, settings, command palette, workspaces, tabs, mobile gestures.
 
 **Status key:** `not-started` | `spec` | `in-progress` | `done`
 
@@ -24,6 +24,7 @@
 | 13 | SDK Feature Expansion | done | [13-sdk-feature-expansion.md](specs/13-sdk-feature-expansion.md) | #16 pluggable gateway, Phase 3 rollback |
 | 16 | Pluggable Agent Gateway | done | [0016-pluggable-agent-gateway.md](specs/0016-pluggable-agent-gateway.md) | Multi-provider support |
 | 15 | Unified Tauri Tray App | spec | [0015-unified-tray-packaging.md](specs/0015-unified-tray-packaging.md) | Distribution/packaging |
+| 24 | UX Ergonomics | done | [24-ux-ergonomics.md](specs/24-ux-ergonomics.md) | — |
 | 12 | Cass Session API | spec | [12-cass-session-api.md](specs/12-cass-session-api.md) | — |
 
 ### Agent-Orch Drop-In (new — accelerates Phases 1-3)
@@ -49,6 +50,7 @@ Port baseplane's agent-orch UI + extract shared ai-elements package. Replaces bu
 | Agent-orch drop-in (A.1-A.4) | Phase 1 (chat quality), 2 (dashboard/sidebar), 3.5 (image upload) |
 | Voice input (A.5) | Phase 1.3 (mobile chat experience) |
 | AIChatAgent migration (A.2) | Phase 1.4 (error handling — resumable streaming, auto-reconnect) |
+| #24 UX Ergonomics | Phase 2.5-2.6 (workspaces, tabs), 4 (notifications), 6.1+6.3 (settings, theming), 7.4 (command palette) |
 
 ---
 
@@ -82,8 +84,10 @@ Port baseplane's agent-orch UI + extract shared ai-elements package. Replaces bu
 |-----|------|--------|-------|
 | 2.1 | Dashboard Layout | done | Shipped in A.3 — AgentOrchPage with SessionSidebar + session grouping by project. |
 | 2.2 | Attention Queue | done | Shipped in A.3 — Gate state visible in sidebar status badges. |
-| 2.3 | Session Status Indicators | done | Shipped in A.3 — SessionMetadataHeader with status, elapsed timer, WS dot. |
-| 2.4 | Cost Tracking | done | Shipped in A.3 — Cost/duration display in SessionMetadataHeader. |
+| 2.3 | Session Status Indicators | done | Shipped in A.3 — SessionMetadataHeader with status, elapsed timer, WS dot. Replaced by StatusBar in #24. |
+| 2.4 | Cost Tracking | done | Shipped in A.3 — Cost/duration display in SessionMetadataHeader. Moved to StatusBar in #24. |
+| 2.5 | Workspace Grouping | done | #24. Auto-detect workspaces by repo_origin, workspace selector in sidebar, per-workspace defaults. |
+| 2.6 | Agent Tabs | done | #24. Tab bar with Cmd+T/W/1-9 shortcuts, localStorage persistence. |
 
 ## Phase 3: Session Management
 
@@ -100,9 +104,9 @@ Port baseplane's agent-orch UI + extract shared ai-elements package. Replaces bu
 
 | Sub | Name | Status | Spec |
 |-----|------|--------|------|
-| 4.1 | Push Notifications (Web Push) | not-started | — |
-| 4.2 | In-App Notification System | not-started | — |
-| 4.3 | PWA Shell | not-started | — |
+| 4.1 | Push Notifications (Web Push) | done | #22 + #24. VAPID keys, subscription management, gate/completion/error notifications with action buttons. |
+| 4.2 | In-App Notification System | done | #22 + #24. NotificationBell + drawer, notification preferences, service worker click handling. |
+| 4.3 | PWA Shell | done | #22. vite-plugin-pwa, manifest, service worker with precache + push handler. |
 
 ## Phase 5: File Viewer + Integrations
 
@@ -117,9 +121,9 @@ Port baseplane's agent-orch UI + extract shared ai-elements package. Replaces bu
 
 | Sub | Name | Status | Spec |
 |-----|------|--------|------|
-| 6.1 | Dedicated Settings Page | not-started | — |
+| 6.1 | Dedicated Settings Page | done | #24. Settings page with Account, Defaults (permission/model/budget/thinking/effort), Notifications, Appearance sections. user_preferences table in ProjectRegistry DO. |
 | 6.2 | Auth Enhancements | not-started | — |
-| 6.3 | Theming | not-started | — |
+| 6.3 | Theming | done | #24. Appearance section in settings with theme (light/dark/system) and sidebar variant selectors. |
 
 ## Phase 7: Advanced Chat Features
 
@@ -127,7 +131,7 @@ Port baseplane's agent-orch UI + extract shared ai-elements package. Replaces bu
 |-----|------|--------|------|
 | 7.2 | Slash Commands | not-started | — |
 | 7.3 | Input History | not-started | — |
-| 7.4 | Command Palette | not-started | — |
+| 7.4 | Command Palette | done | #24. Cmd+K palette with fuzzy search over sessions, projects, actions, navigation. Built on cmdk. |
 
 ## Phase 8: Data Layer + Offline
 
