@@ -23,6 +23,7 @@ import {
   SelectValue,
 } from '~/components/ui/select'
 import { cn } from '~/lib/utils'
+import { useWorkspaceStore } from '~/stores/workspace'
 import { SessionListItem } from './SessionListItem'
 import { SpawnAgentForm, type SpawnFormConfig } from './SpawnAgentForm'
 import type { SessionRecord } from './use-agent-orch-sessions'
@@ -72,14 +73,16 @@ export function SessionSidebar({
   collapsed,
   onToggleCollapse,
 }: SessionSidebarProps) {
-  const [showSpawnForm, setShowSpawnForm] = useState(false)
+  const [showAdvanced, setShowAdvanced] = useState(false)
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [showArchived, setShowArchived] = useState(false)
   const [groupBy, setGroupBy] = useState<'project' | 'date'>('project')
+  const workspaceProjects = useWorkspaceStore((s) => s.workspaceProjects)
 
   const filteredSessions = sessions.filter((s) => {
+    if (workspaceProjects && !workspaceProjects.includes(s.project)) return false
     if (!showArchived && s.archived) return false
     if (searchQuery) {
       const q = searchQuery.toLowerCase()
@@ -92,7 +95,7 @@ export function SessionSidebar({
         return false
     }
     if (statusFilter === 'running') return s.status === 'running'
-    if (statusFilter === 'completed') return s.status === 'completed' || s.status === 'idle'
+    if (statusFilter === 'completed') return s.status === 'idle'
     if (statusFilter === 'failed') return s.status === 'failed' || s.status === 'aborted'
     return true
   })
@@ -127,9 +130,8 @@ export function SessionSidebar({
         {!collapsed && <h3 className="text-sm font-semibold">Sessions</h3>}
         <div className="flex items-center gap-1">
           {!collapsed && (
-            <Button variant="ghost" size="sm" onClick={() => setShowSpawnForm(!showSpawnForm)}>
-              <PlusIcon className="mr-1 size-4" />
-              New
+            <Button variant="ghost" size="sm" onClick={() => setShowAdvanced(!showAdvanced)}>
+              <PlusIcon className="size-4" />
             </Button>
           )}
           <Button
@@ -177,12 +179,23 @@ export function SessionSidebar({
         </div>
       ) : (
         <>
-          {showSpawnForm && (
+          {showAdvanced && (
             <div className="border-b p-3">
+              <div className="mb-2 flex items-center justify-between">
+                <span className="text-xs font-medium text-muted-foreground">Advanced</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-5 px-1 text-xs"
+                  onClick={() => setShowAdvanced(false)}
+                >
+                  Close
+                </Button>
+              </div>
               <SpawnAgentForm
                 onSpawn={(config) => {
                   onSpawn(config)
-                  setShowSpawnForm(false)
+                  setShowAdvanced(false)
                 }}
                 inline
               />

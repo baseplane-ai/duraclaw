@@ -38,7 +38,7 @@ describe('SessionRecord', () => {
       id: 'sess-2',
       userId: 'user-abc',
       project: 'proj',
-      status: 'completed',
+      status: 'idle',
       model: null,
       created_at: '2026-04-10T00:00:00Z',
       updated_at: '2026-04-10T00:00:00Z',
@@ -271,7 +271,7 @@ describe('useAgentOrchSessions', () => {
     await waitFor(() => expect(result.current.isLoading).toBe(false))
 
     await act(async () => {
-      await result.current.updateSession('s1', { status: 'completed', summary: 'done' })
+      await result.current.updateSession('s1', { status: 'idle', summary: 'done' })
     })
 
     const patchCall = fetchMock.mock.calls.find(
@@ -280,12 +280,12 @@ describe('useAgentOrchSessions', () => {
     )
     expect(patchCall).toBeTruthy()
     const body = JSON.parse((patchCall![1] as RequestInit).body as string)
-    expect(body.status).toBe('completed')
+    expect(body.status).toBe('idle')
     expect(body.summary).toBe('done')
 
     // Optimistic update applied
     const updated = result.current.sessions.find((s) => s.id === 's1')
-    expect(updated?.status).toBe('completed')
+    expect(updated?.status).toBe('idle')
   })
 
   test('handles fetch failure gracefully', async () => {
@@ -574,13 +574,13 @@ describe('Message dedup logic', () => {
 // ── ProjectRegistry migration tests ──────────────────────────────────
 
 describe('ProjectRegistry migrations', () => {
-  test('has 5 migration versions', () => {
-    expect(REGISTRY_MIGRATIONS).toHaveLength(5)
+  test('has 6 migration versions', () => {
+    expect(REGISTRY_MIGRATIONS).toHaveLength(6)
   })
 
-  test('migrations are ordered by version 1-5', () => {
+  test('migrations are ordered by version 1-6', () => {
     const versions = REGISTRY_MIGRATIONS.map((m) => m.version)
-    expect(versions).toEqual([1, 2, 3, 4, 5])
+    expect(versions).toEqual([1, 2, 3, 4, 5, 6])
   })
 
   test('v1 creates sessions table with expected columns', () => {
@@ -635,6 +635,22 @@ describe('ProjectRegistry migrations', () => {
 
   test('v4 description mentions archived', () => {
     expect(REGISTRY_MIGRATIONS[3].description).toContain('archived')
+  })
+
+  test('v6 creates user_preferences table with expected columns', () => {
+    const statements: string[] = []
+    const mockSql = { exec: (q: string) => statements.push(q) }
+    REGISTRY_MIGRATIONS[5].up(mockSql)
+    expect(statements).toHaveLength(1)
+    expect(statements[0]).toContain('CREATE TABLE')
+    expect(statements[0]).toContain('user_preferences')
+    expect(statements[0]).toContain('user_id TEXT PRIMARY KEY')
+    expect(statements[0]).toContain('permission_mode TEXT')
+    expect(statements[0]).toContain('model TEXT')
+    expect(statements[0]).toContain('max_budget REAL')
+    expect(statements[0]).toContain('thinking_mode TEXT')
+    expect(statements[0]).toContain('effort TEXT')
+    expect(statements[0]).toContain('updated_at TEXT')
   })
 
   test('each migration has a non-empty description', () => {
@@ -743,7 +759,7 @@ describe('updateSession field filtering', () => {
 
   test('includes only allowed fields in SET clause', () => {
     const { setClauses, values } = buildSetClauses({
-      status: 'completed',
+      status: 'idle',
       archived: 1,
       malicious_field: 'DROP TABLE',
     })
@@ -753,7 +769,7 @@ describe('updateSession field filtering', () => {
     expect(setClauses).not.toContain('malicious_field = ?')
     // updated_at + status + archived
     expect(values).toHaveLength(3)
-    expect(values[1]).toBe('completed')
+    expect(values[1]).toBe('idle')
     expect(values[2]).toBe(1)
   })
 

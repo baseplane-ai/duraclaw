@@ -38,7 +38,6 @@ const PAGE_SIZE = 25
 
 const STATUS_VARIANTS: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
   running: 'default',
-  completed: 'secondary',
   failed: 'destructive',
   aborted: 'destructive',
   idle: 'outline',
@@ -184,7 +183,6 @@ export function SessionHistory() {
           <SelectContent>
             <SelectItem value="all">All statuses</SelectItem>
             <SelectItem value="running">Running</SelectItem>
-            <SelectItem value="completed">Completed</SelectItem>
             <SelectItem value="idle">Idle</SelectItem>
             <SelectItem value="failed">Failed</SelectItem>
             <SelectItem value="aborted">Aborted</SelectItem>

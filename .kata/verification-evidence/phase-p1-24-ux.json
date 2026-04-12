@@ -1,0 +1,127 @@
+{
+  "spec": "planning/specs/24-ux-ergonomics.md",
+  "issue": 24,
+  "branch": "feat/24-ux-ergonomics",
+  "verifiedAt": "2026-04-12T23:45:00Z",
+  "verdict": "PASS",
+  "steps": [
+    {
+      "id": "VP1",
+      "title": "Status Bar",
+      "result": "PASS",
+      "evidence": [
+        "Status bar visible at bottom with fixed bottom-0 left-0 right-0 z-50 h-7 font-mono classes",
+        "Shows 'No session selected' in muted text when no session selected (browser verified)",
+        "Background color changes: blue (running), amber (waiting), red (error/aborted) — code verified at status-bar.tsx:81-96",
+        "All items clickable: model picker, permission cycle, kata status popover — code verified",
+        "Included in authenticated-layout.tsx as <StatusBar /> fixed at bottom",
+        "Height is h-7 (28px), uses monospace font"
+      ]
+    },
+    {
+      "id": "VP2",
+      "title": "Settings & Defaults",
+      "result": "PASS",
+      "evidence": [
+        "Settings page has Account, Defaults, Notifications, Appearance sections (browser verified)",
+        "Defaults section includes: Permission Mode (6 radio options), Model dropdown, Max Budget, Thinking Mode, Effort (browser verified)",
+        "user_preferences table created via migration v6 in project-registry-migrations.ts",
+        "GET/PUT /api/preferences routes exist in api/index.ts:221-234",
+        "useUserDefaults() hook at hooks/use-user-defaults.ts with localStorage caching and server sync"
+      ]
+    },
+    {
+      "id": "VP3",
+      "title": "Zero-Friction New Session",
+      "result": "PASS",
+      "evidence": [
+        "QuickPromptInput component at components/quick-prompt-input.tsx with centered heading 'What should the agent do?'",
+        "Config chips for project and model visible and clickable (browser verified — saw 'baseplane' and 'claude-opus-4-6' buttons)",
+        "Type prompt + Enter starts session via onSubmit handler",
+        "Replaces empty state in AgentOrchPage.tsx:227-240 — shows QuickPromptInput when no session selected"
+      ]
+    },
+    {
+      "id": "VP4",
+      "title": "Chat-List Sidebar",
+      "result": "PASS",
+      "evidence": [
+        "Sessions show colored status dots: green=running, yellow=waiting, red=error, blue pulse=spawning, grey outline=idle (code verified at SessionListItem.tsx:52-72)",
+        "Preview text shown (session prompt), time-ago format (e.g. '23h ago', '1d ago', '9d ago') — browser verified",
+        "Turns and cost shown as secondary text (browser verified)",
+        "Right-click context menu with Rename, Tag, Fork, Archive options (code verified at lines 141-158, browser saw 'Session options' triggers)"
+      ]
+    },
+    {
+      "id": "VP5",
+      "title": "Command Palette",
+      "result": "PASS",
+      "evidence": [
+        "CommandMenu component at components/command-menu.tsx with sections: Recent Sessions, Projects, Actions, Navigation, Theme",
+        "Ctrl+K binding in context/search-provider.tsx:18-27",
+        "Fuzzy search via cmdk CommandInput over sessions, projects, navigation items",
+        "Session results include status, project, time-ago; Project results include branch and dirty flag",
+        "Command Palette heading visible in DOM (browser verified)"
+      ]
+    },
+    {
+      "id": "VP6",
+      "title": "Bug Fixes",
+      "result": "PASS",
+      "evidence": [
+        "ResultEvent handler at session-do.ts:659 sets status to 'idle' (not 'completed') for is_error:false",
+        "SessionStatus type at shared-types/index.ts:407-415 does NOT include 'completed'",
+        "No remaining references to 'completed' status in orchestrator source",
+        "All notification URLs use /?session=${id} format (verified at lines 609, 640, 678, 693, 720)",
+        "/session/{id} route redirects to /?session={id} — browser verified: navigated to /session/test-session-id, URL became /?session=test-session-id"
+      ]
+    },
+    {
+      "id": "VP7",
+      "title": "Workspaces",
+      "result": "PASS",
+      "evidence": [
+        "WorkspaceSelector component at components/workspace-selector.tsx with groupProjectsIntoWorkspaces() logic",
+        "Groups projects by repo_origin field — auto-detects workspace name from git remote URL",
+        "Workspace selector dropdown shows 'All' + grouped workspaces (browser verified: 'All Workspaces 12 projects' button, dropdown with 'All' and 'Ungrouped 12')",
+        "repo_origin added to ProjectInfo type in shared-types/index.ts:348",
+        "workspace_preferences table + API routes in project-registry.ts"
+      ]
+    },
+    {
+      "id": "VP8",
+      "title": "Notification Actions",
+      "result": "PASS",
+      "evidence": [
+        "Service worker handles notification click actions at sw.ts:23-49: approve/deny POSTs to tool-approval endpoint, new-session opens dashboard, default opens session URL",
+        "Push notification payloads include actions: ask_user sends 'open', permission_request sends 'approve'+'deny', completion sends 'open'+'new-session' (session-do.ts:612, 644-647, 681-684)",
+        "showNotification passes actions array at sw.ts:13-20"
+      ]
+    },
+    {
+      "id": "VP9",
+      "title": "Agent Tabs",
+      "result": "PASS",
+      "evidence": [
+        "TabBar component at components/tab-bar.tsx with session tabs and close buttons",
+        "Tab visible in browser: saw '12f633610379 Close tab' button in accessibility tree after selecting a session",
+        "Keyboard shortcuts at AgentOrchPage.tsx:170-204: Cmd+T adds tab, Cmd+W closes, Cmd+1-9 switches",
+        "localStorage persistence via stores/tabs.ts with loadTabs/saveTabs functions",
+        "Wired into AgentOrchPage.tsx:226 as <TabBar onSelectSession={handleSelectSession} />"
+      ]
+    },
+    {
+      "id": "VP10",
+      "title": "Mobile Gestures",
+      "result": "PASS (after fix)",
+      "evidence": [
+        "INITIAL: Missing — no touch event handlers existed in SessionListItem.tsx",
+        "FIX APPLIED: Added swipe-left, long-press, and scroll deadzone handlers",
+        "Swipe-left: 80px threshold, translateX transform reveals archive button (red bg-destructive)",
+        "Long-press: 500ms timer opens context menu, cancelled on >10px movement",
+        "Scroll deadzone: gesture decided on first 10px — vertical > horizontal aborts swipe, lets scroll happen",
+        "Typecheck passes clean after fix"
+      ]
+    }
+  ]
+}

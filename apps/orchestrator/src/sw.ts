@@ -38,5 +38,12 @@ self.addEventListener('notificationclick', (event) => {
     return
   }
 
+  // New Session action — open dashboard without session context
+  if (event.action === 'new-session') {
+    event.waitUntil(self.clients.openWindow('/'))
+    return
+  }
+
+  // Open action or default click — open the session URL
   event.waitUntil(self.clients.openWindow(url || '/'))
 })

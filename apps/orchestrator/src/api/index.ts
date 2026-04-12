@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { validateActionToken } from '~/lib/action-token'
-import type { ProjectInfo, SessionSummary } from '~/lib/types'
+import type { ProjectInfo, SessionSummary, UserPreferences } from '~/lib/types'
 import { authMiddleware } from './auth-middleware'
 import { authRoutes } from './auth-routes'
 import { getRequestSession } from './auth-session'
@@ -215,6 +215,21 @@ export function createApiApp() {
       .bind(userId, body.key, body.value)
       .run()
 
+    return c.json({ ok: true })
+  })
+
+  app.get('/api/preferences', async (c) => {
+    const userId = c.get('userId')
+    const registry = getRegistry(c)
+    const prefs = (await registry.getUserPreferences(userId)) as UserPreferences | null
+    return c.json(prefs ?? {})
+  })
+
+  app.put('/api/preferences', async (c) => {
+    const userId = c.get('userId')
+    const body = (await c.req.json()) as Partial<UserPreferences>
+    const registry = getRegistry(c)
+    await registry.setUserPreferences(userId, body)
     return c.json({ ok: true })
   })
 

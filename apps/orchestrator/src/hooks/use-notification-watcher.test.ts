@@ -25,7 +25,7 @@ describe('useNotificationWatcher', () => {
   it('does not notify on initial load', () => {
     const sessions = [
       { id: 's1', status: 'running', project: 'proj' },
-      { id: 's2', status: 'completed', project: 'proj' },
+      { id: 's2', status: 'idle', project: 'proj' },
     ]
 
     renderHook(() => useNotificationWatcher(sessions))
@@ -45,12 +45,12 @@ describe('useNotificationWatcher', () => {
     )
   })
 
-  it('notifies when session transitions to completed', () => {
+  it('notifies when session transitions from running to idle', () => {
     const { rerender } = renderHook(({ sessions }) => useNotificationWatcher(sessions), {
       initialProps: { sessions: [{ id: 's1', status: 'running', project: 'proj' }] },
     })
 
-    rerender({ sessions: [{ id: 's1', status: 'completed', project: 'proj' }] })
+    rerender({ sessions: [{ id: 's1', status: 'idle', project: 'proj' }] })
 
     expect(mockAddNotification).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'completed', sessionId: 's1' }),
@@ -80,6 +80,62 @@ describe('useNotificationWatcher', () => {
     expect(mockAddNotification).not.toHaveBeenCalled()
   })
 
+  it('does not notify completion when transitioning from non-running to idle', () => {
+    const { rerender } = renderHook(({ sessions }) => useNotificationWatcher(sessions), {
+      initialProps: { sessions: [{ id: 's1', status: 'waiting_gate', project: 'proj' }] },
+    })
+
+    rerender({ sessions: [{ id: 's1', status: 'idle', project: 'proj' }] })
+
+    expect(mockAddNotification).not.toHaveBeenCalled()
+  })
+
+  it('does not notify completion when transitioning from stopped to idle', () => {
+    const { rerender } = renderHook(({ sessions }) => useNotificationWatcher(sessions), {
+      initialProps: { sessions: [{ id: 's1', status: 'stopped', project: 'proj' }] },
+    })
+
+    rerender({ sessions: [{ id: 's1', status: 'idle', project: 'proj' }] })
+
+    expect(mockAddNotification).not.toHaveBeenCalled()
+  })
+
+  it('generates notification URLs with /?session= format', () => {
+    const { rerender } = renderHook(({ sessions }) => useNotificationWatcher(sessions), {
+      initialProps: { sessions: [{ id: 's1', status: 'running', project: 'proj' }] },
+    })
+
+    rerender({ sessions: [{ id: 's1', status: 'waiting_gate', project: 'proj' }] })
+
+    expect(mockAddNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ url: '/?session=s1' }),
+    )
+  })
+
+  it('generates completion notification URLs with /?session= format', () => {
+    const { rerender } = renderHook(({ sessions }) => useNotificationWatcher(sessions), {
+      initialProps: { sessions: [{ id: 's1', status: 'running', project: 'proj' }] },
+    })
+
+    rerender({ sessions: [{ id: 's1', status: 'idle', project: 'proj' }] })
+
+    expect(mockAddNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ url: '/?session=s1' }),
+    )
+  })
+
+  it('generates error notification URLs with /?session= format', () => {
+    const { rerender } = renderHook(({ sessions }) => useNotificationWatcher(sessions), {
+      initialProps: { sessions: [{ id: 's1', status: 'running', project: 'proj' }] },
+    })
+
+    rerender({ sessions: [{ id: 's1', status: 'failed', project: 'proj' }] })
+
+    expect(mockAddNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ url: '/?session=s1' }),
+    )
+  })
+
   it('uses title over project for sessionName', () => {
     const { rerender } = renderHook(({ sessions }) => useNotificationWatcher(sessions), {
       initialProps: {
@@ -88,7 +144,7 @@ describe('useNotificationWatcher', () => {
     })
 
     rerender({
-      sessions: [{ id: 's1', status: 'completed', project: 'proj', title: 'My Session' }],
+      sessions: [{ id: 's1', status: 'idle', project: 'proj', title: 'My Session' }],
     })
 
     expect(mockAddNotification).toHaveBeenCalledWith(

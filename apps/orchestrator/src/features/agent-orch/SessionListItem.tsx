@@ -1,9 +1,14 @@
 /**
  * SessionListItem — Renders a single session entry in the sidebar.
+ *
+ * Chat-list style: status dot, title, time-ago, preview line,
+ * turns/cost secondary info, right-click context menu.
+ *
+ * Mobile gestures: swipe-left to archive, long-press for context menu.
  */
 
-import { EditIcon, GitForkIcon, MoreHorizontalIcon, TagIcon } from 'lucide-react'
-import { useCallback, useRef, useState } from 'react'
+import { ArchiveIcon, EditIcon, GitForkIcon, TagIcon } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Badge } from '~/components/ui/badge'
 import { Button } from '~/components/ui/button'
 import {
@@ -35,14 +40,6 @@ interface SessionListItemProps {
   onFork?: () => void
 }
 
-const STATUS_VARIANTS: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
-  running: 'default',
-  completed: 'secondary',
-  failed: 'destructive',
-  aborted: 'destructive',
-  idle: 'outline',
-}
-
 function formatTimeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime()
   const minutes = Math.floor(diff / 60000)
@@ -52,6 +49,37 @@ function formatTimeAgo(dateStr: string): string {
   if (hours < 24) return `${hours}h ago`
   const days = Math.floor(hours / 24)
   return `${days}d ago`
+}
+
+function StatusDot({ status, numTurns }: { status: string; numTurns: number }) {
+  const isSpawning = status === 'running' && numTurns === 0
+
+  if (isSpawning) {
+    return <span className="size-2 shrink-0 rounded-full bg-blue-500 animate-pulse" />
+  }
+
+  switch (status) {
+    case 'running':
+      return <span className="size-2 shrink-0 rounded-full bg-green-500" />
+    case 'waiting_gate':
+    case 'waiting_input':
+    case 'waiting_permission':
+      return <span className="size-2 shrink-0 rounded-full bg-yellow-500" />
+    case 'failed':
+    case 'aborted':
+      return <span className="size-2 shrink-0 rounded-full bg-red-500" />
+    default:
+      return <span className="size-2 shrink-0 rounded-full border border-gray-400" />
+  }
+}
+
+function getPreviewText(session: SessionRecord): string | undefined {
+  // Prefer summary, then prompt
+  return session.summary || session.prompt || undefined
+}
+
+function formatCost(cost: number): string {
+  return `$${cost.toFixed(2)}`
 }
 
 export function SessionListItem({
@@ -64,6 +92,8 @@ export function SessionListItem({
   onFork,
 }: SessionListItemProps) {
   const status = session.status || 'idle'
+  const numTurns = session.num_turns ?? 0
+  const [menuOpen, setMenuOpen] = useState(false)
   const [renameOpen, setRenameOpen] = useState(false)
   const [tagOpen, setTagOpen] = useState(false)
   const [renameValue, setRenameValue] = useState('')
@@ -72,6 +102,7 @@ export function SessionListItem({
   const tagInputRef = useRef<HTMLInputElement>(null)
 
   const displayName = session.title || session.id.slice(0, 12)
+  const preview = getPreviewText(session)
 
   const handleRenameOpen = useCallback(() => {
     setRenameValue(session.title || '')
@@ -97,49 +128,117 @@ export function SessionListItem({
     setTagOpen(false)
   }, [tagValue, onTag])
 
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    setMenuOpen(true)
+  }, [])
+
+  // --- Mobile gesture state ---
+  const SWIPE_THRESHOLD = 80
+  const VERTICAL_DEADZONE = 30
+  const LONG_PRESS_MS = 500
+  const LONG_PRESS_MOVE_THRESHOLD = 10
+
+  const [swipeX, setSwipeX] = useState(0)
+  const [swiped, setSwiped] = useState(false)
+  const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null)
+  const gestureDecidedRef = useRef<'swipe' | 'scroll' | null>(null)
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const clearLongPress = useCallback(() => {
+    if (longPressTimerRef.current != null) {
+      clearTimeout(longPressTimerRef.current)
+      longPressTimerRef.current = null
+    }
+  }, [])
+
+  // Clean up timer on unmount
+  useEffect(() => clearLongPress, [clearLongPress])
+
+  const handleTouchStart = useCallback(
+    (e: React.TouchEvent) => {
+      const touch = e.touches[0]
+      touchStartRef.current = { x: touch.clientX, y: touch.clientY, time: Date.now() }
+      gestureDecidedRef.current = null
+      // Reset swipe if it was previously swiped open
+      if (swiped) {
+        setSwiped(false)
+        setSwipeX(0)
+      }
+
+      // Start long-press timer
+      longPressTimerRef.current = setTimeout(() => {
+        longPressTimerRef.current = null
+        setMenuOpen(true)
+        touchStartRef.current = null // prevent further gesture handling
+      }, LONG_PRESS_MS)
+    },
+    [swiped],
+  )
+
+  const handleTouchMove = useCallback(
+    (e: React.TouchEvent) => {
+      if (!touchStartRef.current) return
+      const touch = e.touches[0]
+      const dx = touch.clientX - touchStartRef.current.x
+      const dy = touch.clientY - touchStartRef.current.y
+      const absDx = Math.abs(dx)
+      const absDy = Math.abs(dy)
+
+      // Cancel long-press if moved past threshold
+      if (absDx > LONG_PRESS_MOVE_THRESHOLD || absDy > LONG_PRESS_MOVE_THRESHOLD) {
+        clearLongPress()
+      }
+
+      // Decide gesture direction on first significant movement
+      if (gestureDecidedRef.current === null && (absDx > 10 || absDy > 10)) {
+        if (absDy > absDx) {
+          // Vertical wins -> let scroll happen
+          gestureDecidedRef.current = 'scroll'
+          return
+        }
+        gestureDecidedRef.current = 'swipe'
+      }
+
+      if (gestureDecidedRef.current !== 'swipe') return
+
+      // Only allow swipe-left (negative dx), clamp to prevent over-swipe
+      if (dx < 0 && absDy < VERTICAL_DEADZONE) {
+        const clampedX = Math.max(dx, -120)
+        setSwipeX(clampedX)
+      }
+    },
+    [clearLongPress],
+  )
+
+  const handleTouchEnd = useCallback(() => {
+    clearLongPress()
+
+    if (gestureDecidedRef.current === 'swipe' && swipeX < -SWIPE_THRESHOLD) {
+      // Snap to reveal archive action
+      setSwiped(true)
+      setSwipeX(-SWIPE_THRESHOLD)
+    } else {
+      setSwipeX(0)
+      setSwiped(false)
+    }
+
+    touchStartRef.current = null
+    gestureDecidedRef.current = null
+  }, [clearLongPress, swipeX])
+
+  const handleSwipeArchive = useCallback(() => {
+    onArchive?.(!session.archived)
+    setSwiped(false)
+    setSwipeX(0)
+  }, [onArchive, session.archived])
+
   return (
     <>
-      <div className={cn('flex items-center gap-1', session.archived && 'opacity-50')}>
-        <button
-          type="button"
-          onClick={onClick}
-          className={cn(
-            'min-w-0 flex-1 rounded-md border px-2 py-1 text-left text-sm transition-colors hover:bg-accent',
-            isSelected && 'border-primary bg-accent',
-          )}
-        >
-          <div className="flex items-center justify-between">
-            <span className="truncate font-medium">{displayName}</span>
-            <div className="ml-2 flex shrink-0 items-center gap-1">
-              {session.tag && (
-                <Badge variant="outline" className="text-[10px] px-1 py-0">
-                  {session.tag}
-                </Badge>
-              )}
-              {session.archived && <span className="text-xs text-muted-foreground">archived</span>}
-              <Badge variant={STATUS_VARIANTS[status] ?? 'outline'}>{status}</Badge>
-            </div>
-          </div>
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            {session.created_at && <span>{formatTimeAgo(session.created_at)}</span>}
-            {(session.num_turns ?? 0) > 0 && <span>{session.num_turns} turns</span>}
-            {session.title && (
-              <span className="truncate opacity-60" title={session.id}>
-                {session.id.slice(0, 8)}
-              </span>
-            )}
-          </div>
-        </button>
-        <DropdownMenu>
+      <div className={cn('relative overflow-hidden rounded-md', session.archived && 'opacity-50')}>
+        <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
           <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="size-6 shrink-0 p-0"
-              aria-label="Session options"
-            >
-              <MoreHorizontalIcon className="size-3" />
-            </Button>
+            <span className="sr-only">Session options</span>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
             <DropdownMenuItem onClick={handleRenameOpen}>
@@ -160,6 +259,70 @@ export function SessionListItem({
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+
+        {/* Swipe-reveal archive action (sits behind the button) */}
+        {(swipeX < 0 || swiped) && (
+          <button
+            type="button"
+            onClick={handleSwipeArchive}
+            className="absolute inset-y-0 right-0 flex w-20 items-center justify-center bg-destructive text-destructive-foreground text-xs font-medium"
+          >
+            <ArchiveIcon className="mr-1 size-3.5" />
+            {session.archived ? 'Restore' : 'Archive'}
+          </button>
+        )}
+
+        <button
+          type="button"
+          onClick={onClick}
+          onContextMenu={handleContextMenu}
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
+          style={{
+            transform: swipeX < 0 ? `translateX(${swipeX}px)` : undefined,
+            transition: gestureDecidedRef.current === 'swipe' ? 'none' : 'transform 200ms ease-out',
+          }}
+          className={cn(
+            'relative z-10 w-full rounded-md border bg-background px-2.5 py-2 text-left text-sm transition-colors hover:bg-accent',
+            isSelected && 'border-primary bg-accent',
+          )}
+        >
+          {/* Row 1: dot + title + time-ago */}
+          <div className="flex items-center gap-2">
+            <StatusDot status={status} numTurns={numTurns} />
+            <span className="min-w-0 flex-1 truncate font-medium">{displayName}</span>
+            <div className="ml-auto flex shrink-0 items-center gap-1.5">
+              {session.tag && (
+                <Badge variant="outline" className="text-[10px] px-1 py-0">
+                  {session.tag}
+                </Badge>
+              )}
+              {session.archived && <span className="text-xs text-muted-foreground">archived</span>}
+              {session.updated_at && (
+                <span className="text-xs text-muted-foreground">
+                  {formatTimeAgo(session.updated_at)}
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Row 2: preview + turns/cost */}
+          <div className="mt-0.5 flex items-center gap-2 pl-4">
+            {preview && (
+              <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                {preview}
+              </span>
+            )}
+            {!preview && <span className="min-w-0 flex-1" />}
+            <div className="ml-auto flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+              {numTurns > 0 && <span>{numTurns} turns</span>}
+              {session.total_cost_usd != null && session.total_cost_usd > 0 && (
+                <span>{formatCost(session.total_cost_usd)}</span>
+              )}
+            </div>
+          </div>
+        </button>
       </div>
 
       {/* Rename dialog */}

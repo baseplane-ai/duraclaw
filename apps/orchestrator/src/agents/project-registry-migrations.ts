@@ -76,4 +76,19 @@ export const REGISTRY_MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 6,
+    description: 'Add user_preferences table for user defaults',
+    up: (sql) => {
+      sql.exec(`CREATE TABLE IF NOT EXISTS user_preferences (
+        user_id TEXT PRIMARY KEY,
+        permission_mode TEXT DEFAULT 'default',
+        model TEXT DEFAULT 'claude-opus-4-6',
+        max_budget REAL,
+        thinking_mode TEXT DEFAULT 'adaptive',
+        effort TEXT DEFAULT 'high',
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`)
+    },
+  },
 ]

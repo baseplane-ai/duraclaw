@@ -1,0 +1,299 @@
+/**
+ * @vitest-environment jsdom
+ */
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+// ── Mocks ──────────────────────────────────────────────────────────
+
+// Mock TanStack Router
+vi.mock('@tanstack/react-router', () => ({
+  createFileRoute: () => () => ({ component: undefined }),
+}))
+
+// Mock layout wrappers to passthrough children
+vi.mock('~/components/layout/header', () => ({
+  Header: ({ children }: { children: React.ReactNode }) => (
+    <div data-testid="header">{children}</div>
+  ),
+}))
+vi.mock('~/components/layout/main', () => ({
+  Main: ({ children }: { children: React.ReactNode }) => <div data-testid="main">{children}</div>,
+}))
+
+// Mock auth-client
+const mockSignOut = vi.fn(() => Promise.resolve())
+vi.mock('~/lib/auth-client', () => ({
+  signOut: () => mockSignOut(),
+}))
+
+// Mock useUserDefaults
+const mockUpdatePreferences = vi.fn()
+let mockUserDefaultsReturn = {
+  preferences: {
+    permission_mode: 'default',
+    model: 'claude-opus-4-6',
+    max_budget: null as number | null,
+    thinking_mode: 'adaptive',
+    effort: 'high',
+  },
+  updatePreferences: mockUpdatePreferences,
+  loading: false,
+}
+vi.mock('~/hooks/use-user-defaults', () => ({
+  useUserDefaults: () => mockUserDefaultsReturn,
+}))
+
+// Mock NotificationPreferences
+vi.mock('~/components/notification-preferences', () => ({
+  NotificationPreferences: () => (
+    <div data-testid="notification-preferences">NotificationPrefs</div>
+  ),
+}))
+
+// Mock theme provider
+const mockSetTheme = vi.fn()
+let mockThemeReturn = {
+  theme: 'system' as string,
+  setTheme: mockSetTheme,
+  defaultTheme: 'system',
+  resolvedTheme: 'light' as const,
+  resetTheme: vi.fn(),
+}
+vi.mock('~/context/theme-provider', () => ({
+  useTheme: () => mockThemeReturn,
+}))
+
+// Mock layout provider
+const mockSetVariant = vi.fn()
+let mockLayoutReturn = {
+  variant: 'inset' as string,
+  setVariant: mockSetVariant,
+  defaultVariant: 'inset',
+  collapsible: 'icon' as const,
+  setCollapsible: vi.fn(),
+  defaultCollapsible: 'icon' as const,
+  resetLayout: vi.fn(),
+}
+vi.mock('~/context/layout-provider', () => ({
+  useLayout: () => mockLayoutReturn,
+}))
+
+// We cannot import the Route export and extract the component easily,
+// so we import the file and test the individual section functions.
+// Since they are not exported, we'll re-import the module and render sections
+// by rendering the whole page.
+
+// The SettingsPage is not exported directly, but it's set as the route component.
+// We'll access it by importing the module and manually getting the component.
+// Actually, let's just import the whole module and test via the page structure.
+
+// Helper: We need to get SettingsPage. Since createFileRoute is mocked,
+// we need a different approach. Let's re-mock createFileRoute to capture the component.
+let CapturedComponent: React.ComponentType | null = null
+vi.mock('@tanstack/react-router', () => ({
+  createFileRoute: () => (opts: { component: React.ComponentType }) => {
+    CapturedComponent = opts.component
+    return opts
+  },
+}))
+
+// Force re-import to capture
+await import('./settings')
+
+describe('SettingsPage', () => {
+  beforeEach(() => {
+    mockSignOut.mockClear()
+    mockUpdatePreferences.mockClear()
+    mockSetTheme.mockClear()
+    mockSetVariant.mockClear()
+    mockUserDefaultsReturn = {
+      preferences: {
+        permission_mode: 'default',
+        model: 'claude-opus-4-6',
+        max_budget: null,
+        thinking_mode: 'adaptive',
+        effort: 'high',
+      },
+      updatePreferences: mockUpdatePreferences,
+      loading: false,
+    }
+    mockThemeReturn = {
+      theme: 'system',
+      setTheme: mockSetTheme,
+      defaultTheme: 'system',
+      resolvedTheme: 'light',
+      resetTheme: vi.fn(),
+    }
+    mockLayoutReturn = {
+      variant: 'inset',
+      setVariant: mockSetVariant,
+      defaultVariant: 'inset',
+      collapsible: 'icon',
+      setCollapsible: vi.fn(),
+      defaultCollapsible: 'icon',
+      resetLayout: vi.fn(),
+    }
+  })
+
+  afterEach(() => {
+    cleanup()
+  })
+
+  function renderPage() {
+    if (!CapturedComponent) throw new Error('SettingsPage component not captured')
+    return render(<CapturedComponent />)
+  }
+
+  // ── Page structure ────────────────────────────────────────────────
+
+  it('renders all four section headings', () => {
+    renderPage()
+    expect(screen.getByText('Account')).toBeDefined()
+    expect(screen.getByText('Defaults')).toBeDefined()
+    expect(screen.getByText('Notifications')).toBeDefined()
+    expect(screen.getByText('Appearance')).toBeDefined()
+  })
+
+  it('renders the page title in the header', () => {
+    renderPage()
+    expect(screen.getByText('Settings')).toBeDefined()
+  })
+
+  // ── Account section ───────────────────────────────────────────────
+
+  it('renders the Sign Out button', () => {
+    renderPage()
+    expect(screen.getByRole('button', { name: 'Sign Out' })).toBeDefined()
+  })
+
+  it('calls signOut when Sign Out is clicked', async () => {
+    mockSignOut.mockReturnValue(new Promise(() => {})) // never resolves
+    renderPage()
+    const btn = screen.getByRole('button', { name: 'Sign Out' })
+
+    await act(async () => {
+      btn.click()
+    })
+
+    expect(mockSignOut).toHaveBeenCalledOnce()
+  })
+
+  // ── Defaults section ──────────────────────────────────────────────
+
+  it('shows loading state when preferences are loading', () => {
+    mockUserDefaultsReturn.loading = true
+    renderPage()
+    expect(screen.getByText('Loading preferences...')).toBeDefined()
+  })
+
+  it('renders all permission mode radio options', () => {
+    renderPage()
+    expect(screen.getByText('Default')).toBeDefined()
+    expect(screen.getByText('Accept Edits')).toBeDefined()
+    expect(screen.getByText('Bypass')).toBeDefined()
+    expect(screen.getByText('Plan')).toBeDefined()
+    expect(screen.getByText("Don't Ask")).toBeDefined()
+    expect(screen.getByText('Auto')).toBeDefined()
+  })
+
+  it('renders permission mode descriptions', () => {
+    renderPage()
+    expect(screen.getByText('Ask for permission on risky actions')).toBeDefined()
+    expect(screen.getByText('Auto-accept file edits')).toBeDefined()
+    expect(screen.getByText('Skip all permission prompts')).toBeDefined()
+    expect(screen.getByText('Plan only, no execution')).toBeDefined()
+    expect(screen.getByText('Never ask questions')).toBeDefined()
+    expect(screen.getByText('Fully autonomous mode')).toBeDefined()
+  })
+
+  it('calls updatePreferences when a permission mode radio is clicked', async () => {
+    renderPage()
+    const planRadio = screen.getByLabelText('Plan')
+
+    await act(async () => {
+      planRadio.click()
+    })
+
+    expect(mockUpdatePreferences).toHaveBeenCalledWith({ permission_mode: 'plan' })
+  })
+
+  it('renders the Max Budget input with placeholder', () => {
+    renderPage()
+    const input = screen.getByLabelText('Max Budget (USD)')
+    expect(input).toBeDefined()
+    expect(input.getAttribute('placeholder')).toBe('No limit')
+    expect(input.getAttribute('type')).toBe('number')
+  })
+
+  it('calls updatePreferences with null when budget is cleared', async () => {
+    mockUserDefaultsReturn.preferences.max_budget = 10
+    renderPage()
+    const input = screen.getByLabelText('Max Budget (USD)') as HTMLInputElement
+
+    await act(async () => {
+      fireEvent.change(input, { target: { value: '' } })
+    })
+
+    expect(mockUpdatePreferences).toHaveBeenCalledWith({ max_budget: null })
+  })
+
+  it('calls updatePreferences with parsed number when budget is set', async () => {
+    renderPage()
+    const input = screen.getByLabelText('Max Budget (USD)') as HTMLInputElement
+
+    await act(async () => {
+      fireEvent.change(input, { target: { value: '25.5' } })
+    })
+
+    expect(mockUpdatePreferences).toHaveBeenCalledWith({ max_budget: 25.5 })
+  })
+
+  it('renders Model label', () => {
+    renderPage()
+    expect(screen.getByText('Model')).toBeDefined()
+  })
+
+  it('renders Thinking Mode label', () => {
+    renderPage()
+    expect(screen.getByText('Thinking Mode')).toBeDefined()
+  })
+
+  it('renders Effort label', () => {
+    renderPage()
+    expect(screen.getByText('Effort')).toBeDefined()
+  })
+
+  // ── Notifications section ─────────────────────────────────────────
+
+  it('embeds the NotificationPreferences component', () => {
+    renderPage()
+    expect(screen.getByTestId('notification-preferences')).toBeDefined()
+  })
+
+  it('renders notification section description', () => {
+    renderPage()
+    expect(screen.getByText('Configure which events trigger push notifications.')).toBeDefined()
+  })
+
+  // ── Appearance section ────────────────────────────────────────────
+
+  it('renders Theme label', () => {
+    renderPage()
+    expect(screen.getByText('Theme')).toBeDefined()
+  })
+
+  it('renders Sidebar Variant label', () => {
+    renderPage()
+    expect(screen.getByText('Sidebar Variant')).toBeDefined()
+  })
+
+  it('renders section descriptions', () => {
+    renderPage()
+    expect(screen.getByText('Manage your account settings.')).toBeDefined()
+    expect(
+      screen.getByText('Default values for new sessions. These can be overridden per session.'),
+    ).toBeDefined()
+    expect(screen.getByText('Customize the look and feel of the application.')).toBeDefined()
+  })
+})

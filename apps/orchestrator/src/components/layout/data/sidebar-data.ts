@@ -1,4 +1,4 @@
-import { Clock, Command, LayoutDashboard, MessagesSquare, Settings } from 'lucide-react'
+import { Clock, LayoutDashboard, MessagesSquare, Settings } from 'lucide-react'
 import type { SidebarData } from '../types'
 
 export const sidebarData: SidebarData = {
@@ -7,13 +7,6 @@ export const sidebarData: SidebarData = {
     email: '',
     avatar: '',
   },
-  teams: [
-    {
-      name: 'Duraclaw',
-      logo: Command,
-      plan: 'Orchestrator',
-    },
-  ],
   navGroups: [
     {
       title: 'General',

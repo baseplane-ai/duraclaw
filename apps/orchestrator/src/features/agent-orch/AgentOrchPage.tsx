@@ -12,6 +12,9 @@ import { Header } from '~/components/layout/header'
 import { Main } from '~/components/layout/main'
 import { PushOptInBanner } from '~/components/push-opt-in-banner'
 import { PwaInstallBanner } from '~/components/pwa-install-banner'
+import { QuickPromptInput } from '~/components/quick-prompt-input'
+import { TabBar } from '~/components/tab-bar'
+import { useTabStore } from '~/stores/tabs'
 import { AgentDetailView } from './AgentDetailView'
 import { SessionSidebar } from './SessionSidebar'
 import type { SpawnFormConfig } from './SpawnAgentForm'
@@ -30,6 +33,24 @@ function AgentOrchContent() {
     (search as { session?: string }).session ?? null,
   )
   const [spawnConfig, setSpawnConfig] = useState<SpawnConfig | null>(null)
+  const [projects, setProjects] = useState<Array<{ name: string; path: string }>>([])
+  const [projectsLoading, setProjectsLoading] = useState(true)
+
+  useEffect(() => {
+    fetch('/api/gateway/projects')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        const d = data as Record<string, unknown> | Array<{ name: string; path: string }> | null
+        const list = Array.isArray(d)
+          ? d
+          : ((d?.projects as Array<{ name: string; path: string }>) ?? [])
+        setProjects(list)
+      })
+      .catch(() => {})
+      .finally(() => setProjectsLoading(false))
+  }, [])
+
+  const addTab = useTabStore((s) => s.addTab)
 
   const handleSpawn = useCallback(
     async (config: SpawnFormConfig) => {
@@ -58,21 +79,23 @@ function AgentOrchContent() {
           agent: config.agent,
         })
         setSelectedSessionId(sessionId)
+        addTab(sessionId)
         navigate({ to: '/', search: { session: sessionId } })
       } catch (err) {
         console.error('[AgentOrch] Spawn failed:', err)
       }
     },
-    [navigate],
+    [navigate, addTab],
   )
 
   const handleSelectSession = useCallback(
     (sessionId: string) => {
       setSpawnConfig(null)
       setSelectedSessionId(sessionId)
+      addTab(sessionId)
       navigate({ to: '/', search: { session: sessionId } })
     },
-    [navigate],
+    [navigate, addTab],
   )
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
@@ -143,13 +166,50 @@ function AgentOrchContent() {
     [updateSession],
   )
 
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const isMod = e.metaKey || e.ctrlKey
+
+      // Cmd+T: add current session as tab (or no-op)
+      if (isMod && e.key === 't') {
+        e.preventDefault()
+        if (selectedSessionId) {
+          useTabStore.getState().addTab(selectedSessionId)
+        }
+      }
+
+      // Cmd+W: close current tab
+      if (isMod && e.key === 'w') {
+        e.preventDefault()
+        if (selectedSessionId) {
+          useTabStore.getState().removeTab(selectedSessionId)
+        }
+      }
+
+      // Cmd+1-9: switch to Nth tab
+      if (isMod && e.key >= '1' && e.key <= '9') {
+        const idx = parseInt(e.key, 10) - 1
+        const tabs = useTabStore.getState().tabs
+        if (idx < tabs.length) {
+          e.preventDefault()
+          const tab = tabs[idx]
+          useTabStore.getState().setActiveTab(tab.sessionId)
+          handleSelectSession(tab.sessionId)
+        }
+      }
+    }
+
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [selectedSessionId, handleSelectSession])
+
   return (
     <>
       <Header />
       <Main>
         <PwaInstallBanner />
         <PushOptInBanner />
-        <div className="flex h-[calc(100vh-4rem)] overflow-hidden">
+        <div className="flex h-[calc(100vh-4rem-28px)] overflow-hidden">
           <SessionSidebar
             sessions={sessions}
             selectedSessionId={selectedSessionId}
@@ -163,6 +223,7 @@ function AgentOrchContent() {
             onToggleCollapse={handleToggleSidebar}
           />
           <div className="flex flex-1 flex-col overflow-hidden">
+            <TabBar onSelectSession={handleSelectSession} />
             {selectedSessionId ? (
               <AgentDetailWithSpawn
                 key={selectedSessionId}
@@ -171,11 +232,11 @@ function AgentOrchContent() {
                 onStateChange={handleStateChange}
               />
             ) : (
-              <div className="flex flex-1 items-center justify-center">
-                <p className="text-sm text-muted-foreground">
-                  Select a session or create a new one
-                </p>
-              </div>
+              <QuickPromptInput
+                onSubmit={handleSpawn}
+                projects={projects}
+                projectsLoading={projectsLoading}
+              />
             )}
           </div>
         </div>

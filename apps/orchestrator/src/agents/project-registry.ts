@@ -1,6 +1,6 @@
 import { DurableObject } from 'cloudflare:workers'
 import { runMigrations } from '~/lib/do-migrations'
-import type { Env, SessionSummary } from '~/lib/types'
+import type { Env, SessionSummary, UserPreferences } from '~/lib/types'
 import { REGISTRY_MIGRATIONS } from './project-registry-migrations'
 
 export class ProjectRegistry extends DurableObject<Env> {
@@ -325,5 +325,63 @@ export class ProjectRegistry extends DurableObject<Env> {
         userId,
       )
       .toArray() as unknown as SessionSummary[]
+  }
+
+  async getUserPreferences(userId: string): Promise<UserPreferences | null> {
+    await this.ensureInit()
+    const rows = this.ctx.storage.sql
+      .exec('SELECT * FROM user_preferences WHERE user_id = ?', userId)
+      .toArray()
+    if (rows.length === 0) return null
+    const row = rows[0]
+    return {
+      permission_mode: row.permission_mode as string,
+      model: row.model as string,
+      max_budget: row.max_budget as number | null,
+      thinking_mode: row.thinking_mode as string,
+      effort: row.effort as string,
+    }
+  }
+
+  async setUserPreferences(userId: string, prefs: Partial<UserPreferences>): Promise<void> {
+    await this.ensureInit()
+    const allowedFields = ['permission_mode', 'model', 'max_budget', 'thinking_mode', 'effort']
+    const existing = this.ctx.storage.sql
+      .exec('SELECT user_id FROM user_preferences WHERE user_id = ?', userId)
+      .toArray()
+
+    if (existing.length > 0) {
+      const updates: string[] = []
+      const values: unknown[] = []
+      for (const [key, value] of Object.entries(prefs)) {
+        if (allowedFields.includes(key)) {
+          updates.push(`${key} = ?`)
+          values.push(value)
+        }
+      }
+      if (updates.length > 0) {
+        updates.push("updated_at = datetime('now')")
+        values.push(userId)
+        this.ctx.storage.sql.exec(
+          `UPDATE user_preferences SET ${updates.join(', ')} WHERE user_id = ?`,
+          ...values,
+        )
+      }
+    } else {
+      const cols = ['user_id']
+      const vals: unknown[] = [userId]
+      const placeholders = ['?']
+      for (const [key, value] of Object.entries(prefs)) {
+        if (allowedFields.includes(key)) {
+          cols.push(key)
+          vals.push(value)
+          placeholders.push('?')
+        }
+      }
+      this.ctx.storage.sql.exec(
+        `INSERT INTO user_preferences (${cols.join(', ')}) VALUES (${placeholders.join(', ')})`,
+        ...vals,
+      )
+    }
   }
 }

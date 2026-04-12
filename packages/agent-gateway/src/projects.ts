@@ -28,6 +28,18 @@ async function getBranch(dir: string): Promise<string> {
   }
 }
 
+/** Get the git remote origin URL, or null. */
+async function getRemoteOrigin(dir: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync('git', ['config', '--get', 'remote.origin.url'], {
+      cwd: dir,
+    })
+    return stdout.trim() || null
+  } catch {
+    return null
+  }
+}
+
 /** Check if a git working tree has uncommitted changes. */
 async function isDirty(dir: string): Promise<boolean> {
   try {
@@ -64,12 +76,14 @@ export async function discoverProjects(
 
     const branch = await getBranch(fullPath)
     const dirty = await isDirty(fullPath)
+    const repo_origin = await getRemoteOrigin(fullPath)
     projects.push({
       name: entry.name,
       path: fullPath,
       branch,
       dirty,
       active_session: activeSessions[fullPath] ?? null,
+      repo_origin,
     })
   }
 

@@ -431,9 +431,7 @@ export class SessionDO extends Agent<Env, SessionState> {
   async sendMessage(content: string | ContentBlock[]): Promise<{ ok: boolean; error?: string }> {
     const { status } = this.state
     const isActive = status === 'running' || status === 'waiting_gate'
-    const isResumable =
-      (status === 'idle' || status === 'completed' || status === 'stopped') &&
-      this.state.sdk_session_id
+    const isResumable = (status === 'idle' || status === 'stopped') && this.state.sdk_session_id
 
     if (!isActive && !isResumable) {
       return { ok: false, error: `Cannot send message: status is '${status}'` }
@@ -608,9 +606,10 @@ export class SessionDO extends Agent<Env, SessionState> {
           {
             title: this.state.project || 'Duraclaw',
             body: `Asking: ${((event.questions?.[0] as Record<string, unknown>)?.question as string)?.slice(0, 100) || 'Question'}`,
-            url: `/sessions/${this.state.session_id}`,
+            url: `/?session=${this.state.session_id}`,
             tag: `session-${this.state.session_id}`,
             sessionId: this.state.session_id ?? '',
+            actions: [{ action: 'open', title: 'Open' }],
           },
           'blocked',
         )
@@ -638,7 +637,7 @@ export class SessionDO extends Agent<Env, SessionState> {
               {
                 title: this.state.project || 'Duraclaw',
                 body: `Needs permission: ${event.tool_name}`,
-                url: `/sessions/${this.state.session_id}`,
+                url: `/?session=${this.state.session_id}`,
                 tag: `session-${this.state.session_id}`,
                 sessionId: this.state.session_id ?? '',
                 actionToken,
@@ -657,7 +656,7 @@ export class SessionDO extends Agent<Env, SessionState> {
 
       case 'result':
         this.updateState({
-          status: event.is_error ? 'failed' : 'completed',
+          status: event.is_error ? 'failed' : 'idle',
           completed_at: new Date().toISOString(),
           result: event.result,
           duration_ms: (this.state.duration_ms ?? 0) + (event.duration_ms ?? 0),
@@ -676,9 +675,13 @@ export class SessionDO extends Agent<Env, SessionState> {
             {
               title: this.state.project || 'Duraclaw',
               body: `Completed (${this.state.num_turns} turns, $${(this.state.total_cost_usd ?? 0).toFixed(2)})`,
-              url: `/sessions/${this.state.session_id}`,
+              url: `/?session=${this.state.session_id}`,
               tag: `session-${this.state.session_id}`,
               sessionId: this.state.session_id ?? '',
+              actions: [
+                { action: 'open', title: 'Open' },
+                { action: 'new-session', title: 'New Session' },
+              ],
             },
             'completed',
           )
@@ -687,7 +690,7 @@ export class SessionDO extends Agent<Env, SessionState> {
             {
               title: this.state.project || 'Duraclaw',
               body: `Failed: ${event.result || 'Session failed'}`,
-              url: `/sessions/${this.state.session_id}`,
+              url: `/?session=${this.state.session_id}`,
               tag: `session-${this.state.session_id}`,
               sessionId: this.state.session_id ?? '',
             },
@@ -714,7 +717,7 @@ export class SessionDO extends Agent<Env, SessionState> {
           {
             title: this.state.project || 'Duraclaw',
             body: `Error: ${event.error}`,
-            url: `/sessions/${this.state.session_id}`,
+            url: `/?session=${this.state.session_id}`,
             tag: `session-${this.state.session_id}`,
             sessionId: this.state.session_id ?? '',
           },

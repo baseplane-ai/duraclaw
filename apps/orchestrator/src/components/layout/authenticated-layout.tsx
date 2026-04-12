@@ -1,6 +1,7 @@
 import { Outlet } from '@tanstack/react-router'
 import { AppSidebar } from '~/components/layout/app-sidebar'
 import { SkipToMain } from '~/components/skip-to-main'
+import { StatusBar } from '~/components/status-bar'
 import { SidebarInset, SidebarProvider } from '~/components/ui/sidebar'
 import { LayoutProvider } from '~/context/layout-provider'
 import { SearchProvider } from '~/context/search-provider'
@@ -31,11 +32,15 @@ export function AuthenticatedLayout({ children }: AuthenticatedLayoutProps) {
               // If layout is fixed and sidebar is inset,
               // set the height to 100svh - spacing (total margins) to prevent overflow
               'peer-data-[variant=inset]:has-data-[layout=fixed]:h-[calc(100svh-(var(--spacing)*4))]',
+
+              // Bottom padding for the fixed status bar
+              'pb-7',
             )}
           >
             {children ?? <Outlet />}
           </SidebarInset>
         </SidebarProvider>
+        <StatusBar />
       </LayoutProvider>
     </SearchProvider>
   )

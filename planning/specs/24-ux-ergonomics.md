@@ -1,9 +1,61 @@
 ---
-issue: 24
+github_issue: 24
 title: "UX Ergonomics — Chat-Native Session Orchestration"
-status: draft
+status: approved
 research: planning/research/2026-04-12-ux-ergonomics.md
 created: 2026-04-12
+phases:
+  - id: p1
+    name: "Foundation — Status Bar + Settings + Bug Fixes"
+    behaviors: [B4, B5, B8, B9]
+    tasks:
+      - "Create StatusBar component with left/right sections, color-coded background"
+      - "Add StatusBar to AuthenticatedLayout (fixed bottom)"
+      - "Create user_preferences table in ProjectRegistry DO (migration)"
+      - "Add GET/PUT /api/preferences routes"
+      - "Create useUserDefaults() hook"
+      - "Redesign settings page with Defaults, Notifications, Appearance sections"
+      - "Fix ResultEvent handler in session-do.ts: completed → idle"
+      - "Remove completed from SessionStatus type, update all references"
+      - "Fix notification URLs to use /?session={id} format"
+      - "Add redirect in session.$id.tsx route"
+      - "Remove SessionMetadataHeader component (replaced by status bar)"
+  - id: p2
+    name: "Chat-Native — New Session Flow + Session List"
+    behaviors: [B1, B2]
+    tasks:
+      - "Create QuickPromptInput component (centered prompt + config chips)"
+      - "Replace empty-state in AgentOrchPage with QuickPromptInput"
+      - "Implement config chips (project, model, permission) with click-to-cycle"
+      - "Refactor SessionListItem for chat-list style (preview, dots, no badge)"
+      - "Add last-message-preview to SessionRecord"
+      - "Implement context menu (right-click/long-press) replacing dropdown"
+      - "Add swipe gesture support for mobile (archive left, pin right)"
+      - "Move SpawnAgentForm into Advanced expandable section"
+  - id: p3
+    name: "Command Palette + Workspaces"
+    behaviors: [B3, B6]
+    tasks:
+      - "Extend CommandMenu component with session/project/action sections"
+      - "Wire Cmd+K to command palette"
+      - "Add fuzzy search over sessions, projects, actions"
+      - "Add repo_origin to gateway /projects response"
+      - "Implement workspace auto-detection (group by repo_origin)"
+      - "Create WorkspaceSelector component (replaces TeamSwitcher)"
+      - "Add workspace_preferences table + API routes"
+      - "Wire workspace filter into session sidebar"
+  - id: p4
+    name: "Kata Status + Notifications + Tabs"
+    behaviors: [B7, B10, B11]
+    tasks:
+      - "Add kata mode/phase to status bar with click-to-expand popover"
+      - "Add kata mode badges to session sidebar items"
+      - "Add action buttons to push notification payloads"
+      - "Handle notification actions in service worker"
+      - "Create TabBar component"
+      - "Add tab keyboard shortcuts (Cmd+T/W/1-9)"
+      - "Persist tab state in localStorage"
+      - "Wire tab switching to session selection"
 ---
 
 # UX Ergonomics — Chat-Native Session Orchestration

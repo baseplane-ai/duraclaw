@@ -39,15 +39,15 @@ export function useNotificationWatcher(sessions: SessionInfo[]) {
           sessionId: session.id,
           sessionName: name,
           body: 'Session needs input',
-          url: `/sessions/${session.id}`,
+          url: `/?session=${session.id}`,
         })
-      } else if (session.status === 'completed') {
+      } else if (session.status === 'idle' && prevStatus === 'running') {
         addNotification({
           type: 'completed',
           sessionId: session.id,
           sessionName: name,
           body: 'Session completed',
-          url: `/sessions/${session.id}`,
+          url: `/?session=${session.id}`,
         })
       } else if (session.status === 'failed' || session.status === 'error') {
         addNotification({
@@ -55,7 +55,7 @@ export function useNotificationWatcher(sessions: SessionInfo[]) {
           sessionId: session.id,
           sessionName: name,
           body: 'Session failed',
-          url: `/sessions/${session.id}`,
+          url: `/?session=${session.id}`,
         })
       }
 

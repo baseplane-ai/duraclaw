@@ -345,6 +345,7 @@ export interface ProjectInfo {
   branch: string
   dirty: boolean
   active_session: string | null
+  repo_origin: string | null
 }
 
 // ── SDK Session Info (on-disk session metadata) ─────────────────────
@@ -409,7 +410,6 @@ export type SessionStatus =
   | 'waiting_input'
   | 'waiting_permission'
   | 'waiting_gate'
-  | 'completed'
   | 'failed'
   | 'aborted'
   | 'stopped'
@@ -494,6 +494,16 @@ export interface StoredMessage {
   type: string
   data: string
   created_at: string
+}
+
+// ── User Preferences ────────────────────────────────────────────────
+
+export interface UserPreferences {
+  permission_mode: string
+  model: string
+  max_budget: number | null
+  thinking_mode: string
+  effort: string
 }
 
 // ── Session Context (agent-gateway internal) ─────────────────────────

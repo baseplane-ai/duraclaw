@@ -1,0 +1,145 @@
+/**
+ * @vitest-environment jsdom
+ *
+ * AgentDetailView tests — verifies SessionMetadataHeader is not rendered
+ * (its functionality moved to the global StatusBar).
+ */
+
+import { cleanup, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { useStatusBarStore } from '~/stores/status-bar'
+import { AgentDetailView } from './AgentDetailView'
+import type { UseCodingAgentResult } from './use-coding-agent'
+
+// Mock child components to isolate AgentDetailView rendering
+vi.mock('./ChatThread', () => ({
+  ChatThread: (props: Record<string, unknown>) => (
+    <div data-testid="chat-thread" data-status={props.status} />
+  ),
+}))
+
+vi.mock('./KataStatePanel', () => ({
+  KataStatePanel: () => <div data-testid="kata-state-panel" />,
+}))
+
+vi.mock('./MessageInput', () => ({
+  MessageInput: () => <div data-testid="message-input" />,
+}))
+
+function makeAgent(overrides: Partial<UseCodingAgentResult> = {}): UseCodingAgentResult {
+  return {
+    state: {
+      status: 'running',
+      session_id: 'test-session',
+      project: 'test',
+      project_path: '/tmp/test',
+      model: 'claude-opus-4-0',
+      prompt: 'hello',
+      userId: 'u1',
+      started_at: '2026-01-01T00:00:00Z',
+      completed_at: null,
+      num_turns: 0,
+      total_cost_usd: null,
+      duration_ms: null,
+      gate: null,
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+      result: null,
+      error: null,
+      summary: null,
+      sdk_session_id: null,
+    },
+    events: [],
+    messages: [],
+    streamingContent: '',
+    sessionResult: null,
+    kataState: null,
+    contextUsage: null,
+    wsReadyState: 1,
+    spawn: vi.fn(),
+    stop: vi.fn(),
+    abort: vi.fn(),
+    interrupt: vi.fn(),
+    getContextUsage: vi.fn(),
+    resolveGate: vi.fn(),
+    sendMessage: vi.fn(),
+    rewind: vi.fn(),
+    injectQaPair: vi.fn(),
+    ...overrides,
+  }
+}
+
+afterEach(() => {
+  cleanup()
+  useStatusBarStore.getState().clear()
+})
+
+describe('AgentDetailView', () => {
+  it('does not render SessionMetadataHeader', () => {
+    const agent = makeAgent()
+    render(<AgentDetailView name="test" agent={agent} />)
+
+    // The old SessionMetadataHeader had data-testid or specific elements;
+    // verify no element with that identity exists in the tree
+    const container = screen.getByTestId('agent-detail-view')
+    expect(container.querySelector('[data-testid="session-metadata-header"]')).toBeNull()
+  })
+
+  it('renders ChatThread and KataStatePanel', () => {
+    const agent = makeAgent()
+    render(<AgentDetailView name="test" agent={agent} />)
+
+    expect(screen.getByTestId('chat-thread')).toBeTruthy()
+    expect(screen.getByTestId('kata-state-panel')).toBeTruthy()
+  })
+
+  it('renders MessageInput when status is running', () => {
+    const base = makeAgent()
+    const agent = makeAgent({ state: { ...base.state, status: 'running' } as typeof base.state })
+    render(<AgentDetailView name="test" agent={agent} />)
+
+    expect(screen.getByTestId('message-input')).toBeTruthy()
+  })
+
+  it('does not render MessageInput when status is failed', () => {
+    const base = makeAgent()
+    const agent = makeAgent({ state: { ...base.state, status: 'failed' } as typeof base.state })
+    render(<AgentDetailView name="test" agent={agent} />)
+
+    expect(screen.queryByTestId('message-input')).toBeNull()
+  })
+
+  it('syncs session data to the global status bar store', () => {
+    const stopFn = vi.fn()
+    const interruptFn = vi.fn()
+    const agent = makeAgent({
+      stop: stopFn,
+      interrupt: interruptFn,
+      contextUsage: { totalTokens: 1000, maxTokens: 200000, percentage: 0.5 },
+    })
+
+    render(<AgentDetailView name="test" agent={agent} />)
+
+    const store = useStatusBarStore.getState()
+    expect(store.state).toBe(agent.state)
+    expect(store.wsReadyState).toBe(1)
+    expect(store.contextUsage).toEqual({ totalTokens: 1000, maxTokens: 200000, percentage: 0.5 })
+    expect(store.onStop).toBe(stopFn)
+    expect(store.onInterrupt).toBe(interruptFn)
+  })
+
+  it('clears status bar store on unmount', () => {
+    const agent = makeAgent()
+    const { unmount } = render(<AgentDetailView name="test" agent={agent} />)
+
+    // Verify store is populated
+    expect(useStatusBarStore.getState().state).toBe(agent.state)
+
+    unmount()
+
+    // Store should be cleared
+    const store = useStatusBarStore.getState()
+    expect(store.state).toBeNull()
+    expect(store.onStop).toBeNull()
+  })
+})

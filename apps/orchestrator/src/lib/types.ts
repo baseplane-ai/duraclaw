@@ -14,6 +14,7 @@ export type {
   SpawnConfig,
   StoredMessage,
   UIStreamChunk,
+  UserPreferences,
 } from '@duraclaw/shared-types'
 
 // ── CF-specific types ──────────────────────────────────────────────

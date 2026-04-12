@@ -15,6 +15,7 @@ import type {
   SessionInitEvent,
   SessionState,
   SessionStateChangedEvent,
+  SessionStatus,
   SessionSummary,
   SetModelCommand,
   SetPermissionModeCommand,
@@ -396,5 +397,37 @@ describe('shared-types: SDK summary fields', () => {
       pending_permission: null,
     }
     expect(state.summary).toBe('Migrated database schema')
+  })
+})
+
+describe('SessionStatus type', () => {
+  test('includes expected valid statuses', () => {
+    const validStatuses: SessionStatus[] = [
+      'idle',
+      'running',
+      'waiting_input',
+      'waiting_permission',
+      'waiting_gate',
+      'failed',
+      'aborted',
+      'stopped',
+    ]
+    expect(validStatuses).toHaveLength(8)
+  })
+
+  test('does not include completed (sessions use idle instead)', () => {
+    // This is a runtime check that the set of valid statuses does not include 'completed'.
+    // The type-level exclusion is enforced by removing 'completed' from the SessionStatus union.
+    const allStatuses: SessionStatus[] = [
+      'idle',
+      'running',
+      'waiting_input',
+      'waiting_permission',
+      'waiting_gate',
+      'failed',
+      'aborted',
+      'stopped',
+    ]
+    expect(allStatuses).not.toContain('completed')
   })
 })

@@ -89,10 +89,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         hydrateMessages(connection).catch(() => {})
       }
       // Re-hydrate when a resumed session completes
-      if (
-        prevStatus === 'running' &&
-        (newState.status === 'idle' || newState.status === 'completed')
-      ) {
+      if (prevStatus === 'running' && newState.status === 'idle') {
         hydrateMessages(connection).catch(() => {})
       }
     },

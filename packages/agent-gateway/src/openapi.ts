@@ -236,8 +236,9 @@ export const spec = {
           branch: { type: 'string', example: 'main' },
           dirty: { type: 'boolean' },
           active_session: { type: ['string', 'null'] },
+          repo_origin: { type: ['string', 'null'] },
         },
-        required: ['name', 'path', 'branch', 'dirty', 'active_session'],
+        required: ['name', 'path', 'branch', 'dirty', 'active_session', 'repo_origin'],
       },
       FileEntry: {
         type: 'object',
