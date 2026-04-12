@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react'
+import { NotificationBell } from '~/components/notification-bell'
+import { NotificationDrawer } from '~/components/notification-drawer'
 import { Separator } from '~/components/ui/separator'
 import { SidebarTrigger } from '~/components/ui/sidebar'
 import { cn } from '~/lib/utils'
@@ -10,6 +12,7 @@ type HeaderProps = React.HTMLAttributes<HTMLElement> & {
 
 export function Header({ className, fixed, children, ...props }: HeaderProps) {
   const [offset, setOffset] = useState(0)
+  const [drawerOpen, setDrawerOpen] = useState(false)
 
   useEffect(() => {
     const onScroll = () => {
@@ -42,9 +45,11 @@ export function Header({ className, fixed, children, ...props }: HeaderProps) {
         )}
       >
         <SidebarTrigger variant="outline" className="max-md:scale-125" />
+        <NotificationBell onClick={() => setDrawerOpen(true)} />
         <Separator orientation="vertical" className="h-6" />
         {children}
       </div>
+      <NotificationDrawer open={drawerOpen} onOpenChange={setDrawerOpen} />
     </header>
   )
 }

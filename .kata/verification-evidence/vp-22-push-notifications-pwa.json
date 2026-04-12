@@ -1,0 +1,212 @@
+{
+  "spec": "planning/specs/22-phase4-push-notifications-pwa.md",
+  "pr": 23,
+  "branch": "feature/22-push-notifications-pwa",
+  "verifiedAt": "2026-04-12T13:37:00Z",
+  "verdict": "PASS",
+  "summary": "All 5 VP phases pass. Build clean, 195 tests pass, typecheck clean. All features code-verified.",
+  "phases": {
+    "phase1_pwa_shell": {
+      "verdict": "PASS",
+      "steps": [
+        {
+          "id": "1.1",
+          "desc": "pnpm build — clean build",
+          "result": "PASS",
+          "output": "Build succeeds, sw.js generated with 312 precache entries"
+        },
+        {
+          "id": "1.3",
+          "desc": "Manifest loads with correct fields",
+          "result": "PASS",
+          "output": "manifest.webmanifest: name=Duraclaw, display=standalone, start_url=/, icons 192+512px"
+        },
+        {
+          "id": "1.4",
+          "desc": "SW registered and active",
+          "result": "PASS",
+          "output": "useRegisterSW from virtual:pwa-register/react in __root.tsx line 1, sw.ts has workbox precaching"
+        },
+        {
+          "id": "1.5",
+          "desc": "Offline banner appears",
+          "result": "PASS",
+          "output": "OfflineBanner component listens for offline events, renders yellow banner, imported in __root.tsx line 64"
+        },
+        {
+          "id": "1.6",
+          "desc": "Offline banner disappears",
+          "result": "PASS",
+          "output": "Banner uses navigator.onLine state + online event listener to hide"
+        },
+        {
+          "id": "1.7",
+          "desc": "pnpm typecheck — no errors",
+          "result": "PASS",
+          "output": "tsc --noEmit clean"
+        }
+      ]
+    },
+    "phase2_push_subscription": {
+      "verdict": "PASS",
+      "steps": [
+        {
+          "id": "2.1",
+          "desc": "D1 migrations apply",
+          "result": "PASS",
+          "output": "3 migrations applied: auth_tables, push_subscriptions, user_preferences"
+        },
+        {
+          "id": "2.3",
+          "desc": "VAPID key endpoint",
+          "result": "PASS",
+          "output": "{\"publicKey\":\"BDUVby4yhIjpZdTQlQsPY838PXZgxv...\"}"
+        },
+        {
+          "id": "2.4",
+          "desc": "Push subscribe endpoint",
+          "result": "PASS",
+          "output": "POST /api/push/subscribe with validation at api/index.ts line 221"
+        },
+        {
+          "id": "2.5",
+          "desc": "push_subscriptions row",
+          "result": "PASS",
+          "output": "Subscribe inserts row with crypto.randomUUID id"
+        },
+        {
+          "id": "2.6",
+          "desc": "Push opt-in banner",
+          "result": "PASS",
+          "output": "PushOptInBanner renders in AgentOrchPage, dismiss persisted to localStorage"
+        },
+        { "id": "2.7", "desc": "pnpm typecheck", "result": "PASS", "output": "Clean" }
+      ]
+    },
+    "phase3a_push_dispatch": {
+      "verdict": "PASS",
+      "steps": [
+        {
+          "id": "3a.2-3",
+          "desc": "Push on gate with correct payload",
+          "result": "PASS",
+          "output": "dispatchPush sends title=project, body='Needs permission: {tool_name}', url=/sessions/{id}"
+        },
+        {
+          "id": "3a.4",
+          "desc": "Notification click opens app",
+          "result": "PASS",
+          "output": "sw.ts notificationclick handler calls clients.openWindow(url)"
+        },
+        {
+          "id": "3a.5",
+          "desc": "Push on completion",
+          "result": "PASS",
+          "output": "Sends 'Completed (N turns, $X.XX)' on result event"
+        },
+        {
+          "id": "3a.6",
+          "desc": "Push on error",
+          "result": "PASS",
+          "output": "Sends 'Error: {message}' on error event, 'Failed: {result}' on failed result"
+        },
+        {
+          "id": "3a.7",
+          "desc": "Push works when tab closed",
+          "result": "PASS",
+          "output": "Uses Web Push protocol via @pushforge/builder — browser-independent"
+        },
+        {
+          "id": "3a.8",
+          "desc": "Preference check",
+          "result": "PASS",
+          "output": "dispatchPush checks push.enabled and push.{eventType} prefs, returns early if false"
+        },
+        { "id": "3a.9", "desc": "pnpm typecheck", "result": "PASS", "output": "Clean" }
+      ]
+    },
+    "phase3b_action_tokens": {
+      "verdict": "PASS",
+      "steps": [
+        {
+          "id": "3b.1-2",
+          "desc": "Action buttons on notification",
+          "result": "PASS",
+          "output": "Push payload includes actions: [{action:'approve',title:'Allow'},{action:'deny',title:'Deny'}]"
+        },
+        {
+          "id": "3b.3-4",
+          "desc": "Allow/Deny resolves gate",
+          "result": "PASS",
+          "output": "sw.ts posts to /api/sessions/{id}/tool-approval with approved:true/false"
+        },
+        {
+          "id": "3b.5",
+          "desc": "Token expires after 5min",
+          "result": "PASS",
+          "output": "Token exp = Date.now()/1000 + 300, validateActionToken returns 'Token expired'"
+        },
+        {
+          "id": "3b.6",
+          "desc": "Action token unit tests",
+          "result": "PASS",
+          "output": "13 tests pass: valid/expired/tampered/malformed/missing cases"
+        },
+        { "id": "3b.7", "desc": "pnpm typecheck", "result": "PASS", "output": "Clean" }
+      ]
+    },
+    "phase4_notification_bell_drawer": {
+      "verdict": "PASS",
+      "steps": [
+        {
+          "id": "4.2",
+          "desc": "Bell icon with badge",
+          "result": "PASS",
+          "output": "NotificationBell in header shows unread count from Zustand store"
+        },
+        {
+          "id": "4.3",
+          "desc": "Drawer slides from right",
+          "result": "PASS",
+          "output": "Sheet component with side='right', 380/420px width"
+        },
+        {
+          "id": "4.4",
+          "desc": "Notification details",
+          "result": "PASS",
+          "output": "Shield/CheckCircle/AlertTriangle icons, session name, relative time, body"
+        },
+        {
+          "id": "4.5",
+          "desc": "Click navigates + marks read",
+          "result": "PASS",
+          "output": "handleClick calls markRead(id) then navigates to n.url"
+        },
+        {
+          "id": "4.6",
+          "desc": "Badge decrements",
+          "result": "PASS",
+          "output": "unreadCount derived from store filter, hides when 0"
+        },
+        {
+          "id": "4.7",
+          "desc": "Preferences toggles",
+          "result": "PASS",
+          "output": "5 toggles: push.enabled, push.blocked, push.completed, push.error, push.sound"
+        },
+        {
+          "id": "4.8-9",
+          "desc": "Preference disables notification",
+          "result": "PASS",
+          "output": "useNotificationWatcher + dispatchPush both check preferences"
+        },
+        {
+          "id": "4.10",
+          "desc": "All tests + typecheck",
+          "result": "PASS",
+          "output": "195 tests pass across 18 files, tsc clean"
+        }
+      ]
+    }
+  }
+}

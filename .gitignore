@@ -42,5 +42,6 @@ logs/
 .claude/sessions/
 .claude/.cleanup-ran
 .dev.vars
+.env.vapid
 .kata/sessions/
 .kata/.cleanup-ran

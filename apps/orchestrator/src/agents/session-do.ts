@@ -1,5 +1,7 @@
 import { Agent, type Connection, type ConnectionContext, callable } from 'agents'
+import { generateActionToken } from '~/lib/action-token'
 import { runMigrations } from '~/lib/do-migrations'
+import { type PushPayload, sendPushNotification } from '~/lib/push'
 import type {
   ContentBlock,
   Env,
@@ -228,6 +230,78 @@ export class SessionDO extends Agent<Env, SessionState> {
       sendCommand(this.vpsWs, cmd)
     } else {
       console.error(`[SessionDO:${this.ctx.id}] Cannot send to gateway: no active connection`)
+    }
+  }
+
+  private async dispatchPush(payload: PushPayload, eventType: 'blocked' | 'completed' | 'error') {
+    const userId = this.state.userId
+    if (!userId) return
+
+    const vapidPublicKey = this.env.VAPID_PUBLIC_KEY
+    const vapidPrivateKey = this.env.VAPID_PRIVATE_KEY
+    const vapidSubject = this.env.VAPID_SUBJECT
+    if (!vapidPublicKey || !vapidPrivateKey || !vapidSubject) {
+      console.log(`[SessionDO:${this.ctx.id}] Push not configured — skipping`)
+      return
+    }
+
+    // Check user preferences cascade
+    try {
+      const prefs = await this.env.AUTH_DB.prepare(
+        'SELECT key, value FROM user_preferences WHERE user_id = ? AND key LIKE ?',
+      )
+        .bind(userId, 'push.%')
+        .all<{ key: string; value: string }>()
+
+      const prefMap = new Map(prefs.results.map((r) => [r.key, r.value]))
+
+      // Master toggle
+      if (prefMap.get('push.enabled') === 'false') return
+
+      // Event-specific toggle
+      const prefKey = `push.${eventType}`
+      if (prefMap.get(prefKey) === 'false') return
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Failed to check push preferences:`, err)
+      // Continue — default is opt-in (send notification)
+    }
+
+    // Fetch subscriptions
+    let subscriptions: Array<{ id: string; endpoint: string; p256dh: string; auth: string }>
+    try {
+      const result = await this.env.AUTH_DB.prepare(
+        'SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ?',
+      )
+        .bind(userId)
+        .all<{ id: string; endpoint: string; p256dh: string; auth: string }>()
+      subscriptions = result.results
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Failed to fetch push subscriptions:`, err)
+      return
+    }
+
+    if (subscriptions.length === 0) return
+
+    const vapid = { publicKey: vapidPublicKey, privateKey: vapidPrivateKey, subject: vapidSubject }
+
+    // Send to all subscriptions (best-effort, no retry)
+    for (const sub of subscriptions) {
+      const result = await sendPushNotification(sub, payload, vapid)
+      if (result.gone) {
+        // 410 Gone — delete stale subscription
+        try {
+          await this.env.AUTH_DB.prepare('DELETE FROM push_subscriptions WHERE id = ?')
+            .bind(sub.id)
+            .run()
+          console.log(`[SessionDO:${this.ctx.id}] Deleted stale push subscription ${sub.id}`)
+        } catch (err) {
+          console.error(`[SessionDO:${this.ctx.id}] Failed to delete stale subscription:`, err)
+        }
+      } else if (!result.ok) {
+        console.log(
+          `[SessionDO:${this.ctx.id}] Push to ${sub.endpoint.slice(0, 50)}... returned ${result.status}`,
+        )
+      }
     }
   }
 
@@ -529,6 +603,17 @@ export class SessionDO extends Agent<Env, SessionState> {
             detail: { questions: event.questions },
           },
         })
+        this.syncStatusToRegistry()
+        this.dispatchPush(
+          {
+            title: this.state.project || 'Duraclaw',
+            body: `Asking: ${((event.questions?.[0] as Record<string, unknown>)?.question as string)?.slice(0, 100) || 'Question'}`,
+            url: `/sessions/${this.state.session_id}`,
+            tag: `session-${this.state.session_id}`,
+            sessionId: this.state.session_id ?? '',
+          },
+          'blocked',
+        )
         break
 
       case 'permission_request':
@@ -540,6 +625,34 @@ export class SessionDO extends Agent<Env, SessionState> {
             detail: { tool_name: event.tool_name, input: event.input },
           },
         })
+        this.syncStatusToRegistry()
+        // Generate action token and dispatch push with it (fire-and-forget)
+        ;(async () => {
+          try {
+            const actionToken = await generateActionToken(
+              this.state.session_id ?? '',
+              event.tool_call_id,
+              this.env.BETTER_AUTH_SECRET,
+            )
+            this.dispatchPush(
+              {
+                title: this.state.project || 'Duraclaw',
+                body: `Needs permission: ${event.tool_name}`,
+                url: `/sessions/${this.state.session_id}`,
+                tag: `session-${this.state.session_id}`,
+                sessionId: this.state.session_id ?? '',
+                actionToken,
+                actions: [
+                  { action: 'approve', title: 'Allow' },
+                  { action: 'deny', title: 'Deny' },
+                ],
+              },
+              'blocked',
+            )
+          } catch (err) {
+            console.error(`[SessionDO:${this.ctx.id}] Failed to generate action token:`, err)
+          }
+        })()
         break
 
       case 'result':
@@ -558,6 +671,29 @@ export class SessionDO extends Agent<Env, SessionState> {
         this.vpsWs = null
         this.syncStatusToRegistry()
         this.syncResultToRegistry()
+        if (!event.is_error) {
+          this.dispatchPush(
+            {
+              title: this.state.project || 'Duraclaw',
+              body: `Completed (${this.state.num_turns} turns, $${(this.state.total_cost_usd ?? 0).toFixed(2)})`,
+              url: `/sessions/${this.state.session_id}`,
+              tag: `session-${this.state.session_id}`,
+              sessionId: this.state.session_id ?? '',
+            },
+            'completed',
+          )
+        } else {
+          this.dispatchPush(
+            {
+              title: this.state.project || 'Duraclaw',
+              body: `Failed: ${event.result || 'Session failed'}`,
+              url: `/sessions/${this.state.session_id}`,
+              tag: `session-${this.state.session_id}`,
+              sessionId: this.state.session_id ?? '',
+            },
+            'error',
+          )
+        }
         break
 
       case 'stopped':
@@ -574,6 +710,16 @@ export class SessionDO extends Agent<Env, SessionState> {
       case 'error':
         this.updateState({ status: 'failed', error: event.error })
         this.syncStatusToRegistry()
+        this.dispatchPush(
+          {
+            title: this.state.project || 'Duraclaw',
+            body: `Error: ${event.error}`,
+            url: `/sessions/${this.state.session_id}`,
+            tag: `session-${this.state.session_id}`,
+            sessionId: this.state.session_id ?? '',
+          },
+          'error',
+        )
         break
     }
   }

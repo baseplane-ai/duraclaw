@@ -10,6 +10,8 @@ import { useNavigate, useSearch } from '@tanstack/react-router'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Header } from '~/components/layout/header'
 import { Main } from '~/components/layout/main'
+import { PushOptInBanner } from '~/components/push-opt-in-banner'
+import { PwaInstallBanner } from '~/components/pwa-install-banner'
 import { AgentDetailView } from './AgentDetailView'
 import { SessionSidebar } from './SessionSidebar'
 import type { SpawnFormConfig } from './SpawnAgentForm'
@@ -145,6 +147,8 @@ function AgentOrchContent() {
     <>
       <Header />
       <Main>
+        <PwaInstallBanner />
+        <PushOptInBanner />
         <div className="flex h-[calc(100vh-4rem)] overflow-hidden">
           <SessionSidebar
             sessions={sessions}

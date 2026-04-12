@@ -6,6 +6,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react'
+import { useNotificationWatcher } from '~/hooks/use-notification-watcher'
 import type { SessionSummary } from '~/lib/types'
 
 export interface SessionRecord extends SessionSummary {
@@ -33,6 +34,8 @@ export interface UseAgentOrchSessionsResult {
 export function useAgentOrchSessions(): UseAgentOrchSessionsResult {
   const [sessions, setSessions] = useState<SessionRecord[]>([])
   const [isLoading, setIsLoading] = useState(true)
+
+  useNotificationWatcher(sessions)
 
   const fetchSessions = useCallback(async () => {
     try {

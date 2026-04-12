@@ -1,7 +1,9 @@
 import { Hono } from 'hono'
+import { validateActionToken } from '~/lib/action-token'
 import type { ProjectInfo, SessionSummary } from '~/lib/types'
 import { authMiddleware } from './auth-middleware'
 import { authRoutes } from './auth-routes'
+import { getRequestSession } from './auth-session'
 import type { ApiAppEnv } from './context'
 
 interface CreateSessionBody {
@@ -81,7 +83,197 @@ export function createApiApp() {
 
   app.get('/api/health', (c) => c.json({ ok: true }))
   app.route('/api/auth', authRoutes)
+
+  app.get('/api/push/vapid-key', (c) => {
+    const publicKey = c.env.VAPID_PUBLIC_KEY
+    if (!publicKey) {
+      return c.json({ error: 'Push not configured' }, 503)
+    }
+    return c.json({ publicKey })
+  })
+
+  // Tool approval — supports both session cookie auth AND Bearer action token auth
+  // Must be BEFORE authMiddleware because Bearer tokens bypass session auth
+  app.post('/api/sessions/:id/tool-approval', async (c) => {
+    const sessionId = c.req.param('id')
+    const body = (await c.req.json()) as { approved?: boolean; toolCallId?: string }
+
+    if (typeof body.approved !== 'boolean') {
+      return c.json({ error: 'Invalid tool approval payload' }, 400)
+    }
+
+    // Check for Bearer token auth first (from push notification actions)
+    const authHeader = c.req.header('authorization')
+    if (authHeader?.startsWith('Bearer ')) {
+      const token = authHeader.slice(7)
+      const result = await validateActionToken(token, c.env.BETTER_AUTH_SECRET)
+      if (!result.ok) {
+        return c.json({ error: result.error }, 401)
+      }
+
+      // Token is valid — use sid/gid from token
+      if (result.sid !== sessionId) {
+        return c.json({ error: 'Token session mismatch' }, 401)
+      }
+
+      const doId = c.env.SESSION_AGENT.idFromString(sessionId)
+      const sessionDO = c.env.SESSION_AGENT.get(doId)
+      const response = await sessionDO.fetch(
+        new Request('https://session/tool-approval', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-partykit-room': sessionId,
+            'x-user-id': 'action-token',
+          },
+          body: JSON.stringify({
+            approved: body.approved,
+            toolCallId: result.gid,
+          }),
+        }),
+      )
+
+      if (!response.ok) {
+        return c.json({ error: 'Tool approval failed' }, 400)
+      }
+
+      return c.json({ ok: true })
+    }
+
+    // Fall back to session cookie auth
+    const session = await getRequestSession(c.env, c.req.raw)
+    if (!session) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const userId = session.userId
+
+    const ownership = await getOwnedSession(c.env, sessionId, userId)
+    if (!ownership.ok) {
+      return c.json(
+        { error: ownership.status === 404 ? 'Session not found' : 'Forbidden' },
+        ownership.status,
+      )
+    }
+
+    if (typeof body.toolCallId !== 'string') {
+      return c.json({ error: 'Invalid tool approval payload' }, 400)
+    }
+
+    const doId = c.env.SESSION_AGENT.idFromString(ownership.session.id)
+    const sessionDO = c.env.SESSION_AGENT.get(doId)
+    const response = await sessionDO.fetch(
+      new Request('https://session/tool-approval', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-partykit-room': ownership.session.id,
+          'x-user-id': userId,
+        },
+        body: JSON.stringify({
+          approved: body.approved,
+          toolCallId: body.toolCallId,
+        }),
+      }),
+    )
+
+    if (!response.ok) {
+      return c.json({ error: 'Tool approval failed' }, 400)
+    }
+
+    return c.json({ ok: true })
+  })
+
   app.use('/api/*', authMiddleware)
+
+  app.get('/api/user/preferences', async (c) => {
+    const userId = c.get('userId')
+    const result = await c.env.AUTH_DB.prepare(
+      'SELECT key, value FROM user_preferences WHERE user_id = ?',
+    )
+      .bind(userId)
+      .all<{ key: string; value: string }>()
+
+    const prefs: Record<string, string> = {}
+    for (const row of result.results) {
+      prefs[row.key] = row.value
+    }
+    return c.json(prefs)
+  })
+
+  app.put('/api/user/preferences', async (c) => {
+    const userId = c.get('userId')
+    const body = (await c.req.json()) as { key?: string; value?: string }
+
+    if (typeof body.key !== 'string' || typeof body.value !== 'string') {
+      return c.json({ error: 'Missing required fields: key, value' }, 400)
+    }
+
+    await c.env.AUTH_DB.prepare(
+      'INSERT OR REPLACE INTO user_preferences (user_id, key, value) VALUES (?, ?, ?)',
+    )
+      .bind(userId, body.key, body.value)
+      .run()
+
+    return c.json({ ok: true })
+  })
+
+  app.post('/api/push/subscribe', async (c) => {
+    const userId = c.get('userId')
+    const body = (await c.req.json()) as {
+      endpoint?: string
+      keys?: { p256dh?: string; auth?: string }
+    }
+
+    if (!body.endpoint || !body.keys?.p256dh || !body.keys?.auth) {
+      return c.json({ error: 'Missing required fields: endpoint, keys.p256dh, keys.auth' }, 400)
+    }
+
+    try {
+      new URL(body.endpoint)
+    } catch {
+      return c.json({ error: 'Invalid endpoint URL' }, 400)
+    }
+
+    const id = crypto.randomUUID()
+    const userAgent = c.req.header('user-agent') ?? null
+
+    await c.env.AUTH_DB.prepare(
+      `INSERT OR REPLACE INTO push_subscriptions (id, user_id, endpoint, p256dh, auth, user_agent)
+       VALUES (
+         COALESCE((SELECT id FROM push_subscriptions WHERE user_id = ? AND endpoint = ?), ?),
+         ?, ?, ?, ?, ?
+       )`,
+    )
+      .bind(
+        userId,
+        body.endpoint,
+        id,
+        userId,
+        body.endpoint,
+        body.keys.p256dh,
+        body.keys.auth,
+        userAgent,
+      )
+      .run()
+
+    return c.json({ ok: true }, 201)
+  })
+
+  app.post('/api/push/unsubscribe', async (c) => {
+    const userId = c.get('userId')
+    const body = (await c.req.json()) as { endpoint?: string }
+
+    if (!body.endpoint) {
+      return c.json({ error: 'Missing required field: endpoint' }, 400)
+    }
+
+    await c.env.AUTH_DB.prepare('DELETE FROM push_subscriptions WHERE user_id = ? AND endpoint = ?')
+      .bind(userId, body.endpoint)
+      .run()
+
+    return c.body(null, 204)
+  })
 
   app.get('/api/projects', async (c) => {
     const userId = c.get('userId')
@@ -368,45 +560,6 @@ export function createApiApp() {
     }
 
     return c.json({ status: 'aborted' })
-  })
-
-  app.post('/api/sessions/:id/tool-approval', async (c) => {
-    const userId = c.get('userId')
-    const ownership = await getOwnedSession(c.env, c.req.param('id'), userId)
-    if (!ownership.ok) {
-      return c.json(
-        { error: ownership.status === 404 ? 'Session not found' : 'Forbidden' },
-        ownership.status,
-      )
-    }
-
-    const body = (await c.req.json()) as { approved?: boolean; toolCallId?: string }
-    if (typeof body.toolCallId !== 'string' || typeof body.approved !== 'boolean') {
-      return c.json({ error: 'Invalid tool approval payload' }, 400)
-    }
-
-    const doId = c.env.SESSION_AGENT.idFromString(ownership.session.id)
-    const sessionDO = c.env.SESSION_AGENT.get(doId)
-    const response = await sessionDO.fetch(
-      new Request('https://session/tool-approval', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-partykit-room': ownership.session.id,
-          'x-user-id': userId,
-        },
-        body: JSON.stringify({
-          approved: body.approved,
-          toolCallId: body.toolCallId,
-        }),
-      }),
-    )
-
-    if (!response.ok) {
-      return c.json({ error: 'Tool approval failed' }, 400)
-    }
-
-    return c.json({ ok: true })
   })
 
   app.post('/api/sessions/:id/answers', async (c) => {
