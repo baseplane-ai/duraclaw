@@ -1,0 +1,50 @@
+{
+  "phase": "mobile-ui",
+  "name": "Mobile UI Verification (390x844)",
+  "date": "2026-04-11",
+  "commit": "6587fb1",
+  "verdict": "PASS (after fix)",
+  "steps": [
+    {
+      "id": "VP1",
+      "title": "Set mobile viewport 390x844",
+      "result": "PASS",
+      "evidence": "chrome-devtools-axi resize 390 844 confirmed."
+    },
+    {
+      "id": "VP2",
+      "title": "Dashboard mobile layout",
+      "result": "PASS (after fix)",
+      "evidence": "Initially FAILED: session sidebar 280px didn't auto-collapse, leaving 110px for content. Fixed in 6587fb1: default collapsed when innerWidth < 640. Re-verified: sidebar auto-collapses, main content fills width."
+    },
+    {
+      "id": "VP3",
+      "title": "Session chat mobile",
+      "result": "PASS (after fix)",
+      "evidence": "With sidebar auto-collapsed, chat area fills width. Metadata header (status, project, model, turns, cost, duration), message content, input with attach/submit all visible and usable."
+    },
+    {
+      "id": "VP4",
+      "title": "History page mobile",
+      "result": "PASS",
+      "evidence": "History page renders well at 390px. Header, search input, status filter visible. Table has horizontal scroll. Pagination (38 sessions, page 1/2) visible."
+    },
+    {
+      "id": "VP5",
+      "title": "Sidebar navigation mobile",
+      "result": "PASS",
+      "evidence": "Hamburger opens sheet dialog with Dashboard, Sessions, History, Settings links. Navigation between pages works."
+    },
+    {
+      "id": "VP6",
+      "title": "Session sidebar mobile",
+      "result": "PASS (after fix)",
+      "evidence": "Auto-collapsed at mobile width. Expand button available. Session dots visible as compact icons for quick switching."
+    }
+  ],
+  "fix": {
+    "commit": "6587fb1",
+    "file": "apps/orchestrator/src/features/agent-orch/AgentOrchPage.tsx",
+    "description": "Default sidebarCollapsed to true when window.innerWidth < 640 and no localStorage preference stored."
+  }
+}
