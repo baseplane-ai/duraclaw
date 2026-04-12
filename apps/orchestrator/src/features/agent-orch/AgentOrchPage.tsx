@@ -73,11 +73,12 @@ function AgentOrchContent() {
     [navigate],
   )
 
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(
-    () =>
-      typeof window !== 'undefined' &&
-      localStorage.getItem('agent-orch-sidebar-collapsed') === 'true',
-  )
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    if (typeof window === 'undefined') return false
+    const stored = localStorage.getItem('agent-orch-sidebar-collapsed')
+    if (stored !== null) return stored === 'true'
+    return window.innerWidth < 640
+  })
   const handleToggleSidebar = useCallback(() => {
     setSidebarCollapsed((prev) => {
       const next = !prev
