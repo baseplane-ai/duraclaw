@@ -1,99 +1,171 @@
-# Verification Tools — Duraclaw
+# Verification Tools — Project Configuration
 
-This project verifies against a real local stack:
-
-- Orchestrator UI/API on a Vite-assigned local port, persisted to `logs/verify/state/runtime.env`
-- Gateway API on `http://127.0.0.1:9877`
-- Auth via Better Auth cookie sessions
-- Browser automation via `agent-browser`
-
-## Verification Growth Rule
-
-- Treat `pnpm verify:smoke` as the current baseline, not the permanent definition of "covered"
-- As roadmap items land, add or extend targeted verification scripts in `scripts/verify/` and expose them as root `pnpm verify:*` commands
-- Prefer capability-oriented names such as `verify:dashboard`, `verify:session:rewind`, or `verify:settings:theme`
-- Keep new checks cumulative and map them back to the roadmap subphase they prove
+Fill in this file with YOUR project's specific verification setup.
+The verification agent reads this before executing any Verification Plan.
 
 ## Project Dev Server
 
 ```bash
-# Starts both services in the background, writes logs under logs/verify/
-pnpm verify:dev:up
+# Command to start the dev server (background it with &)
+{dev_server_command}
 
-# Readiness endpoint for the orchestrator
-# Resolved at runtime from logs/verify/state/runtime.env
-${VERIFY_ORCH_URL}/api/auth/get-session
+# Health/readiness endpoint to poll before running VP steps
+{dev_server_health}
 
-# Preferred UI port
-43173
+# Port the dev server listens on
+{port}
 ```
 
-## API Base URLs
+## API Base URL
 
-```text
-${VERIFY_ORCH_URL}/api
-http://127.0.0.1:9877
+```
+{base_url}
+# e.g., http://localhost:3000/api
 ```
 
 ## Authentication
 
 ```bash
-# Creates or signs into the local verification user and refreshes the cookie jar.
-# Cookie jar: logs/verify/state/auth.cookies.txt
-pnpm verify:auth
-```
-
-Default local verification credentials can be overridden:
-
-```bash
-export VERIFY_AUTH_EMAIL="agent.verify+duraclaw@example.com"
-export VERIFY_AUTH_PASSWORD="duraclaw-test-password"
+# How to get a test auth token (if APIs require auth)
+# e.g., curl -s -X POST http://localhost:3000/api/auth/login \
+#   -H "Content-Type: application/json" \
+#   -d '{"email": "test@example.com", "password": "test123"}' | jq -r '.token'
+{auth_command}
 ```
 
 ## Database Access
 
 ```bash
-# Better Auth user/session tables (local D1 for the orchestrator worker)
-cd apps/orchestrator
-pnpm exec wrangler d1 execute duraclaw-auth --local --command \
-  "SELECT email, name FROM user ORDER BY createdAt DESC LIMIT 5;"
-
-# Session state is stored in Durable Object SQLite. Verify that state through the
-# real HTTP/WebSocket APIs rather than trying to read the DO database directly.
+# How to query the database directly (for state verification)
+# e.g., sqlite3 data/app.db "SELECT ..."
+# e.g., psql postgresql://localhost/mydb -c "SELECT ..."
+{db_command}
 ```
 
 ## Key Endpoints / Pages
 
+List the main routes the verification agent may need to hit:
+
 | Route | Method | Purpose |
 |-------|--------|---------|
-| `/health` | `GET` | Gateway readiness; no auth required |
-| `/projects` | `GET` | Gateway project discovery; Bearer auth if `CC_GATEWAY_API_TOKEN` is set |
-| `/projects/:name/files?depth=1` | `GET` | Real file-tree verification against a discovered project |
-| `/projects/:name/git-status` | `GET` | Real git-status verification against a discovered project |
-| `/api/auth/get-session` | `GET` | Orchestrator readiness and authenticated session validation |
-| `/api/auth/sign-up/email` | `POST` | Create the local verification user |
-| `/api/auth/sign-in/email` | `POST` | Produce a real Better Auth session cookie |
-| `/api/projects` | `GET` | Orchestrator -> gateway project proxy verification |
-| `/api/sessions` | `POST` | Real session creation verification |
-| `/api/sessions/:id` | `GET` | Session state polling and completion verification |
-| `/api/sessions/:id/messages` | `GET` | Persisted assistant output verification |
-| `/login` | `GET` | Browser entry point for real UI auth smoke tests |
-| `/` | `GET` | Post-login landing page for browser smoke verification |
-| `/session/:id` | `GET` | Live session page verification in the browser |
+| {/api/health} | {GET} | {Health check} |
+| {/api/...} | {GET/POST/...} | {Description} |
 
 ## Project-Specific Notes
 
-- Canonical quick smoke suite: `pnpm verify:smoke`
-- Session lifecycle smoke: `pnpm verify:session`
-- Session UI smoke: `pnpm verify:browser:session`
-- Future roadmap work should follow the same pattern: baseline smoke stays green, and each new feature adds a targeted `verify:*` command instead of relying on the old baseline alone
-- Raw artifacts go to `logs/verify/`
-- Structured phase evidence belongs in `.kata/verification-evidence/`
-- `pnpm verify:dev:up` overrides local dev env so the orchestrator points at `ws://127.0.0.1:9877`, then records the actual Vite URL in `logs/verify/state/runtime.env`
-- The orchestrator dev server is held open in tmux session `duraclaw-verify-orchestrator`
-- The orchestrator launcher must preserve a PTY. Logging is done with `tmux pipe-pane`; direct shell redirection can produce empty HTML responses for `/` and `/login` while API routes still appear healthy
-- If local orchestrator startup fails, check `logs/verify/orchestrator.log`
-- The preferred orchestrator port is `43173`, but the wrapper tolerates Vite picking another local port and reuses that detected URL for later auth/browser checks
-- `VERIFY_PROJECT` is optional. If unset, the gateway smoke script uses the first discovered project returned by `/projects`
-- The gateway currently discovers `/data/projects/baseplane*` by default, so verification normally targets one of those worktrees rather than the `duraclaw` repo itself
-- The repo-local CLI entrypoint for workflow checks is `pnpm kata ...`
+{Anything else the verification agent needs to know — seed data, environment
+variables, services that must be running, ports to avoid, etc.}
+
+---
+
+<!-- DELETE everything below this line once filled in. It's reference only. -->
+
+# Reference Patterns
+
+## Dev Server Wait Loop
+
+```bash
+# Start server and wait for health
+npm run dev &
+DEV_PID=$!
+for i in $(seq 1 30); do
+  curl -sf http://localhost:3000/health && break
+  sleep 1
+done
+```
+
+## API Testing with curl
+
+```bash
+# GET with status check
+STATUS=$(curl -sf -o /dev/null -w "%{http_code}" http://localhost:3000/api/users)
+[ "$STATUS" = "200" ] && echo "PASS" || echo "FAIL: got $STATUS"
+
+# POST with JSON body
+curl -s -X POST http://localhost:3000/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Test", "email": "test@example.com"}'
+
+# JSON field check with jq
+VALUE=$(curl -s http://localhost:3000/api/users/1 | jq -r '.name')
+[ "$VALUE" = "Test" ] && echo "PASS" || echo "FAIL: got $VALUE"
+
+# Error case (expect 404)
+STATUS=$(curl -sf -o /dev/null -w "%{http_code}" http://localhost:3000/api/users/99999)
+[ "$STATUS" = "404" ] && echo "PASS" || echo "FAIL: got $STATUS"
+```
+
+## Browser / UI Testing
+
+Use `agent-browser` for real browser automation (Chromium, installed globally):
+
+```bash
+# Open page and get interactive element refs
+agent-browser open http://localhost:3000
+agent-browser wait --load networkidle
+agent-browser snapshot -i
+
+# Check page text / structure
+agent-browser get text body
+agent-browser get title
+
+# Interact with elements
+agent-browser click @e1
+agent-browser fill @e2 "test value"
+
+# Screenshot for evidence
+agent-browser screenshot --annotate
+
+# Verify a route renders expected content
+agent-browser open http://localhost:3000/dashboard && agent-browser wait --load networkidle && agent-browser snapshot -i
+agent-browser close
+```
+
+Fallback (no JS rendering needed):
+```
+# Page content check via WebFetch
+WebFetch(url="http://localhost:3000/dashboard", prompt="Does this page show a user table?")
+
+# HTML inspection
+curl -s http://localhost:3000/ | grep -q 'data-testid="main-content"'
+```
+
+## CLI Testing
+
+```bash
+# Output + exit code
+OUTPUT=$(node dist/index.js my-command 2>&1)
+echo "$OUTPUT" | grep -q "expected text" && echo "PASS" || echo "FAIL"
+```
+
+## Database Checks
+
+```bash
+# SQLite
+sqlite3 data.db "SELECT count(*) FROM users"
+
+# PostgreSQL
+psql -c "SELECT name FROM users LIMIT 1" postgres://localhost/mydb
+```
+
+## Evidence File Format
+
+Write to `.kata/verification-evidence/vp-{phaseId}-{issueNumber}.json`:
+
+```json
+{
+  "phaseId": "p1",
+  "issueNumber": 123,
+  "timestamp": "2026-02-25T12:00:00.000Z",
+  "steps": [
+    {"id": "VP1", "description": "Health returns 200", "passed": true, "actual": "200 OK"},
+    {"id": "VP2", "description": "Create user", "passed": false, "actual": "500", "expected": "201"}
+  ],
+  "allStepsPassed": false
+}
+```
+
+Rules:
+- Record EVERY step, not just failures
+- Include actual response/output
+- Timestamp must be current (staleness check uses it)
