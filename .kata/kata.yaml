@@ -135,3 +135,4 @@ modes:
       - configure kata
       - initialize kata
     template: onboard.md
+kata_version: 0.3.0
