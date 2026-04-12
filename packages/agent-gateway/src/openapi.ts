@@ -57,7 +57,7 @@ export const spec = {
         operationId: 'listProjects',
         summary: 'List discovered projects',
         description:
-          'Returns all projects under /data/projects/ matching configured prefixes (PROJECT_PATTERNS env).',
+          'Returns all git repos under /data/projects/. When PROJECT_PATTERNS env is set, filters to matching prefixes.',
         responses: {
           '200': {
             description: 'Array of discovered projects',

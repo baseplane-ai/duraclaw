@@ -7,12 +7,8 @@ import type { ProjectInfo } from './types.js'
 const execFileAsync = promisify(execFile)
 
 const PROJECTS_DIR = '/data/projects'
-const PROJECT_PREFIXES = (
-  process.env.PROJECT_PATTERNS ??
-  process.env.WORKTREE_PATTERNS ??
-  'baseplane'
-)
-  .split(',')
+const RAW_PATTERNS = process.env.PROJECT_PATTERNS ?? process.env.WORKTREE_PATTERNS ?? ''
+const PROJECT_PREFIXES = RAW_PATTERNS.split(',')
   .map((p) => p.trim())
   .filter(Boolean)
 
@@ -51,8 +47,8 @@ async function isDirty(dir: string): Promise<boolean> {
 }
 
 /**
- * Discover all projects under /data/projects/ matching PROJECT_PATTERNS.
- * A valid project must have a .git directory/file and a package.json.
+ * Discover all git repos under /data/projects/.
+ * When PROJECT_PATTERNS is set, only repos matching those prefixes are returned.
  */
 export async function discoverProjects(
   activeSessions: Record<string, string>, // project_path → session_id
@@ -62,14 +58,17 @@ export async function discoverProjects(
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue
-    if (!PROJECT_PREFIXES.some((prefix) => entry.name.startsWith(prefix))) continue
+    if (
+      PROJECT_PREFIXES.length > 0 &&
+      !PROJECT_PREFIXES.some((prefix) => entry.name.startsWith(prefix))
+    )
+      continue
 
     const fullPath = path.join(PROJECTS_DIR, entry.name)
 
-    // Verify it's a git repo with package.json
+    // Verify it's a git repo
     try {
       await fs.access(path.join(fullPath, '.git'))
-      await fs.access(path.join(fullPath, 'package.json'))
     } catch {
       continue
     }
@@ -97,8 +96,9 @@ export async function resolveProject(name: string): Promise<string | null> {
   const fullPath = path.join(PROJECTS_DIR, name)
   try {
     await fs.access(path.join(fullPath, '.git'))
-    // Verify it matches a known prefix
-    if (!PROJECT_PREFIXES.some((prefix) => name.startsWith(prefix))) return null
+    // If prefixes are configured, verify project matches one
+    if (PROJECT_PREFIXES.length > 0 && !PROJECT_PREFIXES.some((prefix) => name.startsWith(prefix)))
+      return null
     return fullPath
   } catch {
     return null
