@@ -120,8 +120,7 @@ export function NavSessions() {
   const navigate = useNavigate()
   const addTab = useTabStore((s) => s.addTab)
 
-  // Filter out archived sessions and invalid UUID-format IDs (legacy/corrupted)
-  const visible = sessions.filter((s) => !s.archived && /^[0-9a-f]{64}$/.test(s.id))
+  const visible = sessions.filter((s) => !s.archived)
 
   // Recent: last 5 sessions by updated_at
   const recent = [...visible]

@@ -25,6 +25,14 @@ function getRegistry(c: { env: ApiAppEnv['Bindings'] }) {
   return c.env.SESSION_REGISTRY.get(registryId) as any
 }
 
+/** Resolve a session ID to a DO ID — hex IDs use idFromString, UUIDs use idFromName */
+function getSessionDoId(env: ApiAppEnv['Bindings'], sessionId: string) {
+  const isHexId = /^[0-9a-f]{64}$/.test(sessionId)
+  return isHexId
+    ? env.SESSION_AGENT.idFromString(sessionId)
+    : env.SESSION_AGENT.idFromName(sessionId)
+}
+
 async function fetchGatewayProjects(env: ApiAppEnv['Bindings']): Promise<ProjectInfo[]> {
   if (!env.CC_GATEWAY_URL) {
     throw new Error('CC_GATEWAY_URL not configured')
@@ -115,7 +123,7 @@ export function createApiApp() {
         return c.json({ error: 'Token session mismatch' }, 401)
       }
 
-      const doId = c.env.SESSION_AGENT.idFromString(sessionId)
+      const doId = getSessionDoId(c.env, sessionId)
       const sessionDO = c.env.SESSION_AGENT.get(doId)
       const response = await sessionDO.fetch(
         new Request('https://session/tool-approval', {
@@ -159,7 +167,7 @@ export function createApiApp() {
       return c.json({ error: 'Invalid tool approval payload' }, 400)
     }
 
-    const doId = c.env.SESSION_AGENT.idFromString(ownership.session.id)
+    const doId = getSessionDoId(c.env, ownership.session.id)
     const sessionDO = c.env.SESSION_AGENT.get(doId)
     const response = await sessionDO.fetch(
       new Request('https://session/tool-approval', {
@@ -478,7 +486,7 @@ export function createApiApp() {
       )
     }
 
-    const doId = c.env.SESSION_AGENT.idFromString(ownership.session.id)
+    const doId = getSessionDoId(c.env, ownership.session.id)
     const sessionDO = c.env.SESSION_AGENT.get(doId)
     const response = await sessionDO.fetch(
       new Request('https://session/state', {
@@ -507,7 +515,7 @@ export function createApiApp() {
       )
     }
 
-    const doId = c.env.SESSION_AGENT.idFromString(ownership.session.id)
+    const doId = getSessionDoId(c.env, ownership.session.id)
     const sessionDO = c.env.SESSION_AGENT.get(doId)
     const response = await sessionDO.fetch(
       new Request('https://session/messages', {
@@ -577,7 +585,7 @@ export function createApiApp() {
     }
 
     // Find the SDK session ID from the SessionDO state
-    const doId = c.env.SESSION_AGENT.idFromString(ownership.session.id)
+    const doId = getSessionDoId(c.env, ownership.session.id)
     const sessionDO = c.env.SESSION_AGENT.get(doId)
     const stateResp = await sessionDO.fetch(
       new Request('https://session/state', {
@@ -629,7 +637,7 @@ export function createApiApp() {
       )
     }
 
-    const doId = c.env.SESSION_AGENT.idFromString(ownership.session.id)
+    const doId = getSessionDoId(c.env, ownership.session.id)
     const sessionDO = c.env.SESSION_AGENT.get(doId)
     const response = await sessionDO.fetch(
       new Request('https://session/abort', {
@@ -666,7 +674,7 @@ export function createApiApp() {
       return c.json({ error: 'Invalid answers payload' }, 400)
     }
 
-    const doId = c.env.SESSION_AGENT.idFromString(ownership.session.id)
+    const doId = getSessionDoId(c.env, ownership.session.id)
     const sessionDO = c.env.SESSION_AGENT.get(doId)
     const response = await sessionDO.fetch(
       new Request('https://session/answers', {

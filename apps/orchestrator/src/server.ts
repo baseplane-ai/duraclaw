@@ -19,7 +19,11 @@ export default {
 
       const sessionId = wsMatch[1]
       try {
-        const doId = env.SESSION_AGENT.idFromString(sessionId)
+        // Hex IDs (from newUniqueId) use idFromString; all others use idFromName
+        const isHexId = /^[0-9a-f]{64}$/.test(sessionId)
+        const doId = isHexId
+          ? env.SESSION_AGENT.idFromString(sessionId)
+          : env.SESSION_AGENT.idFromName(sessionId)
         const stub = env.SESSION_AGENT.get(doId)
         const headers = new Headers(request.headers)
         headers.set('x-partykit-room', sessionId)
