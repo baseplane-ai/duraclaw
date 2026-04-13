@@ -58,7 +58,7 @@ export function AgentDetailView({ name: _name, agent }: AgentDetailViewProps) {
   const canSend = status === 'running' || status === 'waiting_gate' || isResumable
 
   return (
-    <div className="flex h-full flex-col" data-testid="agent-detail-view">
+    <div className="flex min-h-0 flex-1 flex-col" data-testid="agent-detail-view">
       <KataStatePanel kataState={kataState} />
 
       <ChatThread

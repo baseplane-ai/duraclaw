@@ -60,7 +60,7 @@ export function ChatThread({
   onRewind,
 }: ChatThreadProps) {
   return (
-    <Conversation className="flex-1">
+    <Conversation className="min-h-0 flex-1">
       <ConversationContent>
         {messages.length === 0 ? (
           <ConversationEmptyState
