@@ -13,6 +13,64 @@ export class ProjectRegistry extends DurableObject<Env> {
     runMigrations(this.ctx.storage.sql, REGISTRY_MIGRATIONS)
     // Clean up legacy lock state
     await this.ctx.storage.delete('state')
+
+    // Schedule discovery alarm if not already set
+    const currentAlarm = await this.ctx.storage.getAlarm()
+    if (!currentAlarm) {
+      await this.ctx.storage.setAlarm(Date.now() + 5 * 60 * 1000)
+    }
+  }
+
+  async alarm(): Promise<void> {
+    await this.ensureInit()
+
+    try {
+      const gatewayUrl = this.env.CC_GATEWAY_URL
+      if (!gatewayUrl) {
+        console.log('[ProjectRegistry] No CC_GATEWAY_URL configured, skipping discovery sync')
+        return
+      }
+
+      // Get watermark — default to 7 days ago
+      const watermark =
+        ((await this.ctx.storage.get('sync_watermark')) as string) ??
+        new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
+
+      const httpBase = gatewayUrl.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+      const discoverUrl = new URL('/sessions/discover', httpBase)
+      discoverUrl.searchParams.set('since', watermark)
+
+      const headers: Record<string, string> = {}
+      if (this.env.CC_GATEWAY_SECRET) {
+        headers.Authorization = `Bearer ${this.env.CC_GATEWAY_SECRET}`
+      }
+
+      const resp = await fetch(discoverUrl.toString(), { headers })
+      if (!resp.ok) {
+        console.error(`[ProjectRegistry] Gateway returned ${resp.status} during discovery sync`)
+        return
+      }
+
+      const data = (await resp.json()) as { sessions: DiscoveredSession[] }
+      if (data.sessions.length > 0) {
+        // Use a placeholder userId — discovered sessions are single-user VPS model
+        const userId = 'system'
+        const result = await this.syncDiscoveredSessions(userId, data.sessions)
+        console.log(
+          `[ProjectRegistry] Discovery sync: ${result.inserted} inserted, ${result.updated} updated`,
+        )
+
+        // Update watermark
+        if (result.watermark) {
+          await this.ctx.storage.put('sync_watermark', result.watermark)
+        }
+      }
+    } catch (err) {
+      console.error('[ProjectRegistry] Discovery sync failed:', err)
+    } finally {
+      // Always reschedule — alarms fire once, must reschedule for recurring behavior
+      await this.ctx.storage.setAlarm(Date.now() + 5 * 60 * 1000)
+    }
   }
 
   async registerSession(session: SessionSummary): Promise<void> {

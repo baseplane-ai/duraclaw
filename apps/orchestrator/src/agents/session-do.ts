@@ -225,6 +225,34 @@ export class SessionDO extends Agent<Env, SessionState> {
     }
   }
 
+  private async syncDiscoveredToRegistry() {
+    try {
+      // Only sync if we have an sdk_session_id — otherwise there's nothing to link
+      if (!this.state.sdk_session_id) return
+
+      const registryId = this.env.SESSION_REGISTRY.idFromName('default')
+      const registry = this.env.SESSION_REGISTRY.get(registryId) as any
+      await registry.syncDiscoveredSessions(this.state.userId ?? 'system', [
+        {
+          sdk_session_id: this.state.sdk_session_id,
+          agent: 'claude',
+          project_dir: this.state.project_path || '',
+          project: this.state.project || '',
+          branch: '',
+          started_at: this.state.started_at || this.state.created_at || new Date().toISOString(),
+          last_activity: new Date().toISOString(),
+          summary: this.state.summary || '',
+          tag: null,
+          title: null,
+          message_count: this.state.num_turns,
+          user: this.state.userId,
+        },
+      ])
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Failed to sync discovered session:`, err)
+    }
+  }
+
   private sendToGateway(cmd: GatewayCommand) {
     if (this.vpsWs) {
       sendCommand(this.vpsWs, cmd)
@@ -670,6 +698,7 @@ export class SessionDO extends Agent<Env, SessionState> {
         this.vpsWs = null
         this.syncStatusToRegistry()
         this.syncResultToRegistry()
+        this.syncDiscoveredToRegistry()
         if (!event.is_error) {
           this.dispatchPush(
             {

@@ -40,6 +40,8 @@ function createFakeRegistry(sql: FakeSql) {
     storage: {
       sql,
       delete: async () => true,
+      getAlarm: async () => null,
+      setAlarm: async () => {},
     },
   }
   const fakeEnv = {}
