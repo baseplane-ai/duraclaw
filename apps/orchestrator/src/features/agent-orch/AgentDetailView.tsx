@@ -3,6 +3,7 @@
  */
 
 import { useEffect } from 'react'
+import { StatusBar } from '~/components/status-bar'
 import { useStatusBarStore } from '~/stores/status-bar'
 import { ChatThread } from './ChatThread'
 import { KataStatePanel } from './KataStatePanel'
@@ -72,6 +73,7 @@ export function AgentDetailView({ name: _name, agent }: AgentDetailViewProps) {
         onRewind={isTerminal ? undefined : rewind}
       />
 
+      <StatusBar />
       {canSend && <MessageInput onSend={sendMessage} disabled={!canSend} />}
     </div>
   )

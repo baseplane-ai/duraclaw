@@ -162,21 +162,12 @@ export function StatusBar() {
   const status = state?.status
   const canStop = status === 'running' || status === 'waiting_gate'
 
-  if (!state) {
-    return (
-      <div
-        className="fixed bottom-0 left-0 right-0 z-50 flex h-7 items-center justify-center bg-background border-t px-2 font-mono text-xs"
-        data-testid="status-bar"
-      >
-        <span className="text-muted-foreground">No session selected</span>
-      </div>
-    )
-  }
+  if (!state) return null
 
   return (
     <div
       className={cn(
-        'fixed bottom-0 left-0 right-0 z-50 flex h-7 items-center justify-between px-2 font-mono text-xs',
+        'flex h-7 items-center justify-between px-2 font-mono text-xs',
         getBarClasses(status),
       )}
       data-testid="status-bar"

@@ -14,12 +14,10 @@ import { PushOptInBanner } from '~/components/push-opt-in-banner'
 import { PwaInstallBanner } from '~/components/pwa-install-banner'
 import { QuickPromptInput } from '~/components/quick-prompt-input'
 import { TabBar } from '~/components/tab-bar'
-import { cn } from '~/lib/utils'
 import { useTabStore } from '~/stores/tabs'
 import { AgentDetailView } from './AgentDetailView'
-import { SessionCardList } from './SessionCardList'
-import { SessionSidebar } from './SessionSidebar'
 import type { SpawnFormConfig } from './SpawnAgentForm'
+import { getPreviewText } from './session-utils'
 import { useAgentOrchSessions } from './use-agent-orch-sessions'
 import { type SpawnConfig, useCodingAgent } from './use-coding-agent'
 
@@ -28,7 +26,7 @@ export function AgentOrchPage() {
 }
 
 function AgentOrchContent() {
-  const { sessions, updateSession, archiveSession } = useAgentOrchSessions()
+  const { sessions, updateSession } = useAgentOrchSessions()
   const search = useSearch({ from: '/_authenticated/' })
   const navigate = useNavigate()
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
@@ -81,7 +79,7 @@ function AgentOrchContent() {
           agent: config.agent,
         })
         setSelectedSessionId(sessionId)
-        addTab(sessionId)
+        addTab(sessionId, config.prompt?.slice(0, 40) || config.project)
         navigate({ to: '/', search: { session: sessionId } })
       } catch (err) {
         console.error('[AgentOrch] Spawn failed:', err)
@@ -94,71 +92,14 @@ function AgentOrchContent() {
     (sessionId: string) => {
       setSpawnConfig(null)
       setSelectedSessionId(sessionId)
-      addTab(sessionId)
+      // Find session to get its title
+      const session = sessions.find((s) => s.id === sessionId)
+      const title =
+        session?.title || getPreviewText(session ?? { prompt: undefined }) || sessionId.slice(0, 12)
+      addTab(sessionId, title)
       navigate({ to: '/', search: { session: sessionId } })
     },
-    [navigate, addTab],
-  )
-
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
-    if (typeof window === 'undefined') return false
-    const stored = localStorage.getItem('agent-orch-sidebar-collapsed')
-    if (stored !== null) return stored === 'true'
-    return window.innerWidth < 640
-  })
-  const handleToggleSidebar = useCallback(() => {
-    setSidebarCollapsed((prev) => {
-      const next = !prev
-      localStorage.setItem('agent-orch-sidebar-collapsed', String(next))
-      return next
-    })
-  }, [])
-
-  const handleArchiveSession = useCallback(
-    (sessionId: string, archived: boolean) => {
-      archiveSession(sessionId, archived)
-    },
-    [archiveSession],
-  )
-
-  const handleRenameSession = useCallback(
-    (sessionId: string, title: string) => {
-      updateSession(sessionId, { title })
-    },
-    [updateSession],
-  )
-
-  const handleTagSession = useCallback(
-    (sessionId: string, tag: string | null) => {
-      updateSession(sessionId, { tag })
-    },
-    [updateSession],
-  )
-
-  const handleForkSession = useCallback(
-    async (sessionId: string) => {
-      try {
-        const resp = await fetch(`/api/sessions/${sessionId}/fork`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({}),
-        })
-        if (!resp.ok) {
-          const err = (await resp.json()) as { error?: string }
-          console.error('[AgentOrch] Fork failed:', err.error)
-          return
-        }
-        const data = (await resp.json()) as { session_id: string }
-        // Select the forked session
-        if (data.session_id) {
-          setSelectedSessionId(data.session_id)
-          navigate({ to: '/', search: { session: data.session_id } })
-        }
-      } catch (err) {
-        console.error('[AgentOrch] Fork failed:', err)
-      }
-    },
-    [navigate],
+    [navigate, addTab, sessions],
   )
 
   const handleStateChange = useCallback(
@@ -211,53 +152,22 @@ function AgentOrchContent() {
       <Main>
         <PwaInstallBanner />
         <PushOptInBanner />
-        <div className="flex h-[calc(100vh-4rem-28px)] overflow-hidden">
-          {/* Desktop: sidebar */}
-          <div className="hidden sm:block">
-            <SessionSidebar
-              sessions={sessions}
-              selectedSessionId={selectedSessionId}
-              onSelectSession={handleSelectSession}
-              onSpawn={handleSpawn}
-              onArchiveSession={handleArchiveSession}
-              onRenameSession={handleRenameSession}
-              onTagSession={handleTagSession}
-              onForkSession={handleForkSession}
-              collapsed={sidebarCollapsed}
-              onToggleCollapse={handleToggleSidebar}
+        <div className="flex h-[calc(100vh-4rem)] flex-col overflow-hidden">
+          <TabBar onSelectSession={handleSelectSession} />
+          {selectedSessionId ? (
+            <AgentDetailWithSpawn
+              key={selectedSessionId}
+              sessionId={selectedSessionId}
+              spawnConfig={spawnConfig}
+              onStateChange={handleStateChange}
             />
-          </div>
-          {/* Mobile: card list (only shown when no session is selected) */}
-          <div
-            className={cn(
-              'sm:hidden',
-              selectedSessionId ? 'hidden' : 'flex h-full flex-col w-full overflow-hidden',
-            )}
-          >
-            <SessionCardList
-              sessions={sessions}
-              selectedSessionId={selectedSessionId}
-              onSelectSession={handleSelectSession}
-              onArchiveSession={handleArchiveSession}
+          ) : (
+            <QuickPromptInput
+              onSubmit={handleSpawn}
+              projects={projects}
+              projectsLoading={projectsLoading}
             />
-          </div>
-          <div className="flex flex-1 flex-col overflow-hidden">
-            <TabBar onSelectSession={handleSelectSession} />
-            {selectedSessionId ? (
-              <AgentDetailWithSpawn
-                key={selectedSessionId}
-                sessionId={selectedSessionId}
-                spawnConfig={spawnConfig}
-                onStateChange={handleStateChange}
-              />
-            ) : (
-              <QuickPromptInput
-                onSubmit={handleSpawn}
-                projects={projects}
-                projectsLoading={projectsLoading}
-              />
-            )}
-          </div>
+          )}
         </div>
       </Main>
     </>
@@ -278,6 +188,7 @@ function AgentDetailWithSpawn({
 }) {
   const agent = useCodingAgent(sessionId)
   const spawnedRef = useRef(false)
+  const updateTabTitle = useTabStore((s) => s.updateTabTitle)
 
   // Spawn once we have state (WS is connected and synced)
   useEffect(() => {
@@ -289,7 +200,7 @@ function AgentDetailWithSpawn({
     }
   }, [spawnConfig, agent.state, agent.spawn])
 
-  // Sync DO state changes to registry
+  // Sync DO state changes to registry + update tab title from summary
   const prevStateRef = useRef(agent.state)
   useEffect(() => {
     if (agent.state && agent.state !== prevStateRef.current) {
@@ -299,8 +210,11 @@ function AgentDetailWithSpawn({
         num_turns: agent.state.num_turns,
         error: agent.state.error,
       })
+      // Update tab title when session gets a summary
+      const title = agent.state.summary || agent.state.project
+      if (title) updateTabTitle(sessionId, title)
     }
-  }, [agent.state, sessionId, onStateChange])
+  }, [agent.state, sessionId, onStateChange, updateTabTitle])
 
   return <AgentDetailView name={sessionId} agent={agent} />
 }

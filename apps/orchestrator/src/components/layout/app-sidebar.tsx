@@ -10,6 +10,7 @@ import { useSession } from '~/lib/auth-client'
 import { AppTitle } from './app-title'
 import { adminNavGroup, sidebarData } from './data/sidebar-data'
 import { NavGroup } from './nav-group'
+import { NavSessions } from './nav-sessions'
 import { NavUser } from './nav-user'
 
 export function AppSidebar() {
@@ -26,6 +27,7 @@ export function AppSidebar() {
         {sidebarData.navGroups.map((props) => (
           <NavGroup key={props.title} {...props} />
         ))}
+        <NavSessions />
         {isAdmin && <NavGroup {...adminNavGroup} />}
       </SidebarContent>
       <SidebarFooter>
