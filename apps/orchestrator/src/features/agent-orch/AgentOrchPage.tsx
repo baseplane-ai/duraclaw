@@ -14,8 +14,10 @@ import { PushOptInBanner } from '~/components/push-opt-in-banner'
 import { PwaInstallBanner } from '~/components/pwa-install-banner'
 import { QuickPromptInput } from '~/components/quick-prompt-input'
 import { TabBar } from '~/components/tab-bar'
+import { cn } from '~/lib/utils'
 import { useTabStore } from '~/stores/tabs'
 import { AgentDetailView } from './AgentDetailView'
+import { SessionCardList } from './SessionCardList'
 import { SessionSidebar } from './SessionSidebar'
 import type { SpawnFormConfig } from './SpawnAgentForm'
 import { useAgentOrchSessions } from './use-agent-orch-sessions'
@@ -210,18 +212,30 @@ function AgentOrchContent() {
         <PwaInstallBanner />
         <PushOptInBanner />
         <div className="flex h-[calc(100vh-4rem-28px)] overflow-hidden">
-          <SessionSidebar
-            sessions={sessions}
-            selectedSessionId={selectedSessionId}
-            onSelectSession={handleSelectSession}
-            onSpawn={handleSpawn}
-            onArchiveSession={handleArchiveSession}
-            onRenameSession={handleRenameSession}
-            onTagSession={handleTagSession}
-            onForkSession={handleForkSession}
-            collapsed={sidebarCollapsed}
-            onToggleCollapse={handleToggleSidebar}
-          />
+          {/* Desktop: sidebar */}
+          <div className="hidden sm:block">
+            <SessionSidebar
+              sessions={sessions}
+              selectedSessionId={selectedSessionId}
+              onSelectSession={handleSelectSession}
+              onSpawn={handleSpawn}
+              onArchiveSession={handleArchiveSession}
+              onRenameSession={handleRenameSession}
+              onTagSession={handleTagSession}
+              onForkSession={handleForkSession}
+              collapsed={sidebarCollapsed}
+              onToggleCollapse={handleToggleSidebar}
+            />
+          </div>
+          {/* Mobile: card list (only shown when no session is selected) */}
+          <div className={cn('sm:hidden', selectedSessionId ? 'hidden' : 'flex flex-col w-full')}>
+            <SessionCardList
+              sessions={sessions}
+              selectedSessionId={selectedSessionId}
+              onSelectSession={handleSelectSession}
+              onArchiveSession={handleArchiveSession}
+            />
+          </div>
           <div className="flex flex-1 flex-col overflow-hidden">
             <TabBar onSelectSession={handleSelectSession} />
             {selectedSessionId ? (

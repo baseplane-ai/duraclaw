@@ -120,4 +120,25 @@ export const REGISTRY_MIGRATIONS: Migration[] = [
       )
     },
   },
+  {
+    version: 8,
+    description: 'Add kata state columns for session cards',
+    up: (sql) => {
+      try {
+        sql.exec(`ALTER TABLE sessions ADD COLUMN kata_mode TEXT`)
+      } catch {
+        /* Column already exists */
+      }
+      try {
+        sql.exec(`ALTER TABLE sessions ADD COLUMN kata_issue INTEGER`)
+      } catch {
+        /* Column already exists */
+      }
+      try {
+        sql.exec(`ALTER TABLE sessions ADD COLUMN kata_phase TEXT`)
+      } catch {
+        /* Column already exists */
+      }
+    },
+  },
 ]

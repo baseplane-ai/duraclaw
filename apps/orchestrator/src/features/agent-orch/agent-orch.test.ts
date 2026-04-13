@@ -574,13 +574,13 @@ describe('Message dedup logic', () => {
 // ── ProjectRegistry migration tests ──────────────────────────────────
 
 describe('ProjectRegistry migrations', () => {
-  test('has 6 migration versions', () => {
-    expect(REGISTRY_MIGRATIONS).toHaveLength(7)
+  test('has 8 migration versions', () => {
+    expect(REGISTRY_MIGRATIONS).toHaveLength(8)
   })
 
-  test('migrations are ordered by version 1-7', () => {
+  test('migrations are ordered by version 1-8', () => {
     const versions = REGISTRY_MIGRATIONS.map((m) => m.version)
-    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7])
+    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8])
   })
 
   test('v1 creates sessions table with expected columns', () => {

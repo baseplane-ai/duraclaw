@@ -7,6 +7,8 @@ import type {
   GatewayEvent,
   GetContextUsageCommand,
   InterruptCommand,
+  KataSessionState,
+  KataStateEvent,
   ProjectInfo,
   RateLimitEvent,
   ResultEvent,
@@ -552,5 +554,115 @@ describe('shared-types: session discovery (#27)', () => {
     // readonly is enforced at compile time; at runtime we verify the values are set
     expect(source.agent).toBe('codex')
     expect(source.description).toBe('OpenAI Codex sessions')
+  })
+})
+
+describe('shared-types: kata state fields (#29)', () => {
+  test('SessionSummary accepts kata_mode, kata_issue, kata_phase', () => {
+    const summary: SessionSummary = {
+      id: '123',
+      userId: 'user-1',
+      project: 'dev1',
+      status: 'running',
+      model: 'claude-opus-4-6',
+      created_at: '2026-04-13T00:00:00Z',
+      updated_at: '2026-04-13T01:00:00Z',
+      kata_mode: 'implementation',
+      kata_issue: 29,
+      kata_phase: 'p1',
+    }
+    expect(summary.kata_mode).toBe('implementation')
+    expect(summary.kata_issue).toBe(29)
+    expect(summary.kata_phase).toBe('p1')
+  })
+
+  test('SessionSummary kata fields are optional', () => {
+    const summary: SessionSummary = {
+      id: '456',
+      userId: 'user-2',
+      project: 'dev2',
+      status: 'idle',
+      model: null,
+      created_at: '',
+      updated_at: '',
+    }
+    expect(summary.kata_mode).toBeUndefined()
+    expect(summary.kata_issue).toBeUndefined()
+    expect(summary.kata_phase).toBeUndefined()
+  })
+
+  test('SessionSummary kata fields accept null', () => {
+    const summary: SessionSummary = {
+      id: '789',
+      userId: 'user-3',
+      project: 'dev3',
+      status: 'idle',
+      model: null,
+      created_at: '',
+      updated_at: '',
+      kata_mode: null,
+      kata_issue: null,
+      kata_phase: null,
+    }
+    expect(summary.kata_mode).toBeNull()
+    expect(summary.kata_issue).toBeNull()
+    expect(summary.kata_phase).toBeNull()
+  })
+
+  test('KataSessionState has expected shape', () => {
+    const state: KataSessionState = {
+      sessionId: 'sess-1',
+      workflowId: 'wf-1',
+      issueNumber: 29,
+      sessionType: 'implementation',
+      currentMode: 'implementation',
+      currentPhase: 'p1',
+      completedPhases: ['p0'],
+      template: 'feature',
+      phases: ['p0', 'p1', 'p2'],
+      modeHistory: [{ mode: 'planning', enteredAt: '2026-04-13T00:00:00Z' }],
+      modeState: { planning: { status: 'done', enteredAt: '2026-04-13T00:00:00Z' } },
+      updatedAt: '2026-04-13T01:00:00Z',
+      beadsCreated: [],
+      editedFiles: [],
+    }
+    expect(state.currentMode).toBe('implementation')
+    expect(state.issueNumber).toBe(29)
+    expect(state.currentPhase).toBe('p1')
+  })
+
+  test('KataStateEvent is part of GatewayEvent union', () => {
+    const event: GatewayEvent = {
+      type: 'kata_state',
+      session_id: 'sess-1',
+      project: 'dev1',
+      kata_state: {
+        sessionId: 'sess-1',
+        workflowId: null,
+        issueNumber: null,
+        sessionType: null,
+        currentMode: 'freeform',
+        currentPhase: null,
+        completedPhases: [],
+        template: null,
+        phases: [],
+        modeHistory: [],
+        modeState: {},
+        updatedAt: '2026-04-13T00:00:00Z',
+        beadsCreated: [],
+        editedFiles: [],
+      },
+    }
+    expect(event.type).toBe('kata_state')
+  })
+
+  test('KataStateEvent kata_state can be null', () => {
+    const event: KataStateEvent = {
+      type: 'kata_state',
+      session_id: 'sess-1',
+      project: 'dev1',
+      kata_state: null,
+    }
+    expect(event.kata_state).toBeNull()
   })
 })

@@ -28,6 +28,7 @@ import {
 } from '~/components/ui/dropdown-menu'
 import { Input } from '~/components/ui/input'
 import { cn } from '~/lib/utils'
+import { formatCost, formatTimeAgo, getPreviewText, StatusDot } from './session-utils'
 import type { SessionRecord } from './use-agent-orch-sessions'
 
 interface SessionListItemProps {
@@ -38,48 +39,6 @@ interface SessionListItemProps {
   onRename?: (title: string) => void
   onTag?: (tag: string | null) => void
   onFork?: () => void
-}
-
-function formatTimeAgo(dateStr: string): string {
-  const diff = Date.now() - new Date(dateStr).getTime()
-  const minutes = Math.floor(diff / 60000)
-  if (minutes < 1) return 'just now'
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  return `${days}d ago`
-}
-
-function StatusDot({ status, numTurns }: { status: string; numTurns: number }) {
-  const isSpawning = status === 'running' && numTurns === 0
-
-  if (isSpawning) {
-    return <span className="size-2 shrink-0 rounded-full bg-blue-500 animate-pulse" />
-  }
-
-  switch (status) {
-    case 'running':
-      return <span className="size-2 shrink-0 rounded-full bg-green-500" />
-    case 'waiting_gate':
-    case 'waiting_input':
-    case 'waiting_permission':
-      return <span className="size-2 shrink-0 rounded-full bg-yellow-500" />
-    case 'failed':
-    case 'aborted':
-      return <span className="size-2 shrink-0 rounded-full bg-red-500" />
-    default:
-      return <span className="size-2 shrink-0 rounded-full border border-gray-400" />
-  }
-}
-
-function getPreviewText(session: SessionRecord): string | undefined {
-  // Prefer summary, then prompt
-  return session.summary || session.prompt || undefined
-}
-
-function formatCost(cost: number): string {
-  return `$${cost.toFixed(2)}`
 }
 
 export function SessionListItem({

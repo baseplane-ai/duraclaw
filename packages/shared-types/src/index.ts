@@ -534,6 +534,9 @@ export interface SessionSummary {
   agent?: string | null
   message_count?: number | null
   sdk_session_id?: string | null
+  kata_mode?: string | null
+  kata_issue?: number | null
+  kata_phase?: string | null
 }
 
 // ── Stored Message (for SQLite persistence) ─────────────────────────

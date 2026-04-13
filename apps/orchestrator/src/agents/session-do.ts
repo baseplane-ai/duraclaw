@@ -8,6 +8,7 @@ import type {
   GateResponse,
   GatewayCommand,
   GatewayEvent,
+  KataSessionState,
   SessionState,
   SpawnConfig,
 } from '~/lib/types'
@@ -261,6 +262,20 @@ export class SessionDO extends Agent<Env, SessionState> {
       ])
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to sync discovered session:`, err)
+    }
+  }
+
+  private async syncKataToRegistry(kataState: KataSessionState | null) {
+    try {
+      const registryId = this.env.SESSION_REGISTRY.idFromName('default')
+      const registry = this.env.SESSION_REGISTRY.get(registryId) as any
+      await registry.updateSession(this.state.session_id ?? this.ctx.id.toString(), {
+        kata_mode: kataState?.currentMode ?? null,
+        kata_issue: kataState?.issueNumber ?? null,
+        kata_phase: kataState?.currentPhase ?? null,
+      })
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Failed to sync kata state to registry:`, err)
     }
   }
 
@@ -793,6 +808,19 @@ export class SessionDO extends Agent<Env, SessionState> {
         this.vpsWs = null
         this.syncStatusToRegistry()
         break
+
+      case 'kata_state': {
+        // Store full state in kv for detailed queries
+        try {
+          this
+            .sql`INSERT OR REPLACE INTO kv (key, value) VALUES ('kata_state', ${JSON.stringify(event.kata_state)})`
+        } catch (err) {
+          console.error(`[SessionDO:${this.ctx.id}] Failed to persist kata state:`, err)
+        }
+        // Sync summary fields to registry for card display
+        this.syncKataToRegistry(event.kata_state)
+        break
+      }
 
       case 'error':
         this.updateState({ status: 'failed', error: event.error })

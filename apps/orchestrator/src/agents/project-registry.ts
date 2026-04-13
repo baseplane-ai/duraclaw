@@ -154,7 +154,10 @@ export class ProjectRegistry extends DurableObject<Env> {
          origin,
          agent,
          message_count,
-         sdk_session_id
+         sdk_session_id,
+         kata_mode,
+         kata_issue,
+         kata_phase
        FROM sessions
        WHERE id = ?
        LIMIT 1`,
@@ -187,7 +190,10 @@ export class ProjectRegistry extends DurableObject<Env> {
          origin,
          agent,
          message_count,
-         sdk_session_id
+         sdk_session_id,
+         kata_mode,
+         kata_issue,
+         kata_phase
        FROM sessions
        WHERE user_id = ?
        ORDER BY updated_at DESC`,
@@ -243,6 +249,9 @@ export class ProjectRegistry extends DurableObject<Env> {
       'agent',
       'message_count',
       'sdk_session_id',
+      'kata_mode',
+      'kata_issue',
+      'kata_phase',
     ]
     for (const field of allowedFields) {
       if (field in updates) {

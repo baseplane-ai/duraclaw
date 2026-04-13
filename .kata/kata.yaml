@@ -1,11 +1,13 @@
 project:
-  name: duraclaw
-  build_command: "npm run build"
-  test_command: "npm test"
-  test_command_changed: "npm test"
+  name: ''
+  test_command: turbo test
+  ci: null
 spec_path: planning/specs
 research_path: planning/research
 session_retention_days: 7
+reviews:
+  spec_review: false
+  code_reviewer: null
 global_rules:
   - >-
     When a task instruction says 'Invoke /skill-name', use the Skill tool to invoke that skill before starting work on
@@ -168,16 +170,4 @@ modes:
     workflow_prefix: DB
     aliases:
       - investigate
-  onboard:
-    name: Onboard
-    description: Configure kata for a new project
-    rules:
-      - You are an ONBOARDING GUIDE. Walk the user through kata setup with an interview.
-    stop_conditions: []
-    intent_keywords:
-      - onboard
-      - setup kata
-      - configure kata
-      - initialize kata
-    template: onboard.md
-kata_version: 0.4.0
+kata_version: 0.5.0

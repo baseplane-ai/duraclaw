@@ -15,15 +15,10 @@ import { useState } from 'react'
 import { Button } from '~/components/ui/button'
 import { Input } from '~/components/ui/input'
 import { ScrollArea } from '~/components/ui/scroll-area'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '~/components/ui/select'
 import { cn } from '~/lib/utils'
 import { useWorkspaceStore } from '~/stores/workspace'
+import { ActiveStrip } from './ActiveStrip'
+import { type DateRange, FilterChipBar, getRecentAndOlder } from './FilterChipBar'
 import { SessionListItem } from './SessionListItem'
 import { SpawnAgentForm, type SpawnFormConfig } from './SpawnAgentForm'
 import type { SessionRecord } from './use-agent-orch-sessions'
@@ -79,6 +74,8 @@ export function SessionSidebar({
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [showArchived, setShowArchived] = useState(false)
   const [groupBy, setGroupBy] = useState<'project' | 'date'>('project')
+  const [dateRange, setDateRange] = useState<DateRange>('this-week')
+  const [showOlder, setShowOlder] = useState(false)
   const workspaceProjects = useWorkspaceStore((s) => s.workspaceProjects)
 
   const filteredSessions = sessions.filter((s) => {
@@ -100,8 +97,13 @@ export function SessionSidebar({
     return true
   })
 
+  const { recent: recentSessions, older: olderSessions } = getRecentAndOlder(
+    filteredSessions,
+    dateRange,
+  )
+
   const groups = new Map<string, SessionRecord[]>()
-  for (const session of filteredSessions) {
+  for (const session of recentSessions) {
     const key = groupBy === 'date' ? getDateGroup(session.created_at) : session.project || 'unknown'
     if (!groups.has(key)) groups.set(key, [])
     groups.get(key)?.push(session)
@@ -202,6 +204,12 @@ export function SessionSidebar({
             </div>
           )}
 
+          <ActiveStrip
+            sessions={sessions}
+            onSelectSession={onSelectSession}
+            selectedSessionId={selectedSessionId}
+          />
+
           <div className="space-y-2 border-b p-3">
             <Input
               placeholder="Search sessions..."
@@ -210,17 +218,12 @@ export function SessionSidebar({
               aria-label="Search sessions"
               data-testid="session-search"
             />
-            <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v ?? 'all')}>
-              <SelectTrigger aria-label="Filter by status" data-testid="session-status-filter">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All</SelectItem>
-                <SelectItem value="running">Running</SelectItem>
-                <SelectItem value="completed">Completed</SelectItem>
-                <SelectItem value="failed">Failed</SelectItem>
-              </SelectContent>
-            </Select>
+            <FilterChipBar
+              statusFilter={statusFilter}
+              onStatusChange={setStatusFilter}
+              dateRange={dateRange}
+              onDateRangeChange={setDateRange}
+            />
             <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <input
                 type="checkbox"
@@ -255,7 +258,7 @@ export function SessionSidebar({
 
           <ScrollArea className="flex-1">
             <div className="space-y-1 p-2">
-              {filteredSessions.length === 0 && (
+              {recentSessions.length === 0 && olderSessions.length === 0 && (
                 <p className="p-4 text-center text-xs text-muted-foreground">
                   {sessions.length === 0
                     ? 'No sessions yet — click New to get started'
@@ -305,6 +308,38 @@ export function SessionSidebar({
                 )
               })}
             </div>
+            {olderSessions.length > 0 && (
+              <div className="border-t p-2">
+                <button
+                  type="button"
+                  onClick={() => setShowOlder(!showOlder)}
+                  className="flex w-full items-center gap-1 rounded px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-accent"
+                >
+                  {showOlder ? (
+                    <ChevronDownIcon className="size-3" />
+                  ) : (
+                    <ChevronRightIcon className="size-3" />
+                  )}
+                  Older Sessions ({olderSessions.length})
+                </button>
+                {showOlder && (
+                  <div className="ml-2 mt-1 space-y-1">
+                    {olderSessions.map((session) => (
+                      <SessionListItem
+                        key={session.id}
+                        session={session}
+                        isSelected={selectedSessionId === session.id}
+                        onClick={() => onSelectSession(session.id)}
+                        onArchive={(archived) => onArchiveSession?.(session.id, archived)}
+                        onRename={(title) => onRenameSession?.(session.id, title)}
+                        onTag={(tag) => onTagSession?.(session.id, tag)}
+                        onFork={() => onForkSession?.(session.id)}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </ScrollArea>
         </>
       )}

@@ -1,4 +1,4 @@
-import { Clock, LayoutDashboard, MessagesSquare, Settings, Users } from 'lucide-react'
+import { MessagesSquare, Settings, Users } from 'lucide-react'
 import type { NavGroup, SidebarData } from '../types'
 
 export const sidebarData: SidebarData = {
@@ -12,19 +12,9 @@ export const sidebarData: SidebarData = {
       title: 'General',
       items: [
         {
-          title: 'Dashboard',
-          url: '/',
-          icon: LayoutDashboard,
-        },
-        {
           title: 'Sessions',
           url: '/',
           icon: MessagesSquare,
-        },
-        {
-          title: 'History',
-          url: '/history',
-          icon: Clock,
         },
         {
           title: 'Settings',

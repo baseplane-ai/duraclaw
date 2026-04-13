@@ -1,0 +1,71 @@
+{
+  "phaseId": "p3",
+  "issueNumber": 29,
+  "spec": "29-mobile-session-cards-nav-cleanup",
+  "branch": "feat/29-mobile-session-cards-nav-cleanup",
+  "pr": 32,
+  "timestamp": "2026-04-13T12:48:00.000Z",
+  "verdict": "PASS",
+  "devServer": "http://localhost:5181",
+  "steps": [
+    {
+      "id": "V1",
+      "title": "Mobile Card Layout",
+      "result": "PASS",
+      "evidence": [
+        "Desktop: SessionSidebar visible with session list, Sessions + Settings nav items",
+        "Mobile (400x800): Full-width session cards, no sidebar column",
+        "Cards show: status dot, title/ID, time-ago (13h ago, 1d ago)",
+        "Date group header visible: THIS WEEK",
+        "Master-detail: tapped card navigates to /session/:id with Sessions back button"
+      ]
+    },
+    {
+      "id": "V2",
+      "title": "Active Strip",
+      "result": "PASS",
+      "evidence": [
+        "4 active strip pills visible at top of mobile card list (Switch to session: buttons)",
+        "Pills show project initials (ba = baseplane)",
+        "Tapping pill navigates to session detail view (/session/4aae01b403ca...)",
+        "Session showed waiting_input status confirming qualifying session logic"
+      ]
+    },
+    {
+      "id": "V3",
+      "title": "Card Gestures",
+      "result": "PASS",
+      "evidence": [
+        "12 elements with data-session-card attribute found in DOM",
+        "touch-action: pan-y confirmed on card elements (correct for horizontal gesture)",
+        "Code inspection: useDrag from @use-gesture/react with axis:'x', filterTaps, rubberband:0.15",
+        "useSpring from @react-spring/web with tension:250, friction:26",
+        "Swipe-left reveals archive action (ArchiveIcon + Archive/Restore text)",
+        "No swipe-right: movement clamped with Math.min(mx, 0)",
+        "Velocity flick detection: vx > 0.5 && dx < 0",
+        "SWIPE_THRESHOLD = 80px"
+      ]
+    },
+    {
+      "id": "V4",
+      "title": "Navigation Cleanup",
+      "result": "PASS",
+      "evidence": [
+        "Sidebar nav items: Sessions, Settings only (no Dashboard, no History)",
+        "No workspace selector dropdown in sidebar header",
+        "/history returns Not Found page",
+        "Filter chip bar visible: Workspace, All, This Week chips"
+      ]
+    },
+    {
+      "id": "V5",
+      "title": "Unit Tests + Typecheck",
+      "result": "PASS",
+      "evidence": [
+        "vitest run: 31 test files, 358 tests — all passed",
+        "Test files present: __tests__/active-strip-utils.test.ts, __tests__/filter-utils.test.ts, __tests__/session-card-filters.test.ts, session-utils.test.tsx, SessionCardList.test.tsx",
+        "pnpm typecheck: 6/6 tasks successful, 0 type errors"
+      ]
+    }
+  ]
+}

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { REGISTRY_MIGRATIONS } from './project-registry-migrations'
 
 vi.mock('cloudflare:workers', () => ({
   DurableObject: class DurableObject {
@@ -180,5 +181,142 @@ describe('ProjectRegistry.listSessionsPaginated', () => {
     expect(countCall!.query).not.toContain('model = ?')
     // Only userId binding
     expect(countCall!.bindings).toEqual(['user-1'])
+  })
+})
+
+describe('ProjectRegistry kata state columns (#29)', () => {
+  let sql: FakeSql
+  let registry: InstanceType<typeof ProjectRegistry>
+
+  beforeEach(() => {
+    sql = new FakeSql()
+    registry = createFakeRegistry(sql)
+  })
+
+  it('getSession SELECT includes kata columns', async () => {
+    sql.onQuery('FROM sessions', [
+      {
+        id: 's1',
+        userId: 'u1',
+        project: 'dev1',
+        status: 'running',
+        kata_mode: 'implementation',
+        kata_issue: 29,
+        kata_phase: 'p1',
+      },
+    ])
+
+    const session = await registry.getSession('s1')
+
+    const selectCall = sql.calls.find(
+      (c) => c.query.includes('FROM sessions') && c.query.includes('LIMIT 1'),
+    )
+    expect(selectCall).toBeDefined()
+    expect(selectCall!.query).toContain('kata_mode')
+    expect(selectCall!.query).toContain('kata_issue')
+    expect(selectCall!.query).toContain('kata_phase')
+    expect(session).toBeDefined()
+    expect(session!.kata_mode).toBe('implementation')
+    expect(session!.kata_issue).toBe(29)
+    expect(session!.kata_phase).toBe('p1')
+  })
+
+  it('listSessions SELECT includes kata columns', async () => {
+    sql.onQuery('ORDER BY updated_at DESC', [
+      {
+        id: 's1',
+        userId: 'u1',
+        project: 'dev1',
+        status: 'idle',
+        kata_mode: 'research',
+        kata_issue: 42,
+        kata_phase: 'p2',
+      },
+    ])
+
+    const sessions = await registry.listSessions('u1')
+
+    const selectCall = sql.calls.find(
+      (c) => c.query.includes('FROM sessions') && c.query.includes('ORDER BY updated_at DESC'),
+    )
+    expect(selectCall).toBeDefined()
+    expect(selectCall!.query).toContain('kata_mode')
+    expect(selectCall!.query).toContain('kata_issue')
+    expect(selectCall!.query).toContain('kata_phase')
+    expect(sessions).toHaveLength(1)
+    expect(sessions[0].kata_mode).toBe('research')
+  })
+
+  it('updateSession accepts kata fields', async () => {
+    sql.onQuery('UPDATE sessions', [])
+
+    await registry.updateSession('s1', {
+      kata_mode: 'implementation',
+      kata_issue: 29,
+      kata_phase: 'p1',
+    })
+
+    const updateCall = sql.calls.find((c) => c.query.includes('UPDATE sessions'))
+    expect(updateCall).toBeDefined()
+    expect(updateCall!.query).toContain('kata_mode = ?')
+    expect(updateCall!.query).toContain('kata_issue = ?')
+    expect(updateCall!.query).toContain('kata_phase = ?')
+    expect(updateCall!.bindings).toContain('implementation')
+    expect(updateCall!.bindings).toContain(29)
+    expect(updateCall!.bindings).toContain('p1')
+  })
+
+  it('updateSession accepts null kata fields', async () => {
+    sql.onQuery('UPDATE sessions', [])
+
+    await registry.updateSession('s1', {
+      kata_mode: null,
+      kata_issue: null,
+      kata_phase: null,
+    })
+
+    const updateCall = sql.calls.find((c) => c.query.includes('UPDATE sessions'))
+    expect(updateCall).toBeDefined()
+    expect(updateCall!.bindings).toContain(null)
+  })
+})
+
+describe('REGISTRY_MIGRATIONS v8: kata state columns', () => {
+  it('exists as version 8', () => {
+    const v8 = REGISTRY_MIGRATIONS.find((m) => m.version === 8)
+    expect(v8).toBeDefined()
+    expect(v8!.description).toContain('kata')
+  })
+
+  it('adds kata_mode, kata_issue, kata_phase columns', () => {
+    const v8 = REGISTRY_MIGRATIONS.find((m) => m.version === 8)!
+    const executed: string[] = []
+    const fakeSql = {
+      exec(query: string) {
+        executed.push(query)
+        return { toArray: () => [] }
+      },
+    }
+
+    v8.up(fakeSql as any)
+
+    expect(executed).toContain('ALTER TABLE sessions ADD COLUMN kata_mode TEXT')
+    expect(executed).toContain('ALTER TABLE sessions ADD COLUMN kata_issue INTEGER')
+    expect(executed).toContain('ALTER TABLE sessions ADD COLUMN kata_phase TEXT')
+  })
+
+  it('does not throw if columns already exist', () => {
+    const v8 = REGISTRY_MIGRATIONS.find((m) => m.version === 8)!
+    const fakeSql = {
+      exec(query: string) {
+        if (query.includes('ALTER TABLE')) {
+          throw new Error('duplicate column name')
+        }
+        return { toArray: () => [] }
+      },
+    }
+
+    // Should not throw
+    expect(() => v8.up(fakeSql as any)).not.toThrow()
   })
 })
