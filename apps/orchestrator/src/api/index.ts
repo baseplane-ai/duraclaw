@@ -209,7 +209,7 @@ export function createApiApp() {
       return c.json({ error: 'Missing required fields: email, password, name' }, 400)
     }
 
-    const auth = createAuth(c.env) as any
+    const auth = createAuth(c.env, { allowSignUp: true }) as any
     const result = await auth.api.signUpEmail({
       body: { email: body.email, password: body.password, name: body.name },
     })

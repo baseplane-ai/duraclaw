@@ -8,11 +8,14 @@ import * as schema from './auth-schema'
  * Create a Better Auth instance for the current request.
  * Must be per-request because D1 bindings are only available in request context.
  */
-export function createAuth(env: {
-  AUTH_DB: D1Database
-  BETTER_AUTH_SECRET: string
-  BETTER_AUTH_URL?: string
-}) {
+export function createAuth(
+  env: {
+    AUTH_DB: D1Database
+    BETTER_AUTH_SECRET: string
+    BETTER_AUTH_URL?: string
+  },
+  opts?: { allowSignUp?: boolean },
+) {
   const db = drizzle(env.AUTH_DB, { schema })
   const isLocalDev =
     !env.BETTER_AUTH_URL ||
@@ -51,7 +54,7 @@ export function createAuth(env: {
     trustedOrigins,
     emailAndPassword: {
       enabled: true,
-      disableSignUp: true,
+      disableSignUp: !opts?.allowSignUp,
     },
     plugins: [admin()],
   })
