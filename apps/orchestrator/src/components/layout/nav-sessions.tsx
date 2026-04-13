@@ -125,12 +125,17 @@ export function NavSessions() {
     .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
     .slice(0, 5)
 
-  // Projects: group all visible sessions
+  // Projects: group all visible sessions, sorted by updated_at DESC within each group
   const groups = new Map<string, SessionRecord[]>()
   for (const session of visible) {
     const key = session.project || 'unknown'
     if (!groups.has(key)) groups.set(key, [])
     groups.get(key)?.push(session)
+  }
+  for (const [, projectSessions] of groups) {
+    projectSessions.sort(
+      (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
+    )
   }
 
   const handleSelect = useCallback(
@@ -218,17 +223,23 @@ export function NavSessions() {
           Projects
         </SidebarGroupLabel>
         <SidebarMenu>
-          {Array.from(groups.entries()).map(([project, projectSessions]) => (
-            <ProjectGroup
-              key={project}
-              project={project}
-              sessions={projectSessions}
-              activeSessionId={activeSessionId}
-              onSelect={handleSelect}
-              onRename={handleRename}
-              onArchive={handleArchive}
-            />
-          ))}
+          {Array.from(groups.entries())
+            .sort(([, a], [, b]) => {
+              const aMax = a[0]?.updated_at ?? ''
+              const bMax = b[0]?.updated_at ?? ''
+              return bMax > aMax ? 1 : bMax < aMax ? -1 : 0
+            })
+            .map(([project, projectSessions]) => (
+              <ProjectGroup
+                key={project}
+                project={project}
+                sessions={projectSessions}
+                activeSessionId={activeSessionId}
+                onSelect={handleSelect}
+                onRename={handleRename}
+                onArchive={handleArchive}
+              />
+            ))}
         </SidebarMenu>
       </SidebarGroup>
     </>
