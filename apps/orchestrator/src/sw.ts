@@ -5,9 +5,12 @@ import { precacheAndRoute } from 'workbox-precaching'
 
 precacheAndRoute(self.__WB_MANIFEST)
 
-// Auto-activate new service worker without waiting for tabs to close
+// Auto-activate: skipWaiting on install OR when app sends SKIP_WAITING message
 self.addEventListener('install', () => self.skipWaiting())
 self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()))
+self.addEventListener('message', (event) => {
+  if (event.data?.type === 'SKIP_WAITING') self.skipWaiting()
+})
 
 // Push event handler stub — implemented in Phase 3a
 self.addEventListener('push', (event) => {

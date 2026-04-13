@@ -2,6 +2,7 @@ import { Outlet } from '@tanstack/react-router'
 import { AppSidebar } from '~/components/layout/app-sidebar'
 import { SkipToMain } from '~/components/skip-to-main'
 import { StatusBar } from '~/components/status-bar'
+import { SwUpdateBanner } from '~/components/sw-update-banner'
 import { SidebarInset, SidebarProvider } from '~/components/ui/sidebar'
 import { LayoutProvider } from '~/context/layout-provider'
 import { SearchProvider } from '~/context/search-provider'
@@ -41,6 +42,7 @@ export function AuthenticatedLayout({ children }: AuthenticatedLayoutProps) {
           </SidebarInset>
         </SidebarProvider>
         <StatusBar />
+        <SwUpdateBanner />
       </LayoutProvider>
     </SearchProvider>
   )
