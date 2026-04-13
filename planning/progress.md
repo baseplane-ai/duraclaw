@@ -1,6 +1,6 @@
 # Duraclaw v2 — Progress Tracker
 
-> Updated 2026-04-12 (late). Issue #24 UX ergonomics shipped — chat-native session orchestration, status bar, settings, command palette, workspaces, tabs, mobile gestures.
+> Updated 2026-04-13. Issue #27 VPS session discovery shipped — session source adapters, DO sync with dedup, blended history UI, resume discovered sessions. Issue #24 UX ergonomics shipped prior.
 
 **Status key:** `not-started` | `spec` | `in-progress` | `done`
 
@@ -26,7 +26,7 @@
 | 15 | Unified Tauri Tray App | spec | [0015-unified-tray-packaging.md](specs/0015-unified-tray-packaging.md) | Distribution/packaging |
 | 24 | UX Ergonomics | done | [24-ux-ergonomics.md](specs/24-ux-ergonomics.md) | — |
 | 12 | Cass Session API | spec | [12-cass-session-api.md](specs/12-cass-session-api.md) | — |
-| 27 | VPS Session Discovery | spec | [27-vps-session-discovery.md](specs/27-vps-session-discovery.md) | — |
+| 27 | VPS Session Discovery | done | [27-vps-session-discovery.md](specs/27-vps-session-discovery.md) | — |
 
 ### Agent-Orch Drop-In (new — accelerates Phases 1-3)
 
