@@ -84,29 +84,30 @@ function SessionContextMenu({
   }, [session, onRename])
 
   return (
-    <DropdownMenu open={open} onOpenChange={setOpen}>
-      <DropdownMenuTrigger asChild>
-        {/* biome-ignore lint/a11y/noStaticElementInteractions: context menu trigger wraps interactive children */}
-        <span
-          onContextMenu={handleContextMenu}
-          onTouchStart={handleTouchStart}
-          onTouchEnd={handleTouchEnd}
-          onTouchMove={handleTouchEnd}
-        >
-          {children}
-        </span>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" side="right">
-        <DropdownMenuItem onClick={handleRename}>
-          <EditIcon className="mr-2 size-3" />
-          Rename
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => onArchive(session.id, !session.archived)}>
-          <ArchiveIcon className="mr-2 size-3" />
-          {session.archived ? 'Unarchive' : 'Archive'}
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <>
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: context menu on right-click/long-press only */}
+      <span
+        onContextMenu={handleContextMenu}
+        onTouchStart={handleTouchStart}
+        onTouchEnd={handleTouchEnd}
+        onTouchMove={handleTouchEnd}
+      >
+        {children}
+      </span>
+      <DropdownMenu open={open} onOpenChange={setOpen}>
+        <DropdownMenuTrigger className="sr-only" />
+        <DropdownMenuContent align="start" side="right">
+          <DropdownMenuItem onClick={handleRename}>
+            <EditIcon className="mr-2 size-3" />
+            Rename
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => onArchive(session.id, !session.archived)}>
+            <ArchiveIcon className="mr-2 size-3" />
+            {session.archived ? 'Unarchive' : 'Archive'}
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </>
   )
 }
 
