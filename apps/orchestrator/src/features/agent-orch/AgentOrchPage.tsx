@@ -228,7 +228,12 @@ function AgentOrchContent() {
             />
           </div>
           {/* Mobile: card list (only shown when no session is selected) */}
-          <div className={cn('sm:hidden', selectedSessionId ? 'hidden' : 'flex flex-col w-full')}>
+          <div
+            className={cn(
+              'sm:hidden',
+              selectedSessionId ? 'hidden' : 'flex h-full flex-col w-full overflow-hidden',
+            )}
+          >
             <SessionCardList
               sessions={sessions}
               selectedSessionId={selectedSessionId}
