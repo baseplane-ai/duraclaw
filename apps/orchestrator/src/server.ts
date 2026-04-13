@@ -25,10 +25,6 @@ export default {
         if (!session) {
           return new Response('Session not found', { status: 404 })
         }
-        if (session.userId && session.userId !== authSession.userId) {
-          return new Response('Forbidden', { status: 403 })
-        }
-
         const doId = env.SESSION_AGENT.idFromString(sessionId)
         const stub = env.SESSION_AGENT.get(doId)
         const headers = new Headers(request.headers)
