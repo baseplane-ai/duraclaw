@@ -19,12 +19,6 @@ export default {
 
       const sessionId = wsMatch[1]
       try {
-        const registryId = env.SESSION_REGISTRY.idFromName('default')
-        const registry = env.SESSION_REGISTRY.get(registryId) as any
-        const session = await registry.getSession(sessionId)
-        if (!session) {
-          return new Response('Session not found', { status: 404 })
-        }
         const doId = env.SESSION_AGENT.idFromString(sessionId)
         const stub = env.SESSION_AGENT.get(doId)
         const headers = new Headers(request.headers)
