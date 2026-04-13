@@ -77,13 +77,14 @@ describe('ProjectRegistry.searchSessions', () => {
     expect(patternBindings).toHaveLength(7)
   })
 
-  it('passes userId as first binding', async () => {
+  it('passes pattern bindings without userId (userId is unused)', async () => {
     sql.onQuery('prompt LIKE', [])
 
     await registry.searchSessions('user-42', 'foo')
 
     const searchCall = sql.calls.find((c) => c.query.includes('prompt LIKE'))
-    expect(searchCall!.bindings[0]).toBe('user-42')
+    // searchSessions uses _userId (unused), so all bindings are the pattern
+    expect(searchCall!.bindings.every((b) => b === '%foo%')).toBe(true)
   })
 })
 
@@ -112,7 +113,7 @@ describe('ProjectRegistry.listSessionsPaginated', () => {
       (c) => c.query.includes('FROM sessions') && c.query.includes('LIMIT'),
     )
     expect(selectCall).toBeDefined()
-    expect(selectCall!.query).toContain('ORDER BY updated_at DESC')
+    expect(selectCall!.query).toContain('ORDER BY last_activity DESC')
     expect(selectCall!.bindings).toContain(50) // default limit
     expect(selectCall!.bindings).toContain(0) // default offset
   })
@@ -132,7 +133,7 @@ describe('ProjectRegistry.listSessionsPaginated', () => {
     expect(countCall!.query).toContain('status = ?')
     expect(countCall!.query).toContain('project = ?')
     expect(countCall!.query).toContain('model = ?')
-    expect(countCall!.bindings).toEqual(['user-1', 'done', 'myproj', 'opus'])
+    expect(countCall!.bindings).toEqual(['done', 'myproj', 'opus'])
   })
 
   it('uses custom sort, limit, and offset', async () => {
@@ -179,8 +180,8 @@ describe('ProjectRegistry.listSessionsPaginated', () => {
     expect(countCall!.query).not.toContain('status = ?')
     expect(countCall!.query).not.toContain('project = ?')
     expect(countCall!.query).not.toContain('model = ?')
-    // Only userId binding
-    expect(countCall!.bindings).toEqual(['user-1'])
+    // No filter bindings when options are omitted
+    expect(countCall!.bindings).toEqual([])
   })
 })
 
@@ -222,7 +223,7 @@ describe('ProjectRegistry kata state columns (#29)', () => {
   })
 
   it('listSessions SELECT includes kata columns', async () => {
-    sql.onQuery('ORDER BY updated_at DESC', [
+    sql.onQuery('ORDER BY COALESCE(last_activity', [
       {
         id: 's1',
         userId: 'u1',
@@ -237,7 +238,8 @@ describe('ProjectRegistry kata state columns (#29)', () => {
     const sessions = await registry.listSessions('u1')
 
     const selectCall = sql.calls.find(
-      (c) => c.query.includes('FROM sessions') && c.query.includes('ORDER BY updated_at DESC'),
+      (c) =>
+        c.query.includes('FROM sessions') && c.query.includes('ORDER BY COALESCE(last_activity'),
     )
     expect(selectCall).toBeDefined()
     expect(selectCall!.query).toContain('kata_mode')
