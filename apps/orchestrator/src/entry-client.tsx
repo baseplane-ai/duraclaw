@@ -1,6 +1,12 @@
+import { RouterProvider } from '@tanstack/react-router'
+import { dbReady } from '~/db/db-instance'
+import { evictOldMessages } from '~/db/messages-collection'
+
+// Non-blocking eviction after DB is ready
+dbReady.then(() => evictOldMessages()).catch(() => {})
+
 import { StrictMode } from 'react'
 import ReactDOM from 'react-dom/client'
-import { RouterProvider } from '@tanstack/react-router'
 import { getRouter } from './router'
 
 const rootElement = document.getElementById('root')

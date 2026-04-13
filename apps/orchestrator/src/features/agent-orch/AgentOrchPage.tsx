@@ -14,11 +14,11 @@ import { PushOptInBanner } from '~/components/push-opt-in-banner'
 import { PwaInstallBanner } from '~/components/pwa-install-banner'
 import { QuickPromptInput } from '~/components/quick-prompt-input'
 import { TabBar } from '~/components/tab-bar'
+import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { useTabStore } from '~/stores/tabs'
 import { AgentDetailView } from './AgentDetailView'
 import type { SpawnFormConfig } from './SpawnAgentForm'
 import { getPreviewText } from './session-utils'
-import { useAgentOrchSessions } from './use-agent-orch-sessions'
 import { type SpawnConfig, useCodingAgent } from './use-coding-agent'
 
 export function AgentOrchPage() {
@@ -26,7 +26,7 @@ export function AgentOrchPage() {
 }
 
 function AgentOrchContent() {
-  const { sessions, updateSession } = useAgentOrchSessions()
+  const { sessions, updateSession } = useSessionsCollection()
   const search = useSearch({ from: '/_authenticated/' })
   const navigate = useNavigate()
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(

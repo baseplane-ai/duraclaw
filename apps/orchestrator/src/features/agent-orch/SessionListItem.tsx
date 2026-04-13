@@ -27,9 +27,9 @@ import {
   DropdownMenuTrigger,
 } from '~/components/ui/dropdown-menu'
 import { Input } from '~/components/ui/input'
+import type { SessionRecord } from '~/db/sessions-collection'
 import { cn } from '~/lib/utils'
 import { formatCost, formatTimeAgo, getPreviewText, StatusDot } from './session-utils'
-import type { SessionRecord } from './use-agent-orch-sessions'
 
 interface SessionListItemProps {
   session: SessionRecord

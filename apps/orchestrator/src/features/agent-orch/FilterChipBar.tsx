@@ -11,9 +11,9 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '~/components/ui/dropdown-menu'
+import type { SessionRecord } from '~/db/sessions-collection'
 import type { ProjectInfo } from '~/lib/types'
 import { useWorkspaceStore } from '~/stores/workspace'
-import type { SessionRecord } from './use-agent-orch-sessions'
 
 // Date range options
 export type DateRange = 'all' | 'today' | 'yesterday' | 'this-week' | 'this-month'

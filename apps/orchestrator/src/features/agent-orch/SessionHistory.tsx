@@ -1,16 +1,12 @@
 /**
  * SessionHistory — Full history page with sortable, filterable session table.
+ * Uses TanStackDB sessions collection for client-side sort/filter/search.
  */
 
+import { useLiveQuery } from '@tanstack/react-db'
 import { useNavigate } from '@tanstack/react-router'
-import {
-  ArrowDownIcon,
-  ArrowUpIcon,
-  ChevronLeftIcon,
-  ChevronRightIcon,
-  SearchIcon,
-} from 'lucide-react'
-import { useCallback, useEffect, useState } from 'react'
+import { ArrowDownIcon, ArrowUpIcon, SearchIcon } from 'lucide-react'
+import { useMemo, useState } from 'react'
 import { Badge } from '~/components/ui/badge'
 import { Button } from '~/components/ui/button'
 import { Input } from '~/components/ui/input'
@@ -29,12 +25,10 @@ import {
   TableHeader,
   TableRow,
 } from '~/components/ui/table'
-import type { SessionSummary } from '~/lib/types'
+import { type SessionRecord, sessionsCollection } from '~/db/sessions-collection'
 
 type SortField = 'updated_at' | 'created_at' | 'total_cost_usd' | 'duration_ms' | 'num_turns'
 type SortDir = 'asc' | 'desc'
-
-const PAGE_SIZE = 25
 
 const STATUS_VARIANTS: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
   running: 'default',
@@ -69,65 +63,49 @@ function formatDate(dateStr: string): string {
 
 export function SessionHistory() {
   const navigate = useNavigate()
-  const [sessions, setSessions] = useState<SessionSummary[]>([])
-  const [total, setTotal] = useState(0)
-  const [isLoading, setIsLoading] = useState(true)
 
   const [sortBy, setSortBy] = useState<SortField>('updated_at')
   const [sortDir, setSortDir] = useState<SortDir>('desc')
   const [statusFilter, setStatusFilter] = useState<string>('')
   const [projectFilter, setProjectFilter] = useState<string>('')
   const [searchQuery, setSearchQuery] = useState('')
-  const [page, setPage] = useState(0)
 
-  const fetchHistory = useCallback(async () => {
-    setIsLoading(true)
-    try {
-      const params = new URLSearchParams()
-      params.set('sortBy', sortBy)
-      params.set('sortDir', sortDir)
-      params.set('limit', String(PAGE_SIZE))
-      params.set('offset', String(page * PAGE_SIZE))
-      if (statusFilter) params.set('status', statusFilter)
-      if (projectFilter) params.set('project', projectFilter)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: allSessions, isLoading } = useLiveQuery(sessionsCollection as any)
 
-      const resp = await fetch(`/api/sessions/history?${params}`)
-      if (resp.ok) {
-        const data = (await resp.json()) as { sessions: SessionSummary[]; total: number }
-        setSessions(data.sessions)
-        setTotal(data.total)
-      }
-    } catch {
-      // ignore
-    } finally {
-      setIsLoading(false)
-    }
-  }, [sortBy, sortDir, statusFilter, projectFilter, page])
+  const filtered = useMemo(() => {
+    if (!allSessions) return []
+    let result = [...allSessions] as SessionRecord[]
 
-  const fetchSearch = useCallback(async () => {
-    if (!searchQuery.trim()) return
-    setIsLoading(true)
-    try {
-      const resp = await fetch(`/api/sessions/search?q=${encodeURIComponent(searchQuery.trim())}`)
-      if (resp.ok) {
-        const data = (await resp.json()) as { sessions: SessionSummary[] }
-        setSessions(data.sessions)
-        setTotal(data.sessions.length)
-      }
-    } catch {
-      // ignore
-    } finally {
-      setIsLoading(false)
-    }
-  }, [searchQuery])
-
-  useEffect(() => {
+    // Status filter
+    if (statusFilter) result = result.filter((s) => s.status === statusFilter)
+    // Project filter
+    if (projectFilter) result = result.filter((s) => s.project === projectFilter)
+    // Search
     if (searchQuery.trim()) {
-      const timeout = setTimeout(fetchSearch, 300)
-      return () => clearTimeout(timeout)
+      const q = searchQuery.trim().toLowerCase()
+      result = result.filter((s) =>
+        [s.title, s.prompt, s.summary].some((f) => f?.toLowerCase().includes(q)),
+      )
     }
-    fetchHistory()
-  }, [fetchHistory, fetchSearch, searchQuery])
+    // Sort
+    result.sort((a, b) => {
+      const aVal = a[sortBy] ?? 0
+      const bVal = b[sortBy] ?? 0
+      const cmp =
+        typeof aVal === 'string'
+          ? new Date(aVal).getTime() - new Date(bVal as string).getTime()
+          : (aVal as number) - (bVal as number)
+      return sortDir === 'asc' ? cmp : -cmp
+    })
+
+    return result
+  }, [allSessions, statusFilter, projectFilter, searchQuery, sortBy, sortDir])
+
+  const projects = useMemo(() => {
+    if (!allSessions) return []
+    return [...new Set((allSessions as SessionRecord[]).map((s) => s.project).filter(Boolean))]
+  }, [allSessions])
 
   const toggleSort = (field: SortField) => {
     if (sortBy === field) {
@@ -136,7 +114,6 @@ export function SessionHistory() {
       setSortBy(field)
       setSortDir('desc')
     }
-    setPage(0)
   }
 
   const SortIcon = ({ field }: { field: SortField }) => {
@@ -148,11 +125,6 @@ export function SessionHistory() {
     )
   }
 
-  const totalPages = Math.ceil(total / PAGE_SIZE)
-  const isSearching = !!searchQuery.trim()
-
-  const projects = [...new Set(sessions.map((s) => s.project).filter(Boolean))]
-
   return (
     <div className="space-y-4">
       {/* Filters */}
@@ -162,20 +134,14 @@ export function SessionHistory() {
           <Input
             placeholder="Search sessions..."
             value={searchQuery}
-            onChange={(e) => {
-              setSearchQuery(e.target.value)
-              setPage(0)
-            }}
+            onChange={(e) => setSearchQuery(e.target.value)}
             className="pl-9"
             data-testid="history-search"
           />
         </div>
         <Select
           value={statusFilter || 'all'}
-          onValueChange={(v) => {
-            setStatusFilter(v === 'all' ? '' : v)
-            setPage(0)
-          }}
+          onValueChange={(v) => setStatusFilter(v === 'all' ? '' : v)}
         >
           <SelectTrigger className="w-[140px]" data-testid="history-status-filter">
             <SelectValue placeholder="Status" />
@@ -191,10 +157,7 @@ export function SessionHistory() {
         {projects.length > 1 && (
           <Select
             value={projectFilter || 'all'}
-            onValueChange={(v) => {
-              setProjectFilter(v === 'all' ? '' : v)
-              setPage(0)
-            }}
+            onValueChange={(v) => setProjectFilter(v === 'all' ? '' : v)}
           >
             <SelectTrigger className="w-[160px]" data-testid="history-project-filter">
               <SelectValue placeholder="Project" />
@@ -251,20 +214,20 @@ export function SessionHistory() {
           </TableRow>
         </TableHeader>
         <TableBody>
-          {isLoading && sessions.length === 0 ? (
+          {isLoading && filtered.length === 0 ? (
             <TableRow>
               <TableCell colSpan={9} className="py-8 text-center text-muted-foreground">
                 Loading...
               </TableCell>
             </TableRow>
-          ) : sessions.length === 0 ? (
+          ) : filtered.length === 0 ? (
             <TableRow>
               <TableCell colSpan={9} className="py-8 text-center text-muted-foreground">
                 No sessions found
               </TableCell>
             </TableRow>
           ) : (
-            sessions.map((session) => {
+            filtered.map((session) => {
               const primary =
                 session.title ?? session.summary ?? session.prompt ?? session.id.slice(0, 12)
               return (
@@ -290,7 +253,7 @@ export function SessionHistory() {
                         {session.agent}
                       </Badge>
                     ) : (
-                      <span className="text-muted-foreground">—</span>
+                      <span className="text-muted-foreground">-</span>
                     )}
                   </TableCell>
                   <TableCell>{session.project}</TableCell>
@@ -302,7 +265,7 @@ export function SessionHistory() {
                   <TableCell>{formatDate(session.created_at)}</TableCell>
                   <TableCell>{formatDuration(session.duration_ms)}</TableCell>
                   <TableCell>{formatCost(session.total_cost_usd)}</TableCell>
-                  <TableCell>{session.num_turns ?? session.message_count ?? '—'}</TableCell>
+                  <TableCell>{session.num_turns ?? session.message_count ?? '-'}</TableCell>
                   <TableCell>
                     {session.sdk_session_id &&
                       session.agent === 'claude' &&
@@ -341,36 +304,6 @@ export function SessionHistory() {
           )}
         </TableBody>
       </Table>
-
-      {/* Pagination */}
-      {!isSearching && totalPages > 1 && (
-        <div className="flex items-center justify-between">
-          <span className="text-sm text-muted-foreground">
-            {total} session{total !== 1 ? 's' : ''} total
-          </span>
-          <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={page === 0}
-              onClick={() => setPage((p) => p - 1)}
-            >
-              <ChevronLeftIcon className="size-4" />
-            </Button>
-            <span className="text-sm">
-              {page + 1} / {totalPages}
-            </span>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={page >= totalPages - 1}
-              onClick={() => setPage((p) => p + 1)}
-            >
-              <ChevronRightIcon className="size-4" />
-            </Button>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import type { SessionRecord } from '~/db/sessions-collection'
 import { isQualifyingSession } from '../ActiveStrip'
-import type { SessionRecord } from '../use-agent-orch-sessions'
 
 function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {

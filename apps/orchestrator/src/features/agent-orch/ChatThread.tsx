@@ -22,19 +22,10 @@ import {
   ToolCallListHeader,
 } from '@duraclaw/ai-elements'
 import { FileIcon, HistoryIcon } from 'lucide-react'
-import type { GateResponse, SessionState } from '~/lib/types'
+import type { ChatMessage, GateResponse, SessionState } from '~/lib/types'
 import { GateResolver } from './GateResolver'
 import { StreamingText } from './StreamingText'
 import type { ContentBlock } from './use-coding-agent'
-
-export interface ChatMessage {
-  id: number | string
-  role: 'user' | 'assistant' | 'tool' | 'qa_pair'
-  type: string
-  content: string
-  event_uuid?: string | null
-  created_at?: string
-}
 
 interface ChatThreadProps {
   messages: ChatMessage[]

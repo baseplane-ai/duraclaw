@@ -4,9 +4,9 @@
  * Hides entirely when no qualifying sessions exist.
  */
 
+import type { SessionRecord } from '~/db/sessions-collection'
 import { cn } from '~/lib/utils'
 import { getPreviewText, getProjectInitials } from './session-utils'
-import type { SessionRecord } from './use-agent-orch-sessions'
 
 const ACTIVE_STATUSES = new Set(['running', 'waiting_gate', 'waiting_input', 'waiting_permission'])
 const IDLE_RECENCY_MS = 2 * 60 * 60 * 1000 // 2 hours

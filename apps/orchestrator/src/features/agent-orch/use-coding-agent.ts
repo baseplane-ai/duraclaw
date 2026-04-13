@@ -9,14 +9,16 @@
 
 import { useAgent } from 'agents/react'
 import { useCallback, useRef, useState } from 'react'
+import { type CachedMessage, messagesCollection } from '~/db/messages-collection'
+import { sessionsCollection } from '~/db/sessions-collection'
 import type {
+  ChatMessage,
   ContentBlock,
   GateResponse,
   KataSessionState,
   SessionState,
   SpawnConfig,
 } from '~/lib/types'
-import type { ChatMessage } from './ChatThread'
 
 export type { ContentBlock, GateResponse, SessionState as CodingAgentState, SpawnConfig }
 
@@ -93,6 +95,56 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     setContextUsage(null)
   }
 
+  /** Write a message to the local cache collection (cache-behind). */
+  const cacheMessage = useCallback(
+    (msg: Omit<CachedMessage, 'sessionId'>) => {
+      try {
+        messagesCollection.insert({
+          ...msg,
+          sessionId: agentName,
+        } as CachedMessage & Record<string, unknown>)
+      } catch {
+        // Ignore duplicate inserts
+      }
+    },
+    [agentName],
+  )
+
+  /** Load cached messages from the local collection (cache-first). */
+  function loadCachedMessages(sessionId: string) {
+    try {
+      const cached: CachedMessage[] = []
+      for (const [, msg] of messagesCollection as Iterable<[string, CachedMessage]>) {
+        if (msg.sessionId === sessionId) {
+          cached.push(msg)
+        }
+      }
+      if (cached.length > 0) {
+        cached.sort((a, b) => {
+          if (a.created_at && b.created_at) {
+            return new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+          }
+          return 0
+        })
+        for (const msg of cached) {
+          if (msg.event_uuid) knownEventUuidsRef.current.add(msg.event_uuid)
+        }
+        setMessages(
+          cached.map((m) => ({
+            id: m.id,
+            role: m.role,
+            type: m.type,
+            content: m.content,
+            event_uuid: m.event_uuid,
+            created_at: m.created_at,
+          })),
+        )
+      }
+    } catch {
+      // Collection may not be initialized yet
+    }
+  }
+
   const connection = useAgent<SessionState>({
     agent: 'session-agent',
     name: agentName,
@@ -100,9 +152,23 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       const prevStatus = prevStatusRef.current
       prevStatusRef.current = newState.status
       setState(newState)
+      // WS bridge: update sessions collection with fresh status
+      try {
+        sessionsCollection.update(agentName, (draft) => {
+          draft.status = newState.status
+          draft.updated_at = new Date().toISOString()
+          if (newState.num_turns != null) draft.num_turns = newState.num_turns
+          if (newState.total_cost_usd != null) draft.total_cost_usd = newState.total_cost_usd
+          if (newState.duration_ms != null) draft.duration_ms = newState.duration_ms
+        })
+      } catch {
+        // Collection item may not exist yet — ignore
+      }
       // Hydrate messages on first state sync
       if (!hydratedRef.current) {
         hydratedRef.current = true
+        // Cache-first: load from local collection before WS hydration
+        loadCachedMessages(agentName)
         hydrateMessages(connection).catch(() => {})
       }
       // Re-hydrate when a resumed session completes
@@ -183,6 +249,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           if (event.type === 'assistant' && event.uuid) {
             setStreamingContent('') // Clear streaming on final content
             if (knownEventUuidsRef.current.has(event.uuid)) return
+            const contentStr = JSON.stringify(event.content)
             setMessages((prev) => {
               if (prev.some((m) => m.event_uuid === event.uuid)) return prev
               return [
@@ -191,13 +258,23 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
                   id: event.uuid as string,
                   role: 'assistant',
                   type: 'text',
-                  content: JSON.stringify(event.content),
+                  content: contentStr,
                   event_uuid: event.uuid,
                 },
               ]
             })
+            // Cache-behind write
+            cacheMessage({
+              id: event.uuid as string,
+              role: 'assistant',
+              type: 'text',
+              content: contentStr,
+              event_uuid: event.uuid,
+              created_at: new Date().toISOString(),
+            })
           } else if (event.type === 'tool_result' && event.uuid) {
             if (knownEventUuidsRef.current.has(event.uuid)) return
+            const contentStr = JSON.stringify(event.content)
             setMessages((prev) => {
               if (prev.some((m) => m.event_uuid === event.uuid)) return prev
               return [
@@ -206,10 +283,19 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
                   id: `tool-${event.uuid}`,
                   role: 'tool',
                   type: 'tool_result',
-                  content: JSON.stringify(event.content),
+                  content: contentStr,
                   event_uuid: event.uuid,
                 },
               ]
+            })
+            // Cache-behind write
+            cacheMessage({
+              id: `tool-${event.uuid}`,
+              role: 'tool',
+              type: 'tool_result',
+              content: contentStr,
+              event_uuid: event.uuid,
+              created_at: new Date().toISOString(),
             })
           }
         } else if (parsed.type === 'user_message') {
@@ -271,6 +357,19 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         })
         return [...allMessages, ...newRealtime]
       })
+      // Write hydrated messages to local collection for future cache-first loads
+      for (const msg of allMessages) {
+        const id =
+          msg.event_uuid || (msg.role === 'user' ? `hydrated-user-${msg.id}` : String(msg.id))
+        cacheMessage({
+          id,
+          role: msg.role,
+          type: msg.type,
+          content: msg.content,
+          event_uuid: msg.event_uuid ?? undefined,
+          created_at: msg.created_at ?? new Date().toISOString(),
+        })
+      }
     }
   }
 
@@ -341,6 +440,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   const sendMessage = useCallback(
     async (content: string | ContentBlock[]) => {
       const optimisticId = `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      const contentStr = JSON.stringify(content)
       optimisticIdsRef.current.add(optimisticId)
       setMessages((prev) => [
         ...prev,
@@ -348,9 +448,17 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           id: optimisticId,
           role: 'user',
           type: 'text',
-          content: JSON.stringify(content),
+          content: contentStr,
         },
       ])
+      // Cache-behind write for user message
+      cacheMessage({
+        id: optimisticId,
+        role: 'user',
+        type: 'text',
+        content: contentStr,
+        created_at: new Date().toISOString(),
+      })
       const result = (await connection.call('sendMessage', [content])) as {
         ok: boolean
         error?: string
@@ -361,7 +469,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       }
       return result
     },
-    [connection],
+    [connection, cacheMessage],
   )
 
   return {

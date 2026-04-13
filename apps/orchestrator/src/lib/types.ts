@@ -18,6 +18,17 @@ export type {
   UserPreferences,
 } from '@duraclaw/shared-types'
 
+// ── Chat message type (shared across features + db) ───────────────
+
+export interface ChatMessage {
+  id: number | string
+  role: 'user' | 'assistant' | 'tool' | 'qa_pair'
+  type: string
+  content: string
+  event_uuid?: string | null
+  created_at?: string
+}
+
 // ── CF-specific types ──────────────────────────────────────────────
 
 export interface Env {

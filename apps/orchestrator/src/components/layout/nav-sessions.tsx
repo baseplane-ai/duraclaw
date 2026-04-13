@@ -30,11 +30,9 @@ import {
   SidebarMenuSubItem,
   useSidebar,
 } from '~/components/ui/sidebar'
+import type { SessionRecord } from '~/db/sessions-collection'
 import { getPreviewText, StatusDot } from '~/features/agent-orch/session-utils'
-import {
-  type SessionRecord,
-  useAgentOrchSessions,
-} from '~/features/agent-orch/use-agent-orch-sessions'
+import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { useTabStore } from '~/stores/tabs'
 
 function getDisplayName(session: SessionRecord): string {
@@ -114,7 +112,7 @@ function SessionContextMenu({
 // ── Main component ─────────────────────────────────────────────────
 
 export function NavSessions() {
-  const { sessions, updateSession, archiveSession } = useAgentOrchSessions()
+  const { sessions, updateSession, archiveSession } = useSessionsCollection()
   const { setOpenMobile } = useSidebar()
   const location = useLocation()
   const navigate = useNavigate()

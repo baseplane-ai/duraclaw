@@ -5,8 +5,8 @@ import { Main } from '~/components/layout/main'
 import { TabBar } from '~/components/tab-bar'
 import { AgentDetailView } from '~/features/agent-orch/AgentDetailView'
 import { getPreviewText } from '~/features/agent-orch/session-utils'
-import { useAgentOrchSessions } from '~/features/agent-orch/use-agent-orch-sessions'
 import { useCodingAgent } from '~/features/agent-orch/use-coding-agent'
+import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { useTabStore } from '~/stores/tabs'
 
 export const Route = createFileRoute('/_authenticated/session/$id')({
@@ -16,7 +16,7 @@ export const Route = createFileRoute('/_authenticated/session/$id')({
 function SessionDetailPage() {
   const { id: sessionId } = Route.useParams()
   const navigate = useNavigate()
-  const { sessions, updateSession } = useAgentOrchSessions()
+  const { sessions, updateSession } = useSessionsCollection()
   const addTab = useTabStore((s) => s.addTab)
 
   useEffect(() => {

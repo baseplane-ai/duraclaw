@@ -95,6 +95,21 @@ importers:
       '@tailwindcss/vite':
         specifier: ^4.2.2
         version: 4.2.2(vite@8.0.8(@types/node@22.19.15)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.1)(tsx@4.21.0))
+      '@tanstack/browser-db-sqlite-persistence':
+        specifier: 0.1.8
+        version: 0.1.8(@journeyapps/wa-sqlite@1.6.0)(typescript@5.8.3)
+      '@tanstack/db':
+        specifier: 0.6.4
+        version: 0.6.4(typescript@5.8.3)
+      '@tanstack/query-core':
+        specifier: '5'
+        version: 5.99.0
+      '@tanstack/query-db-collection':
+        specifier: 1.0.35
+        version: 1.0.35(@tanstack/query-core@5.99.0)(typescript@5.8.3)
+      '@tanstack/react-db':
+        specifier: 0.1.82
+        version: 0.1.82(react@19.2.4)(typescript@5.8.3)
       '@tanstack/react-router':
         specifier: ^1.168.10
         version: 1.168.10(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -1992,6 +2007,9 @@ packages:
     resolution: {integrity: sha512-AokJm4tuBHillT+FpMtxQ60n8ObyXBatq7jD2/JA9dxbDDokKQm8KMht5ibGzLVU9IJDIKK4TPKgMHEYMn3lMg==}
     engines: {node: '>=18'}
 
+  '@journeyapps/wa-sqlite@1.6.0':
+    resolution: {integrity: sha512-ZhHCTQiGGGoJz6LJPTH880BMO0kR0uVepoNTGCUpl65ZQ82r1RUHXGUpGWY3yndsjWKNveOxsqCCAgvI+TTu2w==}
+
   '@jridgewell/gen-mapping@0.3.13':
     resolution: {integrity: sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==}
 
@@ -3104,9 +3122,48 @@ packages:
     peerDependencies:
       vite: ^5.2.0 || ^6 || ^7 || ^8
 
+  '@tanstack/browser-db-sqlite-persistence@0.1.8':
+    resolution: {integrity: sha512-jUO53ByWScHPcOjiQeyxA4YsHbfZua3xY5dHIqR7Bq9e7qLrjrQ++NKrz9o1UsrmZwcKeZE624+NRezKBsIihw==}
+    peerDependencies:
+      '@journeyapps/wa-sqlite': ^1.4.1
+      typescript: '>=4.7'
+
+  '@tanstack/db-ivm@0.1.18':
+    resolution: {integrity: sha512-+pZJiRKdoKRM5Epq9T7otD9ZJl82pRFauo7LKuJGrarjVKQ7r+QQlPe3kGdN9LEKSnuNGIWjX9OOY4M8kH4eLw==}
+    peerDependencies:
+      typescript: '>=4.7'
+
+  '@tanstack/db-sqlite-persistence-core@0.1.8':
+    resolution: {integrity: sha512-HeDf5veix93e98Z6i9t8M8DHiyOLcyZBHX2CsLEUc9aEOgPrKRLx/FT3Pc1JY1Kt4KZhinTrhkiSJeYLg8YZuA==}
+    peerDependencies:
+      typescript: '>=4.7'
+
+  '@tanstack/db@0.6.4':
+    resolution: {integrity: sha512-svDkMfYnVM4PrczZ/X0kJ+9e/1KIFyB8sS+K22tgTuPTDG7bAV7ynpBP/acG8Y0xuhQsT/HXziOK4jsy6C7dig==}
+    peerDependencies:
+      typescript: '>=4.7'
+
   '@tanstack/history@1.161.6':
     resolution: {integrity: sha512-NaOGLRrddszbQj9upGat6HG/4TKvXLvu+osAIgfxPYA+eIvYKv8GKDJOrY2D3/U9MRnKfMWD7bU4jeD4xmqyIg==}
     engines: {node: '>=20.19'}
+
+  '@tanstack/pacer-lite@0.2.1':
+    resolution: {integrity: sha512-3PouiFjR4B6x1c969/Pl4ZIJleof1M0n6fNX8NRiC9Sqv1g06CVDlEaXUR4212ycGFyfq4q+t8Gi37Xy+z34iQ==}
+    engines: {node: '>=18'}
+
+  '@tanstack/query-core@5.99.0':
+    resolution: {integrity: sha512-3Jv3WQG0BCcH7G+7lf/bP8QyBfJOXeY+T08Rin3GZ1bshvwlbPt7NrDHMEzGdKIOmOzvIQmxjk28YEQX60k7pQ==}
+
+  '@tanstack/query-db-collection@1.0.35':
+    resolution: {integrity: sha512-hfVwlkJoVlhJSCZm9B/KdkYvxl9twVrEt3q0IkXSEmblvslE/+vFQ7IoRciKKKBbJb6PoT2tQFD8FhxFvcypLg==}
+    peerDependencies:
+      '@tanstack/query-core': ^5.0.0
+      typescript: '>=4.7'
+
+  '@tanstack/react-db@0.1.82':
+    resolution: {integrity: sha512-lQ5igC7Dgb5HwnfwSyKsuHPYo8wdO0HyHSF3ygBvZ8RZ3KTRtdHbYGsphz7iKJKoZhFmBE/hafq0oichY7m7rQ==}
+    peerDependencies:
+      react: '>=16.8.0'
 
   '@tanstack/react-router@1.168.10':
     resolution: {integrity: sha512-/RmDlOwDkCug609KdPB3U+U1zmrtadJpvsmRg2zEn8TRCKRNri7dYZIjQZbNg8PgUiRL4T6njrZBV1ChzblNaA==}
@@ -4518,6 +4575,10 @@ packages:
     resolution: {integrity: sha512-buRG0fpBtRHSTCOASe6hD258tEubFoRLb4ZNA6NxMVHNw2gOcwHo9wyablzMzOA5z9xA9L1KNjk/Nt6MT9aYow==}
     engines: {node: '>= 0.6'}
 
+  fractional-indexing@3.2.0:
+    resolution: {integrity: sha512-PcOxmqwYCW7O2ovKRU8OoQQj2yqTfEB/yeTYk4gPid6dN5ODRfU1hXd9tTVZzax/0NkO7AxpHykvZnT1aYp/BQ==}
+    engines: {node: ^14.13.1 || >=16.0.0}
+
   framer-motion@12.38.0:
     resolution: {integrity: sha512-rFYkY/pigbcswl1XQSb7q424kSTQ8q6eAC+YUsSKooHQYuLdzdHjrt6uxUC+PRAO++q5IS7+TamgIw1AphxR+g==}
     peerDependencies:
@@ -5874,6 +5935,9 @@ packages:
     peerDependencies:
       react: ^18.0.0 || ^19.0.0 || ^19.0.0-rc
       react-dom: ^18.0.0 || ^19.0.0 || ^19.0.0-rc
+
+  sorted-btree@1.8.1:
+    resolution: {integrity: sha512-395+XIP+wqNn3USkFSrNz7G3Ss/MXlZEqesxvzCRFwL14h6e8LukDHdLBePn5pwbm5OQ9vGu8mDyz2lLDIqamQ==}
 
   source-map-js@1.2.1:
     resolution: {integrity: sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==}
@@ -8096,6 +8160,8 @@ snapshots:
 
   '@isaacs/cliui@9.0.0': {}
 
+  '@journeyapps/wa-sqlite@1.6.0': {}
+
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:
       '@jridgewell/sourcemap-codec': 1.5.5
@@ -9113,7 +9179,51 @@ snapshots:
       tailwindcss: 4.2.2
       vite: 8.0.8(@types/node@22.19.15)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.1)(tsx@4.21.0)
 
+  '@tanstack/browser-db-sqlite-persistence@0.1.8(@journeyapps/wa-sqlite@1.6.0)(typescript@5.8.3)':
+    dependencies:
+      '@journeyapps/wa-sqlite': 1.6.0
+      '@tanstack/db-sqlite-persistence-core': 0.1.8(typescript@5.8.3)
+      typescript: 5.8.3
+
+  '@tanstack/db-ivm@0.1.18(typescript@5.8.3)':
+    dependencies:
+      fractional-indexing: 3.2.0
+      sorted-btree: 1.8.1
+      typescript: 5.8.3
+
+  '@tanstack/db-sqlite-persistence-core@0.1.8(typescript@5.8.3)':
+    dependencies:
+      '@standard-schema/spec': 1.1.0
+      '@tanstack/db': 0.6.4(typescript@5.8.3)
+      typescript: 5.8.3
+
+  '@tanstack/db@0.6.4(typescript@5.8.3)':
+    dependencies:
+      '@standard-schema/spec': 1.1.0
+      '@tanstack/db-ivm': 0.1.18(typescript@5.8.3)
+      '@tanstack/pacer-lite': 0.2.1
+      typescript: 5.8.3
+
   '@tanstack/history@1.161.6': {}
+
+  '@tanstack/pacer-lite@0.2.1': {}
+
+  '@tanstack/query-core@5.99.0': {}
+
+  '@tanstack/query-db-collection@1.0.35(@tanstack/query-core@5.99.0)(typescript@5.8.3)':
+    dependencies:
+      '@standard-schema/spec': 1.1.0
+      '@tanstack/db': 0.6.4(typescript@5.8.3)
+      '@tanstack/query-core': 5.99.0
+      typescript: 5.8.3
+
+  '@tanstack/react-db@0.1.82(react@19.2.4)(typescript@5.8.3)':
+    dependencies:
+      '@tanstack/db': 0.6.4(typescript@5.8.3)
+      react: 19.2.4
+      use-sync-external-store: 1.6.0(react@19.2.4)
+    transitivePeerDependencies:
+      - typescript
 
   '@tanstack/react-router@1.168.10(react-dom@19.2.4(react@19.2.4))(react@19.2.4)':
     dependencies:
@@ -10735,6 +10845,8 @@ snapshots:
       signal-exit: 4.1.0
 
   forwarded@0.2.0: {}
+
+  fractional-indexing@3.2.0: {}
 
   framer-motion@12.38.0(react-dom@19.2.4(react@19.2.4))(react@19.2.4):
     dependencies:
@@ -12477,6 +12589,8 @@ snapshots:
     dependencies:
       react: 19.2.4
       react-dom: 19.2.4(react@19.2.4)
+
+  sorted-btree@1.8.1: {}
 
   source-map-js@1.2.1: {}
 

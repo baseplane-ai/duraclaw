@@ -9,13 +9,13 @@ import { useDrag } from '@use-gesture/react'
 import { ArchiveIcon, ChevronDownIcon, ChevronRightIcon } from 'lucide-react'
 import { useState } from 'react'
 import { Badge } from '~/components/ui/badge'
+import type { SessionRecord } from '~/db/sessions-collection'
 import { cn } from '~/lib/utils'
 import { useWorkspaceStore } from '~/stores/workspace'
 import { ActiveStrip } from './ActiveStrip'
 import { type DateRange, FilterChipBar, getRecentAndOlder } from './FilterChipBar'
 import { DATE_GROUP_ORDER, getDateGroup } from './SessionSidebar'
 import { formatTimeAgo, getPreviewText, StatusDot } from './session-utils'
-import type { SessionRecord } from './use-agent-orch-sessions'
 
 interface SessionCardListProps {
   sessions: SessionRecord[]

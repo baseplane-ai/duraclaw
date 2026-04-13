@@ -15,13 +15,13 @@ import { useState } from 'react'
 import { Button } from '~/components/ui/button'
 import { Input } from '~/components/ui/input'
 import { ScrollArea } from '~/components/ui/scroll-area'
+import type { SessionRecord } from '~/db/sessions-collection'
 import { cn } from '~/lib/utils'
 import { useWorkspaceStore } from '~/stores/workspace'
 import { ActiveStrip } from './ActiveStrip'
 import { type DateRange, FilterChipBar, getRecentAndOlder } from './FilterChipBar'
 import { SessionListItem } from './SessionListItem'
 import { SpawnAgentForm, type SpawnFormConfig } from './SpawnAgentForm'
-import type { SessionRecord } from './use-agent-orch-sessions'
 
 export function getDateGroup(dateStr: string): string {
   const date = new Date(dateStr)
