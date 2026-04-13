@@ -89,6 +89,7 @@ export function createApiApp() {
   const app = new Hono<ApiAppEnv>()
 
   app.get('/api/health', (c) => c.json({ ok: true }))
+
   app.route('/api/auth', authRoutes)
 
   app.get('/api/push/vapid-key', (c) => {

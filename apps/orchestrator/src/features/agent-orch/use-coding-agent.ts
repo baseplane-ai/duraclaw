@@ -322,8 +322,14 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     let allMessages: ChatMessage[] = []
     let offset = 0
     let batch: ChatMessage[]
+
+    // Pass session ID as a hint so the DO can self-init for discovered sessions
+    const hints = { session_hint: agentName }
+
     do {
-      batch = (await conn.call('getMessages', [{ offset, limit: PAGE_LIMIT }])) as ChatMessage[]
+      batch = (await conn.call('getMessages', [
+        { offset, limit: PAGE_LIMIT, ...hints },
+      ])) as ChatMessage[]
       allMessages = [...allMessages, ...batch]
       offset += batch.length
     } while (batch.length >= PAGE_LIMIT)

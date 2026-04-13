@@ -625,9 +625,29 @@ export class SessionDO extends Agent<Env, SessionState> {
   }
 
   @callable()
-  async getMessages(opts?: { offset?: number; limit?: number }) {
+  async getMessages(opts?: { offset?: number; limit?: number; session_hint?: string }) {
     const limit = opts?.limit ?? 200
     const offset = opts?.offset ?? 0
+
+    // Self-initialize from registry for discovered sessions
+    if (!this.state.sdk_session_id && opts?.session_hint) {
+      try {
+        const registryId = this.env.SESSION_REGISTRY.idFromName('default')
+        const registry = this.env.SESSION_REGISTRY.get(registryId) as any
+        const session = await registry.getSession(opts.session_hint)
+        if (session?.sdk_session_id) {
+          this.updateState({
+            sdk_session_id: session.sdk_session_id,
+            project: session.project ?? '',
+            session_id: session.id,
+            summary: session.summary ?? null,
+            created_at: session.created_at || this.state.created_at || new Date().toISOString(),
+          })
+        }
+      } catch (err) {
+        console.error(`[SessionDO:${this.ctx.id}] Failed to init from registry:`, err)
+      }
+    }
 
     // Hydrate from VPS gateway on first access for discovered sessions with no events
     if (offset === 0 && this.state.sdk_session_id && this.state.project) {
