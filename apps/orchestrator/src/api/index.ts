@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { validateActionToken } from '~/lib/action-token'
+import { createAuth } from '~/lib/auth'
 import type { DiscoveredSession, ProjectInfo, SessionSummary, UserPreferences } from '~/lib/types'
 import { authMiddleware } from './auth-middleware'
 import { authRoutes } from './auth-routes'
@@ -184,6 +185,45 @@ export function createApiApp() {
     }
 
     return c.json({ ok: true })
+  })
+
+  // Token-protected bootstrap endpoint — creates the first admin user.
+  // Requires BOOTSTRAP_TOKEN secret. Remove the secret after use to lock down.
+  app.post('/api/bootstrap', async (c) => {
+    const token = c.env.BOOTSTRAP_TOKEN
+    if (!token) {
+      return c.json({ error: 'Bootstrap is disabled' }, 403)
+    }
+
+    const authHeader = c.req.header('authorization')
+    if (!authHeader?.startsWith('Bearer ') || authHeader.slice(7) !== token) {
+      return c.json({ error: 'Invalid bootstrap token' }, 401)
+    }
+
+    const body = (await c.req.json()) as {
+      email?: string
+      password?: string
+      name?: string
+    }
+    if (!body.email || !body.password || !body.name) {
+      return c.json({ error: 'Missing required fields: email, password, name' }, 400)
+    }
+
+    const auth = createAuth(c.env) as any
+    const result = await auth.api.signUpEmail({
+      body: { email: body.email, password: body.password, name: body.name },
+    })
+
+    if (!result?.user?.id) {
+      return c.json({ error: 'Failed to create user' }, 500)
+    }
+
+    // Promote to admin
+    await c.env.AUTH_DB.prepare("UPDATE users SET role = 'admin' WHERE id = ?")
+      .bind(result.user.id)
+      .run()
+
+    return c.json({ ok: true, userId: result.user.id, role: 'admin' })
   })
 
   app.use('/api/*', authMiddleware)

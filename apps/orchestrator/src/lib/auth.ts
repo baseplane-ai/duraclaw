@@ -51,6 +51,7 @@ export function createAuth(env: {
     trustedOrigins,
     emailAndPassword: {
       enabled: true,
+      disableSignUp: true,
     },
     plugins: [admin()],
   })
