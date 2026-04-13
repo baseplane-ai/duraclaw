@@ -765,6 +765,73 @@ Phase 10: Platform Evolution
 
 ---
 
+## Phase 11: UX Overhaul — Session-Centric Navigation
+
+> Kill navigation confusion, make session switching the fastest possible on every device. Mobile-first card-based UI with gesture support, desktop keyboard-first switching.
+
+**Principles:**
+- Sessions *are* the home — no separate "Dashboard" concept
+- Workspace is a filter, not a top-level context switch
+- Mobile: one-hand operation, gesture-driven switching
+- Desktop: keyboard shortcuts for everything, Cmd+K as centerpiece
+
+### 11.1 Mobile Session Cards + Active Strip
+
+Replace the sidebar-based session list on mobile with a card-based layout:
+
+- [ ] **Active strip** — horizontal scrolling pill bar at top showing running/waiting sessions (status-colored, project initials, tap to switch)
+- [ ] **Session cards** — full-width cards in vertical scroll, grouped by date. Each card: status dot, title, project, time-ago, turns/cost, prompt preview
+- [ ] **Card gestures** — swipe-left to archive (re-skin existing), swipe-right to pin to active strip. Long-press for context menu (existing)
+- [ ] **Responsive breakpoint** — cards on mobile (<640px), existing sidebar on desktop
+- [ ] **`@use-gesture/react`** — replace raw touchstart/touchmove with velocity-based flick detection and spring physics
+
+### 11.2 Navigation Cleanup
+
+Remove redundant nav items and simplify information architecture:
+
+- [ ] **Remove "Dashboard" nav item** — "Sessions" is the home page at `/`
+- [ ] **Remove workspace selector from sidebar header** — demote to filter chip inside session list
+- [ ] **Remove History as separate route** — fold into session list with date-range filter, remove `/history` route
+- [ ] **Sidebar nav** becomes: Sessions | Settings | Admin
+- [ ] **Workspace + status as filter chips** — horizontal chip bar in session list header (workspace, status, date range)
+
+### 11.3 Cmd+K Session Fuzzy Finder
+
+Desktop keyboard-first session switching:
+
+- [ ] **Cmd+K popup** — fuzzy search over session title, prompt, tag, project
+- [ ] **Arrow keys + Enter** to select, Escape to close
+- [ ] **Action sections** — sessions (switch), actions (new session, toggle theme), navigation (settings, admin)
+- [ ] **Recency-weighted** — recent sessions rank higher in results
+- [ ] **Wire into or replace existing SearchProvider/cmdk** (7.4 command palette already uses cmdk)
+
+### 11.4 Keyboard Navigation Shortcuts
+
+- [ ] **Cmd+[ / Cmd+]** — prev/next session in list order (wraps around)
+- [ ] **Cmd+Shift+A** — toggle active-only filter
+- [ ] Keep existing: Cmd+T (add tab), Cmd+W (close tab), Cmd+1-9 (switch to tab N)
+
+### 11.5 Mobile Swipe-Between-Sessions
+
+Gesture-based session switching in detail view:
+
+- [ ] **Edge swipe left/right** — switch to prev/next session in list order
+- [ ] **Active strip stays visible** during detail view for one-tap switching
+- [ ] **Spring animation** with `@use-gesture/react` for native feel
+- [ ] **`overscroll-behavior: none`** — prevent browser gesture conflicts
+- [ ] **CSS `scroll-snap`** for smooth card carousel on home view
+
+### 11.6 Live Session Card Previews
+
+Make the session list itself a live dashboard:
+
+- [ ] **Running sessions** — pulsing border + streaming last line of agent output on card
+- [ ] **Waiting sessions** — show the question/gate text inline on card
+- [ ] **Inline answer** — answer `waiting_input` directly from card without opening session
+- [ ] **Cost ticker** — live-updating cost on running session cards
+
+---
+
 ## Quick Wins (< 1 hour each, do anytime)
 
 1. Wire dashboard.tsx to `/` route (already built!)

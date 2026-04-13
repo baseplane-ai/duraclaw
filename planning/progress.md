@@ -27,6 +27,9 @@
 | 24 | UX Ergonomics | done | [24-ux-ergonomics.md](specs/24-ux-ergonomics.md) | — |
 | 12 | Cass Session API | spec | [12-cass-session-api.md](specs/12-cass-session-api.md) | — |
 | 27 | VPS Session Discovery | done | [27-vps-session-discovery.md](specs/27-vps-session-discovery.md) | — |
+| 29 | Mobile Cards + Nav Cleanup (11.1-11.2) | not-started | — | — |
+| 30 | Cmd+K Fuzzy Finder + Keyboard Nav (11.3-11.4) | not-started | — | #29 (cards exist first) |
+| 31 | Mobile Swipe + Live Card Previews (11.5-11.6) | not-started | — | #29 |
 
 ### Agent-Orch Drop-In (new — accelerates Phases 1-3)
 
@@ -158,6 +161,17 @@ Port baseplane's agent-orch UI + extract shared ai-elements package. Replaces bu
 | 10.3 | Executor Registry + Multi-Provider | done | #16 shipped. Claude + Codex verified live. Spawn form has model selector with agent routing. |
 | 10.4 | Multi-Model Support | not-started | — |
 | 10.5 | Agent Orchestration | not-started | Sub-agent RPC pattern from Think |
+
+## Phase 11: UX Overhaul — Session-Centric Navigation
+
+| Sub | Name | Status | Notes |
+|-----|------|--------|-------|
+| 11.1 | Mobile Session Cards + Active Strip | not-started | Card-based mobile layout, active strip, @use-gesture/react |
+| 11.2 | Navigation Cleanup | not-started | Kill Dashboard/workspace/History duplication, filter chips |
+| 11.3 | Cmd+K Session Fuzzy Finder | not-started | Desktop keyboard-first switching, cmdk-based |
+| 11.4 | Keyboard Navigation Shortcuts | not-started | Cmd+[/], Cmd+Shift+A |
+| 11.5 | Mobile Swipe-Between-Sessions | not-started | Edge swipe in detail view, scroll-snap carousel |
+| 11.6 | Live Session Card Previews | not-started | Streaming output on cards, inline answer from card |
 
 ---
 
