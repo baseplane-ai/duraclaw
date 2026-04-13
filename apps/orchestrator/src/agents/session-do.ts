@@ -273,6 +273,52 @@ export class SessionDO extends Agent<Env, SessionState> {
     }
   }
 
+  /**
+   * Fetch SDK session transcript from the VPS gateway and persist as events.
+   * Called on first getMessages() for discovered sessions with empty events table.
+   */
+  private async hydrateFromGateway() {
+    const gatewayUrl = this.env.CC_GATEWAY_URL
+    if (!gatewayUrl || !this.state.sdk_session_id || !this.state.project) return
+
+    const httpBase = gatewayUrl.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+    const url = new URL(
+      `/projects/${encodeURIComponent(this.state.project)}/sessions/${encodeURIComponent(this.state.sdk_session_id)}/messages`,
+      httpBase,
+    )
+    const headers: Record<string, string> = {}
+    if (this.env.CC_GATEWAY_SECRET) {
+      headers.Authorization = `Bearer ${this.env.CC_GATEWAY_SECRET}`
+    }
+
+    try {
+      const resp = await fetch(url.toString(), { headers })
+      if (!resp.ok) {
+        console.error(
+          `[SessionDO:${this.ctx.id}] Gateway hydration failed: ${resp.status} ${resp.statusText}`,
+        )
+        return
+      }
+      const data = (await resp.json()) as {
+        messages: Array<{ type: string; uuid: string; content: unknown }>
+      }
+      if (!data.messages?.length) return
+
+      let persisted = 0
+      for (const msg of data.messages) {
+        if (msg.type === 'assistant' || msg.type === 'tool_result') {
+          this.persistEvent(msg as unknown as GatewayEvent)
+          persisted++
+        }
+      }
+      console.log(
+        `[SessionDO:${this.ctx.id}] Hydrated ${persisted} events from gateway for sdk_session=${this.state.sdk_session_id.slice(0, 12)}`,
+      )
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Gateway hydration error:`, err)
+    }
+  }
+
   private sendToGateway(cmd: GatewayCommand) {
     if (this.vpsWs) {
       sendCommand(this.vpsWs, cmd)
@@ -582,6 +628,14 @@ export class SessionDO extends Agent<Env, SessionState> {
   async getMessages(opts?: { offset?: number; limit?: number }) {
     const limit = opts?.limit ?? 200
     const offset = opts?.offset ?? 0
+
+    // Hydrate from VPS gateway on first access for discovered sessions with no events
+    if (offset === 0 && this.state.sdk_session_id && this.state.project) {
+      const count = this.sql<{ n: number }>`SELECT COUNT(*) as n FROM events`
+      if ([...count][0]?.n === 0) {
+        await this.hydrateFromGateway()
+      }
+    }
 
     // Derive ChatMessage objects from the events table.
     // The messages table was never populated — events is the source of truth.

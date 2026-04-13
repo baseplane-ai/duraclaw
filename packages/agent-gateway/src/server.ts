@@ -187,6 +187,44 @@ const server = Bun.serve<WsData>({
       return json(200, { sessions })
     }
 
+    // GET /projects/:name/sessions/:id/messages — fetch SDK session transcript
+    const sessionMessagesMatch = path.match(/^\/projects\/([^/]+)\/sessions\/([^/]+)\/messages$/)
+    if (req.method === 'GET' && sessionMessagesMatch) {
+      const [, name, sdkSessionId] = sessionMessagesMatch
+      const projectPath = await resolveProject(name)
+      if (!projectPath) {
+        return json(404, { error: `Project "${name}" not found` })
+      }
+      try {
+        const { getSessionMessages } = await import('@anthropic-ai/claude-agent-sdk')
+        const rawMessages = await getSessionMessages(sdkSessionId, { dir: projectPath })
+        // Map SDK messages to gateway event shapes for direct persistence in the DO
+        const events = rawMessages
+          .filter((m: any) => m.type === 'assistant' || m.type === 'user')
+          .map((m: any) => {
+            if (m.type === 'assistant') {
+              return {
+                type: 'assistant' as const,
+                session_id: m.session_id,
+                uuid: m.uuid,
+                content: m.message?.content ?? [],
+              }
+            }
+            return {
+              type: 'user' as const,
+              session_id: m.session_id,
+              uuid: m.uuid,
+              content: m.message?.content ?? m.message ?? '',
+            }
+          })
+        return json(200, { messages: events })
+      } catch (err) {
+        return json(500, {
+          error: `Failed to read session messages: ${err instanceof Error ? err.message : String(err)}`,
+        })
+      }
+    }
+
     // GET /projects/:name/sessions/latest
     const latestSessionMatch = path.match(/^\/projects\/([^/]+)\/sessions\/latest$/)
     if (req.method === 'GET' && latestSessionMatch) {
