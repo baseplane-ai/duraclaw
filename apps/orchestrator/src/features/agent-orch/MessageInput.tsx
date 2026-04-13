@@ -124,7 +124,7 @@ export function MessageInput({ onSend, disabled }: MessageInputProps) {
           setImages([])
           setError(null)
         }}
-        className="border-t"
+        className="border-t px-4"
       >
         <PromptInputTextarea
           placeholder={disabled ? 'Session is not running' : 'Send a message...'}

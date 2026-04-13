@@ -149,7 +149,7 @@ function AgentOrchContent() {
   return (
     <>
       <Header fixed />
-      <Main fixed className="p-0">
+      <Main fixed fluid className="p-0">
         <PwaInstallBanner />
         <PushOptInBanner />
         <TabBar onSelectSession={handleSelectSession} />

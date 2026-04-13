@@ -47,7 +47,7 @@ function SessionDetailPage() {
   return (
     <>
       <Header fixed />
-      <Main fixed className="p-0">
+      <Main fixed fluid className="p-0">
         <TabBar onSelectSession={handleSelectSession} />
         <SessionDetailWithSync sessionId={sessionId} onStateChange={handleStateChange} />
       </Main>
