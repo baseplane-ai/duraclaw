@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type {
   ContextUsageEvent,
+  DiscoveredSession,
   ExecuteCommand,
   GatewayCommand,
   GatewayEvent,
@@ -13,6 +14,7 @@ import type {
   RewindCommand,
   RewindResultEvent,
   SessionInitEvent,
+  SessionSource,
   SessionState,
   SessionStateChangedEvent,
   SessionStatus,
@@ -429,5 +431,126 @@ describe('SessionStatus type', () => {
       'stopped',
     ]
     expect(allStatuses).not.toContain('completed')
+  })
+})
+
+describe('shared-types: session discovery (#27)', () => {
+  test('DiscoveredSession has all required fields', () => {
+    const session: DiscoveredSession = {
+      sdk_session_id: 'sess-abc-123',
+      agent: 'claude',
+      project_dir: '/data/projects/dev1',
+      project: 'dev1',
+      branch: 'main',
+      started_at: '2026-04-12T00:00:00Z',
+      last_activity: '2026-04-12T01:00:00Z',
+      summary: 'Added OAuth flow',
+      tag: null,
+      title: null,
+      message_count: null,
+      user: null,
+    }
+    expect(session.sdk_session_id).toBe('sess-abc-123')
+    expect(session.agent).toBe('claude')
+    expect(session.project_dir).toBe('/data/projects/dev1')
+    expect(session.project).toBe('dev1')
+    expect(session.branch).toBe('main')
+    expect(session.started_at).toBe('2026-04-12T00:00:00Z')
+    expect(session.last_activity).toBe('2026-04-12T01:00:00Z')
+    expect(session.summary).toBe('Added OAuth flow')
+  })
+
+  test('DiscoveredSession nullable fields accept values', () => {
+    const session: DiscoveredSession = {
+      sdk_session_id: 'sess-def-456',
+      agent: 'codex',
+      project_dir: '/data/projects/dev2',
+      project: 'dev2',
+      branch: 'feature/oauth',
+      started_at: '2026-04-12T00:00:00Z',
+      last_activity: '2026-04-12T02:00:00Z',
+      summary: 'Refactored auth module',
+      tag: 'auth-work',
+      title: 'OAuth Refactor',
+      message_count: 42,
+      user: 'ben',
+    }
+    expect(session.tag).toBe('auth-work')
+    expect(session.title).toBe('OAuth Refactor')
+    expect(session.message_count).toBe(42)
+    expect(session.user).toBe('ben')
+  })
+
+  test('SessionSource interface can be implemented', async () => {
+    const source: SessionSource = {
+      agent: 'claude',
+      description: 'Claude Code sessions via SDK',
+      async available() {
+        return true
+      },
+      async discoverSessions(_projectPath, _opts) {
+        return []
+      },
+    }
+    expect(source.agent).toBe('claude')
+    expect(source.description).toBe('Claude Code sessions via SDK')
+    expect(await source.available()).toBe(true)
+    expect(await source.discoverSessions('/data/projects/dev1')).toEqual([])
+  })
+
+  test('SessionSource.discoverSessions accepts optional filter opts', async () => {
+    const sessions: DiscoveredSession[] = [
+      {
+        sdk_session_id: 'sess-1',
+        agent: 'claude',
+        project_dir: '/data/projects/dev1',
+        project: 'dev1',
+        branch: 'main',
+        started_at: '2026-04-12T00:00:00Z',
+        last_activity: '2026-04-12T01:00:00Z',
+        summary: 'test session',
+        tag: null,
+        title: null,
+        message_count: null,
+        user: null,
+      },
+    ]
+
+    const source: SessionSource = {
+      agent: 'claude',
+      description: 'Claude Code sessions',
+      async available() {
+        return true
+      },
+      async discoverSessions(_projectPath, opts) {
+        if (opts?.limit && opts.limit < sessions.length) {
+          return sessions.slice(0, opts.limit)
+        }
+        return sessions
+      },
+    }
+
+    const result = await source.discoverSessions('/data/projects/dev1', {
+      since: '2026-04-01T00:00:00Z',
+      limit: 10,
+    })
+    expect(result).toHaveLength(1)
+    expect(result[0].sdk_session_id).toBe('sess-1')
+  })
+
+  test('SessionSource agent and description are readonly', () => {
+    const source: SessionSource = {
+      agent: 'codex',
+      description: 'OpenAI Codex sessions',
+      async available() {
+        return false
+      },
+      async discoverSessions() {
+        return []
+      },
+    }
+    // readonly is enforced at compile time; at runtime we verify the values are set
+    expect(source.agent).toBe('codex')
+    expect(source.description).toBe('OpenAI Codex sessions')
   })
 })

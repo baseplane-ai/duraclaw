@@ -362,6 +362,52 @@ export interface SdkSessionInfo {
   tag: string | null
 }
 
+// ── Session Discovery ───────────────────────────────────────────────
+
+export interface DiscoveredSession {
+  /** Unique session ID from the agent (SDK session_id, thread_id, etc.) */
+  sdk_session_id: string
+  /** Agent that created this session */
+  agent: string
+  /** Project directory path */
+  project_dir: string
+  /** Project name (derived from path) */
+  project: string
+  /** Git branch at time of session */
+  branch: string
+  /** Session start time (ISO) */
+  started_at: string
+  /** Last activity time (ISO) */
+  last_activity: string
+  /** Session summary or first prompt */
+  summary: string
+  /** User-assigned tag */
+  tag: string | null
+  /** Title (from SDK rename or agent-generated) */
+  title: string | null
+  /** Number of messages/turns if known */
+  message_count: number | null
+  /** User identity from the agent */
+  user: string | null
+}
+
+export interface SessionSource {
+  /** Agent name matching the execution adapter (e.g. 'claude', 'codex') */
+  readonly agent: string
+  /** Human-readable description */
+  readonly description: string
+  /** Whether this source can discover sessions (binary exists, dirs present, etc.) */
+  available(): Promise<boolean>
+  /** Discover sessions in a project directory, optionally filtered by timestamp */
+  discoverSessions(
+    projectPath: string,
+    opts?: {
+      since?: string
+      limit?: number
+    },
+  ): Promise<DiscoveredSession[]>
+}
+
 // ── File API ─────────────────────────────────────────────────────────
 
 export interface FileEntry {

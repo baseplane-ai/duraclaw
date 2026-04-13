@@ -1,7 +1,7 @@
 import type { ExecuteCommand, ResumeCommand } from '@duraclaw/shared-types'
 import type { ServerWebSocket } from 'bun'
 import { describe, expect, it } from 'vitest'
-import type { GatewaySessionContext, WsData } from '../types.js'
+import type { DiscoveredSession, GatewaySessionContext, SessionSource, WsData } from '../types.js'
 import type { AdapterCapabilities, AgentAdapter } from './types.js'
 
 /**
@@ -83,5 +83,42 @@ describe('AgentAdapter interface', () => {
 
     // models is not set, should be undefined
     expect(caps.models).toBeUndefined()
+  })
+})
+
+describe('Session discovery re-exports from types.ts', () => {
+  it('DiscoveredSession is re-exported and usable', () => {
+    const session: DiscoveredSession = {
+      sdk_session_id: 'sess-1',
+      agent: 'claude',
+      project_dir: '/data/projects/dev1',
+      project: 'dev1',
+      branch: 'main',
+      started_at: '2026-04-12T00:00:00Z',
+      last_activity: '2026-04-12T01:00:00Z',
+      summary: 'test',
+      tag: null,
+      title: null,
+      message_count: null,
+      user: null,
+    }
+    expect(session.sdk_session_id).toBe('sess-1')
+    expect(session.agent).toBe('claude')
+  })
+
+  it('SessionSource is re-exported and usable', async () => {
+    const source: SessionSource = {
+      agent: 'claude',
+      description: 'Claude Code sessions',
+      async available() {
+        return true
+      },
+      async discoverSessions() {
+        return []
+      },
+    }
+    expect(source.agent).toBe('claude')
+    expect(await source.available()).toBe(true)
+    expect(await source.discoverSessions('/tmp')).toEqual([])
   })
 })

@@ -168,6 +168,65 @@ export const spec = {
         },
       },
     },
+    '/sessions/discover': {
+      get: {
+        operationId: 'discoverSessions',
+        summary: 'Discover sessions from all agent sources',
+        description:
+          'Iterates all discovered projects, calls each registered SessionSource, returns merged results sorted by last_activity DESC.',
+        parameters: [
+          {
+            name: 'since',
+            in: 'query',
+            schema: { type: 'string', format: 'date-time' },
+            description: 'ISO timestamp — only sessions with activity after this time',
+          },
+          {
+            name: 'limit',
+            in: 'query',
+            schema: { type: 'integer', default: 50 },
+            description: 'Max sessions per project per source',
+          },
+          {
+            name: 'project',
+            in: 'query',
+            schema: { type: 'string' },
+            description: 'Filter to a specific project name',
+          },
+        ],
+        responses: {
+          '200': {
+            description: 'Discovered sessions from all sources',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    sessions: {
+                      type: 'array',
+                      items: { $ref: '#/components/schemas/DiscoveredSession' },
+                    },
+                    sources: {
+                      type: 'object',
+                      additionalProperties: {
+                        type: 'object',
+                        properties: {
+                          available: { type: 'boolean' },
+                          session_count: { type: 'integer' },
+                        },
+                        required: ['available', 'session_count'],
+                      },
+                    },
+                  },
+                  required: ['sessions', 'sources'],
+                },
+              },
+            },
+          },
+          '401': { $ref: '#/components/responses/Unauthorized' },
+        },
+      },
+    },
     '/projects/{name}/kata-status': {
       get: {
         operationId: 'getKataStatus',
@@ -257,6 +316,33 @@ export const spec = {
           status: { type: 'string', enum: ['modified', 'staged', 'untracked', 'clean'] },
         },
         required: ['path', 'status'],
+      },
+      DiscoveredSession: {
+        type: 'object',
+        properties: {
+          sdk_session_id: { type: 'string' },
+          agent: { type: 'string', example: 'claude' },
+          project_dir: { type: 'string' },
+          project: { type: 'string' },
+          branch: { type: 'string' },
+          started_at: { type: 'string', format: 'date-time' },
+          last_activity: { type: 'string', format: 'date-time' },
+          summary: { type: 'string' },
+          tag: { type: ['string', 'null'] },
+          title: { type: ['string', 'null'] },
+          message_count: { type: ['integer', 'null'] },
+          user: { type: ['string', 'null'] },
+        },
+        required: [
+          'sdk_session_id',
+          'agent',
+          'project_dir',
+          'project',
+          'branch',
+          'started_at',
+          'last_activity',
+          'summary',
+        ],
       },
       KataSessionState: {
         type: 'object',

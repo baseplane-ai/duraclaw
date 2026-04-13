@@ -9,6 +9,12 @@ import { handleFileContents, handleFileTree, handleGitStatus } from './files.js'
 import { findLatestKataState } from './kata.js'
 import { spec as openapiSpec } from './openapi.js'
 import { discoverProjects, resolveProject } from './projects.js'
+import {
+  ClaudeSessionSource,
+  CodexSessionSource,
+  OpenCodeSessionSource,
+  SessionSourceRegistry,
+} from './session-sources/index.js'
 import { listSdkSessions } from './sessions-list.js'
 import type { GatewayCommand, GatewaySessionContext, WsData } from './types.js'
 
@@ -18,6 +24,11 @@ export const registry = new AdapterRegistry()
 registry.register(new ClaudeAdapter())
 registry.register(new CodexAdapter())
 registry.register(new OpenCodeAdapter())
+
+const sessionSources = new SessionSourceRegistry()
+sessionSources.register(new ClaudeSessionSource())
+sessionSources.register(new CodexSessionSource())
+sessionSources.register(new OpenCodeSessionSource())
 
 const PORT = Number(process.env.CC_GATEWAY_PORT ?? 9877)
 const startedAt = Date.now()
@@ -73,6 +84,45 @@ const server = Bun.serve<WsData>({
     if (req.method === 'GET' && path === '/capabilities') {
       const agents = await registry.listCapabilities()
       return json(200, { agents })
+    }
+
+    // GET /sessions/discover — discover sessions from all sources across all projects
+    if (req.method === 'GET' && path === '/sessions/discover') {
+      const since = url.searchParams.get('since') ?? undefined
+      const limit = Number(url.searchParams.get('limit') ?? 50)
+      const projectFilter = url.searchParams.get('project') ?? undefined
+
+      // Discover all projects
+      const projects = await discoverProjects({})
+      const filtered = projectFilter ? projects.filter((p) => p.name === projectFilter) : projects
+
+      const allSessions: import('./types.js').DiscoveredSession[] = []
+      const sourceSummary: Record<string, { available: boolean; session_count: number }> = {}
+
+      // Initialize source summary
+      for (const source of sessionSources.listSources()) {
+        const avail = await source.available()
+        sourceSummary[source.agent] = { available: avail, session_count: 0 }
+      }
+
+      // Discover sessions from each source for each project
+      for (const project of filtered) {
+        for (const source of sessionSources.listSources()) {
+          if (!sourceSummary[source.agent].available) continue
+          try {
+            const sessions = await source.discoverSessions(project.path, { since, limit })
+            allSessions.push(...sessions)
+            sourceSummary[source.agent].session_count += sessions.length
+          } catch (err) {
+            console.error(`[session-discover] ${source.agent} failed for ${project.name}:`, err)
+          }
+        }
+      }
+
+      // Sort by last_activity descending
+      allSessions.sort((a, b) => (b.last_activity > a.last_activity ? 1 : -1))
+
+      return json(200, { sessions: allSessions, sources: sourceSummary })
     }
 
     // GET /projects
