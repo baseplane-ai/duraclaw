@@ -182,7 +182,7 @@ export function StatusBar() {
       data-testid="status-bar"
     >
       {/* Left section */}
-      <div className="flex items-center gap-3 overflow-hidden">
+      <div className="flex min-w-0 flex-1 items-center gap-3 overflow-hidden">
         <WsDot readyState={wsReadyState} />
         <span className="text-foreground">{status}</span>
         <span className="text-muted-foreground">{state.project || '--'}</span>
@@ -196,7 +196,7 @@ export function StatusBar() {
       </div>
 
       {/* Right section */}
-      <div className="flex items-center gap-2">
+      <div className="flex shrink-0 items-center gap-2">
         <ElapsedTimer state={state} />
         {sessionResult?.duration_ms != null && (
           <span className="text-muted-foreground">{formatDuration(sessionResult.duration_ms)}</span>

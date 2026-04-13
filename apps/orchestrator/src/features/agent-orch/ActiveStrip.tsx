@@ -5,7 +5,7 @@
  */
 
 import { cn } from '~/lib/utils'
-import { getProjectInitials } from './session-utils'
+import { getPreviewText, getProjectInitials } from './session-utils'
 import type { SessionRecord } from './use-agent-orch-sessions'
 
 const ACTIVE_STATUSES = new Set(['running', 'waiting_gate', 'waiting_input', 'waiting_permission'])
@@ -58,7 +58,7 @@ export function ActiveStrip({ sessions, onSelectSession, selectedSessionId }: Ac
           <button
             key={session.id}
             type="button"
-            aria-label={`Switch to session: ${session.title || session.id.slice(0, 12)}`}
+            aria-label={`Switch to session: ${session.title || getPreviewText(session) || session.id.slice(0, 8)}`}
             onClick={() => onSelectSession(session.id)}
             className={cn(
               'shrink-0 rounded-full px-3 py-1.5 text-xs font-medium text-white transition-opacity',

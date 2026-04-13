@@ -5,7 +5,6 @@
  */
 
 import { animated, useSpring } from '@react-spring/web'
-import { useNavigate } from '@tanstack/react-router'
 import { useDrag } from '@use-gesture/react'
 import { ArchiveIcon, ChevronDownIcon, ChevronRightIcon } from 'lucide-react'
 import { useState } from 'react'
@@ -145,7 +144,6 @@ export function SessionCardList({
   onSelectSession,
   onArchiveSession,
 }: SessionCardListProps) {
-  const navigate = useNavigate()
   const workspaceProjects = useWorkspaceStore((s) => s.workspaceProjects)
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [dateRange, setDateRange] = useState<DateRange>('this-week')
@@ -176,7 +174,6 @@ export function SessionCardList({
 
   const handleCardClick = (sessionId: string) => {
     onSelectSession(sessionId)
-    navigate({ to: '/session/$id', params: { id: sessionId } })
   }
 
   return (
