@@ -5,6 +5,7 @@ import { REGISTRY_MIGRATIONS } from './project-registry-migrations'
 
 export class ProjectRegistry extends DurableObject<Env> {
   private initialized = false
+  private inAlarm = false
 
   private async ensureInit() {
     if (this.initialized) return
@@ -14,15 +15,19 @@ export class ProjectRegistry extends DurableObject<Env> {
     // Clean up legacy lock state
     await this.ctx.storage.delete('state')
 
-    // Schedule discovery alarm if not already set
-    const currentAlarm = await this.ctx.storage.getAlarm()
-    if (!currentAlarm) {
-      await this.ctx.storage.setAlarm(Date.now() + 5 * 60 * 1000)
+    // Schedule discovery alarm if not already set (skip when called from alarm handler)
+    if (!this.inAlarm) {
+      const currentAlarm = await this.ctx.storage.getAlarm()
+      if (!currentAlarm) {
+        await this.ctx.storage.setAlarm(Date.now() + 5 * 60 * 1000)
+      }
     }
   }
 
   async alarm(): Promise<void> {
+    this.inAlarm = true
     await this.ensureInit()
+    this.inAlarm = false
 
     try {
       const gatewayUrl = this.env.CC_GATEWAY_URL
@@ -457,16 +462,18 @@ export class ProjectRegistry extends DurableObject<Env> {
         continue
       }
 
-      // Check for fuzzy match: same project + created_at within 60s
+      // Check for fuzzy match: same project + user + created_at within 60s
       const fuzzy = this.ctx.storage.sql
         .exec(
           `SELECT id FROM sessions
            WHERE project = ?
+             AND user_id = ?
              AND ABS(strftime('%s', created_at) - strftime('%s', ?)) < 60
              AND sdk_session_id IS NULL
            ORDER BY ABS(strftime('%s', created_at) - strftime('%s', ?)) ASC
            LIMIT 1`,
           s.project,
+          userId,
           s.started_at,
           s.started_at,
         )

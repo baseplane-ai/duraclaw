@@ -105,19 +105,25 @@ const server = Bun.serve<WsData>({
         sourceSummary[source.agent] = { available: avail, session_count: 0 }
       }
 
-      // Discover sessions from each source for each project
-      for (const project of filtered) {
-        for (const source of sessionSources.listSources()) {
-          if (!sourceSummary[source.agent].available) continue
-          try {
-            const sessions = await source.discoverSessions(project.path, { since, limit })
-            allSessions.push(...sessions)
-            sourceSummary[source.agent].session_count += sessions.length
-          } catch (err) {
-            console.error(`[session-discover] ${source.agent} failed for ${project.name}:`, err)
+      // Discover sessions from each source for each project (parallel across projects)
+      const projectResults = await Promise.all(
+        filtered.map(async (project) => {
+          const projectSessions: import('./types.js').DiscoveredSession[] = []
+          for (const source of sessionSources.listSources()) {
+            if (!sourceSummary[source.agent].available) continue
+            try {
+              const sessions = await source.discoverSessions(project.path, { since, limit })
+              projectSessions.push(...sessions)
+              sourceSummary[source.agent].session_count += sessions.length
+            } catch (err) {
+              console.error(`[session-discover] ${source.agent} failed for ${project.name}:`, err)
+            }
           }
-        }
-      }
+          return projectSessions
+        }),
+      )
+      const allDiscovered = projectResults.flat()
+      allSessions.push(...allDiscovered)
 
       // Sort by last_activity descending
       allSessions.sort((a, b) => (b.last_activity > a.last_activity ? 1 : -1))
