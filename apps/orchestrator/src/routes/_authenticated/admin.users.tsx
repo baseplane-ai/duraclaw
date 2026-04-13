@@ -65,6 +65,10 @@ function AdminUsersPage() {
 
   const [deleteTarget, setDeleteTarget] = useState<AdminUser | null>(null)
 
+  const [passwordTarget, setPasswordTarget] = useState<AdminUser | null>(null)
+  const [newPassword, setNewPassword] = useState('')
+  const [passwordError, setPasswordError] = useState('')
+
   const fetchUsers = useCallback(async () => {
     setLoading(true)
     setError('')
@@ -114,6 +118,25 @@ function AdminUsersPage() {
       return
     }
     fetchUsers()
+  }
+
+  const handleSetPassword = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!passwordTarget) return
+    setPasswordError('')
+
+    const { error: err } = await authClient.admin.setUserPassword({
+      userId: passwordTarget.id,
+      newPassword,
+    })
+
+    if (err) {
+      setPasswordError(err.message ?? 'Failed to set password')
+      return
+    }
+
+    setPasswordTarget(null)
+    setNewPassword('')
   }
 
   const handleDelete = async () => {
@@ -195,7 +218,14 @@ function AdminUsersPage() {
                             <Badge variant="secondary">Active</Badge>
                           )}
                         </TableCell>
-                        <TableCell className="text-right">
+                        <TableCell className="text-right space-x-2">
+                          <Button
+                            onClick={() => setPasswordTarget(user)}
+                            size="sm"
+                            variant="outline"
+                          >
+                            Set Password
+                          </Button>
                           <Button
                             onClick={() => setDeleteTarget(user)}
                             size="sm"
@@ -286,6 +316,46 @@ function AdminUsersPage() {
               )}
               <DialogFooter>
                 <Button type="submit">Create</Button>
+              </DialogFooter>
+            </form>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog
+          onOpenChange={(open) => {
+            if (!open) {
+              setPasswordTarget(null)
+              setNewPassword('')
+              setPasswordError('')
+            }
+          }}
+          open={!!passwordTarget}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>
+                Set password for {passwordTarget?.name ?? passwordTarget?.email}
+              </DialogTitle>
+            </DialogHeader>
+            <form className="space-y-4" onSubmit={handleSetPassword}>
+              <div>
+                <Label htmlFor="new-password">New Password</Label>
+                <Input
+                  id="new-password"
+                  minLength={8}
+                  onChange={(e) => setNewPassword((e.target as unknown as { value: string }).value)}
+                  required
+                  type="password"
+                  value={newPassword}
+                />
+              </div>
+              {passwordError && (
+                <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+                  {passwordError}
+                </div>
+              )}
+              <DialogFooter>
+                <Button type="submit">Set Password</Button>
               </DialogFooter>
             </form>
           </DialogContent>
