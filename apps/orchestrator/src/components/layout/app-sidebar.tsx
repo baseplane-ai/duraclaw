@@ -7,13 +7,17 @@ import {
 } from '~/components/ui/sidebar'
 import { WorkspaceSelector } from '~/components/workspace-selector'
 import { useLayout } from '~/context/layout-provider'
+import { useSession } from '~/lib/auth-client'
 // import { AppTitle } from './app-title'
-import { sidebarData } from './data/sidebar-data'
+import { adminNavGroup, sidebarData } from './data/sidebar-data'
 import { NavGroup } from './nav-group'
 import { NavUser } from './nav-user'
 
 export function AppSidebar() {
   const { collapsible, variant } = useLayout()
+  const { data: session } = useSession()
+  const isAdmin = session?.user?.role === 'admin'
+
   return (
     <Sidebar collapsible={collapsible} variant={variant}>
       <SidebarHeader>
@@ -27,6 +31,7 @@ export function AppSidebar() {
         {sidebarData.navGroups.map((props) => (
           <NavGroup key={props.title} {...props} />
         ))}
+        {isAdmin && <NavGroup {...adminNavGroup} />}
       </SidebarContent>
       <SidebarFooter>
         <NavUser user={sidebarData.user} />

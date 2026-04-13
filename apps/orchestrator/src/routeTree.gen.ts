@@ -15,6 +15,7 @@ import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/
 import { Route as AuthenticatedSettingsRouteImport } from './routes/_authenticated/settings'
 import { Route as AuthenticatedHistoryRouteImport } from './routes/_authenticated/history'
 import { Route as AuthenticatedSessionIdRouteImport } from './routes/_authenticated/session.$id'
+import { Route as AuthenticatedAdminUsersRouteImport } from './routes/_authenticated/admin.users'
 
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
@@ -45,12 +46,18 @@ const AuthenticatedSessionIdRoute = AuthenticatedSessionIdRouteImport.update({
   path: '/session/$id',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
+const AuthenticatedAdminUsersRoute = AuthenticatedAdminUsersRouteImport.update({
+  id: '/admin/users',
+  path: '/admin/users',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AuthenticatedIndexRoute
   '/login': typeof LoginRoute
   '/history': typeof AuthenticatedHistoryRoute
   '/settings': typeof AuthenticatedSettingsRoute
+  '/admin/users': typeof AuthenticatedAdminUsersRoute
   '/session/$id': typeof AuthenticatedSessionIdRoute
 }
 export interface FileRoutesByTo {
@@ -58,6 +65,7 @@ export interface FileRoutesByTo {
   '/history': typeof AuthenticatedHistoryRoute
   '/settings': typeof AuthenticatedSettingsRoute
   '/': typeof AuthenticatedIndexRoute
+  '/admin/users': typeof AuthenticatedAdminUsersRoute
   '/session/$id': typeof AuthenticatedSessionIdRoute
 }
 export interface FileRoutesById {
@@ -67,13 +75,26 @@ export interface FileRoutesById {
   '/_authenticated/history': typeof AuthenticatedHistoryRoute
   '/_authenticated/settings': typeof AuthenticatedSettingsRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
+  '/_authenticated/admin/users': typeof AuthenticatedAdminUsersRoute
   '/_authenticated/session/$id': typeof AuthenticatedSessionIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/login' | '/history' | '/settings' | '/session/$id'
+  fullPaths:
+    | '/'
+    | '/login'
+    | '/history'
+    | '/settings'
+    | '/admin/users'
+    | '/session/$id'
   fileRoutesByTo: FileRoutesByTo
-  to: '/login' | '/history' | '/settings' | '/' | '/session/$id'
+  to:
+    | '/login'
+    | '/history'
+    | '/settings'
+    | '/'
+    | '/admin/users'
+    | '/session/$id'
   id:
     | '__root__'
     | '/_authenticated'
@@ -81,6 +102,7 @@ export interface FileRouteTypes {
     | '/_authenticated/history'
     | '/_authenticated/settings'
     | '/_authenticated/'
+    | '/_authenticated/admin/users'
     | '/_authenticated/session/$id'
   fileRoutesById: FileRoutesById
 }
@@ -133,6 +155,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedSessionIdRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/admin/users': {
+      id: '/_authenticated/admin/users'
+      path: '/admin/users'
+      fullPath: '/admin/users'
+      preLoaderRoute: typeof AuthenticatedAdminUsersRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
   }
 }
 
@@ -140,6 +169,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedHistoryRoute: typeof AuthenticatedHistoryRoute
   AuthenticatedSettingsRoute: typeof AuthenticatedSettingsRoute
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
+  AuthenticatedAdminUsersRoute: typeof AuthenticatedAdminUsersRoute
   AuthenticatedSessionIdRoute: typeof AuthenticatedSessionIdRoute
 }
 
@@ -147,6 +177,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedHistoryRoute: AuthenticatedHistoryRoute,
   AuthenticatedSettingsRoute: AuthenticatedSettingsRoute,
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
+  AuthenticatedAdminUsersRoute: AuthenticatedAdminUsersRoute,
   AuthenticatedSessionIdRoute: AuthenticatedSessionIdRoute,
 }
 

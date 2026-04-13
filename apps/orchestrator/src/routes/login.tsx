@@ -14,18 +14,14 @@ function LoginPage() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
-  const [isSignUp, setIsSignUp] = useState(false)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError('')
 
-    const fn = isSignUp ? authClient.signUp.email : authClient.signIn.email
-
-    const { error: authError } = await fn({
+    const { error: authError } = await authClient.signIn.email({
       email,
       password,
-      ...(isSignUp ? { name: email.split('@')[0] } : {}),
     })
 
     if (authError) {
@@ -79,7 +75,7 @@ function LoginPage() {
               <p className="text-xs font-semibold uppercase tracking-[0.24em] text-muted-foreground">
                 Access
               </p>
-              <CardTitle className="text-2xl">{isSignUp ? 'Create account' : 'Sign in'}</CardTitle>
+              <CardTitle className="text-2xl">Sign in</CardTitle>
             </CardHeader>
             <CardContent>
               <form className="space-y-4" onSubmit={handleSubmit}>
@@ -122,17 +118,9 @@ function LoginPage() {
                   </div>
                 )}
                 <Button className="min-h-11 w-full" type="submit">
-                  {isSignUp ? 'Sign Up' : 'Sign In'}
+                  Sign In
                 </Button>
               </form>
-              <Button
-                className="mt-4 min-h-11 w-full"
-                onClick={() => setIsSignUp((value) => !value)}
-                type="button"
-                variant="ghost"
-              >
-                {isSignUp ? 'Already have an account? Sign in' : "Don't have an account? Sign up"}
-              </Button>
             </CardContent>
           </Card>
         </div>

@@ -3,11 +3,15 @@ import type { Env } from '~/lib/types'
 
 export interface RequestSession {
   userId: string
+  role: string
   session: unknown
   user: unknown
 }
 
-export async function getRequestSession(env: Env, request: Request): Promise<RequestSession | null> {
+export async function getRequestSession(
+  env: Env,
+  request: Request,
+): Promise<RequestSession | null> {
   const auth = createAuth(env) as any
   const result = await auth.api.getSession({
     headers: request.headers,
@@ -20,6 +24,7 @@ export async function getRequestSession(env: Env, request: Request): Promise<Req
 
   return {
     userId,
+    role: result?.user?.role ?? 'user',
     session: result.session ?? null,
     user: result.user ?? null,
   }

@@ -1,5 +1,5 @@
-import { Clock, LayoutDashboard, MessagesSquare, Settings } from 'lucide-react'
-import type { SidebarData } from '../types'
+import { Clock, LayoutDashboard, MessagesSquare, Settings, Users } from 'lucide-react'
+import type { NavGroup, SidebarData } from '../types'
 
 export const sidebarData: SidebarData = {
   user: {
@@ -32,6 +32,17 @@ export const sidebarData: SidebarData = {
           icon: Settings,
         },
       ],
+    },
+  ],
+}
+
+export const adminNavGroup: NavGroup = {
+  title: 'Admin',
+  items: [
+    {
+      title: 'Users',
+      url: '/admin/users',
+      icon: Users,
     },
   ],
 }

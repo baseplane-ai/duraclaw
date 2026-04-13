@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core'
+import { integer, sqliteTable, text } from 'drizzle-orm/sqlite-core'
 
 export const users = sqliteTable('users', {
   id: text('id').primaryKey(),
@@ -6,6 +6,10 @@ export const users = sqliteTable('users', {
   email: text('email').notNull().unique(),
   emailVerified: integer('email_verified', { mode: 'boolean' }).notNull().default(false),
   image: text('image'),
+  role: text('role').notNull().default('user'),
+  banned: integer('banned', { mode: 'boolean' }).notNull().default(false),
+  banReason: text('ban_reason'),
+  banExpires: integer('ban_expires', { mode: 'timestamp' }),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 })
@@ -19,6 +23,7 @@ export const sessions = sqliteTable('sessions', {
   userId: text('user_id')
     .notNull()
     .references(() => users.id),
+  impersonatedBy: text('impersonated_by'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 })
