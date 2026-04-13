@@ -26,6 +26,7 @@
 | 15 | Unified Tauri Tray App | spec | [0015-unified-tray-packaging.md](specs/0015-unified-tray-packaging.md) | Distribution/packaging |
 | 24 | UX Ergonomics | done | [24-ux-ergonomics.md](specs/24-ux-ergonomics.md) | — |
 | 12 | Cass Session API | spec | [12-cass-session-api.md](specs/12-cass-session-api.md) | — |
+| 27 | VPS Session Discovery | spec | [27-vps-session-discovery.md](specs/27-vps-session-discovery.md) | — |
 
 ### Agent-Orch Drop-In (new — accelerates Phases 1-3)
 
