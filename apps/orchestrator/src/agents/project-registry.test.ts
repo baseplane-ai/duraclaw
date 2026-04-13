@@ -70,10 +70,10 @@ describe('ProjectRegistry.searchSessions', () => {
     expect(searchCall).toBeDefined()
     expect(searchCall!.query).toContain('summary LIKE ?')
 
-    // Should have userId + 5 pattern bindings (prompt, project, id, title, summary)
+    // Should have userId + 7 pattern bindings (prompt, project, id, title, summary, agent, sdk_session_id)
     const pattern = '%test query%'
     const patternBindings = searchCall!.bindings.filter((b) => b === pattern)
-    expect(patternBindings).toHaveLength(5)
+    expect(patternBindings).toHaveLength(7)
   })
 
   it('passes userId as first binding', async () => {

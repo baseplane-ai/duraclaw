@@ -216,6 +216,7 @@ export function SessionHistory() {
         <TableHeader>
           <TableRow>
             <TableHead>Session</TableHead>
+            <TableHead>Agent</TableHead>
             <TableHead>Project</TableHead>
             <TableHead>Status</TableHead>
             <TableHead
@@ -246,18 +247,19 @@ export function SessionHistory() {
               Turns
               <SortIcon field="num_turns" />
             </TableHead>
+            <TableHead className="w-[80px]" />
           </TableRow>
         </TableHeader>
         <TableBody>
           {isLoading && sessions.length === 0 ? (
             <TableRow>
-              <TableCell colSpan={7} className="py-8 text-center text-muted-foreground">
+              <TableCell colSpan={9} className="py-8 text-center text-muted-foreground">
                 Loading...
               </TableCell>
             </TableRow>
           ) : sessions.length === 0 ? (
             <TableRow>
-              <TableCell colSpan={7} className="py-8 text-center text-muted-foreground">
+              <TableCell colSpan={9} className="py-8 text-center text-muted-foreground">
                 No sessions found
               </TableCell>
             </TableRow>
@@ -270,16 +272,29 @@ export function SessionHistory() {
                 data-testid="history-row"
               >
                 <TableCell>
-                  <div className="max-w-[250px]">
-                    <span className="block truncate font-medium">
-                      {session.title || session.id.slice(0, 12)}
-                    </span>
-                    {session.prompt && (
-                      <span className="block truncate text-xs text-muted-foreground">
-                        {session.prompt}
-                      </span>
-                    )}
-                  </div>
+                  {(() => {
+                    const primary =
+                      session.title ?? session.summary ?? session.prompt ?? session.id.slice(0, 12)
+                    return (
+                      <div className="max-w-[250px]">
+                        <span className="block truncate font-medium">{primary}</span>
+                        {session.prompt && session.prompt !== primary && (
+                          <span className="block truncate text-xs text-muted-foreground">
+                            {session.prompt}
+                          </span>
+                        )}
+                      </div>
+                    )
+                  })()}
+                </TableCell>
+                <TableCell>
+                  {session.agent ? (
+                    <Badge variant="secondary" className="text-xs">
+                      {session.agent}
+                    </Badge>
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
                 </TableCell>
                 <TableCell>{session.project}</TableCell>
                 <TableCell>
@@ -290,7 +305,23 @@ export function SessionHistory() {
                 <TableCell>{formatDate(session.created_at)}</TableCell>
                 <TableCell>{formatDuration(session.duration_ms)}</TableCell>
                 <TableCell>{formatCost(session.total_cost_usd)}</TableCell>
-                <TableCell>{session.num_turns ?? '-'}</TableCell>
+                <TableCell>{session.num_turns ?? session.message_count ?? '—'}</TableCell>
+                <TableCell>
+                  {session.sdk_session_id &&
+                    session.agent === 'claude' &&
+                    session.origin === 'discovered' && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          navigate({ to: '/', search: { session: session.id } })
+                        }}
+                      >
+                        Resume
+                      </Button>
+                    )}
+                </TableCell>
               </TableRow>
             ))
           )}

@@ -290,9 +290,11 @@ export class ProjectRegistry extends DurableObject<Env> {
          sdk_session_id
        FROM sessions
        WHERE user_id = ?
-         AND (prompt LIKE ? OR project LIKE ? OR id LIKE ? OR title LIKE ? OR summary LIKE ?)
+         AND (prompt LIKE ? OR project LIKE ? OR id LIKE ? OR title LIKE ? OR summary LIKE ? OR agent LIKE ? OR sdk_session_id LIKE ?)
        ORDER BY updated_at DESC`,
         userId,
+        pattern,
+        pattern,
         pattern,
         pattern,
         pattern,
