@@ -449,7 +449,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     if (this.vpsWs) {
       sendCommand(this.vpsWs, { type: 'stop', session_id: this.state.session_id ?? '' })
     } else {
-      this.updateState({ status: 'stopped', gate: null })
+      this.updateState({ status: 'idle', gate: null })
       this.syncStatusToRegistry()
     }
 
@@ -523,7 +523,7 @@ export class SessionDO extends Agent<Env, SessionState> {
   async sendMessage(content: string | ContentBlock[]): Promise<{ ok: boolean; error?: string }> {
     const { status } = this.state
     const isActive = status === 'running' || status === 'waiting_gate'
-    const isResumable = (status === 'idle' || status === 'stopped') && this.state.sdk_session_id
+    const isResumable = status === 'idle' && this.state.sdk_session_id
 
     if (!isActive && !isResumable) {
       return { ok: false, error: `Cannot send message: status is '${status}'` }
@@ -794,7 +794,7 @@ export class SessionDO extends Agent<Env, SessionState> {
 
       case 'stopped':
         this.updateState({
-          status: 'stopped',
+          status: 'idle',
           gate: null,
           completed_at: new Date().toISOString(),
         })

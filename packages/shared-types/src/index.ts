@@ -458,7 +458,6 @@ export type SessionStatus =
   | 'waiting_gate'
   | 'failed'
   | 'aborted'
-  | 'stopped'
 
 export interface SessionState {
   status: SessionStatus
