@@ -530,6 +530,10 @@ export interface SessionSummary {
   title?: string | null
   tag?: string | null
   archived?: boolean
+  origin?: string | null
+  agent?: string | null
+  message_count?: number | null
+  sdk_session_id?: string | null
 }
 
 // ── Stored Message (for SQLite persistence) ─────────────────────────

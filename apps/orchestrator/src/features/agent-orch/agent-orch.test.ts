@@ -575,12 +575,12 @@ describe('Message dedup logic', () => {
 
 describe('ProjectRegistry migrations', () => {
   test('has 6 migration versions', () => {
-    expect(REGISTRY_MIGRATIONS).toHaveLength(6)
+    expect(REGISTRY_MIGRATIONS).toHaveLength(7)
   })
 
-  test('migrations are ordered by version 1-6', () => {
+  test('migrations are ordered by version 1-7', () => {
     const versions = REGISTRY_MIGRATIONS.map((m) => m.version)
-    expect(versions).toEqual([1, 2, 3, 4, 5, 6])
+    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7])
   })
 
   test('v1 creates sessions table with expected columns', () => {

@@ -91,4 +91,33 @@ export const REGISTRY_MIGRATIONS: Migration[] = [
       )`)
     },
   },
+  {
+    version: 7,
+    description: 'Add session discovery columns: origin, agent, message_count, sdk_session_id',
+    up: (sql) => {
+      try {
+        sql.exec(`ALTER TABLE sessions ADD COLUMN origin TEXT DEFAULT 'duraclaw'`)
+      } catch {
+        /* Column already exists */
+      }
+      try {
+        sql.exec(`ALTER TABLE sessions ADD COLUMN agent TEXT DEFAULT 'claude'`)
+      } catch {
+        /* Column already exists */
+      }
+      try {
+        sql.exec(`ALTER TABLE sessions ADD COLUMN message_count INTEGER`)
+      } catch {
+        /* Column already exists */
+      }
+      try {
+        sql.exec(`ALTER TABLE sessions ADD COLUMN sdk_session_id TEXT`)
+      } catch {
+        /* Column already exists */
+      }
+      sql.exec(
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_sdk_id ON sessions(sdk_session_id) WHERE sdk_session_id IS NOT NULL`,
+      )
+    },
+  },
 ]

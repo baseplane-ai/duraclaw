@@ -1,6 +1,6 @@
 import { DurableObject } from 'cloudflare:workers'
 import { runMigrations } from '~/lib/do-migrations'
-import type { Env, SessionSummary, UserPreferences } from '~/lib/types'
+import type { DiscoveredSession, Env, SessionSummary, UserPreferences } from '~/lib/types'
 import { REGISTRY_MIGRATIONS } from './project-registry-migrations'
 
 export class ProjectRegistry extends DurableObject<Env> {
@@ -18,8 +18,8 @@ export class ProjectRegistry extends DurableObject<Env> {
   async registerSession(session: SessionSummary): Promise<void> {
     await this.ensureInit()
     this.ctx.storage.sql.exec(
-      `INSERT OR REPLACE INTO sessions (id, user_id, project, status, model, created_at, updated_at, prompt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR REPLACE INTO sessions (id, user_id, project, status, model, created_at, updated_at, prompt, origin, agent)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'duraclaw', 'claude')`,
       session.id,
       session.userId ?? null,
       session.project,
@@ -87,7 +87,11 @@ export class ProjectRegistry extends DurableObject<Env> {
          prompt,
          summary,
          title,
-         tag
+         tag,
+         origin,
+         agent,
+         message_count,
+         sdk_session_id
        FROM sessions
        WHERE id = ?
        LIMIT 1`,
@@ -116,7 +120,11 @@ export class ProjectRegistry extends DurableObject<Env> {
          summary,
          title,
          tag,
-         archived
+         archived,
+         origin,
+         agent,
+         message_count,
+         sdk_session_id
        FROM sessions
        WHERE user_id = ?
        ORDER BY updated_at DESC`,
@@ -168,6 +176,10 @@ export class ProjectRegistry extends DurableObject<Env> {
       'total_cost_usd',
       'num_turns',
       'archived',
+      'origin',
+      'agent',
+      'message_count',
+      'sdk_session_id',
     ]
     for (const field of allowedFields) {
       if (field in updates) {
@@ -213,7 +225,11 @@ export class ProjectRegistry extends DurableObject<Env> {
          summary,
          title,
          tag,
-         archived
+         archived,
+         origin,
+         agent,
+         message_count,
+         sdk_session_id
        FROM sessions
        WHERE user_id = ?
          AND (prompt LIKE ? OR project LIKE ? OR id LIKE ? OR title LIKE ? OR summary LIKE ?)
@@ -286,7 +302,11 @@ export class ProjectRegistry extends DurableObject<Env> {
          summary,
          title,
          tag,
-         archived
+         archived,
+         origin,
+         agent,
+         message_count,
+         sdk_session_id
        FROM sessions
        WHERE ${where}
        ORDER BY ${sortCol} ${sortDir}
@@ -316,7 +336,13 @@ export class ProjectRegistry extends DurableObject<Env> {
          total_cost_usd,
          num_turns,
          prompt,
-         summary
+         summary,
+         title,
+         tag,
+         origin,
+         agent,
+         message_count,
+         sdk_session_id
        FROM sessions
        WHERE project = ?
          AND user_id = ?
@@ -325,6 +351,114 @@ export class ProjectRegistry extends DurableObject<Env> {
         userId,
       )
       .toArray() as unknown as SessionSummary[]
+  }
+
+  async syncDiscoveredSessions(
+    userId: string,
+    sessions: DiscoveredSession[],
+  ): Promise<{ inserted: number; updated: number; watermark: string }> {
+    await this.ensureInit()
+    let inserted = 0
+    let updated = 0
+    let watermark = ''
+
+    for (const s of sessions) {
+      // Track latest activity for watermark
+      if (s.last_activity > watermark) {
+        watermark = s.last_activity
+      }
+
+      // Check if session exists by sdk_session_id
+      const existing = this.ctx.storage.sql
+        .exec(`SELECT id, origin FROM sessions WHERE sdk_session_id = ? LIMIT 1`, s.sdk_session_id)
+        .toArray()
+
+      if (existing.length > 0) {
+        // Update existing session — preserve Duraclaw-specific fields (cost, model, status)
+        this.ctx.storage.sql.exec(
+          `UPDATE sessions SET
+            last_activity = CASE WHEN ? > COALESCE(updated_at, '') THEN ? ELSE updated_at END,
+            updated_at = CASE WHEN ? > COALESCE(updated_at, '') THEN ? ELSE updated_at END,
+            summary = COALESCE(?, summary),
+            tag = COALESCE(?, tag),
+            title = COALESCE(?, title),
+            message_count = COALESCE(?, message_count),
+            agent = COALESCE(?, agent)
+          WHERE sdk_session_id = ?`,
+          s.last_activity,
+          s.last_activity,
+          s.last_activity,
+          s.last_activity,
+          s.summary || null,
+          s.tag,
+          s.title,
+          s.message_count,
+          s.agent,
+          s.sdk_session_id,
+        )
+        updated++
+        continue
+      }
+
+      // Check for fuzzy match: same project + created_at within 60s
+      const fuzzy = this.ctx.storage.sql
+        .exec(
+          `SELECT id FROM sessions
+           WHERE project = ?
+             AND ABS(strftime('%s', created_at) - strftime('%s', ?)) < 60
+             AND sdk_session_id IS NULL
+           LIMIT 1`,
+          s.project,
+          s.started_at,
+        )
+        .toArray()
+
+      if (fuzzy.length > 0) {
+        // Update the matching session with discovered data
+        const matchId = (fuzzy[0] as { id: string }).id
+        this.ctx.storage.sql.exec(
+          `UPDATE sessions SET
+            sdk_session_id = ?,
+            origin = CASE WHEN origin = 'duraclaw' THEN origin ELSE 'discovered' END,
+            agent = ?,
+            summary = COALESCE(?, summary),
+            tag = COALESCE(?, tag),
+            title = COALESCE(?, title),
+            message_count = ?
+          WHERE id = ?`,
+          s.sdk_session_id,
+          s.agent,
+          s.summary || null,
+          s.tag,
+          s.title,
+          s.message_count,
+          matchId,
+        )
+        updated++
+        continue
+      }
+
+      // Insert new discovered session
+      const id = s.sdk_session_id // Use sdk_session_id as the row ID
+      this.ctx.storage.sql.exec(
+        `INSERT INTO sessions (id, user_id, project, status, model, created_at, updated_at, origin, agent, sdk_session_id, summary, tag, title, message_count)
+         VALUES (?, ?, ?, 'idle', NULL, ?, ?, 'discovered', ?, ?, ?, ?, ?, ?)`,
+        id,
+        userId,
+        s.project,
+        s.started_at,
+        s.last_activity,
+        s.agent,
+        s.sdk_session_id,
+        s.summary || null,
+        s.tag,
+        s.title,
+        s.message_count,
+      )
+      inserted++
+    }
+
+    return { inserted, updated, watermark }
   }
 
   async getUserPreferences(userId: string): Promise<UserPreferences | null> {

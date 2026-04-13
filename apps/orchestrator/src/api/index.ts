@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { validateActionToken } from '~/lib/action-token'
-import type { ProjectInfo, SessionSummary, UserPreferences } from '~/lib/types'
+import type { DiscoveredSession, ProjectInfo, SessionSummary, UserPreferences } from '~/lib/types'
 import { authMiddleware } from './auth-middleware'
 import { authRoutes } from './auth-routes'
 import { getRequestSession } from './auth-session'
@@ -341,6 +341,37 @@ export function createApiApp() {
       limit: c.req.query('limit') ? Number(c.req.query('limit')) : undefined,
       offset: c.req.query('offset') ? Number(c.req.query('offset')) : undefined,
     })
+    return c.json(result)
+  })
+
+  app.post('/api/sessions/sync', async (c) => {
+    const userId = c.get('userId')
+
+    if (!c.env.CC_GATEWAY_URL) {
+      return c.json({ error: 'CC_GATEWAY_URL not configured' }, 500)
+    }
+
+    const httpBase = c.env.CC_GATEWAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+    const discoverUrl = new URL('/sessions/discover', httpBase)
+    const headers: Record<string, string> = {}
+    if (c.env.CC_GATEWAY_SECRET) {
+      headers.Authorization = `Bearer ${c.env.CC_GATEWAY_SECRET}`
+    }
+
+    let sessions: DiscoveredSession[]
+    try {
+      const resp = await fetch(discoverUrl.toString(), { headers })
+      if (!resp.ok) {
+        return c.json({ error: `Gateway returned ${resp.status}` }, 502)
+      }
+      const data = (await resp.json()) as { sessions: DiscoveredSession[] }
+      sessions = data.sessions
+    } catch {
+      return c.json({ error: 'Gateway unreachable' }, 502)
+    }
+
+    const registry = getRegistry(c)
+    const result = await registry.syncDiscoveredSessions(userId, sessions)
     return c.json(result)
   })
 
