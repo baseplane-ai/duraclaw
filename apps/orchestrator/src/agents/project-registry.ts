@@ -167,7 +167,7 @@ export class ProjectRegistry extends DurableObject<Env> {
     return rows[0] ?? null
   }
 
-  async listSessions(userId: string): Promise<SessionSummary[]> {
+  async listSessions(_userId: string): Promise<SessionSummary[]> {
     await this.ensureInit()
     return this.ctx.storage.sql
       .exec(
@@ -195,14 +195,12 @@ export class ProjectRegistry extends DurableObject<Env> {
          kata_issue,
          kata_phase
        FROM sessions
-       WHERE user_id = ?
        ORDER BY updated_at DESC`,
-        userId,
       )
       .toArray() as unknown as SessionSummary[]
   }
 
-  async listActiveSessions(userId: string): Promise<SessionSummary[]> {
+  async listActiveSessions(_userId: string): Promise<SessionSummary[]> {
     await this.ensureInit()
     return this.ctx.storage.sql
       .exec(
@@ -220,10 +218,8 @@ export class ProjectRegistry extends DurableObject<Env> {
          prompt,
          summary
        FROM sessions
-       WHERE user_id = ?
-         AND status IN ('running', 'waiting_input', 'waiting_permission')
+       WHERE status IN ('running', 'waiting_input', 'waiting_permission')
        ORDER BY created_at DESC`,
-        userId,
       )
       .toArray() as unknown as SessionSummary[]
   }
@@ -277,7 +273,7 @@ export class ProjectRegistry extends DurableObject<Env> {
     )
   }
 
-  async searchSessions(userId: string, query: string): Promise<SessionSummary[]> {
+  async searchSessions(_userId: string, query: string): Promise<SessionSummary[]> {
     await this.ensureInit()
     const pattern = `%${query}%`
     return this.ctx.storage.sql
@@ -303,10 +299,8 @@ export class ProjectRegistry extends DurableObject<Env> {
          message_count,
          sdk_session_id
        FROM sessions
-       WHERE user_id = ?
-         AND (prompt LIKE ? OR project LIKE ? OR id LIKE ? OR title LIKE ? OR summary LIKE ? OR agent LIKE ? OR sdk_session_id LIKE ?)
+       WHERE (prompt LIKE ? OR project LIKE ? OR id LIKE ? OR title LIKE ? OR summary LIKE ? OR agent LIKE ? OR sdk_session_id LIKE ?)
        ORDER BY updated_at DESC`,
-        userId,
         pattern,
         pattern,
         pattern,
@@ -319,7 +313,7 @@ export class ProjectRegistry extends DurableObject<Env> {
   }
 
   async listSessionsPaginated(
-    userId: string,
+    _userId: string,
     opts: {
       sortBy?: 'updated_at' | 'created_at' | 'total_cost_usd' | 'duration_ms' | 'num_turns'
       sortDir?: 'asc' | 'desc'
@@ -331,8 +325,8 @@ export class ProjectRegistry extends DurableObject<Env> {
     },
   ): Promise<{ sessions: SessionSummary[]; total: number }> {
     await this.ensureInit()
-    const conditions: string[] = ['user_id = ?']
-    const params: unknown[] = [userId]
+    const conditions: string[] = ['1 = 1']
+    const params: unknown[] = []
 
     if (opts.status) {
       conditions.push('status = ?')
@@ -394,7 +388,7 @@ export class ProjectRegistry extends DurableObject<Env> {
     return { sessions, total }
   }
 
-  async listSessionsByProject(project: string, userId: string): Promise<SessionSummary[]> {
+  async listSessionsByProject(project: string, _userId: string): Promise<SessionSummary[]> {
     await this.ensureInit()
     return this.ctx.storage.sql
       .exec(
@@ -419,10 +413,8 @@ export class ProjectRegistry extends DurableObject<Env> {
          sdk_session_id
        FROM sessions
        WHERE project = ?
-         AND user_id = ?
        ORDER BY created_at DESC`,
         project,
-        userId,
       )
       .toArray() as unknown as SessionSummary[]
   }
