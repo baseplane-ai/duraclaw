@@ -75,6 +75,23 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   const knownEventUuidsRef = useRef<Set<string>>(new Set())
   const optimisticIdsRef = useRef<Set<string>>(new Set())
   const prevStatusRef = useRef<string | null>(null)
+  const prevAgentNameRef = useRef(agentName)
+
+  // Reset all state when agentName changes (e.g. tab switch without remount)
+  if (prevAgentNameRef.current !== agentName) {
+    prevAgentNameRef.current = agentName
+    hydratedRef.current = false
+    knownEventUuidsRef.current = new Set()
+    optimisticIdsRef.current = new Set()
+    prevStatusRef.current = null
+    setState(null)
+    setEvents([])
+    setMessages([])
+    setStreamingContent('')
+    setSessionResult(null)
+    setKataState(null)
+    setContextUsage(null)
+  }
 
   const connection = useAgent<SessionState>({
     agent: 'session-agent',
