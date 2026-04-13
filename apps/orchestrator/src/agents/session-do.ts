@@ -641,6 +641,7 @@ export class SessionDO extends Agent<Env, SessionState> {
             project: session.project ?? '',
             session_id: session.id,
             summary: session.summary ?? null,
+            started_at: session.created_at || this.state.created_at || new Date().toISOString(),
             created_at: session.created_at || this.state.created_at || new Date().toISOString(),
           })
         }

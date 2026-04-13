@@ -54,8 +54,6 @@ export function AgentDetailView({ name: _name, agent }: AgentDetailViewProps) {
 
   const status = state?.status ?? 'idle'
   const isTerminal = status === 'failed' || status === 'aborted'
-  const isResumable = status === 'idle' && !!state?.started_at
-  const canSend = status === 'running' || status === 'waiting_gate' || isResumable
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="agent-detail-view">
@@ -74,7 +72,7 @@ export function AgentDetailView({ name: _name, agent }: AgentDetailViewProps) {
       />
 
       <StatusBar />
-      {canSend && <MessageInput onSend={sendMessage} disabled={!canSend} />}
+      <MessageInput onSend={sendMessage} disabled={isTerminal} />
     </div>
   )
 }
