@@ -33,9 +33,17 @@ export const useTabStore = create<TabStore>((set, get) => ({
   activeTabId: initial.activeTabId,
   addTab: (sessionId, title) => {
     const { tabs } = get()
-    if (tabs.some((t) => t.sessionId === sessionId)) {
-      set({ activeTabId: sessionId })
-      saveTabs(tabs, sessionId)
+    const existing = tabs.find((t) => t.sessionId === sessionId)
+    if (existing) {
+      // Update title if a better one is provided
+      if (title && title !== existing.title) {
+        const newTabs = tabs.map((t) => (t.sessionId === sessionId ? { ...t, title } : t))
+        set({ tabs: newTabs, activeTabId: sessionId })
+        saveTabs(newTabs, sessionId)
+      } else {
+        set({ activeTabId: sessionId })
+        saveTabs(tabs, sessionId)
+      }
       return
     }
     const newTabs = [...tabs, { sessionId, title: title || sessionId.slice(0, 12) }]
