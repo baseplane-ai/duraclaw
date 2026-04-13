@@ -11,6 +11,7 @@ import { useAgent } from 'agents/react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { type CachedMessage, messagesCollection } from '~/db/messages-collection'
 import { sessionsCollection } from '~/db/sessions-collection'
+import { useMessagesCollection } from '~/hooks/use-messages-collection'
 import type {
   ChatMessage,
   ContentBlock,
@@ -74,6 +75,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   const [kataState, setKataState] = useState<KataSessionState | null>(null)
   const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null)
   const hydratedRef = useRef(false)
+  const cacheSeededRef = useRef(false)
   const knownEventUuidsRef = useRef<Set<string>>(new Set())
   const optimisticIdsRef = useRef<Set<string>>(new Set())
   const prevStatusRef = useRef<string | null>(null)
@@ -83,6 +85,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   if (prevAgentNameRef.current !== agentName) {
     prevAgentNameRef.current = agentName
     hydratedRef.current = false
+    cacheSeededRef.current = false
     knownEventUuidsRef.current = new Set()
     optimisticIdsRef.current = new Set()
     prevStatusRef.current = null
@@ -110,46 +113,29 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     [agentName],
   )
 
-  /** Load cached messages from the local collection (cache-first). */
-  const loadCachedMessages = useCallback(function loadCachedMessages(sessionId: string) {
-    try {
-      const cached: CachedMessage[] = []
-      for (const [, msg] of messagesCollection as Iterable<[string, CachedMessage]>) {
-        if (msg.sessionId === sessionId) {
-          cached.push(msg)
-        }
-      }
-      if (cached.length > 0) {
-        cached.sort((a, b) => {
-          if (a.created_at && b.created_at) {
-            return new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-          }
-          return 0
-        })
-        for (const msg of cached) {
-          if (msg.event_uuid) knownEventUuidsRef.current.add(msg.event_uuid)
-        }
-        setMessages(
-          cached.map((m) => ({
-            id: m.id,
-            role: m.role,
-            type: m.type,
-            content: m.content,
-            event_uuid: m.event_uuid,
-            created_at: m.created_at,
-          })),
-        )
-      }
-    } catch {
-      // Collection may not be initialized yet
-    }
-  }, [])
+  // Cache-first: use reactive query to load cached messages from OPFS immediately.
+  // This fires as soon as the persisted collection hydrates, before WS connects.
+  const { messages: cachedMessages } = useMessagesCollection(agentName)
 
-  // Cache-first: eagerly load cached messages on session switch so they render
-  // immediately, before the WebSocket connects and onStateUpdate fires.
   useEffect(() => {
-    loadCachedMessages(agentName)
-  }, [agentName, loadCachedMessages])
+    // Seed messages state from cache once, before WS hydration arrives
+    if (cachedMessages.length > 0 && !cacheSeededRef.current && !hydratedRef.current) {
+      cacheSeededRef.current = true
+      for (const msg of cachedMessages) {
+        if (msg.event_uuid) knownEventUuidsRef.current.add(msg.event_uuid)
+      }
+      setMessages(
+        cachedMessages.map((m) => ({
+          id: m.id,
+          role: m.role,
+          type: m.type,
+          content: m.content,
+          event_uuid: m.event_uuid,
+          created_at: m.created_at,
+        })),
+      )
+    }
+  }, [cachedMessages])
 
   const connection = useAgent<SessionState>({
     agent: 'session-agent',
@@ -173,8 +159,6 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       // Hydrate messages on first state sync
       if (!hydratedRef.current) {
         hydratedRef.current = true
-        // Cache-first: load from local collection before WS hydration
-        loadCachedMessages(agentName)
         hydrateMessages(connection).catch(() => {})
       }
       // Re-hydrate when a resumed session completes
