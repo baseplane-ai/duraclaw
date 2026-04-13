@@ -46,9 +46,9 @@ function makeApp(env: any) {
   const app = createApiApp()
   // Wrap to inject env bindings
   return {
-    async request(path: string) {
+    async request(path: string, init?: RequestInit) {
       const url = `http://localhost${path}`
-      const req = new Request(url)
+      const req = new Request(url, init)
       return app.fetch(req, env)
     },
   }
@@ -165,6 +165,131 @@ describe('GET /api/sessions/history', () => {
     const body = (await res.json()) as { total: number; sessions: unknown[] }
     expect(body.total).toBe(42)
     expect(body.sessions).toHaveLength(2)
+  })
+})
+
+describe('POST /api/sessions', () => {
+  let registry: ReturnType<typeof createMockRegistry>
+  let env: any
+  let lastFetchBody: any
+
+  function createMockSessionDO() {
+    return {
+      fetch: vi.fn().mockImplementation(async (req: Request) => {
+        lastFetchBody = await req.json()
+        return new Response(JSON.stringify({ ok: true, session_id: 'do-123' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }),
+    }
+  }
+
+  beforeEach(() => {
+    lastFetchBody = null
+    registry = createMockRegistry({
+      registerSession: vi.fn().mockResolvedValue(undefined),
+    })
+    env = createMockEnv(registry)
+    env.SESSION_AGENT.newUniqueId.mockReturnValue({ toString: () => 'new-do-id' })
+    env.SESSION_AGENT.get.mockReturnValue(createMockSessionDO())
+    env.CC_GATEWAY_URL = 'wss://gateway.test'
+    mockedGetRequestSession.mockResolvedValue({
+      userId: 'user-1',
+      session: { id: 's' },
+      user: { id: 'user-1' },
+    })
+  })
+
+  it('returns 400 when project or prompt is missing', async () => {
+    const app = makeApp(env)
+    const res = await app.request('/api/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project: 'my-project' }),
+    })
+
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toMatch(/Missing required fields/)
+  })
+
+  it('creates a session and returns session_id', async () => {
+    const app = makeApp(env)
+    const res = await app.request('/api/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project: 'my-project', prompt: 'do stuff' }),
+    })
+
+    expect(res.status).toBe(201)
+    const body = (await res.json()) as { session_id: string }
+    expect(body.session_id).toBe('new-do-id')
+    expect(registry.registerSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'new-do-id',
+        userId: 'user-1',
+        project: 'my-project',
+        status: 'running',
+      }),
+    )
+  })
+
+  it('does not pass sdk_session_id to DO for a regular spawn', async () => {
+    const app = makeApp(env)
+    await app.request('/api/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project: 'my-project', prompt: 'do stuff' }),
+    })
+
+    expect(lastFetchBody).toBeDefined()
+    expect(lastFetchBody.sdk_session_id).toBeUndefined()
+    expect(lastFetchBody.project).toBe('my-project')
+    expect(lastFetchBody.prompt).toBe('do stuff')
+  })
+
+  it('passes sdk_session_id and agent to DO for resume', async () => {
+    const app = makeApp(env)
+    const res = await app.request('/api/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        project: 'my-project',
+        prompt: 'resume',
+        sdk_session_id: 'sdk-abc-123',
+        agent: 'claude',
+      }),
+    })
+
+    expect(res.status).toBe(201)
+    expect(lastFetchBody).toBeDefined()
+    expect(lastFetchBody.sdk_session_id).toBe('sdk-abc-123')
+    expect(lastFetchBody.agent).toBe('claude')
+    expect(lastFetchBody.project).toBe('my-project')
+    expect(lastFetchBody.prompt).toBe('resume')
+  })
+
+  it('returns 500 when DO returns non-ok response', async () => {
+    env.SESSION_AGENT.get.mockReturnValue({
+      fetch: vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ ok: false, error: 'boom' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    })
+
+    const app = makeApp(env)
+    const res = await app.request('/api/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project: 'my-project', prompt: 'do stuff' }),
+    })
+
+    expect(res.status).toBe(500)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toBe('Failed to create session')
   })
 })
 

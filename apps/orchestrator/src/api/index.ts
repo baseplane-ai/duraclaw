@@ -11,6 +11,8 @@ interface CreateSessionBody {
   prompt?: string
   model?: string
   system_prompt?: string
+  sdk_session_id?: string
+  agent?: string
 }
 
 type RegistrySession = SessionSummary & {
@@ -404,6 +406,8 @@ export function createApiApp() {
           prompt: body.prompt,
           model: body.model,
           system_prompt: body.system_prompt,
+          sdk_session_id: body.sdk_session_id,
+          agent: body.agent,
           userId,
         }),
       }),

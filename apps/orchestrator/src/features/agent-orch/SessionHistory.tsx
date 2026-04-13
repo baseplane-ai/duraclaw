@@ -310,9 +310,25 @@ export function SessionHistory() {
                         <Button
                           variant="ghost"
                           size="sm"
-                          onClick={(e) => {
+                          onClick={async (e) => {
                             e.stopPropagation()
-                            navigate({ to: '/', search: { session: session.id } })
+                            try {
+                              const resp = await fetch('/api/sessions', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                  project: session.project,
+                                  prompt: 'resume',
+                                  sdk_session_id: session.sdk_session_id,
+                                  agent: session.agent ?? 'claude',
+                                }),
+                              })
+                              if (!resp.ok) return
+                              const data = (await resp.json()) as { session_id: string }
+                              navigate({ to: '/', search: { session: data.session_id } })
+                            } catch (err) {
+                              console.error('[SessionHistory] Resume failed:', err)
+                            }
                           }}
                         >
                           Resume

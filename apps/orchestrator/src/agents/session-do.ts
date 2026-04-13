@@ -63,12 +63,23 @@ export class SessionDO extends Agent<Env, SessionState> {
     const url = new URL(request.url)
     if (request.method === 'POST' && url.pathname === '/create') {
       try {
-        const body = (await request.json()) as SpawnConfig & { userId?: string }
+        const body = (await request.json()) as SpawnConfig & {
+          userId?: string
+          sdk_session_id?: string
+          project_path?: string
+        }
         const userId = request.headers.get('x-user-id') ?? body.userId ?? null
         if (userId) {
           this.updateState({ userId })
         }
-        const result = await this.spawn(body)
+
+        let result: { ok: boolean; session_id?: string; error?: string }
+        if (body.sdk_session_id) {
+          // Resume a discovered session
+          result = await this.resumeDiscovered(body, body.sdk_session_id)
+        } else {
+          result = await this.spawn(body)
+        }
         return new Response(JSON.stringify(result), {
           status: result.ok ? 200 : 400,
           headers: { 'Content-Type': 'application/json' },
@@ -372,6 +383,50 @@ export class SessionDO extends Agent<Env, SessionState> {
 
     console.log(
       `[SessionDO:${id}] spawn: ${config.project} "${typeof config.prompt === 'string' ? config.prompt.slice(0, 80) : '[content blocks]'}"`,
+    )
+    return { ok: true, session_id: id }
+  }
+
+  /**
+   * Resume a discovered VPS session by sdk_session_id.
+   * Called from the /create handler when sdk_session_id is present.
+   */
+  private async resumeDiscovered(
+    config: SpawnConfig,
+    sdkSessionId: string,
+  ): Promise<{ ok: boolean; session_id?: string; error?: string }> {
+    if (this.state.status === 'running' || this.state.status === 'waiting_gate') {
+      return { ok: false, error: 'Session already active' }
+    }
+
+    const now = new Date().toISOString()
+    const id = this.ctx.id.toString()
+
+    this.setState({
+      ...DEFAULT_STATE,
+      status: 'running',
+      session_id: id,
+      userId: this.state.userId,
+      project: config.project,
+      project_path: config.project,
+      model: config.model ?? null,
+      prompt: typeof config.prompt === 'string' ? config.prompt : JSON.stringify(config.prompt),
+      started_at: now,
+      created_at: this.state.created_at || now,
+      updated_at: now,
+      sdk_session_id: sdkSessionId,
+    })
+
+    this.connectAndStream({
+      type: 'resume',
+      project: config.project,
+      prompt: config.prompt,
+      sdk_session_id: sdkSessionId,
+      agent: config.agent,
+    })
+
+    console.log(
+      `[SessionDO:${id}] resumeDiscovered: ${config.project} sdk_session=${sdkSessionId.slice(0, 12)}`,
     )
     return { ok: true, session_id: id }
   }
