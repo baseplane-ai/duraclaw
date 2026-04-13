@@ -189,7 +189,7 @@ export function SessionCardList({
         dateRange={dateRange}
         onDateRangeChange={setDateRange}
       />
-      <ul className="space-y-4 p-4 list-none">
+      <ul className="space-y-4 p-4 pb-10 list-none">
         {recentSessions.length === 0 && olderSessions.length === 0 && (
           <li className="list-none">
             <p className="p-4 text-center text-sm text-muted-foreground">
