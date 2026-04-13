@@ -60,7 +60,7 @@ export function SessionListItem({
   const renameInputRef = useRef<HTMLInputElement>(null)
   const tagInputRef = useRef<HTMLInputElement>(null)
 
-  const displayName = session.title || session.id.slice(0, 12)
+  const displayName = session.title || getPreviewText(session) || session.id.slice(0, 8)
   const preview = getPreviewText(session)
 
   const handleRenameOpen = useCallback(() => {

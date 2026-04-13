@@ -10,13 +10,12 @@ import { useDrag } from '@use-gesture/react'
 import { ArchiveIcon, ChevronDownIcon, ChevronRightIcon } from 'lucide-react'
 import { useState } from 'react'
 import { Badge } from '~/components/ui/badge'
-import { ScrollArea } from '~/components/ui/scroll-area'
 import { cn } from '~/lib/utils'
 import { useWorkspaceStore } from '~/stores/workspace'
 import { ActiveStrip } from './ActiveStrip'
 import { type DateRange, FilterChipBar, getRecentAndOlder } from './FilterChipBar'
 import { DATE_GROUP_ORDER, getDateGroup } from './SessionSidebar'
-import { formatTimeAgo, StatusDot } from './session-utils'
+import { formatTimeAgo, getPreviewText, StatusDot } from './session-utils'
 import type { SessionRecord } from './use-agent-orch-sessions'
 
 interface SessionCardListProps {
@@ -89,7 +88,7 @@ function SwipeableCard({
 
   const status = session.status || 'idle'
   const numTurns = session.num_turns ?? 0
-  const displayName = session.title || session.id.slice(0, 12)
+  const displayName = session.title || getPreviewText(session) || session.id.slice(0, 8)
 
   return (
     <div className="relative overflow-hidden rounded-lg">
@@ -181,7 +180,7 @@ export function SessionCardList({
   }
 
   return (
-    <ScrollArea className="flex-1" style={{ overscrollBehavior: 'none' }}>
+    <div className="flex-1 overflow-y-auto" style={{ WebkitOverflowScrolling: 'touch' }}>
       <ActiveStrip
         sessions={sessions}
         onSelectSession={handleCardClick}
@@ -193,7 +192,7 @@ export function SessionCardList({
         dateRange={dateRange}
         onDateRangeChange={setDateRange}
       />
-      <ul className="space-y-4 p-4 list-none" style={{ overscrollBehavior: 'none' }}>
+      <ul className="space-y-4 p-4 list-none">
         {recentSessions.length === 0 && olderSessions.length === 0 && (
           <li className="list-none">
             <p className="p-4 text-center text-sm text-muted-foreground">
@@ -257,7 +256,7 @@ export function SessionCardList({
                       numTurns={session.num_turns ?? 0}
                     />
                     <span className="min-w-0 flex-1 truncate">
-                      {session.title || session.id.slice(0, 12)}
+                      {session.title || getPreviewText(session) || session.id.slice(0, 8)}
                     </span>
                     {session.updated_at && (
                       <span className="shrink-0 text-xs text-muted-foreground">
@@ -271,6 +270,6 @@ export function SessionCardList({
           </li>
         )}
       </ul>
-    </ScrollArea>
+    </div>
   )
 }
