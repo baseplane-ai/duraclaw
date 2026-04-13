@@ -97,13 +97,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     return super.onRequest(request)
   }
 
-  onConnect(connection: Connection, ctx: ConnectionContext) {
-    const requestUserId = ctx.request.headers.get('x-user-id')
-    if (!requestUserId) {
-      void connection.close()
-      return
-    }
-
+  onConnect(connection: Connection, _ctx: ConnectionContext) {
     // Replay recent events from DO SQLite for reconnecting clients
     const events = this.sql<{ data: string }>`SELECT data FROM events ORDER BY id DESC LIMIT 50`
     for (const row of [...events].reverse()) {
