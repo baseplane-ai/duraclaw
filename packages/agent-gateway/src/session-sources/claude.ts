@@ -1,4 +1,3 @@
-import { access } from 'node:fs/promises'
 import path from 'node:path'
 import { listSdkSessions } from '../sessions-list.js'
 import type { DiscoveredSession, SessionSource } from './types.js'
@@ -8,12 +7,7 @@ export class ClaudeSessionSource implements SessionSource {
   readonly description = 'Claude Code sessions from .claude/sessions/'
 
   async available(): Promise<boolean> {
-    try {
-      await access(path.join(process.cwd(), '.claude'))
-      return true
-    } catch {
-      return false
-    }
+    return true
   }
 
   async discoverSessions(

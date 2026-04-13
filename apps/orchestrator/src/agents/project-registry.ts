@@ -437,7 +437,6 @@ export class ProjectRegistry extends DurableObject<Env> {
         // Update existing session — preserve Duraclaw-specific fields (cost, model, status)
         this.ctx.storage.sql.exec(
           `UPDATE sessions SET
-            last_activity = CASE WHEN ? > COALESCE(updated_at, '') THEN ? ELSE updated_at END,
             updated_at = CASE WHEN ? > COALESCE(updated_at, '') THEN ? ELSE updated_at END,
             summary = COALESCE(?, summary),
             tag = COALESCE(?, tag),
@@ -445,8 +444,6 @@ export class ProjectRegistry extends DurableObject<Env> {
             message_count = COALESCE(?, message_count),
             agent = COALESCE(?, agent)
           WHERE sdk_session_id = ?`,
-          s.last_activity,
-          s.last_activity,
           s.last_activity,
           s.last_activity,
           s.summary || null,
@@ -467,8 +464,10 @@ export class ProjectRegistry extends DurableObject<Env> {
            WHERE project = ?
              AND ABS(strftime('%s', created_at) - strftime('%s', ?)) < 60
              AND sdk_session_id IS NULL
+           ORDER BY ABS(strftime('%s', created_at) - strftime('%s', ?)) ASC
            LIMIT 1`,
           s.project,
+          s.started_at,
           s.started_at,
         )
         .toArray()

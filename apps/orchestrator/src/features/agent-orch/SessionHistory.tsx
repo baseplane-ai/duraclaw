@@ -264,66 +264,64 @@ export function SessionHistory() {
               </TableCell>
             </TableRow>
           ) : (
-            sessions.map((session) => (
-              <TableRow
-                key={session.id}
-                className="cursor-pointer"
-                onClick={() => navigate({ to: '/', search: { session: session.id } })}
-                data-testid="history-row"
-              >
-                <TableCell>
-                  {(() => {
-                    const primary =
-                      session.title ?? session.summary ?? session.prompt ?? session.id.slice(0, 12)
-                    return (
-                      <div className="max-w-[250px]">
-                        <span className="block truncate font-medium">{primary}</span>
-                        {session.prompt && session.prompt !== primary && (
-                          <span className="block truncate text-xs text-muted-foreground">
-                            {session.prompt}
-                          </span>
-                        )}
-                      </div>
-                    )
-                  })()}
-                </TableCell>
-                <TableCell>
-                  {session.agent ? (
-                    <Badge variant="secondary" className="text-xs">
-                      {session.agent}
-                    </Badge>
-                  ) : (
-                    <span className="text-muted-foreground">—</span>
-                  )}
-                </TableCell>
-                <TableCell>{session.project}</TableCell>
-                <TableCell>
-                  <Badge variant={STATUS_VARIANTS[session.status] ?? 'outline'}>
-                    {session.status}
-                  </Badge>
-                </TableCell>
-                <TableCell>{formatDate(session.created_at)}</TableCell>
-                <TableCell>{formatDuration(session.duration_ms)}</TableCell>
-                <TableCell>{formatCost(session.total_cost_usd)}</TableCell>
-                <TableCell>{session.num_turns ?? session.message_count ?? '—'}</TableCell>
-                <TableCell>
-                  {session.sdk_session_id &&
-                    session.agent === 'claude' &&
-                    session.origin === 'discovered' && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          navigate({ to: '/', search: { session: session.id } })
-                        }}
-                      >
-                        Resume
-                      </Button>
+            sessions.map((session) => {
+              const primary =
+                session.title ?? session.summary ?? session.prompt ?? session.id.slice(0, 12)
+              return (
+                <TableRow
+                  key={session.id}
+                  className="cursor-pointer"
+                  onClick={() => navigate({ to: '/', search: { session: session.id } })}
+                  data-testid="history-row"
+                >
+                  <TableCell>
+                    <div className="max-w-[250px]">
+                      <span className="block truncate font-medium">{primary}</span>
+                      {session.prompt && session.prompt !== primary && (
+                        <span className="block truncate text-xs text-muted-foreground">
+                          {session.prompt}
+                        </span>
+                      )}
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    {session.agent ? (
+                      <Badge variant="secondary" className="text-xs">
+                        {session.agent}
+                      </Badge>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
                     )}
-                </TableCell>
-              </TableRow>
-            ))
+                  </TableCell>
+                  <TableCell>{session.project}</TableCell>
+                  <TableCell>
+                    <Badge variant={STATUS_VARIANTS[session.status] ?? 'outline'}>
+                      {session.status}
+                    </Badge>
+                  </TableCell>
+                  <TableCell>{formatDate(session.created_at)}</TableCell>
+                  <TableCell>{formatDuration(session.duration_ms)}</TableCell>
+                  <TableCell>{formatCost(session.total_cost_usd)}</TableCell>
+                  <TableCell>{session.num_turns ?? session.message_count ?? '—'}</TableCell>
+                  <TableCell>
+                    {session.sdk_session_id &&
+                      session.agent === 'claude' &&
+                      session.origin === 'discovered' && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            navigate({ to: '/', search: { session: session.id } })
+                          }}
+                        >
+                          Resume
+                        </Button>
+                      )}
+                  </TableCell>
+                </TableRow>
+              )
+            })
           )}
         </TableBody>
       </Table>
