@@ -148,27 +148,25 @@ function AgentOrchContent() {
 
   return (
     <>
-      <Header />
-      <Main>
+      <Header fixed />
+      <Main fixed className="p-0">
         <PwaInstallBanner />
         <PushOptInBanner />
-        <div className="flex h-[calc(100vh-4rem)] flex-col overflow-hidden">
-          <TabBar onSelectSession={handleSelectSession} />
-          {selectedSessionId ? (
-            <AgentDetailWithSpawn
-              key={selectedSessionId}
-              sessionId={selectedSessionId}
-              spawnConfig={spawnConfig}
-              onStateChange={handleStateChange}
-            />
-          ) : (
-            <QuickPromptInput
-              onSubmit={handleSpawn}
-              projects={projects}
-              projectsLoading={projectsLoading}
-            />
-          )}
-        </div>
+        <TabBar onSelectSession={handleSelectSession} />
+        {selectedSessionId ? (
+          <AgentDetailWithSpawn
+            key={selectedSessionId}
+            sessionId={selectedSessionId}
+            spawnConfig={spawnConfig}
+            onStateChange={handleStateChange}
+          />
+        ) : (
+          <QuickPromptInput
+            onSubmit={handleSpawn}
+            projects={projects}
+            projectsLoading={projectsLoading}
+          />
+        )}
       </Main>
     </>
   )

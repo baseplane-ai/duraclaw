@@ -46,12 +46,10 @@ function SessionDetailPage() {
 
   return (
     <>
-      <Header />
-      <Main>
-        <div className="flex h-[calc(100vh-4rem)] flex-col overflow-hidden">
-          <TabBar onSelectSession={handleSelectSession} />
-          <SessionDetailWithSync sessionId={sessionId} onStateChange={handleStateChange} />
-        </div>
+      <Header fixed />
+      <Main fixed className="p-0">
+        <TabBar onSelectSession={handleSelectSession} />
+        <SessionDetailWithSync sessionId={sessionId} onStateChange={handleStateChange} />
       </Main>
     </>
   )
