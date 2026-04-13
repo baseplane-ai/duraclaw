@@ -8,7 +8,7 @@
  */
 
 import { useAgent } from 'agents/react'
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { type CachedMessage, messagesCollection } from '~/db/messages-collection'
 import { sessionsCollection } from '~/db/sessions-collection'
 import type {
@@ -111,7 +111,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   )
 
   /** Load cached messages from the local collection (cache-first). */
-  function loadCachedMessages(sessionId: string) {
+  const loadCachedMessages = useCallback(function loadCachedMessages(sessionId: string) {
     try {
       const cached: CachedMessage[] = []
       for (const [, msg] of messagesCollection as Iterable<[string, CachedMessage]>) {
@@ -143,7 +143,13 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     } catch {
       // Collection may not be initialized yet
     }
-  }
+  }, [])
+
+  // Cache-first: eagerly load cached messages on session switch so they render
+  // immediately, before the WebSocket connects and onStateUpdate fires.
+  useEffect(() => {
+    loadCachedMessages(agentName)
+  }, [agentName, loadCachedMessages])
 
   const connection = useAgent<SessionState>({
     agent: 'session-agent',
