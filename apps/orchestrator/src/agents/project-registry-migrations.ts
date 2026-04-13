@@ -141,4 +141,17 @@ export const REGISTRY_MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 9,
+    description: 'Add last_activity column for gateway-sourced recency sorting',
+    up: (sql) => {
+      try {
+        sql.exec(`ALTER TABLE sessions ADD COLUMN last_activity TEXT`)
+      } catch {
+        /* Column already exists */
+      }
+      // Backfill from updated_at for existing rows
+      sql.exec(`UPDATE sessions SET last_activity = updated_at WHERE last_activity IS NULL`)
+    },
+  },
 ]

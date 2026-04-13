@@ -120,12 +120,16 @@ export function NavSessions() {
 
   const visible = sessions.filter((s) => !s.archived)
 
-  // Recent: last 5 sessions by updated_at
+  // Recent: last 5 sessions by last_activity (gateway-sourced timestamp)
   const recent = [...visible]
-    .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
+    .sort(
+      (a, b) =>
+        new Date(b.last_activity ?? b.updated_at).getTime() -
+        new Date(a.last_activity ?? a.updated_at).getTime(),
+    )
     .slice(0, 5)
 
-  // Projects: group all visible sessions, sorted by updated_at DESC within each group
+  // Projects: group all visible sessions, sorted by last_activity DESC within each group
   const groups = new Map<string, SessionRecord[]>()
   for (const session of visible) {
     const key = session.project || 'unknown'
@@ -134,7 +138,9 @@ export function NavSessions() {
   }
   for (const [, projectSessions] of groups) {
     projectSessions.sort(
-      (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
+      (a, b) =>
+        new Date(b.last_activity ?? b.updated_at).getTime() -
+        new Date(a.last_activity ?? a.updated_at).getTime(),
     )
   }
 
@@ -225,8 +231,8 @@ export function NavSessions() {
         <SidebarMenu>
           {Array.from(groups.entries())
             .sort(([, a], [, b]) => {
-              const aMax = a[0]?.updated_at ?? ''
-              const bMax = b[0]?.updated_at ?? ''
+              const aMax = a[0]?.last_activity ?? a[0]?.updated_at ?? ''
+              const bMax = b[0]?.last_activity ?? b[0]?.updated_at ?? ''
               return bMax > aMax ? 1 : bMax < aMax ? -1 : 0
             })
             .map(([project, projectSessions]) => (

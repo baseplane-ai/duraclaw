@@ -81,8 +81,8 @@ export class ProjectRegistry extends DurableObject<Env> {
   async registerSession(session: SessionSummary): Promise<void> {
     await this.ensureInit()
     this.ctx.storage.sql.exec(
-      `INSERT OR REPLACE INTO sessions (id, user_id, project, status, model, created_at, updated_at, prompt, origin, agent)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'duraclaw', 'claude')`,
+      `INSERT OR REPLACE INTO sessions (id, user_id, project, status, model, created_at, updated_at, last_activity, prompt, origin, agent)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'duraclaw', 'claude')`,
       session.id,
       session.userId ?? null,
       session.project,
@@ -90,6 +90,7 @@ export class ProjectRegistry extends DurableObject<Env> {
       session.model,
       session.created_at,
       session.updated_at,
+      session.last_activity ?? session.updated_at,
       session.prompt ?? null,
     )
   }
@@ -144,6 +145,7 @@ export class ProjectRegistry extends DurableObject<Env> {
          model,
          created_at,
          updated_at,
+         last_activity,
          duration_ms,
          total_cost_usd,
          num_turns,
@@ -179,6 +181,7 @@ export class ProjectRegistry extends DurableObject<Env> {
          model,
          created_at,
          updated_at,
+         last_activity,
          duration_ms,
          total_cost_usd,
          num_turns,
@@ -195,7 +198,7 @@ export class ProjectRegistry extends DurableObject<Env> {
          kata_issue,
          kata_phase
        FROM sessions
-       ORDER BY updated_at DESC`,
+       ORDER BY COALESCE(last_activity, updated_at) DESC`,
       )
       .toArray() as unknown as SessionSummary[]
   }
@@ -286,6 +289,7 @@ export class ProjectRegistry extends DurableObject<Env> {
          model,
          created_at,
          updated_at,
+         last_activity,
          duration_ms,
          total_cost_usd,
          num_turns,
@@ -300,7 +304,7 @@ export class ProjectRegistry extends DurableObject<Env> {
          sdk_session_id
        FROM sessions
        WHERE (prompt LIKE ? OR project LIKE ? OR id LIKE ? OR title LIKE ? OR summary LIKE ? OR agent LIKE ? OR sdk_session_id LIKE ?)
-       ORDER BY updated_at DESC`,
+       ORDER BY COALESCE(last_activity, updated_at) DESC`,
         pattern,
         pattern,
         pattern,
@@ -315,7 +319,13 @@ export class ProjectRegistry extends DurableObject<Env> {
   async listSessionsPaginated(
     _userId: string,
     opts: {
-      sortBy?: 'updated_at' | 'created_at' | 'total_cost_usd' | 'duration_ms' | 'num_turns'
+      sortBy?:
+        | 'updated_at'
+        | 'created_at'
+        | 'last_activity'
+        | 'total_cost_usd'
+        | 'duration_ms'
+        | 'num_turns'
       sortDir?: 'asc' | 'desc'
       status?: string
       project?: string
@@ -342,7 +352,7 @@ export class ProjectRegistry extends DurableObject<Env> {
     }
 
     const where = conditions.join(' AND ')
-    const sortCol = opts.sortBy ?? 'updated_at'
+    const sortCol = opts.sortBy ?? 'last_activity'
     const sortDir = opts.sortDir === 'asc' ? 'ASC' : 'DESC'
     const limit = opts.limit ?? 50
     const offset = opts.offset ?? 0
@@ -363,6 +373,7 @@ export class ProjectRegistry extends DurableObject<Env> {
          model,
          created_at,
          updated_at,
+         last_activity,
          duration_ms,
          total_cost_usd,
          num_turns,
@@ -400,6 +411,7 @@ export class ProjectRegistry extends DurableObject<Env> {
          model,
          created_at,
          updated_at,
+         last_activity,
          duration_ms,
          total_cost_usd,
          num_turns,
@@ -413,7 +425,7 @@ export class ProjectRegistry extends DurableObject<Env> {
          sdk_session_id
        FROM sessions
        WHERE project = ?
-       ORDER BY created_at DESC`,
+       ORDER BY COALESCE(last_activity, updated_at) DESC`,
         project,
       )
       .toArray() as unknown as SessionSummary[]
@@ -444,12 +456,15 @@ export class ProjectRegistry extends DurableObject<Env> {
         this.ctx.storage.sql.exec(
           `UPDATE sessions SET
             updated_at = CASE WHEN ? > COALESCE(updated_at, '') THEN ? ELSE updated_at END,
+            last_activity = CASE WHEN ? > COALESCE(last_activity, '') THEN ? ELSE last_activity END,
             summary = COALESCE(?, summary),
             tag = COALESCE(?, tag),
             title = COALESCE(?, title),
             message_count = COALESCE(?, message_count),
             agent = COALESCE(?, agent)
           WHERE sdk_session_id = ?`,
+          s.last_activity,
+          s.last_activity,
           s.last_activity,
           s.last_activity,
           s.summary || null,
@@ -488,6 +503,7 @@ export class ProjectRegistry extends DurableObject<Env> {
             sdk_session_id = ?,
             origin = CASE WHEN origin = 'duraclaw' THEN origin ELSE 'discovered' END,
             agent = ?,
+            last_activity = CASE WHEN ? > COALESCE(last_activity, '') THEN ? ELSE last_activity END,
             summary = COALESCE(?, summary),
             tag = COALESCE(?, tag),
             title = COALESCE(?, title),
@@ -495,6 +511,8 @@ export class ProjectRegistry extends DurableObject<Env> {
           WHERE id = ?`,
           s.sdk_session_id,
           s.agent,
+          s.last_activity,
+          s.last_activity,
           s.summary || null,
           s.tag,
           s.title,
@@ -508,12 +526,13 @@ export class ProjectRegistry extends DurableObject<Env> {
       // Insert new discovered session
       const id = s.sdk_session_id // Use sdk_session_id as the row ID
       this.ctx.storage.sql.exec(
-        `INSERT INTO sessions (id, user_id, project, status, model, created_at, updated_at, origin, agent, sdk_session_id, summary, tag, title, message_count)
-         VALUES (?, ?, ?, 'idle', NULL, ?, ?, 'discovered', ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO sessions (id, user_id, project, status, model, created_at, updated_at, last_activity, origin, agent, sdk_session_id, summary, tag, title, message_count)
+         VALUES (?, ?, ?, 'idle', NULL, ?, ?, ?, 'discovered', ?, ?, ?, ?, ?, ?)`,
         id,
         userId,
         s.project,
         s.started_at,
+        s.last_activity,
         s.last_activity,
         s.agent,
         s.sdk_session_id,

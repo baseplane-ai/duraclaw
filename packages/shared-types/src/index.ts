@@ -521,6 +521,7 @@ export interface SessionSummary {
   model: string | null
   created_at: string
   updated_at: string
+  last_activity?: string | null
   duration_ms?: number | null
   total_cost_usd?: number | null
   num_turns?: number | null
