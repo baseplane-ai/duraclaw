@@ -5,6 +5,10 @@ import { precacheAndRoute } from 'workbox-precaching'
 
 precacheAndRoute(self.__WB_MANIFEST)
 
+// Auto-activate new service worker without waiting for tabs to close
+self.addEventListener('install', () => self.skipWaiting())
+self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()))
+
 // Push event handler stub — implemented in Phase 3a
 self.addEventListener('push', (event) => {
   const data = event.data?.json()

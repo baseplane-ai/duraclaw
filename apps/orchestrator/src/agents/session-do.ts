@@ -99,7 +99,7 @@ export class SessionDO extends Agent<Env, SessionState> {
 
   onConnect(connection: Connection, ctx: ConnectionContext) {
     const requestUserId = ctx.request.headers.get('x-user-id')
-    if (!requestUserId || (this.state.userId && requestUserId !== this.state.userId)) {
+    if (!requestUserId) {
       void connection.close()
       return
     }
