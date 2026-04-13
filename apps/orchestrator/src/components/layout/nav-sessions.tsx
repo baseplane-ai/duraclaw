@@ -1,11 +1,11 @@
 /**
- * NavSessions — Session list rendered inside the AppSidebar.
- * Replaces the standalone SessionSidebar panel.
+ * NavSessions — Session list rendered inside the AppSidebar, grouped by project.
  */
 
 import { Link, useLocation, useNavigate } from '@tanstack/react-router'
-import { PlusIcon } from 'lucide-react'
+import { ChevronRight, FolderIcon, PlusIcon } from 'lucide-react'
 import { useCallback, useState } from 'react'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '~/components/ui/collapsible'
 import {
   SidebarGroup,
   SidebarGroupAction,
@@ -13,6 +13,9 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
+  SidebarMenuSub,
+  SidebarMenuSubButton,
+  SidebarMenuSubItem,
   useSidebar,
 } from '~/components/ui/sidebar'
 import { getPreviewText, StatusDot } from '~/features/agent-orch/session-utils'
@@ -32,12 +35,15 @@ export function NavSessions() {
   const location = useLocation()
   const navigate = useNavigate()
   const addTab = useTabStore((s) => s.addTab)
-  const [showAll, setShowAll] = useState(false)
 
-  // Show non-archived sessions, sorted by updated_at desc
+  // Show non-archived sessions, grouped by project
   const visible = sessions.filter((s) => !s.archived)
-  const displayed = showAll ? visible : visible.slice(0, 10)
-  const hasMore = visible.length > 10
+  const groups = new Map<string, SessionRecord[]>()
+  for (const session of visible) {
+    const key = session.project || 'unknown'
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key)?.push(session)
+  }
 
   const handleSelect = useCallback(
     (session: SessionRecord) => {
@@ -64,24 +70,15 @@ export function NavSessions() {
         </Link>
       </SidebarGroupAction>
       <SidebarMenu>
-        {displayed.map((session) => {
-          const status = session.status || 'idle'
-          const numTurns = session.num_turns ?? 0
-          const isActive = activeSessionId === session.id
-
-          return (
-            <SidebarMenuItem key={session.id}>
-              <SidebarMenuButton
-                isActive={isActive}
-                tooltip={getDisplayName(session)}
-                onClick={() => handleSelect(session)}
-              >
-                <StatusDot status={status} numTurns={numTurns} />
-                <span className="truncate">{getDisplayName(session)}</span>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          )
-        })}
+        {Array.from(groups.entries()).map(([project, projectSessions]) => (
+          <ProjectGroup
+            key={project}
+            project={project}
+            sessions={projectSessions}
+            activeSessionId={activeSessionId}
+            onSelect={handleSelect}
+          />
+        ))}
         {visible.length === 0 && (
           <SidebarMenuItem>
             <SidebarMenuButton disabled>
@@ -89,14 +86,70 @@ export function NavSessions() {
             </SidebarMenuButton>
           </SidebarMenuItem>
         )}
-        {hasMore && !showAll && (
-          <SidebarMenuItem>
-            <SidebarMenuButton onClick={() => setShowAll(true)}>
-              <span className="text-muted-foreground">Show {visible.length - 10} more...</span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        )}
       </SidebarMenu>
     </SidebarGroup>
+  )
+}
+
+function ProjectGroup({
+  project,
+  sessions,
+  activeSessionId,
+  onSelect,
+}: {
+  project: string
+  sessions: SessionRecord[]
+  activeSessionId: string | null
+  onSelect: (session: SessionRecord) => void
+}) {
+  const hasActive = sessions.some((s) => s.id === activeSessionId)
+  const [maxVisible, setMaxVisible] = useState(5)
+  const displayed = sessions.slice(0, maxVisible)
+  const hasMore = sessions.length > maxVisible
+
+  return (
+    <Collapsible
+      asChild
+      defaultOpen={hasActive || sessions.length <= 5}
+      className="group/collapsible"
+    >
+      <SidebarMenuItem>
+        <CollapsibleTrigger asChild>
+          <SidebarMenuButton tooltip={project}>
+            <FolderIcon className="size-4" />
+            <span>{project}</span>
+            <span className="ml-auto text-xs text-muted-foreground">{sessions.length}</span>
+            <ChevronRight className="ml-1 size-3 transition-transform duration-200 group-data-[state=open]/collapsible:rotate-90" />
+          </SidebarMenuButton>
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <SidebarMenuSub>
+            {displayed.map((session) => {
+              const status = session.status || 'idle'
+              const numTurns = session.num_turns ?? 0
+              const isActive = activeSessionId === session.id
+
+              return (
+                <SidebarMenuSubItem key={session.id}>
+                  <SidebarMenuSubButton isActive={isActive} onClick={() => onSelect(session)}>
+                    <StatusDot status={status} numTurns={numTurns} />
+                    <span className="truncate">{getDisplayName(session)}</span>
+                  </SidebarMenuSubButton>
+                </SidebarMenuSubItem>
+              )
+            })}
+            {hasMore && (
+              <SidebarMenuSubItem>
+                <SidebarMenuSubButton onClick={() => setMaxVisible((v) => v + 10)}>
+                  <span className="text-muted-foreground">
+                    {sessions.length - maxVisible} more...
+                  </span>
+                </SidebarMenuSubButton>
+              </SidebarMenuSubItem>
+            )}
+          </SidebarMenuSub>
+        </CollapsibleContent>
+      </SidebarMenuItem>
+    </Collapsible>
   )
 }
