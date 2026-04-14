@@ -97,14 +97,11 @@ function AgentOrchContent() {
 
   const handleSelectSession = useCallback(
     (sessionId: string) => {
-      setSpawnConfig(null)
-      setSelectedSessionId(sessionId)
-      // Find session to get its title
       const session = sessions.find((s) => s.id === sessionId)
       const title =
         session?.title || getPreviewText(session ?? { prompt: undefined }) || sessionId.slice(0, 12)
       addTab(sessionId, title)
-      navigate({ to: '/', search: { session: sessionId } })
+      navigate({ to: '/session/$id', params: { id: sessionId } })
     },
     [navigate, addTab, sessions],
   )
