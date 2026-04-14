@@ -4,9 +4,10 @@ import { useTabStore } from '~/stores/tabs'
 
 interface TabBarProps {
   onSelectSession: (sessionId: string) => void
+  onLastTabClosed?: () => void
 }
 
-export function TabBar({ onSelectSession }: TabBarProps) {
+export function TabBar({ onSelectSession, onLastTabClosed }: TabBarProps) {
   const { tabs, activeTabId, setActiveTab, removeTab } = useTabStore()
 
   if (tabs.length === 0) return null
@@ -32,7 +33,20 @@ export function TabBar({ onSelectSession }: TabBarProps) {
             className="ml-1 rounded p-0.5 opacity-0 hover:bg-muted group-hover:opacity-100"
             onClick={(e) => {
               e.stopPropagation()
+              const isLastTab = tabs.length === 1
               removeTab(tab.sessionId)
+              if (isLastTab && onLastTabClosed) {
+                onLastTabClosed()
+              } else {
+                // Navigate to the new active tab
+                const remaining = tabs.filter((t) => t.sessionId !== tab.sessionId)
+                if (remaining.length > 0) {
+                  const idx = tabs.findIndex((t) => t.sessionId === tab.sessionId)
+                  const next = remaining[Math.min(idx, remaining.length - 1)]
+                  setActiveTab(next.sessionId)
+                  onSelectSession(next.sessionId)
+                }
+              }
             }}
             aria-label="Close tab"
           >

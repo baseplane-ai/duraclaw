@@ -37,6 +37,10 @@ function SessionDetailPage() {
     [navigate, addTab, sessions],
   )
 
+  const handleLastTabClosed = useCallback(() => {
+    navigate({ to: '/' })
+  }, [navigate])
+
   const handleStateChange = useCallback(
     (sid: string, patch: Record<string, unknown>) => {
       updateSession(sid, patch)
@@ -48,7 +52,7 @@ function SessionDetailPage() {
     <>
       <Header fixed />
       <Main fixed fluid className="p-0">
-        <TabBar onSelectSession={handleSelectSession} />
+        <TabBar onSelectSession={handleSelectSession} onLastTabClosed={handleLastTabClosed} />
         <SessionDetailWithSync
           key={sessionId}
           sessionId={sessionId}

@@ -106,6 +106,12 @@ function AgentOrchContent() {
     [navigate, addTab, sessions],
   )
 
+  const handleLastTabClosed = useCallback(() => {
+    setSpawnConfig(null)
+    setSelectedSessionId(null)
+    navigate({ to: '/' })
+  }, [navigate])
+
   const handleStateChange = useCallback(
     (sessionId: string, patch: Record<string, unknown>) => {
       updateSession(sessionId, patch)
@@ -129,7 +135,11 @@ function AgentOrchContent() {
       if (isMod && e.key === 'w') {
         e.preventDefault()
         if (selectedSessionId) {
+          const { tabs } = useTabStore.getState()
           useTabStore.getState().removeTab(selectedSessionId)
+          if (tabs.length <= 1) {
+            handleLastTabClosed()
+          }
         }
       }
 
@@ -148,7 +158,7 @@ function AgentOrchContent() {
 
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [selectedSessionId, handleSelectSession])
+  }, [selectedSessionId, handleSelectSession, handleLastTabClosed])
 
   return (
     <>
@@ -156,7 +166,7 @@ function AgentOrchContent() {
       <Main fixed fluid className="p-0">
         <PwaInstallBanner />
         <PushOptInBanner />
-        <TabBar onSelectSession={handleSelectSession} />
+        <TabBar onSelectSession={handleSelectSession} onLastTabClosed={handleLastTabClosed} />
         {selectedSessionId ? (
           <AgentDetailWithSpawn
             key={selectedSessionId}
