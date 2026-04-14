@@ -15,6 +15,8 @@ import {
   Reasoning,
   ReasoningContent,
   ReasoningTrigger,
+  Suggestion,
+  Suggestions,
   Tool,
   ToolContent,
   ToolHeader,
@@ -74,6 +76,7 @@ interface ChatThreadProps {
   onRewind?: (turnIndex: number) => void
   branchInfo?: Map<string, { current: number; total: number; siblings: string[] }>
   onBranchNavigate?: (messageId: string, direction: 'prev' | 'next') => void
+  onSendSuggestion?: (text: string) => void
 }
 
 function renderPart(
@@ -172,6 +175,7 @@ export function ChatThread({
   onRewind,
   branchInfo,
   onBranchNavigate,
+  onSendSuggestion,
 }: ChatThreadProps) {
   return (
     <Conversation className="min-h-0 flex-1">
@@ -195,10 +199,26 @@ export function ChatThread({
             </div>
           </div>
         ) : messages.length === 0 ? (
-          <ConversationEmptyState
-            title="No messages yet"
-            description="The session will appear here as it runs"
-          />
+          <ConversationEmptyState>
+            <div className="space-y-1">
+              <h3 className="text-sm font-medium">
+                {onSendSuggestion ? 'Start a conversation' : 'No messages yet'}
+              </h3>
+              <p className="text-sm text-muted-foreground">
+                {onSendSuggestion
+                  ? 'Choose a suggestion or type your own message'
+                  : 'The session will appear here as it runs'}
+              </p>
+            </div>
+            {onSendSuggestion && (
+              <Suggestions className="mt-4 justify-center">
+                <Suggestion suggestion="Explain this codebase" onClick={onSendSuggestion} />
+                <Suggestion suggestion="Run the test suite" onClick={onSendSuggestion} />
+                <Suggestion suggestion="What changed recently?" onClick={onSendSuggestion} />
+                <Suggestion suggestion="Find and fix bugs" onClick={onSendSuggestion} />
+              </Suggestions>
+            )}
+          </ConversationEmptyState>
         ) : (
           messages.map((msg, turnIndex) => {
             const rewindButton = onRewind ? (

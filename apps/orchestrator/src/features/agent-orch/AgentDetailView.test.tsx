@@ -14,7 +14,11 @@ import type { UseCodingAgentResult } from './use-coding-agent'
 // Mock child components to isolate AgentDetailView rendering
 vi.mock('./ChatThread', () => ({
   ChatThread: (props: Record<string, unknown>) => (
-    <div data-testid="chat-thread" data-status={props.status} />
+    <div
+      data-testid="chat-thread"
+      data-status={props.status}
+      data-has-send-suggestion={props.onSendSuggestion ? 'true' : 'false'}
+    />
   ),
 }))
 
@@ -24,6 +28,16 @@ vi.mock('./KataStatePanel', () => ({
 
 vi.mock('./MessageInput', () => ({
   MessageInput: () => <div data-testid="message-input" />,
+}))
+
+vi.mock('./ConversationDownload', () => ({
+  ConversationDownload: ({ messages, sessionId }: Record<string, unknown>) => (
+    <div
+      data-testid="conversation-download"
+      data-message-count={(messages as unknown[]).length}
+      data-session-id={sessionId as string}
+    />
+  ),
 }))
 
 function makeAgent(overrides: Partial<UseCodingAgentResult> = {}): UseCodingAgentResult {
@@ -155,5 +169,41 @@ describe('AgentDetailView', () => {
     const store = useStatusBarStore.getState()
     expect(store.state).toBeNull()
     expect(store.onStop).toBeNull()
+  })
+
+  it('renders ConversationDownload with messages and sessionId', () => {
+    const agent = makeAgent()
+    render(<AgentDetailView name="test" agent={agent} />)
+
+    const download = screen.getByTestId('conversation-download')
+    expect(download).toBeTruthy()
+    expect(download.getAttribute('data-message-count')).toBe('0')
+    expect(download.getAttribute('data-session-id')).toBe('test-session')
+  })
+
+  it('passes onSendSuggestion to ChatThread when not terminal', () => {
+    const agent = makeAgent()
+    render(<AgentDetailView name="test" agent={agent} />)
+
+    const chatThread = screen.getByTestId('chat-thread')
+    expect(chatThread.getAttribute('data-has-send-suggestion')).toBe('true')
+  })
+
+  it('does not pass onSendSuggestion to ChatThread when status is failed', () => {
+    const base = makeAgent()
+    const agent = makeAgent({ state: { ...base.state, status: 'failed' } as typeof base.state })
+    render(<AgentDetailView name="test" agent={agent} />)
+
+    const chatThread = screen.getByTestId('chat-thread')
+    expect(chatThread.getAttribute('data-has-send-suggestion')).toBe('false')
+  })
+
+  it('does not pass onSendSuggestion to ChatThread when status is aborted', () => {
+    const base = makeAgent()
+    const agent = makeAgent({ state: { ...base.state, status: 'aborted' } as typeof base.state })
+    render(<AgentDetailView name="test" agent={agent} />)
+
+    const chatThread = screen.getByTestId('chat-thread')
+    expect(chatThread.getAttribute('data-has-send-suggestion')).toBe('false')
   })
 })

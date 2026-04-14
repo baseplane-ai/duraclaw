@@ -17,8 +17,10 @@ vi.mock('@duraclaw/ai-elements', () => ({
   ConversationContent: ({ children }: Record<string, unknown>) => (
     <div data-testid="conversation-content">{children as React.ReactNode}</div>
   ),
-  ConversationEmptyState: ({ title }: Record<string, unknown>) => (
-    <div data-testid="empty-state">{title as string}</div>
+  ConversationEmptyState: ({ children, title }: Record<string, unknown>) => (
+    <div data-testid="empty-state">
+      {children ? (children as React.ReactNode) : (title as string)}
+    </div>
   ),
   ConversationScrollButton: () => <div data-testid="scroll-button" />,
   Message: ({ children, from }: Record<string, unknown>) => (
@@ -35,6 +37,18 @@ vi.mock('@duraclaw/ai-elements', () => ({
     <div>{children as React.ReactNode}</div>
   ),
   ReasoningTrigger: () => <div />,
+  Suggestion: ({ suggestion, onClick }: Record<string, unknown>) => (
+    <button
+      type="button"
+      data-testid="suggestion"
+      onClick={() => (onClick as (s: string) => void)?.(suggestion as string)}
+    >
+      {suggestion as string}
+    </button>
+  ),
+  Suggestions: ({ children }: Record<string, unknown>) => (
+    <div data-testid="suggestions">{children as React.ReactNode}</div>
+  ),
   Tool: ({ children }: Record<string, unknown>) => <div>{children as React.ReactNode}</div>,
   ToolContent: ({ children }: Record<string, unknown>) => <div>{children as React.ReactNode}</div>,
   ToolHeader: () => <div />,
@@ -288,5 +302,69 @@ describe('ChatThread MessageBranch', () => {
 
     expect(screen.getByText('My question here')).toBeTruthy()
     expect(screen.getByText('1/2')).toBeTruthy()
+  })
+})
+
+describe('ChatThread Suggestions', () => {
+  const defaultProps = {
+    gate: null,
+    status: 'running' as const,
+    state: null,
+    isConnecting: false,
+    onResolveGate: vi.fn(),
+    readOnly: false,
+  }
+
+  it('shows suggestions in empty state when onSendSuggestion is provided', () => {
+    render(<ChatThread {...defaultProps} messages={[]} onSendSuggestion={vi.fn()} />)
+
+    expect(screen.getByTestId('suggestions')).toBeTruthy()
+    expect(screen.getByText('Explain this codebase')).toBeTruthy()
+    expect(screen.getByText('Run the test suite')).toBeTruthy()
+    expect(screen.getByText('What changed recently?')).toBeTruthy()
+    expect(screen.getByText('Find and fix bugs')).toBeTruthy()
+  })
+
+  it('shows "Start a conversation" title when onSendSuggestion is provided', () => {
+    render(<ChatThread {...defaultProps} messages={[]} onSendSuggestion={vi.fn()} />)
+
+    expect(screen.getByText('Start a conversation')).toBeTruthy()
+    expect(screen.getByText('Choose a suggestion or type your own message')).toBeTruthy()
+  })
+
+  it('shows "No messages yet" title when onSendSuggestion is not provided', () => {
+    render(<ChatThread {...defaultProps} messages={[]} />)
+
+    expect(screen.getByText('No messages yet')).toBeTruthy()
+    expect(screen.getByText('The session will appear here as it runs')).toBeTruthy()
+  })
+
+  it('does not show suggestions when onSendSuggestion is not provided', () => {
+    render(<ChatThread {...defaultProps} messages={[]} />)
+
+    expect(screen.queryByTestId('suggestions')).toBeNull()
+  })
+
+  it('calls onSendSuggestion when a suggestion is clicked', () => {
+    const onSendSuggestion = vi.fn()
+    render(<ChatThread {...defaultProps} messages={[]} onSendSuggestion={onSendSuggestion} />)
+
+    fireEvent.click(screen.getByText('Explain this codebase'))
+    expect(onSendSuggestion).toHaveBeenCalledWith('Explain this codebase')
+  })
+
+  it('does not show suggestions when there are messages', () => {
+    const messages: SessionMessage[] = [
+      {
+        id: 'usr-1',
+        role: 'user',
+        parts: [{ type: 'text', text: 'Hello' }],
+        createdAt: new Date(),
+      },
+    ]
+
+    render(<ChatThread {...defaultProps} messages={messages} onSendSuggestion={vi.fn()} />)
+
+    expect(screen.queryByTestId('suggestions')).toBeNull()
   })
 })
