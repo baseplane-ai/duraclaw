@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { loadTurnState } from './session-do-helpers'
 import { SESSION_DO_MIGRATIONS } from './session-do-migrations'
 
 /**
@@ -109,5 +110,74 @@ describe('SESSION_DO_MIGRATIONS', () => {
       expect(hasEvents).toBe(true)
       expect(hasKv).toBe(true)
     })
+  })
+})
+
+describe('loadTurnState', () => {
+  /** Helper: create a fake sql tagged-template function backed by an in-memory map */
+  function createFakeSql(rows: Record<string, { value: string }[]>) {
+    return function fakeSql<T>(strings: TemplateStringsArray, ..._values: unknown[]): T[] {
+      const query = strings.join('?').trim()
+      for (const [pattern, result] of Object.entries(rows)) {
+        if (query.includes(pattern)) {
+          return result as T[]
+        }
+      }
+      return [] as T[]
+    }
+  }
+
+  it('returns turnCounter from assistant_config when present', () => {
+    const sql = createFakeSql({
+      turnCounter: [{ value: '42' }],
+    })
+
+    const result = loadTurnState(sql, 0)
+    expect(result.turnCounter).toBe(42)
+  })
+
+  it('seeds turnCounter from pathLength + 1 when no config row exists', () => {
+    const sql = createFakeSql({})
+
+    const result = loadTurnState(sql, 7)
+    expect(result.turnCounter).toBe(8)
+  })
+
+  it('returns currentTurnMessageId from assistant_config when present', () => {
+    const sql = createFakeSql({
+      turnCounter: [{ value: '5' }],
+      currentTurnMessageId: [{ value: 'msg-abc-123' }],
+    })
+
+    const result = loadTurnState(sql, 0)
+    expect(result.currentTurnMessageId).toBe('msg-abc-123')
+  })
+
+  it('returns null currentTurnMessageId when no config row exists', () => {
+    const sql = createFakeSql({
+      turnCounter: [{ value: '1' }],
+    })
+
+    const result = loadTurnState(sql, 0)
+    expect(result.currentTurnMessageId).toBeNull()
+  })
+
+  it('returns null currentTurnMessageId when stored value is empty string', () => {
+    const sql = createFakeSql({
+      turnCounter: [{ value: '1' }],
+      currentTurnMessageId: [{ value: '' }],
+    })
+
+    const result = loadTurnState(sql, 0)
+    expect(result.currentTurnMessageId).toBeNull()
+  })
+
+  it('handles non-numeric turnCounter gracefully (falls back to 0)', () => {
+    const sql = createFakeSql({
+      turnCounter: [{ value: 'not-a-number' }],
+    })
+
+    const result = loadTurnState(sql, 3)
+    expect(result.turnCounter).toBe(0)
   })
 })

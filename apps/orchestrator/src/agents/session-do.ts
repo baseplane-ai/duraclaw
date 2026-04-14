@@ -21,6 +21,7 @@ import {
   finalizeStreamingParts,
   partialAssistantToParts,
 } from './gateway-event-mapper'
+import { loadTurnState } from './session-do-helpers'
 import { SESSION_DO_MIGRATIONS } from './session-do-migrations'
 
 const DEFAULT_STATE: SessionState = {
@@ -67,24 +68,14 @@ export class SessionDO extends Agent<Env, SessionState> {
     runMigrations(this.ctx.storage.sql, SESSION_DO_MIGRATIONS)
     this.session = Session.create(this)
 
-    // Load turnCounter from assistant_config (survives hibernation)
-    const configRows = this.sql<{ value: string }>`
-      SELECT value FROM assistant_config WHERE session_id = '' AND key = 'turnCounter'
-    `
-    if (configRows.length > 0) {
-      this.turnCounter = Number.parseInt(configRows[0].value, 10) || 0
-    } else {
-      // First use or data loss — seed from path length to avoid ID collisions
-      this.turnCounter = this.session.getPathLength() + 1
-    }
+    // Trigger Session's lazy table initialization (creates assistant_config etc.)
+    // before we query those tables directly via this.sql.
+    const pathLength = this.session.getPathLength()
 
-    // Load currentTurnMessageId
-    const turnIdRows = this.sql<{ value: string }>`
-      SELECT value FROM assistant_config WHERE session_id = '' AND key = 'currentTurnMessageId'
-    `
-    if (turnIdRows.length > 0 && turnIdRows[0].value !== '') {
-      this.currentTurnMessageId = turnIdRows[0].value
-    }
+    // Load persisted turn state from assistant_config
+    const turnState = loadTurnState(this.sql.bind(this), pathLength)
+    this.turnCounter = turnState.turnCounter
+    this.currentTurnMessageId = turnState.currentTurnMessageId
   }
 
   /**
