@@ -1,6 +1,7 @@
 'use client'
 
-import { type LucideIcon, XIcon } from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
+import { XIcon } from 'lucide-react'
 import type { ComponentProps, HTMLAttributes } from 'react'
 import { cn } from '../lib/utils'
 import { Button } from '../ui/button'
@@ -99,20 +100,7 @@ export const ArtifactAction = ({
     return (
       <TooltipProvider>
         <Tooltip>
-          <TooltipTrigger
-            render={
-              <Button
-                className={cn('size-8 p-0 text-muted-foreground hover:text-foreground', className)}
-                size={size}
-                type="button"
-                variant={variant}
-                {...props}
-              />
-            }
-          >
-            {Icon ? <Icon className="size-4" /> : children}
-            <span className="sr-only">{label || tooltip}</span>
-          </TooltipTrigger>
+          <TooltipTrigger asChild>{button}</TooltipTrigger>
           <TooltipContent>
             <p>{tooltip}</p>
           </TooltipContent>

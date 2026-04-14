@@ -1,9 +1,9 @@
 'use client'
 
+import { useControllableState } from '@radix-ui/react-use-controllable-state'
 import { CheckCircleIcon, ChevronDownIcon, Loader2, WrenchIcon, XCircleIcon } from 'lucide-react'
 import type { ComponentProps } from 'react'
 import { createContext, memo, useContext, useMemo, useState } from 'react'
-import { useControllableState } from '../hooks/use-controllable-state'
 import { getToolDisplayName, summarizeToolArgs, summarizeToolResult } from '../lib/tool-display'
 import { cn } from '../lib/utils'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../ui/collapsible'

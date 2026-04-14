@@ -33,7 +33,11 @@ export const ModelSelectorContent = ({
   title = 'Model Selector',
   ...props
 }: ModelSelectorContentProps) => (
-  <DialogContent className={cn('p-0', className)} {...props}>
+  <DialogContent
+    aria-describedby={undefined}
+    className={cn('outline! border-none! p-0 outline-border! outline-solid!', className)}
+    {...props}
+  >
     <DialogTitle className="sr-only">{title}</DialogTitle>
     <Command className="**:data-[slot=command-input-wrapper]:h-auto">{children}</Command>
   </DialogContent>
@@ -135,6 +139,7 @@ export type ModelSelectorLogoProps = Omit<ComponentProps<'img'>, 'src' | 'alt'> 
     | 'scaleway'
     | 'amazon-bedrock'
     | 'cerebras'
+    // oxlint-disable-next-line typescript-eslint(ban-types) -- intentional pattern for autocomplete-friendly string union
     | (string & {})
 }
 
@@ -154,7 +159,7 @@ export type ModelSelectorLogoGroupProps = ComponentProps<'div'>
 export const ModelSelectorLogoGroup = ({ className, ...props }: ModelSelectorLogoGroupProps) => (
   <div
     className={cn(
-      '-space-x-1 flex shrink-0 items-center [&>img]:rounded-full [&>img]:bg-background [&>img]:p-px [&>img]:ring-1 dark:[&>img]:bg-foreground',
+      'flex shrink-0 items-center -space-x-1 [&>img]:rounded-full [&>img]:bg-background [&>img]:p-px [&>img]:ring-1 dark:[&>img]:bg-foreground',
       className,
     )}
     {...props}

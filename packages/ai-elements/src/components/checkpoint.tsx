@@ -1,6 +1,7 @@
 'use client'
 
-import { BookmarkIcon, type LucideProps } from 'lucide-react'
+import type { LucideProps } from 'lucide-react'
+import { BookmarkIcon } from 'lucide-react'
 import type { ComponentProps, HTMLAttributes } from 'react'
 import { cn } from '../lib/utils'
 import { Button } from '../ui/button'
@@ -11,7 +12,7 @@ export type CheckpointProps = HTMLAttributes<HTMLDivElement>
 
 export const Checkpoint = ({ className, children, ...props }: CheckpointProps) => (
   <div
-    className={cn('flex items-center gap-0.5 text-muted-foreground overflow-hidden', className)}
+    className={cn('flex items-center gap-0.5 overflow-hidden text-muted-foreground', className)}
     {...props}
   >
     {children}
@@ -30,7 +31,6 @@ export type CheckpointTriggerProps = ComponentProps<typeof Button> & {
 
 export const CheckpointTrigger = ({
   children,
-  className,
   variant = 'ghost',
   size = 'sm',
   tooltip,
@@ -38,8 +38,10 @@ export const CheckpointTrigger = ({
 }: CheckpointTriggerProps) =>
   tooltip ? (
     <Tooltip>
-      <TooltipTrigger render={<Button size={size} type="button" variant={variant} {...props} />}>
-        {children}
+      <TooltipTrigger asChild>
+        <Button size={size} type="button" variant={variant} {...props}>
+          {children}
+        </Button>
       </TooltipTrigger>
       <TooltipContent align="start" side="bottom">
         {tooltip}

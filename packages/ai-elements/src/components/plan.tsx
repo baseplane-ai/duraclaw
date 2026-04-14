@@ -2,7 +2,7 @@
 
 import { ChevronsUpDownIcon } from 'lucide-react'
 import type { ComponentProps } from 'react'
-import { createContext, useContext } from 'react'
+import { createContext, useContext, useMemo } from 'react'
 import { cn } from '../lib/utils'
 import { Button } from '../ui/button'
 import {
@@ -15,9 +15,10 @@ import {
   CardTitle,
 } from '../ui/card'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../ui/collapsible'
+
 import { Shimmer } from './shimmer'
 
-type PlanContextValue = {
+interface PlanContextValue {
   isStreaming: boolean
 }
 
@@ -35,13 +36,17 @@ export type PlanProps = ComponentProps<typeof Collapsible> & {
   isStreaming?: boolean
 }
 
-export const Plan = ({ className, isStreaming = false, children, ...props }: PlanProps) => (
-  <PlanContext.Provider value={{ isStreaming }}>
-    <Collapsible data-slot="plan" {...props}>
-      <Card className={cn('shadow-none', className)}>{children}</Card>
-    </Collapsible>
-  </PlanContext.Provider>
-)
+export const Plan = ({ className, isStreaming = false, children, ...props }: PlanProps) => {
+  const contextValue = useMemo(() => ({ isStreaming }), [isStreaming])
+
+  return (
+    <PlanContext.Provider value={contextValue}>
+      <Collapsible asChild data-slot="plan" {...props}>
+        <Card className={cn('shadow-none', className)}>{children}</Card>
+      </Collapsible>
+    </PlanContext.Provider>
+  )
+}
 
 export type PlanHeaderProps = ComponentProps<typeof CardHeader>
 
@@ -94,7 +99,7 @@ export const PlanAction = (props: PlanActionProps) => (
 export type PlanContentProps = ComponentProps<typeof CardContent>
 
 export const PlanContent = (props: PlanContentProps) => (
-  <CollapsibleContent>
+  <CollapsibleContent asChild>
     <CardContent data-slot="plan-content" {...props} />
   </CollapsibleContent>
 )
@@ -108,18 +113,16 @@ export const PlanFooter = (props: PlanFooterProps) => (
 export type PlanTriggerProps = ComponentProps<typeof CollapsibleTrigger>
 
 export const PlanTrigger = ({ className, ...props }: PlanTriggerProps) => (
-  <CollapsibleTrigger
-    render={
-      <Button
-        className={cn('size-8', className)}
-        data-slot="plan-trigger"
-        size="icon"
-        variant="ghost"
-      />
-    }
-    {...props}
-  >
-    <ChevronsUpDownIcon className="size-4" />
-    <span className="sr-only">Toggle plan</span>
+  <CollapsibleTrigger asChild>
+    <Button
+      className={cn('size-8', className)}
+      data-slot="plan-trigger"
+      size="icon"
+      variant="ghost"
+      {...props}
+    >
+      <ChevronsUpDownIcon className="size-4" />
+      <span className="sr-only">Toggle plan</span>
+    </Button>
   </CollapsibleTrigger>
 )

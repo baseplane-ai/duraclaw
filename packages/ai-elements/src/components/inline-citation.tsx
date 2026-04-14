@@ -1,17 +1,12 @@
 'use client'
 
 import { ArrowLeftIcon, ArrowRightIcon } from 'lucide-react'
-import {
-  type ComponentProps,
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useState,
-} from 'react'
+import type { ComponentProps } from 'react'
+import { createContext, useCallback, useContext, useEffect, useState } from 'react'
 import { cn } from '../lib/utils'
 import { Badge } from '../ui/badge'
-import { Carousel, type CarouselApi, CarouselContent, CarouselItem } from '../ui/carousel'
+import type { CarouselApi } from '../ui/carousel'
+import { Carousel, CarouselContent, CarouselItem } from '../ui/carousel'
 import { HoverCard, HoverCardContent, HoverCardTrigger } from '../ui/hover-card'
 
 export type InlineCitationProps = ComponentProps<'span'>
@@ -28,7 +23,9 @@ export const InlineCitationText = ({ className, ...props }: InlineCitationTextPr
 
 export type InlineCitationCardProps = ComponentProps<typeof HoverCard>
 
-export const InlineCitationCard = (props: InlineCitationCardProps) => <HoverCard {...props} />
+export const InlineCitationCard = (props: InlineCitationCardProps) => (
+  <HoverCard closeDelay={0} openDelay={0} {...props} />
+)
 
 export type InlineCitationCardTriggerProps = ComponentProps<typeof Badge> & {
   sources: string[]
@@ -39,18 +36,16 @@ export const InlineCitationCardTrigger = ({
   className,
   ...props
 }: InlineCitationCardTriggerProps) => (
-  <HoverCardTrigger
-    delay={0}
-    closeDelay={0}
-    render={<Badge className={cn('ml-1 rounded-full', className)} variant="secondary" {...props} />}
-  >
-    {sources[0] ? (
-      <>
-        {new URL(sources[0]).hostname} {sources.length > 1 && `+${sources.length - 1}`}
-      </>
-    ) : (
-      'unknown'
-    )}
+  <HoverCardTrigger asChild>
+    <Badge className={cn('ml-1 rounded-full', className)} variant="secondary" {...props}>
+      {sources[0] ? (
+        <>
+          {new URL(sources[0]).hostname} {sources.length > 1 && `+${sources.length - 1}`}
+        </>
+      ) : (
+        'unknown'
+      )}
+    </Badge>
   </HoverCardTrigger>
 )
 
@@ -126,18 +121,27 @@ export const InlineCitationCarouselIndex = ({
   const [current, setCurrent] = useState(0)
   const [count, setCount] = useState(0)
 
+  const syncState = useCallback(() => {
+    if (!api) {
+      return
+    }
+    setCount(api.scrollSnapList().length)
+    setCurrent(api.selectedScrollSnap() + 1)
+  }, [api])
+
   useEffect(() => {
     if (!api) {
       return
     }
 
-    setCount(api.scrollSnapList().length)
-    setCurrent(api.selectedScrollSnap() + 1)
+    syncState()
 
-    api.on('select', () => {
-      setCurrent(api.selectedScrollSnap() + 1)
-    })
-  }, [api])
+    api.on('select', syncState)
+
+    return () => {
+      api.off('select', syncState)
+    }
+  }, [api, syncState])
 
   return (
     <div

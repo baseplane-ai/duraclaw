@@ -58,7 +58,7 @@ describe('package structure', () => {
   })
 
   it('required directories exist with files', () => {
-    const dirs = ['components', 'ui', 'lib', 'hooks']
+    const dirs = ['components', 'ui', 'lib']
     for (const dir of dirs) {
       const files = readdirSync(join(SRC_DIR, dir))
       expect(files.length).toBeGreaterThan(0)
@@ -104,8 +104,15 @@ describe('package structure', () => {
     expect(content).toContain('export function groupToolCalls(')
   })
 
-  it('hooks/use-controllable-state.ts exports the hook', () => {
-    const content = readFileSync(join(SRC_DIR, 'hooks', 'use-controllable-state.ts'), 'utf-8')
-    expect(content).toContain('export function useControllableState')
+  it('useControllableState comes from @radix-ui (no custom hook)', () => {
+    // Verify no custom hook file exists — we use @radix-ui/react-use-controllable-state
+    const hooksDir = join(SRC_DIR, 'hooks')
+    let files: string[] = []
+    try {
+      files = readdirSync(hooksDir)
+    } catch {
+      // hooks dir may not exist, that's fine
+    }
+    expect(files).not.toContain('use-controllable-state.ts')
   })
 })

@@ -12,6 +12,7 @@
  * - Tool: Detailed tool invocation with input/output
  */
 
+import { useControllableState } from '@radix-ui/react-use-controllable-state'
 import {
   BotIcon,
   ChevronDownIcon,
@@ -26,7 +27,6 @@ import {
 } from 'lucide-react'
 import type { ComponentProps, ReactNode } from 'react'
 import { createContext, memo, useContext, useMemo } from 'react'
-import { useControllableState } from '../hooks/use-controllable-state'
 import { cn } from '../lib/utils'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../ui/collapsible'
 

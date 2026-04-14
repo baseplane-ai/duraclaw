@@ -16,10 +16,12 @@ import {
   Reasoning,
   ReasoningContent,
   ReasoningTrigger,
-  ToolCallItem,
-  ToolCallList,
-  ToolCallListContent,
-  ToolCallListHeader,
+  Tool,
+  ToolContent,
+  ToolHeader,
+  type ToolHeaderProps,
+  ToolInput,
+  ToolOutput,
 } from '@duraclaw/ai-elements'
 import { FileIcon, HistoryIcon } from 'lucide-react'
 import { Skeleton } from '~/components/ui/skeleton'
@@ -180,28 +182,38 @@ export function ChatThread({
                         </MessageContent>
                       </Message>
                     )}
-                    {toolUseBlocks.length > 0 && (
-                      <ToolCallList defaultOpen={false}>
-                        <ToolCallListHeader count={toolUseBlocks.length} />
-                        <ToolCallListContent>
-                          {toolUseBlocks.map((tool: unknown, i: number) => {
-                            const t = tool as {
-                              id?: string
-                              name?: string
-                              input?: unknown
-                            }
-                            return (
-                              <ToolCallItem
-                                key={t.id || i}
-                                toolName={t.name || 'unknown'}
-                                args={t.input}
-                                status={isCurrentTurn ? 'running' : 'completed'}
-                              />
-                            )
-                          })}
-                        </ToolCallListContent>
-                      </ToolCallList>
-                    )}
+                    {toolUseBlocks.length > 0 &&
+                      toolUseBlocks.map((tool: unknown, i: number) => {
+                        const t = tool as {
+                          id?: string
+                          name?: string
+                          input?: unknown
+                          output?: unknown
+                          error?: string
+                        }
+                        const state = isCurrentTurn
+                          ? 'input-available'
+                          : t.error
+                            ? 'output-error'
+                            : 'output-available'
+                        return (
+                          <Tool key={t.id || i}>
+                            <ToolHeader
+                              {...({
+                                type: 'dynamic-tool',
+                                toolName: t.name || 'unknown',
+                                state,
+                              } as ToolHeaderProps)}
+                            />
+                            <ToolContent>
+                              <ToolInput input={t.input} />
+                              {!isCurrentTurn && (
+                                <ToolOutput output={t.output} errorText={t.error ?? undefined} />
+                              )}
+                            </ToolContent>
+                          </Tool>
+                        )
+                      })}
                   </div>
                   {rewindButton}
                 </div>

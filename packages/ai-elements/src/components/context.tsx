@@ -1,7 +1,8 @@
 'use client'
 
 import type { LanguageModelUsage } from 'ai'
-import { type ComponentProps, createContext, useContext } from 'react'
+import type { ComponentProps } from 'react'
+import { createContext, useContext, useMemo } from 'react'
 import { getUsage } from 'tokenlens'
 import { cn } from '../lib/utils'
 import { Button } from '../ui/button'
@@ -16,7 +17,7 @@ const ICON_STROKE_WIDTH = 2
 
 type ModelId = string
 
-type ContextSchema = {
+interface ContextSchema {
   usedTokens: number
   maxTokens: number
   usage?: LanguageModelUsage
@@ -37,18 +38,18 @@ const useContextValue = () => {
 
 export type ContextProps = ComponentProps<typeof HoverCard> & ContextSchema
 
-export const Context = ({ usedTokens, maxTokens, usage, modelId, ...props }: ContextProps) => (
-  <ContextContext.Provider
-    value={{
-      usedTokens,
-      maxTokens,
-      usage,
-      modelId,
-    }}
-  >
-    <HoverCard {...props} />
-  </ContextContext.Provider>
-)
+export const Context = ({ usedTokens, maxTokens, usage, modelId, ...props }: ContextProps) => {
+  const contextValue = useMemo(
+    () => ({ maxTokens, modelId, usage, usedTokens }),
+    [maxTokens, modelId, usage, usedTokens],
+  )
+
+  return (
+    <ContextContext.Provider value={contextValue}>
+      <HoverCard closeDelay={0} openDelay={0} {...props} />
+    </ContextContext.Provider>
+  )
+}
 
 const ContextIcon = () => {
   const { usedTokens, maxTokens } = useContextValue()
@@ -85,7 +86,7 @@ const ContextIcon = () => {
         strokeDashoffset={dashOffset}
         strokeLinecap="round"
         strokeWidth={ICON_STROKE_WIDTH}
-        style={{ transformOrigin: 'center', transform: 'rotate(-90deg)' }}
+        style={{ transform: 'rotate(-90deg)', transformOrigin: 'center' }}
       />
     </svg>
   )
@@ -97,21 +98,17 @@ export const ContextTrigger = ({ children, ...props }: ContextTriggerProps) => {
   const { usedTokens, maxTokens } = useContextValue()
   const usedPercent = usedTokens / maxTokens
   const renderedPercent = new Intl.NumberFormat('en-US', {
-    style: 'percent',
     maximumFractionDigits: 1,
+    style: 'percent',
   }).format(usedPercent)
 
   return (
-    <HoverCardTrigger
-      delay={0}
-      closeDelay={0}
-      render={children ? undefined : <Button type="button" variant="ghost" {...props} />}
-    >
+    <HoverCardTrigger asChild>
       {children ?? (
-        <>
+        <Button type="button" variant="ghost" {...props}>
           <span className="font-medium text-muted-foreground">{renderedPercent}</span>
           <ContextIcon />
-        </>
+        </Button>
       )}
     </HoverCardTrigger>
   )
@@ -133,8 +130,8 @@ export const ContextContentHeader = ({
   const { usedTokens, maxTokens } = useContextValue()
   const usedPercent = usedTokens / maxTokens
   const displayPct = new Intl.NumberFormat('en-US', {
-    style: 'percent',
     maximumFractionDigits: 1,
+    style: 'percent',
   }).format(usedPercent)
   const used = new Intl.NumberFormat('en-US', {
     notation: 'compact',
@@ -188,8 +185,8 @@ export const ContextContentFooter = ({
       }).costUSD?.totalUSD
     : undefined
   const totalCost = new Intl.NumberFormat('en-US', {
-    style: 'currency',
     currency: 'USD',
+    style: 'currency',
   }).format(costUSD ?? 0)
 
   return (
@@ -209,6 +206,17 @@ export const ContextContentFooter = ({
     </div>
   )
 }
+
+const TokensWithCost = ({ tokens, costText }: { tokens?: number; costText?: string }) => (
+  <span>
+    {tokens === undefined
+      ? '—'
+      : new Intl.NumberFormat('en-US', {
+          notation: 'compact',
+        }).format(tokens)}
+    {costText ? <span className="ml-2 text-muted-foreground">• {costText}</span> : null}
+  </span>
+)
 
 export type ContextInputUsageProps = ComponentProps<'div'>
 
@@ -231,8 +239,8 @@ export const ContextInputUsage = ({ className, children, ...props }: ContextInpu
       }).costUSD?.totalUSD
     : undefined
   const inputCostText = new Intl.NumberFormat('en-US', {
-    style: 'currency',
     currency: 'USD',
+    style: 'currency',
   }).format(inputCost ?? 0)
 
   return (
@@ -264,8 +272,8 @@ export const ContextOutputUsage = ({ className, children, ...props }: ContextOut
       }).costUSD?.totalUSD
     : undefined
   const outputCostText = new Intl.NumberFormat('en-US', {
-    style: 'currency',
     currency: 'USD',
+    style: 'currency',
   }).format(outputCost ?? 0)
 
   return (
@@ -301,8 +309,8 @@ export const ContextReasoningUsage = ({
       }).costUSD?.totalUSD
     : undefined
   const reasoningCostText = new Intl.NumberFormat('en-US', {
-    style: 'currency',
     currency: 'USD',
+    style: 'currency',
   }).format(reasoningCost ?? 0)
 
   return (
@@ -334,8 +342,8 @@ export const ContextCacheUsage = ({ className, children, ...props }: ContextCach
       }).costUSD?.totalUSD
     : undefined
   const cacheCostText = new Intl.NumberFormat('en-US', {
-    style: 'currency',
     currency: 'USD',
+    style: 'currency',
   }).format(cacheCost ?? 0)
 
   return (
@@ -345,14 +353,3 @@ export const ContextCacheUsage = ({ className, children, ...props }: ContextCach
     </div>
   )
 }
-
-const TokensWithCost = ({ tokens, costText }: { tokens?: number; costText?: string }) => (
-  <span>
-    {tokens === undefined
-      ? '—'
-      : new Intl.NumberFormat('en-US', {
-          notation: 'compact',
-        }).format(tokens)}
-    {costText ? <span className="ml-2 text-muted-foreground">• {costText}</span> : null}
-  </span>
-)

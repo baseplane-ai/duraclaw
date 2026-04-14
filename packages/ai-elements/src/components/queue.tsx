@@ -7,7 +7,7 @@ import { Button } from '../ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../ui/collapsible'
 import { ScrollArea } from '../ui/scroll-area'
 
-export type QueueMessagePart = {
+export interface QueueMessagePart {
   type: string
   text?: string
   url?: string
@@ -15,12 +15,12 @@ export type QueueMessagePart = {
   mediaType?: string
 }
 
-export type QueueMessage = {
+export interface QueueMessage {
   id: string
   parts: QueueMessagePart[]
 }
 
-export type QueueTodo = {
+export interface QueueTodo {
   id: string
   title: string
   description?: string
@@ -152,7 +152,7 @@ export const QueueItemFile = ({ children, className, ...props }: QueueItemFilePr
 export type QueueListProps = ComponentProps<typeof ScrollArea>
 
 export const QueueList = ({ children, className, ...props }: QueueListProps) => (
-  <ScrollArea className={cn('-mb-1 mt-2', className)} {...props}>
+  <ScrollArea className={cn('mt-2 -mb-1', className)} {...props}>
     <div className="max-h-40 pr-4">
       <ul>{children}</ul>
     </div>
@@ -174,19 +174,17 @@ export const QueueSectionTrigger = ({
   className,
   ...props
 }: QueueSectionTriggerProps) => (
-  <CollapsibleTrigger
-    render={
-      <button
-        className={cn(
-          'group flex w-full items-center justify-between rounded-md bg-muted/40 px-3 py-2 text-left font-medium text-muted-foreground text-sm transition-colors hover:bg-muted',
-          className,
-        )}
-        type="button"
-        {...props}
-      />
-    }
-  >
-    {children}
+  <CollapsibleTrigger asChild>
+    <button
+      className={cn(
+        'group flex w-full items-center justify-between rounded-md bg-muted/40 px-3 py-2 text-left font-medium text-muted-foreground text-sm transition-colors hover:bg-muted',
+        className,
+      )}
+      type="button"
+      {...props}
+    >
+      {children}
+    </button>
   </CollapsibleTrigger>
 )
 
@@ -205,7 +203,7 @@ export const QueueSectionLabel = ({
   ...props
 }: QueueSectionLabelProps) => (
   <span className={cn('flex items-center gap-2', className)} {...props}>
-    <ChevronDownIcon className="group-data-[closed]:-rotate-90 size-4 transition-transform" />
+    <ChevronDownIcon className="size-4 transition-transform group-data-[state=closed]:-rotate-90" />
     {icon}
     <span>
       {count} {label}
