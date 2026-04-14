@@ -1,4 +1,6 @@
 import { Agent, type Connection, type ConnectionContext, callable } from 'agents'
+import type { SessionMessage, SessionMessagePart } from 'agents/experimental/memory/session'
+import { Session } from 'agents/experimental/memory/session'
 import { generateActionToken } from '~/lib/action-token'
 import { runMigrations } from '~/lib/do-migrations'
 import { type PushPayload, sendPushNotification } from '~/lib/push'
@@ -13,6 +15,12 @@ import type {
   SpawnConfig,
 } from '~/lib/types'
 import { connectToExecutor, parseEvent, sendCommand } from '~/lib/vps-client'
+import {
+  applyToolResult,
+  assistantContentToParts,
+  finalizeStreamingParts,
+  partialAssistantToParts,
+} from './gateway-event-mapper'
 import { SESSION_DO_MIGRATIONS } from './session-do-migrations'
 
 const DEFAULT_STATE: SessionState = {
@@ -43,17 +51,40 @@ const DEFAULT_STATE: SessionState = {
  * Implements bidirectional relay:
  *   Browser WS <-> SessionDO <-> Gateway WS
  *
- * Broadcasts raw GatewayEvents to connected clients.
+ * Persists messages via Session class (agents/experimental/memory/session).
  * Uses @callable RPC methods for spawn, resolveGate, sendMessage, etc.
  */
 export class SessionDO extends Agent<Env, SessionState> {
   initialState = DEFAULT_STATE
   private vpsWs: WebSocket | null = null
+  private session!: Session
+  private turnCounter = 0
+  private currentTurnMessageId: string | null = null
 
   // ── Lifecycle ──────────────────────────────────────────────────
 
   async onStart() {
     runMigrations(this.ctx.storage.sql, SESSION_DO_MIGRATIONS)
+    this.session = Session.create(this)
+
+    // Load turnCounter from assistant_config (survives hibernation)
+    const configRows = this.sql<{ value: string }>`
+      SELECT value FROM assistant_config WHERE session_id = '' AND key = 'turnCounter'
+    `
+    if (configRows.length > 0) {
+      this.turnCounter = Number.parseInt(configRows[0].value, 10) || 0
+    } else {
+      // First use or data loss — seed from path length to avoid ID collisions
+      this.turnCounter = this.session.getPathLength() + 1
+    }
+
+    // Load currentTurnMessageId
+    const turnIdRows = this.sql<{ value: string }>`
+      SELECT value FROM assistant_config WHERE session_id = '' AND key = 'currentTurnMessageId'
+    `
+    if (turnIdRows.length > 0 && turnIdRows[0].value !== '') {
+      this.currentTurnMessageId = turnIdRows[0].value
+    }
   }
 
   /**
@@ -98,14 +129,14 @@ export class SessionDO extends Agent<Env, SessionState> {
   }
 
   onConnect(connection: Connection, _ctx: ConnectionContext) {
-    // Replay recent events from DO SQLite for reconnecting clients
-    const events = this.sql<{ data: string }>`SELECT data FROM events ORDER BY id DESC LIMIT 50`
-    for (const row of [...events].reverse()) {
-      try {
-        connection.send(JSON.stringify({ type: 'gateway_event', event: JSON.parse(row.data) }))
-      } catch {
-        // Skip malformed events
+    // Replay full message history for reconnecting clients
+    try {
+      const messages = this.session.getHistory()
+      if (messages.length > 0) {
+        connection.send(JSON.stringify({ type: 'messages', messages }))
       }
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Failed to replay history:`, err)
     }
 
     // Re-emit gate if session is waiting
@@ -194,12 +225,18 @@ export class SessionDO extends Agent<Env, SessionState> {
     this.broadcastToClients(JSON.stringify({ type: 'gateway_event', event }))
   }
 
-  private persistEvent(event: GatewayEvent) {
+  private broadcastMessage(message: SessionMessage) {
+    this.broadcastToClients(JSON.stringify({ type: 'message', message }))
+  }
+
+  private persistTurnState() {
     try {
       this
-        .sql`INSERT INTO events (type, data, ts) VALUES (${event.type}, ${JSON.stringify(event)}, ${Date.now()})`
+        .sql`INSERT OR REPLACE INTO assistant_config (session_id, key, value) VALUES ('', 'turnCounter', ${String(this.turnCounter)})`
+      this
+        .sql`INSERT OR REPLACE INTO assistant_config (session_id, key, value) VALUES ('', 'currentTurnMessageId', ${this.currentTurnMessageId ?? ''})`
     } catch (err) {
-      console.error(`[SessionDO:${this.ctx.id}] Failed to persist event:`, err)
+      console.error(`[SessionDO:${this.ctx.id}] Failed to persist turn state:`, err)
     }
   }
 
@@ -274,8 +311,8 @@ export class SessionDO extends Agent<Env, SessionState> {
   }
 
   /**
-   * Fetch SDK session transcript from the VPS gateway and persist as events.
-   * Called on first getMessages() for discovered sessions with empty events table.
+   * Fetch SDK session transcript from the VPS gateway and persist via Session.
+   * Called on first getMessages() for discovered sessions with empty history.
    */
   private async hydrateFromGateway() {
     const gatewayUrl = this.env.CC_GATEWAY_URL
@@ -300,17 +337,38 @@ export class SessionDO extends Agent<Env, SessionState> {
         return
       }
       const data = (await resp.json()) as {
-        messages: Array<{ type: string; uuid: string; content: unknown }>
+        messages: Array<{ type: string; uuid: string; content: unknown[] }>
       }
       if (!data.messages?.length) return
 
       let persisted = 0
+      let lastMsgId: string | null = null
       for (const msg of data.messages) {
-        if (msg.type === 'assistant' || msg.type === 'tool_result') {
-          this.persistEvent(msg as unknown as GatewayEvent)
+        if (msg.type === 'assistant') {
+          this.turnCounter++
+          const msgId = `msg-${this.turnCounter}`
+          const sessionMsg: SessionMessage = {
+            id: msgId,
+            role: 'assistant',
+            parts: assistantContentToParts(msg.content),
+            createdAt: new Date(),
+          }
+          await this.session.appendMessage(sessionMsg, lastMsgId)
+          lastMsgId = msgId
+          persisted++
+        } else if (msg.type === 'tool_result') {
+          // Apply tool results to the last assistant message
+          if (lastMsgId) {
+            const existing = this.session.getMessage(lastMsgId)
+            if (existing) {
+              const updatedParts = applyToolResult(existing.parts, msg)
+              this.session.updateMessage({ ...existing, parts: updatedParts })
+            }
+          }
           persisted++
         }
       }
+      this.persistTurnState()
       console.log(
         `[SessionDO:${this.ctx.id}] Hydrated ${persisted} events from gateway for sdk_session=${this.state.sdk_session_id.slice(0, 12)}`,
       )
@@ -561,6 +619,36 @@ export class SessionDO extends Agent<Env, SessionState> {
       return { ok: false, error: 'Invalid response for gate type' }
     }
 
+    // Update the message part state for the resolved gate
+    if (this.currentTurnMessageId || this.turnCounter > 0) {
+      const currentMsgId = this.currentTurnMessageId ?? `msg-${this.turnCounter}`
+      const existing = this.session.getMessage(currentMsgId)
+      if (existing) {
+        const updatedParts = existing.parts.map((p) => {
+          if (p.toolCallId === gateId) {
+            if (response.approved !== undefined) {
+              return {
+                ...p,
+                state: response.approved ? 'output-available' : 'output-denied',
+                ...(response.approved && response.answer ? { output: response.answer } : {}),
+              }
+            }
+            if (response.answer !== undefined) {
+              return { ...p, state: 'output-available', output: response.answer }
+            }
+          }
+          return p
+        })
+        const updatedMsg: SessionMessage = { ...existing, parts: updatedParts }
+        try {
+          this.session.updateMessage(updatedMsg)
+          this.broadcastMessage(updatedMsg)
+        } catch (err) {
+          console.error(`[SessionDO:${this.ctx.id}] Failed to update gate resolution:`, err)
+        }
+      }
+    }
+
     this.updateState({ status: 'running', gate: null })
     return { ok: true }
   }
@@ -573,6 +661,28 @@ export class SessionDO extends Agent<Env, SessionState> {
 
     if (!isActive && !isResumable) {
       return { ok: false, error: `Cannot send message: status is '${status}'` }
+    }
+
+    // Persist user message
+    this.turnCounter++
+    const userMsgId = `usr-${this.turnCounter}`
+    const userMsg: SessionMessage = {
+      id: userMsgId,
+      role: 'user',
+      parts: [
+        {
+          type: 'text',
+          text: typeof content === 'string' ? content : JSON.stringify(content),
+        },
+      ],
+      createdAt: new Date(),
+    }
+    try {
+      await this.session.appendMessage(userMsg)
+      this.persistTurnState()
+      this.broadcastMessage(userMsg)
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Failed to persist user message:`, err)
     }
 
     if (isActive && this.vpsWs) {
@@ -625,10 +735,12 @@ export class SessionDO extends Agent<Env, SessionState> {
   }
 
   @callable()
-  async getMessages(opts?: { offset?: number; limit?: number; session_hint?: string }) {
-    const limit = opts?.limit ?? 200
-    const offset = opts?.offset ?? 0
-
+  async getMessages(opts?: {
+    offset?: number
+    limit?: number
+    session_hint?: string
+    leafId?: string
+  }) {
     // Self-initialize from registry for discovered sessions
     if (!this.state.sdk_session_id && opts?.session_hint) {
       try {
@@ -650,73 +762,28 @@ export class SessionDO extends Agent<Env, SessionState> {
       }
     }
 
-    // Hydrate from VPS gateway on first access for discovered sessions with no events
-    if (offset === 0 && this.state.sdk_session_id && this.state.project) {
-      const count = this.sql<{ n: number }>`SELECT COUNT(*) as n FROM events`
-      if ([...count][0]?.n === 0) {
+    // Hydrate from VPS gateway on first access for discovered sessions
+    if (this.state.sdk_session_id && this.state.project) {
+      const pathLen = this.session.getPathLength()
+      if (pathLen === 0) {
         await this.hydrateFromGateway()
       }
     }
 
-    // Derive ChatMessage objects from the events table.
-    // The messages table was never populated — events is the source of truth.
-    const rows = this.sql<{
-      id: number
-      type: string
-      data: string
-      ts: number
-    }>`SELECT id, type, data, ts FROM events WHERE type IN ('assistant', 'tool_result') ORDER BY id ASC LIMIT ${limit} OFFSET ${offset}`
-
-    const messages: Array<{
-      id: number | string
-      role: string
-      type: string
-      content: string
-      event_uuid: string | null
-      created_at: string
-    }> = []
-
-    for (const row of rows) {
-      try {
-        const event = JSON.parse(row.data)
-        if (row.type === 'assistant') {
-          messages.push({
-            id: event.uuid ?? row.id,
-            role: 'assistant',
-            type: 'text',
-            content: JSON.stringify(event.content ?? []),
-            event_uuid: event.uuid ?? null,
-            created_at: new Date(row.ts).toISOString(),
-          })
-        } else if (row.type === 'tool_result') {
-          messages.push({
-            id: `tool-${event.uuid ?? row.id}`,
-            role: 'tool',
-            type: 'tool_result',
-            content: JSON.stringify(event.content ?? []),
-            event_uuid: event.uuid ?? null,
-            created_at: new Date(row.ts).toISOString(),
-          })
-        }
-      } catch {
-        // Skip malformed event rows
-      }
+    // Return messages from Session history
+    try {
+      return this.session.getHistory(opts?.leafId)
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Failed to get history:`, err)
+      return []
     }
-
-    return messages
   }
 
   @callable()
   async getStatus() {
-    const rows = this.sql<{
-      id: number
-      ts: string
-      type: string
-      data: string | null
-    }>`SELECT id, ts, type, data FROM events ORDER BY id DESC LIMIT 50`
     return {
       state: this.state,
-      recent_events: [...rows],
+      recent_events: [],
     }
   }
 
@@ -735,31 +802,136 @@ export class SessionDO extends Agent<Env, SessionState> {
   // ── Gateway Event Handling ─────────────────────────────────────
 
   handleGatewayEvent(event: GatewayEvent) {
-    // Persist every event for audit/replay
-    this.persistEvent(event)
-
-    // Broadcast raw event to all connected clients
-    this.broadcastGatewayEvent(event)
-
-    // Update state based on event type
     switch (event.type) {
       case 'session.init':
         this.updateState({ sdk_session_id: event.sdk_session_id, model: event.model })
         break
 
-      case 'partial_assistant':
-        // No state change needed — event is broadcast to clients
+      case 'partial_assistant': {
+        const parts = partialAssistantToParts(event.content)
+        if (!this.currentTurnMessageId) {
+          // First partial of this turn — append new message
+          const msgId = `msg-${this.turnCounter}`
+          this.currentTurnMessageId = msgId
+          const msg: SessionMessage = {
+            id: msgId,
+            role: 'assistant',
+            parts,
+            createdAt: new Date(),
+          }
+          try {
+            this.session.appendMessage(msg, `usr-${this.turnCounter}`)
+            this.persistTurnState()
+            this.broadcastMessage(msg)
+          } catch (err) {
+            console.error(`[SessionDO:${this.ctx.id}] Failed to persist partial assistant:`, err)
+            this.broadcastToClients(JSON.stringify({ type: 'raw_event', event }))
+          }
+        } else {
+          // Subsequent partial — update existing message with accumulated text
+          const existing = this.session.getMessage(this.currentTurnMessageId)
+          if (existing) {
+            // Merge streaming text: find existing streaming text parts and append
+            const updatedParts = [...existing.parts]
+            for (const newPart of parts) {
+              if (newPart.type === 'text') {
+                const existingTextIdx = updatedParts.findIndex(
+                  (p) => p.type === 'text' && p.state === 'streaming',
+                )
+                if (existingTextIdx !== -1) {
+                  updatedParts[existingTextIdx] = {
+                    ...updatedParts[existingTextIdx],
+                    text: (updatedParts[existingTextIdx].text ?? '') + (newPart.text ?? ''),
+                  }
+                } else {
+                  updatedParts.push(newPart)
+                }
+              }
+            }
+            const updatedMsg: SessionMessage = { ...existing, parts: updatedParts }
+            try {
+              this.session.updateMessage(updatedMsg)
+              this.broadcastMessage(updatedMsg)
+            } catch (err) {
+              console.error(`[SessionDO:${this.ctx.id}] Failed to update partial:`, err)
+              this.broadcastToClients(JSON.stringify({ type: 'raw_event', event }))
+            }
+          }
+        }
         break
+      }
 
-      case 'assistant':
+      case 'assistant': {
+        // Final assistant message — replace streaming parts with final parts
+        const parts = assistantContentToParts(event.content as unknown[])
+        const msgId = this.currentTurnMessageId ?? `msg-${this.turnCounter}`
+        const msg: SessionMessage = {
+          id: msgId,
+          role: 'assistant',
+          parts,
+          createdAt: new Date(),
+        }
+        try {
+          if (this.currentTurnMessageId) {
+            this.session.updateMessage(msg)
+          } else {
+            this.session.appendMessage(msg, `usr-${this.turnCounter}`)
+          }
+          this.currentTurnMessageId = null
+          this.persistTurnState()
+          this.broadcastMessage(msg)
+        } catch (err) {
+          console.error(`[SessionDO:${this.ctx.id}] Failed to persist assistant:`, err)
+          this.broadcastToClients(JSON.stringify({ type: 'raw_event', event }))
+        }
         this.updateState({ num_turns: this.state.num_turns + 1 })
         break
+      }
 
-      case 'tool_result':
-        // No state change needed
+      case 'tool_result': {
+        // Update the current assistant message's tool parts with results
+        const currentMsgId = this.currentTurnMessageId ?? `msg-${this.turnCounter}`
+        const existing = this.session.getMessage(currentMsgId)
+        if (existing) {
+          const updatedParts = applyToolResult(existing.parts, event)
+          const updatedMsg: SessionMessage = { ...existing, parts: updatedParts }
+          try {
+            this.session.updateMessage(updatedMsg)
+            this.broadcastMessage(updatedMsg)
+          } catch (err) {
+            console.error(`[SessionDO:${this.ctx.id}] Failed to persist tool result:`, err)
+            this.broadcastToClients(JSON.stringify({ type: 'raw_event', event }))
+          }
+        }
         break
+      }
 
-      case 'ask_user':
+      case 'ask_user': {
+        // Add ask_user part to current assistant message
+        const currentMsgId = this.currentTurnMessageId ?? `msg-${this.turnCounter}`
+        const existing = this.session.getMessage(currentMsgId)
+        if (existing) {
+          const updatedParts: SessionMessagePart[] = [
+            ...existing.parts,
+            {
+              type: 'tool-ask_user',
+              toolCallId: event.tool_call_id,
+              toolName: 'ask_user',
+              input: { questions: event.questions },
+              state: 'approval-requested',
+            },
+          ]
+          const updatedMsg: SessionMessage = { ...existing, parts: updatedParts }
+          try {
+            this.session.updateMessage(updatedMsg)
+            this.broadcastMessage(updatedMsg)
+          } catch (err) {
+            console.error(`[SessionDO:${this.ctx.id}] Failed to persist ask_user:`, err)
+            this.broadcastToClients(JSON.stringify({ type: 'raw_event', event }))
+          }
+        }
+
+        // PRESERVE existing side effects exactly
         this.updateState({
           status: 'waiting_gate',
           gate: {
@@ -781,8 +953,34 @@ export class SessionDO extends Agent<Env, SessionState> {
           'blocked',
         )
         break
+      }
 
-      case 'permission_request':
+      case 'permission_request': {
+        // Add permission part to current assistant message
+        const currentMsgId = this.currentTurnMessageId ?? `msg-${this.turnCounter}`
+        const existing = this.session.getMessage(currentMsgId)
+        if (existing) {
+          const updatedParts: SessionMessagePart[] = [
+            ...existing.parts,
+            {
+              type: 'tool-permission',
+              toolCallId: event.tool_call_id,
+              toolName: 'permission',
+              input: { tool_name: event.tool_name, tool_call_id: event.tool_call_id },
+              state: 'approval-requested',
+            },
+          ]
+          const updatedMsg: SessionMessage = { ...existing, parts: updatedParts }
+          try {
+            this.session.updateMessage(updatedMsg)
+            this.broadcastMessage(updatedMsg)
+          } catch (err) {
+            console.error(`[SessionDO:${this.ctx.id}] Failed to persist permission:`, err)
+            this.broadcastToClients(JSON.stringify({ type: 'raw_event', event }))
+          }
+        }
+
+        // PRESERVE all existing side effects (state update, registry sync, action token, push)
         this.updateState({
           status: 'waiting_gate',
           gate: {
@@ -792,7 +990,6 @@ export class SessionDO extends Agent<Env, SessionState> {
           },
         })
         this.syncStatusToRegistry()
-        // Generate action token and dispatch push with it (fire-and-forget)
         ;(async () => {
           try {
             const actionToken = await generateActionToken(
@@ -820,8 +1017,46 @@ export class SessionDO extends Agent<Env, SessionState> {
           }
         })()
         break
+      }
 
-      case 'result':
+      case 'file_changed': {
+        // Add file_changed data part to current assistant message
+        const currentMsgId = this.currentTurnMessageId ?? `msg-${this.turnCounter}`
+        const existing = this.session.getMessage(currentMsgId)
+        if (existing) {
+          const updatedParts: SessionMessagePart[] = [
+            ...existing.parts,
+            {
+              type: 'data-file-changed',
+              text: event.path,
+              state: event.tool === 'write' ? 'created' : 'modified',
+            },
+          ]
+          const updatedMsg: SessionMessage = { ...existing, parts: updatedParts }
+          try {
+            this.session.updateMessage(updatedMsg)
+            this.broadcastMessage(updatedMsg)
+          } catch (err) {
+            console.error(`[SessionDO:${this.ctx.id}] Failed to persist file_changed:`, err)
+          }
+        }
+        break
+      }
+
+      case 'result': {
+        // Finalize orphaned streaming parts
+        if (this.currentTurnMessageId) {
+          const existing = this.session.getMessage(this.currentTurnMessageId)
+          if (existing) {
+            const finalizedParts = finalizeStreamingParts(existing.parts)
+            this.session.updateMessage({ ...existing, parts: finalizedParts })
+            this.broadcastMessage({ ...existing, parts: finalizedParts })
+          }
+          this.currentTurnMessageId = null
+          this.persistTurnState()
+        }
+
+        // PRESERVE all existing side effects exactly
         this.updateState({
           status: event.is_error ? 'failed' : 'idle',
           completed_at: new Date().toISOString(),
@@ -866,8 +1101,21 @@ export class SessionDO extends Agent<Env, SessionState> {
           )
         }
         break
+      }
 
-      case 'stopped':
+      case 'stopped': {
+        // Finalize orphaned streaming parts
+        if (this.currentTurnMessageId) {
+          const existing = this.session.getMessage(this.currentTurnMessageId)
+          if (existing) {
+            const finalizedParts = finalizeStreamingParts(existing.parts)
+            this.session.updateMessage({ ...existing, parts: finalizedParts })
+          }
+          this.currentTurnMessageId = null
+          this.persistTurnState()
+        }
+
+        // PRESERVE existing side effects
         this.updateState({
           status: 'idle',
           gate: null,
@@ -877,21 +1125,33 @@ export class SessionDO extends Agent<Env, SessionState> {
         this.vpsWs = null
         this.syncStatusToRegistry()
         break
+      }
 
       case 'kata_state': {
-        // Store full state in kv for detailed queries
+        // PRESERVE existing side effects — store in kv and sync to registry
         try {
           this
             .sql`INSERT OR REPLACE INTO kv (key, value) VALUES ('kata_state', ${JSON.stringify(event.kata_state)})`
         } catch (err) {
           console.error(`[SessionDO:${this.ctx.id}] Failed to persist kata state:`, err)
         }
-        // Sync summary fields to registry for card display
         this.syncKataToRegistry(event.kata_state)
         break
       }
 
-      case 'error':
+      case 'error': {
+        // Finalize orphaned streaming parts
+        if (this.currentTurnMessageId) {
+          const existing = this.session.getMessage(this.currentTurnMessageId)
+          if (existing) {
+            const finalizedParts = finalizeStreamingParts(existing.parts)
+            this.session.updateMessage({ ...existing, parts: finalizedParts })
+          }
+          this.currentTurnMessageId = null
+          this.persistTurnState()
+        }
+
+        // PRESERVE existing side effects
         this.updateState({ status: 'failed', error: event.error })
         this.syncStatusToRegistry()
         this.dispatchPush(
@@ -905,6 +1165,15 @@ export class SessionDO extends Agent<Env, SessionState> {
           'error',
         )
         break
+      }
+
+      // Events that don't produce message parts — just broadcast raw
+      default: {
+        // context_usage, rewind_result, session_state_changed, rate_limit,
+        // task_started, task_progress, task_notification — broadcast as-is
+        this.broadcastGatewayEvent(event)
+        break
+      }
     }
   }
 }

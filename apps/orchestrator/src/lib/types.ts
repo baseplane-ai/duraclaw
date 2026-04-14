@@ -1,3 +1,5 @@
+// Re-export Session types for convenience
+
 // Re-export shared types
 export type {
   BrowserCommand,
@@ -17,6 +19,7 @@ export type {
   UIStreamChunk,
   UserPreferences,
 } from '@duraclaw/shared-types'
+export type { SessionMessage, SessionMessagePart } from 'agents/experimental/memory/session'
 
 // ── Chat message type (shared across features + db) ───────────────
 
