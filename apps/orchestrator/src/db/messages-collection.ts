@@ -10,13 +10,16 @@
 
 import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence'
 import { createCollection, localOnlyCollectionOptions } from '@tanstack/db'
-import type { ChatMessage } from '~/lib/types'
+import type { SessionMessagePart } from '~/lib/types'
 import { persistence } from './db-instance'
 
 /** Message stored in the local cache with session context */
-export interface CachedMessage extends Omit<ChatMessage, 'id'> {
-  id: string // narrowed from number | string to string only
+export interface CachedMessage {
+  id: string
   sessionId: string
+  role: string
+  parts: SessionMessagePart[]
+  createdAt?: Date | string
 }
 
 function createMessagesCollection() {
@@ -29,7 +32,7 @@ function createMessagesCollection() {
     const opts = persistedCollectionOptions({
       ...localOpts,
       persistence,
-      schemaVersion: 1,
+      schemaVersion: 2,
     })
     // TanStackDB beta: persistedCollectionOptions adds a schema type that
     // conflicts with createCollection overloads. Runtime behavior is correct.
@@ -51,7 +54,12 @@ export function evictOldMessages() {
   try {
     const staleKeys: string[] = []
     for (const [key, msg] of messagesCollection as Iterable<[string, CachedMessage]>) {
-      if (msg.created_at && msg.created_at < cutoff) {
+      const ts = msg.createdAt
+        ? typeof msg.createdAt === 'string'
+          ? msg.createdAt
+          : msg.createdAt.toISOString()
+        : undefined
+      if (ts && ts < cutoff) {
         staleKeys.push(key)
       }
     }

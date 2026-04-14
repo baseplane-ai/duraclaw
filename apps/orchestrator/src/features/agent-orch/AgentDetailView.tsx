@@ -2,10 +2,11 @@
  * AgentDetailView — Live status display for a single SessionDO instance.
  */
 
-import { useEffect } from 'react'
+import { useCallback, useEffect } from 'react'
 import { StatusBar } from '~/components/status-bar'
 import { useStatusBarStore } from '~/stores/status-bar'
 import { ChatThread } from './ChatThread'
+import { ConversationDownload } from './ConversationDownload'
 import { KataStatePanel } from './KataStatePanel'
 import { MessageInput } from './MessageInput'
 import type { UseCodingAgentResult } from './use-coding-agent'
@@ -19,7 +20,6 @@ export function AgentDetailView({ name: _name, agent }: AgentDetailViewProps) {
   const {
     state,
     messages,
-    streamingContent,
     sessionResult,
     kataState,
     contextUsage,
@@ -31,6 +31,8 @@ export function AgentDetailView({ name: _name, agent }: AgentDetailViewProps) {
     sendMessage,
     rewind,
     injectQaPair,
+    branchInfo,
+    navigateBranch,
   } = agent
 
   // Sync session data to global status bar store
@@ -53,12 +55,23 @@ export function AgentDetailView({ name: _name, agent }: AgentDetailViewProps) {
     return () => statusBarClear()
   }, [statusBarClear])
 
+  const handleSendSuggestion = useCallback(
+    (text: string) => {
+      sendMessage(text)
+    },
+    [sendMessage],
+  )
+
   const status = state?.status ?? 'idle'
   const isTerminal = status === 'failed' || status === 'aborted'
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="agent-detail-view">
       <KataStatePanel kataState={kataState} />
+
+      <div className="flex items-center justify-end px-4 py-1">
+        <ConversationDownload messages={messages} sessionId={state?.session_id ?? 'unknown'} />
+      </div>
 
       <ChatThread
         messages={messages}
@@ -68,9 +81,11 @@ export function AgentDetailView({ name: _name, agent }: AgentDetailViewProps) {
         isConnecting={isConnecting}
         onResolveGate={resolveGate}
         readOnly={isTerminal}
-        streamingContent={isTerminal ? undefined : streamingContent}
         onQaResolved={injectQaPair}
         onRewind={isTerminal ? undefined : rewind}
+        branchInfo={branchInfo}
+        onBranchNavigate={navigateBranch}
+        onSendSuggestion={isTerminal ? undefined : handleSendSuggestion}
       />
 
       <StatusBar />

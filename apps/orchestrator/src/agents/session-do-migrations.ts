@@ -47,4 +47,13 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
       )`)
     },
   },
+  {
+    version: 4,
+    description: 'Rename old tables to _deprecated (Session class manages its own tables)',
+    up: (sql) => {
+      sql.exec(`ALTER TABLE messages RENAME TO _deprecated_messages`)
+      sql.exec(`ALTER TABLE events RENAME TO _deprecated_events`)
+      // kv table stays — still used for kata_state
+    },
+  },
 ]
