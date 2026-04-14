@@ -780,6 +780,79 @@ export class SessionDO extends Agent<Env, SessionState> {
   }
 
   @callable()
+  async getBranches(messageId: string): Promise<SessionMessage[]> {
+    try {
+      return this.session.getBranches(messageId)
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Failed to get branches:`, err)
+      return []
+    }
+  }
+
+  @callable()
+  async resubmitMessage(
+    originalMessageId: string,
+    newContent: string,
+  ): Promise<{ ok: boolean; leafId?: string; error?: string }> {
+    // 1. If streaming in progress, abort first
+    if (this.currentTurnMessageId) {
+      if (this.vpsWs) {
+        sendCommand(this.vpsWs, { type: 'abort', session_id: this.state.session_id ?? '' })
+        this.vpsWs.close()
+        this.vpsWs = null
+      }
+      // Finalize orphaned streaming parts
+      const existing = this.session.getMessage(this.currentTurnMessageId)
+      if (existing) {
+        const finalizedParts = finalizeStreamingParts(existing.parts)
+        this.session.updateMessage({ ...existing, parts: finalizedParts })
+      }
+      this.currentTurnMessageId = null
+    }
+
+    // 2. Find the parent of the original message
+    const originalMsg = this.session.getMessage(originalMessageId)
+    if (!originalMsg) {
+      return { ok: false, error: 'Original message not found' }
+    }
+
+    // Get history to find parent: the message before originalMessageId in the path
+    const history = this.session.getHistory(originalMessageId)
+    const origIdx = history.findIndex((m) => m.id === originalMessageId)
+    const parentId = origIdx > 0 ? history[origIdx - 1].id : null
+
+    // 3. Create new user message as sibling branch
+    this.turnCounter++
+    const newUserMsgId = `usr-${this.turnCounter}`
+    const newUserMsg: SessionMessage = {
+      id: newUserMsgId,
+      role: 'user',
+      parts: [{ type: 'text', text: newContent }],
+      createdAt: new Date(),
+    }
+
+    try {
+      this.session.appendMessage(newUserMsg, parentId)
+      this.persistTurnState()
+      this.broadcastMessage(newUserMsg)
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Failed to create branch:`, err)
+      return { ok: false, error: 'Failed to create branch' }
+    }
+
+    // 4. Send to gateway for execution
+    this.updateState({ status: 'running', gate: null, error: null })
+    this.connectAndStream({
+      type: 'resume',
+      project: this.state.project,
+      prompt: newContent,
+      sdk_session_id: this.state.sdk_session_id ?? '',
+    })
+
+    return { ok: true, leafId: newUserMsgId }
+  }
+
+  @callable()
   async getStatus() {
     return {
       state: this.state,

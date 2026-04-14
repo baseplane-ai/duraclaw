@@ -30,6 +30,8 @@ export function AgentDetailView({ name: _name, agent }: AgentDetailViewProps) {
     sendMessage,
     rewind,
     injectQaPair,
+    branchInfo,
+    navigateBranch,
   } = agent
 
   // Sync session data to global status bar store
@@ -69,6 +71,8 @@ export function AgentDetailView({ name: _name, agent }: AgentDetailViewProps) {
         readOnly={isTerminal}
         onQaResolved={injectQaPair}
         onRewind={isTerminal ? undefined : rewind}
+        branchInfo={branchInfo}
+        onBranchNavigate={navigateBranch}
       />
 
       <StatusBar />

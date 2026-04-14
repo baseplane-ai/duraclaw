@@ -55,6 +55,13 @@ export interface UseCodingAgentResult {
   sendMessage: (content: string | ContentBlock[]) => Promise<unknown>
   rewind: (turnIndex: number) => Promise<{ ok: boolean; error?: string }>
   injectQaPair: (question: string, answer: string) => void
+  branchInfo: Map<string, { current: number; total: number; siblings: string[] }>
+  getBranches: (messageId: string) => Promise<SessionMessage[]>
+  resubmitMessage: (
+    messageId: string,
+    content: string,
+  ) => Promise<{ ok: boolean; leafId?: string; error?: string }>
+  navigateBranch: (messageId: string, direction: 'prev' | 'next') => Promise<void>
 }
 
 /**
@@ -73,6 +80,9 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   } | null>(null)
   const [kataState, setKataState] = useState<KataSessionState | null>(null)
   const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null)
+  const [branchInfo, setBranchInfo] = useState<
+    Map<string, { current: number; total: number; siblings: string[] }>
+  >(new Map())
   const hydratedRef = useRef(false)
   const cacheSeededRef = useRef(false)
   const knownEventUuidsRef = useRef<Set<string>>(new Set())
@@ -281,6 +291,8 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           createdAt: msg.createdAt,
         })
       }
+      // Refresh branch info after hydration
+      refreshBranchInfo(serverMessages).catch(() => {})
     }
   }
 
@@ -348,6 +360,95 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     [connection],
   )
 
+  const refreshBranchInfo = useCallback(
+    async (msgs: SessionMessage[]) => {
+      const newBranchInfo = new Map<
+        string,
+        { current: number; total: number; siblings: string[] }
+      >()
+
+      for (const msg of msgs) {
+        if (msg.role === 'user') {
+          try {
+            const msgIdx = msgs.findIndex((m) => m.id === msg.id)
+            const parentId = msgIdx > 0 ? msgs[msgIdx - 1].id : null
+
+            if (parentId) {
+              const siblings = (await connection.call('getBranches', [
+                parentId,
+              ])) as SessionMessage[]
+              const userSiblings = siblings.filter((s) => s.role === 'user')
+              if (userSiblings.length > 1) {
+                const currentIdx = userSiblings.findIndex((s) => s.id === msg.id)
+                newBranchInfo.set(msg.id, {
+                  current: currentIdx + 1,
+                  total: userSiblings.length,
+                  siblings: userSiblings.map((s) => s.id),
+                })
+              }
+            }
+          } catch {
+            // Skip — non-critical
+          }
+        }
+      }
+
+      setBranchInfo(newBranchInfo)
+    },
+    [connection],
+  )
+
+  const getBranches = useCallback(
+    async (messageId: string) => {
+      return connection.call('getBranches', [messageId]) as Promise<SessionMessage[]>
+    },
+    [connection],
+  )
+
+  const resubmitMessage = useCallback(
+    async (messageId: string, content: string) => {
+      const result = (await connection.call('resubmitMessage', [messageId, content])) as {
+        ok: boolean
+        leafId?: string
+        error?: string
+      }
+      if (result.ok && result.leafId) {
+        const newMessages = (await connection.call('getMessages', [
+          { session_hint: agentName, leafId: result.leafId },
+        ])) as SessionMessage[]
+        if (newMessages.length > 0) {
+          setMessages(newMessages)
+          await refreshBranchInfo(newMessages)
+        }
+      }
+      return result
+    },
+    [connection, agentName, refreshBranchInfo],
+  )
+
+  const navigateBranch = useCallback(
+    async (messageId: string, direction: 'prev' | 'next') => {
+      const info = branchInfo.get(messageId)
+      if (!info) return
+
+      const currentIdx = info.current - 1
+      const targetIdx = direction === 'prev' ? currentIdx - 1 : currentIdx + 1
+      if (targetIdx < 0 || targetIdx >= info.siblings.length) return
+
+      const targetSiblingId = info.siblings[targetIdx]
+
+      const branchMessages = (await connection.call('getMessages', [
+        { session_hint: agentName, leafId: targetSiblingId },
+      ])) as SessionMessage[]
+
+      if (branchMessages.length > 0) {
+        setMessages(branchMessages)
+        await refreshBranchInfo(branchMessages)
+      }
+    },
+    [connection, agentName, branchInfo, refreshBranchInfo],
+  )
+
   const sendMessage = useCallback(
     async (content: string | ContentBlock[]) => {
       const optimisticId = `usr-optimistic-${Date.now()}`
@@ -393,5 +494,9 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     sendMessage,
     rewind,
     injectQaPair,
+    branchInfo,
+    getBranches,
+    resubmitMessage,
+    navigateBranch,
   }
 }

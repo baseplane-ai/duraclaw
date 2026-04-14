@@ -65,6 +65,10 @@ function makeAgent(overrides: Partial<UseCodingAgentResult> = {}): UseCodingAgen
     sendMessage: vi.fn(),
     rewind: vi.fn(),
     injectQaPair: vi.fn(),
+    branchInfo: new Map(),
+    getBranches: vi.fn(),
+    resubmitMessage: vi.fn(),
+    navigateBranch: vi.fn(),
     ...overrides,
   }
 }
@@ -126,6 +130,16 @@ describe('AgentDetailView', () => {
     expect(store.contextUsage).toEqual({ totalTokens: 1000, maxTokens: 200000, percentage: 0.5 })
     expect(store.onStop).toBe(stopFn)
     expect(store.onInterrupt).toBe(interruptFn)
+  })
+
+  it('passes branchInfo and onBranchNavigate to ChatThread', () => {
+    const branchInfo = new Map([['usr-1', { current: 1, total: 2, siblings: ['usr-1', 'usr-3'] }]])
+    const navigateBranch = vi.fn()
+    const agent = makeAgent({ branchInfo, navigateBranch })
+    render(<AgentDetailView name="test" agent={agent} />)
+
+    const chatThread = screen.getByTestId('chat-thread')
+    expect(chatThread).toBeTruthy()
   })
 
   it('clears status bar store on unmount', () => {

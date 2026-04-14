@@ -22,10 +22,45 @@ import {
   ToolInput,
   ToolOutput,
 } from '@duraclaw/ai-elements'
-import { FileIcon, HistoryIcon } from 'lucide-react'
+import { ChevronLeftIcon, ChevronRightIcon, FileIcon, HistoryIcon } from 'lucide-react'
 import { Skeleton } from '~/components/ui/skeleton'
 import type { GateResponse, SessionMessage, SessionMessagePart, SessionState } from '~/lib/types'
 import { GateResolver } from './GateResolver'
+
+interface MessageBranchProps {
+  current: number
+  total: number
+  onNavigate: (direction: 'prev' | 'next') => void
+}
+
+function MessageBranch({ current, total, onNavigate }: MessageBranchProps) {
+  if (total <= 1) return null
+  return (
+    <div className="flex items-center gap-1 text-xs text-muted-foreground">
+      <button
+        type="button"
+        onClick={() => onNavigate('prev')}
+        disabled={current <= 1}
+        className="rounded p-0.5 hover:bg-accent disabled:opacity-30"
+        aria-label="Previous branch"
+      >
+        <ChevronLeftIcon className="size-3.5" />
+      </button>
+      <span className="min-w-[2ch] text-center">
+        {current}/{total}
+      </span>
+      <button
+        type="button"
+        onClick={() => onNavigate('next')}
+        disabled={current >= total}
+        className="rounded p-0.5 hover:bg-accent disabled:opacity-30"
+        aria-label="Next branch"
+      >
+        <ChevronRightIcon className="size-3.5" />
+      </button>
+    </div>
+  )
+}
 
 interface ChatThreadProps {
   messages: SessionMessage[]
@@ -37,6 +72,8 @@ interface ChatThreadProps {
   readOnly?: boolean
   onQaResolved?: (question: string, answer: string) => void
   onRewind?: (turnIndex: number) => void
+  branchInfo?: Map<string, { current: number; total: number; siblings: string[] }>
+  onBranchNavigate?: (messageId: string, direction: 'prev' | 'next') => void
 }
 
 function renderPart(
@@ -133,6 +170,8 @@ export function ChatThread({
   readOnly,
   onQaResolved,
   onRewind,
+  branchInfo,
+  onBranchNavigate,
 }: ChatThreadProps) {
   return (
     <Conversation className="min-h-0 flex-1">
@@ -191,10 +230,22 @@ export function ChatThread({
 
             if (msg.role === 'user') {
               const textPart = msg.parts.find((p) => p.type === 'text')
+              const branch = branchInfo?.get(msg.id)
               return (
                 <div key={msg.id} className="group relative" data-turn-index={turnIndex}>
                   <Message from="user">
-                    <MessageContent>{textPart?.text || ''}</MessageContent>
+                    <MessageContent>
+                      <div className="flex items-start justify-between gap-2">
+                        <span>{textPart?.text || ''}</span>
+                        {branch && onBranchNavigate && (
+                          <MessageBranch
+                            current={branch.current}
+                            total={branch.total}
+                            onNavigate={(dir) => onBranchNavigate(msg.id, dir)}
+                          />
+                        )}
+                      </div>
+                    </MessageContent>
                   </Message>
                   {rewindButton}
                 </div>
