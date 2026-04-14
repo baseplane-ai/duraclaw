@@ -200,7 +200,7 @@ export class ProjectRegistry extends DurableObject<Env> {
          kata_issue,
          kata_phase
        FROM sessions
-       ORDER BY COALESCE(last_activity, created_at) DESC`,
+       ORDER BY last_activity IS NULL, last_activity DESC`,
       )
       .toArray() as unknown as SessionSummary[]
   }
@@ -270,17 +270,12 @@ export class ProjectRegistry extends DurableObject<Env> {
 
   async backfillLastActivity(): Promise<number> {
     await this.ensureInit()
-    this.ctx.storage.sql.exec(
-      `UPDATE sessions SET created_at = updated_at WHERE created_at IS NULL OR created_at = ''`,
-    )
-    this.ctx.storage.sql.exec(
-      `UPDATE sessions SET last_activity = created_at WHERE last_activity IS NULL`,
-    )
-    // Return count of rows with last_activity still null
-    const remaining = this.ctx.storage.sql
-      .exec(`SELECT COUNT(*) as cnt FROM sessions WHERE last_activity IS NULL`)
-      .toArray() as { cnt: number }[]
-    return remaining[0]?.cnt ?? 0
+    // Clear bad backfills — real values come from gateway sync only
+    this.ctx.storage.sql.exec(`UPDATE sessions SET last_activity = NULL`)
+    const total = this.ctx.storage.sql.exec(`SELECT COUNT(*) as cnt FROM sessions`).toArray() as {
+      cnt: number
+    }[]
+    return total[0]?.cnt ?? 0
   }
 
   async archiveSession(sessionId: string): Promise<void> {
@@ -321,7 +316,7 @@ export class ProjectRegistry extends DurableObject<Env> {
          sdk_session_id
        FROM sessions
        WHERE (prompt LIKE ? OR project LIKE ? OR id LIKE ? OR title LIKE ? OR summary LIKE ? OR agent LIKE ? OR sdk_session_id LIKE ?)
-       ORDER BY COALESCE(last_activity, created_at) DESC`,
+       ORDER BY last_activity IS NULL, last_activity DESC`,
         pattern,
         pattern,
         pattern,
@@ -442,7 +437,7 @@ export class ProjectRegistry extends DurableObject<Env> {
          sdk_session_id
        FROM sessions
        WHERE project = ?
-       ORDER BY COALESCE(last_activity, created_at) DESC`,
+       ORDER BY last_activity IS NULL, last_activity DESC`,
         project,
       )
       .toArray() as unknown as SessionSummary[]

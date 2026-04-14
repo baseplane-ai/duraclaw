@@ -89,7 +89,7 @@ const server = Bun.serve<WsData>({
     // GET /sessions/discover — discover sessions from all sources across all projects
     if (req.method === 'GET' && path === '/sessions/discover') {
       const since = url.searchParams.get('since') ?? undefined
-      const limit = Number(url.searchParams.get('limit') ?? 50)
+      const limit = Number(url.searchParams.get('limit') ?? 200)
       const projectFilter = url.searchParams.get('project') ?? undefined
 
       // Discover all projects

@@ -17,7 +17,7 @@ interface SessionInfoFile {
  * List SDK sessions found on disk for a project.
  * Uses the SDK's listSessions first (catches forked sessions), with disk scan as fallback.
  */
-export async function listSdkSessions(projectPath: string, limit = 20): Promise<SdkSessionInfo[]> {
+export async function listSdkSessions(projectPath: string, limit = 200): Promise<SdkSessionInfo[]> {
   // Try SDK listSessions first — it handles forked sessions and internal session storage
   try {
     const { listSessions } = await import('@anthropic-ai/claude-agent-sdk')

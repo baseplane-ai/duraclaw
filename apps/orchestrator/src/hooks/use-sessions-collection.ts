@@ -37,8 +37,12 @@ export function useSessionsCollection(): UseSessionsCollectionResult {
     return ([...data] as SessionRecord[])
       .filter((s) => !s.archived)
       .sort((a, b) => {
-        const aTime = new Date(a.last_activity ?? a.created_at).getTime()
-        const bTime = new Date(b.last_activity ?? b.created_at).getTime()
+        // Sessions with real last_activity (from gateway) sort first, NULLs last
+        const aHas = !!a.last_activity
+        const bHas = !!b.last_activity
+        if (aHas !== bHas) return aHas ? -1 : 1
+        const aTime = new Date(a.last_activity ?? a.updated_at).getTime()
+        const bTime = new Date(b.last_activity ?? b.updated_at).getTime()
         return bTime - aTime
       })
   }, [data])

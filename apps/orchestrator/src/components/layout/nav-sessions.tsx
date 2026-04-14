@@ -109,6 +109,16 @@ function SessionContextMenu({
   )
 }
 
+/** Sort by last_activity DESC, NULLs last (fall back to updated_at within NULL group) */
+function byActivity(a: SessionRecord, b: SessionRecord): number {
+  const aHas = !!a.last_activity
+  const bHas = !!b.last_activity
+  if (aHas !== bHas) return aHas ? -1 : 1
+  const aTime = new Date(a.last_activity ?? a.updated_at).getTime()
+  const bTime = new Date(b.last_activity ?? b.updated_at).getTime()
+  return bTime - aTime
+}
+
 // ── Main component ─────────────────────────────────────────────────
 
 export function NavSessions() {
@@ -121,13 +131,7 @@ export function NavSessions() {
   const visible = sessions.filter((s) => !s.archived)
 
   // Recent: last 5 sessions by last_activity (gateway-sourced timestamp)
-  const recent = [...visible]
-    .sort(
-      (a, b) =>
-        new Date(b.last_activity ?? b.created_at).getTime() -
-        new Date(a.last_activity ?? a.created_at).getTime(),
-    )
-    .slice(0, 5)
+  const recent = [...visible].sort(byActivity).slice(0, 5)
 
   // Projects: group all visible sessions, sorted by last_activity DESC within each group
   const groups = new Map<string, SessionRecord[]>()
@@ -137,11 +141,7 @@ export function NavSessions() {
     groups.get(key)?.push(session)
   }
   for (const [, projectSessions] of groups) {
-    projectSessions.sort(
-      (a, b) =>
-        new Date(b.last_activity ?? b.created_at).getTime() -
-        new Date(a.last_activity ?? a.created_at).getTime(),
-    )
+    projectSessions.sort(byActivity)
   }
 
   const handleSelect = useCallback(
