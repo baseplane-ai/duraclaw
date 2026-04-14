@@ -46,6 +46,7 @@ export interface UseCodingAgentResult {
   kataState: KataSessionState | null
   contextUsage: ContextUsage | null
   wsReadyState: number
+  isConnecting: boolean
   spawn: (config: SpawnConfig) => Promise<unknown>
   stop: (reason?: string) => Promise<unknown>
   abort: (reason?: string) => Promise<unknown>
@@ -418,6 +419,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   }, [])
 
   const wsReadyState = state ? 1 : 0
+  const isConnecting = !hydratedRef.current
 
   const rewind = useCallback(
     async (turnIndex: number) => {
@@ -477,6 +479,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     kataState,
     contextUsage,
     wsReadyState,
+    isConnecting,
     spawn,
     stop,
     abort,

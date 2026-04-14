@@ -24,6 +24,7 @@ export function AgentDetailView({ name: _name, agent }: AgentDetailViewProps) {
     kataState,
     contextUsage,
     wsReadyState,
+    isConnecting,
     stop,
     interrupt,
     resolveGate,
@@ -64,6 +65,7 @@ export function AgentDetailView({ name: _name, agent }: AgentDetailViewProps) {
         gate={state?.gate ?? null}
         status={status}
         state={state}
+        isConnecting={isConnecting}
         onResolveGate={resolveGate}
         readOnly={isTerminal}
         streamingContent={isTerminal ? undefined : streamingContent}

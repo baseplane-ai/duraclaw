@@ -22,6 +22,7 @@ import {
   ToolCallListHeader,
 } from '@duraclaw/ai-elements'
 import { FileIcon, HistoryIcon } from 'lucide-react'
+import { Skeleton } from '~/components/ui/skeleton'
 import type { ChatMessage, GateResponse, SessionState } from '~/lib/types'
 import { GateResolver } from './GateResolver'
 import { StreamingText } from './StreamingText'
@@ -32,6 +33,7 @@ interface ChatThreadProps {
   gate: SessionState['gate']
   status: SessionState['status']
   state: SessionState | null
+  isConnecting?: boolean
   onResolveGate: (gateId: string, response: GateResponse) => Promise<unknown>
   readOnly?: boolean
   streamingContent?: string
@@ -44,6 +46,7 @@ export function ChatThread({
   gate,
   status,
   state: _state,
+  isConnecting,
   onResolveGate,
   readOnly,
   streamingContent,
@@ -53,7 +56,25 @@ export function ChatThread({
   return (
     <Conversation className="min-h-0 flex-1">
       <ConversationContent>
-        {messages.length === 0 ? (
+        {messages.length === 0 && isConnecting ? (
+          <div className="space-y-6 p-6">
+            <div className="flex items-start gap-3">
+              <Skeleton className="size-8 rounded-full" />
+              <div className="flex-1 space-y-2">
+                <Skeleton className="h-4 w-3/4" />
+                <Skeleton className="h-4 w-1/2" />
+              </div>
+            </div>
+            <div className="flex items-start gap-3">
+              <Skeleton className="size-8 rounded-full" />
+              <div className="flex-1 space-y-2">
+                <Skeleton className="h-4 w-5/6" />
+                <Skeleton className="h-4 w-2/3" />
+                <Skeleton className="h-4 w-1/3" />
+              </div>
+            </div>
+          </div>
+        ) : messages.length === 0 ? (
           <ConversationEmptyState
             title="No messages yet"
             description="The session will appear here as it runs"
