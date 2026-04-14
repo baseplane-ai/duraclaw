@@ -23,17 +23,33 @@ export async function listSdkSessions(projectPath: string, limit = 20): Promise<
     const { listSessions } = await import('@anthropic-ai/claude-agent-sdk')
     const sdkSessions = await listSessions({ dir: projectPath })
     if (Array.isArray(sdkSessions) && sdkSessions.length > 0) {
-      const results: SdkSessionInfo[] = sdkSessions.map((s: any) => ({
-        session_id: s.sessionId ?? s.session_id ?? '',
-        user: s.user ?? '',
-        branch: s.branch ?? '',
-        project_dir: s.projectDir ?? s.project_dir ?? projectPath,
-        workflow_id: s.workflowId ?? s.workflow_id ?? '',
-        started_at: s.startedAt ?? s.started_at ?? '',
-        last_activity: s.lastActivity ?? s.last_activity ?? s.startedAt ?? '',
-        summary: s.summary ?? '',
-        tag: s.tag ?? null,
-      }))
+      const sessionsDir = nodePath.join(projectPath, '.claude', 'sessions')
+      const results: SdkSessionInfo[] = await Promise.all(
+        sdkSessions.map(async (s: any) => {
+          const sessionId = s.sessionId ?? s.session_id ?? ''
+          // SDK may not provide lastActivity — fall back to session dir mtime
+          let lastActivity = s.lastActivity ?? s.last_activity ?? ''
+          if (!lastActivity && sessionId) {
+            try {
+              const dirStat = await stat(nodePath.join(sessionsDir, sessionId))
+              lastActivity = dirStat.mtime.toISOString()
+            } catch {
+              lastActivity = s.startedAt ?? s.started_at ?? ''
+            }
+          }
+          return {
+            session_id: sessionId,
+            user: s.user ?? '',
+            branch: s.branch ?? '',
+            project_dir: s.projectDir ?? s.project_dir ?? projectPath,
+            workflow_id: s.workflowId ?? s.workflow_id ?? '',
+            started_at: s.startedAt ?? s.started_at ?? '',
+            last_activity: lastActivity,
+            summary: s.summary ?? '',
+            tag: s.tag ?? null,
+          }
+        }),
+      )
       results.sort((a, b) => (b.last_activity > a.last_activity ? 1 : -1))
       return results.slice(0, limit)
     }

@@ -99,8 +99,9 @@ export class ProjectRegistry extends DurableObject<Env> {
     await this.ensureInit()
     const now = new Date().toISOString()
     this.ctx.storage.sql.exec(
-      `UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?`,
+      `UPDATE sessions SET status = ?, updated_at = ?, last_activity = ? WHERE id = ?`,
       status,
+      now,
       now,
       sessionId,
     )
@@ -123,11 +124,12 @@ export class ProjectRegistry extends DurableObject<Env> {
     await this.ensureInit()
     const now = new Date().toISOString()
     this.ctx.storage.sql.exec(
-      `UPDATE sessions SET summary = ?, duration_ms = ?, total_cost_usd = ?, num_turns = ?, updated_at = ? WHERE id = ?`,
+      `UPDATE sessions SET summary = ?, duration_ms = ?, total_cost_usd = ?, num_turns = ?, updated_at = ?, last_activity = ? WHERE id = ?`,
       result.summary ?? null,
       result.duration_ms ?? null,
       result.total_cost_usd ?? null,
       result.num_turns ?? null,
+      now,
       now,
       sessionId,
     )
