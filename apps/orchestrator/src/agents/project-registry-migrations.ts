@@ -150,8 +150,14 @@ export const REGISTRY_MIGRATIONS: Migration[] = [
       } catch {
         /* Column already exists */
       }
-      // Backfill from updated_at for existing rows
-      sql.exec(`UPDATE sessions SET last_activity = updated_at WHERE last_activity IS NULL`)
+      // Leave last_activity NULL — real values come from gateway discovery sync
+    },
+  },
+  {
+    version: 10,
+    description: 'Clear backfilled last_activity — real values come from gateway sync',
+    up: (sql) => {
+      sql.exec(`UPDATE sessions SET last_activity = NULL`)
     },
   },
 ]
