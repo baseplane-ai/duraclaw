@@ -391,6 +391,12 @@ export function createApiApp() {
     return c.json(result)
   })
 
+  app.post('/api/sessions/backfill', async (c) => {
+    const registry = getRegistry(c)
+    const remaining = await registry.backfillLastActivity()
+    return c.json({ ok: true, remaining_null: remaining })
+  })
+
   app.post('/api/sessions/sync', async (c) => {
     const userId = c.get('userId')
 

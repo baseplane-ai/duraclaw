@@ -200,7 +200,7 @@ export class ProjectRegistry extends DurableObject<Env> {
          kata_issue,
          kata_phase
        FROM sessions
-       ORDER BY COALESCE(last_activity, updated_at) DESC`,
+       ORDER BY COALESCE(last_activity, created_at) DESC`,
       )
       .toArray() as unknown as SessionSummary[]
   }
@@ -268,6 +268,21 @@ export class ProjectRegistry extends DurableObject<Env> {
     )
   }
 
+  async backfillLastActivity(): Promise<number> {
+    await this.ensureInit()
+    this.ctx.storage.sql.exec(
+      `UPDATE sessions SET created_at = updated_at WHERE created_at IS NULL OR created_at = ''`,
+    )
+    this.ctx.storage.sql.exec(
+      `UPDATE sessions SET last_activity = created_at WHERE last_activity IS NULL`,
+    )
+    // Return count of rows with last_activity still null
+    const remaining = this.ctx.storage.sql
+      .exec(`SELECT COUNT(*) as cnt FROM sessions WHERE last_activity IS NULL`)
+      .toArray() as { cnt: number }[]
+    return remaining[0]?.cnt ?? 0
+  }
+
   async archiveSession(sessionId: string): Promise<void> {
     await this.ensureInit()
     const now = new Date().toISOString()
@@ -306,7 +321,7 @@ export class ProjectRegistry extends DurableObject<Env> {
          sdk_session_id
        FROM sessions
        WHERE (prompt LIKE ? OR project LIKE ? OR id LIKE ? OR title LIKE ? OR summary LIKE ? OR agent LIKE ? OR sdk_session_id LIKE ?)
-       ORDER BY COALESCE(last_activity, updated_at) DESC`,
+       ORDER BY COALESCE(last_activity, created_at) DESC`,
         pattern,
         pattern,
         pattern,
@@ -427,7 +442,7 @@ export class ProjectRegistry extends DurableObject<Env> {
          sdk_session_id
        FROM sessions
        WHERE project = ?
-       ORDER BY COALESCE(last_activity, updated_at) DESC`,
+       ORDER BY COALESCE(last_activity, created_at) DESC`,
         project,
       )
       .toArray() as unknown as SessionSummary[]
@@ -458,14 +473,13 @@ export class ProjectRegistry extends DurableObject<Env> {
         this.ctx.storage.sql.exec(
           `UPDATE sessions SET
             updated_at = CASE WHEN ? > COALESCE(updated_at, '') THEN ? ELSE updated_at END,
-            last_activity = CASE WHEN ? > COALESCE(last_activity, '') THEN ? ELSE last_activity END,
+            last_activity = ?,
             summary = COALESCE(?, summary),
             tag = COALESCE(?, tag),
             title = COALESCE(?, title),
             message_count = COALESCE(?, message_count),
             agent = COALESCE(?, agent)
           WHERE sdk_session_id = ?`,
-          s.last_activity,
           s.last_activity,
           s.last_activity,
           s.last_activity,
@@ -505,7 +519,7 @@ export class ProjectRegistry extends DurableObject<Env> {
             sdk_session_id = ?,
             origin = CASE WHEN origin = 'duraclaw' THEN origin ELSE 'discovered' END,
             agent = ?,
-            last_activity = CASE WHEN ? > COALESCE(last_activity, '') THEN ? ELSE last_activity END,
+            last_activity = ?,
             summary = COALESCE(?, summary),
             tag = COALESCE(?, tag),
             title = COALESCE(?, title),
@@ -513,7 +527,6 @@ export class ProjectRegistry extends DurableObject<Env> {
           WHERE id = ?`,
           s.sdk_session_id,
           s.agent,
-          s.last_activity,
           s.last_activity,
           s.summary || null,
           s.tag,

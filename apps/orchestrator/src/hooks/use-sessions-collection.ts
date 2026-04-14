@@ -37,8 +37,8 @@ export function useSessionsCollection(): UseSessionsCollectionResult {
     return ([...data] as SessionRecord[])
       .filter((s) => !s.archived)
       .sort((a, b) => {
-        const aTime = new Date(a.last_activity ?? a.updated_at).getTime()
-        const bTime = new Date(b.last_activity ?? b.updated_at).getTime()
+        const aTime = new Date(a.last_activity ?? a.created_at).getTime()
+        const bTime = new Date(b.last_activity ?? b.created_at).getTime()
         return bTime - aTime
       })
   }, [data])

@@ -124,8 +124,8 @@ export function NavSessions() {
   const recent = [...visible]
     .sort(
       (a, b) =>
-        new Date(b.last_activity ?? b.updated_at).getTime() -
-        new Date(a.last_activity ?? a.updated_at).getTime(),
+        new Date(b.last_activity ?? b.created_at).getTime() -
+        new Date(a.last_activity ?? a.created_at).getTime(),
     )
     .slice(0, 5)
 
@@ -139,8 +139,8 @@ export function NavSessions() {
   for (const [, projectSessions] of groups) {
     projectSessions.sort(
       (a, b) =>
-        new Date(b.last_activity ?? b.updated_at).getTime() -
-        new Date(a.last_activity ?? a.updated_at).getTime(),
+        new Date(b.last_activity ?? b.created_at).getTime() -
+        new Date(a.last_activity ?? a.created_at).getTime(),
     )
   }
 

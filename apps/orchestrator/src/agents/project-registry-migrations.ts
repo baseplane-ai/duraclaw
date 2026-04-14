@@ -160,4 +160,16 @@ export const REGISTRY_MIGRATIONS: Migration[] = [
       sql.exec(`UPDATE sessions SET last_activity = NULL`)
     },
   },
+  {
+    version: 11,
+    description: 'Backfill empty created_at and null last_activity',
+    up: (sql) => {
+      sql.exec(
+        `UPDATE sessions SET created_at = updated_at WHERE created_at IS NULL OR created_at = ''`,
+      )
+      // For sessions without gateway last_activity, use created_at as baseline
+      // (real values will be overwritten by next gateway sync)
+      sql.exec(`UPDATE sessions SET last_activity = created_at WHERE last_activity IS NULL`)
+    },
+  },
 ]
