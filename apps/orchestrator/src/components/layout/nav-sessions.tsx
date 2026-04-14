@@ -148,7 +148,7 @@ export function NavSessions() {
     (session: SessionRecord) => {
       addTab(session.id, getDisplayName(session))
       setOpenMobile(false)
-      navigate({ to: '/', search: { session: session.id } })
+      navigate({ to: '/session/$id', params: { id: session.id } })
     },
     [addTab, setOpenMobile, navigate],
   )

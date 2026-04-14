@@ -29,10 +29,17 @@ function AgentOrchContent() {
   const { sessions, updateSession } = useSessionsCollection()
   const search = useSearch({ from: '/_authenticated/' })
   const navigate = useNavigate()
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
-    (search as { session?: string }).session ?? null,
-  )
+  const searchSessionId = (search as { session?: string }).session ?? null
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(searchSessionId)
   const [spawnConfig, setSpawnConfig] = useState<SpawnConfig | null>(null)
+
+  // Sync selectedSessionId when URL search param changes (e.g. sidebar navigation)
+  useEffect(() => {
+    if (searchSessionId && searchSessionId !== selectedSessionId) {
+      setSpawnConfig(null)
+      setSelectedSessionId(searchSessionId)
+    }
+  }, [searchSessionId, selectedSessionId])
   const [projects, setProjects] = useState<Array<{ name: string; path: string }>>([])
   const [projectsLoading, setProjectsLoading] = useState(true)
 
