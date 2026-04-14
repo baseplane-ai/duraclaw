@@ -13,10 +13,10 @@ import { type CachedMessage, messagesCollection } from '~/db/messages-collection
 import { sessionsCollection } from '~/db/sessions-collection'
 import { useMessagesCollection } from '~/hooks/use-messages-collection'
 import type {
-  ChatMessage,
   ContentBlock,
   GateResponse,
   KataSessionState,
+  SessionMessage,
   SessionState,
   SpawnConfig,
 } from '~/lib/types'
@@ -40,8 +40,7 @@ export interface ContextUsage {
 export interface UseCodingAgentResult {
   state: SessionState | null
   events: Array<{ ts: string; type: string; data?: unknown }>
-  messages: ChatMessage[]
-  streamingContent: string
+  messages: SessionMessage[]
   sessionResult: { total_cost_usd: number; duration_ms: number } | null
   kataState: KataSessionState | null
   contextUsage: ContextUsage | null
@@ -67,8 +66,7 @@ export interface UseCodingAgentResult {
 export function useCodingAgent(agentName: string): UseCodingAgentResult {
   const [state, setState] = useState<SessionState | null>(null)
   const [events, setEvents] = useState<Array<{ ts: string; type: string; data?: unknown }>>([])
-  const [messages, setMessages] = useState<ChatMessage[]>([])
-  const [streamingContent, setStreamingContent] = useState('')
+  const [messages, setMessages] = useState<SessionMessage[]>([])
   const [sessionResult, setSessionResult] = useState<{
     total_cost_usd: number
     duration_ms: number
@@ -93,7 +91,6 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     setState(null)
     setEvents([])
     setMessages([])
-    setStreamingContent('')
     setSessionResult(null)
     setKataState(null)
     setContextUsage(null)
@@ -123,16 +120,14 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     if (cachedMessages.length > 0 && !cacheSeededRef.current && !hydratedRef.current) {
       cacheSeededRef.current = true
       for (const msg of cachedMessages) {
-        if (msg.event_uuid) knownEventUuidsRef.current.add(msg.event_uuid)
+        knownEventUuidsRef.current.add(msg.id)
       }
       setMessages(
         cachedMessages.map((m) => ({
           id: m.id,
           role: m.role,
-          type: m.type,
-          content: m.content,
-          event_uuid: m.event_uuid,
-          created_at: m.created_at,
+          parts: m.parts,
+          createdAt: m.createdAt ? new Date(m.createdAt as string) : undefined,
         })),
       )
     }
@@ -170,6 +165,61 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     onMessage: (message: MessageEvent) => {
       try {
         const parsed = JSON.parse(typeof message.data === 'string' ? message.data : '')
+
+        // NEW: Handle SessionMessage wire format (single message upsert)
+        if (parsed.type === 'message' && parsed.message) {
+          const msg = parsed.message as SessionMessage
+          setMessages((prev) => {
+            // Check if this is a server echo of an optimistic user message
+            if (msg.role === 'user') {
+              const withoutOptimistic = prev.filter((m) => !optimisticIdsRef.current.has(m.id))
+              const idx = withoutOptimistic.findIndex((m) => m.id === msg.id)
+              if (idx !== -1) {
+                const updated = [...withoutOptimistic]
+                updated[idx] = msg
+                return updated
+              }
+              return [...withoutOptimistic, msg]
+            }
+            // For non-user messages, upsert by id
+            const idx = prev.findIndex((m) => m.id === msg.id)
+            if (idx !== -1) {
+              const updated = [...prev]
+              updated[idx] = msg
+              return updated
+            }
+            return [...prev, msg]
+          })
+          // Cache-behind write
+          cacheMessage({
+            id: msg.id,
+            role: msg.role,
+            parts: msg.parts,
+            createdAt: msg.createdAt,
+          })
+          return
+        }
+
+        // NEW: Handle bulk message replay on connect
+        if (parsed.type === 'messages' && Array.isArray(parsed.messages)) {
+          const msgs = parsed.messages as SessionMessage[]
+          setMessages(msgs)
+          for (const msg of msgs) {
+            knownEventUuidsRef.current.add(msg.id)
+          }
+          hydratedRef.current = true
+          for (const msg of msgs) {
+            cacheMessage({
+              id: msg.id,
+              role: msg.role,
+              parts: msg.parts,
+              createdAt: msg.createdAt,
+            })
+          }
+          return
+        }
+
+        // Handle legacy gateway_event format (non-message events only)
         if (parsed.type === 'gateway_event' && parsed.event) {
           const event = parsed.event as GatewayEvent & { uuid?: string; content?: unknown[] }
           setEvents((prev) => [
@@ -205,111 +255,6 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
               })
             }
           }
-
-          // Accumulate streaming text from partial_assistant deltas
-          if (event.type === 'partial_assistant' && Array.isArray(event.content)) {
-            setStreamingContent((prev) => {
-              let delta = ''
-              for (const block of event.content as unknown[]) {
-                const b = block as Record<string, unknown>
-                if (typeof b.text === 'string') delta += b.text
-                else if (typeof b.delta === 'string') delta += b.delta
-                else if (b.delta && typeof (b.delta as Record<string, unknown>).text === 'string') {
-                  delta += (b.delta as Record<string, unknown>).text
-                }
-              }
-              return prev + delta
-            })
-          }
-
-          // Render file_changed events as transient messages
-          if (event.type === 'file_changed') {
-            const fileEvent = event as { path?: string; tool?: string }
-            setMessages((prev) => [
-              ...prev,
-              {
-                id: `file-${Date.now()}-${Math.random()}`,
-                role: 'tool' as const,
-                type: 'file_changed',
-                content: JSON.stringify({ path: fileEvent.path, tool: fileEvent.tool }),
-              },
-            ])
-          }
-
-          // Build messages from events — dedup against hydrated messages
-          if (event.type === 'assistant' && event.uuid) {
-            setStreamingContent('') // Clear streaming on final content
-            if (knownEventUuidsRef.current.has(event.uuid)) return
-            const contentStr = JSON.stringify(event.content)
-            setMessages((prev) => {
-              if (prev.some((m) => m.event_uuid === event.uuid)) return prev
-              return [
-                ...prev,
-                {
-                  id: event.uuid as string,
-                  role: 'assistant',
-                  type: 'text',
-                  content: contentStr,
-                  event_uuid: event.uuid,
-                },
-              ]
-            })
-            // Cache-behind write
-            cacheMessage({
-              id: event.uuid as string,
-              role: 'assistant',
-              type: 'text',
-              content: contentStr,
-              event_uuid: event.uuid,
-              created_at: new Date().toISOString(),
-            })
-          } else if (event.type === 'tool_result' && event.uuid) {
-            if (knownEventUuidsRef.current.has(event.uuid)) return
-            const contentStr = JSON.stringify(event.content)
-            setMessages((prev) => {
-              if (prev.some((m) => m.event_uuid === event.uuid)) return prev
-              return [
-                ...prev,
-                {
-                  id: `tool-${event.uuid}`,
-                  role: 'tool',
-                  type: 'tool_result',
-                  content: contentStr,
-                  event_uuid: event.uuid,
-                },
-              ]
-            })
-            // Cache-behind write
-            cacheMessage({
-              id: `tool-${event.uuid}`,
-              role: 'tool',
-              type: 'tool_result',
-              content: contentStr,
-              event_uuid: event.uuid,
-              created_at: new Date().toISOString(),
-            })
-          }
-        } else if (parsed.type === 'user_message') {
-          // User message broadcast from DO — skip if we already added it optimistically
-          const broadcastContent = JSON.stringify(parsed.content)
-          setMessages((prev) => {
-            const isDuplicate = prev.some(
-              (m) =>
-                m.role === 'user' &&
-                optimisticIdsRef.current.has(String(m.id)) &&
-                m.content === broadcastContent,
-            )
-            if (isDuplicate) return prev
-            return [
-              ...prev,
-              {
-                id: `user-${Date.now()}`,
-                role: 'user',
-                type: 'text',
-                content: broadcastContent,
-              },
-            ]
-          })
         }
       } catch {
         // Ignore non-JSON messages (state sync handled by onStateUpdate)
@@ -317,54 +262,23 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     },
   })
 
-  /** Fetch persisted messages with pagination, populate messages state and dedup set. */
+  /** Fetch persisted messages, populate messages state and dedup set. */
   async function hydrateMessages(conn: typeof connection) {
-    const PAGE_LIMIT = 200
-    let allMessages: ChatMessage[] = []
-    let offset = 0
-    let batch: ChatMessage[]
-
-    // Pass session ID as a hint so the DO can self-init for discovered sessions
     const hints = { session_hint: agentName }
+    const serverMessages = (await conn.call('getMessages', [{ ...hints }])) as SessionMessage[]
 
-    do {
-      batch = (await conn.call('getMessages', [
-        { offset, limit: PAGE_LIMIT, ...hints },
-      ])) as ChatMessage[]
-      allMessages = [...allMessages, ...batch]
-      offset += batch.length
-    } while (batch.length >= PAGE_LIMIT)
-
-    if (allMessages.length > 0) {
-      for (const msg of allMessages) {
-        if (msg.event_uuid) {
-          knownEventUuidsRef.current.add(msg.event_uuid)
-        }
+    if (serverMessages.length > 0) {
+      for (const msg of serverMessages) {
+        knownEventUuidsRef.current.add(msg.id)
       }
-      setMessages((prev) => {
-        if (prev.length === 0) return allMessages
-        const hydratedIds = new Set(allMessages.map((m) => m.event_uuid).filter(Boolean))
-        const hydratedUserContent = new Set(
-          allMessages.filter((m) => m.role === 'user').map((m) => m.content),
-        )
-        const newRealtime = prev.filter((m) => {
-          if (m.event_uuid) return !hydratedIds.has(m.event_uuid)
-          if (m.role === 'user') return !hydratedUserContent.has(m.content)
-          return true
-        })
-        return [...allMessages, ...newRealtime]
-      })
+      setMessages(serverMessages)
       // Write hydrated messages to local collection for future cache-first loads
-      for (const msg of allMessages) {
-        const id =
-          msg.event_uuid || (msg.role === 'user' ? `hydrated-user-${msg.id}` : String(msg.id))
+      for (const msg of serverMessages) {
         cacheMessage({
-          id,
+          id: msg.id,
           role: msg.role,
-          type: msg.type,
-          content: msg.content,
-          event_uuid: msg.event_uuid ?? undefined,
-          created_at: msg.created_at ?? new Date().toISOString(),
+          parts: msg.parts,
+          createdAt: msg.createdAt,
         })
       }
     }
@@ -411,9 +325,8 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       ...prev,
       {
         id: `qa-${Date.now()}`,
-        role: 'qa_pair' as const,
-        type: 'qa_pair',
-        content: JSON.stringify({ question, answer }),
+        role: 'qa_pair',
+        parts: [{ type: 'text', text: `Q: ${question}\nA: ${answer}` }],
       },
     ])
   }, [])
@@ -437,26 +350,18 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
 
   const sendMessage = useCallback(
     async (content: string | ContentBlock[]) => {
-      const optimisticId = `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-      const contentStr = JSON.stringify(content)
+      const optimisticId = `usr-optimistic-${Date.now()}`
+      const textContent = typeof content === 'string' ? content : JSON.stringify(content)
       optimisticIdsRef.current.add(optimisticId)
       setMessages((prev) => [
         ...prev,
         {
           id: optimisticId,
           role: 'user',
-          type: 'text',
-          content: contentStr,
+          parts: [{ type: 'text', text: textContent }],
+          createdAt: new Date(),
         },
       ])
-      // Cache-behind write for user message
-      cacheMessage({
-        id: optimisticId,
-        role: 'user',
-        type: 'text',
-        content: contentStr,
-        created_at: new Date().toISOString(),
-      })
       const result = (await connection.call('sendMessage', [content])) as {
         ok: boolean
         error?: string
@@ -467,14 +372,13 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       }
       return result
     },
-    [connection, cacheMessage],
+    [connection],
   )
 
   return {
     state,
     events,
     messages,
-    streamingContent,
     sessionResult,
     kataState,
     contextUsage,

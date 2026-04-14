@@ -1,8 +1,7 @@
 /**
  * ChatThread — Renders the CodingAgent conversation as a chat thread.
  *
- * Transforms raw gateway events (assistant, tool_result, user_message)
- * into a scrollable chat UI using shared ai-elements components.
+ * Renders SessionMessage parts directly using shared ai-elements components.
  */
 
 import {
@@ -25,22 +24,103 @@ import {
 } from '@duraclaw/ai-elements'
 import { FileIcon, HistoryIcon } from 'lucide-react'
 import { Skeleton } from '~/components/ui/skeleton'
-import type { ChatMessage, GateResponse, SessionState } from '~/lib/types'
+import type { GateResponse, SessionMessage, SessionMessagePart, SessionState } from '~/lib/types'
 import { GateResolver } from './GateResolver'
-import { StreamingText } from './StreamingText'
-import type { ContentBlock } from './use-coding-agent'
 
 interface ChatThreadProps {
-  messages: ChatMessage[]
+  messages: SessionMessage[]
   gate: SessionState['gate']
   status: SessionState['status']
   state: SessionState | null
   isConnecting?: boolean
   onResolveGate: (gateId: string, response: GateResponse) => Promise<unknown>
   readOnly?: boolean
-  streamingContent?: string
   onQaResolved?: (question: string, answer: string) => void
   onRewind?: (turnIndex: number) => void
+}
+
+function renderPart(
+  part: SessionMessagePart,
+  index: number,
+  gate: SessionState['gate'],
+  status: SessionState['status'],
+  onResolveGate: (gateId: string, response: GateResponse) => Promise<unknown>,
+  readOnly?: boolean,
+  onQaResolved?: (question: string, answer: string) => void,
+) {
+  if (part.type === 'text') {
+    return (
+      <Message key={index} from="assistant">
+        <MessageContent>
+          <MessageResponse isAnimating={part.state === 'streaming'}>
+            {part.text || ''}
+          </MessageResponse>
+        </MessageContent>
+      </Message>
+    )
+  }
+
+  if (part.type === 'reasoning') {
+    return (
+      <Reasoning key={index} isStreaming={part.state === 'streaming'} defaultOpen={true}>
+        <ReasoningTrigger />
+        <ReasoningContent>{part.text || ''}</ReasoningContent>
+      </Reasoning>
+    )
+  }
+
+  if (part.type === 'data-file-changed') {
+    return (
+      <div key={index} className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <FileIcon className="size-3" />
+        <span>
+          {part.state === 'created' ? 'Created' : 'Modified'}{' '}
+          <code className="rounded bg-muted px-1">{part.text || 'unknown'}</code>
+        </span>
+      </div>
+    )
+  }
+
+  // Gate parts (ask_user, permission) that are still pending
+  if (
+    (part.type === 'tool-ask_user' || part.type === 'tool-permission') &&
+    part.state === 'approval-requested' &&
+    !readOnly &&
+    gate &&
+    status === 'waiting_gate'
+  ) {
+    return (
+      <GateResolver key={index} gate={gate} onResolve={onResolveGate} onResolved={onQaResolved} />
+    )
+  }
+
+  // Tool parts (including resolved gates)
+  if (part.type?.startsWith('tool-')) {
+    const state = (part.state as ToolHeaderProps['state']) ?? 'input-available'
+    return (
+      <Tool key={index}>
+        <ToolHeader
+          {...({
+            type: 'dynamic-tool',
+            toolName: part.toolName || part.type.replace('tool-', ''),
+            state,
+          } as ToolHeaderProps)}
+        />
+        <ToolContent>
+          <ToolInput input={part.input} />
+          {(state === 'output-available' || state === 'output-error') && (
+            <ToolOutput
+              output={part.output}
+              errorText={state === 'output-error' ? String(part.output ?? 'Error') : undefined}
+            />
+          )}
+        </ToolContent>
+      </Tool>
+    )
+  }
+
+  // Unknown part type — skip (forward-compatible)
+  return null
 }
 
 export function ChatThread({
@@ -51,7 +131,6 @@ export function ChatThread({
   isConnecting,
   onResolveGate,
   readOnly,
-  streamingContent,
   onQaResolved,
   onRewind,
 }: ChatThreadProps) {
@@ -99,15 +178,11 @@ export function ChatThread({
             ) : null
 
             if (msg.role === 'qa_pair') {
-              const qa = safeParseJson(msg.content) as {
-                question?: string
-                answer?: string
-              }
+              const textPart = msg.parts.find((p) => p.type === 'text')
               return (
                 <div key={msg.id} className="group relative" data-turn-index={turnIndex}>
                   <div className="space-y-1 rounded-lg border-l-2 border-blue-500/30 bg-blue-500/5 p-3">
-                    <p className="text-xs text-muted-foreground">{qa?.question || 'Question'}</p>
-                    <p className="text-sm">{qa?.answer || ''}</p>
+                    <p className="text-sm">{textPart?.text || ''}</p>
                   </div>
                   {rewindButton}
                 </div>
@@ -115,25 +190,11 @@ export function ChatThread({
             }
 
             if (msg.role === 'user') {
-              const userContent = parseUserContent(msg.content)
+              const textPart = msg.parts.find((p) => p.type === 'text')
               return (
                 <div key={msg.id} className="group relative" data-turn-index={turnIndex}>
                   <Message from="user">
-                    <MessageContent>
-                      {userContent.images.length > 0 && (
-                        <div className="flex flex-wrap gap-2">
-                          {userContent.images.map((img) => (
-                            <img
-                              key={img.data.slice(-20)}
-                              src={`data:${img.media_type};base64,${img.data}`}
-                              alt="User upload"
-                              className="max-h-48 max-w-full rounded-md object-contain"
-                            />
-                          ))}
-                        </div>
-                      )}
-                      {userContent.text}
-                    </MessageContent>
+                    <MessageContent>{textPart?.text || ''}</MessageContent>
                   </Message>
                   {rewindButton}
                 </div>
@@ -141,173 +202,23 @@ export function ChatThread({
             }
 
             if (msg.role === 'assistant') {
-              const content = safeParseJson(msg.content)
-              const blocks = Array.isArray(content) ? content : []
-              const textBlocks = blocks.filter(
-                (b: unknown) => (b as { type: string }).type === 'text',
-              )
-              const toolUseBlocks = blocks.filter(
-                (b: unknown) => (b as { type: string }).type === 'tool_use',
-              )
-              const thinkingBlocks = blocks.filter(
-                (b: unknown) => (b as { type: string }).type === 'thinking',
-              )
-              const textContent = textBlocks
-                .map((b: unknown) => (b as { text?: string }).text || '')
-                .join('\n')
-              const thinkingText = thinkingBlocks
-                .map(
-                  (b: unknown) =>
-                    (b as { thinking?: string; text?: string }).thinking ||
-                    (b as { text?: string }).text ||
-                    '',
-                )
-                .join('\n')
-
-              const isCurrentTurn = turnIndex === messages.length - 1 && status === 'running'
-
               return (
                 <div key={msg.id} className="group relative" data-turn-index={turnIndex}>
                   <div className="space-y-2">
-                    {thinkingText && (
-                      <Reasoning isStreaming={isCurrentTurn} defaultOpen={true}>
-                        <ReasoningTrigger />
-                        <ReasoningContent>{thinkingText}</ReasoningContent>
-                      </Reasoning>
+                    {msg.parts.map((part, i) =>
+                      renderPart(part, i, gate, status, onResolveGate, readOnly, onQaResolved),
                     )}
-                    {textContent && (
-                      <Message from="assistant">
-                        <MessageContent>
-                          <MessageResponse>{textContent}</MessageResponse>
-                        </MessageContent>
-                      </Message>
-                    )}
-                    {toolUseBlocks.length > 0 &&
-                      toolUseBlocks.map((tool: unknown, i: number) => {
-                        const t = tool as {
-                          id?: string
-                          name?: string
-                          input?: unknown
-                          output?: unknown
-                          error?: string
-                        }
-                        const state = isCurrentTurn
-                          ? 'input-available'
-                          : t.error
-                            ? 'output-error'
-                            : 'output-available'
-                        return (
-                          <Tool key={t.id || i}>
-                            <ToolHeader
-                              {...({
-                                type: 'dynamic-tool',
-                                toolName: t.name || 'unknown',
-                                state,
-                              } as ToolHeaderProps)}
-                            />
-                            <ToolContent>
-                              <ToolInput input={t.input} />
-                              {!isCurrentTurn && (
-                                <ToolOutput output={t.output} errorText={t.error ?? undefined} />
-                              )}
-                            </ToolContent>
-                          </Tool>
-                        )
-                      })}
                   </div>
                   {rewindButton}
                 </div>
               )
             }
 
-            if (msg.role === 'tool') {
-              if (msg.type === 'file_changed') {
-                const data = safeParseJson(msg.content) as { path?: string }
-                return (
-                  <div key={msg.id} className="group relative" data-turn-index={turnIndex}>
-                    <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                      <FileIcon className="size-3" />
-                      <span>
-                        Modified{' '}
-                        <code className="rounded bg-muted px-1">{data?.path || 'unknown'}</code>
-                      </span>
-                    </div>
-                    {rewindButton}
-                  </div>
-                )
-              }
-              return null
-            }
-
             return null
           })
-        )}
-
-        {/* Thinking indicator */}
-        {status === 'running' && !streamingContent && (
-          <Message from="assistant">
-            <MessageContent>
-              <span className="inline-flex items-center gap-1.5 text-muted-foreground">
-                <span className="flex gap-0.5">
-                  <span className="size-1.5 animate-bounce rounded-full bg-current [animation-delay:0ms]" />
-                  <span className="size-1.5 animate-bounce rounded-full bg-current [animation-delay:150ms]" />
-                  <span className="size-1.5 animate-bounce rounded-full bg-current [animation-delay:300ms]" />
-                </span>
-                Thinking
-              </span>
-            </MessageContent>
-          </Message>
-        )}
-
-        {/* Streaming text for in-progress assistant turn */}
-        {streamingContent && (
-          <Message from="assistant">
-            <MessageContent>
-              <StreamingText streamingContent={streamingContent} />
-            </MessageContent>
-          </Message>
-        )}
-
-        {/* Gate inline at end of chat */}
-        {!readOnly && gate && status === 'waiting_gate' && (
-          <GateResolver gate={gate} onResolve={onResolveGate} onResolved={onQaResolved} />
         )}
       </ConversationContent>
       <ConversationScrollButton />
     </Conversation>
   )
-}
-
-function safeParseJson(str: string): unknown {
-  try {
-    return JSON.parse(str)
-  } catch {
-    return str
-  }
-}
-
-interface ParsedUserContent {
-  text: string
-  images: Array<{ media_type: string; data: string }>
-}
-
-function parseUserContent(str: string): ParsedUserContent {
-  try {
-    const parsed = JSON.parse(str)
-    if (typeof parsed === 'string') return { text: parsed, images: [] }
-    if (Array.isArray(parsed)) {
-      const images: ParsedUserContent['images'] = []
-      const texts: string[] = []
-      for (const block of parsed as ContentBlock[]) {
-        if (block.type === 'text') texts.push(block.text)
-        else if (block.type === 'image' && block.source) {
-          images.push({ media_type: block.source.media_type, data: block.source.data })
-        }
-      }
-      return { text: texts.join('\n'), images }
-    }
-    return { text: str, images: [] }
-  } catch {
-    return { text: str, images: [] }
-  }
 }

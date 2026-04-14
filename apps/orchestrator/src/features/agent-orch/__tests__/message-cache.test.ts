@@ -2,11 +2,12 @@
  * Tests for message cache-behind writes and cache-first hydration in useCodingAgent.
  *
  * Validates that:
- * - Assistant/tool_result events are written to messagesCollection (cache-behind)
- * - User messages from sendMessage are written to messagesCollection
+ * - SessionMessage events are written to messagesCollection (cache-behind)
+ * - Bulk message replay is written to messagesCollection
  * - Hydrated messages are written to messagesCollection
  * - On first state sync, cached messages are loaded before WS hydration (cache-first)
  * - Duplicate insert errors are silently ignored
+ * - Legacy gateway_event format (non-message events) still works
  *
  * @vitest-environment jsdom
  */
@@ -49,6 +50,22 @@ vi.mock('~/db/messages-collection', () => ({
   },
 }))
 
+// Mock useMessagesCollection to return filtered/sorted cached messages
+// This avoids the useLiveQuery + TanStack Collection requirement
+vi.mock('~/hooks/use-messages-collection', () => ({
+  useMessagesCollection: (sessionId: string) => {
+    const filtered = mockCollectionEntries
+      .map(([, msg]) => msg)
+      .filter((m) => m.sessionId === sessionId)
+      .sort((a, b) => {
+        const aTime = a.createdAt ? new Date(a.createdAt as string).getTime() : 0
+        const bTime = b.createdAt ? new Date(b.createdAt as string).getTime() : 0
+        return aTime - bTime
+      })
+    return { messages: filtered, isLoading: false }
+  },
+}))
+
 // Import after mocks
 import { useCodingAgent } from '../use-coding-agent'
 
@@ -56,7 +73,7 @@ function makeWsMessage(data: unknown): MessageEvent {
   return { data: JSON.stringify(data) } as MessageEvent
 }
 
-describe('message cache-behind writes', () => {
+describe('message cache-behind writes (SessionMessage format)', () => {
   beforeEach(() => {
     capturedOnStateUpdate = null
     capturedOnMessage = null
@@ -70,20 +87,18 @@ describe('message cache-behind writes', () => {
     vi.restoreAllMocks()
   })
 
-  test('assistant event triggers cache-behind write to messagesCollection', () => {
+  test('single message event triggers cache-behind write', () => {
     renderHook(() => useCodingAgent('test-session'))
-
-    const now = new Date('2026-04-13T12:00:00Z')
-    vi.setSystemTime(now)
 
     act(() => {
       capturedOnMessage!(
         makeWsMessage({
-          type: 'gateway_event',
-          event: {
-            type: 'assistant',
-            uuid: 'evt-uuid-1',
-            content: [{ type: 'text', text: 'Hello world' }],
+          type: 'message',
+          message: {
+            id: 'msg-1',
+            role: 'assistant',
+            parts: [{ type: 'text', text: 'Hello world' }],
+            createdAt: '2026-04-13T12:00:00Z',
           },
         }),
       )
@@ -91,45 +106,45 @@ describe('message cache-behind writes', () => {
 
     expect(mockInsert).toHaveBeenCalledWith(
       expect.objectContaining({
-        id: 'evt-uuid-1',
+        id: 'msg-1',
         sessionId: 'test-session',
         role: 'assistant',
-        type: 'text',
-        content: JSON.stringify([{ type: 'text', text: 'Hello world' }]),
-        event_uuid: 'evt-uuid-1',
-        created_at: '2026-04-13T12:00:00.000Z',
+        parts: [{ type: 'text', text: 'Hello world' }],
       }),
     )
   })
 
-  test('tool_result event triggers cache-behind write to messagesCollection', () => {
+  test('bulk messages replay triggers cache-behind writes for all messages', () => {
     renderHook(() => useCodingAgent('test-session'))
 
     act(() => {
       capturedOnMessage!(
         makeWsMessage({
-          type: 'gateway_event',
-          event: {
-            type: 'tool_result',
-            uuid: 'tool-uuid-1',
-            content: [{ type: 'tool_result', output: 'done' }],
-          },
+          type: 'messages',
+          messages: [
+            {
+              id: 'msg-1',
+              role: 'user',
+              parts: [{ type: 'text', text: 'Hello' }],
+            },
+            {
+              id: 'msg-2',
+              role: 'assistant',
+              parts: [{ type: 'text', text: 'Hi there' }],
+            },
+          ],
         }),
       )
     })
 
+    expect(mockInsert).toHaveBeenCalledTimes(2)
+    expect(mockInsert).toHaveBeenCalledWith(expect.objectContaining({ id: 'msg-1', role: 'user' }))
     expect(mockInsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'tool-tool-uuid-1',
-        sessionId: 'test-session',
-        role: 'tool',
-        type: 'tool_result',
-        event_uuid: 'tool-uuid-1',
-      }),
+      expect.objectContaining({ id: 'msg-2', role: 'assistant' }),
     )
   })
 
-  test('partial_assistant events do NOT trigger cache-behind writes', () => {
+  test('legacy gateway_event non-message events do NOT trigger cache writes', () => {
     renderHook(() => useCodingAgent('test-session'))
 
     act(() => {
@@ -137,67 +152,14 @@ describe('message cache-behind writes', () => {
         makeWsMessage({
           type: 'gateway_event',
           event: {
-            type: 'partial_assistant',
-            content: [{ type: 'text', delta: 'streaming...' }],
+            type: 'context_usage',
+            usage: { totalTokens: 100, maxTokens: 200000, percentage: 0.05 },
           },
         }),
       )
     })
 
     expect(mockInsert).not.toHaveBeenCalled()
-  })
-
-  test('file_changed events do NOT trigger cache-behind writes', () => {
-    renderHook(() => useCodingAgent('test-session'))
-
-    act(() => {
-      capturedOnMessage!(
-        makeWsMessage({
-          type: 'gateway_event',
-          event: {
-            type: 'file_changed',
-            path: '/src/foo.ts',
-            tool: 'Edit',
-          },
-        }),
-      )
-    })
-
-    expect(mockInsert).not.toHaveBeenCalled()
-  })
-
-  test('user_message broadcasts do NOT trigger cache-behind writes', () => {
-    renderHook(() => useCodingAgent('test-session'))
-
-    act(() => {
-      capturedOnMessage!(
-        makeWsMessage({
-          type: 'user_message',
-          content: 'hello from another tab',
-        }),
-      )
-    })
-
-    expect(mockInsert).not.toHaveBeenCalled()
-  })
-
-  test('sendMessage writes user message to cache', async () => {
-    const { result } = renderHook(() => useCodingAgent('test-session'))
-
-    mockCall.mockResolvedValueOnce({ ok: true })
-
-    await act(async () => {
-      await result.current.sendMessage('Hello agent')
-    })
-
-    expect(mockInsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionId: 'test-session',
-        role: 'user',
-        type: 'text',
-        content: JSON.stringify('Hello agent'),
-      }),
-    )
   })
 
   test('duplicate insert errors are silently ignored', () => {
@@ -212,11 +174,11 @@ describe('message cache-behind writes', () => {
       act(() => {
         capturedOnMessage!(
           makeWsMessage({
-            type: 'gateway_event',
-            event: {
-              type: 'assistant',
-              uuid: 'dup-uuid',
-              content: [{ type: 'text', text: 'duplicate' }],
+            type: 'message',
+            message: {
+              id: 'dup-msg',
+              role: 'assistant',
+              parts: [{ type: 'text', text: 'duplicate' }],
             },
           }),
         )
@@ -239,7 +201,7 @@ describe('message cache-first hydration', () => {
   })
 
   test('loads cached messages from collection on first state sync', () => {
-    // Seed the mock collection with cached messages
+    // Seed the mock collection with cached messages (new parts format)
     mockCollectionEntries.push(
       [
         'cached-1',
@@ -247,10 +209,8 @@ describe('message cache-first hydration', () => {
           id: 'cached-1',
           sessionId: 'test-session',
           role: 'assistant',
-          type: 'text',
-          content: '{"text":"cached hello"}',
-          event_uuid: 'evt-cached-1',
-          created_at: '2026-01-01T00:00:00Z',
+          parts: [{ type: 'text', text: 'cached hello' }],
+          createdAt: '2026-01-01T00:00:00Z',
         },
       ],
       [
@@ -259,9 +219,8 @@ describe('message cache-first hydration', () => {
           id: 'cached-2',
           sessionId: 'test-session',
           role: 'user',
-          type: 'text',
-          content: '"user input"',
-          created_at: '2026-01-01T01:00:00Z',
+          parts: [{ type: 'text', text: 'user input' }],
+          createdAt: '2026-01-01T01:00:00Z',
         },
       ],
     )
@@ -287,9 +246,8 @@ describe('message cache-first hydration', () => {
           id: 'msg-1',
           sessionId: 'test-session',
           role: 'assistant',
-          type: 'text',
-          content: '"mine"',
-          created_at: '2026-01-01T00:00:00Z',
+          parts: [{ type: 'text', text: 'mine' }],
+          createdAt: '2026-01-01T00:00:00Z',
         },
       ],
       [
@@ -298,9 +256,8 @@ describe('message cache-first hydration', () => {
           id: 'msg-2',
           sessionId: 'other-session',
           role: 'assistant',
-          type: 'text',
-          content: '"not mine"',
-          created_at: '2026-01-01T00:00:00Z',
+          parts: [{ type: 'text', text: 'not mine' }],
+          createdAt: '2026-01-01T00:00:00Z',
         },
       ],
     )
@@ -315,7 +272,7 @@ describe('message cache-first hydration', () => {
     expect(result.current.messages[0].id).toBe('msg-1')
   })
 
-  test('sorts cached messages by created_at', () => {
+  test('sorts cached messages by createdAt', () => {
     mockCollectionEntries.push(
       [
         'late',
@@ -323,9 +280,8 @@ describe('message cache-first hydration', () => {
           id: 'late',
           sessionId: 'test-session',
           role: 'assistant',
-          type: 'text',
-          content: '"late"',
-          created_at: '2026-01-02T00:00:00Z',
+          parts: [{ type: 'text', text: 'late' }],
+          createdAt: '2026-01-02T00:00:00Z',
         },
       ],
       [
@@ -334,9 +290,8 @@ describe('message cache-first hydration', () => {
           id: 'early',
           sessionId: 'test-session',
           role: 'assistant',
-          type: 'text',
-          content: '"early"',
-          created_at: '2026-01-01T00:00:00Z',
+          parts: [{ type: 'text', text: 'early' }],
+          createdAt: '2026-01-01T00:00:00Z',
         },
       ],
     )
@@ -358,10 +313,8 @@ describe('message cache-first hydration', () => {
         id: 'cached-evt',
         sessionId: 'test-session',
         role: 'assistant',
-        type: 'text',
-        content: '"cached"',
-        event_uuid: 'already-known-uuid',
-        created_at: '2026-01-01T00:00:00Z',
+        parts: [{ type: 'text', text: 'cached' }],
+        createdAt: '2026-01-01T00:00:00Z',
       },
     ])
 
@@ -371,23 +324,24 @@ describe('message cache-first hydration', () => {
       capturedOnStateUpdate!({ status: 'idle' })
     })
 
-    // Now send an event with the same uuid -- should be deduped
+    // Now send a message event with the same id -- should upsert in place
     act(() => {
       capturedOnMessage!(
         makeWsMessage({
-          type: 'gateway_event',
-          event: {
-            type: 'assistant',
-            uuid: 'already-known-uuid',
-            content: [{ type: 'text', text: 'duplicate' }],
+          type: 'message',
+          message: {
+            id: 'cached-evt',
+            role: 'assistant',
+            parts: [{ type: 'text', text: 'updated' }],
           },
         }),
       )
     })
 
-    // Should still only have the cached message, not a duplicate
+    // Should still only have one message (upserted)
     const assistantMsgs = result.current.messages.filter((m) => m.role === 'assistant')
     expect(assistantMsgs).toHaveLength(1)
+    expect(assistantMsgs[0].parts[0].text).toBe('updated')
   })
 
   test('handles collection iteration error gracefully', () => {
@@ -435,20 +389,16 @@ describe('hydration writes to collection', () => {
   test('hydrateMessages writes hydrated messages to collection', async () => {
     const hydratedMessages = [
       {
-        id: 1,
+        id: 'usr-1',
         role: 'user',
-        type: 'text',
-        content: '"hello"',
-        event_uuid: null,
-        created_at: '2026-01-01T00:00:00Z',
+        parts: [{ type: 'text', text: 'hello' }],
+        createdAt: '2026-01-01T00:00:00Z',
       },
       {
-        id: 2,
+        id: 'asst-1',
         role: 'assistant',
-        type: 'text',
-        content: '"hi back"',
-        event_uuid: 'hydrated-evt-1',
-        created_at: '2026-01-01T01:00:00Z',
+        parts: [{ type: 'text', text: 'hi back' }],
+        createdAt: '2026-01-01T01:00:00Z',
       },
     ]
 
@@ -464,24 +414,21 @@ describe('hydration writes to collection', () => {
     })
 
     // Should have written both messages to collection
-    // User message uses hydrated-user-{id} format since no event_uuid
     expect(mockInsert).toHaveBeenCalledWith(
       expect.objectContaining({
-        id: 'hydrated-user-1',
+        id: 'usr-1',
         sessionId: 'test-session',
         role: 'user',
-        content: '"hello"',
+        parts: [{ type: 'text', text: 'hello' }],
       }),
     )
 
-    // Assistant message uses event_uuid as id
     expect(mockInsert).toHaveBeenCalledWith(
       expect.objectContaining({
-        id: 'hydrated-evt-1',
+        id: 'asst-1',
         sessionId: 'test-session',
         role: 'assistant',
-        content: '"hi back"',
-        event_uuid: 'hydrated-evt-1',
+        parts: [{ type: 'text', text: 'hi back' }],
       }),
     )
   })

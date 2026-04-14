@@ -19,7 +19,6 @@ export function AgentDetailView({ name: _name, agent }: AgentDetailViewProps) {
   const {
     state,
     messages,
-    streamingContent,
     sessionResult,
     kataState,
     contextUsage,
@@ -68,7 +67,6 @@ export function AgentDetailView({ name: _name, agent }: AgentDetailViewProps) {
         isConnecting={isConnecting}
         onResolveGate={resolveGate}
         readOnly={isTerminal}
-        streamingContent={isTerminal ? undefined : streamingContent}
         onQaResolved={injectQaPair}
         onRewind={isTerminal ? undefined : rewind}
       />

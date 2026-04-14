@@ -17,8 +17,16 @@ export function useMessagesCollection(sessionId: string) {
     return (data as unknown as CachedMessage[])
       .filter((m) => m.sessionId === sessionId)
       .sort((a, b) => {
-        if (a.created_at && b.created_at) {
-          return new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+        if (a.createdAt && b.createdAt) {
+          const aTime =
+            typeof a.createdAt === 'string'
+              ? new Date(a.createdAt).getTime()
+              : a.createdAt.getTime()
+          const bTime =
+            typeof b.createdAt === 'string'
+              ? new Date(b.createdAt).getTime()
+              : b.createdAt.getTime()
+          return aTime - bTime
         }
         return 0
       })
