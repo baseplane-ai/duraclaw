@@ -1441,6 +1441,39 @@ export class SessionDO extends Agent<Env, SessionState> {
           this.broadcastMessage(errorMsg)
         }
 
+        // If the SDK result contains text that isn't already in the last message,
+        // append it as a visible assistant message so the final response is shown.
+        if (!event.is_error && event.result && typeof event.result === 'string') {
+          const lastMsgId = `msg-${this.turnCounter}`
+          const lastMsg = this.session.getMessage(lastMsgId)
+          const lastHasText = lastMsg?.parts?.some(
+            (p) => p.type === 'text' && p.state === 'done' && p.text,
+          )
+          if (!lastHasText) {
+            // The last assistant turn had only tool calls, no final text — add result text
+            if (lastMsg) {
+              const updatedParts: SessionMessagePart[] = [
+                ...lastMsg.parts,
+                { type: 'text', text: event.result, state: 'done' },
+              ]
+              const updatedMsg: SessionMessage = { ...lastMsg, parts: updatedParts }
+              this.session.updateMessage(updatedMsg)
+              this.broadcastMessage(updatedMsg)
+            } else {
+              this.turnCounter++
+              const resultMsgId = `msg-${this.turnCounter}`
+              const resultMsg: SessionMessage = {
+                id: resultMsgId,
+                role: 'assistant',
+                parts: [{ type: 'text', text: event.result, state: 'done' }],
+                createdAt: new Date(),
+              }
+              this.session.appendMessage(resultMsg)
+              this.broadcastMessage(resultMsg)
+            }
+          }
+        }
+
         // PRESERVE all existing side effects — always transition to idle
         this.updateState({
           status: 'idle',
