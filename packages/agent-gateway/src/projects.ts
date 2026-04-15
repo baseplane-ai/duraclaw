@@ -12,6 +12,13 @@ const PROJECT_PREFIXES = RAW_PATTERNS.split(',')
   .map((p) => p.trim())
   .filter(Boolean)
 
+const HIDDEN_PROJECTS = new Set(
+  (process.env.HIDDEN_PROJECTS ?? '')
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean),
+)
+
 /** Get current git branch for a directory, or "unknown". */
 async function getBranch(dir: string): Promise<string> {
   try {
@@ -63,6 +70,7 @@ export async function discoverProjects(
       !PROJECT_PREFIXES.some((prefix) => entry.name.startsWith(prefix))
     )
       continue
+    if (HIDDEN_PROJECTS.has(entry.name)) continue
 
     const fullPath = path.join(PROJECTS_DIR, entry.name)
 
@@ -99,6 +107,7 @@ export async function resolveProject(name: string): Promise<string | null> {
     // If prefixes are configured, verify project matches one
     if (PROJECT_PREFIXES.length > 0 && !PROJECT_PREFIXES.some((prefix) => name.startsWith(prefix)))
       return null
+    if (HIDDEN_PROJECTS.has(name)) return null
     return fullPath
   } catch {
     return null

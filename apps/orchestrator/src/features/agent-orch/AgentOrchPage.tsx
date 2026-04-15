@@ -40,17 +40,23 @@ function AgentOrchContent() {
       setSelectedSessionId(searchSessionId)
     }
   }, [searchSessionId, selectedSessionId])
-  const [projects, setProjects] = useState<Array<{ name: string; path: string }>>([])
+  const [projects, setProjects] = useState<
+    Array<{ name: string; path: string; repo_origin?: string | null }>
+  >([])
   const [projectsLoading, setProjectsLoading] = useState(true)
 
   useEffect(() => {
     fetch('/api/gateway/projects')
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
-        const d = data as Record<string, unknown> | Array<{ name: string; path: string }> | null
+        const d = data as
+          | Record<string, unknown>
+          | Array<{ name: string; path: string; repo_origin?: string | null }>
+          | null
         const list = Array.isArray(d)
-          ? d
-          : ((d?.projects as Array<{ name: string; path: string }>) ?? [])
+          ? d.map((p: any) => ({ name: p.name, path: p.path, repo_origin: p.repo_origin ?? null }))
+          : ((d?.projects as Array<{ name: string; path: string; repo_origin?: string | null }>) ??
+            [])
         setProjects(list)
       })
       .catch(() => {})

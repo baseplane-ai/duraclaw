@@ -9,8 +9,19 @@
  */
 
 import { Link, useLocation, useNavigate } from '@tanstack/react-router'
-import { ArchiveIcon, ChevronRight, ClockIcon, EditIcon, FolderIcon, PlusIcon } from 'lucide-react'
-import { useCallback, useRef, useState } from 'react'
+import {
+  ArchiveIcon,
+  ChevronRight,
+  ClockIcon,
+  EditIcon,
+  Eye,
+  EyeOff,
+  FolderGit2,
+  FolderIcon,
+  GitBranchIcon,
+  PlusIcon,
+} from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '~/components/ui/collapsible'
 import {
   DropdownMenu,
@@ -248,6 +259,8 @@ export function NavSessions() {
             ))}
         </SidebarMenu>
       </SidebarGroup>
+
+      <AllProjectsBrowser />
     </>
   )
 }
@@ -320,5 +333,136 @@ function ProjectGroup({
         </CollapsibleContent>
       </SidebarMenuItem>
     </Collapsible>
+  )
+}
+
+// ── All Projects browser ──────────────────────────────────────────
+
+interface ProjectInfo {
+  name: string
+  path: string
+  branch: string
+  dirty: boolean
+  active_session: string | null
+  repo_origin: string
+  hidden: boolean
+}
+
+function extractRepoName(repoOrigin: string): string {
+  const cleaned = repoOrigin.replace(/\.git$/, '')
+  const parts = cleaned.split(/[/:]/)
+  const name = parts[parts.length - 1] || 'Unknown'
+  return name.charAt(0).toUpperCase() + name.slice(1)
+}
+
+function AllProjectsBrowser() {
+  const [projects, setProjects] = useState<ProjectInfo[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    fetch('/api/gateway/projects/all')
+      .then((r) => (r.ok ? r.json() : []))
+      .then((data) => {
+        if (Array.isArray(data)) setProjects(data as ProjectInfo[])
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false))
+  }, [])
+
+  const handleToggleHidden = useCallback((projectName: string) => {
+    setProjects((prev) => {
+      const updated = prev.map((p) => (p.name === projectName ? { ...p, hidden: !p.hidden } : p))
+      const hiddenList = updated.filter((p) => p.hidden).map((p) => p.name)
+      fetch('/api/user/preferences', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: 'hidden_projects', value: JSON.stringify(hiddenList) }),
+      }).catch(() => {})
+      return updated
+    })
+  }, [])
+
+  // Group by repo_origin
+  const repoGroups = new Map<string, ProjectInfo[]>()
+  for (const project of projects) {
+    const key = project.repo_origin || 'Unknown'
+    if (!repoGroups.has(key)) repoGroups.set(key, [])
+    repoGroups.get(key)?.push(project)
+  }
+
+  if (loading) {
+    return (
+      <SidebarGroup>
+        <SidebarGroupLabel>
+          <FolderGit2 className="mr-1 size-3" />
+          All Projects
+        </SidebarGroupLabel>
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton disabled>
+              <span className="text-muted-foreground">Loading...</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
+      </SidebarGroup>
+    )
+  }
+
+  return (
+    <SidebarGroup>
+      <SidebarGroupLabel>
+        <FolderGit2 className="mr-1 size-3" />
+        All Projects
+      </SidebarGroupLabel>
+      <SidebarMenu>
+        {Array.from(repoGroups.entries()).map(([repoOrigin, repoProjects]) => (
+          <Collapsible key={repoOrigin} asChild defaultOpen className="group/collapsible">
+            <SidebarMenuItem>
+              <CollapsibleTrigger asChild>
+                <SidebarMenuButton tooltip={extractRepoName(repoOrigin)}>
+                  <FolderGit2 className="size-4" />
+                  <span>{extractRepoName(repoOrigin)}</span>
+                  <span className="ml-auto text-xs text-muted-foreground">
+                    {repoProjects.length}
+                  </span>
+                  <ChevronRight className="ml-1 size-3 transition-transform duration-200 group-data-[state=open]/collapsible:rotate-90" />
+                </SidebarMenuButton>
+              </CollapsibleTrigger>
+              <CollapsibleContent>
+                <SidebarMenuSub>
+                  {repoProjects.map((project) => (
+                    <SidebarMenuSubItem key={project.name}>
+                      <SidebarMenuSubButton className={project.hidden ? 'opacity-40' : undefined}>
+                        <div className="flex min-w-0 flex-1 flex-col">
+                          <span className="truncate text-sm leading-tight">{project.name}</span>
+                          <span className="flex items-center gap-1 truncate text-[10px] text-muted-foreground leading-tight">
+                            <GitBranchIcon className="size-2.5" />
+                            {project.branch}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          className="ml-auto shrink-0 p-0.5 text-muted-foreground hover:text-foreground"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            handleToggleHidden(project.name)
+                          }}
+                        >
+                          {project.hidden ? (
+                            <EyeOff className="size-3" />
+                          ) : (
+                            <Eye className="size-3" />
+                          )}
+                        </button>
+                      </SidebarMenuSubButton>
+                    </SidebarMenuSubItem>
+                  ))}
+                </SidebarMenuSub>
+              </CollapsibleContent>
+            </SidebarMenuItem>
+          </Collapsible>
+        ))}
+      </SidebarMenu>
+    </SidebarGroup>
   )
 }

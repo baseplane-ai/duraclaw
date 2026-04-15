@@ -342,9 +342,22 @@ export function createApiApp() {
 
     try {
       const projects = await fetchGatewayProjects(c.env)
+
+      // Filter out user-hidden projects
+      const hiddenResult = await c.env.AUTH_DB.prepare(
+        "SELECT value FROM user_preferences WHERE user_id = ? AND key = 'hidden_projects'",
+      )
+        .bind(userId)
+        .first<{ value: string }>()
+      const hiddenSet = new Set(
+        hiddenResult?.value ? (JSON.parse(hiddenResult.value) as string[]) : [],
+      )
+      const visibleProjects =
+        hiddenSet.size > 0 ? projects.filter((p) => !hiddenSet.has(p.name)) : projects
+
       const registry = getRegistry(c)
       const merged = await Promise.all(
-        projects.map(async (project) => ({
+        visibleProjects.map(async (project) => ({
           ...project,
           sessions: (await registry.listSessionsByProject(
             project.name,
@@ -560,7 +573,41 @@ export function createApiApp() {
   app.get('/api/gateway/projects', async (c) => {
     try {
       const projects = await fetchGatewayProjects(c.env)
-      return c.json(projects)
+
+      // Filter out user-hidden projects
+      const userId = c.get('userId')
+      const hiddenResult = await c.env.AUTH_DB.prepare(
+        "SELECT value FROM user_preferences WHERE user_id = ? AND key = 'hidden_projects'",
+      )
+        .bind(userId)
+        .first<{ value: string }>()
+      const hiddenSet = new Set(
+        hiddenResult?.value ? (JSON.parse(hiddenResult.value) as string[]) : [],
+      )
+      const filtered =
+        hiddenSet.size > 0 ? projects.filter((p) => !hiddenSet.has(p.name)) : projects
+
+      return c.json(filtered)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Gateway unreachable'
+      return c.json({ error: message }, 502)
+    }
+  })
+
+  app.get('/api/gateway/projects/all', async (c) => {
+    try {
+      const projects = await fetchGatewayProjects(c.env)
+
+      const userId = c.get('userId')
+      const hiddenResult = await c.env.AUTH_DB.prepare(
+        "SELECT value FROM user_preferences WHERE user_id = ? AND key = 'hidden_projects'",
+      )
+        .bind(userId)
+        .first<{ value: string }>()
+      const hiddenNames: string[] = hiddenResult?.value ? JSON.parse(hiddenResult.value) : []
+      const hiddenSet = new Set(hiddenNames)
+
+      return c.json(projects.map((p) => ({ ...p, hidden: hiddenSet.has(p.name) })))
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Gateway unreachable'
       return c.json({ error: message }, 502)

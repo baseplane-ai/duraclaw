@@ -11,7 +11,9 @@ import { Label } from '~/components/ui/label'
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from '~/components/ui/select'
@@ -35,8 +37,15 @@ export interface QuickPromptInputProps {
     prompt: string
     newTab?: boolean
   }) => void
-  projects: Array<{ name: string; path: string }>
+  projects: Array<{ name: string; path: string; repo_origin?: string | null }>
   projectsLoading?: boolean
+}
+
+function extractRepoName(repoOrigin: string): string {
+  const cleaned = repoOrigin.replace(/\.git$/, '')
+  const parts = cleaned.split(/[/:]/)
+  const name = parts[parts.length - 1] || 'Unknown'
+  return name.charAt(0).toUpperCase() + name.slice(1)
 }
 
 export function QuickPromptInput({ onSubmit, projects, projectsLoading }: QuickPromptInputProps) {
@@ -106,11 +115,26 @@ export function QuickPromptInput({ onSubmit, projects, projectsLoading }: QuickP
             <SelectValue placeholder={projectsLoading ? 'Loading...' : 'Project'} />
           </SelectTrigger>
           <SelectContent>
-            {projects.map((p) => (
-              <SelectItem key={p.name} value={p.name} className="text-xs font-mono">
-                {p.name}
-              </SelectItem>
-            ))}
+            {(() => {
+              const grouped = new Map<string, typeof projects>()
+              for (const p of projects) {
+                const key = p.repo_origin || 'Other'
+                if (!grouped.has(key)) grouped.set(key, [])
+                grouped.get(key)?.push(p)
+              }
+              return Array.from(grouped.entries()).map(([origin, groupProjects]) => (
+                <SelectGroup key={origin}>
+                  <SelectLabel className="text-[10px] font-medium text-muted-foreground">
+                    {extractRepoName(origin)}
+                  </SelectLabel>
+                  {groupProjects.map((p) => (
+                    <SelectItem key={p.name} value={p.name} className="text-xs font-mono">
+                      {p.name}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              ))
+            })()}
           </SelectContent>
         </Select>
         <Select value={selectedModel} onValueChange={setSelectedModel}>
