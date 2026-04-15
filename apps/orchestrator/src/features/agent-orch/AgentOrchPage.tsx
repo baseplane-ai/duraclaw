@@ -31,16 +31,40 @@ function AgentOrchContent() {
   const search = useSearch({ from: '/_authenticated/' })
   const navigate = useNavigate()
   const searchSessionId = (search as { session?: string }).session ?? null
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(searchSessionId)
-  const [spawnConfig, setSpawnConfig] = useState<SpawnConfig | null>(null)
 
-  // Sync selectedSessionId when URL search param changes (e.g. sidebar navigation)
+  // On cold launch (PWA / refresh) with no ?session param, restore the active tab's session
+  const { tabs, activeTabId } = useTabStore()
+  const initialRestoredRef = useRef(() => {
+    if (searchSessionId || !activeTabId) return null
+    return tabs.find((t) => t.id === activeTabId)?.sessionId ?? null
+  })
+  const restoredSessionId = useState(() => initialRestoredRef.current())[0]
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
+    searchSessionId ?? restoredSessionId,
+  )
+  const [spawnConfig, setSpawnConfig] = useState<SpawnConfig | null>(null)
+  const prevSearchRef = useRef(searchSessionId)
+  const didRestoreRef = useRef(false)
+
+  // On restore, push the session into the URL so bookmarks/refresh work
   useEffect(() => {
+    if (restoredSessionId && !didRestoreRef.current) {
+      didRestoreRef.current = true
+      navigate({ to: '/', search: { session: restoredSessionId }, replace: true })
+    }
+  }, [restoredSessionId, navigate])
+
+  // Sync URL → selectedSessionId on subsequent navigations
+  useEffect(() => {
+    const prev = prevSearchRef.current
+    prevSearchRef.current = searchSessionId
+
     if (searchSessionId && searchSessionId !== selectedSessionId) {
       setSpawnConfig(null)
       setSelectedSessionId(searchSessionId)
-    } else if (!searchSessionId && selectedSessionId) {
-      // "New session" navigates to "/" without ?session — clear selection
+    } else if (!searchSessionId && selectedSessionId && prev !== null) {
+      // Navigated from a session URL to "/" (e.g. "New session" click) — clear selection.
+      // Skips cold launch where prev is also null (restore case).
       setSpawnConfig(null)
       setSelectedSessionId(null)
     }
