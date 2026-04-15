@@ -1117,23 +1117,45 @@ export class SessionDO extends Agent<Env, SessionState> {
 
       case 'partial_assistant': {
         const parts = partialAssistantToParts(event.content)
+        const msgId = `msg-${this.turnCounter}`
+
         if (!this.currentTurnMessageId) {
-          // First partial of this turn — append new message
-          const msgId = `msg-${this.turnCounter}`
           this.currentTurnMessageId = msgId
-          const msg: SessionMessage = {
-            id: msgId,
-            role: 'assistant',
-            parts,
-            createdAt: new Date(),
-          }
-          try {
-            this.session.appendMessage(msg, `usr-${this.turnCounter}`)
-            this.persistTurnState()
-            this.broadcastMessage(msg)
-          } catch (err) {
-            console.error(`[SessionDO:${this.ctx.id}] Failed to persist partial assistant:`, err)
-            this.broadcastToClients(JSON.stringify({ type: 'raw_event', event }))
+
+          // Check if message already exists (multi-response turn: assistant → tool → assistant)
+          const existing = this.session.getMessage(msgId)
+          if (existing) {
+            // Merge streaming text into existing parts (preserving tool results)
+            const updatedParts = [...existing.parts]
+            for (const newPart of parts) {
+              if (newPart.type === 'text') {
+                updatedParts.push(newPart)
+              }
+            }
+            const updatedMsg: SessionMessage = { ...existing, parts: updatedParts }
+            try {
+              this.session.updateMessage(updatedMsg)
+              this.broadcastMessage(updatedMsg)
+            } catch (err) {
+              console.error(`[SessionDO:${this.ctx.id}] Failed to update partial assistant:`, err)
+              this.broadcastToClients(JSON.stringify({ type: 'raw_event', event }))
+            }
+          } else {
+            // First partial of this turn — append new message
+            const msg: SessionMessage = {
+              id: msgId,
+              role: 'assistant',
+              parts,
+              createdAt: new Date(),
+            }
+            try {
+              this.session.appendMessage(msg, `usr-${this.turnCounter}`)
+              this.persistTurnState()
+              this.broadcastMessage(msg)
+            } catch (err) {
+              console.error(`[SessionDO:${this.ctx.id}] Failed to persist partial assistant:`, err)
+              this.broadcastToClients(JSON.stringify({ type: 'raw_event', event }))
+            }
           }
         } else {
           // Subsequent partial — update existing message with accumulated text
@@ -1170,17 +1192,31 @@ export class SessionDO extends Agent<Env, SessionState> {
       }
 
       case 'assistant': {
-        // Final assistant message — replace streaming parts with final parts
-        const parts = assistantContentToParts(event.content as unknown[])
+        // Final assistant message — finalize streaming parts with final content
+        const newParts = assistantContentToParts(event.content as unknown[])
         const msgId = this.currentTurnMessageId ?? `msg-${this.turnCounter}`
+
+        // Merge: keep existing non-streaming parts (tool results from prior cycles),
+        // replace streaming text with finalized content
+        const existing = this.session.getMessage(msgId)
+        let mergedParts: SessionMessagePart[]
+        if (existing) {
+          // Keep all non-streaming parts (tool results, file changes, etc.), drop streaming text
+          const retained = existing.parts.filter((p) => p.state !== 'streaming')
+          // Append the new finalized parts (text + tool_use from this response cycle)
+          mergedParts = [...retained, ...newParts]
+        } else {
+          mergedParts = newParts
+        }
+
         const msg: SessionMessage = {
           id: msgId,
           role: 'assistant',
-          parts,
-          createdAt: new Date(),
+          parts: mergedParts,
+          createdAt: existing?.createdAt ?? new Date(),
         }
         try {
-          if (this.currentTurnMessageId) {
+          if (existing) {
             this.session.updateMessage(msg)
           } else {
             this.session.appendMessage(msg, `usr-${this.turnCounter}`)
