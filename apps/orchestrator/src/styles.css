@@ -2,6 +2,26 @@
 @import "tw-animate-css";
 @import "./styles/theme.css";
 
+/* Scan workspace ai-elements package (excluded by default since it's in node_modules) */
+@source "../../packages/ai-elements/src";
+
+/*
+ * Safelist complex selector-based classes from ai-elements that Tailwind v4's
+ * extractor can't parse from TS source (brackets with >, =, dots in selectors).
+ */
+
+/* InputGroup: layout selectors */
+@source inline("group/input-group group-data-[disabled=true]/input-group:opacity-50 has-[>textarea]:h-auto has-[>[data-align=inline-start]]:[&>input]:pl-2 has-[>[data-align=inline-end]]:[&>input]:pr-2 has-[>[data-align=block-start]]:h-auto has-[>[data-align=block-start]]:flex-col has-[>[data-align=block-start]]:[&>input]:pb-3 has-[>[data-align=block-end]]:h-auto has-[>[data-align=block-end]]:flex-col has-[>[data-align=block-end]]:[&>input]:pt-3 has-[[data-slot=input-group-control]:focus-visible]:ring-ring has-[[data-slot=input-group-control]:focus-visible]:ring-1 has-[[data-slot][aria-invalid=true]]:ring-destructive/20 has-[[data-slot][aria-invalid=true]]:border-destructive dark:has-[[data-slot][aria-invalid=true]]:ring-destructive/40");
+
+/* InputGroupAddon: nested button/kbd/svg/input selectors */
+@source inline("has-[>button]:ml-[-0.45rem] has-[>button]:mr-[-0.4rem] has-[>kbd]:ml-[-0.35rem] has-[>kbd]:mr-[-0.35rem] has-[>svg]:p-0 has-[>svg]:px-2 has-[>svg]:px-2.5 has-[>input]/input-group:pb-2.5 has-[>input]/input-group:pt-2.5");
+
+/* Message: user/assistant role styling */
+@source inline("is-user is-assistant is-user:dark group-[.is-user]:ml-auto group-[.is-user]:rounded-lg group-[.is-user]:bg-secondary group-[.is-user]:px-4 group-[.is-user]:py-3 group-[.is-user]:text-foreground group-[.is-assistant]:text-foreground");
+
+/* ButtonGroup + Select: nested element selectors */
+@source inline("has-[>[data-slot=button-group]]:gap-2");
+
 @custom-variant dark (&:is(.dark *));
 
 @layer base {

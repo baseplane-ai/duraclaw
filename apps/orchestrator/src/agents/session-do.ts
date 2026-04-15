@@ -335,7 +335,35 @@ export class SessionDO extends Agent<Env, SessionState> {
       let persisted = 0
       let lastMsgId: string | null = null
       for (const msg of data.messages) {
-        if (msg.type === 'assistant') {
+        if (msg.type === 'user') {
+          this.turnCounter++
+          const msgId = `usr-${this.turnCounter}`
+          const sessionMsg: SessionMessage = {
+            id: msgId,
+            role: 'user',
+            parts: [
+              {
+                type: 'text',
+                text:
+                  typeof msg.content === 'string'
+                    ? msg.content
+                    : Array.isArray(msg.content)
+                      ? msg.content
+                          .map((c: unknown) =>
+                            typeof c === 'string'
+                              ? c
+                              : ((c as Record<string, unknown>)?.text ?? JSON.stringify(c)),
+                          )
+                          .join('')
+                      : JSON.stringify(msg.content),
+              },
+            ],
+            createdAt: new Date(),
+          }
+          await this.session.appendMessage(sessionMsg, lastMsgId)
+          lastMsgId = msgId
+          persisted++
+        } else if (msg.type === 'assistant') {
           this.turnCounter++
           const msgId = `msg-${this.turnCounter}`
           const sessionMsg: SessionMessage = {
@@ -473,6 +501,28 @@ export class SessionDO extends Agent<Env, SessionState> {
       updated_at: now,
     })
 
+    // Persist initial prompt as a user message so it survives reload
+    this.turnCounter++
+    const userMsgId = `usr-${this.turnCounter}`
+    const userMsg: SessionMessage = {
+      id: userMsgId,
+      role: 'user',
+      parts: [
+        {
+          type: 'text',
+          text: typeof config.prompt === 'string' ? config.prompt : JSON.stringify(config.prompt),
+        },
+      ],
+      createdAt: new Date(),
+    }
+    try {
+      await this.session.appendMessage(userMsg)
+      this.persistTurnState()
+      this.broadcastMessage(userMsg)
+    } catch (err) {
+      console.error(`[SessionDO:${id}] Failed to persist initial prompt:`, err)
+    }
+
     this.connectAndStream({
       type: 'execute',
       project: config.project,
@@ -520,6 +570,28 @@ export class SessionDO extends Agent<Env, SessionState> {
       updated_at: now,
       sdk_session_id: sdkSessionId,
     })
+
+    // Persist resume prompt as a user message
+    this.turnCounter++
+    const userMsgId = `usr-${this.turnCounter}`
+    const userMsg: SessionMessage = {
+      id: userMsgId,
+      role: 'user',
+      parts: [
+        {
+          type: 'text',
+          text: typeof config.prompt === 'string' ? config.prompt : JSON.stringify(config.prompt),
+        },
+      ],
+      createdAt: new Date(),
+    }
+    try {
+      await this.session.appendMessage(userMsg)
+      this.persistTurnState()
+      this.broadcastMessage(userMsg)
+    } catch (err) {
+      console.error(`[SessionDO:${id}] Failed to persist resume prompt:`, err)
+    }
 
     this.connectAndStream({
       type: 'resume',
