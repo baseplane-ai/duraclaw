@@ -1,5 +1,5 @@
 import { ChevronDown, X } from 'lucide-react'
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { SessionRecord } from '~/db/sessions-collection'
 import { getPreviewText, StatusDot } from '~/features/agent-orch/session-utils'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
@@ -61,6 +61,8 @@ export function TabBar({ onSelectSession, onLastTabClosed }: TabBarProps) {
   )
 }
 
+const LONG_PRESS_MS = 500
+
 function ProjectTab({
   project,
   sessionId,
@@ -80,8 +82,10 @@ function ProjectTab({
   onSwitchSession: (sessionId: string, title: string) => void
   onClose: () => void
 }) {
-  const [dropdownOpen, setDropdownOpen] = useState(false)
-  const dropdownRef = useRef<HTMLDivElement>(null)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const didLongPress = useRef(false)
 
   // Get all sessions for this project, sorted by activity
   const projectSessions = sessions
@@ -95,20 +99,57 @@ function ProjectTab({
   const currentSession = sessions.find((s) => s.id === sessionId)
   const hasMultipleSessions = projectSessions.length > 1
 
-  const handleBlur = useCallback((e: React.FocusEvent) => {
-    // Close dropdown if focus leaves the dropdown area
-    if (dropdownRef.current && !dropdownRef.current.contains(e.relatedTarget as Node)) {
-      setDropdownOpen(false)
+  // Close menu on outside click/touch
+  useEffect(() => {
+    if (!menuOpen) return
+    const handler = (e: MouseEvent | TouchEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    document.addEventListener('touchstart', handler)
+    return () => {
+      document.removeEventListener('mousedown', handler)
+      document.removeEventListener('touchstart', handler)
+    }
+  }, [menuOpen])
+
+  const clearLongPress = useCallback(() => {
+    if (longPressTimer.current) {
+      clearTimeout(longPressTimer.current)
+      longPressTimer.current = null
     }
   }, [])
 
+  // Long-press: open menu on mobile
+  const handleTouchStart = useCallback(() => {
+    didLongPress.current = false
+    longPressTimer.current = setTimeout(() => {
+      didLongPress.current = true
+      setMenuOpen(true)
+    }, LONG_PRESS_MS)
+  }, [])
+
+  const handleTouchEnd = useCallback(
+    (e: React.TouchEvent) => {
+      clearLongPress()
+      // If long press triggered the menu, prevent the click/select
+      if (didLongPress.current) {
+        e.preventDefault()
+        didLongPress.current = false
+      }
+    },
+    [clearLongPress],
+  )
+
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    setMenuOpen((v) => !v)
+  }, [])
+
   return (
-    // biome-ignore lint/a11y/noStaticElementInteractions: blur handler for dropdown dismiss
-    <div
-      className="group relative flex items-center border-r"
-      ref={dropdownRef}
-      onBlur={handleBlur}
-    >
+    <div className="group relative flex items-center border-r" ref={containerRef}>
       <button
         type="button"
         className={cn(
@@ -116,6 +157,10 @@ function ProjectTab({
           isActive && 'bg-accent text-accent-foreground',
         )}
         onClick={onSelect}
+        onTouchStart={handleTouchStart}
+        onTouchEnd={handleTouchEnd}
+        onTouchCancel={clearLongPress}
+        onContextMenu={handleContextMenu}
       >
         {currentSession && (
           <StatusDot
@@ -131,61 +176,68 @@ function ProjectTab({
         </div>
       </button>
 
-      {/* Session switcher dropdown trigger */}
-      {hasMultipleSessions && (
-        <button
-          type="button"
-          className={cn(
-            'px-1 py-1.5 opacity-0 hover:bg-muted transition-opacity',
-            isActive ? 'opacity-60' : 'group-hover:opacity-60',
-            dropdownOpen && 'opacity-100 bg-muted',
-          )}
-          onClick={(e) => {
-            e.stopPropagation()
-            setDropdownOpen((v) => !v)
-          }}
-          aria-label="Switch session"
-        >
-          <ChevronDown className="size-3" />
-        </button>
-      )}
-
-      {/* Close button */}
+      {/* Single caret menu trigger */}
       <button
         type="button"
-        className="px-1 py-1.5 opacity-0 hover:bg-muted group-hover:opacity-100"
+        className={cn(
+          'px-1 py-1.5 transition-opacity hover:bg-muted',
+          isActive ? 'opacity-60' : 'opacity-0 group-hover:opacity-60',
+          menuOpen && 'opacity-100 bg-muted',
+        )}
         onClick={(e) => {
           e.stopPropagation()
-          onClose()
+          setMenuOpen((v) => !v)
         }}
-        aria-label="Close tab"
+        aria-label="Tab options"
       >
-        <X className="size-3" />
+        <ChevronDown className="size-3" />
       </button>
 
-      {/* Session dropdown */}
-      {dropdownOpen && hasMultipleSessions && (
+      {/* Unified tab menu */}
+      {menuOpen && (
         <div className="absolute left-0 top-full z-50 mt-px min-w-48 max-w-64 rounded-md border bg-popover p-1 shadow-md">
-          {projectSessions.map((s) => (
-            <button
-              key={s.id}
-              type="button"
-              className={cn(
-                'flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-accent',
-                s.id === sessionId && 'bg-accent/50',
-              )}
-              onClick={() => {
-                onSwitchSession(s.id, getSessionDisplayName(s))
-                setDropdownOpen(false)
-              }}
-            >
-              <StatusDot status={s.status || 'idle'} numTurns={s.num_turns ?? 0} />
-              <span className="truncate">{getSessionDisplayName(s)}</span>
-              {s.id === sessionId && (
-                <span className="ml-auto text-[10px] text-muted-foreground">current</span>
-              )}
-            </button>
-          ))}
+          {/* Session switcher section */}
+          {hasMultipleSessions && (
+            <>
+              <div className="px-2 py-1 text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
+                Sessions
+              </div>
+              {projectSessions.map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  className={cn(
+                    'flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-accent',
+                    s.id === sessionId && 'bg-accent/50',
+                  )}
+                  onClick={() => {
+                    onSwitchSession(s.id, getSessionDisplayName(s))
+                    setMenuOpen(false)
+                  }}
+                >
+                  <StatusDot status={s.status || 'idle'} numTurns={s.num_turns ?? 0} />
+                  <span className="truncate">{getSessionDisplayName(s)}</span>
+                  {s.id === sessionId && (
+                    <span className="ml-auto text-[10px] text-muted-foreground">current</span>
+                  )}
+                </button>
+              ))}
+              <div className="my-1 border-t" />
+            </>
+          )}
+
+          {/* Close tab action */}
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-accent text-destructive"
+            onClick={() => {
+              setMenuOpen(false)
+              onClose()
+            }}
+          >
+            <X className="size-3" />
+            <span>Close tab</span>
+          </button>
         </div>
       )}
     </div>
