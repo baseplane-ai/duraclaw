@@ -35,7 +35,7 @@ function SessionDetailPage() {
         session?.title || getPreviewText(session ?? { prompt: undefined }) || sid.slice(0, 12)
       const project = session?.project || 'unknown'
       addTab(project, sid, title)
-      navigate({ to: '/session/$id', params: { id: sid } })
+      navigate({ to: '/', search: { session: sid } })
     },
     [navigate, addTab, sessions],
   )

@@ -117,7 +117,9 @@ function AgentOrchContent() {
         session?.title || getPreviewText(session ?? { prompt: undefined }) || sessionId.slice(0, 12)
       const project = session?.project || 'unknown'
       addTab(project, sessionId, title)
-      navigate({ to: '/session/$id', params: { id: sessionId } })
+      setSpawnConfig(null)
+      setSelectedSessionId(sessionId)
+      navigate({ to: '/', search: { session: sessionId } })
     },
     [navigate, addTab, sessions],
   )
