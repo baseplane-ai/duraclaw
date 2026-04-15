@@ -1,7 +1,6 @@
-import { type RefObject, useCallback, useEffect, useRef } from 'react'
+import { useDrag } from '@use-gesture/react'
+import { type RefObject, useCallback } from 'react'
 import { useTabStore } from '~/stores/tabs'
-
-const SWIPE_THRESHOLD = 80
 
 /**
  * Detects horizontal swipe gestures on the given element and switches
@@ -11,8 +10,6 @@ export function useSwipeTabs(
   ref: RefObject<HTMLElement | null>,
   onSelectSession: (sessionId: string) => void,
 ) {
-  const touchStart = useRef<{ x: number; y: number } | null>(null)
-
   const handleSwipe = useCallback(
     (dir: 'left' | 'right') => {
       const { tabs, activeTabId, setActiveTab } = useTabStore.getState()
@@ -27,30 +24,20 @@ export function useSwipeTabs(
     [onSelectSession],
   )
 
-  useEffect(() => {
-    const el = ref.current
-    if (!el) return
-
-    const onTouchStart = (e: TouchEvent) => {
-      const t = e.touches[0]
-      touchStart.current = { x: t.clientX, y: t.clientY }
-    }
-    const onTouchEnd = (e: TouchEvent) => {
-      if (!touchStart.current) return
-      const t = e.changedTouches[0]
-      const dx = t.clientX - touchStart.current.x
-      const dy = t.clientY - touchStart.current.y
-      touchStart.current = null
-      if (Math.abs(dx) > SWIPE_THRESHOLD && Math.abs(dx) > Math.abs(dy) * 1.5) {
-        handleSwipe(dx > 0 ? 'right' : 'left')
-      }
-    }
-
-    el.addEventListener('touchstart', onTouchStart, { passive: true })
-    el.addEventListener('touchend', onTouchEnd, { passive: true })
-    return () => {
-      el.removeEventListener('touchstart', onTouchStart)
-      el.removeEventListener('touchend', onTouchEnd)
-    }
-  }, [ref, handleSwipe])
+  useDrag(
+    ({ swipe: [swipeX], event }) => {
+      if (swipeX === 0) return
+      // Don't swipe if user is interacting with an input/textarea
+      const target = event.target as HTMLElement
+      if (target.closest('input, textarea, [contenteditable]')) return
+      handleSwipe(swipeX > 0 ? 'right' : 'left')
+    },
+    {
+      target: ref,
+      axis: 'x',
+      swipe: { distance: 50, velocity: 0.3 },
+      filterTaps: true,
+      eventOptions: { passive: true },
+    },
+  )
 }
