@@ -24,7 +24,15 @@ import {
   ToolInput,
   ToolOutput,
 } from '@duraclaw/ai-elements'
-import { ChevronLeftIcon, ChevronRightIcon, FileIcon, HistoryIcon } from 'lucide-react'
+import {
+  CheckIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  CopyIcon,
+  FileIcon,
+  HistoryIcon,
+} from 'lucide-react'
+import { useCallback, useRef, useState } from 'react'
 import { Skeleton } from '~/components/ui/skeleton'
 import type { GateResponse, SessionMessage, SessionMessagePart, SessionState } from '~/lib/types'
 import { GateResolver } from './GateResolver'
@@ -64,6 +72,31 @@ function MessageBranch({ current, total, onNavigate }: MessageBranchProps) {
   )
 }
 
+function CopyMessageButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false)
+  const timeoutRef = useRef<ReturnType<typeof setTimeout>>(null)
+
+  const copy = useCallback(() => {
+    navigator.clipboard.writeText(text)
+    setCopied(true)
+    if (timeoutRef.current) clearTimeout(timeoutRef.current)
+    timeoutRef.current = setTimeout(() => setCopied(false), 2000)
+  }, [text])
+
+  const Icon = copied ? CheckIcon : CopyIcon
+
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      className="rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground group-hover:opacity-100"
+      aria-label="Copy message"
+    >
+      <Icon className="size-3.5" />
+    </button>
+  )
+}
+
 interface ChatThreadProps {
   messages: SessionMessage[]
   gate: SessionState['gate']
@@ -95,6 +128,11 @@ function renderPart(
           <MessageResponse isAnimating={part.state === 'streaming'}>
             {part.text || ''}
           </MessageResponse>
+          {part.state !== 'streaming' && part.text && (
+            <div className="flex justify-end">
+              <CopyMessageButton text={part.text} />
+            </div>
+          )}
         </MessageContent>
       </Message>
     )
