@@ -6,8 +6,8 @@ status: approved
 priority: high
 github_issue: 38
 created: 2026-04-14
-updated: 2026-04-14
-approved: 2026-04-14
+updated: 2026-04-15
+approved: 2026-04-15
 phases:
   - id: p1
     name: "Migrate PreToolUse hooks to canUseTool callback"
@@ -37,19 +37,51 @@ phases:
         description: "Gateway server 'answer' command resolves ctx.pendingAnswer with provided answers"
         type: "unit"
   - id: p2
+    name: "Update GateResolver for structured AskUserQuestion UI"
+    tasks:
+      - "Write component tests for structured question rendering"
+      - "Render questions array with header chip, question text, and option cards"
+      - "Support single-select (click option to select) and multi-select (toggle options)"
+      - "Support free-text 'Other' answer with text input fallback"
+      - "Format answers as { [questionText]: selectedLabel } keyed by question text"
+      - "Support multiple questions (1-4) rendered sequentially"
+      - "Run tests to verify"
+    test_cases:
+      - id: "gate-renders-question-text"
+        description: "GateResolver renders question text and header chip from gate.detail.questions[0]"
+        type: "unit"
+      - id: "gate-renders-options"
+        description: "GateResolver renders option cards with label and description for each option"
+        type: "unit"
+      - id: "gate-select-option"
+        description: "Clicking an option highlights it and enables the Submit button"
+        type: "unit"
+      - id: "gate-other-input"
+        description: "User can type a custom 'Other' answer in the text input instead of selecting an option"
+        type: "unit"
+      - id: "gate-multi-select"
+        description: "When multiSelect is true, user can toggle multiple options before submitting"
+        type: "unit"
+      - id: "gate-answer-format"
+        description: "Submitted answer is formatted as { [questionText]: selectedLabel } for the resolveGate call"
+        type: "unit"
+      - id: "gate-multiple-questions"
+        description: "When questions array has 2+ items, all are rendered with their own options"
+        type: "unit"
+  - id: p3
     name: "End-to-end gate flow verification"
     tasks:
       - "Start a session that triggers AskUserQuestion"
       - "Verify ask_user event flows from gateway to SessionDO to browser"
-      - "Verify GateResolver renders in ChatThread with question content"
+      - "Verify GateResolver renders in ChatThread with structured question UI"
       - "Verify answer submission flows from browser to SessionDO to gateway to SDK"
       - "Verify session resumes after answer is provided"
     test_cases:
       - id: "e2e-gate-renders"
-        description: "When Claude calls AskUserQuestion, GateResolver appears in the chat thread with the question text"
+        description: "When Claude calls AskUserQuestion, GateResolver appears with question text, header, and option cards"
         type: "smoke"
       - id: "e2e-answer-resumes"
-        description: "After submitting an answer via GateResolver, the session resumes and Claude continues"
+        description: "After selecting an option and submitting, the session resumes and Claude continues"
         type: "smoke"
       - id: "e2e-reconnect-gate"
         description: "Disconnecting and reconnecting while gate is pending re-renders the GateResolver"
@@ -58,7 +90,11 @@ phases:
 
 ## Overview
 
-The AskUserQuestion tool call from the Claude Agent SDK is never intercepted by the gateway. The current implementation uses PreToolUse hooks (claude.ts:200-339) to intercept both AskUserQuestion and permission prompts, but the SDK no longer fires PreToolUse hooks for AskUserQuestion. The fix is to replace the PreToolUse hook approach with the SDK's native `canUseTool` callback, which fires for all tool calls including AskUserQuestion and supports injecting answers via `updatedInput` in the `PermissionResult`.
+The AskUserQuestion tool call from the Claude Agent SDK is never intercepted by the gateway, and the GateResolver UI doesn't render the structured question format (options with labels/descriptions, multi-select, header chips) that AskUserQuestion provides. Two fixes are needed:
+
+1. **Gateway (P1):** Replace PreToolUse hooks with the SDK's native `canUseTool` callback. The SDK no longer fires PreToolUse hooks for AskUserQuestion, so the current interception code is dead. The `canUseTool` callback fires for all tool calls and supports injecting answers via `updatedInput`.
+
+2. **UI (P2):** Rewrite GateResolver's `ask_user` branch to render structured questions with selectable option cards, multi-select support, header chips, and an "Other" free-text fallback — matching the SDK's `AskUserQuestionInput` schema.
 
 ## Root Cause
 
@@ -116,13 +152,44 @@ The SDK's native mechanism for tool interception is the `canUseTool` callback (`
 - **Expected:** No changes — appends `tool-ask_user` part, sets `waiting_gate`, dispatches push notification. Already implemented correctly at session-do.ts:973-1019.
 - **Verify:** Existing behavior — covered by the e2e flow.
 
-### B5: GateResolver UI (unchanged)
+### B5: GateResolver renders structured AskUserQuestion UI
 
 **Core:**
 - **ID:** gateresolver-askuser-ui
-- **Trigger:** ChatThread renders `tool-ask_user` part in `approval-requested` state
-- **Expected:** No changes — GateResolver already renders question text, input field, and submit button. Located at GateResolver.tsx:69-109.
-- **Verify:** Existing behavior — covered by the e2e flow.
+- **Trigger:** ChatThread renders `tool-ask_user` part in `approval-requested` state while session is `waiting_gate`
+- **Expected:** GateResolver renders the structured question format from `gate.detail.questions` array. For each question:
+  - Displays `header` as a chip/tag label
+  - Displays `question` text
+  - Renders each `option` as a selectable card showing `label` and `description`
+  - If `multiSelect` is true, allows toggling multiple options; otherwise single-select
+  - Provides an "Other" free-text input for custom answers
+  - Submit button sends `onResolve(gate.id, { answer: selectedLabel })` for single-select, or `onResolve(gate.id, { answer: 'label1, label2' })` for multi-select (comma-separated)
+- **Verify:** Component test: render GateResolver with `gate.detail: { questions: [{ question: 'Which?', header: 'Library', options: [{ label: 'lodash', description: 'Utility library' }, { label: 'ramda', description: 'FP library' }], multiSelect: false }] }`. Assert header chip, question text, and option cards render. Click 'lodash' card, click Submit, assert `onResolve` called with `{ answer: 'lodash' }`.
+**Source:** `apps/orchestrator/src/features/agent-orch/GateResolver.tsx` (rewriting lines 69-109)
+
+#### UI Layer
+- **Component:** `GateResolver` (existing, `ask_user` branch needs full rewrite)
+- **Question data shape** (from SDK `AskUserQuestionInput`):
+  ```typescript
+  questions: Array<{
+    question: string;      // "Which library should we use?"
+    header: string;        // "Library" (chip label, max 12 chars)
+    options: Array<{
+      label: string;       // "lodash"
+      description: string; // "General-purpose utility library"
+      preview?: string;    // Optional code/mockup preview (markdown)
+    }>;                    // 2-4 options
+    multiSelect: boolean;  // false = single-select, true = multi-select
+  }>;
+  ```
+- **Answer format** (from SDK `AskUserQuestionOutput`):
+  The SDK expects answers as `{ [questionText]: answerString }` keyed by question text. Multi-select answers are comma-separated. The existing `resolveGate` sends `{ answer: string }` — the GateResolver formats the answer string before calling `onResolve`.
+- **States:**
+  - `idle`: Shows question(s) with option cards, "Other" text input, and disabled Submit button
+  - `option-selected`: An option card is highlighted, Submit button enabled
+  - `other-typed`: Text input has content, Submit button enabled
+  - `resolving`: All controls disabled, Submit shows loading state
+- **Accessibility:** Option cards are buttons with `aria-pressed` for selection state. "Other" input has associated label. Submit button has descriptive text.
 
 ### B6: resolveGate answer flow (unchanged)
 
@@ -134,11 +201,11 @@ The SDK's native mechanism for tool interception is the `canUseTool` callback (`
 
 ## Non-Goals
 
-- **UI changes:** GateResolver already handles `ask_user` gates correctly. No UI modifications needed.
 - **Shared types changes:** Event shapes (`AskUserEvent`, `PermissionRequestEvent`, `AnswerCommand`) are unchanged.
-- **SessionDO changes:** Gate handling logic is unchanged — the fix is purely in the gateway adapter.
+- **SessionDO changes:** Gate handling logic is unchanged — the fix is in the gateway adapter and GateResolver UI.
 - **Other adapters:** Only the Claude adapter is affected. Codex and OpenCode adapters don't support AskUserQuestion.
-- **Multi-question rendering:** AskUserQuestion supports 1-4 questions. Current UI handles this adequately for now.
+- **Preview rendering:** AskUserQuestion options can include `preview` content (markdown mockups, code snippets). This fix shows `label` and `description` only; preview rendering is deferred.
+- **Annotations:** The SDK supports `annotations` (per-question notes from the user). Not implemented in this fix.
 - **Auto-resolve mode:** No headless/batch auto-answer support — always relay to user.
 
 ## Implementation Phases
@@ -180,7 +247,36 @@ The SDK's native mechanism for tool interception is the `canUseTool` callback (`
 
 **Note on `PermissionResult` fields:** The SDK's `PermissionResult` type includes optional fields (`updatedPermissions`, `decisionClassification`, `interrupt`, `toolUseID`) beyond `behavior` and `updatedInput`/`message`. These are intentionally not used — we only need `behavior: 'allow'` with optional `updatedInput` for AskUserQuestion, and `behavior: 'deny'` with `message` for denied permissions.
 
-### Phase 2: End-to-end verification (1 hour)
+### Phase 2: Update GateResolver for structured questions (1-2 hours)
+
+**Scope:** `apps/orchestrator/src/features/agent-orch/GateResolver.tsx` and new test file.
+
+**Test-first ordering:** Write component tests before modifying GateResolver.
+
+1. **Write component tests** — Define expected rendering and interaction:
+   - Renders question text and header chip from `gate.detail.questions[0]`
+   - Renders option cards with `label` and `description`
+   - Single-select: clicking an option highlights it exclusively
+   - Multi-select: clicking toggles option selection
+   - "Other" text input works as fallback
+   - Submit sends correctly formatted answer
+   - Multiple questions (2+) all render
+
+2. **Rewrite the `ask_user` branch of GateResolver** — Replace the simple text input (lines 69-109) with structured question rendering:
+   - Read `gate.detail.questions` (array, not single `question` string)
+   - For each question: render `header` chip, `question` text, option cards
+   - Option cards: `label` as title, `description` as subtitle, selectable
+   - Single-select: clicking one deselects others
+   - Multi-select: toggle selection with visual indicator
+   - "Other" text input always available below options
+   - Submit button: enabled when option selected or text entered
+   - Answer format: selected `label` value (or comma-separated for multi-select, or custom text for "Other")
+
+3. **Update answer format for resolveGate** — The SDK expects answers as `{ [questionText]: answerString }`. The current `resolveGate` sends `{ answer: string }`. For single-question (common case), send `{ answer: selectedLabel }`. For multiple questions, the GateResolver collects answers per question and formats them.
+
+4. **Run tests** — Verify all component tests pass.
+
+### Phase 3: End-to-end verification (1 hour)
 
 1. **Live session test** — Start a session that triggers AskUserQuestion, verify the full flow works end-to-end.
 2. **Edge cases** — Test timeout, abort while gated, reconnect while gated.
@@ -201,7 +297,14 @@ bun test src/adapters/claude.test.ts --filter "permission"
 ```
 Expected: Permission allow/deny tests pass.
 
-### V3: Smoke test — GateResolver renders in browser
+### V3: Unit test — GateResolver structured question rendering
+```bash
+cd /data/projects/duraclaw/apps/orchestrator
+pnpm vitest run src/features/agent-orch/GateResolver.test.tsx
+```
+Expected: All GateResolver tests pass — question text, header chip, option cards, selection, multi-select, "Other" input, submit.
+
+### V4: Smoke test — GateResolver renders in browser
 ```bash
 chrome-devtools-axi open http://localhost:43173/login
 # ... login flow ...
@@ -210,11 +313,11 @@ chrome-devtools-axi snapshot
 ```
 Expected: GateResolver appears with question text, input, and submit button.
 
-### V4: Smoke test — Answer submission resumes session
+### V5: Smoke test — Answer submission resumes session
 Submit an answer and verify session continues.
 Expected: GateResolver disappears, session status returns to `running`.
 
-### V5: Smoke test — Reconnect re-renders gate
+### V6: Smoke test — Reconnect re-renders gate
 Close and reopen browser while gate is pending.
 Expected: GateResolver re-renders with the same question content.
 
