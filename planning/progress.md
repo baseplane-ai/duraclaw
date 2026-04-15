@@ -1,6 +1,6 @@
 # Duraclaw v2 — Progress Tracker
 
-> Updated 2026-04-13. Issue #27 VPS session discovery shipped — session source adapters, DO sync with dedup, blended history UI, resume discovered sessions. Issue #24 UX ergonomics shipped prior.
+> Updated 2026-04-15. Issue #38 AskUserQuestion gate fix shipped — canUseTool migration, structured question UI. Issue #27 VPS session discovery shipped prior.
 
 **Status key:** `not-started` | `spec` | `in-progress` | `done`
 
@@ -30,6 +30,7 @@
 | 29 | Mobile Cards + Nav Cleanup (11.1-11.2) | not-started | — | — |
 | 30 | Cmd+K Fuzzy Finder + Keyboard Nav (11.3-11.4) | not-started | — | #29 (cards exist first) |
 | 31 | Mobile Swipe + Live Card Previews (11.5-11.6) | not-started | — | #29 |
+| 38 | AskUserQuestion Gate Fix | done | [38-askuserquestion-gate-fix.md](specs/38-askuserquestion-gate-fix.md) | — |
 
 ### Agent-Orch Drop-In (new — accelerates Phases 1-3)
 
