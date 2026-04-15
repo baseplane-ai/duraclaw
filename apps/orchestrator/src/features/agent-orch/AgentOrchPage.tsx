@@ -135,8 +135,7 @@ function AgentOrchContent() {
     [updateSession],
   )
 
-  const swipeRef = useRef<HTMLElement>(null)
-  useSwipeTabs(swipeRef, handleSelectSession)
+  const swipeBind = useSwipeTabs(handleSelectSession)
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -184,7 +183,7 @@ function AgentOrchContent() {
   return (
     <>
       <Header fixed />
-      <Main ref={swipeRef} fixed fluid className="p-0">
+      <Main fixed fluid className="p-0" {...swipeBind()}>
         <PwaInstallBanner />
         <PushOptInBanner />
         <TabBar onSelectSession={handleSelectSession} onLastTabClosed={handleLastTabClosed} />

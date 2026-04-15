@@ -51,13 +51,12 @@ function SessionDetailPage() {
     [updateSession],
   )
 
-  const swipeRef = useRef<HTMLElement>(null)
-  useSwipeTabs(swipeRef, handleSelectSession)
+  const swipeBind = useSwipeTabs(handleSelectSession)
 
   return (
     <>
       <Header fixed />
-      <Main ref={swipeRef} fixed fluid className="p-0">
+      <Main fixed fluid className="p-0" {...swipeBind()}>
         <TabBar onSelectSession={handleSelectSession} onLastTabClosed={handleLastTabClosed} />
         <SessionDetailWithSync
           key={sessionId}
