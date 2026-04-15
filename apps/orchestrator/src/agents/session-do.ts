@@ -290,62 +290,11 @@ export class SessionDO extends Agent<Env, SessionState> {
    * syncs any missed messages, and transitions to the correct status.
    */
   private async recoverFromDroppedConnection() {
-    const gatewayUrl = this.env.CC_GATEWAY_URL
-    const sdkSessionId = this.state.sdk_session_id
-    const project = this.state.project
-
-    if (!gatewayUrl || !sdkSessionId || !project) {
-      console.log(
-        `[SessionDO:${this.ctx.id}] Recovery: missing gateway URL/session/project — marking idle`,
-      )
-      this.updateState({ status: 'idle', gate: null, error: 'Gateway connection lost' })
-      this.syncStatusToRegistry()
-      return
-    }
-
-    const httpBase = gatewayUrl.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
-    const headers: Record<string, string> = {}
-    if (this.env.CC_GATEWAY_SECRET) {
-      headers.Authorization = `Bearer ${this.env.CC_GATEWAY_SECRET}`
-    }
-
+    // Sync any missed messages from the gateway transcript
     try {
-      // Check if the session is still listed (i.e. still known to the VPS)
-      const sessionsUrl = new URL(`/projects/${encodeURIComponent(project)}/sessions`, httpBase)
-      const sessResp = await fetch(sessionsUrl.toString(), { headers })
-      if (sessResp.ok) {
-        const data = (await sessResp.json()) as {
-          sessions: Array<{ session_id: string; last_activity: string }>
-        }
-        const match = data.sessions.find((s) => s.session_id === sdkSessionId)
-        if (match) {
-          // Session exists on VPS — sync latest messages
-          const msgUrl = new URL(
-            `/projects/${encodeURIComponent(project)}/sessions/${encodeURIComponent(sdkSessionId)}/messages`,
-            httpBase,
-          )
-          const msgResp = await fetch(msgUrl.toString(), { headers })
-          if (msgResp.ok) {
-            const msgData = (await msgResp.json()) as {
-              messages: Array<{ type: string; uuid: string; content: unknown[] }>
-            }
-            const serverMsgCount = msgData.messages?.length ?? 0
-            const localMsgCount = this.session.getPathLength()
-
-            if (serverMsgCount > localMsgCount) {
-              console.log(
-                `[SessionDO:${this.ctx.id}] Recovery: server has ${serverMsgCount} messages vs local ${localMsgCount} — rehydrating`,
-              )
-              // Re-run hydration to pick up missed messages
-              // (hydrateFromGateway is idempotent — it checks pathLength first)
-              // Clear path to force re-hydration
-              await this.hydrateFromGateway()
-            }
-          }
-        }
-      }
+      await this.hydrateFromGateway()
     } catch (err) {
-      console.error(`[SessionDO:${this.ctx.id}] Recovery poll failed:`, err)
+      console.error(`[SessionDO:${this.ctx.id}] Recovery hydration failed:`, err)
     }
 
     // Finalize any streaming parts
@@ -492,6 +441,15 @@ export class SessionDO extends Agent<Env, SessionState> {
    * Fetch SDK session transcript from the VPS gateway and persist via Session.
    * Called on first getMessages() for discovered sessions with empty history.
    */
+  /**
+   * Fetch SDK session transcript from the VPS gateway and persist via Session.
+   *
+   * Skips the first `skipCount` user/assistant messages that are already
+   * persisted locally. When called with skipCount=0 (default) on a session
+   * that already has messages, it effectively skips nothing but also doesn't
+   * duplicate — the skipCount should match the number of user+assistant
+   * messages already in the Session tree.
+   */
   private async hydrateFromGateway() {
     const gatewayUrl = this.env.CC_GATEWAY_URL
     if (!gatewayUrl || !this.state.sdk_session_id || !this.state.project) return
@@ -519,9 +477,36 @@ export class SessionDO extends Agent<Env, SessionState> {
       }
       if (!data.messages?.length) return
 
+      // Count how many user/assistant messages we already have locally.
+      // We skip that many from the gateway transcript to avoid duplicates.
+      const localHistory = this.session.getPathLength()
+      let skipped = 0
+
       let persisted = 0
       let lastMsgId: string | null = null
+
+      // If we have local messages, set lastMsgId to the latest one so new
+      // messages get appended to the end of the existing tree.
+      if (localHistory > 0) {
+        const history = this.session.getHistory()
+        if (history.length > 0) {
+          lastMsgId = history[history.length - 1].id
+        }
+      }
+
       for (const msg of data.messages) {
+        // Skip user/assistant messages we already persisted
+        if (msg.type === 'user' || msg.type === 'assistant') {
+          if (skipped < localHistory) {
+            skipped++
+            continue
+          }
+        }
+        // Also skip tool_results that belong to already-persisted messages
+        if (msg.type === 'tool_result' && skipped <= localHistory && persisted === 0) {
+          continue
+        }
+
         if (msg.type === 'user') {
           this.turnCounter++
           const msgId = `usr-${this.turnCounter}`
@@ -574,9 +559,11 @@ export class SessionDO extends Agent<Env, SessionState> {
           persisted++
         }
       }
-      this.persistTurnState()
+      if (persisted > 0) {
+        this.persistTurnState()
+      }
       console.log(
-        `[SessionDO:${this.ctx.id}] Hydrated ${persisted} events from gateway for sdk_session=${this.state.sdk_session_id.slice(0, 12)}`,
+        `[SessionDO:${this.ctx.id}] Hydrated ${persisted} new events (skipped ${skipped} existing) from gateway for sdk_session=${this.state.sdk_session_id.slice(0, 12)}`,
       )
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Gateway hydration error:`, err)
@@ -1012,12 +999,10 @@ export class SessionDO extends Agent<Env, SessionState> {
       }
     }
 
-    // Hydrate from VPS gateway on first access for discovered sessions
+    // Hydrate from VPS gateway — syncs any messages we don't have yet.
+    // Safe to call when messages already exist (skips already-persisted ones).
     if (this.state.sdk_session_id && this.state.project) {
-      const pathLen = this.session.getPathLength()
-      if (pathLen === 0) {
-        await this.hydrateFromGateway()
-      }
+      await this.hydrateFromGateway()
     }
 
     // Return messages from Session history
