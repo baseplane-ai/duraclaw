@@ -146,7 +146,7 @@ export function NavSessions() {
 
   const handleSelect = useCallback(
     (session: SessionRecord) => {
-      addTab(session.id, getDisplayName(session))
+      addTab(session.project || 'unknown', session.id, getDisplayName(session))
       setOpenMobile(false)
       navigate({ to: '/session/$id', params: { id: session.id } })
     },

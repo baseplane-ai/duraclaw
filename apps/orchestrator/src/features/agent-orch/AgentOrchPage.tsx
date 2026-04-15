@@ -57,10 +57,10 @@ function AgentOrchContent() {
       .finally(() => setProjectsLoading(false))
   }, [])
 
-  const addTab = useTabStore((s) => s.addTab)
+  const { addTab, addNewTab } = useTabStore()
 
   const handleSpawn = useCallback(
-    async (config: SpawnFormConfig) => {
+    async (config: SpawnFormConfig & { newTab?: boolean }) => {
       // Create session via the existing POST /api/sessions route
       try {
         const resp = await fetch('/api/sessions', {
@@ -77,6 +77,7 @@ function AgentOrchContent() {
 
         const data = (await resp.json()) as { session_id: string }
         const sessionId = data.session_id
+        const title = config.prompt?.slice(0, 40) || config.project
 
         // Set spawn config for auto-spawn in AgentDetailWithSpawn
         setSpawnConfig({
@@ -86,13 +87,20 @@ function AgentOrchContent() {
           agent: config.agent,
         })
         setSelectedSessionId(sessionId)
-        addTab(sessionId, config.prompt?.slice(0, 40) || config.project)
+
+        // Add to tab: replace existing project tab or force new tab
+        if (config.newTab) {
+          addNewTab(config.project, sessionId, title)
+        } else {
+          addTab(config.project, sessionId, title)
+        }
+
         navigate({ to: '/', search: { session: sessionId } })
       } catch (err) {
         console.error('[AgentOrch] Spawn failed:', err)
       }
     },
-    [navigate, addTab],
+    [navigate, addTab, addNewTab],
   )
 
   const handleSelectSession = useCallback(
@@ -100,7 +108,8 @@ function AgentOrchContent() {
       const session = sessions.find((s) => s.id === sessionId)
       const title =
         session?.title || getPreviewText(session ?? { prompt: undefined }) || sessionId.slice(0, 12)
-      addTab(sessionId, title)
+      const project = session?.project || 'unknown'
+      addTab(project, sessionId, title)
       navigate({ to: '/session/$id', params: { id: sessionId } })
     },
     [navigate, addTab, sessions],
@@ -127,16 +136,18 @@ function AgentOrchContent() {
       if (isMod && e.key === 't') {
         e.preventDefault()
         if (selectedSessionId) {
-          useTabStore.getState().addTab(selectedSessionId)
+          const session = sessions.find((s) => s.id === selectedSessionId)
+          const project = session?.project || 'unknown'
+          useTabStore.getState().addTab(project, selectedSessionId)
         }
       }
 
       // Cmd+W: close current tab
       if (isMod && e.key === 'w') {
         e.preventDefault()
-        if (selectedSessionId) {
-          const { tabs } = useTabStore.getState()
-          useTabStore.getState().removeTab(selectedSessionId)
+        const { tabs, activeTabId } = useTabStore.getState()
+        if (activeTabId) {
+          useTabStore.getState().removeTab(activeTabId)
           if (tabs.length <= 1) {
             handleLastTabClosed()
           }
@@ -150,7 +161,7 @@ function AgentOrchContent() {
         if (idx < tabs.length) {
           e.preventDefault()
           const tab = tabs[idx]
-          useTabStore.getState().setActiveTab(tab.sessionId)
+          useTabStore.getState().setActiveTab(tab.id)
           handleSelectSession(tab.sessionId)
         }
       }
@@ -158,7 +169,7 @@ function AgentOrchContent() {
 
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [selectedSessionId, handleSelectSession, handleLastTabClosed])
+  }, [selectedSessionId, sessions, handleSelectSession, handleLastTabClosed])
 
   return (
     <>
@@ -200,7 +211,6 @@ function AgentDetailWithSpawn({
 }) {
   const agent = useCodingAgent(sessionId)
   const spawnedRef = useRef(false)
-  const updateTabTitle = useTabStore((s) => s.updateTabTitle)
 
   // Spawn once we have state (WS is connected and synced)
   useEffect(() => {
@@ -224,9 +234,12 @@ function AgentDetailWithSpawn({
       })
       // Update tab title when session gets a summary
       const title = agent.state.summary || agent.state.project
-      if (title) updateTabTitle(sessionId, title)
+      if (title) {
+        const tab = useTabStore.getState().findTabBySession(sessionId)
+        if (tab) useTabStore.getState().updateTabTitle(tab.id, title)
+      }
     }
-  }, [agent.state, sessionId, onStateChange, updateTabTitle])
+  }, [agent.state, sessionId, onStateChange])
 
   return <AgentDetailView name={sessionId} agent={agent} />
 }

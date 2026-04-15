@@ -23,7 +23,8 @@ function SessionDetailPage() {
     const session = sessions.find((s) => s.id === sessionId)
     const title =
       session?.title || getPreviewText(session ?? { prompt: undefined }) || sessionId.slice(0, 12)
-    addTab(sessionId, title)
+    const project = session?.project || 'unknown'
+    addTab(project, sessionId, title)
   }, [sessionId, addTab, sessions])
 
   const handleSelectSession = useCallback(
@@ -31,7 +32,8 @@ function SessionDetailPage() {
       const session = sessions.find((s) => s.id === sid)
       const title =
         session?.title || getPreviewText(session ?? { prompt: undefined }) || sid.slice(0, 12)
-      addTab(sid, title)
+      const project = session?.project || 'unknown'
+      addTab(project, sid, title)
       navigate({ to: '/session/$id', params: { id: sid } })
     },
     [navigate, addTab, sessions],
@@ -81,6 +83,12 @@ function SessionDetailWithSync({
         num_turns: agent.state.num_turns,
         error: agent.state.error,
       })
+      // Update tab title when session gets a summary
+      const title = agent.state.summary || agent.state.project
+      if (title) {
+        const tab = useTabStore.getState().findTabBySession(sessionId)
+        if (tab) useTabStore.getState().updateTabTitle(tab.id, title)
+      }
     }
   }, [agent.state, sessionId, onStateChange])
 

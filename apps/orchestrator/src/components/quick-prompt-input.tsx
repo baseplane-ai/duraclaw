@@ -6,6 +6,8 @@
  */
 
 import { useEffect, useRef, useState } from 'react'
+import { Checkbox } from '~/components/ui/checkbox'
+import { Label } from '~/components/ui/label'
 import {
   Select,
   SelectContent,
@@ -15,6 +17,7 @@ import {
 } from '~/components/ui/select'
 import { Textarea } from '~/components/ui/textarea'
 import { useUserDefaults } from '~/hooks/use-user-defaults'
+import { useTabStore } from '~/stores/tabs'
 
 const MODEL_OPTIONS = [
   { value: 'claude-opus-4-6', label: 'claude-opus-4-6', agent: 'claude' },
@@ -25,7 +28,13 @@ const MODEL_OPTIONS = [
 ]
 
 export interface QuickPromptInputProps {
-  onSubmit: (config: { project: string; model: string; agent?: string; prompt: string }) => void
+  onSubmit: (config: {
+    project: string
+    model: string
+    agent?: string
+    prompt: string
+    newTab?: boolean
+  }) => void
   projects: Array<{ name: string; path: string }>
   projectsLoading?: boolean
 }
@@ -39,6 +48,10 @@ export function QuickPromptInput({ onSubmit, projects, projectsLoading }: QuickP
     return MODEL_OPTIONS.find((m) => m.value === preferences.model)?.value ?? MODEL_OPTIONS[0].value
   })
   const [prompt, setPrompt] = useState('')
+  const [newTab, setNewTab] = useState(false)
+
+  // Check if selected project already has a tab
+  const existingTab = useTabStore((s) => s.findTabByProject)(selectedProject)
 
   // Update model when preferences load
   useEffect(() => {
@@ -57,6 +70,13 @@ export function QuickPromptInput({ onSubmit, projects, projectsLoading }: QuickP
     textareaRef.current?.focus()
   }, [])
 
+  // Reset newTab when project changes
+  const prevProjectRef = useRef(selectedProject)
+  if (prevProjectRef.current !== selectedProject) {
+    prevProjectRef.current = selectedProject
+    setNewTab(false)
+  }
+
   const currentModel = MODEL_OPTIONS.find((m) => m.value === selectedModel) ?? MODEL_OPTIONS[0]
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -68,6 +88,7 @@ export function QuickPromptInput({ onSubmit, projects, projectsLoading }: QuickP
         model: currentModel.value,
         agent: currentModel.agent,
         prompt: prompt.trim(),
+        newTab: existingTab ? newTab : undefined,
       })
     }
   }
@@ -114,6 +135,18 @@ export function QuickPromptInput({ onSubmit, projects, projectsLoading }: QuickP
         className="max-w-lg w-full"
         rows={3}
       />
+      {existingTab && (
+        <div className="flex items-center gap-2">
+          <Checkbox
+            id="new-tab"
+            checked={newTab}
+            onCheckedChange={(checked) => setNewTab(checked === true)}
+          />
+          <Label htmlFor="new-tab" className="text-xs text-muted-foreground cursor-pointer">
+            Open in new tab (existing tab for {selectedProject})
+          </Label>
+        </div>
+      )}
     </div>
   )
 }
