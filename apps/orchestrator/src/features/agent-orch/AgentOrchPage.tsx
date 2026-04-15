@@ -39,6 +39,10 @@ function AgentOrchContent() {
     if (searchSessionId && searchSessionId !== selectedSessionId) {
       setSpawnConfig(null)
       setSelectedSessionId(searchSessionId)
+    } else if (!searchSessionId && selectedSessionId) {
+      // "New session" navigates to "/" without ?session — clear selection
+      setSpawnConfig(null)
+      setSelectedSessionId(null)
     }
   }, [searchSessionId, selectedSessionId])
   const [projects, setProjects] = useState<
