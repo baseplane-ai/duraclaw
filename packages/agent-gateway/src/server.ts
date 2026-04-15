@@ -198,25 +198,58 @@ const server = Bun.serve<WsData>({
       try {
         const { getSessionMessages } = await import('@anthropic-ai/claude-agent-sdk')
         const rawMessages = await getSessionMessages(sdkSessionId, { dir: projectPath })
-        // Map SDK messages to gateway event shapes for direct persistence in the DO
-        const events = rawMessages
-          .filter((m: any) => m.type === 'assistant' || m.type === 'user')
-          .map((m: any) => {
-            if (m.type === 'assistant') {
-              return {
-                type: 'assistant' as const,
-                session_id: m.session_id,
-                uuid: m.uuid,
-                content: m.message?.content ?? [],
-              }
+        // Map SDK messages to gateway event shapes for direct persistence in the DO.
+        // User messages may contain tool_result blocks (Claude API format) — split those
+        // into separate tool_result events so the DO can apply them to tool parts.
+        const events: Array<Record<string, unknown>> = []
+        for (const m of rawMessages.filter(
+          (m: any) => m.type === 'assistant' || m.type === 'user',
+        )) {
+          if ((m as any).type === 'assistant') {
+            events.push({
+              type: 'assistant' as const,
+              session_id: (m as any).session_id,
+              uuid: (m as any).uuid,
+              content: (m as any).message?.content ?? [],
+            })
+            continue
+          }
+
+          // User message — separate tool_result blocks from text/image blocks
+          const content = (m as any).message?.content ?? (m as any).message ?? ''
+          if (Array.isArray(content)) {
+            const toolResultBlocks = content.filter((b: any) => b?.type === 'tool_result')
+            const otherBlocks = content.filter((b: any) => b?.type !== 'tool_result')
+
+            // Emit non-tool-result content as a user message (if any)
+            if (otherBlocks.length > 0) {
+              events.push({
+                type: 'user' as const,
+                session_id: (m as any).session_id,
+                uuid: (m as any).uuid,
+                content: otherBlocks,
+              })
             }
-            return {
+
+            // Emit tool_result blocks as a tool_result event
+            if (toolResultBlocks.length > 0) {
+              events.push({
+                type: 'tool_result' as const,
+                session_id: (m as any).session_id,
+                uuid: (m as any).uuid,
+                content: toolResultBlocks,
+              })
+            }
+          } else {
+            // String content — plain user message
+            events.push({
               type: 'user' as const,
-              session_id: m.session_id,
-              uuid: m.uuid,
-              content: m.message?.content ?? m.message ?? '',
-            }
-          })
+              session_id: (m as any).session_id,
+              uuid: (m as any).uuid,
+              content,
+            })
+          }
+        }
         return json(200, { messages: events })
       } catch (err) {
         return json(500, {

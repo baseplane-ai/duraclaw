@@ -508,6 +508,20 @@ export class SessionDO extends Agent<Env, SessionState> {
         }
 
         if (msg.type === 'user') {
+          // Filter out tool_result blocks from user message content — those are handled
+          // as separate tool_result events. If only tool_result blocks remain, skip entirely.
+          let content = msg.content
+          if (Array.isArray(content)) {
+            const filtered = content.filter(
+              (c: unknown) => (c as Record<string, unknown>)?.type !== 'tool_result',
+            )
+            if (filtered.length === 0) {
+              // User message contained only tool_result blocks — skip
+              continue
+            }
+            content = filtered
+          }
+
           this.turnCounter++
           const msgId = `usr-${this.turnCounter}`
           const sessionMsg: SessionMessage = {
@@ -517,17 +531,17 @@ export class SessionDO extends Agent<Env, SessionState> {
               {
                 type: 'text',
                 text:
-                  typeof msg.content === 'string'
-                    ? msg.content
-                    : Array.isArray(msg.content)
-                      ? msg.content
+                  typeof content === 'string'
+                    ? content
+                    : Array.isArray(content)
+                      ? content
                           .map((c: unknown) =>
                             typeof c === 'string'
                               ? c
                               : ((c as Record<string, unknown>)?.text ?? JSON.stringify(c)),
                           )
                           .join('')
-                      : JSON.stringify(msg.content),
+                      : JSON.stringify(content),
               },
             ],
             createdAt: new Date(),
