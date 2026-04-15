@@ -137,7 +137,7 @@ function AgentOrchContent() {
     [updateSession],
   )
 
-  const swipeBind = useSwipeTabs(handleSelectSession)
+  const { swipeProps, debug: swipeDebug } = useSwipeTabs(handleSelectSession)
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -185,7 +185,21 @@ function AgentOrchContent() {
   return (
     <>
       <Header fixed />
-      <Main fixed fluid className="p-0" {...swipeBind()}>
+      <Main fixed fluid className="p-0" {...swipeProps}>
+        {swipeDebug && (
+          <div
+            className="fixed top-16 left-1/2 z-[9999] -translate-x-1/2 rounded-lg px-4 py-2 text-xs font-mono shadow-lg"
+            style={{
+              backgroundColor: swipeDebug.active ? '#22c55e' : '#ef4444',
+              color: 'white',
+            }}
+          >
+            {swipeDebug.active ? 'SWIPE' : 'REJECTED'} {swipeDebug.dir} | dx:
+            {Math.round(swipeDebug.dx)} dy:{Math.round(swipeDebug.dy)} start:
+            {Math.round(swipeDebug.startX)}
+            {swipeDebug.rejected && ` | ${swipeDebug.rejected}`}
+          </div>
+        )}
         <PwaInstallBanner />
         <PushOptInBanner />
         <TabBar onSelectSession={handleSelectSession} onLastTabClosed={handleLastTabClosed} />

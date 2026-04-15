@@ -1,20 +1,31 @@
-import { useDrag } from '@use-gesture/react'
-import { useCallback, useRef } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { useTabStore } from '~/stores/tabs'
 
-const EDGE_ZONE = 30 // px from screen edge to ignore (iOS back gesture)
+const EDGE_ZONE = 30
+const SWIPE_DISTANCE = 60
+const SWIPE_RATIO = 1.5 // horizontal must exceed vertical by this ratio
+
+interface SwipeDebug {
+  active: boolean
+  startX: number
+  dx: number
+  dy: number
+  dir: string
+  rejected?: string
+}
 
 /**
- * Returns bind props for a swipeable container that switches tabs
- * on horizontal swipe. Attach the returned props to the element.
+ * Returns props to spread onto a container element + debug state.
+ * Detects horizontal swipe gestures to switch tabs.
  *
- * Ignores swipes starting within EDGE_ZONE px of screen edges
- * to avoid conflicting with iOS back/forward navigation.
- *
- * Swipe left = next tab, swipe right = previous tab.
+ * Usage:
+ *   const { swipeProps, debug } = useSwipeTabs(onSelectSession)
+ *   <div {...swipeProps}>{children}</div>
  */
 export function useSwipeTabs(onSelectSession: (sessionId: string) => void) {
-  const startX = useRef(0)
+  const touchStart = useRef<{ x: number; y: number; t: number } | null>(null)
+  const [debug, setDebug] = useState<SwipeDebug | null>(null)
+  const debugTimer = useRef<ReturnType<typeof setTimeout>>(null)
 
   const handleSwipe = useCallback(
     (dir: 'left' | 'right') => {
@@ -30,24 +41,65 @@ export function useSwipeTabs(onSelectSession: (sessionId: string) => void) {
     [onSelectSession],
   )
 
-  return useDrag(
-    ({ first, xy: [x], swipe: [swipeX], event }) => {
-      if (first) {
-        startX.current = x
+  const showDebug = useCallback((d: SwipeDebug) => {
+    setDebug(d)
+    if (debugTimer.current) clearTimeout(debugTimer.current)
+    debugTimer.current = setTimeout(() => setDebug(null), 1500)
+  }, [])
+
+  const onTouchStart = useCallback((e: React.TouchEvent) => {
+    const t = e.touches[0]
+    touchStart.current = { x: t.clientX, y: t.clientY, t: Date.now() }
+  }, [])
+
+  const onTouchEnd = useCallback(
+    (e: React.TouchEvent) => {
+      if (!touchStart.current) return
+      const t = e.changedTouches[0]
+      const dx = t.clientX - touchStart.current.x
+      const dy = t.clientY - touchStart.current.y
+      const sx = touchStart.current.x
+      const absDx = Math.abs(dx)
+      const absDy = Math.abs(dy)
+      const dir = dx > 0 ? 'right' : 'left'
+      touchStart.current = null
+
+      // Check: target is input?
+      const target = e.target as HTMLElement
+      if (target.closest('input, textarea, [contenteditable]')) {
+        showDebug({ active: false, startX: sx, dx, dy, dir, rejected: 'input' })
         return
       }
-      if (swipeX === 0) return
-      // Ignore swipes that started near screen edges
-      if (startX.current < EDGE_ZONE || startX.current > window.innerWidth - EDGE_ZONE) return
-      // Don't swipe from inputs
-      const target = event.target as HTMLElement
-      if (target.closest('input, textarea, [contenteditable]')) return
-      handleSwipe(swipeX > 0 ? 'right' : 'left')
+
+      // Check: edge zone
+      if (sx < EDGE_ZONE || sx > window.innerWidth - EDGE_ZONE) {
+        showDebug({ active: false, startX: sx, dx, dy, dir, rejected: 'edge' })
+        return
+      }
+
+      // Check: not enough horizontal distance
+      if (absDx < SWIPE_DISTANCE) {
+        showDebug({ active: false, startX: sx, dx, dy, dir, rejected: `dist:${absDx.toFixed(0)}` })
+        return
+      }
+
+      // Check: not horizontal enough
+      if (absDx < absDy * SWIPE_RATIO) {
+        showDebug({ active: false, startX: sx, dx, dy, dir, rejected: 'vertical' })
+        return
+      }
+
+      showDebug({ active: true, startX: sx, dx, dy, dir })
+      handleSwipe(dir as 'left' | 'right')
     },
-    {
-      axis: 'lock',
-      swipe: { distance: 50, velocity: 0.3 },
-      filterTaps: true,
-    },
+    [handleSwipe, showDebug],
   )
+
+  const swipeProps = {
+    onTouchStart,
+    onTouchEnd,
+    style: { touchAction: 'pan-y' } as React.CSSProperties,
+  }
+
+  return { swipeProps, debug }
 }
