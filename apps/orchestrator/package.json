@@ -8,7 +8,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "deploy": "set -a && . ../../.env && set +a && wrangler deploy",
+    "ship": "set -a && . ../../.env && set +a && wrangler deploy",
     "cf-typegen": "wrangler types"
   },
   "dependencies": {

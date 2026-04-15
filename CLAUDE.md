@@ -49,7 +49,7 @@ pnpm dev                # Dev mode (all packages)
 # Orchestrator
 cd apps/orchestrator
 pnpm dev                # Local dev (Vite + miniflare)
-pnpm deploy             # Build + wrangler deploy
+pnpm ship               # Build + wrangler deploy
 
 # Executor
 cd packages/agent-gateway
@@ -105,7 +105,7 @@ bun run src/server.ts   # Run executor locally
 3. `wrangler d1 migrations apply duraclaw-auth` — create auth tables
 4. Install Bun on VPS if needed
 5. `./packages/agent-gateway/systemd/install.sh` — deploy executor service
-6. `cd apps/orchestrator && pnpm deploy` — deploy to CF Workers
+6. `cd apps/orchestrator && pnpm ship` — deploy to CF Workers
 7. Verify CF tunnel routes to VPS executor
 
 ## Progress Tracking
