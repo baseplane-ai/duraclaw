@@ -97,6 +97,109 @@ function createMessageQueue() {
   }
 }
 
+/**
+ * Handle SDK canUseTool callback — intercepts AskUserQuestion and permission prompts.
+ * Extracted for testability.
+ */
+export async function handleCanUseTool(
+  toolName: string,
+  input: Record<string, unknown>,
+  opts: { signal: AbortSignal; toolUseID: string },
+  ctx: GatewaySessionContext,
+  sendEvent: (event: Record<string, unknown>) => void,
+  sessionId: string,
+): Promise<
+  | { behavior: 'allow'; updatedInput?: Record<string, unknown> }
+  | { behavior: 'deny'; message: string }
+> {
+  const { toolUseID: id, signal } = opts
+
+  if (toolName === 'AskUserQuestion') {
+    // Send ask_user event to orchestrator
+    sendEvent({
+      type: 'ask_user',
+      session_id: sessionId,
+      tool_call_id: id,
+      questions: (input as any).questions ?? [],
+    })
+
+    const answers = await new Promise<Record<string, string>>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => {
+          ctx.pendingAnswer = null
+          reject(new Error('AskUserQuestion timed out after 5 minutes'))
+        },
+        5 * 60 * 1000,
+      )
+
+      ctx.pendingAnswer = {
+        resolve: (a) => {
+          clearTimeout(timeout)
+          resolve(a)
+        },
+        reject: (e) => {
+          clearTimeout(timeout)
+          reject(e)
+        },
+      }
+
+      signal.addEventListener(
+        'abort',
+        () => {
+          clearTimeout(timeout)
+          ctx.pendingAnswer = null
+          reject(new Error('Session aborted'))
+        },
+        { once: true },
+      )
+    })
+
+    return { behavior: 'allow', updatedInput: { ...input, answers } }
+  }
+
+  // Permission prompt for all other tools
+  sendEvent({
+    type: 'permission_request',
+    session_id: sessionId,
+    tool_call_id: id,
+    tool_name: toolName,
+    input,
+  })
+
+  const allowed = await new Promise<boolean>((resolve, reject) => {
+    const timeout = setTimeout(
+      () => {
+        ctx.pendingPermission = null
+        reject(new Error('Permission prompt timed out after 5 minutes'))
+      },
+      5 * 60 * 1000,
+    )
+
+    ctx.pendingPermission = {
+      resolve: (a) => {
+        clearTimeout(timeout)
+        resolve(a)
+      },
+      reject: (e) => {
+        clearTimeout(timeout)
+        reject(e)
+      },
+    }
+
+    signal.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timeout)
+        ctx.pendingPermission = null
+        reject(new Error('Session aborted'))
+      },
+      { once: true },
+    )
+  })
+
+  return allowed ? { behavior: 'allow' } : { behavior: 'deny', message: 'Denied by user' }
+}
+
 export class ClaudeAdapter implements AgentAdapter {
   readonly name = 'claude'
 
@@ -196,117 +299,24 @@ export class ClaudeAdapter implements AgentAdapter {
         options.resume = cmd.sdk_session_id
       }
 
-      // SDK hooks: PreToolUse for permission gating + AskUserQuestion relay, PostToolUse for file-changed events
+      // canUseTool callback: intercepts AskUserQuestion and permission prompts
+      options.canUseTool = async (
+        toolName: string,
+        input: Record<string, unknown>,
+        opts: { signal: AbortSignal; toolUseID: string },
+      ) => {
+        return handleCanUseTool(
+          toolName,
+          input,
+          opts,
+          ctx,
+          (event) => send(ws, event as unknown as GatewayEvent),
+          sessionId,
+        )
+      }
+
+      // PostToolUse hooks for file-change tracking (unchanged)
       options.hooks = {
-        PreToolUse: [
-          {
-            hooks: [
-              async (input: any, toolUseId: string | undefined, _opts: { signal: AbortSignal }) => {
-                const toolName: string = input.tool_name
-                const toolInput: Record<string, unknown> = input.tool_input ?? {}
-                const id = toolUseId ?? input.tool_use_id ?? ''
-
-                if (toolName === 'AskUserQuestion') {
-                  // Relay questions to the orchestrator, wait for answers
-                  send(ws, {
-                    type: 'ask_user',
-                    session_id: sessionId,
-                    tool_call_id: id,
-                    questions: (toolInput as any).questions ?? [],
-                  })
-
-                  const answers = await new Promise<Record<string, string>>((resolve, reject) => {
-                    const timeout = setTimeout(
-                      () => {
-                        ctx.pendingAnswer = null
-                        reject(new Error('AskUserQuestion timed out after 5 minutes'))
-                      },
-                      5 * 60 * 1000,
-                    )
-
-                    ctx.pendingAnswer = {
-                      resolve: (a) => {
-                        clearTimeout(timeout)
-                        resolve(a)
-                      },
-                      reject: (e) => {
-                        clearTimeout(timeout)
-                        reject(e)
-                      },
-                    }
-
-                    ac.signal.addEventListener(
-                      'abort',
-                      () => {
-                        clearTimeout(timeout)
-                        ctx.pendingAnswer = null
-                        reject(new Error('Session aborted'))
-                      },
-                      { once: true },
-                    )
-                  })
-
-                  return {
-                    continue: true,
-                    hookSpecificOutput: {
-                      hookEventName: 'PreToolUse',
-                      permissionDecision: 'allow' as const,
-                      updatedInput: { ...toolInput, answers },
-                    },
-                  }
-                }
-
-                // Permission prompt for other tools
-                send(ws, {
-                  type: 'permission_request',
-                  session_id: sessionId,
-                  tool_call_id: id,
-                  tool_name: toolName,
-                  input: toolInput,
-                })
-
-                const allowed = await new Promise<boolean>((resolve, reject) => {
-                  const timeout = setTimeout(
-                    () => {
-                      ctx.pendingPermission = null
-                      reject(new Error('Permission prompt timed out after 5 minutes'))
-                    },
-                    5 * 60 * 1000,
-                  )
-
-                  ctx.pendingPermission = {
-                    resolve: (a) => {
-                      clearTimeout(timeout)
-                      resolve(a)
-                    },
-                    reject: (e) => {
-                      clearTimeout(timeout)
-                      reject(e)
-                    },
-                  }
-
-                  ac.signal.addEventListener(
-                    'abort',
-                    () => {
-                      clearTimeout(timeout)
-                      ctx.pendingPermission = null
-                      reject(new Error('Session aborted'))
-                    },
-                    { once: true },
-                  )
-                })
-
-                return {
-                  continue: true,
-                  hookSpecificOutput: {
-                    hookEventName: 'PreToolUse',
-                    permissionDecision: allowed ? ('allow' as const) : ('deny' as const),
-                  },
-                }
-              },
-            ],
-          },
-        ],
         PostToolUse: [
           {
             hooks: [
