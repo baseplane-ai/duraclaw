@@ -570,6 +570,11 @@ const server = Bun.serve<WsData>({
           break
         }
 
+        case 'ping': {
+          ws.send(JSON.stringify({ type: 'pong' }))
+          break
+        }
+
         default:
           ws.send(
             JSON.stringify({

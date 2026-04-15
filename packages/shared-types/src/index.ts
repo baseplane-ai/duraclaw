@@ -14,6 +14,7 @@ export type GatewayCommand =
   | SetModelCommand
   | SetPermissionModeCommand
   | StopTaskCommand
+  | PingCommand
 
 export interface ExecuteCommand {
   type: 'execute'
@@ -111,6 +112,10 @@ export interface StopTaskCommand {
   type: 'stop-task'
   session_id: string
   task_id: string
+}
+
+export interface PingCommand {
+  type: 'ping'
 }
 
 export interface AnswerCommand {
