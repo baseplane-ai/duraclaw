@@ -15,6 +15,7 @@ import { PwaInstallBanner } from '~/components/pwa-install-banner'
 import { QuickPromptInput } from '~/components/quick-prompt-input'
 import { TabBar } from '~/components/tab-bar'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
+import { useSwipeTabs } from '~/hooks/use-swipe-tabs'
 import { useTabStore } from '~/stores/tabs'
 import { AgentDetailView } from './AgentDetailView'
 import type { SpawnFormConfig } from './SpawnAgentForm'
@@ -134,6 +135,9 @@ function AgentOrchContent() {
     [updateSession],
   )
 
+  const swipeRef = useRef<HTMLElement>(null)
+  useSwipeTabs(swipeRef, handleSelectSession)
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const isMod = e.metaKey || e.ctrlKey
@@ -180,7 +184,7 @@ function AgentOrchContent() {
   return (
     <>
       <Header fixed />
-      <Main fixed fluid className="p-0">
+      <Main ref={swipeRef} fixed fluid className="p-0">
         <PwaInstallBanner />
         <PushOptInBanner />
         <TabBar onSelectSession={handleSelectSession} onLastTabClosed={handleLastTabClosed} />

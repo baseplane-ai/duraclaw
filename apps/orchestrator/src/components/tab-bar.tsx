@@ -1,5 +1,6 @@
 import { ChevronDown, X } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { SessionRecord } from '~/db/sessions-collection'
 import { getPreviewText, StatusDot } from '~/features/agent-orch/session-utils'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
@@ -61,8 +62,6 @@ export function TabBar({ onSelectSession, onLastTabClosed }: TabBarProps) {
   )
 }
 
-const LONG_PRESS_MS = 500
-
 function ProjectTab({
   project,
   sessionId,
@@ -84,8 +83,9 @@ function ProjectTab({
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
-  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const didLongPress = useRef(false)
+  const caretRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const [menuPos, setMenuPos] = useState({ top: 0, left: 0 })
 
   // Get all sessions for this project, sorted by activity
   const projectSessions = sessions
@@ -103,7 +103,12 @@ function ProjectTab({
   useEffect(() => {
     if (!menuOpen) return
     const handler = (e: MouseEvent | TouchEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+      const target = e.target as Node
+      if (
+        containerRef.current &&
+        !containerRef.current.contains(target) &&
+        !menuRef.current?.contains(target)
+      ) {
         setMenuOpen(false)
       }
     }
@@ -115,41 +120,33 @@ function ProjectTab({
     }
   }, [menuOpen])
 
-  const clearLongPress = useCallback(() => {
-    if (longPressTimer.current) {
-      clearTimeout(longPressTimer.current)
-      longPressTimer.current = null
+  const openMenu = useCallback(() => {
+    if (caretRef.current) {
+      const rect = caretRef.current.getBoundingClientRect()
+      setMenuPos({ top: rect.bottom + 1, left: rect.left })
     }
+    setMenuOpen(true)
   }, [])
 
-  // Long-press: open menu on mobile
-  const handleTouchStart = useCallback(() => {
-    didLongPress.current = false
-    longPressTimer.current = setTimeout(() => {
-      didLongPress.current = true
-      setMenuOpen(true)
-    }, LONG_PRESS_MS)
-  }, [])
-
-  const handleTouchEnd = useCallback(
-    (e: React.TouchEvent) => {
-      clearLongPress()
-      // If long press triggered the menu, prevent the click/select
-      if (didLongPress.current) {
-        e.preventDefault()
-        didLongPress.current = false
-      }
-    },
-    [clearLongPress],
-  )
-
-  const handleContextMenu = useCallback((e: React.MouseEvent) => {
-    e.preventDefault()
-    setMenuOpen((v) => !v)
-  }, [])
+  const toggleMenu = useCallback(() => {
+    if (menuOpen) {
+      setMenuOpen(false)
+    } else {
+      openMenu()
+    }
+  }, [menuOpen, openMenu])
 
   return (
-    <div className="group relative flex items-center border-r" ref={containerRef}>
+    // biome-ignore lint/a11y/noStaticElementInteractions: context menu handler for tab options
+    <div
+      className="group relative flex items-center border-r select-none"
+      ref={containerRef}
+      style={{ WebkitTouchCallout: 'none' }}
+      onContextMenu={(e) => {
+        e.preventDefault()
+        toggleMenu()
+      }}
+    >
       <button
         type="button"
         className={cn(
@@ -157,10 +154,6 @@ function ProjectTab({
           isActive && 'bg-accent text-accent-foreground',
         )}
         onClick={onSelect}
-        onTouchStart={handleTouchStart}
-        onTouchEnd={handleTouchEnd}
-        onTouchCancel={clearLongPress}
-        onContextMenu={handleContextMenu}
       >
         {currentSession && (
           <StatusDot
@@ -176,70 +169,77 @@ function ProjectTab({
         </div>
       </button>
 
-      {/* Single caret menu trigger */}
+      {/* Caret menu trigger — always visible so it's tappable on mobile */}
       <button
+        ref={caretRef}
         type="button"
         className={cn(
-          'px-1 py-1.5 transition-opacity hover:bg-muted',
-          isActive ? 'opacity-60' : 'opacity-0 group-hover:opacity-60',
+          'px-1.5 self-stretch flex items-center transition-opacity hover:bg-muted',
+          isActive || menuOpen ? 'opacity-60' : 'opacity-30 group-hover:opacity-60',
           menuOpen && 'opacity-100 bg-muted',
         )}
         onClick={(e) => {
           e.stopPropagation()
-          setMenuOpen((v) => !v)
+          toggleMenu()
         }}
         aria-label="Tab options"
       >
         <ChevronDown className="size-3" />
       </button>
 
-      {/* Unified tab menu */}
-      {menuOpen && (
-        <div className="absolute left-0 top-full z-50 mt-px min-w-48 max-w-64 rounded-md border bg-popover p-1 shadow-md">
-          {/* Session switcher section */}
-          {hasMultipleSessions && (
-            <>
-              <div className="px-2 py-1 text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
-                Sessions
-              </div>
-              {projectSessions.map((s) => (
-                <button
-                  key={s.id}
-                  type="button"
-                  className={cn(
-                    'flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-accent',
-                    s.id === sessionId && 'bg-accent/50',
-                  )}
-                  onClick={() => {
-                    onSwitchSession(s.id, getSessionDisplayName(s))
-                    setMenuOpen(false)
-                  }}
-                >
-                  <StatusDot status={s.status || 'idle'} numTurns={s.num_turns ?? 0} />
-                  <span className="truncate">{getSessionDisplayName(s)}</span>
-                  {s.id === sessionId && (
-                    <span className="ml-auto text-[10px] text-muted-foreground">current</span>
-                  )}
-                </button>
-              ))}
-              <div className="my-1 border-t" />
-            </>
-          )}
-
-          {/* Close tab action */}
-          <button
-            type="button"
-            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-accent text-destructive"
-            onClick={() => {
-              setMenuOpen(false)
-              onClose()
-            }}
+      {/* Portaled tab menu — renders outside overflow:auto container */}
+      {menuOpen &&
+        createPortal(
+          <div
+            ref={menuRef}
+            className="fixed z-50 min-w-48 max-w-64 rounded-md border bg-popover p-1 shadow-md"
+            style={{ top: menuPos.top, left: menuPos.left }}
           >
-            <X className="size-3" />
-            <span>Close tab</span>
-          </button>
-        </div>
-      )}
+            {/* Session switcher section */}
+            {hasMultipleSessions && (
+              <>
+                <div className="px-2 py-1 text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
+                  Sessions
+                </div>
+                {projectSessions.map((s) => (
+                  <button
+                    key={s.id}
+                    type="button"
+                    className={cn(
+                      'flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-accent',
+                      s.id === sessionId && 'bg-accent/50',
+                    )}
+                    onClick={() => {
+                      onSwitchSession(s.id, getSessionDisplayName(s))
+                      setMenuOpen(false)
+                    }}
+                  >
+                    <StatusDot status={s.status || 'idle'} numTurns={s.num_turns ?? 0} />
+                    <span className="truncate">{getSessionDisplayName(s)}</span>
+                    {s.id === sessionId && (
+                      <span className="ml-auto text-[10px] text-muted-foreground">current</span>
+                    )}
+                  </button>
+                ))}
+                <div className="my-1 border-t" />
+              </>
+            )}
+
+            {/* Close tab action */}
+            <button
+              type="button"
+              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-accent text-destructive"
+              onClick={() => {
+                setMenuOpen(false)
+                onClose()
+              }}
+            >
+              <X className="size-3" />
+              <span>Close tab</span>
+            </button>
+          </div>,
+          document.body,
+        )}
     </div>
   )
 }

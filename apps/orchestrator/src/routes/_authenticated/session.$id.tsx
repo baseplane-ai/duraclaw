@@ -7,6 +7,7 @@ import { AgentDetailView } from '~/features/agent-orch/AgentDetailView'
 import { getPreviewText } from '~/features/agent-orch/session-utils'
 import { useCodingAgent } from '~/features/agent-orch/use-coding-agent'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
+import { useSwipeTabs } from '~/hooks/use-swipe-tabs'
 import { useTabStore } from '~/stores/tabs'
 
 export const Route = createFileRoute('/_authenticated/session/$id')({
@@ -50,10 +51,13 @@ function SessionDetailPage() {
     [updateSession],
   )
 
+  const swipeRef = useRef<HTMLElement>(null)
+  useSwipeTabs(swipeRef, handleSelectSession)
+
   return (
     <>
       <Header fixed />
-      <Main fixed fluid className="p-0">
+      <Main ref={swipeRef} fixed fluid className="p-0">
         <TabBar onSelectSession={handleSelectSession} onLastTabClosed={handleLastTabClosed} />
         <SessionDetailWithSync
           key={sessionId}

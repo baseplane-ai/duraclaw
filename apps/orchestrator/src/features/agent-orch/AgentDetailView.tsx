@@ -66,7 +66,10 @@ export function AgentDetailView({ name: _name, agent }: AgentDetailViewProps) {
   const isTerminal = status === 'aborted'
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col" data-testid="agent-detail-view">
+    <div
+      className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden"
+      data-testid="agent-detail-view"
+    >
       <KataStatePanel kataState={kataState} />
 
       <div className="flex items-center justify-end px-4 py-1">
