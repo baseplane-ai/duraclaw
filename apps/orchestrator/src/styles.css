@@ -105,3 +105,27 @@
     height: 0;
   }
 }
+
+/* Swipe tab-switch animations */
+@keyframes swipeOutLeft {
+  from { opacity: 1; transform: translateX(0); }
+  to   { opacity: 0; transform: translateX(-30%); }
+}
+@keyframes swipeOutRight {
+  from { opacity: 1; transform: translateX(0); }
+  to   { opacity: 0; transform: translateX(30%); }
+}
+@keyframes swipeIn {
+  from { opacity: 0; transform: translateX(0); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+.animate-slide-out-left {
+  animation: swipeOutLeft 150ms ease-in forwards;
+}
+.animate-slide-out-right {
+  animation: swipeOutRight 150ms ease-in forwards;
+}
+.animate-slide-in {
+  animation: swipeIn 120ms ease-out;
+}

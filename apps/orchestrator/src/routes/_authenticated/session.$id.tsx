@@ -51,32 +51,29 @@ function SessionDetailPage() {
     [updateSession],
   )
 
-  const { swipeProps, debug: swipeDebug } = useSwipeTabs(handleSelectSession)
+  const { swipeProps, swipeDir } = useSwipeTabs(handleSelectSession)
 
   return (
     <>
       <Header fixed />
       <Main fixed fluid className="p-0" {...swipeProps}>
-        {swipeDebug && (
-          <div
-            className="fixed top-16 left-1/2 z-[9999] -translate-x-1/2 rounded-lg px-4 py-2 text-xs font-mono shadow-lg"
-            style={{
-              backgroundColor: swipeDebug.active ? '#22c55e' : '#ef4444',
-              color: 'white',
-            }}
-          >
-            {swipeDebug.active ? 'SWIPE' : 'REJECTED'} {swipeDebug.dir} | dx:
-            {Math.round(swipeDebug.dx)} dy:{Math.round(swipeDebug.dy)} start:
-            {Math.round(swipeDebug.startX)}
-            {swipeDebug.rejected && ` | ${swipeDebug.rejected}`}
-          </div>
-        )}
         <TabBar onSelectSession={handleSelectSession} onLastTabClosed={handleLastTabClosed} />
-        <SessionDetailWithSync
-          key={sessionId}
-          sessionId={sessionId}
-          onStateChange={handleStateChange}
-        />
+        <div
+          className={
+            swipeDir === 'left'
+              ? 'animate-slide-out-left'
+              : swipeDir === 'right'
+                ? 'animate-slide-out-right'
+                : 'animate-slide-in'
+          }
+          style={{ flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column' }}
+        >
+          <SessionDetailWithSync
+            key={sessionId}
+            sessionId={sessionId}
+            onStateChange={handleStateChange}
+          />
+        </div>
       </Main>
     </>
   )
