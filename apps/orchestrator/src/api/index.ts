@@ -482,6 +482,30 @@ export function createApiApp() {
     }
 
     const now = new Date().toISOString()
+
+    // When resuming a discovered session, replace the old entry instead of creating a duplicate
+    if (body.sdk_session_id) {
+      const existing = await registry.findSessionBySdkId(body.sdk_session_id)
+      if (existing) {
+        await registry.replaceSessionForResume(existing.id, {
+          id: sessionId,
+          userId,
+          project: body.project,
+          status: 'running',
+          model: body.model ?? existing.model ?? null,
+          created_at: existing.created_at ?? now,
+          updated_at: now,
+          prompt: existing.prompt ?? body.prompt,
+          sdk_session_id: body.sdk_session_id,
+          title: existing.title,
+          summary: existing.summary,
+          tag: existing.tag,
+          agent: body.agent ?? existing.agent,
+        } as any)
+        return c.json({ session_id: sessionId }, 201)
+      }
+    }
+
     await registry.registerSession({
       id: sessionId,
       userId,

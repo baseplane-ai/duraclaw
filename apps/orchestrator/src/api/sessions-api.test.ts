@@ -189,6 +189,8 @@ describe('POST /api/sessions', () => {
     lastFetchBody = null
     registry = createMockRegistry({
       registerSession: vi.fn().mockResolvedValue(undefined),
+      findSessionBySdkId: vi.fn().mockResolvedValue(null),
+      replaceSessionForResume: vi.fn().mockResolvedValue(undefined),
     })
     env = createMockEnv(registry)
     env.SESSION_AGENT.newUniqueId.mockReturnValue({ toString: () => 'new-do-id' })
@@ -268,6 +270,49 @@ describe('POST /api/sessions', () => {
     expect(lastFetchBody.agent).toBe('claude')
     expect(lastFetchBody.project).toBe('my-project')
     expect(lastFetchBody.prompt).toBe('resume')
+  })
+
+  it('replaces existing discovered session on resume instead of creating duplicate', async () => {
+    const existingSession = {
+      id: 'old-discovered-id',
+      project: 'my-project',
+      status: 'idle',
+      model: 'opus',
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+      title: 'Old Title',
+      summary: 'Old Summary',
+      origin: 'discovered',
+      sdk_session_id: 'sdk-abc-123',
+    }
+    registry.findSessionBySdkId.mockResolvedValue(existingSession)
+
+    const app = makeApp(env)
+    const res = await app.request('/api/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        project: 'my-project',
+        prompt: 'resume',
+        sdk_session_id: 'sdk-abc-123',
+        agent: 'claude',
+      }),
+    })
+
+    expect(res.status).toBe(201)
+    const body = (await res.json()) as { session_id: string }
+    expect(body.session_id).toBe('new-do-id')
+    // Should replace the old session, not register a new one
+    expect(registry.replaceSessionForResume).toHaveBeenCalledWith(
+      'old-discovered-id',
+      expect.objectContaining({
+        id: 'new-do-id',
+        sdk_session_id: 'sdk-abc-123',
+        title: 'Old Title',
+        summary: 'Old Summary',
+      }),
+    )
+    expect(registry.registerSession).not.toHaveBeenCalled()
   })
 
   it('returns 500 when DO returns non-ok response', async () => {

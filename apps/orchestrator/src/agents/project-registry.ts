@@ -95,6 +95,71 @@ export class ProjectRegistry extends DurableObject<Env> {
     )
   }
 
+  async findSessionBySdkId(sdkSessionId: string): Promise<SessionSummary | null> {
+    await this.ensureInit()
+    const rows = this.ctx.storage.sql
+      .exec(
+        `SELECT
+         id,
+         user_id AS userId,
+         project,
+         status,
+         model,
+         created_at,
+         updated_at,
+         last_activity,
+         duration_ms,
+         total_cost_usd,
+         num_turns,
+         prompt,
+         summary,
+         title,
+         tag,
+         origin,
+         agent,
+         message_count,
+         sdk_session_id,
+         kata_mode,
+         kata_issue,
+         kata_phase
+       FROM sessions
+       WHERE sdk_session_id = ?
+       LIMIT 1`,
+        sdkSessionId,
+      )
+      .toArray() as unknown as SessionSummary[]
+    return rows[0] ?? null
+  }
+
+  /** Replace a discovered session entry with a new DO-backed session, preserving metadata. */
+  async replaceSessionForResume(
+    oldSessionId: string,
+    newSession: SessionSummary & { sdk_session_id?: string },
+  ): Promise<void> {
+    await this.ensureInit()
+    // Delete the old discovered entry
+    this.ctx.storage.sql.exec(`DELETE FROM sessions WHERE id = ?`, oldSessionId)
+    // Insert the new entry with preserved fields
+    this.ctx.storage.sql.exec(
+      `INSERT INTO sessions (id, user_id, project, status, model, created_at, updated_at, last_activity, prompt, origin, agent, sdk_session_id, title, summary, tag)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'duraclaw', ?, ?, ?, ?, ?)`,
+      newSession.id,
+      newSession.userId ?? null,
+      newSession.project,
+      newSession.status,
+      newSession.model,
+      newSession.created_at,
+      newSession.updated_at,
+      newSession.last_activity ?? newSession.updated_at,
+      newSession.prompt ?? null,
+      newSession.agent ?? 'claude',
+      newSession.sdk_session_id ?? null,
+      newSession.title ?? null,
+      newSession.summary ?? null,
+      newSession.tag ?? null,
+    )
+  }
+
   async updateSessionStatus(sessionId: string, status: string): Promise<void> {
     await this.ensureInit()
     const now = new Date().toISOString()
