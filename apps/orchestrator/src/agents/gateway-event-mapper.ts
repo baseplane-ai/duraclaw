@@ -42,6 +42,21 @@ export function partialAssistantToParts(content: unknown[]): SessionMessagePart[
 }
 
 /**
+ * Extract displayable text from tool result content.
+ * Content can be a string, an array of content blocks [{type:"text", text:"..."}], or other shapes.
+ */
+function extractToolOutput(content: unknown): string | undefined {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    const texts = content
+      .filter((b: any) => b?.type === 'text' && typeof b.text === 'string')
+      .map((b: any) => b.text)
+    if (texts.length > 0) return texts.join('\n')
+  }
+  return undefined
+}
+
+/**
  * Apply a tool_result event to existing message parts.
  * Finds the matching tool part by toolCallId and updates its state/output.
  */
@@ -61,7 +76,7 @@ export function applyToolResult(
       updatedParts[idx] = {
         ...updatedParts[idx],
         state: isError ? 'output-error' : 'output-available',
-        output: isError ? undefined : b.content,
+        output: extractToolOutput(b.content),
       }
     }
   }
