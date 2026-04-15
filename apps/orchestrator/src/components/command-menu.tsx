@@ -87,7 +87,7 @@ export function CommandMenu() {
                       'mr-2 size-2 rounded-full',
                       s.status === 'running'
                         ? 'bg-green-500'
-                        : s.status === 'failed' || s.status === 'aborted'
+                        : s.status === 'aborted'
                           ? 'bg-red-500'
                           : s.status === 'waiting_gate'
                             ? 'bg-yellow-500'

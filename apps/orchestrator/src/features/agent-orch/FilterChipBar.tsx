@@ -30,7 +30,7 @@ const STATUS_OPTIONS = [
   { value: 'all', label: 'All' },
   { value: 'running', label: 'Running' },
   { value: 'completed', label: 'Completed' },
-  { value: 'failed', label: 'Failed' },
+  { value: 'failed', label: 'Aborted' },
 ]
 
 interface FilterChipBarProps {

@@ -93,7 +93,7 @@ export function SessionSidebar({
     }
     if (statusFilter === 'running') return s.status === 'running'
     if (statusFilter === 'completed') return s.status === 'idle'
-    if (statusFilter === 'failed') return s.status === 'failed' || s.status === 'aborted'
+    if (statusFilter === 'failed') return s.status === 'aborted'
     return true
   })
 
@@ -171,7 +171,7 @@ export function SessionSidebar({
                   'size-2 rounded-full',
                   session.status === 'running'
                     ? 'bg-green-500'
-                    : session.status === 'failed' || session.status === 'aborted'
+                    : session.status === 'aborted'
                       ? 'bg-red-500'
                       : 'bg-gray-400',
                 )}

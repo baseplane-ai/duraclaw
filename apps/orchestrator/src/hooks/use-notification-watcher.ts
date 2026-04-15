@@ -49,12 +49,12 @@ export function useNotificationWatcher(sessions: SessionInfo[]) {
           body: 'Session completed',
           url: `/?session=${session.id}`,
         })
-      } else if (session.status === 'failed' || session.status === 'error') {
+      } else if (session.status === 'aborted') {
         addNotification({
           type: 'error',
           sessionId: session.id,
           sessionName: name,
-          body: 'Session failed',
+          body: 'Session aborted',
           url: `/?session=${session.id}`,
         })
       }

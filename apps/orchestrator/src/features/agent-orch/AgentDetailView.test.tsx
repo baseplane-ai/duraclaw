@@ -119,12 +119,14 @@ describe('AgentDetailView', () => {
     expect(screen.getByTestId('message-input')).toBeTruthy()
   })
 
-  it('does not render MessageInput when status is failed', () => {
+  it('renders MessageInput when status is idle with error (previously failed)', () => {
     const base = makeAgent()
-    const agent = makeAgent({ state: { ...base.state, status: 'failed' } as typeof base.state })
+    const agent = makeAgent({
+      state: { ...base.state, status: 'idle', error: 'some error' } as typeof base.state,
+    })
     render(<AgentDetailView name="test" agent={agent} />)
 
-    expect(screen.queryByTestId('message-input')).toBeNull()
+    expect(screen.getByTestId('message-input')).toBeTruthy()
   })
 
   it('syncs session data to the global status bar store', () => {

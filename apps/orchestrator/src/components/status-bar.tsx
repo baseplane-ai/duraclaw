@@ -87,7 +87,6 @@ function getBarClasses(status: string | undefined): string {
     case 'waiting_input':
     case 'waiting_permission':
       return 'bg-amber-950/50 border-t border-amber-800'
-    case 'failed':
     case 'aborted':
       return 'bg-red-950/50 border-t border-red-800'
     default:

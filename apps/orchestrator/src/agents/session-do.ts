@@ -169,7 +169,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     const gatewayUrl = this.env.CC_GATEWAY_URL
     if (!gatewayUrl) {
       console.error(`[SessionDO:${this.ctx.id}] CC_GATEWAY_URL not configured`)
-      this.updateState({ status: 'failed', error: 'CC_GATEWAY_URL not configured' })
+      this.updateState({ status: 'idle', error: 'CC_GATEWAY_URL not configured' })
       return
     }
 
@@ -1400,9 +1400,23 @@ export class SessionDO extends Agent<Env, SessionState> {
           this.persistTurnState()
         }
 
-        // PRESERVE all existing side effects exactly
+        // If SDK reported an error result, show it inline as a system message
+        if (event.is_error && event.result) {
+          this.turnCounter++
+          const errorMsgId = `err-${this.turnCounter}`
+          const errorMsg: SessionMessage = {
+            id: errorMsgId,
+            role: 'system',
+            parts: [{ type: 'text', text: `⚠ Error: ${event.result}` }],
+            createdAt: new Date(),
+          }
+          this.session.appendMessage(errorMsg)
+          this.broadcastMessage(errorMsg)
+        }
+
+        // PRESERVE all existing side effects — always transition to idle
         this.updateState({
-          status: event.is_error ? 'failed' : 'idle',
+          status: 'idle',
           completed_at: new Date().toISOString(),
           result: event.result,
           duration_ms: (this.state.duration_ms ?? 0) + (event.duration_ms ?? 0),
@@ -1495,8 +1509,20 @@ export class SessionDO extends Agent<Env, SessionState> {
           this.persistTurnState()
         }
 
-        // PRESERVE existing side effects
-        this.updateState({ status: 'failed', error: event.error })
+        // Persist error as a visible system message so user sees what happened
+        this.turnCounter++
+        const errorMsgId = `err-${this.turnCounter}`
+        const errorMsg: SessionMessage = {
+          id: errorMsgId,
+          role: 'system',
+          parts: [{ type: 'text', text: `⚠ Error: ${event.error}` }],
+          createdAt: new Date(),
+        }
+        this.session.appendMessage(errorMsg)
+        this.broadcastMessage(errorMsg)
+
+        // Transition to idle (not failed) — session remains interactive
+        this.updateState({ status: 'idle', error: event.error })
         this.syncStatusToRegistry()
         this.dispatchPush(
           {

@@ -154,7 +154,7 @@ export function SessionCardList({
     if (s.archived) return false
     if (statusFilter === 'running') return s.status === 'running'
     if (statusFilter === 'completed') return s.status === 'idle'
-    if (statusFilter === 'failed') return s.status === 'failed' || s.status === 'aborted'
+    if (statusFilter === 'failed') return s.status === 'aborted'
     return true
   })
 

@@ -150,8 +150,7 @@ export function SessionHistory() {
             <SelectItem value="all">All statuses</SelectItem>
             <SelectItem value="running">Running</SelectItem>
             <SelectItem value="idle">Idle</SelectItem>
-            <SelectItem value="failed">Failed</SelectItem>
-            <SelectItem value="aborted">Aborted</SelectItem>
+            <SelectItem value="failed">Aborted</SelectItem>
           </SelectContent>
         </Select>
         {projects.length > 1 && (

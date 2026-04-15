@@ -30,7 +30,6 @@ export function StatusDot({ status, numTurns }: { status: string; numTurns: numb
     case 'waiting_input':
     case 'waiting_permission':
       return <span className="size-2 shrink-0 rounded-full bg-yellow-500" />
-    case 'failed':
     case 'aborted':
       return <span className="size-2 shrink-0 rounded-full bg-red-500" />
     default:
