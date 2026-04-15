@@ -55,12 +55,20 @@ const DEFAULT_STATE: SessionState = {
  * Persists messages via Session class (agents/experimental/memory/session).
  * Uses @callable RPC methods for spawn, resolveGate, sendMessage, etc.
  */
+/** How often the watchdog alarm fires while a session is "running" (ms). */
+const WATCHDOG_INTERVAL_MS = 60_000
+
+/** If no gateway event arrives within this window, consider the connection dead (ms). */
+const STALE_THRESHOLD_MS = 3 * 60_000
+
 export class SessionDO extends Agent<Env, SessionState> {
   initialState = DEFAULT_STATE
   private vpsWs: WebSocket | null = null
   private session!: Session
   private turnCounter = 0
   private currentTurnMessageId: string | null = null
+  /** Timestamp of the last gateway event received on the WS connection. */
+  private lastGatewayActivity = 0
 
   // ── Lifecycle ──────────────────────────────────────────────────
 
@@ -163,6 +171,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     const ws = connectToExecutor(gatewayUrl, this.env.CC_GATEWAY_SECRET)
 
     ws.addEventListener('message', (event: MessageEvent) => {
+      this.lastGatewayActivity = Date.now()
       try {
         const gatewayEvent = parseEvent(event.data)
         this.handleGatewayEvent(gatewayEvent)
@@ -174,22 +183,169 @@ export class SessionDO extends Agent<Env, SessionState> {
     ws.addEventListener('close', () => {
       console.log(`[SessionDO:${this.ctx.id}] Gateway WS closed`)
       this.vpsWs = null
+      // If the session was still active, the connection dropped unexpectedly.
+      // Try to recover final state from the gateway HTTP API.
+      if (this.state.status === 'running' || this.state.status === 'waiting_gate') {
+        this.recoverFromDroppedConnection()
+      }
     })
 
     ws.addEventListener('error', (event: Event) => {
       console.error(`[SessionDO:${this.ctx.id}] Gateway WS error:`, event)
       this.vpsWs = null
       if (this.state.status === 'running' || this.state.status === 'waiting_gate') {
-        this.updateState({ status: 'failed', error: 'Gateway connection error' })
-        this.syncStatusToRegistry()
+        this.recoverFromDroppedConnection()
       }
     })
 
     ws.addEventListener('open', () => {
+      this.lastGatewayActivity = Date.now()
       sendCommand(ws, cmd)
+      // Start watchdog alarm to detect stale connections
+      this.scheduleWatchdog()
     })
 
     this.vpsWs = ws
+  }
+
+  /** Schedule the next watchdog alarm. */
+  private scheduleWatchdog() {
+    this.ctx.storage.setAlarm(Date.now() + WATCHDOG_INTERVAL_MS)
+  }
+
+  /**
+   * DO alarm handler — watchdog for stale gateway connections.
+   *
+   * Fires periodically while a session is "running". If no gateway events
+   * have arrived recently and the WS is gone, attempt recovery.
+   */
+  async alarm() {
+    if (this.state.status !== 'running' && this.state.status !== 'waiting_gate') {
+      return // Session not active, no need to watch
+    }
+
+    const staleDuration = Date.now() - this.lastGatewayActivity
+    if (staleDuration > STALE_THRESHOLD_MS && !this.vpsWs) {
+      console.log(
+        `[SessionDO:${this.ctx.id}] Watchdog: stale for ${Math.round(staleDuration / 1000)}s with no WS — recovering`,
+      )
+      await this.recoverFromDroppedConnection()
+      return
+    }
+
+    if (staleDuration > STALE_THRESHOLD_MS && this.vpsWs) {
+      // WS object exists but no activity — try closing it to trigger recovery
+      console.log(
+        `[SessionDO:${this.ctx.id}] Watchdog: stale for ${Math.round(staleDuration / 1000)}s — closing zombie WS`,
+      )
+      try {
+        this.vpsWs.close()
+      } catch {
+        // Already closed
+      }
+      this.vpsWs = null
+      await this.recoverFromDroppedConnection()
+      return
+    }
+
+    // Still active, schedule next check
+    this.scheduleWatchdog()
+  }
+
+  /**
+   * Attempt to recover session state after the gateway WS dropped.
+   *
+   * Polls the gateway HTTP API for the latest session transcript,
+   * syncs any missed messages, and transitions to the correct status.
+   */
+  private async recoverFromDroppedConnection() {
+    const gatewayUrl = this.env.CC_GATEWAY_URL
+    const sdkSessionId = this.state.sdk_session_id
+    const project = this.state.project
+
+    if (!gatewayUrl || !sdkSessionId || !project) {
+      console.log(
+        `[SessionDO:${this.ctx.id}] Recovery: missing gateway URL/session/project — marking idle`,
+      )
+      this.updateState({ status: 'idle', gate: null, error: 'Gateway connection lost' })
+      this.syncStatusToRegistry()
+      return
+    }
+
+    const httpBase = gatewayUrl.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+    const headers: Record<string, string> = {}
+    if (this.env.CC_GATEWAY_SECRET) {
+      headers.Authorization = `Bearer ${this.env.CC_GATEWAY_SECRET}`
+    }
+
+    try {
+      // Check if the session is still listed (i.e. still known to the VPS)
+      const sessionsUrl = new URL(`/projects/${encodeURIComponent(project)}/sessions`, httpBase)
+      const sessResp = await fetch(sessionsUrl.toString(), { headers })
+      if (sessResp.ok) {
+        const data = (await sessResp.json()) as {
+          sessions: Array<{ session_id: string; last_activity: string }>
+        }
+        const match = data.sessions.find((s) => s.session_id === sdkSessionId)
+        if (match) {
+          // Session exists on VPS — sync latest messages
+          const msgUrl = new URL(
+            `/projects/${encodeURIComponent(project)}/sessions/${encodeURIComponent(sdkSessionId)}/messages`,
+            httpBase,
+          )
+          const msgResp = await fetch(msgUrl.toString(), { headers })
+          if (msgResp.ok) {
+            const msgData = (await msgResp.json()) as {
+              messages: Array<{ type: string; uuid: string; content: unknown[] }>
+            }
+            const serverMsgCount = msgData.messages?.length ?? 0
+            const localMsgCount = this.session.getPathLength()
+
+            if (serverMsgCount > localMsgCount) {
+              console.log(
+                `[SessionDO:${this.ctx.id}] Recovery: server has ${serverMsgCount} messages vs local ${localMsgCount} — rehydrating`,
+              )
+              // Re-run hydration to pick up missed messages
+              // (hydrateFromGateway is idempotent — it checks pathLength first)
+              // Clear path to force re-hydration
+              await this.hydrateFromGateway()
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Recovery poll failed:`, err)
+    }
+
+    // Finalize any streaming parts
+    if (this.currentTurnMessageId) {
+      const existing = this.session.getMessage(this.currentTurnMessageId)
+      if (existing) {
+        const finalizedParts = finalizeStreamingParts(existing.parts)
+        this.session.updateMessage({ ...existing, parts: finalizedParts })
+        this.broadcastMessage({ ...existing, parts: finalizedParts })
+      }
+      this.currentTurnMessageId = null
+      this.persistTurnState()
+    }
+
+    // Transition to idle (session may be resumable via sdk_session_id)
+    this.updateState({
+      status: 'idle',
+      gate: null,
+      error: 'Gateway connection lost — session stopped. You can send a new message to resume.',
+    })
+    this.syncStatusToRegistry()
+
+    // Notify connected clients
+    this.broadcastToClients(
+      JSON.stringify({
+        type: 'gateway_event',
+        event: { type: 'result', is_error: false, result: 'Connection lost — session idle' },
+      }),
+    )
+
+    console.log(`[SessionDO:${this.ctx.id}] Recovery: transitioned to idle`)
   }
 
   // ── Helpers ────────────────────────────────────────────────────
