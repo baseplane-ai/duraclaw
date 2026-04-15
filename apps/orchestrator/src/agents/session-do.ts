@@ -395,6 +395,17 @@ export class SessionDO extends Agent<Env, SessionState> {
     }
   }
 
+  private async syncSdkSessionIdToRegistry(sdkSessionId: string) {
+    try {
+      const sessionId = this.state.session_id ?? this.ctx.id.toString()
+      const registryId = this.env.SESSION_REGISTRY.idFromName('default')
+      const registry = this.env.SESSION_REGISTRY.get(registryId) as any
+      await registry.updateSession(sessionId, { sdk_session_id: sdkSessionId })
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Failed to sync sdk_session_id to registry:`, err)
+    }
+  }
+
   private async syncDiscoveredToRegistry() {
     try {
       // Only sync if we have an sdk_session_id — otherwise there's nothing to link
@@ -1127,6 +1138,8 @@ export class SessionDO extends Agent<Env, SessionState> {
     switch (event.type) {
       case 'session.init':
         this.updateState({ sdk_session_id: event.sdk_session_id, model: event.model })
+        // Sync sdk_session_id to registry so discovery won't create a duplicate row
+        if (event.sdk_session_id) this.syncSdkSessionIdToRegistry(event.sdk_session_id)
         break
 
       case 'partial_assistant': {

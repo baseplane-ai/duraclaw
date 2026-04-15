@@ -554,18 +554,18 @@ export class ProjectRegistry extends DurableObject<Env> {
         continue
       }
 
-      // Check for fuzzy match: same project + user + created_at within 60s
+      // Check for fuzzy match: same project + created_at within 60s + no sdk_session_id yet
+      // Note: user_id is not checked because alarm-based sync uses 'system' as userId
+      // while DO-created sessions have the real userId
       const fuzzy = this.ctx.storage.sql
         .exec(
           `SELECT id FROM sessions
            WHERE project = ?
-             AND user_id = ?
              AND ABS(strftime('%s', created_at) - strftime('%s', ?)) < 60
              AND sdk_session_id IS NULL
            ORDER BY ABS(strftime('%s', created_at) - strftime('%s', ?)) ASC
            LIMIT 1`,
           s.project,
-          userId,
           s.started_at,
           s.started_at,
         )
