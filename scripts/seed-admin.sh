@@ -7,14 +7,14 @@
 #   - Migrations 0004 + 0005 must be applied
 #
 # Usage: ./scripts/seed-admin.sh [base-url]
-#   base-url defaults to https://duraclaw.codevibesmatter.com
+#   base-url defaults to https://dura.baseplane.ai
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../.env"
 
-BASE_URL="${1:-https://duraclaw.codevibesmatter.com}"
+BASE_URL="${1:-https://dura.baseplane.ai}"
 
 echo "Creating admin user: $ADMIN_EMAIL"
 

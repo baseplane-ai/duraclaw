@@ -6,7 +6,7 @@ compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 
 [[routes]]
-pattern = "duraclaw.codevibesmatter.com"
+pattern = "dura.baseplane.ai"
 custom_domain = true
 
 [observability]

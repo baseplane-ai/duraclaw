@@ -22,7 +22,7 @@ export function createAuth(
     env.BETTER_AUTH_URL.includes('localhost') ||
     env.BETTER_AUTH_URL.includes('127.0.0.1')
   // In local dev, wrangler rewrites request URLs to the [[routes]] custom_domain
-  // (e.g. http://duraclaw.codevibesmatter.com) even though the browser is on localhost.
+  // (e.g. http://dura.baseplane.ai) even though the browser is on localhost.
   // Use a function-based trustedOrigins to also trust the request's rewritten origin.
   const staticOrigins = [
     env.BETTER_AUTH_URL,
