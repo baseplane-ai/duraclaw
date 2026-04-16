@@ -55,14 +55,15 @@ const DEFAULT_STATE: SessionState = {
  * Persists messages via Session class (agents/experimental/memory/session).
  * Uses @callable RPC methods for spawn, resolveGate, sendMessage, etc.
  */
-/** How often the watchdog alarm fires while a session is "running" (ms). */
-const WATCHDOG_INTERVAL_MS = 60_000
+/**
+ * How often the watchdog alarm fires while a session is "running" (ms).
+ * Also serves as the keepalive ping interval — alarms survive DO hibernation,
+ * unlike setInterval which stops when the DO is evicted from memory.
+ */
+const WATCHDOG_INTERVAL_MS = 30_000
 
 /** If no gateway event arrives within this window, consider the connection dead (ms). */
-const STALE_THRESHOLD_MS = 3 * 60_000
-
-/** How often to send a keepalive ping on the gateway WS (ms). */
-const PING_INTERVAL_MS = 30_000
+const STALE_THRESHOLD_MS = 5 * 60_000
 
 export class SessionDO extends Agent<Env, SessionState> {
   initialState = DEFAULT_STATE
@@ -72,8 +73,6 @@ export class SessionDO extends Agent<Env, SessionState> {
   private currentTurnMessageId: string | null = null
   /** Timestamp of the last gateway event received on the WS connection. */
   private lastGatewayActivity = 0
-  /** Interval handle for keepalive pings. */
-  private pingInterval: ReturnType<typeof setInterval> | null = null
 
   // ── Lifecycle ──────────────────────────────────────────────────
 
@@ -188,7 +187,6 @@ export class SessionDO extends Agent<Env, SessionState> {
     ws.addEventListener('close', () => {
       console.log(`[SessionDO:${this.ctx.id}] Gateway WS closed`)
       this.vpsWs = null
-      this.stopPing()
       // If the session was still active, the connection dropped unexpectedly.
       // Try to recover final state from the gateway HTTP API.
       if (this.state.status === 'running' || this.state.status === 'waiting_gate') {
@@ -199,7 +197,6 @@ export class SessionDO extends Agent<Env, SessionState> {
     ws.addEventListener('error', (event: Event) => {
       console.error(`[SessionDO:${this.ctx.id}] Gateway WS error:`, event)
       this.vpsWs = null
-      this.stopPing()
       if (this.state.status === 'running' || this.state.status === 'waiting_gate') {
         this.recoverFromDroppedConnection()
       }
@@ -208,9 +205,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     ws.addEventListener('open', () => {
       this.lastGatewayActivity = Date.now()
       sendCommand(ws, cmd)
-      // Start keepalive pings to prevent CF tunnel idle timeout
-      this.startPing(ws)
-      // Start watchdog alarm to detect stale connections
+      // Start watchdog alarm — also handles keepalive pings (survives hibernation)
       this.scheduleWatchdog()
     })
 
@@ -222,28 +217,6 @@ export class SessionDO extends Agent<Env, SessionState> {
     this.ctx.storage.setAlarm(Date.now() + WATCHDOG_INTERVAL_MS)
   }
 
-  /** Start sending keepalive pings on the gateway WS. */
-  private startPing(ws: WebSocket) {
-    this.stopPing()
-    this.pingInterval = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) {
-        try {
-          ws.send(JSON.stringify({ type: 'ping' }))
-        } catch {
-          // WS already closed
-        }
-      }
-    }, PING_INTERVAL_MS)
-  }
-
-  /** Stop the keepalive ping interval. */
-  private stopPing() {
-    if (this.pingInterval) {
-      clearInterval(this.pingInterval)
-      this.pingInterval = null
-    }
-  }
-
   /**
    * DO alarm handler — watchdog for stale gateway connections.
    *
@@ -253,6 +226,16 @@ export class SessionDO extends Agent<Env, SessionState> {
   async alarm() {
     if (this.state.status !== 'running' && this.state.status !== 'waiting_gate') {
       return // Session not active, no need to watch
+    }
+
+    // Send keepalive ping — this runs inside the alarm so it survives DO
+    // hibernation (unlike setInterval which stops when the DO is evicted).
+    if (this.vpsWs) {
+      try {
+        this.vpsWs.send(JSON.stringify({ type: 'ping' }))
+      } catch {
+        // WS already closed — will be caught by staleness check below
+      }
     }
 
     const staleDuration = Date.now() - this.lastGatewayActivity
