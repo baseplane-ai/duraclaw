@@ -1,18 +1,30 @@
 project:
   name: duraclaw
   build_command: pnpm build
-  test_command: cd apps/orchestrator && pnpm test -- --reporter=default 2>&1 || true
+  test_command: pnpm test
   ci: null
 spec_path: planning/specs
 research_path: planning/research
 session_retention_days: 7
 reviews:
-  spec_review: false
-  code_reviewer: null
+  spec_review: true
+  code_review: true
+  code_reviewers:
+    - claude
+    - gemini
+    - codex
+  spec_reviewers:
+    - claude
+    - gemini
+    - codex
 global_rules:
   - >-
     When a task instruction says 'Invoke /skill-name', use the Skill tool to invoke that skill before starting work on
     the task.
+  - >-
+    Git workflow: commit and push directly to main at session close. Do NOT create pull requests. CI runs remotely after
+    push — no local CI gate. If kata-close or any step template tells you to run `gh pr create`, SKIP that step; run
+    `git push origin main` instead.
 task_rules:
   - Tasks are pre-created by kata enter. Do NOT create new tasks with TaskCreate.
   - Run TaskList FIRST to discover pre-created tasks and their dependency chains.

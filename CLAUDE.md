@@ -150,4 +150,4 @@ chrome-devtools-axi snapshot            # Verify redirect to dashboard
 - Commit messages: `type(scope): description` (feat, fix, chore, refactor, docs, test)
 - Biome formatting: 2-space indent, 100 char line width, LF endings
 - Path alias: `~/` maps to `./src/` in orchestrator
-- No remote configured yet — push target TBD
+- Git workflow: commit and push directly to `main` on `origin` (github.com/baseplane-ai/duraclaw). No PR workflow — CI runs remotely after push.
