@@ -1,7 +1,7 @@
 import type { ExecuteCommand, ResumeCommand } from '@duraclaw/shared-types'
-import type { ServerWebSocket } from 'bun'
 import { describe, expect, it } from 'vitest'
-import type { DiscoveredSession, GatewaySessionContext, SessionSource, WsData } from '../types.js'
+import type { SessionChannel } from '../session-channel.js'
+import type { DiscoveredSession, GatewaySessionContext, SessionSource } from '../types.js'
 import type { AdapterCapabilities, AgentAdapter } from './types.js'
 
 /**
@@ -12,7 +12,7 @@ class MockAdapter implements AgentAdapter {
   readonly name = 'mock'
 
   async execute(
-    _ws: ServerWebSocket<WsData>,
+    _ch: SessionChannel,
     _cmd: ExecuteCommand,
     _ctx: GatewaySessionContext,
   ): Promise<void> {
@@ -20,7 +20,7 @@ class MockAdapter implements AgentAdapter {
   }
 
   async resume(
-    _ws: ServerWebSocket<WsData>,
+    _ch: SessionChannel,
     _cmd: ResumeCommand,
     _ctx: GatewaySessionContext,
   ): Promise<void> {

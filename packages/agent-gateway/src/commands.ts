@@ -1,12 +1,11 @@
-import type { ServerWebSocket } from 'bun'
+import type { GatewayEvent } from '@duraclaw/shared-types'
+import type { SessionChannel } from './session-channel.js'
 import type {
-  GatewayEvent,
   GatewaySessionContext,
   GetContextUsageCommand,
   InterruptCommand,
   SetModelCommand,
   SetPermissionModeCommand,
-  WsData,
 } from './types.js'
 
 /** Commands that can be queued before Query is available */
@@ -17,9 +16,9 @@ export type QueueableCommand =
   | GetContextUsageCommand
 
 /** Send a GatewayEvent to the WebSocket client. */
-function send(ws: ServerWebSocket<WsData>, event: GatewayEvent): void {
+function send(ch: SessionChannel, event: GatewayEvent): void {
   try {
-    ws.send(JSON.stringify(event))
+    ch.send(JSON.stringify(event))
   } catch {
     // WS already closed — swallow
   }
@@ -32,11 +31,11 @@ function send(ws: ServerWebSocket<WsData>, event: GatewayEvent): void {
 export async function handleQueryCommand(
   ctx: GatewaySessionContext,
   cmd: QueueableCommand,
-  ws: ServerWebSocket<WsData>,
+  ch: SessionChannel,
 ): Promise<void> {
   const q = ctx.query
   if (!q) {
-    send(ws, {
+    send(ch, {
       type: 'error',
       session_id: ctx.sessionId,
       error: `Cannot execute ${cmd.type}: no active Query object`,
@@ -51,7 +50,7 @@ export async function handleQueryCommand(
     }
     case 'get-context-usage': {
       const usage = await q.getContextUsage()
-      send(ws, {
+      send(ch, {
         type: 'context_usage',
         session_id: ctx.sessionId,
         usage: usage as unknown as Record<string, unknown>,

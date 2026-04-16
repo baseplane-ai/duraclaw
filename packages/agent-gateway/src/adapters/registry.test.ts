@@ -1,6 +1,4 @@
-import type { ServerWebSocket } from 'bun'
 import { describe, expect, it } from 'vitest'
-import type { GatewaySessionContext, WsData } from '../types.js'
 import { AdapterRegistry } from './registry.js'
 import type { AdapterCapabilities, AgentAdapter } from './types.js'
 

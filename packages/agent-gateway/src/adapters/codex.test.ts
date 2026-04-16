@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import type { SessionChannel } from '../session-channel.js'
 import type { GatewaySessionContext } from '../types.js'
 import {
   CodexAdapter,
@@ -23,16 +24,17 @@ function createMockCtx(overrides?: Partial<GatewaySessionContext>): GatewaySessi
   }
 }
 
-/** Create a mock WebSocket that records sent messages. */
-function createMockWs() {
+/** Create a mock SessionChannel that records sent messages. */
+function createMockChannel(): { ch: SessionChannel; sent: string[]; parsedMessages: () => any[] } {
   const sent: string[] = []
-  const ws = {
+  const ch: SessionChannel = {
     send(data: string) {
       sent.push(data)
     },
-    data: { project: 'test' },
-  } as any
-  return { ws, sent, parsedMessages: () => sent.map((s) => JSON.parse(s)) }
+    close() {},
+    readyState: 1,
+  }
+  return { ch, sent, parsedMessages: () => sent.map((s) => JSON.parse(s)) }
 }
 
 describe('CodexAdapter', () => {
@@ -118,9 +120,9 @@ describe('CodexAdapter', () => {
   })
 
   describe('execute with unknown project', () => {
-    it('sends error event when project is not found', async () => {
+    it('sends error event via SessionChannel when project is not found', async () => {
       const adapter = new CodexAdapter()
-      const { ws, parsedMessages } = createMockWs()
+      const { ch, parsedMessages } = createMockChannel()
 
       const ctx = createMockCtx()
       const cmd = {
@@ -129,7 +131,7 @@ describe('CodexAdapter', () => {
         prompt: 'hello',
       }
 
-      await adapter.execute(ws, cmd, ctx)
+      await adapter.execute(ch, cmd, ctx)
 
       const msgs = parsedMessages()
       expect(msgs.length).toBe(1)
@@ -140,9 +142,9 @@ describe('CodexAdapter', () => {
   })
 
   describe('resume with unknown project', () => {
-    it('sends error event when project is not found', async () => {
+    it('sends error event via SessionChannel when project is not found', async () => {
       const adapter = new CodexAdapter()
-      const { ws, parsedMessages } = createMockWs()
+      const { ch, parsedMessages } = createMockChannel()
 
       const ctx = createMockCtx()
       const cmd = {
@@ -152,7 +154,7 @@ describe('CodexAdapter', () => {
         sdk_session_id: 'fake-thread-id',
       }
 
-      await adapter.resume(ws, cmd, ctx)
+      await adapter.resume(ch, cmd, ctx)
 
       const msgs = parsedMessages()
       expect(msgs.length).toBe(1)
@@ -162,20 +164,55 @@ describe('CodexAdapter', () => {
     })
   })
 
-  describe('error suppression on abort', () => {
-    it('does not send error when abortController is already aborted', async () => {
-      // We cannot easily mock the Codex SDK import, but we can test that
-      // when the SDK import fails AND the abort signal is set, no error is sent.
-      // Force abort before execute so the catch path checks signal.
+  describe('SessionChannel integration', () => {
+    it('execute accepts a SessionChannel and sends JSON via ch.send()', async () => {
       const adapter = new CodexAdapter()
-      const { ws, parsedMessages } = createMockWs()
+      const sendSpy = vi.fn()
+      const ch: SessionChannel = {
+        send: sendSpy,
+        close() {},
+        readyState: 1,
+      }
 
       const ctx = createMockCtx()
-      // Use a real project name that resolves so we reach the SDK import path
-      // Since we don't have a real project, we test the unknown-project path instead.
-      // The abort suppression is in the catch block after SDK import, which only
-      // triggers with a valid project. The unknown project path returns early.
-      // So we verify the abort behavior via the abort() method directly.
+      const cmd = {
+        type: 'execute' as const,
+        project: 'nonexistent-project-xyz-999',
+        prompt: 'hello',
+      }
+
+      await adapter.execute(ch, cmd, ctx)
+
+      expect(sendSpy).toHaveBeenCalledTimes(1)
+      const parsed = JSON.parse(sendSpy.mock.calls[0][0])
+      expect(parsed.type).toBe('error')
+    })
+
+    it('swallows errors when SessionChannel.send() throws (closed channel)', async () => {
+      const adapter = new CodexAdapter()
+      const ch: SessionChannel = {
+        send() {
+          throw new Error('Channel closed')
+        },
+        close() {},
+        readyState: 3,
+      }
+
+      const ctx = createMockCtx()
+      const cmd = {
+        type: 'execute' as const,
+        project: 'nonexistent-project-xyz-999',
+        prompt: 'hello',
+      }
+
+      await expect(adapter.execute(ch, cmd, ctx)).resolves.toBeUndefined()
+    })
+  })
+
+  describe('error suppression on abort', () => {
+    it('does not send error when abortController is already aborted', async () => {
+      const adapter = new CodexAdapter()
+      const ctx = createMockCtx()
       ctx.abortController.abort()
       expect(ctx.abortController.signal.aborted).toBe(true)
     })

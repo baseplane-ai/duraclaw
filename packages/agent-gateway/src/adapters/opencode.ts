@@ -1,16 +1,16 @@
 import type { ExecuteCommand, GatewayEvent, ResumeCommand } from '@duraclaw/shared-types'
-import type { ServerWebSocket } from 'bun'
-import type { GatewaySessionContext, WsData } from '../types.js'
+import type { SessionChannel } from '../session-channel.js'
+import type { GatewaySessionContext } from '../types.js'
 import type { AdapterCapabilities, AgentAdapter } from './types.js'
 
 const DEFAULT_OPENCODE_URL = 'http://127.0.0.1:3000'
 
-/** Send a GatewayEvent to the WebSocket client. */
-function send(ws: ServerWebSocket<WsData>, event: GatewayEvent): void {
+/** Send a GatewayEvent to the channel. */
+function send(ch: SessionChannel, event: GatewayEvent): void {
   try {
-    ws.send(JSON.stringify(event))
+    ch.send(JSON.stringify(event))
   } catch {
-    // WS already closed -- swallow
+    // Channel already closed -- swallow
   }
 }
 
@@ -100,21 +100,17 @@ export class OpenCodeAdapter implements AgentAdapter {
   readonly name = 'opencode'
 
   async execute(
-    ws: ServerWebSocket<WsData>,
+    ch: SessionChannel,
     cmd: ExecuteCommand,
     ctx: GatewaySessionContext,
   ): Promise<void> {
-    return this.runSession(ws, cmd, ctx)
+    return this.runSession(ch, cmd, ctx)
   }
 
-  async resume(
-    ws: ServerWebSocket<WsData>,
-    cmd: ResumeCommand,
-    ctx: GatewaySessionContext,
-  ): Promise<void> {
+  async resume(ch: SessionChannel, cmd: ResumeCommand, ctx: GatewaySessionContext): Promise<void> {
     // OpenCode doesn't have a direct resume mechanism like Claude's sdk_session_id.
     // We send the prompt to the existing session referenced by sdk_session_id.
-    return this.runSession(ws, cmd, ctx)
+    return this.runSession(ch, cmd, ctx)
   }
 
   abort(ctx: GatewaySessionContext): void {
@@ -156,7 +152,7 @@ export class OpenCodeAdapter implements AgentAdapter {
   }
 
   private async runSession(
-    ws: ServerWebSocket<WsData>,
+    ch: SessionChannel,
     cmd: ExecuteCommand | ResumeCommand,
     ctx: GatewaySessionContext,
   ): Promise<void> {
@@ -190,7 +186,7 @@ export class OpenCodeAdapter implements AgentAdapter {
           body: {},
         })
         if (!sessionResult.data) {
-          send(ws, {
+          send(ch, {
             type: 'error',
             session_id: sessionId,
             error: `Failed to create OpenCode session: ${sessionResult.error ? JSON.stringify(sessionResult.error) : 'unknown error'}`,
@@ -218,7 +214,7 @@ export class OpenCodeAdapter implements AgentAdapter {
       })
 
       // Send session.init immediately
-      send(ws, {
+      send(ch, {
         type: 'session.init',
         session_id: sessionId,
         sdk_session_id: ocSessionId,
@@ -244,7 +240,7 @@ export class OpenCodeAdapter implements AgentAdapter {
       promptPromise.catch((err: unknown) => {
         if (!ac.signal.aborted) {
           const errMsg = err instanceof Error ? err.message : String(err)
-          send(ws, {
+          send(ch, {
             type: 'error',
             session_id: sessionId,
             error: `OpenCode prompt failed: ${errMsg}`,
@@ -284,7 +280,7 @@ export class OpenCodeAdapter implements AgentAdapter {
 
             if (part.type === 'text' && delta !== undefined) {
               // Streaming text delta
-              send(ws, {
+              send(ch, {
                 type: 'partial_assistant',
                 session_id: sessionId,
                 content: [{ type: 'text', id: part.id, delta }],
@@ -293,7 +289,7 @@ export class OpenCodeAdapter implements AgentAdapter {
               const state = part.state
               if (state?.status === 'running') {
                 // Tool started running -- emit as partial_assistant
-                send(ws, {
+                send(ch, {
                   type: 'partial_assistant',
                   session_id: sessionId,
                   content: [
@@ -307,13 +303,13 @@ export class OpenCodeAdapter implements AgentAdapter {
                 })
               } else if (state?.status === 'completed') {
                 // Tool completed -- emit assistant + tool_result
-                send(ws, {
+                send(ch, {
                   type: 'assistant',
                   session_id: sessionId,
                   uuid: part.id,
                   content: normalizePartToContent(part),
                 })
-                send(ws, {
+                send(ch, {
                   type: 'tool_result',
                   session_id: sessionId,
                   uuid: part.id,
@@ -321,13 +317,13 @@ export class OpenCodeAdapter implements AgentAdapter {
                 })
               } else if (state?.status === 'error') {
                 // Tool error -- emit tool_result with error
-                send(ws, {
+                send(ch, {
                   type: 'assistant',
                   session_id: sessionId,
                   uuid: part.id,
                   content: normalizePartToContent(part),
                 })
-                send(ws, {
+                send(ch, {
                   type: 'tool_result',
                   session_id: sessionId,
                   uuid: part.id,
@@ -356,7 +352,7 @@ export class OpenCodeAdapter implements AgentAdapter {
 
             if (info.error) {
               const errorMsg = info.error.data?.message ?? info.error.name ?? 'Unknown error'
-              send(ws, {
+              send(ch, {
                 type: 'error',
                 session_id: sessionId,
                 error: errorMsg,
@@ -374,7 +370,7 @@ export class OpenCodeAdapter implements AgentAdapter {
 
             const errorMsg =
               props.error?.data?.message ?? props.error?.name ?? 'Unknown session error'
-            send(ws, {
+            send(ch, {
               type: 'error',
               session_id: sessionId,
               error: errorMsg,
@@ -406,7 +402,7 @@ export class OpenCodeAdapter implements AgentAdapter {
               sessionBusy = false
               const duration = Date.now() - startTime
 
-              send(ws, {
+              send(ch, {
                 type: 'result',
                 session_id: sessionId,
                 subtype: 'success',
@@ -424,7 +420,7 @@ export class OpenCodeAdapter implements AgentAdapter {
 
           case 'file.edited': {
             const props = evt.properties as { file: string }
-            send(ws, {
+            send(ch, {
               type: 'file_changed',
               session_id: sessionId,
               path: props.file,
@@ -455,7 +451,7 @@ export class OpenCodeAdapter implements AgentAdapter {
 
       // Don't send error for aborted sessions
       if (!ac.signal.aborted) {
-        send(ws, { type: 'error', session_id: sessionId, error: errMsg })
+        send(ch, { type: 'error', session_id: sessionId, error: errMsg })
       }
     }
   }

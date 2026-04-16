@@ -1,6 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { SessionChannel } from '../session-channel.js'
 import type { GatewaySessionContext } from '../types.js'
 import { ClaudeAdapter, handleCanUseTool } from './claude.js'
+
+/** Create a mock SessionChannel that records sent messages. */
+function createMockChannel(): { ch: SessionChannel; sent: string[]; parsedMessages: () => any[] } {
+  const sent: string[] = []
+  const ch: SessionChannel = {
+    send(data: string) {
+      sent.push(data)
+    },
+    close() {},
+    readyState: 1,
+  }
+  return { ch, sent, parsedMessages: () => sent.map((s) => JSON.parse(s)) }
+}
 
 /** Create a mock GatewaySessionContext */
 function createMockCtx(overrides?: Partial<GatewaySessionContext>): GatewaySessionContext {
@@ -93,15 +107,9 @@ describe('ClaudeAdapter', () => {
   })
 
   describe('execute with unknown project', () => {
-    it('sends error event when project is not found', async () => {
+    it('sends error event via SessionChannel when project is not found', async () => {
       const adapter = new ClaudeAdapter()
-      const sent: string[] = []
-      const ws = {
-        send(data: string) {
-          sent.push(data)
-        },
-        data: { project: 'nonexistent' },
-      } as any
+      const { ch, parsedMessages } = createMockChannel()
 
       const ctx = createMockCtx()
       const cmd = {
@@ -110,26 +118,20 @@ describe('ClaudeAdapter', () => {
         prompt: 'hello',
       }
 
-      await adapter.execute(ws, cmd, ctx)
+      await adapter.execute(ch, cmd, ctx)
 
-      expect(sent.length).toBe(1)
-      const msg = JSON.parse(sent[0])
-      expect(msg.type).toBe('error')
-      expect(msg.error).toContain('not found')
-      expect(msg.session_id).toBe('test-session')
+      const msgs = parsedMessages()
+      expect(msgs.length).toBe(1)
+      expect(msgs[0].type).toBe('error')
+      expect(msgs[0].error).toContain('not found')
+      expect(msgs[0].session_id).toBe('test-session')
     })
   })
 
   describe('resume with unknown project', () => {
-    it('sends error event when project is not found', async () => {
+    it('sends error event via SessionChannel when project is not found', async () => {
       const adapter = new ClaudeAdapter()
-      const sent: string[] = []
-      const ws = {
-        send(data: string) {
-          sent.push(data)
-        },
-        data: { project: 'nonexistent' },
-      } as any
+      const { ch, parsedMessages } = createMockChannel()
 
       const ctx = createMockCtx()
       const cmd = {
@@ -139,12 +141,82 @@ describe('ClaudeAdapter', () => {
         sdk_session_id: 'fake-session-id',
       }
 
-      await adapter.resume(ws, cmd, ctx)
+      await adapter.resume(ch, cmd, ctx)
 
-      expect(sent.length).toBe(1)
-      const msg = JSON.parse(sent[0])
-      expect(msg.type).toBe('error')
-      expect(msg.error).toContain('not found')
+      const msgs = parsedMessages()
+      expect(msgs.length).toBe(1)
+      expect(msgs[0].type).toBe('error')
+      expect(msgs[0].error).toContain('not found')
+    })
+  })
+
+  describe('SessionChannel integration', () => {
+    it('execute accepts a SessionChannel and sends JSON via ch.send()', async () => {
+      const adapter = new ClaudeAdapter()
+      const sendSpy = vi.fn()
+      const ch: SessionChannel = {
+        send: sendSpy,
+        close() {},
+        readyState: 1,
+      }
+
+      const ctx = createMockCtx()
+      const cmd = {
+        type: 'execute' as const,
+        project: 'nonexistent-project-xyz-999',
+        prompt: 'hello',
+      }
+
+      await adapter.execute(ch, cmd, ctx)
+
+      expect(sendSpy).toHaveBeenCalledTimes(1)
+      const parsed = JSON.parse(sendSpy.mock.calls[0][0])
+      expect(parsed.type).toBe('error')
+    })
+
+    it('resume accepts a SessionChannel and sends JSON via ch.send()', async () => {
+      const adapter = new ClaudeAdapter()
+      const sendSpy = vi.fn()
+      const ch: SessionChannel = {
+        send: sendSpy,
+        close() {},
+        readyState: 1,
+      }
+
+      const ctx = createMockCtx()
+      const cmd = {
+        type: 'resume' as const,
+        project: 'nonexistent-project-xyz-999',
+        prompt: 'continue',
+        sdk_session_id: 'fake-session-id',
+      }
+
+      await adapter.resume(ch, cmd, ctx)
+
+      expect(sendSpy).toHaveBeenCalledTimes(1)
+      const parsed = JSON.parse(sendSpy.mock.calls[0][0])
+      expect(parsed.type).toBe('error')
+    })
+
+    it('swallows errors when SessionChannel.send() throws (closed channel)', async () => {
+      const adapter = new ClaudeAdapter()
+      const ch: SessionChannel = {
+        send() {
+          throw new Error('Channel closed')
+        },
+        close() {},
+        readyState: 3, // CLOSED
+      }
+
+      const ctx = createMockCtx()
+      const cmd = {
+        type: 'execute' as const,
+        project: 'nonexistent-project-xyz-999',
+        prompt: 'hello',
+      }
+
+      // Should not throw even when ch.send() throws
+      await expect(adapter.execute(ch, cmd, ctx)).resolves.toBeUndefined()
     })
   })
 })

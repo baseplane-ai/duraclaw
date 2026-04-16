@@ -1,15 +1,15 @@
 import type { ExecuteCommand, GatewayEvent, ResumeCommand } from '@duraclaw/shared-types'
-import type { ServerWebSocket } from 'bun'
 import { resolveProject } from '../projects.js'
-import type { GatewaySessionContext, WsData } from '../types.js'
+import type { SessionChannel } from '../session-channel.js'
+import type { GatewaySessionContext } from '../types.js'
 import type { AdapterCapabilities, AgentAdapter } from './types.js'
 
-/** Send a GatewayEvent to the WebSocket client. */
-function send(ws: ServerWebSocket<WsData>, event: GatewayEvent): void {
+/** Send a GatewayEvent to the channel. */
+function send(ch: SessionChannel, event: GatewayEvent): void {
   try {
-    ws.send(JSON.stringify(event))
+    ch.send(JSON.stringify(event))
   } catch {
-    // WS already closed -- swallow
+    // Channel already closed -- swallow
   }
 }
 
@@ -105,19 +105,15 @@ export class CodexAdapter implements AgentAdapter {
   readonly name = 'codex'
 
   async execute(
-    ws: ServerWebSocket<WsData>,
+    ch: SessionChannel,
     cmd: ExecuteCommand,
     ctx: GatewaySessionContext,
   ): Promise<void> {
-    return this.runSession(ws, cmd, ctx, false)
+    return this.runSession(ch, cmd, ctx, false)
   }
 
-  async resume(
-    ws: ServerWebSocket<WsData>,
-    cmd: ResumeCommand,
-    ctx: GatewaySessionContext,
-  ): Promise<void> {
-    return this.runSession(ws, cmd, ctx, true)
+  async resume(ch: SessionChannel, cmd: ResumeCommand, ctx: GatewaySessionContext): Promise<void> {
+    return this.runSession(ch, cmd, ctx, true)
   }
 
   abort(ctx: GatewaySessionContext): void {
@@ -143,7 +139,7 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   private async runSession(
-    ws: ServerWebSocket<WsData>,
+    ch: SessionChannel,
     cmd: ExecuteCommand | ResumeCommand,
     ctx: GatewaySessionContext,
     isResume: boolean,
@@ -156,7 +152,7 @@ export class CodexAdapter implements AgentAdapter {
     const projectPath = await resolveProject(cmd.project)
     console.log(`[agent-gateway] CodexAdapter: projectPath=${projectPath}`)
     if (!projectPath) {
-      send(ws, {
+      send(ch, {
         type: 'error',
         session_id: sessionId,
         error: `Project "${cmd.project}" not found`,
@@ -211,7 +207,7 @@ export class CodexAdapter implements AgentAdapter {
         switch (event.type) {
           case 'thread.started': {
             const threadId = event.thread_id
-            send(ws, {
+            send(ch, {
               type: 'session.init',
               session_id: sessionId,
               sdk_session_id: threadId,
@@ -225,13 +221,13 @@ export class CodexAdapter implements AgentAdapter {
           case 'item.updated': {
             const item = event.item
             if (item.type === 'agent_message') {
-              send(ws, {
+              send(ch, {
                 type: 'partial_assistant',
                 session_id: sessionId,
                 content: [{ type: 'text', id: item.id, delta: item.text ?? '' }],
               })
             } else if (item.type === 'command_execution') {
-              send(ws, {
+              send(ch, {
                 type: 'partial_assistant',
                 session_id: sessionId,
                 content: [
@@ -250,7 +246,7 @@ export class CodexAdapter implements AgentAdapter {
           case 'item.completed': {
             const item = event.item
             if (item.type === 'agent_message' || item.type === 'reasoning') {
-              send(ws, {
+              send(ch, {
                 type: 'assistant',
                 session_id: sessionId,
                 uuid: item.id,
@@ -262,14 +258,14 @@ export class CodexAdapter implements AgentAdapter {
               item.type === 'mcp_tool_call'
             ) {
               // Emit the tool use as assistant content
-              send(ws, {
+              send(ch, {
                 type: 'assistant',
                 session_id: sessionId,
                 uuid: item.id,
                 content: normalizeItemToAssistantContent(item),
               })
               // Emit the tool result
-              send(ws, {
+              send(ch, {
                 type: 'tool_result',
                 session_id: sessionId,
                 uuid: item.id,
@@ -279,7 +275,7 @@ export class CodexAdapter implements AgentAdapter {
               // Emit file_changed events for file changes
               if (item.type === 'file_change') {
                 for (const change of item.changes) {
-                  send(ws, {
+                  send(ch, {
                     type: 'file_changed',
                     session_id: sessionId,
                     path: change.path,
@@ -289,7 +285,7 @@ export class CodexAdapter implements AgentAdapter {
                 }
               }
             } else if (item.type === 'error') {
-              send(ws, {
+              send(ch, {
                 type: 'error',
                 session_id: sessionId,
                 error: item.message,
@@ -300,7 +296,7 @@ export class CodexAdapter implements AgentAdapter {
 
           case 'turn.completed': {
             const duration = Date.now() - startTime
-            send(ws, {
+            send(ch, {
               type: 'result',
               session_id: sessionId,
               subtype: 'success',
@@ -316,7 +312,7 @@ export class CodexAdapter implements AgentAdapter {
 
           case 'turn.failed': {
             const duration = Date.now() - startTime
-            send(ws, {
+            send(ch, {
               type: 'result',
               session_id: sessionId,
               subtype: 'error',
@@ -331,7 +327,7 @@ export class CodexAdapter implements AgentAdapter {
           }
 
           case 'error': {
-            send(ws, {
+            send(ch, {
               type: 'error',
               session_id: sessionId,
               error: event.message,
@@ -350,7 +346,7 @@ export class CodexAdapter implements AgentAdapter {
 
       // Don't send error for aborted sessions
       if (!ac.signal.aborted) {
-        send(ws, { type: 'error', session_id: sessionId, error: errMsg })
+        send(ch, { type: 'error', session_id: sessionId, error: errMsg })
       }
     }
   }

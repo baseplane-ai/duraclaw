@@ -4,22 +4,22 @@ import type {
   GatewayEvent,
   ResumeCommand,
 } from '@duraclaw/shared-types'
-import type { ServerWebSocket } from 'bun'
 import { handleQueryCommand } from '../commands.js'
 import { buildCleanEnv } from '../env.js'
 import { resolveProject } from '../projects.js'
-import type { GatewaySessionContext, WsData } from '../types.js'
+import type { SessionChannel } from '../session-channel.js'
+import type { GatewaySessionContext } from '../types.js'
 import type { AdapterCapabilities, AgentAdapter } from './types.js'
 
 /** How often to send a heartbeat on the WS to prevent idle timeout (ms). */
 const HEARTBEAT_INTERVAL_MS = 15_000
 
-/** Send a GatewayEvent to the WebSocket client. */
-function send(ws: ServerWebSocket<WsData>, event: GatewayEvent): void {
+/** Send a GatewayEvent to the channel. */
+function send(ch: SessionChannel, event: GatewayEvent): void {
   try {
-    ws.send(JSON.stringify(event))
+    ch.send(JSON.stringify(event))
   } catch {
-    // WS already closed -- swallow
+    // Channel already closed -- swallow
   }
 }
 
@@ -29,12 +29,12 @@ function send(ws: ServerWebSocket<WsData>, event: GatewayEvent): void {
  * (the for-await loop pauses, so no messages flow during tool execution).
  * Returns a stop function.
  */
-function startHeartbeat(ws: ServerWebSocket<WsData>, sessionId: string): () => void {
+function startHeartbeat(ch: SessionChannel, sessionId: string): () => void {
   const timer = setInterval(() => {
     try {
-      ws.send(JSON.stringify({ type: 'heartbeat', session_id: sessionId }))
+      ch.send(JSON.stringify({ type: 'heartbeat', session_id: sessionId }))
     } catch {
-      // WS closed
+      // Channel closed
     }
   }, HEARTBEAT_INTERVAL_MS)
   return () => clearInterval(timer)
@@ -200,19 +200,15 @@ export class ClaudeAdapter implements AgentAdapter {
   readonly name = 'claude'
 
   async execute(
-    ws: ServerWebSocket<WsData>,
+    ch: SessionChannel,
     cmd: ExecuteCommand,
     ctx: GatewaySessionContext,
   ): Promise<void> {
-    return this.runSession(ws, cmd, ctx)
+    return this.runSession(ch, cmd, ctx)
   }
 
-  async resume(
-    ws: ServerWebSocket<WsData>,
-    cmd: ResumeCommand,
-    ctx: GatewaySessionContext,
-  ): Promise<void> {
-    return this.runSession(ws, cmd, ctx)
+  async resume(ch: SessionChannel, cmd: ResumeCommand, ctx: GatewaySessionContext): Promise<void> {
+    return this.runSession(ch, cmd, ctx)
   }
 
   abort(ctx: GatewaySessionContext): void {
@@ -241,7 +237,7 @@ export class ClaudeAdapter implements AgentAdapter {
    * back over the WebSocket connection. Works for both "execute" and "resume" commands.
    */
   private async runSession(
-    ws: ServerWebSocket<WsData>,
+    ch: SessionChannel,
     cmd: ExecuteCommand | ResumeCommand,
     ctx: GatewaySessionContext,
   ): Promise<void> {
@@ -253,7 +249,7 @@ export class ClaudeAdapter implements AgentAdapter {
     const resolvedPath = await resolveProject(cmd.project)
     console.log(`[agent-gateway] executeSession: projectPath=${resolvedPath}`)
     if (!resolvedPath) {
-      send(ws, {
+      send(ch, {
         type: 'error',
         session_id: sessionId,
         error: `Project "${cmd.project}" not found`,
@@ -267,7 +263,7 @@ export class ClaudeAdapter implements AgentAdapter {
     ctx.messageQueue = queue
 
     let sdkSessionId: string | null = null
-    const stopHeartbeat = startHeartbeat(ws, sessionId)
+    const stopHeartbeat = startHeartbeat(ch, sessionId)
 
     try {
       // Dynamic import -- the SDK is ESM-only
@@ -307,7 +303,7 @@ export class ClaudeAdapter implements AgentAdapter {
           input,
           opts,
           ctx,
-          (event) => send(ws, event as unknown as GatewayEvent),
+          (event) => send(ch, event as unknown as GatewayEvent),
           sessionId,
         )
       }
@@ -328,7 +324,7 @@ export class ClaudeAdapter implements AgentAdapter {
                 if (toolName === 'Edit' || toolName === 'Write') {
                   const filePath = toolInput.file_path as string | undefined
                   if (filePath) {
-                    send(ws, {
+                    send(ch, {
                       type: 'file_changed',
                       session_id: sessionId,
                       path: filePath,
@@ -358,7 +354,7 @@ export class ClaudeAdapter implements AgentAdapter {
             const model = (message as any).model ?? null
             const tools = (message as any).tools ?? []
 
-            send(ws, {
+            send(ch, {
               type: 'session.init',
               session_id: sessionId,
               sdk_session_id: sdkSessionId ?? null,
@@ -370,7 +366,7 @@ export class ClaudeAdapter implements AgentAdapter {
             // Drain command queue now that Query is available
             if (ctx.commandQueue.length > 0) {
               for (const queuedCmd of ctx.commandQueue) {
-                await handleQueryCommand(ctx, queuedCmd, ws)
+                await handleQueryCommand(ctx, queuedCmd, ch)
               }
               ctx.commandQueue = []
             }
@@ -395,20 +391,20 @@ export class ClaudeAdapter implements AgentAdapter {
               return { type: block.type, id: block.id ?? '' }
             })
 
-            send(ws, {
+            send(ch, {
               type: 'partial_assistant',
               session_id: sessionId,
               content: blocks,
             })
           } else if (message.type === 'assistant') {
-            send(ws, {
+            send(ch, {
               type: 'assistant',
               session_id: sessionId,
               uuid: (message as any).uuid,
               content: (message as any).message?.content ?? [],
             })
           } else if (message.type === 'tool_use_summary') {
-            send(ws, {
+            send(ch, {
               type: 'tool_result',
               session_id: sessionId,
               uuid: (message as any).uuid ?? '',
@@ -418,19 +414,19 @@ export class ClaudeAdapter implements AgentAdapter {
             message.type === 'system' &&
             (message as any).subtype === 'session_state_changed'
           ) {
-            send(ws, {
+            send(ch, {
               type: 'session_state_changed',
               session_id: sessionId,
               state: (message as any).state,
             })
           } else if (message.type === 'rate_limit_event') {
-            send(ws, {
+            send(ch, {
               type: 'rate_limit',
               session_id: sessionId,
               rate_limit_info: (message as any).rate_limit_info,
             })
           } else if (message.type === 'system' && (message as any).subtype === 'task_started') {
-            send(ws, {
+            send(ch, {
               type: 'task_started',
               session_id: sessionId,
               task_id: (message as any).task_id,
@@ -439,7 +435,7 @@ export class ClaudeAdapter implements AgentAdapter {
               prompt: (message as any).prompt,
             })
           } else if (message.type === 'system' && (message as any).subtype === 'task_progress') {
-            send(ws, {
+            send(ch, {
               type: 'task_progress',
               session_id: sessionId,
               task_id: (message as any).task_id,
@@ -452,7 +448,7 @@ export class ClaudeAdapter implements AgentAdapter {
             message.type === 'system' &&
             (message as any).subtype === 'task_notification'
           ) {
-            send(ws, {
+            send(ch, {
               type: 'task_notification',
               session_id: sessionId,
               task_id: (message as any).task_id,
@@ -477,7 +473,7 @@ export class ClaudeAdapter implements AgentAdapter {
               }
             }
 
-            send(ws, {
+            send(ch, {
               type: 'result',
               session_id: sessionId,
               subtype: result.subtype,
@@ -535,7 +531,7 @@ export class ClaudeAdapter implements AgentAdapter {
 
       // Don't send error for aborted sessions
       if (!ac.signal.aborted) {
-        send(ws, { type: 'error', session_id: sessionId, error: errMsg })
+        send(ch, { type: 'error', session_id: sessionId, error: errMsg })
       }
     } finally {
       stopHeartbeat()

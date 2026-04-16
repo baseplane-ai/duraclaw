@@ -5,10 +5,12 @@ import type { ServerWebSocket } from 'bun'
 import { AdapterRegistry, ClaudeAdapter, CodexAdapter, OpenCodeAdapter } from './adapters/index.js'
 import { verifyToken } from './auth.js'
 import { handleQueryCommand } from './commands.js'
+import { dialbackSessions, dialOutboundWs } from './dialback.js'
 import { handleFileContents, handleFileTree, handleGitStatus } from './files.js'
 import { findLatestKataState } from './kata.js'
 import { spec as openapiSpec } from './openapi.js'
 import { discoverProjects, resolveProject } from './projects.js'
+import { fromServerWebSocket } from './session-channel.js'
 import {
   ClaudeSessionSource,
   CodexSessionSource,
@@ -322,6 +324,55 @@ const server = Bun.serve<WsData>({
       }
     }
 
+    // POST /sessions/start — dial-back session start (from DO)
+    if (req.method === 'POST' && path === '/sessions/start') {
+      let body: { callback_url: string; cmd: GatewayCommand }
+      try {
+        body = (await req.json()) as { callback_url: string; cmd: GatewayCommand }
+      } catch {
+        return json(400, { ok: false, error: 'Invalid JSON body' })
+      }
+
+      if (!body.callback_url || !body.cmd) {
+        return json(400, { ok: false, error: 'Missing callback_url or cmd' })
+      }
+
+      const sessionId = randomUUID()
+      const cmd = body.cmd as GatewayCommand
+
+      // Resolve adapter
+      const agentName = (cmd as any).agent ?? 'claude'
+      const adapter = registry.get(agentName)
+      if (!adapter) {
+        return json(400, {
+          ok: false,
+          error: `Agent "${agentName}" is not available. Available agents: ${registry.listNames().join(', ')}`,
+        })
+      }
+
+      const ac = new AbortController()
+      const ctx: GatewaySessionContext = {
+        sessionId,
+        orgId: cmd.type === 'execute' ? ((cmd as any).org_id ?? null) : null,
+        userId: cmd.type === 'execute' ? ((cmd as any).user_id ?? null) : null,
+        adapterName: agentName,
+        abortController: ac,
+        pendingAnswer: null,
+        pendingPermission: null,
+        messageQueue: null,
+        query: null,
+        commandQueue: [],
+      }
+
+      // Dial outbound WS to the DO's callback_url
+      const callbackUrl = body.callback_url
+      console.log(`[agent-gateway] Dialing back to ${callbackUrl} for session ${sessionId}`)
+
+      dialOutboundWs(callbackUrl, cmd, ctx, adapter, sessionId)
+
+      return json(200, { ok: true, session_id: sessionId })
+    }
+
     // WebSocket upgrade
     if (req.headers.get('upgrade')?.toLowerCase() === 'websocket') {
       const project = url.searchParams.get('project') ?? null
@@ -435,8 +486,9 @@ const server = Bun.serve<WsData>({
           console.log(
             `[agent-gateway] Starting session ${sessionId} for project=${cmd.project} agent=${agentName}`,
           )
+          const ch = fromServerWebSocket(ws)
           const sessionPromise =
-            cmd.type === 'resume' ? adapter.resume(ws, cmd, ctx) : adapter.execute(ws, cmd, ctx)
+            cmd.type === 'resume' ? adapter.resume(ch, cmd, ctx) : adapter.execute(ch, cmd, ctx)
 
           sessionPromise
             .then(() => {
@@ -562,7 +614,7 @@ const server = Bun.serve<WsData>({
               }),
             )
           } else if (ctx.query) {
-            await handleQueryCommand(ctx, cmd, ws)
+            await handleQueryCommand(ctx, cmd, fromServerWebSocket(ws))
           } else {
             // Queue for when Query becomes available
             ctx.commandQueue.push(cmd)
@@ -698,6 +750,17 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
       }
     }
     sessions.clear()
+
+    // Clean up dial-back sessions
+    for (const [_id, entry] of dialbackSessions) {
+      entry.ctx.abortController.abort()
+      try {
+        entry.ws.close()
+      } catch {
+        /* already closed */
+      }
+    }
+    dialbackSessions.clear()
 
     server.stop()
     console.log('[agent-gateway] Server closed')

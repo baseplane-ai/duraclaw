@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import type { SessionChannel } from '../session-channel.js'
 import type { GatewaySessionContext } from '../types.js'
 import {
   normalizePartToContent,
@@ -24,16 +25,17 @@ function createMockCtx(overrides?: Partial<GatewaySessionContext>): GatewaySessi
   }
 }
 
-/** Create a mock WebSocket that records sent messages. */
-function createMockWs() {
+/** Create a mock SessionChannel that records sent messages. */
+function createMockChannel(): { ch: SessionChannel; sent: string[]; parsedMessages: () => any[] } {
   const sent: string[] = []
-  const ws = {
+  const ch: SessionChannel = {
     send(data: string) {
       sent.push(data)
     },
-    data: { project: 'test' },
-  } as any
-  return { ws, sent, parsedMessages: () => sent.map((s) => JSON.parse(s)) }
+    close() {},
+    readyState: 1,
+  }
+  return { ch, sent, parsedMessages: () => sent.map((s) => JSON.parse(s)) }
 }
 
 describe('OpenCodeAdapter', () => {
@@ -321,11 +323,11 @@ describe('normalizePartToToolResult', () => {
 })
 
 describe('OpenCodeAdapter execute error handling', () => {
-  it('sends error event when SDK import fails (sidecar not reachable)', async () => {
+  it('sends error event via SessionChannel when SDK import fails (sidecar not reachable)', async () => {
     // The execute path will fail because no OpenCode sidecar is running.
     // This tests the catch block in runSession.
     const adapter = new OpenCodeAdapter()
-    const { ws, parsedMessages } = createMockWs()
+    const { ch, parsedMessages } = createMockChannel()
 
     const ctx = createMockCtx()
     const cmd = {
@@ -335,7 +337,7 @@ describe('OpenCodeAdapter execute error handling', () => {
       agent: 'opencode',
     }
 
-    await adapter.execute(ws, cmd, ctx)
+    await adapter.execute(ch, cmd, ctx)
 
     const msgs = parsedMessages()
     // Should have received an error (either SDK import failure or connection refused)
@@ -348,7 +350,7 @@ describe('OpenCodeAdapter execute error handling', () => {
 
   it('does not send error when abortController is already aborted', async () => {
     const adapter = new OpenCodeAdapter()
-    const { ws, parsedMessages } = createMockWs()
+    const { ch, parsedMessages } = createMockChannel()
 
     const ctx = createMockCtx()
     // Abort before execute so the catch block checks ac.signal.aborted
@@ -361,12 +363,61 @@ describe('OpenCodeAdapter execute error handling', () => {
       agent: 'opencode',
     }
 
-    await adapter.execute(ws, cmd, ctx)
+    await adapter.execute(ch, cmd, ctx)
 
     const msgs = parsedMessages()
     // Should NOT have any error messages since abort was signaled
     const errorMsgs = msgs.filter((m: any) => m.type === 'error')
     expect(errorMsgs).toHaveLength(0)
+  })
+
+  describe('SessionChannel integration', () => {
+    it('execute accepts a SessionChannel and sends JSON via ch.send()', async () => {
+      const adapter = new OpenCodeAdapter()
+      const sendSpy = vi.fn()
+      const ch: SessionChannel = {
+        send: sendSpy,
+        close() {},
+        readyState: 1,
+      }
+
+      const ctx = createMockCtx()
+      const cmd = {
+        type: 'execute' as const,
+        project: 'test-project',
+        prompt: 'hello',
+        agent: 'opencode',
+      }
+
+      await adapter.execute(ch, cmd, ctx)
+
+      // Should have called ch.send() at least once (error event)
+      expect(sendSpy).toHaveBeenCalled()
+      const parsed = JSON.parse(sendSpy.mock.calls[0][0])
+      expect(parsed.session_id).toBe('test-session')
+    })
+
+    it('swallows errors when SessionChannel.send() throws (closed channel)', async () => {
+      const adapter = new OpenCodeAdapter()
+      const ch: SessionChannel = {
+        send() {
+          throw new Error('Channel closed')
+        },
+        close() {},
+        readyState: 3,
+      }
+
+      const ctx = createMockCtx()
+      const cmd = {
+        type: 'execute' as const,
+        project: 'test-project',
+        prompt: 'hello',
+        agent: 'opencode',
+      }
+
+      // Should not throw even when ch.send() throws
+      await expect(adapter.execute(ch, cmd, ctx)).resolves.toBeUndefined()
+    })
   })
 })
 
