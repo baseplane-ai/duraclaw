@@ -43,6 +43,11 @@ function AgentOrchContent() {
     searchSessionId ?? restoredSessionId,
   )
   const [spawnConfig, setSpawnConfig] = useState<SpawnConfig | null>(null)
+  // Pre-fill hints for the QuickPromptInput composer, set by tab context menu actions.
+  const [quickPromptHint, setQuickPromptHint] = useState<{
+    project: string
+    newTab: boolean
+  } | null>(null)
   const prevSearchRef = useRef(searchSessionId)
   const didRestoreRef = useRef(false)
 
@@ -61,6 +66,7 @@ function AgentOrchContent() {
 
     if (searchSessionId && searchSessionId !== selectedSessionId) {
       setSpawnConfig(null)
+      setQuickPromptHint(null)
       setSelectedSessionId(searchSessionId)
     } else if (!searchSessionId && selectedSessionId && prev !== null) {
       // Navigated from a session URL to "/" (e.g. "New session" click) — clear selection.
@@ -125,6 +131,7 @@ function AgentOrchContent() {
           model: config.model,
           agent: config.agent,
         })
+        setQuickPromptHint(null)
         setSelectedSessionId(sessionId)
 
         // Add to tab: replace existing project tab or force new tab
@@ -158,9 +165,30 @@ function AgentOrchContent() {
 
   const handleLastTabClosed = useCallback(() => {
     setSpawnConfig(null)
+    setQuickPromptHint(null)
     setSelectedSessionId(null)
     navigate({ to: '/' })
   }, [navigate])
+
+  const handleNewSessionInTab = useCallback(
+    (project: string) => {
+      setSpawnConfig(null)
+      setSelectedSessionId(null)
+      setQuickPromptHint({ project, newTab: false })
+      navigate({ to: '/' })
+    },
+    [navigate],
+  )
+
+  const handleNewTabForProject = useCallback(
+    (project: string) => {
+      setSpawnConfig(null)
+      setSelectedSessionId(null)
+      setQuickPromptHint({ project, newTab: true })
+      navigate({ to: '/' })
+    },
+    [navigate],
+  )
 
   const handleStateChange = useCallback(
     (sessionId: string, patch: Record<string, unknown>) => {
@@ -220,7 +248,12 @@ function AgentOrchContent() {
       <Main fixed fluid className="p-0" {...swipeProps}>
         <PwaInstallBanner />
         <PushOptInBanner />
-        <TabBar onSelectSession={handleSelectSession} onLastTabClosed={handleLastTabClosed} />
+        <TabBar
+          onSelectSession={handleSelectSession}
+          onLastTabClosed={handleLastTabClosed}
+          onNewSessionInTab={handleNewSessionInTab}
+          onNewTabForProject={handleNewTabForProject}
+        />
         <div
           className={
             swipeDir === 'left'
@@ -240,9 +273,16 @@ function AgentOrchContent() {
             />
           ) : (
             <QuickPromptInput
+              key={
+                quickPromptHint
+                  ? `hint-${quickPromptHint.project}-${quickPromptHint.newTab}`
+                  : 'default'
+              }
               onSubmit={handleSpawn}
               projects={projects}
               projectsLoading={projectsLoading}
+              initialProject={quickPromptHint?.project}
+              initialNewTab={quickPromptHint?.newTab}
             />
           )}
         </div>

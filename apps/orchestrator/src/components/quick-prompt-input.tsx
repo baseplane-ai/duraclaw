@@ -57,6 +57,10 @@ export interface QuickPromptInputProps {
   }) => void
   projects: Array<{ name: string; path: string; repo_origin?: string | null }>
   projectsLoading?: boolean
+  /** Optional pre-selected project (e.g. from a tab context-menu action). */
+  initialProject?: string
+  /** Optional pre-set newTab checkbox state (applies only if selected project has an existing tab). */
+  initialNewTab?: boolean
 }
 
 function extractRepoName(repoOrigin: string): string {
@@ -66,14 +70,20 @@ function extractRepoName(repoOrigin: string): string {
   return name.charAt(0).toUpperCase() + name.slice(1)
 }
 
-export function QuickPromptInput({ onSubmit, projects, projectsLoading }: QuickPromptInputProps) {
+export function QuickPromptInput({
+  onSubmit,
+  projects,
+  projectsLoading,
+  initialProject,
+  initialNewTab,
+}: QuickPromptInputProps) {
   const { preferences } = useUserDefaults()
 
-  const [selectedProject, setSelectedProject] = useState('')
+  const [selectedProject, setSelectedProject] = useState(initialProject ?? '')
   const [selectedModel, setSelectedModel] = useState(() => {
     return MODEL_OPTIONS.find((m) => m.value === preferences.model)?.value ?? MODEL_OPTIONS[0].value
   })
-  const [newTab, setNewTab] = useState(false)
+  const [newTab, setNewTab] = useState(initialNewTab ?? false)
   const [images, setImages] = useState<ImagePreview[]>([])
   const [imageError, setImageError] = useState<string | null>(null)
 
