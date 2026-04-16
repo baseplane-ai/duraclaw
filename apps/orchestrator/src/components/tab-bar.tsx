@@ -282,13 +282,14 @@ function ProjectTab({
   }
 
   // Desktop: right-click dropdown menu.
+  // Use a hidden trigger so Radix doesn't add click-to-open on the tab itself.
+  // The menu is controlled entirely via the `open` state set by onContextMenu / long-press.
   return (
     <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
-      <DropdownMenuTrigger asChild>
-        <div className="group relative flex items-center border-r select-none" data-tab-id={tabId}>
-          {tabContent}
-        </div>
-      </DropdownMenuTrigger>
+      <div className="group relative flex items-center border-r select-none" data-tab-id={tabId}>
+        {tabContent}
+      </div>
+      <DropdownMenuTrigger className="sr-only absolute size-0 overflow-hidden" />
       <DropdownMenuContent align="start">
         {onNewSessionInTab && (
           <DropdownMenuItem onClick={() => handleMenuAction(onNewSessionInTab)}>
