@@ -1,7 +1,5 @@
-import { useRegisterSW } from 'virtual:pwa-register/react'
 import { createRootRoute, Outlet, useLocation, useNavigate } from '@tanstack/react-router'
 import { useEffect } from 'react'
-import { toast } from 'sonner'
 import { OfflineBanner } from '~/components/offline-banner'
 import { Toaster } from '~/components/ui/sonner'
 import { ThemeProvider } from '~/context/theme-provider'
@@ -17,25 +15,6 @@ function RootComponent() {
   const navigate = useNavigate()
   const { data: session, isPending } = useSession()
   const isLogin = location.pathname === '/login'
-
-  const {
-    needRefresh: [needRefresh, setNeedRefresh],
-    updateServiceWorker,
-  } = useRegisterSW()
-
-  useEffect(() => {
-    if (needRefresh) {
-      toast('New version available', {
-        description: 'Click reload to update the app.',
-        action: {
-          label: 'Reload',
-          onClick: () => updateServiceWorker(true),
-        },
-        duration: Infinity,
-        onDismiss: () => setNeedRefresh(false),
-      })
-    }
-  }, [needRefresh, setNeedRefresh, updateServiceWorker])
 
   useEffect(() => {
     if (isPending) return

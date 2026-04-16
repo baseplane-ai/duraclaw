@@ -1,25 +1,50 @@
 /**
  * useSwUpdate — Service worker update detection + auto-reload.
  *
- * Polls for SW updates every 60s. When a new SW is installed and
- * waiting, triggers skipWaiting + reload so the user gets the
- * latest version without manual cache clearing.
+ * Combines two staleness signals:
+ * 1. Build hash polling (fast — detects new deploys in ~30s)
+ * 2. SW update detection (fallback — browser's native update check)
+ *
+ * When either fires, triggers SW update + reload.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useBuildHash } from './use-build-hash'
 
-const UPDATE_CHECK_INTERVAL = 60_000 // 1 minute
+const SW_POLL_INTERVAL = 60_000 // 1 minute fallback
 
 export function useSwUpdate() {
   const [updateAvailable, setUpdateAvailable] = useState(false)
   const registrationRef = useRef<ServiceWorkerRegistration | null>(null)
+  const { stale: buildStale } = useBuildHash()
+
+  // When build hash detects staleness, force an immediate SW update check
+  useEffect(() => {
+    if (!buildStale) return
+    const reg = registrationRef.current
+    if (reg) {
+      reg
+        .update()
+        .then(() => {
+          // If there's already a waiting worker, signal it
+          if (reg.waiting) {
+            reg.waiting.postMessage({ type: 'SKIP_WAITING' })
+          }
+        })
+        .catch(() => {})
+    }
+    setUpdateAvailable(true)
+  }, [buildStale])
 
   const applyUpdate = useCallback(() => {
     const waiting = registrationRef.current?.waiting
     if (waiting) {
       waiting.postMessage({ type: 'SKIP_WAITING' })
+    } else {
+      // No waiting SW — just reload to pick up new assets
+      window.location.reload()
     }
-    // controllerchange listener below handles the reload
+    // controllerchange listener below handles the reload when SW takes over
   }, [])
 
   useEffect(() => {
@@ -41,19 +66,18 @@ export function useSwUpdate() {
         if (!installing) return
         installing.addEventListener('statechange', () => {
           if (installing.state === 'installed' && navigator.serviceWorker.controller) {
-            // New SW installed while old one is still controlling — update available
             setUpdateAvailable(true)
           }
         })
       })
 
-      // Poll for updates
+      // Poll for SW updates as fallback (slower than build hash, but catches edge cases)
       interval = setInterval(() => {
         registration.update().catch(() => {})
-      }, UPDATE_CHECK_INTERVAL)
+      }, SW_POLL_INTERVAL)
     })
 
-    // When a new SW takes control, reload the page to use fresh assets
+    // When a new SW takes control, reload to use fresh assets
     const onControllerChange = () => {
       window.location.reload()
     }

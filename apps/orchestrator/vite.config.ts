@@ -5,6 +5,7 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import agents from 'agents/vite'
 import { VitePWA } from 'vite-plugin-pwa'
+import { buildHashPlugin } from './src/vite/build-hash-plugin'
 
 export default defineConfig({
   resolve: {
@@ -41,6 +42,7 @@ export default defineConfig({
         ],
       },
     }),
+    buildHashPlugin(),
     cloudflare(),
     react(),
     tailwindcss(),
