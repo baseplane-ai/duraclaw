@@ -26,10 +26,12 @@ vi.mock('agents/react', () => ({
 }))
 
 const mockCollectionUpdate = vi.fn()
+const mockCollectionHas = vi.fn().mockReturnValue(true)
 
 vi.mock('~/db/sessions-collection', () => ({
   sessionsCollection: {
     update: (...args: unknown[]) => mockCollectionUpdate(...args),
+    has: (...args: unknown[]) => mockCollectionHas(...args),
   },
 }))
 
@@ -41,6 +43,7 @@ describe('WS bridge in useCodingAgent', () => {
   beforeEach(() => {
     capturedOnStateUpdate = null
     vi.clearAllMocks()
+    mockCollectionHas.mockReturnValue(true)
     vi.useFakeTimers()
   })
 
@@ -103,19 +106,18 @@ describe('WS bridge in useCodingAgent', () => {
     expect(draft.num_turns).toBe(7)
   })
 
-  test('onStateUpdate catches errors when collection item does not exist', () => {
-    mockCollectionUpdate.mockImplementation(() => {
-      throw new Error('Item not found')
-    })
+  test('onStateUpdate skips update when collection item does not exist', () => {
+    mockCollectionHas.mockReturnValue(false)
 
     renderHook(() => useCodingAgent('nonexistent-session'))
 
-    // Should not throw
     expect(() => {
       act(() => {
         capturedOnStateUpdate!({ status: 'running', num_turns: 1 })
       })
     }).not.toThrow()
+
+    expect(mockCollectionUpdate).not.toHaveBeenCalled()
   })
 
   test('uses agentName as the collection key', () => {

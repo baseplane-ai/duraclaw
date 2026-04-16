@@ -151,8 +151,9 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       const prevStatus = prevStatusRef.current
       prevStatusRef.current = newState.status
       setState(newState)
-      // WS bridge: update sessions collection with fresh status
-      try {
+      // WS bridge: update sessions collection with fresh status.
+      // Skip if record not yet synced — next refetch will pick up the new state.
+      if (sessionsCollection.has(agentName)) {
         sessionsCollection.update(agentName, (draft) => {
           draft.status = newState.status
           draft.updated_at = new Date().toISOString()
@@ -160,8 +161,6 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           if (newState.total_cost_usd != null) draft.total_cost_usd = newState.total_cost_usd
           if (newState.duration_ms != null) draft.duration_ms = newState.duration_ms
         })
-      } catch {
-        // Collection item may not exist yet — ignore
       }
       // Hydrate messages on first state sync
       if (!hydratedRef.current) {

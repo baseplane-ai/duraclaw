@@ -101,9 +101,11 @@ export function useSessionsCollection(): UseSessionsCollectionResult {
     })
 
     tx.mutate(() => {
-      sessionsCollection.update(sessionId, (draft) => {
-        Object.assign(draft, patch)
-      })
+      if (sessionsCollection.has(sessionId)) {
+        sessionsCollection.update(sessionId, (draft) => {
+          Object.assign(draft, patch)
+        })
+      }
     })
 
     await tx.isPersisted.promise
@@ -124,9 +126,11 @@ export function useSessionsCollection(): UseSessionsCollectionResult {
     })
 
     tx.mutate(() => {
-      sessionsCollection.update(sessionId, (draft) => {
-        draft.archived = archived
-      })
+      if (sessionsCollection.has(sessionId)) {
+        sessionsCollection.update(sessionId, (draft) => {
+          draft.archived = archived
+        })
+      }
     })
 
     await tx.isPersisted.promise
