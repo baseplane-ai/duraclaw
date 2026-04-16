@@ -303,8 +303,8 @@ export function ChatThread({
               const textPart = msg.parts.find((p) => p.type === 'text')
               return (
                 <div key={msg.id} className="group relative" data-turn-index={turnIndex}>
-                  <div className="space-y-1 rounded-lg border-l-2 border-blue-500/30 bg-blue-500/5 p-3">
-                    <p className="text-sm">{textPart?.text || ''}</p>
+                  <div className="min-w-0 space-y-1 rounded-lg border-l-2 border-blue-500/30 bg-blue-500/5 p-3">
+                    <p className="break-words text-sm">{textPart?.text || ''}</p>
                   </div>
                   {rewindButton}
                 </div>
@@ -318,8 +318,8 @@ export function ChatThread({
                 <div key={msg.id} className="group relative" data-turn-index={turnIndex}>
                   <Message from="user">
                     <MessageContent>
-                      <div className="flex items-start justify-between gap-2">
-                        <span>{textPart?.text || ''}</span>
+                      <div className="flex min-w-0 items-start justify-between gap-2">
+                        <span className="min-w-0 break-words">{textPart?.text || ''}</span>
                         {branch && onBranchNavigate && (
                           <MessageBranch
                             current={branch.current}
