@@ -88,8 +88,10 @@ async function getOwnedSession(
     return { ok: false, status: 404 }
   }
 
-  // Ownership check: reject requests for sessions that don't belong to the caller.
-  if (session.userId && session.userId !== userId) {
+  // Ownership check: reject sessions that belong to a different real user.
+  // "system" is a placeholder used by the 5-min discovery alarm (which has no
+  // user context) — treat those as shared since duraclaw is single-user per VPS.
+  if (session.userId && session.userId !== userId && session.userId !== 'system') {
     return { ok: false, status: 403 }
   }
 
