@@ -1,7 +1,13 @@
 import { Hono } from 'hono'
 import { validateActionToken } from '~/lib/action-token'
 import { createAuth } from '~/lib/auth'
-import type { DiscoveredSession, ProjectInfo, SessionSummary, UserPreferences } from '~/lib/types'
+import type {
+  ContentBlock,
+  DiscoveredSession,
+  ProjectInfo,
+  SessionSummary,
+  UserPreferences,
+} from '~/lib/types'
 import { authMiddleware } from './auth-middleware'
 import { authRoutes } from './auth-routes'
 import { getRequestSession } from './auth-session'
@@ -9,7 +15,7 @@ import type { ApiAppEnv } from './context'
 
 interface CreateSessionBody {
   project?: string
-  prompt?: string
+  prompt?: string | ContentBlock[]
   model?: string
   system_prompt?: string
   sdk_session_id?: string

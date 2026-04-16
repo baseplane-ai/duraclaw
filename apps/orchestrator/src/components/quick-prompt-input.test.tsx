@@ -25,24 +25,35 @@ describe('QuickPromptInput', () => {
     cleanup()
   })
 
-  it('renders heading, chips, and textarea', () => {
+  it('renders heading, project chip, and composer textarea', () => {
     render(<QuickPromptInput onSubmit={vi.fn()} projects={mockProjects} />)
 
     expect(screen.getByText('What should the agent do?')).toBeDefined()
     expect(screen.getByText('duraclaw')).toBeDefined()
     expect(screen.getByText('claude-opus-4-6')).toBeDefined()
-    expect(screen.getByPlaceholderText('Type a prompt and press Enter...')).toBeDefined()
+    expect(
+      screen.getByPlaceholderText('Describe the task, paste or attach an image...'),
+    ).toBeDefined()
   })
 
-  it('pressing Enter calls onSubmit with correct config', () => {
+  it('exposes an image attach control for new sessions', () => {
+    render(<QuickPromptInput onSubmit={vi.fn()} projects={mockProjects} />)
+    expect(screen.getByLabelText('Attach image')).toBeDefined()
+  })
+
+  it('pressing Enter on the composer submits text prompt', () => {
     const onSubmit = vi.fn()
     render(<QuickPromptInput onSubmit={onSubmit} projects={mockProjects} />)
 
-    const textarea = screen.getByPlaceholderText('Type a prompt and press Enter...')
+    const textarea = screen.getByPlaceholderText(
+      'Describe the task, paste or attach an image...',
+    ) as HTMLTextAreaElement
     fireEvent.change(textarea, { target: { value: 'Fix the bug' } })
     fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false })
 
-    expect(onSubmit).toHaveBeenCalledWith({
+    expect(onSubmit).toHaveBeenCalledTimes(1)
+    const call = onSubmit.mock.calls[0][0]
+    expect(call).toMatchObject({
       project: 'duraclaw',
       model: 'claude-opus-4-6',
       agent: 'claude',
@@ -50,44 +61,27 @@ describe('QuickPromptInput', () => {
     })
   })
 
-  it('clicking project chip cycles through projects', () => {
-    render(<QuickPromptInput onSubmit={vi.fn()} projects={mockProjects} />)
-
-    const projectChip = screen.getByText('duraclaw')
-    expect(projectChip).toBeDefined()
-
-    fireEvent.click(projectChip)
-    expect(screen.getByText('baseplane')).toBeDefined()
-
-    fireEvent.click(screen.getByText('baseplane'))
-    expect(screen.getByText('other-project')).toBeDefined()
-
-    // Wraps around
-    fireEvent.click(screen.getByText('other-project'))
-    expect(screen.getByText('duraclaw')).toBeDefined()
-  })
-
-  it('clicking model chip cycles through models', () => {
-    render(<QuickPromptInput onSubmit={vi.fn()} projects={mockProjects} />)
-
-    const modelChip = screen.getByText('claude-opus-4-6')
-    fireEvent.click(modelChip)
-    expect(screen.getByText('claude-sonnet-4-6')).toBeDefined()
-
-    fireEvent.click(screen.getByText('claude-sonnet-4-6'))
-    expect(screen.getByText('claude-sonnet-4-5')).toBeDefined()
-
-    fireEvent.click(screen.getByText('claude-sonnet-4-5'))
-    expect(screen.getByText('codex — gpt-5.4')).toBeDefined()
-  })
-
   it('Shift+Enter does not submit', () => {
     const onSubmit = vi.fn()
     render(<QuickPromptInput onSubmit={onSubmit} projects={mockProjects} />)
 
-    const textarea = screen.getByPlaceholderText('Type a prompt and press Enter...')
+    const textarea = screen.getByPlaceholderText(
+      'Describe the task, paste or attach an image...',
+    ) as HTMLTextAreaElement
     fireEvent.change(textarea, { target: { value: 'Some prompt' } })
     fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: true })
+
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  it('does not submit when prompt is empty and no images attached', () => {
+    const onSubmit = vi.fn()
+    render(<QuickPromptInput onSubmit={onSubmit} projects={mockProjects} />)
+
+    const textarea = screen.getByPlaceholderText(
+      'Describe the task, paste or attach an image...',
+    ) as HTMLTextAreaElement
+    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false })
 
     expect(onSubmit).not.toHaveBeenCalled()
   })

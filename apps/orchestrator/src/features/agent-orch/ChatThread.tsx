@@ -34,6 +34,7 @@ import {
 } from 'lucide-react'
 import { useCallback, useRef, useState } from 'react'
 import { Skeleton } from '~/components/ui/skeleton'
+import { getImagePartDataUrl } from '~/lib/message-parts'
 import type { GateResponse, SessionMessage, SessionMessagePart, SessionState } from '~/lib/types'
 import { GateResolver } from './GateResolver'
 
@@ -313,20 +314,39 @@ export function ChatThread({
 
             if (msg.role === 'user') {
               const textPart = msg.parts.find((p) => p.type === 'text')
+              const imageParts = msg.parts.flatMap((p) => {
+                const url = getImagePartDataUrl(p)
+                return url ? [{ part: p, url }] : []
+              })
               const branch = branchInfo?.get(msg.id)
               return (
                 <div key={msg.id} className="group relative" data-turn-index={turnIndex}>
                   <Message from="user">
                     <MessageContent>
-                      <div className="flex min-w-0 items-start justify-between gap-2">
-                        <span className="min-w-0 break-words">{textPart?.text || ''}</span>
-                        {branch && onBranchNavigate && (
-                          <MessageBranch
-                            current={branch.current}
-                            total={branch.total}
-                            onNavigate={(dir) => onBranchNavigate(msg.id, dir)}
-                          />
+                      <div className="flex min-w-0 flex-col gap-2">
+                        {imageParts.length > 0 && (
+                          <div className="flex flex-wrap gap-2">
+                            {imageParts.map(({ url }, i) => (
+                              <img
+                                // biome-ignore lint/suspicious/noArrayIndexKey: images share no stable id; order is fixed
+                                key={i}
+                                src={url}
+                                alt="User attachment"
+                                className="max-h-64 max-w-full rounded border object-contain"
+                              />
+                            ))}
+                          </div>
                         )}
+                        <div className="flex min-w-0 items-start justify-between gap-2">
+                          <span className="min-w-0 break-words">{textPart?.text || ''}</span>
+                          {branch && onBranchNavigate && (
+                            <MessageBranch
+                              current={branch.current}
+                              total={branch.total}
+                              onNavigate={(dir) => onBranchNavigate(msg.id, dir)}
+                            />
+                          )}
+                        </div>
                       </div>
                     </MessageContent>
                   </Message>

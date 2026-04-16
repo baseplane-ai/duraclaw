@@ -3,6 +3,7 @@ import type { SessionMessage, SessionMessagePart } from 'agents/experimental/mem
 import { Session } from 'agents/experimental/memory/session'
 import { generateActionToken } from '~/lib/action-token'
 import { runMigrations } from '~/lib/do-migrations'
+import { contentToParts } from '~/lib/message-parts'
 import { type PushPayload, sendPushNotification } from '~/lib/push'
 import type {
   ContentBlock,
@@ -689,12 +690,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     const userMsg: SessionMessage = {
       id: userMsgId,
       role: 'user',
-      parts: [
-        {
-          type: 'text',
-          text: typeof config.prompt === 'string' ? config.prompt : JSON.stringify(config.prompt),
-        },
-      ],
+      parts: contentToParts(config.prompt),
       createdAt: new Date(),
     }
     try {
@@ -914,12 +910,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     const userMsg: SessionMessage = {
       id: userMsgId,
       role: 'user',
-      parts: [
-        {
-          type: 'text',
-          text: typeof content === 'string' ? content : JSON.stringify(content),
-        },
-      ],
+      parts: contentToParts(content),
       createdAt: new Date(),
     }
     try {

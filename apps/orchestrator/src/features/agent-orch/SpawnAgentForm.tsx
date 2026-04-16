@@ -18,6 +18,7 @@ import {
   SelectValue,
 } from '~/components/ui/select'
 import { Textarea } from '~/components/ui/textarea'
+import type { ContentBlock } from '~/lib/types'
 
 interface Project {
   name: string
@@ -36,7 +37,8 @@ export interface SpawnFormConfig {
   project: string
   model: string
   agent?: string
-  prompt: string
+  /** Prompt text or structured content blocks (text + images). */
+  prompt: string | ContentBlock[]
 }
 
 interface SpawnAgentFormProps {

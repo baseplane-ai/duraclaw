@@ -508,7 +508,8 @@ export interface SessionState {
 
 export interface SpawnConfig {
   project: string
-  prompt: string
+  /** Initial message — plain text or structured content blocks (text + images). */
+  prompt: string | ContentBlock[]
   model?: string
   /** Which agent adapter to use (e.g. 'claude', 'codex'). Defaults to 'claude'. */
   agent?: string

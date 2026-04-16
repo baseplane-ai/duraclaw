@@ -12,6 +12,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { type CachedMessage, messagesCollection } from '~/db/messages-collection'
 import { sessionsCollection } from '~/db/sessions-collection'
 import { useMessagesCollection } from '~/hooks/use-messages-collection'
+import { contentToParts } from '~/lib/message-parts'
 import type {
   ContentBlock,
   GateResponse,
@@ -452,14 +453,13 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   const sendMessage = useCallback(
     async (content: string | ContentBlock[]) => {
       const optimisticId = `usr-optimistic-${Date.now()}`
-      const textContent = typeof content === 'string' ? content : JSON.stringify(content)
       optimisticIdsRef.current.add(optimisticId)
       setMessages((prev) => [
         ...prev,
         {
           id: optimisticId,
           role: 'user',
-          parts: [{ type: 'text', text: textContent }],
+          parts: contentToParts(content),
           createdAt: new Date(),
         },
       ])

@@ -112,7 +112,11 @@ function AgentOrchContent() {
 
         const data = (await resp.json()) as { session_id: string }
         const sessionId = data.session_id
-        const title = config.prompt?.slice(0, 40) || config.project
+        const promptText =
+          typeof config.prompt === 'string'
+            ? config.prompt
+            : (config.prompt.find((b) => b.type === 'text')?.text ?? '')
+        const title = promptText.slice(0, 40) || config.project
 
         // Set spawn config for auto-spawn in AgentDetailWithSpawn
         setSpawnConfig({
