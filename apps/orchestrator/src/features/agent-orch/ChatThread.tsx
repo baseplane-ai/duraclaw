@@ -159,16 +159,41 @@ function renderPart(
     )
   }
 
-  // Gate parts (ask_user, permission) that are still pending
+  // Gate parts (ask_user, permission) that are still pending.
+  // Render from the part itself rather than transient session state so the
+  // GateResolver survives reconnects, tab refocus, and cache-first hydration.
+  // The server validates the gateId on resolveGate (returns stale-gate error
+  // if the gate moved on), and once resolved the part state transitions away
+  // from 'approval-requested' via broadcastMessage so this stops rendering.
   if (
     (part.type === 'tool-ask_user' || part.type === 'tool-permission') &&
     part.state === 'approval-requested' &&
     !readOnly &&
-    gate &&
-    status === 'waiting_gate'
+    part.toolCallId
   ) {
+    const partGate =
+      part.type === 'tool-ask_user'
+        ? {
+            id: part.toolCallId,
+            type: 'ask_user' as const,
+            detail: part.input,
+          }
+        : {
+            id: part.toolCallId,
+            type: 'permission_request' as const,
+            detail: part.input,
+          }
+    // Prefer live gate object when status matches (preserves any server-side
+    // detail enrichment), otherwise reconstruct from the persisted part.
+    const resolvedGate =
+      gate && status === 'waiting_gate' && gate.id === part.toolCallId ? gate : partGate
     return (
-      <GateResolver key={index} gate={gate} onResolve={onResolveGate} onResolved={onQaResolved} />
+      <GateResolver
+        key={index}
+        gate={resolvedGate}
+        onResolve={onResolveGate}
+        onResolved={onQaResolved}
+      />
     )
   }
 
