@@ -8,6 +8,7 @@ import { Button } from '~/components/ui/button'
 import { Input } from '~/components/ui/input'
 import { Label } from '~/components/ui/label'
 import type { GateResponse } from '~/lib/types'
+import { cn } from '~/lib/utils'
 
 interface Question {
   question: string
@@ -50,18 +51,19 @@ export function GateResolver({ gate, onResolve, onResolved }: GateResolverProps)
       typeof gate.detail === 'string' ? gate.detail : JSON.stringify(gate.detail, null, 2)
 
     return (
-      <div className="space-y-3 rounded-lg border border-yellow-500/30 bg-yellow-500/5 p-3">
+      <div className="min-w-0 space-y-3 rounded-lg border border-yellow-500/30 bg-yellow-500/5 p-3">
         <div className="text-sm font-medium text-yellow-600 dark:text-yellow-400">
           Permission Request
         </div>
-        <pre className="max-h-40 overflow-auto rounded bg-muted p-2 text-xs whitespace-pre-wrap">
+        <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs">
           {detail}
         </pre>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Button
             size="sm"
             variant="default"
             disabled={resolving}
+            className="flex-1 sm:flex-none"
             onClick={() => handleResolve({ approved: true })}
           >
             Approve
@@ -70,6 +72,7 @@ export function GateResolver({ gate, onResolve, onResolved }: GateResolverProps)
             size="sm"
             variant="destructive"
             disabled={resolving}
+            className="flex-1 sm:flex-none"
             onClick={() => handleResolve({ approved: false })}
           >
             Deny
@@ -96,15 +99,16 @@ export function GateResolver({ gate, onResolve, onResolved }: GateResolverProps)
       }
 
       return (
-        <div className="space-y-3 rounded-lg border border-blue-500/30 bg-blue-500/5 p-3">
+        <div className="min-w-0 space-y-3 rounded-lg border border-blue-500/30 bg-blue-500/5 p-3">
           <div className="text-sm font-medium text-blue-600 dark:text-blue-400">Agent Question</div>
-          <p className="text-sm">{question}</p>
-          <div className="flex gap-2">
-            <Label className="sr-only" htmlFor="gate-answer">
-              Answer
-            </Label>
+          <p className="break-words text-sm">{question}</p>
+          <Label className="sr-only" htmlFor="gate-answer">
+            Answer
+          </Label>
+          <div className="flex flex-col gap-2 sm:flex-row">
             <Input
               id="gate-answer"
+              className="min-w-0 flex-1"
               placeholder="Type your answer..."
               value={answer}
               onChange={(e) => setAnswer(e.target.value)}
@@ -116,6 +120,7 @@ export function GateResolver({ gate, onResolve, onResolved }: GateResolverProps)
             />
             <Button
               size="sm"
+              className="w-full sm:w-auto"
               disabled={resolving || !answer.trim()}
               onClick={() => handleAskUserResolve(answer.trim())}
             >
@@ -169,16 +174,18 @@ export function GateResolver({ gate, onResolve, onResolved }: GateResolverProps)
     }
 
     return (
-      <div className="space-y-3 rounded-lg border border-blue-500/30 bg-blue-500/5 p-3">
+      <div className="min-w-0 space-y-3 rounded-lg border border-blue-500/30 bg-blue-500/5 p-3">
         <div className="text-sm font-medium text-blue-600 dark:text-blue-400">Agent Question</div>
 
         {questions.map((q, qIndex) => (
           <div key={q.header} className="space-y-2">
-            <div className="flex items-center gap-2">
-              <Badge variant="secondary">{q.header}</Badge>
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="secondary" className="max-w-full break-words">
+                {q.header}
+              </Badge>
             </div>
-            <p className="text-sm">{q.question}</p>
-            <div className="flex flex-wrap gap-2">
+            <p className="break-words text-sm">{q.question}</p>
+            <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
               {q.options.map((opt) => {
                 const selected = selections.get(qIndex)?.has(opt.label) ?? false
                 return (
@@ -188,12 +195,17 @@ export function GateResolver({ gate, onResolve, onResolved }: GateResolverProps)
                     size="sm"
                     disabled={resolving}
                     aria-pressed={selected}
-                    className={selected ? 'ring-2 ring-blue-500 border-blue-500' : ''}
+                    className={cn(
+                      'h-auto min-h-8 w-full justify-start whitespace-normal px-3 py-2 text-left sm:w-auto sm:max-w-xs',
+                      selected && 'border-blue-500 ring-2 ring-blue-500',
+                    )}
                     onClick={() => toggleSelection(qIndex, opt.label, q.multiSelect)}
                   >
-                    <span className="flex flex-col items-start text-left">
-                      <span className="font-bold">{opt.label}</span>
-                      <span className="text-xs text-muted-foreground">{opt.description}</span>
+                    <span className="flex w-full min-w-0 flex-col items-start gap-0.5 text-left">
+                      <span className="break-words font-bold">{opt.label}</span>
+                      <span className="break-words text-xs text-muted-foreground">
+                        {opt.description}
+                      </span>
                     </span>
                   </Button>
                 )
@@ -202,9 +214,10 @@ export function GateResolver({ gate, onResolve, onResolved }: GateResolverProps)
           </div>
         ))}
 
-        <div className="flex gap-2">
+        <div className="flex flex-col gap-2 sm:flex-row">
           <Input
             aria-label="Other answer"
+            className="min-w-0 flex-1"
             placeholder="Other..."
             value={otherText}
             disabled={resolving}
@@ -220,7 +233,12 @@ export function GateResolver({ gate, onResolve, onResolved }: GateResolverProps)
               }
             }}
           />
-          <Button size="sm" disabled={resolving || !canSubmit} onClick={handleStructuredSubmit}>
+          <Button
+            size="sm"
+            className="w-full sm:w-auto"
+            disabled={resolving || !canSubmit}
+            onClick={handleStructuredSubmit}
+          >
             Submit
           </Button>
         </div>
