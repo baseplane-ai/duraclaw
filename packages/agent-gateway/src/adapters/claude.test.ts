@@ -236,7 +236,7 @@ describe('handleCanUseTool — AskUserQuestion', () => {
       vi.useRealTimers()
     })
 
-    it('rejects after 5 minute timeout', async () => {
+    it('does not time out — agent waits indefinitely for an answer', async () => {
       const ctx = createMockCtx()
       const { sendEvent } = createMockSend()
 
@@ -249,9 +249,22 @@ describe('handleCanUseTool — AskUserQuestion', () => {
         'sess-3',
       )
 
-      vi.advanceTimersByTime(5 * 60 * 1000)
+      // Advance well past the old 5-minute timeout — should still be pending
+      vi.advanceTimersByTime(60 * 60 * 1000)
 
-      await expect(promise).rejects.toThrow(/timed out/i)
+      // Race against a microtask sentinel to confirm the promise is still pending
+      const settled = await Promise.race([
+        promise.then(
+          () => 'resolved',
+          () => 'rejected',
+        ),
+        Promise.resolve('pending'),
+      ])
+      expect(settled).toBe('pending')
+
+      // Cleanly resolve so the test doesn't leak a pending promise
+      ctx.pendingAnswer!.resolve({ answer: 'late' })
+      await promise
     })
 
     it('rejects when abort signal fires', async () => {
@@ -354,7 +367,7 @@ describe('handleCanUseTool — permission requests', () => {
       vi.useRealTimers()
     })
 
-    it('rejects after 5 minute timeout', async () => {
+    it('does not time out — agent waits indefinitely for a decision', async () => {
       const ctx = createMockCtx()
       const { sendEvent } = createMockSend()
 
@@ -367,9 +380,19 @@ describe('handleCanUseTool — permission requests', () => {
         'sess-13',
       )
 
-      vi.advanceTimersByTime(5 * 60 * 1000)
+      vi.advanceTimersByTime(60 * 60 * 1000)
 
-      await expect(promise).rejects.toThrow(/timed out/i)
+      const settled = await Promise.race([
+        promise.then(
+          () => 'resolved',
+          () => 'rejected',
+        ),
+        Promise.resolve('pending'),
+      ])
+      expect(settled).toBe('pending')
+
+      ctx.pendingPermission!.resolve(true)
+      await promise
     })
 
     it('rejects when abort signal fires', async () => {

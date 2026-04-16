@@ -143,30 +143,14 @@ export async function handleCanUseTool(
       questions: (input as any).questions ?? [],
     })
 
+    // No timeout — the agent waits indefinitely for the user to answer.
+    // The user can still abort the session, which fires `signal` and rejects.
     const answers = await new Promise<Record<string, string>>((resolve, reject) => {
-      const timeout = setTimeout(
-        () => {
-          ctx.pendingAnswer = null
-          reject(new Error('AskUserQuestion timed out after 5 minutes'))
-        },
-        5 * 60 * 1000,
-      )
-
-      ctx.pendingAnswer = {
-        resolve: (a) => {
-          clearTimeout(timeout)
-          resolve(a)
-        },
-        reject: (e) => {
-          clearTimeout(timeout)
-          reject(e)
-        },
-      }
+      ctx.pendingAnswer = { resolve, reject }
 
       signal.addEventListener(
         'abort',
         () => {
-          clearTimeout(timeout)
           ctx.pendingAnswer = null
           reject(new Error('Session aborted'))
         },
@@ -186,30 +170,14 @@ export async function handleCanUseTool(
     input,
   })
 
+  // No timeout — the agent waits indefinitely for the user to decide.
+  // The user can still abort the session, which fires `signal` and rejects.
   const allowed = await new Promise<boolean>((resolve, reject) => {
-    const timeout = setTimeout(
-      () => {
-        ctx.pendingPermission = null
-        reject(new Error('Permission prompt timed out after 5 minutes'))
-      },
-      5 * 60 * 1000,
-    )
-
-    ctx.pendingPermission = {
-      resolve: (a) => {
-        clearTimeout(timeout)
-        resolve(a)
-      },
-      reject: (e) => {
-        clearTimeout(timeout)
-        reject(e)
-      },
-    }
+    ctx.pendingPermission = { resolve, reject }
 
     signal.addEventListener(
       'abort',
       () => {
-        clearTimeout(timeout)
         ctx.pendingPermission = null
         reject(new Error('Session aborted'))
       },
