@@ -32,7 +32,7 @@ function createMessagesCollection() {
     const opts = persistedCollectionOptions({
       ...localOpts,
       persistence,
-      schemaVersion: 2,
+      schemaVersion: 3,
     })
     // TanStackDB beta: persistedCollectionOptions adds a schema type that
     // conflicts with createCollection overloads. Runtime behavior is correct.
