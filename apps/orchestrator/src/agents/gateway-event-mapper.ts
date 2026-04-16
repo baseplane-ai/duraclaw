@@ -86,7 +86,14 @@ export function applyToolResult(
 /**
  * Finalize any streaming parts to done state.
  * Called when session ends (result/stopped/error) to clean up orphaned streaming.
+ * Also marks any tool parts still in 'input-available' (waiting for results) as
+ * 'output-error' since the connection dropped before they could complete.
  */
 export function finalizeStreamingParts(parts: SessionMessagePart[]): SessionMessagePart[] {
-  return parts.map((p) => (p.state === 'streaming' ? { ...p, state: 'done' } : p))
+  return parts.map((p) => {
+    if (p.state === 'streaming') return { ...p, state: 'done' }
+    if (p.state === 'input-available')
+      return { ...p, state: 'output-error', output: 'Connection lost — tool did not complete' }
+    return p
+  })
 }

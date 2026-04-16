@@ -175,14 +175,27 @@ describe('finalizeStreamingParts', () => {
     expect(result[0].state).toBe('done')
   })
 
-  it('leaves non-streaming parts unchanged', () => {
+  it('leaves done and output-available parts unchanged', () => {
     const parts = [
       { type: 'text', text: 'complete', state: 'done' },
-      { type: 'tool-Read', toolCallId: 'tc-1', state: 'input-available' },
+      { type: 'tool-Read', toolCallId: 'tc-1', state: 'output-available', output: 'file contents' },
     ]
     const result = finalizeStreamingParts(parts)
     expect(result[0].state).toBe('done')
-    expect(result[1].state).toBe('input-available')
+    expect(result[1].state).toBe('output-available')
+  })
+
+  it('marks input-available tools as output-error on connection drop', () => {
+    const parts = [
+      { type: 'text', text: 'running tools', state: 'done' },
+      { type: 'tool-Bash', toolCallId: 'tc-1', state: 'input-available' },
+      { type: 'tool-Bash', toolCallId: 'tc-2', state: 'input-available' },
+    ]
+    const result = finalizeStreamingParts(parts)
+    expect(result[0].state).toBe('done')
+    expect(result[1].state).toBe('output-error')
+    expect(result[1].output).toBe('Connection lost — tool did not complete')
+    expect(result[2].state).toBe('output-error')
   })
 
   it('does not mutate the original array', () => {
