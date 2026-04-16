@@ -1,4 +1,3 @@
-// deploy-test: 2026-04-16T19:00 — gateway-path push for git-reset + bun-watch verification
 import { randomUUID } from 'node:crypto'
 import { type FSWatcher, watch } from 'node:fs'
 import * as nodePath from 'node:path'
