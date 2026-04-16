@@ -129,7 +129,7 @@ export async function handleCanUseTool(
   sendEvent: (event: Record<string, unknown>) => void,
   sessionId: string,
 ): Promise<
-  | { behavior: 'allow'; updatedInput?: Record<string, unknown> }
+  | { behavior: 'allow'; updatedInput: Record<string, unknown> }
   | { behavior: 'deny'; message: string }
 > {
   const { toolUseID: id, signal } = opts
@@ -185,7 +185,15 @@ export async function handleCanUseTool(
     )
   })
 
-  return allowed ? { behavior: 'allow' } : { behavior: 'deny', message: 'Denied by user' }
+  // Note: the SDK's runtime Zod validator requires `updatedInput` on every
+  // 'allow' result (the `.d.ts` marks it optional but the schema doesn't).
+  // Returning `{ behavior: 'allow' }` without it triggers a ZodError that
+  // surfaces as a hard failure on any user-approved permission prompt —
+  // most visibly when editing paths under `.claude/` since those always
+  // gate. Pass the original, unmodified input through.
+  return allowed
+    ? { behavior: 'allow', updatedInput: input }
+    : { behavior: 'deny', message: 'Denied by user' }
 }
 
 export class ClaudeAdapter implements AgentAdapter {

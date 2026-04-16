@@ -335,7 +335,35 @@ describe('handleCanUseTool — permission requests', () => {
     })
 
     const result = await promise
-    expect(result).toEqual({ behavior: 'allow' })
+    expect(result).toEqual({ behavior: 'allow', updatedInput: { command: 'ls' } })
+  })
+
+  // Regression guard: the SDK's runtime Zod validator requires `updatedInput`
+  // on every `allow` result (the `.d.ts` lies — it marks it optional). If this
+  // property is dropped, user-approved permission prompts will fail with a
+  // ZodError, most visibly when writing to `.claude/*` paths.
+  it('always includes updatedInput on allow (SDK Zod requirement)', async () => {
+    const ctx = createMockCtx()
+    const { sendEvent } = createMockSend()
+    const input = { file_path: '/repo/.claude/settings.json', content: '{}' }
+
+    const promise = handleCanUseTool(
+      'Write',
+      input,
+      { signal: new AbortController().signal, toolUseID: 'tu-regress-1' },
+      ctx,
+      sendEvent,
+      'sess-regress-1',
+    )
+
+    queueMicrotask(() => {
+      ctx.pendingPermission!.resolve(true)
+    })
+
+    const result = await promise
+    if (result.behavior !== 'allow') throw new Error('expected allow')
+    expect(result.updatedInput).toBeDefined()
+    expect(result.updatedInput).toEqual(input)
   })
 
   it('returns deny when permission denied', async () => {
@@ -481,7 +509,10 @@ describe('handleCanUseTool — round-trip integration', () => {
       'sess-rt-2',
     )
     queueMicrotask(() => ctx.pendingPermission!.resolve(true))
-    expect(await p1).toEqual({ behavior: 'allow' })
+    expect(await p1).toEqual({
+      behavior: 'allow',
+      updatedInput: { file_path: '/tmp/test.ts', content: 'hello' },
+    })
 
     // Second call: deny
     const p2 = handleCanUseTool(
