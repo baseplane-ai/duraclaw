@@ -1,4 +1,5 @@
 import { X } from 'lucide-react'
+import { useEffect, useRef } from 'react'
 import type { SessionRecord } from '~/db/sessions-collection'
 import { StatusDot } from '~/features/agent-orch/session-utils'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
@@ -13,17 +14,30 @@ interface TabBarProps {
 export function TabBar({ onSelectSession, onLastTabClosed }: TabBarProps) {
   const { tabs, activeTabId, setActiveTab, removeTab } = useTabStore()
   const { sessions } = useSessionsCollection()
+  const scrollRef = useRef<HTMLDivElement>(null)
+
+  // Scroll active tab into view when it changes
+  useEffect(() => {
+    if (!activeTabId || !scrollRef.current) return
+    const el = scrollRef.current.querySelector(`[data-tab-id="${activeTabId}"]`) as HTMLElement
+    el?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' })
+  }, [activeTabId])
 
   if (tabs.length === 0) return null
 
   return (
-    <div className="flex items-center border-b bg-background overflow-x-auto" data-testid="tab-bar">
+    <div
+      ref={scrollRef}
+      className="flex items-center border-b bg-background overflow-x-auto"
+      data-testid="tab-bar"
+    >
       {tabs.map((tab) => {
         const currentSession = sessions.find((s) => s.id === tab.sessionId)
 
         return (
           <ProjectTab
             key={tab.id}
+            tabId={tab.id}
             project={tab.project}
             title={tab.title}
             isActive={activeTabId === tab.id}
@@ -55,6 +69,7 @@ export function TabBar({ onSelectSession, onLastTabClosed }: TabBarProps) {
 }
 
 function ProjectTab({
+  tabId,
   project,
   title,
   isActive,
@@ -62,6 +77,7 @@ function ProjectTab({
   onSelect,
   onClose,
 }: {
+  tabId: string
   project: string
   title: string
   isActive: boolean
@@ -70,7 +86,7 @@ function ProjectTab({
   onClose: () => void
 }) {
   return (
-    <div className="group relative flex items-center border-r select-none">
+    <div className="group relative flex items-center border-r select-none" data-tab-id={tabId}>
       <button
         type="button"
         className={cn(

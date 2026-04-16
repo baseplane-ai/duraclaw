@@ -63,7 +63,7 @@ export function useSwipeTabs(onSelectSession: (sessionId: string) => void) {
       touchStart.current = null
 
       const target = e.target as HTMLElement
-      if (target.closest('input, textarea, [contenteditable]')) return
+      if (target.closest('input, textarea, [contenteditable], [data-testid="tab-bar"]')) return
       if (sx < EDGE_ZONE || sx > window.innerWidth - EDGE_ZONE) return
       if (absDx < SWIPE_DISTANCE) return
       if (absDx < absDy * SWIPE_RATIO) return
