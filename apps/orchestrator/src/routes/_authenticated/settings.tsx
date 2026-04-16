@@ -20,9 +20,10 @@ import { useUserDefaults } from '~/hooks/use-user-defaults'
 import { signOut } from '~/lib/auth-client'
 
 const MODEL_OPTIONS = [
+  { value: 'claude-opus-4-7', label: 'claude-opus-4-7' },
   { value: 'claude-opus-4-6', label: 'claude-opus-4-6' },
   { value: 'claude-sonnet-4-6', label: 'claude-sonnet-4-6' },
-  { value: 'claude-sonnet-4-5', label: 'claude-sonnet-4-5' },
+  { value: 'claude-haiku-4-5', label: 'claude-haiku-4-5' },
   { value: 'gpt-5.4', label: 'codex — gpt-5.4' },
   { value: 'gpt-5.4-mini', label: 'codex — gpt-5.4-mini' },
 ]

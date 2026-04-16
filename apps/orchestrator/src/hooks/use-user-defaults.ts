@@ -3,7 +3,7 @@ import type { UserPreferences } from '~/lib/types'
 
 const DEFAULTS: UserPreferences = {
   permission_mode: 'default',
-  model: 'claude-opus-4-6',
+  model: 'claude-opus-4-7',
   max_budget: null,
   thinking_mode: 'adaptive',
   effort: 'high',
