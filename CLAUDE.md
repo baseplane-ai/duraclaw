@@ -98,15 +98,9 @@ bun run src/server.ts   # Run executor locally
 - `result`: Session completed/failed with duration + cost
 - `error`: Fatal error
 
-## Deployment Checklist (not yet done)
+## Deployment
 
-1. `wrangler d1 create duraclaw-auth` — update database_id in wrangler.toml
-2. `wrangler secret put CC_GATEWAY_URL` / `CC_GATEWAY_SECRET` / `BETTER_AUTH_SECRET`
-3. `wrangler d1 migrations apply duraclaw-auth` — create auth tables
-4. Install Bun on VPS if needed
-5. `./packages/agent-gateway/systemd/install.sh` — deploy executor service
-6. `cd apps/orchestrator && pnpm ship` — deploy to CF Workers
-7. Verify CF tunnel routes to VPS executor
+All deploys are handled by the infra server — pushing to `main` on `origin` triggers the pipeline that builds and ships both the orchestrator (CF Workers) and the agent-gateway (systemd on VPS). Do not run `pnpm ship`, `wrangler deploy`, or the gateway install script manually.
 
 ## Progress Tracking
 
