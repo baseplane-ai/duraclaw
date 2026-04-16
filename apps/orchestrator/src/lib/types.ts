@@ -40,6 +40,7 @@ export interface Env {
   ASSETS: Fetcher
   CC_GATEWAY_URL?: string
   CC_GATEWAY_SECRET?: string
+  WORKER_PUBLIC_URL?: string
   AUTH_DB: D1Database
   BETTER_AUTH_SECRET: string
   BETTER_AUTH_URL?: string

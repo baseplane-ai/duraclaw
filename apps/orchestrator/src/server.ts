@@ -12,19 +12,32 @@ export default {
     const url = new URL(request.url)
     const wsMatch = url.pathname.match(WS_ROUTE)
     if (wsMatch && request.headers.get('Upgrade') === 'websocket') {
-      const authSession = await getRequestSession(env, request)
-      if (!authSession) {
-        return new Response('Unauthorized', { status: 401 })
-      }
-
       const sessionId = wsMatch[1]
+      const role = url.searchParams.get('role')
+
       try {
-        // Hex IDs (from newUniqueId) use idFromString; all others use idFromName
         const isHexId = /^[0-9a-f]{64}$/.test(sessionId)
         const doId = isHexId
           ? env.SESSION_AGENT.idFromString(sessionId)
           : env.SESSION_AGENT.idFromName(sessionId)
         const stub = env.SESSION_AGENT.get(doId)
+
+        if (role === 'gateway') {
+          // Gateway auth: validate token in the DO, not via Better Auth
+          const token = url.searchParams.get('token') ?? ''
+          const headers = new Headers(request.headers)
+          headers.set('x-partykit-room', sessionId)
+          headers.set('x-gateway-token', token)
+          const wsRequest = new Request(request, { headers })
+          return stub.fetch(wsRequest)
+        }
+
+        // Browser auth: require Better Auth session
+        const authSession = await getRequestSession(env, request)
+        if (!authSession) {
+          return new Response('Unauthorized', { status: 401 })
+        }
+
         const headers = new Headers(request.headers)
         headers.set('x-partykit-room', sessionId)
         headers.set('x-user-id', authSession.userId)

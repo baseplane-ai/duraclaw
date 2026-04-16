@@ -15,14 +15,20 @@ import type {
   SessionState,
   SpawnConfig,
 } from '~/lib/types'
-import { connectToExecutor, parseEvent, sendCommand } from '~/lib/vps-client'
+import { parseEvent } from '~/lib/vps-client'
 import {
   applyToolResult,
   assistantContentToParts,
   finalizeStreamingParts,
   partialAssistantToParts,
 } from './gateway-event-mapper'
-import { loadTurnState } from './session-do-helpers'
+import {
+  buildGatewayCallbackUrl,
+  buildGatewayStartUrl,
+  getGatewayConnectionId,
+  loadTurnState,
+  validateAndConsumeGatewayToken,
+} from './session-do-helpers'
 import { SESSION_DO_MIGRATIONS } from './session-do-migrations'
 
 const DEFAULT_STATE: SessionState = {
@@ -68,7 +74,6 @@ const STALE_THRESHOLD_MS = 5 * 60_000
 
 export class SessionDO extends Agent<Env, SessionState> {
   initialState = DEFAULT_STATE
-  private vpsWs: WebSocket | null = null
   private session!: Session
   private turnCounter = 0
   private currentTurnMessageId: string | null = null
@@ -132,8 +137,27 @@ export class SessionDO extends Agent<Env, SessionState> {
     return super.onRequest(request)
   }
 
-  onConnect(connection: Connection, _ctx: ConnectionContext) {
-    // Replay full message history for reconnecting clients
+  onConnect(connection: Connection, ctx: ConnectionContext) {
+    const url = new URL(ctx.request.url)
+    const role = url.searchParams.get('role')
+
+    if (role === 'gateway') {
+      // Gateway connection: validate one-shot token
+      const token = ctx.request.headers.get('x-gateway-token')
+      if (!this.validateAndConsumeGatewayToken(token)) {
+        connection.close(4001, 'Invalid or expired gateway token')
+        return
+      }
+
+      // Persist gateway connection ID in SQLite (survives hibernation)
+      // Do NOT use connection.setState — it conflicts with Agent SDK internals
+      this.sql`INSERT OR REPLACE INTO kv (key, value) VALUES ('gateway_conn_id', ${connection.id})`
+      this.lastGatewayActivity = Date.now()
+      console.log(`[SessionDO:${this.ctx.id}] Gateway connected: conn=${connection.id}`)
+      return // No replay, no protocol messages
+    }
+
+    // Browser connection: replay full message history
     try {
       const messages = this.session.getHistory()
       if (messages.length > 0) {
@@ -158,59 +182,119 @@ export class SessionDO extends Agent<Env, SessionState> {
     }
   }
 
+  /** Validate a one-shot gateway token and consume it (delete from SQLite). */
+  private validateAndConsumeGatewayToken(token: string | null): boolean {
+    return validateAndConsumeGatewayToken(this.sql.bind(this), token)
+  }
+
+  /** Suppress Agent SDK protocol messages (identity, state, MCP) for gateway connections. */
+  shouldSendProtocolMessages(_connection: Connection, ctx: ConnectionContext): boolean {
+    const url = new URL(ctx.request.url)
+    return url.searchParams.get('role') !== 'gateway'
+  }
+
   onMessage(connection: Connection, data: string | ArrayBuffer) {
-    // Delegate to Agent base class for @callable RPC dispatch
+    // Check if this is from the gateway connection
+    const gwConnId = this.getGatewayConnectionId()
+    if (gwConnId && connection.id === gwConnId) {
+      // Gateway message: parse and route to handleGatewayEvent
+      this.lastGatewayActivity = Date.now()
+      try {
+        const raw = typeof data === 'string' ? data : new TextDecoder().decode(data)
+        const event = parseEvent(raw)
+        this.handleGatewayEvent(event)
+      } catch (err) {
+        console.error(`[SessionDO:${this.ctx.id}] Failed to parse gateway message:`, err)
+      }
+      return
+    }
+
+    // Browser message: delegate to Agent base class for @callable RPC dispatch
     super.onMessage(connection, data)
+  }
+
+  onClose(connection: Connection, code: number, reason: string, _wasClean: boolean) {
+    const gwConnId = this.getGatewayConnectionId()
+    if (gwConnId && connection.id === gwConnId) {
+      console.log(`[SessionDO:${this.ctx.id}] Gateway WS closed: code=${code} reason=${reason}`)
+      // Clear the persisted gateway connection ID
+      try {
+        this.sql`DELETE FROM kv WHERE key = 'gateway_conn_id'`
+      } catch {
+        /* ignore */
+      }
+
+      // If session was active, the connection dropped unexpectedly
+      if (this.state.status === 'running' || this.state.status === 'waiting_gate') {
+        this.recoverFromDroppedConnection()
+      }
+    }
   }
 
   // ── Gateway Connection ─────────────────────────────────────────
 
-  private connectAndStream(cmd: GatewayCommand) {
+  /**
+   * Trigger the gateway to dial back into this DO via outbound WS.
+   * Generates a one-shot token, stores it in SQLite with 60s TTL,
+   * then POSTs to the gateway's /sessions/start endpoint.
+   */
+  private async triggerGatewayDial(cmd: GatewayCommand) {
     const gatewayUrl = this.env.CC_GATEWAY_URL
-    if (!gatewayUrl) {
-      console.error(`[SessionDO:${this.ctx.id}] CC_GATEWAY_URL not configured`)
-      this.updateState({ status: 'idle', error: 'CC_GATEWAY_URL not configured' })
+    const workerPublicUrl = this.env.WORKER_PUBLIC_URL
+    if (!gatewayUrl || !workerPublicUrl) {
+      console.error(`[SessionDO:${this.ctx.id}] CC_GATEWAY_URL or WORKER_PUBLIC_URL not configured`)
+      this.updateState({ status: 'idle', error: 'Gateway URL or Worker URL not configured' })
       return
     }
 
-    const ws = connectToExecutor(gatewayUrl, this.env.CC_GATEWAY_SECRET)
+    // Generate one-shot token with 60s TTL
+    const token = crypto.randomUUID()
+    const expiresAt = Date.now() + 60_000
+    try {
+      this.sql`INSERT OR REPLACE INTO kv (key, value) VALUES ('gateway_token', ${token})`
+      this
+        .sql`INSERT OR REPLACE INTO kv (key, value) VALUES ('gateway_token_expires', ${String(expiresAt)})`
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Failed to store gateway token:`, err)
+      this.updateState({ status: 'idle', error: 'Failed to store gateway token' })
+      return
+    }
 
-    ws.addEventListener('message', (event: MessageEvent) => {
+    // Build callback URL: wss://worker-url/agents/session-agent/<do-id>?role=gateway&token=<token>
+    const callbackUrl = buildGatewayCallbackUrl(workerPublicUrl, this.ctx.id.toString(), token)
+
+    // POST to gateway to trigger dial-back
+    const startUrl = buildGatewayStartUrl(gatewayUrl)
+
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (this.env.CC_GATEWAY_SECRET) {
+        headers.Authorization = `Bearer ${this.env.CC_GATEWAY_SECRET}`
+      }
+
+      const resp = await fetch(startUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ callback_url: callbackUrl, cmd }),
+      })
+
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => 'unknown error')
+        console.error(`[SessionDO:${this.ctx.id}] Gateway start failed: ${resp.status} ${errText}`)
+        this.updateState({ status: 'idle', error: `Gateway start failed: ${resp.status}` })
+        return
+      }
+
       this.lastGatewayActivity = Date.now()
-      try {
-        const gatewayEvent = parseEvent(event.data)
-        this.handleGatewayEvent(gatewayEvent)
-      } catch (err) {
-        console.error(`[SessionDO:${this.ctx.id}] Failed to parse gateway event:`, err)
-      }
-    })
-
-    ws.addEventListener('close', () => {
-      console.log(`[SessionDO:${this.ctx.id}] Gateway WS closed`)
-      this.vpsWs = null
-      // If the session was still active, the connection dropped unexpectedly.
-      // Try to recover final state from the gateway HTTP API.
-      if (this.state.status === 'running' || this.state.status === 'waiting_gate') {
-        this.recoverFromDroppedConnection()
-      }
-    })
-
-    ws.addEventListener('error', (event: Event) => {
-      console.error(`[SessionDO:${this.ctx.id}] Gateway WS error:`, event)
-      this.vpsWs = null
-      if (this.state.status === 'running' || this.state.status === 'waiting_gate') {
-        this.recoverFromDroppedConnection()
-      }
-    })
-
-    ws.addEventListener('open', () => {
-      this.lastGatewayActivity = Date.now()
-      sendCommand(ws, cmd)
-      // Start watchdog alarm — also handles keepalive pings (survives hibernation)
       this.scheduleWatchdog()
-    })
-
-    this.vpsWs = ws
+      console.log(`[SessionDO:${this.ctx.id}] triggerGatewayDial: POST to gateway succeeded`)
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Gateway start POST failed:`, err)
+      this.updateState({
+        status: 'idle',
+        error: `Gateway start failed: ${err instanceof Error ? err.message : String(err)}`,
+      })
+    }
   }
 
   /** Schedule the next watchdog alarm. */
@@ -229,36 +313,13 @@ export class SessionDO extends Agent<Env, SessionState> {
       return // Session not active, no need to watch
     }
 
-    // Send keepalive ping — this runs inside the alarm so it survives DO
-    // hibernation (unlike setInterval which stops when the DO is evicted).
-    if (this.vpsWs) {
-      try {
-        this.vpsWs.send(JSON.stringify({ type: 'ping' }))
-      } catch {
-        // WS already closed — will be caught by staleness check below
-      }
-    }
-
     const staleDuration = Date.now() - this.lastGatewayActivity
-    if (staleDuration > STALE_THRESHOLD_MS && !this.vpsWs) {
-      console.log(
-        `[SessionDO:${this.ctx.id}] Watchdog: stale for ${Math.round(staleDuration / 1000)}s with no WS — recovering`,
-      )
-      await this.recoverFromDroppedConnection()
-      return
-    }
+    const gwConnId = this.getGatewayConnectionId()
 
-    if (staleDuration > STALE_THRESHOLD_MS && this.vpsWs) {
-      // WS object exists but no activity — try closing it to trigger recovery
+    if (staleDuration > STALE_THRESHOLD_MS && !gwConnId) {
       console.log(
-        `[SessionDO:${this.ctx.id}] Watchdog: stale for ${Math.round(staleDuration / 1000)}s — closing zombie WS`,
+        `[SessionDO:${this.ctx.id}] Watchdog: stale for ${Math.round(staleDuration / 1000)}s with no gateway connection — recovering`,
       )
-      try {
-        this.vpsWs.close()
-      } catch {
-        // Already closed
-      }
-      this.vpsWs = null
       await this.recoverFromDroppedConnection()
       return
     }
@@ -323,7 +384,9 @@ export class SessionDO extends Agent<Env, SessionState> {
   }
 
   private broadcastToClients(data: string) {
+    const gwConnId = this.getGatewayConnectionId()
     for (const conn of this.getConnections()) {
+      if (conn.id === gwConnId) continue // Skip gateway connection
       try {
         conn.send(data)
       } catch {
@@ -580,11 +643,30 @@ export class SessionDO extends Agent<Env, SessionState> {
   }
 
   private sendToGateway(cmd: GatewayCommand) {
-    if (this.vpsWs) {
-      sendCommand(this.vpsWs, cmd)
-    } else {
+    const gwConnId = this.getGatewayConnectionId()
+    if (!gwConnId) {
       console.error(`[SessionDO:${this.ctx.id}] Cannot send to gateway: no active connection`)
+      return
     }
+    // Find the matching connection from the Hibernation API
+    for (const conn of this.getConnections()) {
+      if (conn.id === gwConnId) {
+        try {
+          conn.send(JSON.stringify(cmd))
+        } catch (err) {
+          console.error(`[SessionDO:${this.ctx.id}] Failed to send to gateway:`, err)
+        }
+        return
+      }
+    }
+    console.error(
+      `[SessionDO:${this.ctx.id}] Gateway connection ${gwConnId} not found in active connections`,
+    )
+  }
+
+  /** Read the persisted gateway connection ID from SQLite. */
+  private getGatewayConnectionId(): string | null {
+    return getGatewayConnectionId(this.sql.bind(this))
   }
 
   private async dispatchPush(payload: PushPayload, eventType: 'blocked' | 'completed' | 'error') {
@@ -701,7 +783,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       console.error(`[SessionDO:${id}] Failed to persist initial prompt:`, err)
     }
 
-    this.connectAndStream({
+    void this.triggerGatewayDial({
       type: 'execute',
       project: config.project,
       prompt: config.prompt,
@@ -771,7 +853,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       console.error(`[SessionDO:${id}] Failed to persist resume prompt:`, err)
     }
 
-    this.connectAndStream({
+    void this.triggerGatewayDial({
       type: 'resume',
       project: config.project,
       prompt: config.prompt,
@@ -791,8 +873,9 @@ export class SessionDO extends Agent<Env, SessionState> {
       return { ok: false, error: `Cannot stop: status is '${this.state.status}'` }
     }
 
-    if (this.vpsWs) {
-      sendCommand(this.vpsWs, { type: 'stop', session_id: this.state.session_id ?? '' })
+    const gwConnId = this.getGatewayConnectionId()
+    if (gwConnId) {
+      this.sendToGateway({ type: 'stop', session_id: this.state.session_id ?? '' })
     } else {
       this.updateState({ status: 'idle', gate: null })
       this.syncStatusToRegistry()
@@ -809,13 +892,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     }
 
     this.updateState({ status: 'aborted', gate: null, error: reason ?? 'Aborted by user' })
-
-    if (this.vpsWs) {
-      sendCommand(this.vpsWs, { type: 'abort', session_id: this.state.session_id ?? '' })
-      this.vpsWs.close()
-      this.vpsWs = null
-    }
-
+    this.sendToGateway({ type: 'abort', session_id: this.state.session_id ?? '' })
     this.syncStatusToRegistry()
     console.log(`[SessionDO:${this.ctx.id}] abort: ${reason ?? 'user request'}`)
     return { ok: true }
@@ -921,15 +998,15 @@ export class SessionDO extends Agent<Env, SessionState> {
       console.error(`[SessionDO:${this.ctx.id}] Failed to persist user message:`, err)
     }
 
-    if (isActive && this.vpsWs) {
-      sendCommand(this.vpsWs, {
+    if (isActive) {
+      this.sendToGateway({
         type: 'stream-input',
         session_id: this.state.session_id ?? '',
         message: { role: 'user', content },
       })
     } else if (isResumable) {
       this.updateState({ status: 'running', gate: null, error: null })
-      this.connectAndStream({
+      void this.triggerGatewayDial({
         type: 'resume',
         project: this.state.project,
         prompt: content,
@@ -951,7 +1028,8 @@ export class SessionDO extends Agent<Env, SessionState> {
 
   @callable()
   async getContextUsage(): Promise<{ ok: boolean; error?: string }> {
-    if (!this.vpsWs) {
+    const gwConnId = this.getGatewayConnectionId()
+    if (!gwConnId) {
       return { ok: false, error: 'No active gateway connection' }
     }
     this.sendToGateway({ type: 'get-context-usage', session_id: this.state.session_id ?? '' })
@@ -960,13 +1038,11 @@ export class SessionDO extends Agent<Env, SessionState> {
 
   @callable()
   async rewind(messageId: string): Promise<{ ok: boolean; error?: string }> {
-    if (this.vpsWs) {
-      sendCommand(this.vpsWs, {
-        type: 'rewind',
-        session_id: this.state.session_id ?? '',
-        message_id: messageId,
-      })
-    }
+    this.sendToGateway({
+      type: 'rewind',
+      session_id: this.state.session_id ?? '',
+      message_id: messageId,
+    })
     return { ok: true }
   }
 
@@ -1030,11 +1106,7 @@ export class SessionDO extends Agent<Env, SessionState> {
   ): Promise<{ ok: boolean; leafId?: string; error?: string }> {
     // 1. If streaming in progress, abort first
     if (this.currentTurnMessageId) {
-      if (this.vpsWs) {
-        sendCommand(this.vpsWs, { type: 'abort', session_id: this.state.session_id ?? '' })
-        this.vpsWs.close()
-        this.vpsWs = null
-      }
+      this.sendToGateway({ type: 'abort', session_id: this.state.session_id ?? '' })
       // Finalize orphaned streaming parts
       const existing = this.session.getMessage(this.currentTurnMessageId)
       if (existing) {
@@ -1076,7 +1148,7 @@ export class SessionDO extends Agent<Env, SessionState> {
 
     // 4. Send to gateway for execution
     this.updateState({ status: 'running', gate: null, error: null })
-    this.connectAndStream({
+    void this.triggerGatewayDial({
       type: 'resume',
       project: this.state.project,
       prompt: newContent,
@@ -1460,8 +1532,6 @@ export class SessionDO extends Agent<Env, SessionState> {
           summary: event.sdk_summary ?? this.state.summary,
           gate: null,
         })
-        this.vpsWs?.close()
-        this.vpsWs = null
         this.syncStatusToRegistry()
         this.syncResultToRegistry()
         this.syncDiscoveredToRegistry()
@@ -1513,8 +1583,6 @@ export class SessionDO extends Agent<Env, SessionState> {
           gate: null,
           completed_at: new Date().toISOString(),
         })
-        this.vpsWs?.close()
-        this.vpsWs = null
         this.syncStatusToRegistry()
         break
       }

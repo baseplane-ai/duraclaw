@@ -62,3 +62,4 @@ VAPID_SUBJECT = "mailto:push@codevibesmatter.com"
 # BETTER_AUTH_URL      — Base URL for auth (e.g. https://your-domain.com)
 # VAPID_PUBLIC_KEY     — Web Push VAPID public key (base64url)
 # VAPID_PRIVATE_KEY    — Web Push VAPID private key (base64url)
+# WORKER_PUBLIC_URL    — Public URL of this worker (e.g. https://duraclaw.workers.dev)
