@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionChannel } from '../session-channel.js'
 import type { GatewaySessionContext } from '../types.js'
-import { ClaudeAdapter, handleCanUseTool } from './claude.js'
+import { ClaudeAdapter, handleCanUseTool, isIdleStop } from './claude.js'
 
 /** Create a mock SessionChannel that records sent messages. */
 function createMockChannel(): { ch: SessionChannel; sent: string[]; parsedMessages: () => any[] } {
@@ -603,5 +603,48 @@ describe('handleCanUseTool — round-trip integration', () => {
     expect(sent[0].tool_name).toBe('Write')
     expect(sent[1].type).toBe('permission_request')
     expect(sent[1].tool_name).toBe('Bash')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// isIdleStop — detects "No response requested." SDK idle stops
+// ---------------------------------------------------------------------------
+
+describe('isIdleStop', () => {
+  it('returns true for "No response requested."', () => {
+    expect(isIdleStop({ subtype: 'success', result: 'No response requested.' })).toBe(true)
+  })
+
+  it('returns true case-insensitively', () => {
+    expect(isIdleStop({ subtype: 'success', result: 'no response requested.' })).toBe(true)
+    expect(isIdleStop({ subtype: 'success', result: 'NO RESPONSE REQUESTED.' })).toBe(true)
+  })
+
+  it('returns true without trailing period', () => {
+    expect(isIdleStop({ subtype: 'success', result: 'No response requested' })).toBe(true)
+  })
+
+  it('returns true with leading/trailing whitespace', () => {
+    expect(isIdleStop({ subtype: 'success', result: '  No response requested.  ' })).toBe(true)
+  })
+
+  it('returns false for error results', () => {
+    expect(isIdleStop({ subtype: 'error', result: 'No response requested.' })).toBe(false)
+  })
+
+  it('returns false for real results', () => {
+    expect(isIdleStop({ subtype: 'success', result: 'Task completed successfully' })).toBe(false)
+  })
+
+  it('returns false for empty/null results', () => {
+    expect(isIdleStop({ subtype: 'success', result: '' })).toBe(false)
+    expect(isIdleStop({ subtype: 'success', result: null })).toBe(false)
+    expect(isIdleStop({ subtype: 'success' })).toBe(false)
+  })
+
+  it('returns false for partial matches', () => {
+    expect(
+      isIdleStop({ subtype: 'success', result: 'No response requested. Also did other work.' }),
+    ).toBe(false)
   })
 })

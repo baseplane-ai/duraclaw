@@ -14,6 +14,20 @@ import type { AdapterCapabilities, AgentAdapter } from './types.js'
 /** How often to send a heartbeat on the WS to prevent idle timeout (ms). */
 const HEARTBEAT_INTERVAL_MS = 15_000
 
+/** Max consecutive auto-continues before we stop and let the user intervene. */
+const MAX_AUTO_CONTINUES = 3
+
+/**
+ * Detect SDK "idle stop" — the model emitted "No response requested." and hit
+ * the interactive stop sequence.  In headless/orchestrated mode this is a false
+ * stop; we should auto-resume instead of surfacing it to the user.
+ */
+export function isIdleStop(result: Record<string, unknown>): boolean {
+  if (result.subtype !== 'success') return false
+  const text = typeof result.result === 'string' ? result.result.trim() : ''
+  return /^no response requested\.?$/i.test(text)
+}
+
 /** Send a GatewayEvent to the channel. */
 function send(ch: SessionChannel, event: GatewayEvent): void {
   try {
@@ -341,9 +355,14 @@ export class ClaudeAdapter implements AgentAdapter {
         ],
       }
 
-      /** Process all messages from a single SDK query() call. */
-      async function processQueryMessages(iter: any) {
+      /**
+       * Process all messages from a single SDK query() call.
+       * Returns true if the turn ended with an idle stop ("No response requested.")
+       * that should be auto-continued rather than surfaced to the orchestrator.
+       */
+      async function processQueryMessages(iter: any): Promise<boolean> {
         ctx.query = iter
+        let idleStop = false
 
         for await (const message of iter) {
           console.log(`[agent-gateway] executeSession: message type=${message.type}`)
@@ -459,6 +478,15 @@ export class ClaudeAdapter implements AgentAdapter {
             })
           } else if (message.type === 'result') {
             const result = message as any
+
+            // Detect idle stop — SDK hit the interactive stop sequence with
+            // "No response requested." In headless mode we auto-continue.
+            if (isIdleStop(result)) {
+              idleStop = true
+              console.log(`[agent-gateway] executeSession: idle stop detected — will auto-continue`)
+              continue
+            }
+
             const duration = Date.now() - startTime
 
             // Fetch SDK session summary (best-effort)
@@ -486,6 +514,7 @@ export class ClaudeAdapter implements AgentAdapter {
             })
           }
         }
+        return idleStop
       }
 
       // --- Initial turn ---
@@ -503,19 +532,41 @@ export class ClaudeAdapter implements AgentAdapter {
         prompt: initialPrompt(),
         options: options as any,
       })
-      await processQueryMessages(iter)
+      let wasIdleStop = await processQueryMessages(iter)
+      let autoContinueCount = wasIdleStop ? 1 : 0
 
       // --- Multi-turn loop: wait for follow-up messages and resume ---
       // After each turn's result, keep the session alive by waiting for the next
       // stream-input message. When one arrives, start a new query() with resume.
+      //
+      // If the SDK idle-stopped ("No response requested."), auto-resume with
+      // "continue" instead of waiting for user input — up to MAX_AUTO_CONTINUES
+      // consecutive times to prevent infinite loops.
       while (!ac.signal.aborted && sdkSessionId) {
-        // Wait for the next message from the queue (blocks until stream-input arrives)
-        const nextMsg = await queue.waitForNext()
-        if (!nextMsg) break // queue.done() was called — session is closing
+        let nextContent: string | ContentBlock[]
 
-        const msg = nextMsg // capture for generator closure
+        if (wasIdleStop && autoContinueCount <= MAX_AUTO_CONTINUES) {
+          console.log(
+            `[agent-gateway] executeSession: auto-continuing after idle stop (${autoContinueCount}/${MAX_AUTO_CONTINUES})`,
+          )
+          nextContent = 'continue'
+        } else {
+          // Reset counter when we get a real user message
+          autoContinueCount = 0
+
+          // Wait for the next message from the queue (blocks until stream-input arrives)
+          const nextMsg = await queue.waitForNext()
+          if (!nextMsg) break // queue.done() was called — session is closing
+          nextContent = nextMsg.message.content
+        }
+
+        const content = nextContent // capture for generator closure
         async function* followUpPrompt(): AsyncGenerator<SDKUserMsg> {
-          yield msg
+          yield {
+            type: 'user',
+            message: { role: 'user', content },
+            parent_tool_use_id: null,
+          }
         }
 
         console.log(`[agent-gateway] executeSession: resuming for follow-up turn`)
@@ -524,7 +575,12 @@ export class ClaudeAdapter implements AgentAdapter {
           prompt: followUpPrompt(),
           options: resumeOpts as any,
         })
-        await processQueryMessages(resumeIter)
+        wasIdleStop = await processQueryMessages(resumeIter)
+        if (wasIdleStop) {
+          autoContinueCount++
+        } else {
+          autoContinueCount = 0
+        }
       }
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : String(err)
