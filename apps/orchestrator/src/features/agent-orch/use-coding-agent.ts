@@ -4,14 +4,12 @@
  * Connects over WebSocket to the SessionDO Durable Object.
  * The agents SDK auto-syncs state on connection and broadcasts state updates.
  *
- * Messages flow through `messagesCollection` as the single source of truth:
- *   WS events → collection writes (optimistic, sync) → useLiveQuery → React render
- *   OPFS persistence happens async in the background.
+ * Ported from baseplane agent-orch, adapted for duraclaw's SessionDO.
  */
 
 import { useAgent } from 'agents/react'
-import { useCallback, useRef, useState } from 'react'
-import { pruneStaleMessages, upsertMessage } from '~/db/messages-collection'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { type CachedMessage, messagesCollection } from '~/db/messages-collection'
 import { sessionsCollection } from '~/db/sessions-collection'
 import { useMessagesCollection } from '~/hooks/use-messages-collection'
 import type {
@@ -75,6 +73,7 @@ export interface UseCodingAgentResult {
 export function useCodingAgent(agentName: string): UseCodingAgentResult {
   const [state, setState] = useState<SessionState | null>(null)
   const [events, setEvents] = useState<Array<{ ts: string; type: string; data?: unknown }>>([])
+  const [messages, setMessages] = useState<SessionMessage[]>([])
   const [sessionResult, setSessionResult] = useState<{
     total_cost_usd: number
     duration_ms: number
@@ -85,62 +84,64 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     Map<string, { current: number; total: number; siblings: string[] }>
   >(new Map())
   const hydratedRef = useRef(false)
+  const cacheSeededRef = useRef(false)
+  const knownEventUuidsRef = useRef<Set<string>>(new Set())
   const optimisticIdsRef = useRef<Set<string>>(new Set())
   const prevStatusRef = useRef<string | null>(null)
   const prevAgentNameRef = useRef(agentName)
-  // Stable ref for agentName — callbacks passed to useAgent may capture stale closures,
-  // so we read from the ref to always get the current session ID.
-  const agentNameRef = useRef(agentName)
-  agentNameRef.current = agentName
 
-  // Reset non-message state when agentName changes (e.g. tab switch without remount).
-  // Messages don't need resetting — useMessagesCollection filters by agentName reactively.
+  // Reset all state when agentName changes (e.g. tab switch without remount)
   if (prevAgentNameRef.current !== agentName) {
     prevAgentNameRef.current = agentName
     hydratedRef.current = false
+    cacheSeededRef.current = false
+    knownEventUuidsRef.current = new Set()
     optimisticIdsRef.current = new Set()
     prevStatusRef.current = null
     setState(null)
     setEvents([])
+    setMessages([])
     setSessionResult(null)
     setKataState(null)
     setContextUsage(null)
   }
 
-  // Single source of truth: reactive query over the collection, filtered by sessionId.
-  // Returns cached messages immediately on mount (from OPFS), then reacts to writes.
-  const { messages: collectionMessages } = useMessagesCollection(agentName)
-
-  // Map CachedMessage[] → SessionMessage[] for consumers.
-  // Filter out optimistic IDs that have been superseded by server echoes.
-  const messages: SessionMessage[] = collectionMessages
-    .filter((m) => !optimisticIdsRef.current.has(m.id) || m.sessionId === agentName)
-    .map((m) => ({
-      id: m.id,
-      role: m.role,
-      parts: m.parts,
-      createdAt: m.createdAt ? new Date(m.createdAt as string) : undefined,
-    }))
-
-  /** Write a batch of messages to the collection and prune stale entries. */
-  const syncMessagesToCollection = useCallback(
-    (msgs: SessionMessage[]) => {
-      const currentName = agentNameRef.current
-      const keepIds = new Set<string>()
-      for (const msg of msgs) {
-        keepIds.add(msg.id)
-        upsertMessage(currentName, {
-          id: msg.id,
-          role: msg.role,
-          parts: msg.parts,
-          createdAt: msg.createdAt,
-        })
+  /** Write a message to the local cache collection (cache-behind). */
+  const cacheMessage = useCallback(
+    (msg: Omit<CachedMessage, 'sessionId'>) => {
+      try {
+        messagesCollection.insert({
+          ...msg,
+          sessionId: agentName,
+        } as CachedMessage & Record<string, unknown>)
+      } catch {
+        // Ignore duplicate inserts
       }
-      // Remove messages for this session that aren't in the new set
-      pruneStaleMessages(currentName, keepIds)
     },
-    [], // Uses agentNameRef — no dep on agentName
+    [agentName],
   )
+
+  // Cache-first: use reactive query to load cached messages from OPFS immediately.
+  // This fires as soon as the persisted collection hydrates, before WS connects.
+  const { messages: cachedMessages } = useMessagesCollection(agentName)
+
+  useEffect(() => {
+    // Seed messages state from cache once, before WS hydration arrives
+    if (cachedMessages.length > 0 && !cacheSeededRef.current && !hydratedRef.current) {
+      cacheSeededRef.current = true
+      for (const msg of cachedMessages) {
+        knownEventUuidsRef.current.add(msg.id)
+      }
+      setMessages(
+        cachedMessages.map((m) => ({
+          id: m.id,
+          role: m.role,
+          parts: m.parts,
+          createdAt: m.createdAt ? new Date(m.createdAt as string) : undefined,
+        })),
+      )
+    }
+  }, [cachedMessages])
 
   const connection = useAgent<SessionState>({
     agent: 'session-agent',
@@ -151,7 +152,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       setState(newState)
       // WS bridge: update sessions collection with fresh status
       try {
-        sessionsCollection.update(agentNameRef.current, (draft) => {
+        sessionsCollection.update(agentName, (draft) => {
           draft.status = newState.status
           draft.updated_at = new Date().toISOString()
           if (newState.num_turns != null) draft.num_turns = newState.num_turns
@@ -175,17 +176,32 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       try {
         const parsed = JSON.parse(typeof message.data === 'string' ? message.data : '')
 
-        // Handle SessionMessage wire format (single message upsert)
+        // NEW: Handle SessionMessage wire format (single message upsert)
         if (parsed.type === 'message' && parsed.message) {
           const msg = parsed.message as SessionMessage
-
-          // If this is a server echo of an optimistic user message, clean up optimistic IDs
-          if (msg.role === 'user') {
-            // Remove all optimistic IDs — server echo means they've been accepted
-            optimisticIdsRef.current.clear()
-          }
-
-          upsertMessage(agentNameRef.current, {
+          setMessages((prev) => {
+            // Check if this is a server echo of an optimistic user message
+            if (msg.role === 'user') {
+              const withoutOptimistic = prev.filter((m) => !optimisticIdsRef.current.has(m.id))
+              const idx = withoutOptimistic.findIndex((m) => m.id === msg.id)
+              if (idx !== -1) {
+                const updated = [...withoutOptimistic]
+                updated[idx] = msg
+                return updated
+              }
+              return [...withoutOptimistic, msg]
+            }
+            // For non-user messages, upsert by id
+            const idx = prev.findIndex((m) => m.id === msg.id)
+            if (idx !== -1) {
+              const updated = [...prev]
+              updated[idx] = msg
+              return updated
+            }
+            return [...prev, msg]
+          })
+          // Cache-behind write
+          cacheMessage({
             id: msg.id,
             role: msg.role,
             parts: msg.parts,
@@ -194,13 +210,22 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           return
         }
 
-        // Handle bulk message replay on connect
+        // NEW: Handle bulk message replay on connect
         if (parsed.type === 'messages' && Array.isArray(parsed.messages)) {
           const msgs = parsed.messages as SessionMessage[]
+          setMessages(msgs)
+          for (const msg of msgs) {
+            knownEventUuidsRef.current.add(msg.id)
+          }
           hydratedRef.current = true
-          syncMessagesToCollection(msgs)
-          // Refresh branch info after bulk replay
-          refreshBranchInfo(msgs).catch(() => {})
+          for (const msg of msgs) {
+            cacheMessage({
+              id: msg.id,
+              role: msg.role,
+              parts: msg.parts,
+              createdAt: msg.createdAt,
+            })
+          }
           return
         }
 
@@ -247,13 +272,25 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     },
   })
 
-  /** Fetch persisted messages from the DO, write to collection. */
+  /** Fetch persisted messages, populate messages state and dedup set. */
   async function hydrateMessages(conn: typeof connection) {
-    const hints = { session_hint: agentNameRef.current }
+    const hints = { session_hint: agentName }
     const serverMessages = (await conn.call('getMessages', [{ ...hints }])) as SessionMessage[]
 
     if (serverMessages.length > 0) {
-      syncMessagesToCollection(serverMessages)
+      for (const msg of serverMessages) {
+        knownEventUuidsRef.current.add(msg.id)
+      }
+      setMessages(serverMessages)
+      // Write hydrated messages to local collection for future cache-first loads
+      for (const msg of serverMessages) {
+        cacheMessage({
+          id: msg.id,
+          role: msg.role,
+          parts: msg.parts,
+          createdAt: msg.createdAt,
+        })
+      }
       // Refresh branch info after hydration
       refreshBranchInfo(serverMessages).catch(() => {})
     }
@@ -296,11 +333,14 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   )
 
   const injectQaPair = useCallback((question: string, answer: string) => {
-    upsertMessage(agentNameRef.current, {
-      id: `qa-${Date.now()}`,
-      role: 'qa_pair',
-      parts: [{ type: 'text', text: `Q: ${question}\nA: ${answer}` }],
-    })
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: `qa-${Date.now()}`,
+        role: 'qa_pair',
+        parts: [{ type: 'text', text: `Q: ${question}\nA: ${answer}` }],
+      },
+    ])
   }, [])
 
   const wsReadyState = state ? 1 : 0
@@ -313,16 +353,11 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         error?: string
       }
       if (result.ok) {
-        // Re-hydrate to get the correct message set after rewind
-        const hints = { session_hint: agentNameRef.current }
-        const msgs = (await connection.call('getMessages', [{ ...hints }])) as SessionMessage[]
-        if (msgs.length > 0) {
-          syncMessagesToCollection(msgs)
-        }
+        setMessages((prev) => prev.slice(0, turnIndex + 1))
       }
       return result
     },
-    [connection, syncMessagesToCollection],
+    [connection],
   )
 
   const refreshBranchInfo = useCallback(
@@ -379,16 +414,16 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       }
       if (result.ok && result.leafId) {
         const newMessages = (await connection.call('getMessages', [
-          { session_hint: agentNameRef.current, leafId: result.leafId },
+          { session_hint: agentName, leafId: result.leafId },
         ])) as SessionMessage[]
         if (newMessages.length > 0) {
-          syncMessagesToCollection(newMessages)
+          setMessages(newMessages)
           await refreshBranchInfo(newMessages)
         }
       }
       return result
     },
-    [connection, refreshBranchInfo, syncMessagesToCollection],
+    [connection, agentName, refreshBranchInfo],
   )
 
   const navigateBranch = useCallback(
@@ -403,15 +438,15 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       const targetSiblingId = info.siblings[targetIdx]
 
       const branchMessages = (await connection.call('getMessages', [
-        { session_hint: agentNameRef.current, leafId: targetSiblingId },
+        { session_hint: agentName, leafId: targetSiblingId },
       ])) as SessionMessage[]
 
       if (branchMessages.length > 0) {
-        syncMessagesToCollection(branchMessages)
+        setMessages(branchMessages)
         await refreshBranchInfo(branchMessages)
       }
     },
-    [connection, branchInfo, refreshBranchInfo, syncMessagesToCollection],
+    [connection, agentName, branchInfo, refreshBranchInfo],
   )
 
   const sendMessage = useCallback(
@@ -419,34 +454,26 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       const optimisticId = `usr-optimistic-${Date.now()}`
       const textContent = typeof content === 'string' ? content : JSON.stringify(content)
       optimisticIdsRef.current.add(optimisticId)
-
-      // Optimistic insert into collection — renders immediately via useLiveQuery
-      upsertMessage(agentNameRef.current, {
-        id: optimisticId,
-        role: 'user',
-        parts: [{ type: 'text', text: textContent }],
-        createdAt: new Date(),
-      })
-
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: optimisticId,
+          role: 'user',
+          parts: [{ type: 'text', text: textContent }],
+          createdAt: new Date(),
+        },
+      ])
       const result = (await connection.call('sendMessage', [content])) as {
         ok: boolean
         error?: string
       }
       if (!result.ok) {
-        // Rollback: remove optimistic message from collection
         optimisticIdsRef.current.delete(optimisticId)
-        try {
-          pruneStaleMessages(
-            agentNameRef.current,
-            new Set(collectionMessages.filter((m) => m.id !== optimisticId).map((m) => m.id)),
-          )
-        } catch {
-          // Collection may not have the message
-        }
+        setMessages((prev) => prev.filter((m) => m.id !== optimisticId))
       }
       return result
     },
-    [connection, collectionMessages],
+    [connection],
   )
 
   return {

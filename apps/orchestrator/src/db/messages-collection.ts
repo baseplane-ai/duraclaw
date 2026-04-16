@@ -32,7 +32,7 @@ function createMessagesCollection() {
     const opts = persistedCollectionOptions({
       ...localOpts,
       persistence,
-      schemaVersion: 3,
+      schemaVersion: 2,
     })
     // TanStackDB beta: persistedCollectionOptions adds a schema type that
     // conflicts with createCollection overloads. Runtime behavior is correct.
@@ -44,62 +44,6 @@ function createMessagesCollection() {
 }
 
 export const messagesCollection = createMessagesCollection()
-
-/**
- * Upsert a message into the collection (insert or update-in-place).
- * Optimistic by default — in-memory state updates synchronously,
- * OPFS persistence happens async in the background.
- */
-export function upsertMessage(
-  sessionId: string,
-  msg: {
-    id: string
-    role: string
-    parts: SessionMessagePart[]
-    createdAt?: Date | string
-  },
-) {
-  try {
-    messagesCollection.update(msg.id, (draft) => {
-      draft.role = msg.role as CachedMessage['role']
-      draft.parts = msg.parts
-      if (msg.createdAt) draft.createdAt = msg.createdAt
-    })
-  } catch {
-    // Key not found — insert instead
-    try {
-      messagesCollection.insert({
-        id: msg.id,
-        sessionId,
-        role: msg.role,
-        parts: msg.parts,
-        createdAt: msg.createdAt,
-      } as CachedMessage & Record<string, unknown>)
-    } catch {
-      // Duplicate key race — ignore
-    }
-  }
-}
-
-/**
- * Remove messages for a session that are NOT in the provided set of IDs.
- * Used after bulk replay / branch navigation to prune stale entries.
- */
-export function pruneStaleMessages(sessionId: string, keepIds: Set<string>) {
-  try {
-    const staleKeys: string[] = []
-    for (const [key, msg] of messagesCollection as Iterable<[string, CachedMessage]>) {
-      if (msg.sessionId === sessionId && !keepIds.has(key)) {
-        staleKeys.push(key)
-      }
-    }
-    if (staleKeys.length > 0) {
-      messagesCollection.delete(staleKeys)
-    }
-  } catch {
-    // Collection may not be ready
-  }
-}
 
 /** Evict messages older than 30 days from the local collection */
 export function evictOldMessages() {
