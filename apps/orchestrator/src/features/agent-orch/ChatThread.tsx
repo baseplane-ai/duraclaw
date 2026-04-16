@@ -125,9 +125,7 @@ function renderPart(
     return (
       <Message key={index} from="assistant">
         <MessageContent>
-          <MessageResponse isAnimating={part.state === 'streaming'}>
-            {part.text || ''}
-          </MessageResponse>
+          <MessageResponse isAnimating={false}>{part.text || ''}</MessageResponse>
           {part.state !== 'streaming' && part.text && (
             <div className="flex justify-end">
               <CopyMessageButton text={part.text} />
