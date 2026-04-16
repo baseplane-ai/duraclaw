@@ -88,6 +88,10 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   const optimisticIdsRef = useRef<Set<string>>(new Set())
   const prevStatusRef = useRef<string | null>(null)
   const prevAgentNameRef = useRef(agentName)
+  // Stable ref for agentName — callbacks passed to useAgent may capture stale closures,
+  // so we read from the ref to always get the current session ID.
+  const agentNameRef = useRef(agentName)
+  agentNameRef.current = agentName
 
   // Reset non-message state when agentName changes (e.g. tab switch without remount).
   // Messages don't need resetting — useMessagesCollection filters by agentName reactively.
@@ -121,10 +125,11 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   /** Write a batch of messages to the collection and prune stale entries. */
   const syncMessagesToCollection = useCallback(
     (msgs: SessionMessage[]) => {
+      const currentName = agentNameRef.current
       const keepIds = new Set<string>()
       for (const msg of msgs) {
         keepIds.add(msg.id)
-        upsertMessage(agentName, {
+        upsertMessage(currentName, {
           id: msg.id,
           role: msg.role,
           parts: msg.parts,
@@ -132,9 +137,9 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         })
       }
       // Remove messages for this session that aren't in the new set
-      pruneStaleMessages(agentName, keepIds)
+      pruneStaleMessages(currentName, keepIds)
     },
-    [agentName],
+    [], // Uses agentNameRef — no dep on agentName
   )
 
   const connection = useAgent<SessionState>({
@@ -146,7 +151,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       setState(newState)
       // WS bridge: update sessions collection with fresh status
       try {
-        sessionsCollection.update(agentName, (draft) => {
+        sessionsCollection.update(agentNameRef.current, (draft) => {
           draft.status = newState.status
           draft.updated_at = new Date().toISOString()
           if (newState.num_turns != null) draft.num_turns = newState.num_turns
@@ -180,7 +185,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
             optimisticIdsRef.current.clear()
           }
 
-          upsertMessage(agentName, {
+          upsertMessage(agentNameRef.current, {
             id: msg.id,
             role: msg.role,
             parts: msg.parts,
@@ -244,7 +249,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
 
   /** Fetch persisted messages from the DO, write to collection. */
   async function hydrateMessages(conn: typeof connection) {
-    const hints = { session_hint: agentName }
+    const hints = { session_hint: agentNameRef.current }
     const serverMessages = (await conn.call('getMessages', [{ ...hints }])) as SessionMessage[]
 
     if (serverMessages.length > 0) {
@@ -290,16 +295,13 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     [connection],
   )
 
-  const injectQaPair = useCallback(
-    (question: string, answer: string) => {
-      upsertMessage(agentName, {
-        id: `qa-${Date.now()}`,
-        role: 'qa_pair',
-        parts: [{ type: 'text', text: `Q: ${question}\nA: ${answer}` }],
-      })
-    },
-    [agentName],
-  )
+  const injectQaPair = useCallback((question: string, answer: string) => {
+    upsertMessage(agentNameRef.current, {
+      id: `qa-${Date.now()}`,
+      role: 'qa_pair',
+      parts: [{ type: 'text', text: `Q: ${question}\nA: ${answer}` }],
+    })
+  }, [])
 
   const wsReadyState = state ? 1 : 0
   const isConnecting = !hydratedRef.current
@@ -312,7 +314,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       }
       if (result.ok) {
         // Re-hydrate to get the correct message set after rewind
-        const hints = { session_hint: agentName }
+        const hints = { session_hint: agentNameRef.current }
         const msgs = (await connection.call('getMessages', [{ ...hints }])) as SessionMessage[]
         if (msgs.length > 0) {
           syncMessagesToCollection(msgs)
@@ -320,7 +322,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       }
       return result
     },
-    [connection, agentName, syncMessagesToCollection],
+    [connection, syncMessagesToCollection],
   )
 
   const refreshBranchInfo = useCallback(
@@ -377,7 +379,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       }
       if (result.ok && result.leafId) {
         const newMessages = (await connection.call('getMessages', [
-          { session_hint: agentName, leafId: result.leafId },
+          { session_hint: agentNameRef.current, leafId: result.leafId },
         ])) as SessionMessage[]
         if (newMessages.length > 0) {
           syncMessagesToCollection(newMessages)
@@ -386,7 +388,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       }
       return result
     },
-    [connection, agentName, refreshBranchInfo, syncMessagesToCollection],
+    [connection, refreshBranchInfo, syncMessagesToCollection],
   )
 
   const navigateBranch = useCallback(
@@ -401,7 +403,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       const targetSiblingId = info.siblings[targetIdx]
 
       const branchMessages = (await connection.call('getMessages', [
-        { session_hint: agentName, leafId: targetSiblingId },
+        { session_hint: agentNameRef.current, leafId: targetSiblingId },
       ])) as SessionMessage[]
 
       if (branchMessages.length > 0) {
@@ -409,7 +411,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         await refreshBranchInfo(branchMessages)
       }
     },
-    [connection, agentName, branchInfo, refreshBranchInfo, syncMessagesToCollection],
+    [connection, branchInfo, refreshBranchInfo, syncMessagesToCollection],
   )
 
   const sendMessage = useCallback(
@@ -419,7 +421,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       optimisticIdsRef.current.add(optimisticId)
 
       // Optimistic insert into collection — renders immediately via useLiveQuery
-      upsertMessage(agentName, {
+      upsertMessage(agentNameRef.current, {
         id: optimisticId,
         role: 'user',
         parts: [{ type: 'text', text: textContent }],
@@ -435,7 +437,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         optimisticIdsRef.current.delete(optimisticId)
         try {
           pruneStaleMessages(
-            agentName,
+            agentNameRef.current,
             new Set(collectionMessages.filter((m) => m.id !== optimisticId).map((m) => m.id)),
           )
         } catch {
@@ -444,7 +446,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       }
       return result
     },
-    [connection, agentName, collectionMessages],
+    [connection, collectionMessages],
   )
 
   return {
