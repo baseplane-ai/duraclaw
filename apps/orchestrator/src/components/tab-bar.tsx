@@ -205,22 +205,6 @@ function ProjectTab({
           <span className="max-w-32 truncate leading-tight">{title}</span>
         </div>
       </button>
-
-      {/* Close button */}
-      <button
-        type="button"
-        className={cn(
-          'px-1.5 self-stretch flex items-center transition-opacity hover:bg-muted',
-          isActive ? 'opacity-60' : 'opacity-0 group-hover:opacity-60',
-        )}
-        onClick={(e) => {
-          e.stopPropagation()
-          onClose()
-        }}
-        aria-label="Close tab"
-      >
-        <X className="size-3" />
-      </button>
     </>
   )
 
