@@ -3,7 +3,7 @@
 import type { UIMessage } from 'ai'
 import { ArrowDownIcon, DownloadIcon } from 'lucide-react'
 import type { ComponentProps } from 'react'
-import { useCallback } from 'react'
+import { useCallback, useLayoutEffect } from 'react'
 import { StickToBottom, useStickToBottomContext } from 'use-stick-to-bottom'
 import { cn } from '../lib/utils'
 import { Button } from '../ui/button'
@@ -22,9 +22,22 @@ export const Conversation = ({ className, ...props }: ConversationProps) => (
 
 export type ConversationContentProps = ComponentProps<typeof StickToBottom.Content>
 
-export const ConversationContent = ({ className, ...props }: ConversationContentProps) => (
-  <StickToBottom.Content className={cn('flex flex-col gap-8 p-4', className)} {...props} />
-)
+export const ConversationContent = ({ className, ...props }: ConversationContentProps) => {
+  const { scrollRef } = useStickToBottomContext()
+
+  // Scroll to bottom before first paint so the user never sees content at scrollTop=0.
+  // StickToBottom's ResizeObserver fires asynchronously (after paint), causing a visible
+  // one-frame flash of content scrolled to the top on remount. This layout effect runs
+  // before paint, eliminating the flash.
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    if (el) {
+      el.scrollTop = el.scrollHeight - el.clientHeight
+    }
+  })
+
+  return <StickToBottom.Content className={cn('flex flex-col gap-8 p-4', className)} {...props} />
+}
 
 export type ConversationEmptyStateProps = ComponentProps<'div'> & {
   title?: string
