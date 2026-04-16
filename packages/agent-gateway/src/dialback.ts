@@ -1,6 +1,6 @@
 import type { AgentAdapter } from './adapters/types.js'
 import { handleQueryCommand } from './commands.js'
-import { fromWebSocket, type SessionChannel } from './session-channel.js'
+import { ReconnectableChannel, type SessionChannel } from './session-channel.js'
 import type { GatewayCommand, GatewaySessionContext } from './types.js'
 
 /**
@@ -133,6 +133,10 @@ export function handleDialbackMessage(
 /**
  * Dial an outbound WebSocket to the DO callback_url and run an adapter session over it.
  * Implements reconnect with exponential backoff (1s, 3s, 9s) if the WS drops while the session is still running.
+ *
+ * On first connection (attempt=0): opens WS, creates a ReconnectableChannel, starts the adapter session.
+ * On reconnect (attempt>0): opens a new WS, swaps it into the existing ReconnectableChannel.
+ * The adapter keeps running against the same channel reference throughout.
  */
 export function dialOutboundWs(
   callbackUrl: string,
@@ -141,35 +145,49 @@ export function dialOutboundWs(
   adapter: AgentAdapter,
   sessionId: string,
   attempt = 0,
+  existingChannel?: ReconnectableChannel,
 ) {
   const ws = new WebSocket(callbackUrl)
-  const channel = fromWebSocket(ws)
 
   ws.addEventListener('open', () => {
-    console.log(`[agent-gateway] Dial-back WS connected for session ${sessionId}`)
-    dialbackSessions.set(sessionId, { ctx, channel, ws })
+    console.log(
+      `[agent-gateway] Dial-back WS connected for session ${sessionId} (attempt ${attempt})`,
+    )
 
-    // Run session in background
-    const sessionPromise =
-      cmd.type === 'resume'
-        ? adapter.resume(channel, cmd as any, ctx)
-        : adapter.execute(channel, cmd as any, ctx)
+    if (attempt === 0) {
+      // First connection: create channel and start the adapter session
+      const channel = new ReconnectableChannel(ws)
+      dialbackSessions.set(sessionId, { ctx, channel, ws })
 
-    sessionPromise
-      .then(() => {
-        console.log(`[agent-gateway] Dial-back session ${sessionId} completed`)
-      })
-      .catch((err) => {
-        console.error(`[agent-gateway] Dial-back session ${sessionId} error:`, err)
-      })
-      .finally(() => {
-        dialbackSessions.delete(sessionId)
-      })
+      const sessionPromise =
+        cmd.type === 'resume'
+          ? adapter.resume(channel, cmd as any, ctx)
+          : adapter.execute(channel, cmd as any, ctx)
+
+      sessionPromise
+        .then(() => {
+          console.log(`[agent-gateway] Dial-back session ${sessionId} completed`)
+        })
+        .catch((err) => {
+          console.error(`[agent-gateway] Dial-back session ${sessionId} error:`, err)
+        })
+        .finally(() => {
+          dialbackSessions.delete(sessionId)
+        })
+    } else if (existingChannel) {
+      // Reconnect: swap the underlying WS in the existing channel
+      existingChannel.replaceWebSocket(ws)
+      dialbackSessions.set(sessionId, { ctx, channel: existingChannel, ws })
+      console.log(`[agent-gateway] Dial-back WS swapped for session ${sessionId}`)
+    }
   })
 
   ws.addEventListener('message', (event: MessageEvent) => {
     // Route DO->gateway commands to the session context
     try {
+      const entry = dialbackSessions.get(sessionId)
+      const channel = entry?.channel ?? existingChannel
+      if (!channel) return
       const msg = JSON.parse(typeof event.data === 'string' ? event.data : event.data.toString())
       handleDialbackMessage(sessionId, msg, ctx, channel)
     } catch (err) {
@@ -185,11 +203,12 @@ export function dialOutboundWs(
       const maxRetries = 3
       if (attempt < maxRetries) {
         const delay = 3 ** attempt * 1000
+        const channel = entry.channel as ReconnectableChannel
         console.log(
           `[agent-gateway] Reconnecting dial-back WS in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`,
         )
         setTimeout(() => {
-          dialOutboundWs(callbackUrl, cmd, ctx, adapter, sessionId, attempt + 1)
+          dialOutboundWs(callbackUrl, cmd, ctx, adapter, sessionId, attempt + 1, channel)
         }, delay)
       } else {
         console.error(

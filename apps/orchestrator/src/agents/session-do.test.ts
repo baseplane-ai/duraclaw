@@ -4,7 +4,7 @@ import {
   buildGatewayStartUrl,
   getGatewayConnectionId,
   loadTurnState,
-  validateAndConsumeGatewayToken,
+  validateGatewayToken,
 } from './session-do-helpers'
 import { SESSION_DO_MIGRATIONS } from './session-do-migrations'
 
@@ -235,22 +235,22 @@ describe('loadTurnState', () => {
   })
 })
 
-// ── validateAndConsumeGatewayToken tests ───────────────────────
+// ── validateGatewayToken tests ────────────────────────────────
 
-describe('validateAndConsumeGatewayToken', () => {
+describe('validateGatewayToken', () => {
   it('returns false for null token', () => {
     const { sql } = createKvSql()
-    expect(validateAndConsumeGatewayToken(sql, null)).toBe(false)
+    expect(validateGatewayToken(sql, null)).toBe(false)
   })
 
   it('returns false for empty string token', () => {
     const { sql } = createKvSql()
-    expect(validateAndConsumeGatewayToken(sql, '')).toBe(false)
+    expect(validateGatewayToken(sql, '')).toBe(false)
   })
 
   it('returns false when no token is stored in kv', () => {
     const { sql } = createKvSql()
-    expect(validateAndConsumeGatewayToken(sql, 'some-token')).toBe(false)
+    expect(validateGatewayToken(sql, 'some-token')).toBe(false)
   })
 
   it('returns false when token does not match stored token', () => {
@@ -258,21 +258,21 @@ describe('validateAndConsumeGatewayToken', () => {
       gateway_token: 'correct-token',
       gateway_token_expires: String(Date.now() + 60_000),
     })
-    expect(validateAndConsumeGatewayToken(sql, 'wrong-token')).toBe(false)
+    expect(validateGatewayToken(sql, 'wrong-token')).toBe(false)
   })
 
-  it('returns true and consumes token when token matches and is not expired', () => {
+  it('returns true and does NOT delete token when token matches and is not expired', () => {
     const { sql, store } = createKvSql({
       gateway_token: 'my-token-123',
       gateway_token_expires: String(Date.now() + 60_000),
     })
 
-    const result = validateAndConsumeGatewayToken(sql, 'my-token-123')
+    const result = validateGatewayToken(sql, 'my-token-123')
     expect(result).toBe(true)
 
-    // Token should be consumed (deleted)
-    expect(store.has('gateway_token')).toBe(false)
-    expect(store.has('gateway_token_expires')).toBe(false)
+    // Token should NOT be deleted — it remains valid for reconnects
+    expect(store.has('gateway_token')).toBe(true)
+    expect(store.has('gateway_token_expires')).toBe(true)
   })
 
   it('returns false when token has expired', () => {
@@ -281,7 +281,7 @@ describe('validateAndConsumeGatewayToken', () => {
       gateway_token_expires: String(Date.now() - 1000), // Expired 1 second ago
     })
 
-    const result = validateAndConsumeGatewayToken(sql, 'expired-token')
+    const result = validateGatewayToken(sql, 'expired-token')
     expect(result).toBe(false)
 
     // Expired token should be cleaned up
@@ -295,7 +295,7 @@ describe('validateAndConsumeGatewayToken', () => {
     })
 
     // No gateway_token_expires row -- should still validate
-    const result = validateAndConsumeGatewayToken(sql, 'no-expiry-token')
+    const result = validateGatewayToken(sql, 'no-expiry-token')
     expect(result).toBe(true)
   })
 
@@ -303,17 +303,17 @@ describe('validateAndConsumeGatewayToken', () => {
     const throwingSql = () => {
       throw new Error('DB error')
     }
-    expect(validateAndConsumeGatewayToken(throwingSql as any, 'some-token')).toBe(false)
+    expect(validateGatewayToken(throwingSql as any, 'some-token')).toBe(false)
   })
 
-  it('is one-shot: second call with same token returns false', () => {
+  it('is reusable: second call with same token still returns true', () => {
     const { sql } = createKvSql({
-      gateway_token: 'one-shot-token',
+      gateway_token: 'reusable-token',
       gateway_token_expires: String(Date.now() + 60_000),
     })
 
-    expect(validateAndConsumeGatewayToken(sql, 'one-shot-token')).toBe(true)
-    expect(validateAndConsumeGatewayToken(sql, 'one-shot-token')).toBe(false)
+    expect(validateGatewayToken(sql, 'reusable-token')).toBe(true)
+    expect(validateGatewayToken(sql, 'reusable-token')).toBe(true)
   })
 })
 
@@ -335,6 +335,129 @@ describe('getGatewayConnectionId', () => {
       throw new Error('DB error')
     }
     expect(getGatewayConnectionId(throwingSql as any)).toBeNull()
+  })
+})
+
+// ── Cached getGatewayConnectionId tests ───────────────────────
+//
+// SessionDO wraps getGatewayConnectionId with an in-memory cache to avoid
+// SQLite reads on every WS message. We can't instantiate the DO (TC39
+// decorators), so we test the caching contract by simulating the exact
+// cache-around-helper pattern used in the class.
+
+describe('getGatewayConnectionId caching pattern', () => {
+  /**
+   * Simulates the SessionDO cache wrapper exactly as implemented:
+   *   private cachedGatewayConnId: string | null = null
+   *   private getGatewayConnectionId(): string | null {
+   *     if (this.cachedGatewayConnId) return this.cachedGatewayConnId
+   *     const id = getGatewayConnectionId(this.sql.bind(this))
+   *     this.cachedGatewayConnId = id
+   *     return id
+   *   }
+   */
+  function createCachedGetter(sql: ReturnType<typeof createKvSql>['sql']) {
+    let cachedGatewayConnId: string | null = null
+    const sqlCallCount = { value: 0 }
+    const countingSql = <T>(strings: TemplateStringsArray, ...values: unknown[]): T[] => {
+      sqlCallCount.value++
+      return sql(strings, ...values) as T[]
+    }
+
+    return {
+      get: () => {
+        if (cachedGatewayConnId) return cachedGatewayConnId
+        const id = getGatewayConnectionId(countingSql)
+        cachedGatewayConnId = id
+        return id
+      },
+      setCache: (id: string | null) => {
+        cachedGatewayConnId = id
+      },
+      clearCache: () => {
+        cachedGatewayConnId = null
+      },
+      sqlCallCount,
+    }
+  }
+
+  it('reads from SQLite on first call and caches the result', () => {
+    const { sql } = createKvSql({ gateway_conn_id: 'conn-1' })
+    const cached = createCachedGetter(sql)
+
+    expect(cached.get()).toBe('conn-1')
+    expect(cached.sqlCallCount.value).toBe(1)
+  })
+
+  it('returns cached value without hitting SQLite on subsequent calls', () => {
+    const { sql } = createKvSql({ gateway_conn_id: 'conn-1' })
+    const cached = createCachedGetter(sql)
+
+    cached.get() // populates cache
+    cached.get() // should use cache
+    cached.get() // should use cache
+
+    expect(cached.sqlCallCount.value).toBe(1) // Only one SQL read
+  })
+
+  it('returns null and caches null when no connection is stored', () => {
+    const { sql } = createKvSql()
+    const cached = createCachedGetter(sql)
+
+    expect(cached.get()).toBeNull()
+    // null is falsy, so next call will re-query SQLite (by design — null means no connection)
+    expect(cached.get()).toBeNull()
+    expect(cached.sqlCallCount.value).toBe(2)
+  })
+
+  it('setCache bypasses SQLite entirely (simulates onConnect)', () => {
+    const { sql } = createKvSql()
+    const cached = createCachedGetter(sql)
+
+    cached.setCache('conn-from-onConnect')
+    expect(cached.get()).toBe('conn-from-onConnect')
+    expect(cached.sqlCallCount.value).toBe(0) // Never hit SQLite
+  })
+
+  it('clearCache forces next get to re-read from SQLite (simulates onClose)', () => {
+    const { sql, store } = createKvSql({ gateway_conn_id: 'conn-1' })
+    const cached = createCachedGetter(sql)
+
+    cached.get() // populate cache
+    expect(cached.sqlCallCount.value).toBe(1)
+
+    cached.clearCache() // simulates onClose
+
+    // Simulate SQLite DELETE that onClose does
+    store.delete('gateway_conn_id')
+
+    expect(cached.get()).toBeNull() // re-reads from SQLite
+    expect(cached.sqlCallCount.value).toBe(2)
+  })
+
+  it('setCache after clearCache picks up the new connection (simulates reconnect)', () => {
+    const { sql } = createKvSql({ gateway_conn_id: 'old-conn' })
+    const cached = createCachedGetter(sql)
+
+    cached.get() // cache old-conn
+    cached.clearCache() // onClose
+    cached.setCache('new-conn') // onConnect with new connection
+
+    expect(cached.get()).toBe('new-conn')
+    expect(cached.sqlCallCount.value).toBe(1) // Only the initial read
+  })
+
+  it('hibernation wake: onStart populates cache from SQLite', () => {
+    const { sql } = createKvSql({ gateway_conn_id: 'hibernated-conn' })
+    const cached = createCachedGetter(sql)
+
+    // Simulate onStart: populate cache from SQLite
+    const id = getGatewayConnectionId(sql)
+    cached.setCache(id)
+
+    // Subsequent reads use cache
+    expect(cached.get()).toBe('hibernated-conn')
+    expect(cached.sqlCallCount.value).toBe(0) // get() never hit SQL
   })
 })
 

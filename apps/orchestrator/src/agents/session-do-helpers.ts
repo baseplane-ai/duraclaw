@@ -37,10 +37,12 @@ export function loadTurnState(
 }
 
 /**
- * Validate a one-shot gateway token and consume it (delete from SQLite).
+ * Validate a gateway token against stored token and TTL.
  * Returns true if the token is valid and not expired, false otherwise.
+ * The token is NOT consumed on use — it remains valid until its TTL expires,
+ * allowing reconnects to reuse the same callback URL.
  */
-export function validateAndConsumeGatewayToken(sql: SqlFn, token: string | null): boolean {
+export function validateGatewayToken(sql: SqlFn, token: string | null): boolean {
   if (!token) return false
   try {
     const rows = [...sql<{ value: string }>`SELECT value FROM kv WHERE key = 'gateway_token'`]
@@ -56,8 +58,6 @@ export function validateAndConsumeGatewayToken(sql: SqlFn, token: string | null)
       return false
     }
 
-    // Consume the token (one-shot)
-    sql`DELETE FROM kv WHERE key IN ('gateway_token', 'gateway_token_expires')`
     return true
   } catch {
     return false

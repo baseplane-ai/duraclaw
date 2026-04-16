@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { SessionChannel } from './session-channel.js'
-import { fromServerWebSocket, fromWebSocket } from './session-channel.js'
+import { fromServerWebSocket, fromWebSocket, ReconnectableChannel } from './session-channel.js'
 
 describe('fromServerWebSocket', () => {
   function createMockServerWs() {
@@ -97,6 +97,78 @@ describe('fromWebSocket', () => {
     expect(ch.readyState).toBe(1)
     mock.readyState = 0
     expect(ch.readyState).toBe(0)
+  })
+})
+
+describe('ReconnectableChannel', () => {
+  function createMockWebSocket() {
+    return {
+      send: vi.fn(),
+      close: vi.fn(),
+      readyState: 1,
+    }
+  }
+
+  it('delegates send() to the underlying WebSocket', () => {
+    const mock = createMockWebSocket()
+    const ch = new ReconnectableChannel(mock as any)
+
+    ch.send('hello')
+
+    expect(mock.send).toHaveBeenCalledWith('hello')
+  })
+
+  it('delegates close() to the underlying WebSocket', () => {
+    const mock = createMockWebSocket()
+    const ch = new ReconnectableChannel(mock as any)
+
+    ch.close(1000, 'normal')
+
+    expect(mock.close).toHaveBeenCalledWith(1000, 'normal')
+  })
+
+  it('exposes readyState from the underlying WebSocket', () => {
+    const mock = createMockWebSocket()
+    const ch = new ReconnectableChannel(mock as any)
+
+    expect(ch.readyState).toBe(1)
+  })
+
+  it('replaceWebSocket swaps the underlying WS', () => {
+    const ws1 = createMockWebSocket()
+    const ws2 = createMockWebSocket()
+    const ch = new ReconnectableChannel(ws1 as any)
+
+    ch.send('to-ws1')
+    expect(ws1.send).toHaveBeenCalledWith('to-ws1')
+
+    ch.replaceWebSocket(ws2 as any)
+
+    ch.send('to-ws2')
+    expect(ws2.send).toHaveBeenCalledWith('to-ws2')
+    // ws1 should not receive the second message
+    expect(ws1.send).toHaveBeenCalledTimes(1)
+  })
+
+  it('readyState reflects the new WS after replace', () => {
+    const ws1 = createMockWebSocket()
+    ws1.readyState = 3 // CLOSED
+    const ws2 = createMockWebSocket()
+    ws2.readyState = 1 // OPEN
+
+    const ch = new ReconnectableChannel(ws1 as any)
+    expect(ch.readyState).toBe(3)
+
+    ch.replaceWebSocket(ws2 as any)
+    expect(ch.readyState).toBe(1)
+  })
+
+  it('satisfies the SessionChannel interface', () => {
+    const mock = createMockWebSocket()
+    const ch: SessionChannel = new ReconnectableChannel(mock as any)
+
+    ch.send('msg')
+    expect(mock.send).toHaveBeenCalledWith('msg')
   })
 })
 

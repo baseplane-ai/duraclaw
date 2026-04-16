@@ -40,3 +40,32 @@ export function fromWebSocket(ws: WebSocket): SessionChannel {
     },
   }
 }
+
+/**
+ * A SessionChannel that supports swapping the underlying WebSocket.
+ * Used for dial-back connections where reconnects replace the WS.
+ */
+export class ReconnectableChannel implements SessionChannel {
+  private ws: WebSocket
+
+  constructor(ws: WebSocket) {
+    this.ws = ws
+  }
+
+  send(data: string): void {
+    this.ws.send(data)
+  }
+
+  close(code?: number, reason?: string): void {
+    this.ws.close(code, reason)
+  }
+
+  get readyState(): number {
+    return this.ws.readyState
+  }
+
+  /** Swap the underlying WebSocket (e.g., after reconnect). */
+  replaceWebSocket(ws: WebSocket): void {
+    this.ws = ws
+  }
+}

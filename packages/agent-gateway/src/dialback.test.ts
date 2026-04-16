@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { dialbackSessions, handleDialbackMessage } from './dialback.js'
-import type { SessionChannel } from './session-channel.js'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { AgentAdapter } from './adapters/types.js'
+import { dialbackSessions, dialOutboundWs, handleDialbackMessage } from './dialback.js'
+import { ReconnectableChannel, type SessionChannel } from './session-channel.js'
 import type { GatewaySessionContext } from './types.js'
 
 /** Create a mock SessionChannel that captures sent messages */
@@ -358,5 +359,325 @@ describe('dialbackSessions map', () => {
 
     expect(dialbackSessions.has('test-id')).toBe(true)
     expect(dialbackSessions.get('test-id')?.ctx).toBe(ctx)
+  })
+})
+
+// ── dialOutboundWs tests ──────────────────────────────────────
+
+/**
+ * Controllable mock WebSocket for testing dialOutboundWs.
+ * Allows tests to fire open/close/message/error events on demand.
+ */
+class MockWebSocket {
+  static instances: MockWebSocket[] = []
+  private listeners = new Map<string, Function[]>()
+  readyState = 0 // CONNECTING
+
+  constructor(public url: string) {
+    MockWebSocket.instances.push(this)
+  }
+
+  addEventListener(event: string, handler: Function) {
+    const list = this.listeners.get(event) ?? []
+    list.push(handler)
+    this.listeners.set(event, list)
+  }
+
+  send = vi.fn()
+  close = vi.fn()
+
+  /** Fire an event on this mock WS */
+  emit(event: string, data?: any) {
+    const handlers = this.listeners.get(event) ?? []
+    for (const h of handlers) {
+      h(data ?? {})
+    }
+  }
+
+  /** Simulate the WS opening */
+  simulateOpen() {
+    this.readyState = 1
+    this.emit('open')
+  }
+
+  /** Simulate the WS closing */
+  simulateClose() {
+    this.readyState = 3
+    this.emit('close')
+  }
+
+  /** Simulate a message from the DO */
+  simulateMessage(msg: object) {
+    this.emit('message', { data: JSON.stringify(msg) })
+  }
+}
+
+/** Create a mock adapter that tracks execute/resume calls */
+function createMockAdapter(overrides?: Partial<AgentAdapter>): AgentAdapter {
+  return {
+    name: 'test',
+    execute: vi.fn().mockReturnValue(new Promise(() => {})), // never resolves (long-running)
+    resume: vi.fn().mockReturnValue(new Promise(() => {})),
+    abort: vi.fn(),
+    getCapabilities: vi.fn().mockResolvedValue({
+      agent: 'test',
+      available: true,
+      supportedCommands: [],
+      description: 'test adapter',
+    }),
+    ...overrides,
+  }
+}
+
+describe('dialOutboundWs', () => {
+  let originalWebSocket: typeof globalThis.WebSocket
+
+  beforeEach(() => {
+    MockWebSocket.instances = []
+    originalWebSocket = globalThis.WebSocket
+    globalThis.WebSocket = MockWebSocket as any
+  })
+
+  afterEach(() => {
+    globalThis.WebSocket = originalWebSocket
+    dialbackSessions.clear()
+    vi.restoreAllMocks()
+  })
+
+  it('creates a ReconnectableChannel and calls adapter.execute on first connection', () => {
+    const ctx = createMockCtx()
+    const adapter = createMockAdapter()
+    const cmd = { type: 'execute' as const, project: 'test', prompt: 'hello' }
+
+    dialOutboundWs('wss://example.com/ws', cmd as any, ctx, adapter, 'sess-1')
+
+    expect(MockWebSocket.instances).toHaveLength(1)
+    const ws = MockWebSocket.instances[0]
+
+    // Simulate connection open
+    ws.simulateOpen()
+
+    // Should have registered in dialbackSessions
+    expect(dialbackSessions.has('sess-1')).toBe(true)
+    const entry = dialbackSessions.get('sess-1')!
+    expect(entry.channel).toBeInstanceOf(ReconnectableChannel)
+
+    // Should have called adapter.execute (not resume)
+    expect(adapter.execute).toHaveBeenCalledTimes(1)
+    expect(adapter.resume).not.toHaveBeenCalled()
+
+    // The channel passed to adapter.execute should be the ReconnectableChannel
+    const passedChannel = (adapter.execute as any).mock.calls[0][0]
+    expect(passedChannel).toBe(entry.channel)
+  })
+
+  it('calls adapter.resume when cmd.type is resume', () => {
+    const ctx = createMockCtx()
+    const adapter = createMockAdapter()
+    const cmd = {
+      type: 'resume' as const,
+      project: 'test',
+      prompt: 'continue',
+      sdk_session_id: 'sdk-1',
+    }
+
+    dialOutboundWs('wss://example.com/ws', cmd as any, ctx, adapter, 'sess-1')
+    MockWebSocket.instances[0].simulateOpen()
+
+    expect(adapter.resume).toHaveBeenCalledTimes(1)
+    expect(adapter.execute).not.toHaveBeenCalled()
+  })
+
+  it('does NOT re-execute adapter on reconnect (attempt > 0)', () => {
+    const ctx = createMockCtx()
+    const adapter = createMockAdapter()
+    const cmd = { type: 'execute' as const, project: 'test', prompt: 'hello' }
+    const existingChannel = new ReconnectableChannel({
+      send: vi.fn(),
+      close: vi.fn(),
+      readyState: 3,
+    } as any)
+
+    // Simulate reconnect (attempt=1 with existingChannel)
+    dialOutboundWs('wss://example.com/ws', cmd as any, ctx, adapter, 'sess-1', 1, existingChannel)
+    MockWebSocket.instances[0].simulateOpen()
+
+    // Adapter should NOT be called again
+    expect(adapter.execute).not.toHaveBeenCalled()
+    expect(adapter.resume).not.toHaveBeenCalled()
+
+    // Session should be re-registered in dialbackSessions
+    expect(dialbackSessions.has('sess-1')).toBe(true)
+    // The channel should be the same existingChannel (not a new one)
+    expect(dialbackSessions.get('sess-1')!.channel).toBe(existingChannel)
+  })
+
+  it('calls replaceWebSocket on reconnect to swap the underlying WS', () => {
+    const mockWs = { send: vi.fn(), close: vi.fn(), readyState: 3 } as any
+    const existingChannel = new ReconnectableChannel(mockWs)
+    const replaceSpy = vi.spyOn(existingChannel, 'replaceWebSocket')
+
+    const ctx = createMockCtx()
+    const adapter = createMockAdapter()
+    const cmd = { type: 'execute' as const, project: 'test', prompt: 'hello' }
+
+    dialOutboundWs('wss://example.com/ws', cmd as any, ctx, adapter, 'sess-1', 1, existingChannel)
+
+    const newWs = MockWebSocket.instances[0]
+    newWs.simulateOpen()
+
+    expect(replaceSpy).toHaveBeenCalledTimes(1)
+    expect(replaceSpy).toHaveBeenCalledWith(newWs)
+  })
+
+  it('schedules reconnect on close when session is active and not aborted', () => {
+    vi.useFakeTimers()
+
+    const ctx = createMockCtx()
+    const adapter = createMockAdapter()
+    const cmd = { type: 'execute' as const, project: 'test', prompt: 'hello' }
+
+    dialOutboundWs('wss://example.com/ws', cmd as any, ctx, adapter, 'sess-1')
+    const ws1 = MockWebSocket.instances[0]
+    ws1.simulateOpen()
+
+    // Simulate WS drop
+    ws1.simulateClose()
+
+    // Should schedule a reconnect (1s for attempt 0)
+    expect(MockWebSocket.instances).toHaveLength(1) // not yet
+
+    vi.advanceTimersByTime(1000)
+
+    // A new WebSocket should have been created for reconnect
+    expect(MockWebSocket.instances).toHaveLength(2)
+    const ws2 = MockWebSocket.instances[1]
+    expect(ws2.url).toBe('wss://example.com/ws')
+
+    vi.useRealTimers()
+  })
+
+  it('passes existingChannel through reconnect attempts so adapter is never re-executed', () => {
+    vi.useFakeTimers()
+
+    const ctx = createMockCtx()
+    const adapter = createMockAdapter()
+    const cmd = { type: 'execute' as const, project: 'test', prompt: 'hello' }
+
+    // First connection
+    dialOutboundWs('wss://example.com/ws', cmd as any, ctx, adapter, 'sess-1')
+    const ws1 = MockWebSocket.instances[0]
+    ws1.simulateOpen()
+
+    expect(adapter.execute).toHaveBeenCalledTimes(1)
+
+    // Drop and reconnect
+    ws1.simulateClose()
+    vi.advanceTimersByTime(1000)
+
+    const ws2 = MockWebSocket.instances[1]
+    ws2.simulateOpen()
+
+    // adapter.execute should still only have been called once (from the first connection)
+    expect(adapter.execute).toHaveBeenCalledTimes(1)
+
+    // The channel in dialbackSessions should be a ReconnectableChannel
+    const entry = dialbackSessions.get('sess-1')
+    expect(entry).toBeDefined()
+    expect(entry!.channel).toBeInstanceOf(ReconnectableChannel)
+
+    vi.useRealTimers()
+  })
+
+  it('aborts session after max retries exhausted', () => {
+    vi.useFakeTimers()
+
+    const ctx = createMockCtx()
+    const adapter = createMockAdapter()
+    const cmd = { type: 'execute' as const, project: 'test', prompt: 'hello' }
+
+    dialOutboundWs('wss://example.com/ws', cmd as any, ctx, adapter, 'sess-1')
+    MockWebSocket.instances[0].simulateOpen()
+
+    // Drop and reconnect 3 times (max retries = 3)
+    for (let i = 0; i < 3; i++) {
+      MockWebSocket.instances[MockWebSocket.instances.length - 1].simulateClose()
+      vi.advanceTimersByTime(3 ** i * 1000)
+      MockWebSocket.instances[MockWebSocket.instances.length - 1].simulateOpen()
+    }
+
+    // Now the 4th close should trigger abort (attempt 3 >= maxRetries 3)
+    MockWebSocket.instances[MockWebSocket.instances.length - 1].simulateClose()
+    vi.advanceTimersByTime(30_000) // plenty of time
+
+    expect(ctx.abortController.signal.aborted).toBe(true)
+    expect(dialbackSessions.has('sess-1')).toBe(false)
+
+    vi.useRealTimers()
+  })
+
+  it('does not reconnect when abortController is already aborted', () => {
+    vi.useFakeTimers()
+
+    const ctx = createMockCtx()
+    const adapter = createMockAdapter()
+    const cmd = { type: 'execute' as const, project: 'test', prompt: 'hello' }
+
+    dialOutboundWs('wss://example.com/ws', cmd as any, ctx, adapter, 'sess-1')
+    MockWebSocket.instances[0].simulateOpen()
+
+    // Abort the session, then close WS
+    ctx.abortController.abort()
+    MockWebSocket.instances[0].simulateClose()
+
+    vi.advanceTimersByTime(10_000)
+
+    // No reconnect should have happened
+    expect(MockWebSocket.instances).toHaveLength(1)
+
+    vi.useRealTimers()
+  })
+
+  it('routes messages through the channel from dialbackSessions', () => {
+    const ctx = createMockCtx({
+      pendingAnswer: { resolve: vi.fn(), reject: vi.fn() },
+    })
+    const adapter = createMockAdapter()
+    const cmd = { type: 'execute' as const, project: 'test', prompt: 'hello' }
+
+    dialOutboundWs('wss://example.com/ws', cmd as any, ctx, adapter, 'sess-1')
+    MockWebSocket.instances[0].simulateOpen()
+
+    // Simulate a message from DO
+    MockWebSocket.instances[0].simulateMessage({ type: 'answer', answers: { q1: 'yes' } })
+
+    // Should have resolved the pending answer
+    expect(ctx.pendingAnswer).toBeNull()
+  })
+
+  it('cleans up dialbackSessions when adapter promise resolves', async () => {
+    let resolveSession!: () => void
+    const sessionPromise = new Promise<void>((r) => {
+      resolveSession = r
+    })
+    const adapter = createMockAdapter({
+      execute: vi.fn().mockReturnValue(sessionPromise),
+    })
+
+    const ctx = createMockCtx()
+    const cmd = { type: 'execute' as const, project: 'test', prompt: 'hello' }
+
+    dialOutboundWs('wss://example.com/ws', cmd as any, ctx, adapter, 'sess-1')
+    MockWebSocket.instances[0].simulateOpen()
+
+    expect(dialbackSessions.has('sess-1')).toBe(true)
+
+    // Resolve the adapter session
+    resolveSession()
+    await sessionPromise
+    // Let .finally() run
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(dialbackSessions.has('sess-1')).toBe(false)
   })
 })

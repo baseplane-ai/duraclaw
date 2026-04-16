@@ -27,7 +27,7 @@ import {
   buildGatewayStartUrl,
   getGatewayConnectionId,
   loadTurnState,
-  validateAndConsumeGatewayToken,
+  validateGatewayToken,
 } from './session-do-helpers'
 import { SESSION_DO_MIGRATIONS } from './session-do-migrations'
 
@@ -77,6 +77,8 @@ export class SessionDO extends Agent<Env, SessionState> {
   private session!: Session
   private turnCounter = 0
   private currentTurnMessageId: string | null = null
+  /** Cached gateway connection ID — avoids SQLite reads on every message. */
+  private cachedGatewayConnId: string | null = null
   /** Timestamp of the last gateway event received on the WS connection. */
   private lastGatewayActivity = 0
 
@@ -94,6 +96,9 @@ export class SessionDO extends Agent<Env, SessionState> {
     const turnState = loadTurnState(this.sql.bind(this), pathLength)
     this.turnCounter = turnState.turnCounter
     this.currentTurnMessageId = turnState.currentTurnMessageId
+
+    // Populate gateway connection ID cache (in case we're waking from hibernation)
+    this.cachedGatewayConnId = getGatewayConnectionId(this.sql.bind(this))
   }
 
   /**
@@ -142,9 +147,9 @@ export class SessionDO extends Agent<Env, SessionState> {
     const role = url.searchParams.get('role')
 
     if (role === 'gateway') {
-      // Gateway connection: validate one-shot token
+      // Gateway connection: validate token
       const token = ctx.request.headers.get('x-gateway-token')
-      if (!this.validateAndConsumeGatewayToken(token)) {
+      if (!this.validateGatewayToken(token)) {
         connection.close(4001, 'Invalid or expired gateway token')
         return
       }
@@ -152,6 +157,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       // Persist gateway connection ID in SQLite (survives hibernation)
       // Do NOT use connection.setState — it conflicts with Agent SDK internals
       this.sql`INSERT OR REPLACE INTO kv (key, value) VALUES ('gateway_conn_id', ${connection.id})`
+      this.cachedGatewayConnId = connection.id
       this.lastGatewayActivity = Date.now()
       console.log(`[SessionDO:${this.ctx.id}] Gateway connected: conn=${connection.id}`)
       return // No replay, no protocol messages
@@ -182,9 +188,9 @@ export class SessionDO extends Agent<Env, SessionState> {
     }
   }
 
-  /** Validate a one-shot gateway token and consume it (delete from SQLite). */
-  private validateAndConsumeGatewayToken(token: string | null): boolean {
-    return validateAndConsumeGatewayToken(this.sql.bind(this), token)
+  /** Validate a gateway token against stored token and TTL. */
+  private validateGatewayToken(token: string | null): boolean {
+    return validateGatewayToken(this.sql.bind(this), token)
   }
 
   /** Suppress Agent SDK protocol messages (identity, state, MCP) for gateway connections. */
@@ -218,6 +224,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     if (gwConnId && connection.id === gwConnId) {
       console.log(`[SessionDO:${this.ctx.id}] Gateway WS closed: code=${code} reason=${reason}`)
       // Clear the persisted gateway connection ID
+      this.cachedGatewayConnId = null
       try {
         this.sql`DELETE FROM kv WHERE key = 'gateway_conn_id'`
       } catch {
@@ -229,6 +236,8 @@ export class SessionDO extends Agent<Env, SessionState> {
         this.recoverFromDroppedConnection()
       }
     }
+
+    super.onClose(connection, code, reason, _wasClean)
   }
 
   // ── Gateway Connection ─────────────────────────────────────────
@@ -664,9 +673,13 @@ export class SessionDO extends Agent<Env, SessionState> {
     )
   }
 
-  /** Read the persisted gateway connection ID from SQLite. */
+  /** Read the gateway connection ID, using in-memory cache when available. */
   private getGatewayConnectionId(): string | null {
-    return getGatewayConnectionId(this.sql.bind(this))
+    if (this.cachedGatewayConnId) return this.cachedGatewayConnId
+    // Fallback to SQLite (e.g. after hibernation wake)
+    const id = getGatewayConnectionId(this.sql.bind(this))
+    this.cachedGatewayConnId = id
+    return id
   }
 
   private async dispatchPush(payload: PushPayload, eventType: 'blocked' | 'completed' | 'error') {
