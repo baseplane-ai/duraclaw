@@ -25,32 +25,18 @@ class_name = "SessionDO"
 name = "SESSION_REGISTRY"
 class_name = "ProjectRegistry"
 
-# DO migrations
+# DO migrations — collapsed for fresh deploy on baseplane-ai account.
+# The old worker (on the codevibesmatter account) held the prior v1..v5 chain;
+# here we start at the final SQLite-backed shape.
 [[migrations]]
 tag = "v1"
-new_classes = ["SessionAgent", "SessionRegistry"]
-
-[[migrations]]
-tag = "v2"
-renamed_classes = [{from = "SessionAgent", to = "SessionDO"}, {from = "SessionRegistry", to = "WorktreeRegistry"}]
-
-[[migrations]]
-tag = "v3"
-deleted_classes = ["SessionDO", "WorktreeRegistry"]
-
-[[migrations]]
-tag = "v4"
 new_sqlite_classes = ["SessionDO", "ProjectRegistry"]
-
-[[migrations]]
-tag = "v5"
-deleted_classes = []
 
 # D1 database for auth
 [[d1_databases]]
 binding = "AUTH_DB"
 database_name = "duraclaw-auth"
-database_id = "7f7a3c5e-0609-4527-904e-740ca140538d"
+database_id = "c5b4d822-9bc6-467f-9ad6-7ee779b82e0c"
 
 [vars]
 VAPID_SUBJECT = "mailto:push@codevibesmatter.com"
