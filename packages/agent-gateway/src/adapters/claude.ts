@@ -352,9 +352,13 @@ export class ClaudeAdapter implements AgentAdapter {
         ],
       }
 
-      /** Process all messages from a single SDK query() call. */
-      async function processQueryMessages(iter: any) {
+      /**
+       * Process all messages from a single SDK query() call.
+       * Returns true if the turn was an idle stop that should be auto-nudged.
+       */
+      async function processQueryMessages(iter: any): Promise<boolean> {
         ctx.query = iter
+        let idleStop = false
 
         for await (const message of iter) {
           console.log(`[agent-gateway] executeSession: message type=${message.type}`)
@@ -471,11 +475,12 @@ export class ClaudeAdapter implements AgentAdapter {
           } else if (message.type === 'result') {
             const result = message as any
 
-            // Suppress idle stops — the SDK hit the interactive stop sequence
-            // with "No response requested." Don't forward to orchestrator; keep
-            // the session alive so the user can send follow-up messages.
+            // Idle stop — the model hit the interactive stop sequence with
+            // "No response requested." Don't forward to orchestrator; the
+            // outer loop will auto-nudge with "continue" to keep working.
             if (isIdleStop(result)) {
-              console.log(`[agent-gateway] executeSession: idle stop suppressed`)
+              idleStop = true
+              console.log(`[agent-gateway] executeSession: idle stop detected`)
               continue
             }
 
@@ -506,6 +511,7 @@ export class ClaudeAdapter implements AgentAdapter {
             })
           }
         }
+        return idleStop
       }
 
       // --- Initial turn ---
@@ -523,22 +529,38 @@ export class ClaudeAdapter implements AgentAdapter {
         prompt: initialPrompt(),
         options: options as any,
       })
-      await processQueryMessages(iter)
+      let wasIdleStop = await processQueryMessages(iter)
 
-      // --- Multi-turn loop: wait for follow-up messages and resume ---
-      // After each turn's result, keep the session alive by waiting for the next
-      // stream-input message. When one arrives, start a new query() with resume.
+      // --- Multi-turn loop ---
+      // After each turn, either auto-nudge idle stops or wait for user input.
       //
-      // If the SDK idle-stopped ("No response requested."), the result was
-      // suppressed (not forwarded to orchestrator) so the session stays "running".
-      // The loop just goes back to waiting for the next user message.
+      // Idle stops ("No response requested."): the model hit the SDK's
+      // interactive stop sequence mid-workflow.  The result is suppressed
+      // (not forwarded) and we immediately resume with "continue" so the
+      // session keeps running.  No cap — the stop hooks and task system
+      // will end the session naturally when work is done.
+      //
+      // Normal results: forwarded to orchestrator, then wait for the next
+      // user message (stream-input) before resuming.
       while (!ac.signal.aborted && sdkSessionId) {
-        const nextMsg = await queue.waitForNext()
-        if (!nextMsg) break // queue.done() was called — session is closing
+        let nextContent: string | ContentBlock[]
 
-        const msg = nextMsg // capture for generator closure
+        if (wasIdleStop) {
+          console.log(`[agent-gateway] executeSession: auto-nudging after idle stop`)
+          nextContent = 'continue'
+        } else {
+          const nextMsg = await queue.waitForNext()
+          if (!nextMsg) break // queue.done() was called — session is closing
+          nextContent = nextMsg.message.content
+        }
+
+        const content = nextContent
         async function* followUpPrompt(): AsyncGenerator<SDKUserMsg> {
-          yield msg
+          yield {
+            type: 'user',
+            message: { role: 'user', content },
+            parent_tool_use_id: null,
+          }
         }
 
         console.log(`[agent-gateway] executeSession: resuming for follow-up turn`)
@@ -547,7 +569,7 @@ export class ClaudeAdapter implements AgentAdapter {
           prompt: followUpPrompt(),
           options: resumeOpts as any,
         })
-        await processQueryMessages(resumeIter)
+        wasIdleStop = await processQueryMessages(resumeIter)
       }
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : String(err)
