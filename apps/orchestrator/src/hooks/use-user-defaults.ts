@@ -6,7 +6,7 @@ const DEFAULTS: UserPreferences = {
   model: 'claude-opus-4-7',
   max_budget: null,
   thinking_mode: 'adaptive',
-  effort: 'high',
+  effort: 'xhigh',
 }
 
 export function useUserDefaults() {
