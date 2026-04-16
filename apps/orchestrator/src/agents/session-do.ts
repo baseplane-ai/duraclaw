@@ -1597,6 +1597,10 @@ export class SessionDO extends Agent<Env, SessionState> {
         break
       }
 
+      // Heartbeat from gateway — just keeps the connection alive, no broadcast needed
+      case 'heartbeat':
+        break
+
       // Events that don't produce message parts — just broadcast raw
       default: {
         // context_usage, rewind_result, session_state_changed, rate_limit,

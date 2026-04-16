@@ -11,6 +11,9 @@ import { resolveProject } from '../projects.js'
 import type { GatewaySessionContext, WsData } from '../types.js'
 import type { AdapterCapabilities, AgentAdapter } from './types.js'
 
+/** How often to send a heartbeat on the WS to prevent idle timeout (ms). */
+const HEARTBEAT_INTERVAL_MS = 15_000
+
 /** Send a GatewayEvent to the WebSocket client. */
 function send(ws: ServerWebSocket<WsData>, event: GatewayEvent): void {
   try {
@@ -18,6 +21,23 @@ function send(ws: ServerWebSocket<WsData>, event: GatewayEvent): void {
   } catch {
     // WS already closed -- swallow
   }
+}
+
+/**
+ * Start a heartbeat that sends periodic pings on the WS.
+ * This keeps the connection alive while the SDK is blocked executing tools
+ * (the for-await loop pauses, so no messages flow during tool execution).
+ * Returns a stop function.
+ */
+function startHeartbeat(ws: ServerWebSocket<WsData>, sessionId: string): () => void {
+  const timer = setInterval(() => {
+    try {
+      ws.send(JSON.stringify({ type: 'heartbeat', session_id: sessionId }))
+    } catch {
+      // WS closed
+    }
+  }, HEARTBEAT_INTERVAL_MS)
+  return () => clearInterval(timer)
 }
 
 /** Shape expected by the Claude Agent SDK for streaming user messages. */
@@ -271,6 +291,7 @@ export class ClaudeAdapter implements AgentAdapter {
     ctx.messageQueue = queue
 
     let sdkSessionId: string | null = null
+    const stopHeartbeat = startHeartbeat(ws, sessionId)
 
     try {
       // Dynamic import -- the SDK is ESM-only
@@ -541,6 +562,7 @@ export class ClaudeAdapter implements AgentAdapter {
         send(ws, { type: 'error', session_id: sessionId, error: errMsg })
       }
     } finally {
+      stopHeartbeat()
       // Clean up the message queue and query reference
       queue.done()
       ctx.messageQueue = null

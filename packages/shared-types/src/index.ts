@@ -156,6 +156,12 @@ export type GatewayEvent =
   | TaskStartedEvent
   | TaskProgressEvent
   | TaskNotificationEvent
+  | HeartbeatEvent
+
+export interface HeartbeatEvent {
+  type: 'heartbeat'
+  session_id: string
+}
 
 export interface StoppedEvent {
   type: 'stopped'
