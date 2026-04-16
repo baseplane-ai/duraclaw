@@ -114,7 +114,8 @@ describe('applyToolResult', () => {
     }
     const result = applyToolResult(existing, event)
     expect(result[0].state).toBe('output-error')
-    expect(result[0].output).toBeUndefined()
+    // We preserve the output string so the UI can show the error message.
+    expect(result[0].output).toBe('command failed')
   })
 
   it('does not modify parts without matching toolCallId', () => {

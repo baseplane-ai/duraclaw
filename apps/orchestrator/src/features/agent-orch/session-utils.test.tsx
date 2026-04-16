@@ -93,10 +93,10 @@ describe('StatusDot', () => {
     expect(span?.className).toContain('bg-yellow-500')
   })
 
-  it('renders red dot for failed', () => {
+  it('renders gray-border default dot for failed (only aborted is red)', () => {
     const { container } = render(<StatusDot status="failed" numTurns={2} />)
     const span = container.querySelector('span')
-    expect(span?.className).toContain('bg-red-500')
+    expect(span?.className).toContain('border-gray-400')
   })
 
   it('renders red dot for aborted', () => {

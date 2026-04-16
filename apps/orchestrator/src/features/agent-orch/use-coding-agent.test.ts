@@ -511,7 +511,7 @@ describe('sendMessage (SessionMessage format)', () => {
     expect(result.current.messages).toHaveLength(0)
   })
 
-  test('serializes ContentBlock[] content as JSON text', () => {
+  test('converts ContentBlock[] content to structured SessionMessageParts', () => {
     const { result } = renderHook(() => useCodingAgent('test-session'))
 
     mockCall.mockResolvedValueOnce({ ok: true })
@@ -521,7 +521,7 @@ describe('sendMessage (SessionMessage format)', () => {
       result.current.sendMessage(blocks)
     })
 
-    expect(result.current.messages[0].parts[0].text).toBe(JSON.stringify(blocks))
+    expect(result.current.messages[0].parts).toEqual([{ type: 'text', text: 'hello' }])
   })
 })
 

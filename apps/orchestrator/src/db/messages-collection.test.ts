@@ -88,7 +88,7 @@ describe('messages-collection', () => {
 
     expect(mockPersistedCollectionOptions).toHaveBeenCalledWith(
       expect.objectContaining({
-        schemaVersion: 1,
+        schemaVersion: 2,
         persistence: expect.objectContaining({ adapter: {} }),
       }),
     )
@@ -131,12 +131,12 @@ describe('evictOldMessages', () => {
     const twoDaysAgo = new Date()
     twoDaysAgo.setDate(twoDaysAgo.getDate() - 2)
 
-    const entries: [string, { id: string; created_at: string; sessionId: string }][] = [
+    const entries: [string, { id: string; createdAt: string; sessionId: string }][] = [
       [
         'old-1',
         {
           id: 'old-1',
-          created_at: thirtyOneDaysAgo.toISOString(),
+          createdAt: thirtyOneDaysAgo.toISOString(),
           sessionId: 's1',
         },
       ],
@@ -144,7 +144,7 @@ describe('evictOldMessages', () => {
         'recent-1',
         {
           id: 'recent-1',
-          created_at: twoDaysAgo.toISOString(),
+          createdAt: twoDaysAgo.toISOString(),
           sessionId: 's1',
         },
       ],

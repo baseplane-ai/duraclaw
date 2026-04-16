@@ -79,13 +79,18 @@ async function resolveProjectPath(
 async function getOwnedSession(
   env: ApiAppEnv['Bindings'],
   sessionId: string,
-  _userId: string,
+  userId: string,
 ): Promise<{ ok: true; session: RegistrySession } | { ok: false; status: 403 | 404 }> {
   const registry = getRegistry({ env })
   const session = (await registry.getSession(sessionId)) as RegistrySession | null
 
   if (!session) {
     return { ok: false, status: 404 }
+  }
+
+  // Ownership check: reject requests for sessions that don't belong to the caller.
+  if (session.userId && session.userId !== userId) {
+    return { ok: false, status: 403 }
   }
 
   return { ok: true, session }

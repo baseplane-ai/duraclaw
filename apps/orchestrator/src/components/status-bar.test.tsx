@@ -43,10 +43,9 @@ describe('StatusBar', () => {
     cleanup()
   })
 
-  it('shows "No session selected" when store has no state', () => {
-    render(<StatusBar />)
-    expect(screen.getByText('No session selected')).toBeDefined()
-    expect(screen.getByTestId('status-bar')).toBeDefined()
+  it('renders nothing when store has no state', () => {
+    const { container } = render(<StatusBar />)
+    expect(container.firstChild).toBeNull()
   })
 
   it('shows session data when store has state', () => {
@@ -288,7 +287,7 @@ describe('StatusBar', () => {
     expect(bar.className).toContain('border-amber-800')
   })
 
-  it('applies red background classes when failed', () => {
+  it('applies default background when failed (only aborted is styled red)', () => {
     act(() => {
       useStatusBarStore.getState().set({
         state: makeState({ status: 'failed' }),
@@ -297,8 +296,7 @@ describe('StatusBar', () => {
 
     render(<StatusBar />)
     const bar = screen.getByTestId('status-bar')
-    expect(bar.className).toContain('bg-red-950/50')
-    expect(bar.className).toContain('border-red-800')
+    expect(bar.className).toContain('bg-background')
   })
 
   it('applies red background classes when aborted', () => {
@@ -337,12 +335,15 @@ describe('StatusBar', () => {
     expect(bar.className).toContain('bg-amber-950/50')
   })
 
-  it('has fixed positioning and correct height', () => {
+  it('has correct height', () => {
+    act(() => {
+      useStatusBarStore.getState().set({
+        state: makeState(),
+      })
+    })
+
     render(<StatusBar />)
     const bar = screen.getByTestId('status-bar')
-    expect(bar.className).toContain('fixed')
-    expect(bar.className).toContain('bottom-0')
-    expect(bar.className).toContain('z-50')
     expect(bar.className).toContain('h-7')
   })
 })

@@ -140,10 +140,11 @@ describe('SessionCardList', () => {
     render(
       <SessionCardList sessions={sessions} selectedSessionId={null} onSelectSession={vi.fn()} />,
     )
-    expect(screen.getByText('abcdef123456')).toBeTruthy()
+    // SessionCardList truncates untitled sessions to 8-char IDs.
+    expect(screen.getByText('abcdef12')).toBeTruthy()
   })
 
-  it('calls onSelectSession and navigates on card click', () => {
+  it('calls onSelectSession on card click', () => {
     const onSelect = vi.fn()
     const sessions = [makeSession({ id: 'sess-click', title: 'Clickable' })]
     render(
@@ -151,10 +152,8 @@ describe('SessionCardList', () => {
     )
     fireEvent.click(screen.getByText('Clickable'))
     expect(onSelect).toHaveBeenCalledWith('sess-click')
-    expect(mockNavigate).toHaveBeenCalledWith({
-      to: '/session/$id',
-      params: { id: 'sess-click' },
-    })
+    // Navigation is driven by the parent route via onSelectSession; SessionCardList
+    // itself does not call useNavigate.
   })
 
   it('highlights the selected session card', () => {

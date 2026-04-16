@@ -69,8 +69,8 @@ describe('PWA shell foundation', () => {
       expect(configSource).toContain("filename: 'sw.ts'")
     })
 
-    it('uses prompt registerType', () => {
-      expect(configSource).toContain("registerType: 'prompt'")
+    it('uses autoUpdate registerType', () => {
+      expect(configSource).toContain("registerType: 'autoUpdate'")
     })
 
     it('configures standalone display mode', () => {

@@ -39,7 +39,7 @@ function makeMessage(overrides: Record<string, unknown> = {}) {
     type: 'text',
     content: '{"text":"hello"}',
     event_uuid: 'uuid-1',
-    created_at: '2026-01-01T00:00:00Z',
+    createdAt: '2026-01-01T00:00:00Z',
     ...overrides,
   }
 }
@@ -83,22 +83,22 @@ describe('useMessagesCollection', () => {
     expect(result.current.messages.map((m) => m.id)).toEqual(['m1', 'm3'])
   })
 
-  it('sorts messages by created_at ascending', () => {
+  it('sorts messages by createdAt ascending', () => {
     mockLiveQueryData = [
       makeMessage({
         id: 'late',
         sessionId: 'session-abc',
-        created_at: '2026-01-03T00:00:00Z',
+        createdAt: '2026-01-03T00:00:00Z',
       }),
       makeMessage({
         id: 'early',
         sessionId: 'session-abc',
-        created_at: '2026-01-01T00:00:00Z',
+        createdAt: '2026-01-01T00:00:00Z',
       }),
       makeMessage({
         id: 'mid',
         sessionId: 'session-abc',
-        created_at: '2026-01-02T00:00:00Z',
+        createdAt: '2026-01-02T00:00:00Z',
       }),
     ]
 
@@ -114,15 +114,15 @@ describe('useMessagesCollection', () => {
     expect(result.current.messages).toEqual([])
   })
 
-  it('maintains sort stability for messages without created_at', () => {
+  it('maintains sort stability for messages without createdAt', () => {
     mockLiveQueryData = [
-      makeMessage({ id: 'm1', sessionId: 'session-abc', created_at: undefined }),
-      makeMessage({ id: 'm2', sessionId: 'session-abc', created_at: undefined }),
+      makeMessage({ id: 'm1', sessionId: 'session-abc', createdAt: undefined }),
+      makeMessage({ id: 'm2', sessionId: 'session-abc', createdAt: undefined }),
     ]
 
     const { result } = renderHook(() => useMessagesCollection('session-abc'))
 
-    // Should preserve order when no created_at
+    // Should preserve order when no createdAt
     expect(result.current.messages).toHaveLength(2)
   })
 

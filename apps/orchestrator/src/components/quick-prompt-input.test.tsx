@@ -41,7 +41,7 @@ describe('QuickPromptInput', () => {
     expect(screen.getByLabelText('Attach image')).toBeDefined()
   })
 
-  it('pressing Enter on the composer submits text prompt', () => {
+  it('pressing Enter on the composer submits text prompt', async () => {
     const onSubmit = vi.fn()
     render(<QuickPromptInput onSubmit={onSubmit} projects={mockProjects} />)
 
@@ -49,7 +49,17 @@ describe('QuickPromptInput', () => {
       'Describe the task, paste or attach an image...',
     ) as HTMLTextAreaElement
     fireEvent.change(textarea, { target: { value: 'Fix the bug' } })
-    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false })
+    // PromptInputTextarea turns Enter into form.requestSubmit(); drive the
+    // same path via the visible submit button. PromptInput.handleSubmit is
+    // async (awaits blob-url conversion) so we wait a microtask before
+    // asserting.
+    const submitButton = textarea.form?.querySelector(
+      'button[type="submit"]',
+    ) as HTMLButtonElement | null
+    if (!submitButton) throw new Error('submit button not found')
+    fireEvent.click(submitButton)
+    await Promise.resolve()
+    await Promise.resolve()
 
     expect(onSubmit).toHaveBeenCalledTimes(1)
     const call = onSubmit.mock.calls[0][0]

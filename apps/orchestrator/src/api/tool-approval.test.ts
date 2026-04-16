@@ -52,6 +52,7 @@ function createMockEnv(
     SESSION_AGENT: {
       newUniqueId: vi.fn(),
       idFromString: vi.fn().mockReturnValue('do-id'),
+      idFromName: vi.fn().mockReturnValue('do-id'),
       get: vi.fn().mockReturnValue(sessionDO ?? createMockSessionDO()),
     },
     AUTH_DB: {} as any,

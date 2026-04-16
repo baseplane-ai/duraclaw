@@ -223,7 +223,7 @@ describe('ProjectRegistry kata state columns (#29)', () => {
   })
 
   it('listSessions SELECT includes kata columns', async () => {
-    sql.onQuery('ORDER BY COALESCE(last_activity', [
+    sql.onQuery('ORDER BY last_activity IS NULL', [
       {
         id: 's1',
         userId: 'u1',
@@ -239,7 +239,7 @@ describe('ProjectRegistry kata state columns (#29)', () => {
 
     const selectCall = sql.calls.find(
       (c) =>
-        c.query.includes('FROM sessions') && c.query.includes('ORDER BY COALESCE(last_activity'),
+        c.query.includes('FROM sessions') && c.query.includes('ORDER BY last_activity IS NULL'),
     )
     expect(selectCall).toBeDefined()
     expect(selectCall!.query).toContain('kata_mode')

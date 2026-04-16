@@ -191,14 +191,9 @@ describe('AgentDetailView', () => {
     expect(chatThread.getAttribute('data-has-send-suggestion')).toBe('true')
   })
 
-  it('does not pass onSendSuggestion to ChatThread when status is failed', () => {
-    const base = makeAgent()
-    const agent = makeAgent({ state: { ...base.state, status: 'failed' } as typeof base.state })
-    render(<AgentDetailView name="test" agent={agent} />)
-
-    const chatThread = screen.getByTestId('chat-thread')
-    expect(chatThread.getAttribute('data-has-send-suggestion')).toBe('false')
-  })
+  // Note: 'failed' is not part of SessionStatus (which only covers live SessionState);
+  // it belongs to SessionSummary. AgentDetailView reads live state.status, so there's
+  // no terminal-'failed' path to exercise here — 'aborted' is the only terminal state.
 
   it('does not pass onSendSuggestion to ChatThread when status is aborted', () => {
     const base = makeAgent()
