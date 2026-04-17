@@ -42,5 +42,8 @@
         ]
       }
     ]
+  },
+  "enabledPlugins": {
+    "interface-design@interface-design": true
   }
 }
