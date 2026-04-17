@@ -1,11 +1,21 @@
 import type { BufferedChannel } from './buffered-channel.js'
 
+export interface DialBackClientLogger {
+  info: (msg: string, ...rest: unknown[]) => void
+  warn: (msg: string, ...rest: unknown[]) => void
+  error: (msg: string, ...rest: unknown[]) => void
+}
+
 export interface DialBackClientOptions {
   callbackUrl: string
   bearer: string
   channel: BufferedChannel
   onCommand: (cmd: unknown) => void
   onStateChange?: (state: 'connecting' | 'open' | 'closed' | 'reconnecting') => void
+  /** Optional session id included in structured log lines. Omitted if absent. */
+  sessionId?: string
+  /** Optional logger for structured logs. Defaults to `console`. */
+  logger?: DialBackClientLogger
 }
 
 const BACKOFF_BASE = 1000
@@ -20,6 +30,8 @@ export class DialBackClient {
   private channel: BufferedChannel
   private onCommand: (cmd: unknown) => void
   private onStateChange?: DialBackClientOptions['onStateChange']
+  private sessionId?: string
+  private logger: DialBackClientLogger
 
   private ws: WebSocket | null = null
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -37,6 +49,12 @@ export class DialBackClient {
     this.channel = options.channel
     this.onCommand = options.onCommand
     this.onStateChange = options.onStateChange
+    this.sessionId = options.sessionId
+    this.logger = options.logger ?? console
+  }
+
+  private sessionSuffix(): string {
+    return this.sessionId !== undefined ? ` sessionId=${this.sessionId}` : ''
   }
 
   start(): void {
@@ -85,9 +103,14 @@ export class DialBackClient {
 
     ws.onopen = () => {
       if (this.stopped || ws !== this.ws) return
+      const firstConnect = !this.hasEverConnected
       this.hasEverConnected = true
       this.channel.attachWebSocket(ws)
       this.onStateChange?.('open')
+
+      this.logger.info(
+        `[dial-back-client] connection established${this.sessionSuffix()}${firstConnect ? ' first=true' : ''}`,
+      )
 
       // Reset backoff after connection stays healthy for 10s
       this.healthTimer = setTimeout(() => {
@@ -104,6 +127,8 @@ export class DialBackClient {
         clearTimeout(this.healthTimer)
         this.healthTimer = null
       }
+
+      this.logger.info(`[dial-back-client] connection dropped${this.sessionSuffix()}`)
 
       this.scheduleReconnect()
     }
@@ -142,6 +167,10 @@ export class DialBackClient {
     // Backoff: min(1000 * 3^attempt, 30000)
     const delay = Math.min(BACKOFF_BASE * BACKOFF_MULTIPLIER ** this.attempt, BACKOFF_CAP)
     this.attempt++
+
+    this.logger.info(
+      `[dial-back-client] reconnect attempt=${this.attempt} delay_ms=${delay}${this.sessionSuffix()}`,
+    )
 
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null

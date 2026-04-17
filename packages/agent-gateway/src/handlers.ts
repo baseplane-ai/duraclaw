@@ -193,14 +193,61 @@ export async function handleStartSession(
 
 // ── GET /sessions/:id/status (B5) ──────────────────────────────────
 
+export interface GatewayLogger {
+  info: (msg: string, ...rest: unknown[]) => void
+  warn: (msg: string, ...rest: unknown[]) => void
+  error: (msg: string, ...rest: unknown[]) => void
+}
+
+export interface StatusHandlerOpts {
+  sessionsDir?: string
+  isAlive?: LivenessCheck
+  logger?: GatewayLogger
+  /** Injectable clock for duration measurement (tests). Defaults to performance.now. */
+  now?: () => number
+}
+
 export async function handleStatus(
   sessionId: string,
-  sessionsDir: string = getSessionsDir(),
-  isAlive: LivenessCheck = defaultLivenessCheck,
+  optsOrSessionsDir: StatusHandlerOpts | string = {},
+  isAliveLegacy?: LivenessCheck,
 ): Promise<Response> {
+  // Back-compat: old positional signature (sessionId, sessionsDir, isAlive)
+  const opts: StatusHandlerOpts =
+    typeof optsOrSessionsDir === 'string'
+      ? { sessionsDir: optsOrSessionsDir, isAlive: isAliveLegacy }
+      : optsOrSessionsDir
+
+  const sessionsDir = opts.sessionsDir ?? getSessionsDir()
+  const isAlive = opts.isAlive ?? defaultLivenessCheck
+  const logger: GatewayLogger = opts.logger ?? console
+  const now = opts.now ?? (() => performance.now())
+
+  const start = now()
   const res = await resolveSessionState(sessionsDir, sessionId, isAlive)
-  if (!res.found) return json(404, { ok: false, error: 'session not found' })
+
+  if (!res.found) {
+    const durationMs = Math.round(now() - start)
+    logger.info(
+      `[gateway] status sessionId=${sessionId} state=null duration_ms=${durationMs} found=false`,
+    )
+    return json(404, { ok: false, error: 'session not found' })
+  }
+
+  const durationMs = Math.round(now() - start)
+  logger.info(
+    `[gateway] status sessionId=${sessionId} state=${res.state.state} duration_ms=${durationMs} found=true`,
+  )
   return json(200, { ok: true, ...res.state })
+}
+
+/**
+ * Log an unauthorized status-endpoint hit. Called from the server's auth guard
+ * when a `/sessions/:id/status` request fails bearer check, so the log line
+ * shape stays co-located with the other gateway status logs.
+ */
+export function logStatusUnauthorized(sessionId: string, logger: GatewayLogger = console): void {
+  logger.warn(`[gateway] status unauthorized sessionId=${sessionId}`)
 }
 
 // ── GET /sessions (B5b) ─────────────────────────────────────────────

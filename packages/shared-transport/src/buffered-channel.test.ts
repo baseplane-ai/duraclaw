@@ -197,4 +197,76 @@ describe('BufferedChannel', () => {
     expect(JSON.parse(ws.sent[1]).seq).toBe(9)
     expect(JSON.parse(ws.sent[2]).seq).toBe(10)
   })
+
+  it('emits structured overflow log via injected logger with sessionId', () => {
+    const warn = vi.fn()
+    const logger = { info: vi.fn(), warn, error: vi.fn() }
+    const ch = new BufferedChannel({
+      maxEvents: 3,
+      sessionId: 'abc',
+      logger,
+    })
+
+    for (let i = 1; i <= 5; i++) {
+      ch.send({ seq: i })
+    }
+
+    // Two drops happened (seq=1 then seq=2) — both should log.
+    expect(warn).toHaveBeenCalled()
+    const messages = warn.mock.calls.map((c) => c[0]) as string[]
+    // At least one line matching: [buffered-channel] overflow sessionId=abc dropped_count=... from_seq=1 to_seq=...
+    expect(messages[0]).toContain('[buffered-channel] overflow sessionId=abc')
+    expect(messages[0]).toContain('dropped_count=1')
+    expect(messages[0]).toContain('from_seq=1')
+    expect(messages[0]).toContain('to_seq=1')
+
+    const lastMsg = messages[messages.length - 1]
+    expect(lastMsg).toContain('[buffered-channel] overflow sessionId=abc')
+    expect(lastMsg).toContain('dropped_count=2')
+    expect(lastMsg).toContain('from_seq=1')
+    expect(lastMsg).toContain('to_seq=2')
+  })
+
+  it('omits sessionId from log lines when not provided', () => {
+    const warn = vi.fn()
+    const logger = { info: vi.fn(), warn, error: vi.fn() }
+    const ch = new BufferedChannel({ maxEvents: 1, logger })
+
+    ch.send({ seq: 1 })
+    ch.send({ seq: 2 }) // triggers overflow
+
+    expect(warn).toHaveBeenCalled()
+    const firstMsg = warn.mock.calls[0][0] as string
+    expect(firstMsg).not.toContain('sessionId=')
+    expect(firstMsg).toContain('[buffered-channel] overflow')
+  })
+
+  it('verbose mode emits send logs with depth', () => {
+    const info = vi.fn()
+    const logger = { info, warn: vi.fn(), error: vi.fn() }
+    const ch = new BufferedChannel({ sessionId: 'xyz', logger, verbose: true })
+
+    ch.send({ seq: 1 })
+    ch.send({ seq: 2 })
+
+    expect(info).toHaveBeenCalledTimes(2)
+    const msg1 = info.mock.calls[0][0] as string
+    expect(msg1).toContain('[buffered-channel] send')
+    expect(msg1).toContain('sessionId=xyz')
+    expect(msg1).toContain('depth=1')
+
+    const msg2 = info.mock.calls[1][0] as string
+    expect(msg2).toContain('depth=2')
+  })
+
+  it('non-verbose mode does not emit per-send logs', () => {
+    const info = vi.fn()
+    const logger = { info, warn: vi.fn(), error: vi.fn() }
+    const ch = new BufferedChannel({ logger })
+
+    ch.send({ seq: 1 })
+    ch.send({ seq: 2 })
+
+    expect(info).not.toHaveBeenCalled()
+  })
 })

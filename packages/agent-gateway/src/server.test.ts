@@ -7,6 +7,7 @@ import {
   handleStartSession,
   handleStatus,
   isValidGatewayCommand,
+  logStatusUnauthorized,
   type SpawnFn,
 } from './handlers.js'
 import type { LivenessCheck } from './session-state.js'
@@ -418,5 +419,59 @@ describe('GET /sessions/:id/status', () => {
     expect(resp.status).toBe(200)
     const body = (await resp.json()) as Record<string, unknown>
     expect(body.state).toBe('crashed')
+  })
+
+  it('emits structured log on 200 hit via injected logger', async () => {
+    await fs.writeFile(
+      nodePath.join(tmpDir, 'LOG-OK.pid'),
+      JSON.stringify({ pid: 42, sessionId: 'LOG-OK', started_at: 1 }),
+    )
+    const info = vi.fn()
+    const logger = { info, warn: vi.fn(), error: vi.fn() }
+    let ticker = 0
+    const now = () => {
+      ticker += 7
+      return ticker
+    }
+
+    const isAlive: LivenessCheck = (pid) => pid === 42
+    const resp = await handleStatus('LOG-OK', {
+      sessionsDir: tmpDir,
+      isAlive,
+      logger,
+      now,
+    })
+
+    expect(resp.status).toBe(200)
+    expect(info).toHaveBeenCalledTimes(1)
+    const msg = info.mock.calls[0][0] as string
+    expect(msg).toContain('[gateway] status sessionId=LOG-OK')
+    expect(msg).toContain('state=running')
+    expect(msg).toContain('duration_ms=')
+    expect(msg).toContain('found=true')
+  })
+
+  it('emits structured log on 404 miss via injected logger', async () => {
+    const info = vi.fn()
+    const logger = { info, warn: vi.fn(), error: vi.fn() }
+    const resp = await handleStatus('MISSING', {
+      sessionsDir: tmpDir,
+      logger,
+    })
+
+    expect(resp.status).toBe(404)
+    expect(info).toHaveBeenCalledTimes(1)
+    const msg = info.mock.calls[0][0] as string
+    expect(msg).toContain('[gateway] status sessionId=MISSING')
+    expect(msg).toContain('state=null')
+    expect(msg).toContain('found=false')
+  })
+
+  it('logStatusUnauthorized emits a structured warn line', () => {
+    const warn = vi.fn()
+    const logger = { info: vi.fn(), warn, error: vi.fn() }
+    logStatusUnauthorized('SID-X', logger)
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn.mock.calls[0][0]).toBe('[gateway] status unauthorized sessionId=SID-X')
   })
 })
