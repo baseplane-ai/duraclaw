@@ -11,9 +11,11 @@ items_researched: 6
 
 ## Context
 
-Duraclaw's state surface is large and partly implicit: a per-session Durable Object, a singleton registry DO, a dial-back WS to a VPS executor, and a React client that blends Zustand stores with TanStack DB collections. This audit maps the six surfaces, surfaces the highest-leverage risks, and proposes a ranked set of foundations to invest in.
+Duraclaw's state surface is large and partly implicit: a per-session Durable Object, a singleton registry DO, a dial-back WS to a VPS executor, and a React client that blends Zustand stores with TanStack DB collections. This audit maps the six surfaces, surfaces the highest-leverage risks, and lands on a target architecture that replaces the Cloudflare Agents SDK + Vercel AI SDK layers with a TanStack-shaped, owned-primitives stack.
 
-Classification: **feature research** — read the codebase in full, map current state, identify gaps, recommend.
+Classification: **feature research** — read the codebase in full, map current state, identify gaps, recommend a target architecture and migration path.
+
+The "Target architecture" section below is the decision, not one option among many. The tiered diagnostic findings are the basis for *why*; the migration path is the *how*.
 
 ## Scope
 
@@ -28,16 +30,22 @@ Six surfaces audited, each by a dedicated Explore agent reading the relevant fil
 
 **Out of scope:** service-worker PWA cache (has its own tests and isn't load-bearing for correctness), router search-param state.
 
-## Stack (as-built)
+## Stack (as-built → target)
 
-| Layer | Tech | Version |
+| Layer | As-built | Target |
 |---|---|---|
-| Client stores | Zustand | 5.0.12 |
-| Client collections | TanStack DB + react-db + query-db-collection + browser-db-sqlite-persistence (OPFS) | 0.6.4 / 0.1.82 / 1.0.35 / 0.1.8 |
-| DO↔Client sync | Cloudflare Agents SDK (`agents`) | 0.11.0 *(CLAUDE.md says 0.7 — stale)* |
-| Server state | `SessionDO` (SQLite-backed) + `ProjectRegistry` (singleton, SQLite-backed) | wrangler v1 (fresh migrations) |
-| VPS transport | Dial-back WS, bearer + one-shot 60s UUID | — |
-| Auth | Better Auth + Drizzle + D1 | 1.5.6 / 0.41.0 |
+| Client stores | Zustand 5 (5 stores) | Zustand 5 (UI-only; `auth-store` deleted, `status-bar` no longer mirrors `SessionState`) |
+| Client data | TanStack DB 0.6 (OPFS SQLite) | TanStack DB (sole source of client-visible chat truth; React message state deleted) |
+| Client chat state | Custom hook `useCodingAgent` + React state + WS events | TanStack AI chat hooks (one state machine for all LLM paths) |
+| Client WS | Cloudflare Agents SDK `useAgent` (0.11) | PartySocket (native CF) |
+| Client UI types | Vercel AI SDK types (`ai` package — `import type` only) | TanStack AI types |
+| DO↔Client sync | Cloudflare Agents SDK `Agent` (0.11.0) + custom `{type: 'message'}` broadcast | `PartyServer` + TanStack AI chunk wire format + sidecar telemetry channel |
+| DO message storage | Agents SDK `experimental/memory/session` | `MessageStore` wrapper class (SDK Session behind it, replaceable) |
+| DO LLM calls | *(none today)* | TanStack AI (CF adapter) — router, classifier, titles, summaries, meta-agent |
+| Server state | `SessionDO` + `ProjectRegistry` (singleton, SQLite) | Same DOs; god-object dissolved into `MessageStore + GatewayAdapter + DirectLLM + Broadcast` |
+| VPS transport | Dial-back WS, bearer + one-shot 60s UUID, `ReconnectableChannel` | **Unchanged** — this is the cleanest part of the stack |
+| VPS protocol | Custom `VpsCommand`/`GatewayEvent` | Same VPS side; DO side runs gateway events through a TanStack AI provider adapter |
+| Auth | Better Auth + Drizzle + D1 | Unchanged |
 
 ## Findings
 
@@ -206,47 +214,143 @@ What's actually good and worth preserving:
 - Watchdog alarm — crude, but a real safety net.
 - Optimistic UI + `optimisticIdsRef` dedup — right pattern, just needs durability behind it.
 
-## Recommendations (ranked)
+## Target architecture
 
-### Tier 1 — stop silent data loss
+Rather than patching the current stack surface by surface, the direction is to **change what the stack is** so most of the audit findings stop being possible by construction. The target is TanStack-shaped end-to-end, with Duraclaw owning the primitives it was previously renting from the Cloudflare Agents SDK.
 
-1. **Seq-numbered events + partial replay on DO↔Client.** Client tracks `lastSeq`; DO replays the delta on reconnect. Enables gap detection; fixes mobile/flaky-network. Touches `session-do.ts` broadcast/onConnect and `use-coding-agent.ts` hydration.
-2. **Persistent client write queue** in OPFS. Session CRUD, preferences, and user-message sends all go through a durable queue that replays on reconnect. Surfaces a "pending writes" indicator.
-3. **Idempotency keys on VPS commands** (`execute`, `resume`, `stream-input`, `answer`). Short-lived dedup cache on VPS and DO. Eliminates double-spawn on retry.
+### Shape
 
-### Tier 2 — stop silent corruption
+```
+Client
+  TanStack DB (OPFS)  ← source of truth for client-visible chat state
+  TanStack AI chat hooks  ← single chat state machine
+    │
+    ├─ provider: direct          ← first-party LLM calls (router, titles, summaries, meta-agent)
+    └─ provider: duraclaw-gateway ← relayed VPS Claude Agent SDK sessions
+  PartySocket (WS transport, reconnect, hibernation)
+  Sidecar events channel  ← kata_state, context_usage, file_changed, rate_limit
+      │
+      ▼
+SessionDO  (extends PartyServer)
+  ├─ MessageStore  ← thin class; wraps SDK Session initially, replaceable later
+  ├─ GatewayAdapter  ← VPS GatewayEvent → TanStack AI stream chunks
+  ├─ DirectLLM  ← TanStack AI (CF adapter) for first-party calls
+  └─ Broadcast  ← seq-numbered, owned wire protocol
+      │
+      ▼
+VPS Executor  (unchanged — dial-back WS, ReconnectableChannel, Claude Agent SDK)
+```
 
-4. **Distributed lock on `sdk_session_id`** in `ProjectRegistry` — atomic CAS with TTL lease + force-release by heartbeat. Blocks concurrent resume.
-5. **Transactional mutations in `SessionDO`** — wrap `setState + session.appendMessage + persistTurnState` as one unit. On failure, revert in-memory state or escalate to client.
-6. **Outbox pattern for DO→Registry syncs** — SessionDO writes events to a local table; a pump flushes them with retry. Replaces fire-and-forget at `session-do.ts:426–505`.
+### Key moves
 
-### Tier 3 — structural
+1. **Drop Cloudflare Agents SDK.** Extend PartyServer directly (the layer Agents SDK is built on). `useAgent` becomes `usePartySocket`. The experimental `Session` class stops being a required dependency; it lives *inside* a `MessageStore` wrapper we control, and can be replaced without touching the rest of the DO.
+2. **Drop Vercel AI SDK.** It's already runtime-dead in Duraclaw — every import is `import type` in `packages/ai-elements`. Replacing the type vocabulary with TanStack AI's shapes costs almost nothing.
+3. **Adopt TanStack AI as real runtime.** The outer-layer direct-LLM path (router, classifier, titles, summaries) uses TanStack AI's CF adapter inside the DO. That's when the framework actually earns rent, not before.
+4. **Shape the gateway stream to TanStack AI chunks.** The existing `gateway-event-mapper.ts` becomes a TanStack AI provider. Client gets one chat hook for both first-party calls and VPS-relayed sessions — provider is the only difference.
+5. **Unify client storage.** TanStack DB is the source of truth for messages (already is, partially). Delete the parallel React `messages` state in `useCodingAgent`. Chat components read from `useMessagesCollection(sessionId)` directly.
+6. **Gates become synthetic tool calls.** `permission_request` and `ask_user` become tools the user "responds" to via TanStack AI's isomorphic tool system. Lives inside the chat stream. Natural fit.
+7. **Telemetry stays sidecar.** `kata_state`, `context_usage`, `file_changed`, `rate_limit` are observational, not conversational. Separate typed event channel. Panels subscribe as needed.
+8. **Own the wire protocol.** Seq-numbered events, idempotency keys, partial replay are designed in from day one — not retrofitted.
 
-7. **Break up `SessionDO` (1669 lines / 5 concerns).** Extract `GatewayClient` (dial/send/token), `EventDispatcher` (handleGatewayEvent), `RecoveryManager` (watchdog + hydrate), `RegistrySync` (5 sync methods). Eliminates several concurrency hazards as a side effect.
-8. **Delete `HeartbeatEvent` type** (legacy from the pre-dial-back design; no longer needed since `ReconnectableChannel` handles drops). Make `STALE_THRESHOLD_MS` env-configurable and consider scoping it to gate-state vs active-streaming so long model thinks don't false-trigger recovery.
-9. **Client-state cleanup:**
-   - Delete `auth-store.ts`.
-   - Add `typeof window` guard to `tabs.ts:38`.
-   - Move `SessionState` out of `status-bar` — derive from WS/Query instead.
-10. **Plan sharding + KV read cache for `ProjectRegistry`.** Not urgent, but the singleton is load-bearing and has no escape hatch today.
+### What this architecture resolves by construction
 
-### Tier 4 — observability / testing
+Several audit findings stop being possible:
 
-11. **Metrics:** registry sync success rate, per-connection broadcast queue depth, WS reconnect rate, pending-optimistic-writes count.
-12. **Integration tests** with real TanStack DB + WS + OPFS — current coverage is all-mocked, so flaky-network and concurrent-mutation bugs won't show up.
+- **Dual client sync path (WS event + TanStack DB cache with divergence risk)** — collapses to one path. Only TanStack DB.
+- **SessionDO god-object (1669 lines, 5 concerns)** — dissolves naturally: broadcaster + gateway adapter + direct LLM caller + message store. Each small. Mutation funneling falls out of the new shape.
+- **Custom wire-event schema drift** — gone. TanStack AI chunk shape is the protocol; chat UI and chat store speak the same types.
+- **Vercel AI SDK and `@cloudflare/ai-chat` dead weight** — deleted.
+- **Experimental SDK lock-in risk** — contained behind `MessageStore`. One file to rewrite if upstream breaks.
+- **`HeartbeatEvent` legacy type** — deleted; not modeled in the new wire format.
+
+### What the architecture doesn't resolve — still needs explicit work
+
+- **Concurrent `resume` of same `sdk_session_id`** — still needs a distributed lock in `ProjectRegistry`, regardless of stack.
+- **Offline write queue** — TanStack DB provides the store, but the durable "replay on reconnect" queue for optimistic mutations is still code to write.
+- **Idempotency keys on VPS commands** — gateway adapter passes them through, but VPS-side dedup cache is still needed.
+- **`ProjectRegistry` singleton bottleneck** — orthogonal. Shard + KV cache story is the same in either architecture.
+- **SSR hazards in `tabs.ts` / `status-bar` domain leak / dead `auth-store`** — client-state cleanup still required.
+- **Integration tests** — real TanStack DB + WS + OPFS coverage is independent of the framework choice.
+
+## Migration path
+
+### Phase 0 — validate the shape (1–2 days)
+
+Throwaway spike. Build a minimal PartyServer-based DO with:
+- Native CF WebSocket + PartyServer
+- `usePartySocket` on the client
+- TanStack AI chat hook pointed at one toy provider
+- TanStack DB collection receiving streamed chunks
+- A "hello world" direct LLM call via TanStack AI's Anthropic adapter, inside the DO
+
+No session resume, no branching, no rewind, no gateway. ~150 lines of real code. The goal is to confirm the pieces snap together the way the target diagram claims, and to develop an opinion about the message chunk shape before committing.
+
+If the spike feels wrong, back out cheaply.
+
+### Phase 1 — carve out `MessageStore` (1 week, low risk)
+
+Still inside the current stack (Agents SDK + Vercel AI types). Pure containment:
+
+- Introduce `MessageStore` class inside `SessionDO`. Initially, it just delegates to `this.session` (the SDK's experimental `Session`).
+- Every call site in `session-do.ts` that touches `this.session.*` moves to `this.messageStore.*`.
+- Single funnel for message mutations. This alone pays down:
+  - **`turnCounter` race across 4 paths** — now one path.
+  - **Partial state persistence** — `MessageStore.append` can enforce the setState + appendMessage ordering as one transaction.
+  - **God-object decomposition** — first real seam extracted.
+
+Shippable independently of the rest of the migration. Buys time.
+
+### Phase 2 — gateway adapter + TanStack AI provider (1–2 weeks)
+
+- Build `duraclaw-gateway-provider` as a TanStack AI provider. Internally, it receives `GatewayEvent` from the existing VPS dial-back channel and emits TanStack AI chunks.
+- On the DO side, wire it as an alternative broadcast path. Keep the existing `{type: 'message'}` broadcast alive for now — run both in parallel behind a flag.
+- On the client, introduce the TanStack AI chat hook for new sessions; old path continues for existing ones.
+- Model `permission_request` / `ask_user` as synthetic tool calls. Sidecar events (`kata_state`, `context_usage`, etc.) stay on a separate typed channel.
+
+At the end of this phase: the entire VPS→client stream is TanStack-shaped. Client UX unified.
+
+### Phase 3 — direct LLM path + outer layer (1 week)
+
+- Add TanStack AI CF adapter inside `SessionDO` for first-party LLM calls.
+- Build the router/classifier/meta-agent that decides when to spawn a heavy gateway session vs. answer inline.
+- Streaming path is the same as the gateway's — TanStack AI chunks through the DO's broadcast. Client can't tell which provider served a given message except by metadata.
+
+### Phase 4 — drop Agents SDK and Vercel AI types (1 week)
+
+- Replace `Agent` base class with direct `PartyServer` extension on `SessionDO`.
+- Replace `useAgent` with `usePartySocket` on the client.
+- Swap `ai` type imports in `packages/ai-elements` for TanStack AI types. `ai` and `@cloudflare/ai-chat` leave `package.json`.
+- Decide whether to replace `Session` (the experimental class still inside `MessageStore`) or keep it. The wrapper means either choice is isolated.
+
+### Phase 5 — parallel hardening (ongoing, runs alongside)
+
+Independent of the framework migration, these still need explicit work:
+
+- **Distributed `sdk_session_id` lock** in `ProjectRegistry` (atomic CAS + TTL lease + heartbeat release). Blocks concurrent resume corruption.
+- **Persistent client write queue** in OPFS for optimistic mutations (sessions, prefs, sends). Replays on reconnect.
+- **Idempotency keys** on VPS commands (`execute`, `resume`, `stream-input`, `answer`) + short-lived dedup cache.
+- **Outbox pattern** for DO→Registry syncs (replaces fire-and-forget).
+- **Client-state cleanup:** delete `auth-store.ts`; add `typeof window` guard to `tabs.ts:38`; move `SessionState` out of `status-bar`.
+- **Watchdog tuning:** make `STALE_THRESHOLD_MS` env-configurable; scope it to activity state.
+- **Metrics:** registry sync success rate, broadcast queue depth per connection, WS reconnect rate, pending-optimistic-writes count.
+- **Integration tests:** real TanStack DB + WS + OPFS (not mocks).
+- **`ProjectRegistry` sharding + KV cache** — parked until scale demands it; design decision tracked separately.
 
 ## Recommended next step
 
-If the goal is one initiative that buys the most reliability, bundle **Tier 1 as a single epic**. Seq-numbers + persistent write queue + idempotency keys are the same pattern applied at three layers — and together they make the system actually reliable under the flaky networks and retries where most of the current latent bugs live.
+Run **Phase 0** this weekend. It's cheap, it's honest, and it tells you in a couple of hours whether the target architecture holds together. If it does, **Phase 1 (`MessageStore` carve-out)** is the right thing to land next — it's pure containment, pays down risk inside the current stack, and sets up everything after it.
 
-Tier 2 is where correctness (not just reliability) lives — if a session can get silently corrupted by a concurrent resume or a half-committed mutation, that's worth fixing even before perf/scale work.
+Don't start Phase 2 until Phase 0 has validated the shape. The cost of discovering the provider abstraction doesn't fit mid-migration is much higher than the cost of a spike.
 
 ## Open questions
 
-- **Better Auth session flow** — `auth-store` is dead, but is there a plan to cache tokens client-side at all, or is that fully delegated to Better Auth cookies?
-- **Agents SDK `Session` experimental API** — how stable is this? The DO is tightly coupled to it and the surface isn't versioned.
-- **Gateway HTTP fallback** — the DO-side `hydrateFromGateway` already speaks HTTP to the gateway. Is adding a message-fetch HTTP endpoint for the client's WS-stall fallback a natural extension?
-- **Scope of Tier 1** — is this scoped as a single epic, or should seq-numbers ship first (smallest unit, biggest unlock), write queue second, idempotency third?
+- **Phase 0 spike** — what provider shape feels right for the gateway adapter? TanStack AI's provider interface is the hinge point; the spike should land opinions about chunk shape, tool-call round-trip for gates, and how sidecar telemetry is subscribed.
+- **`MessageStore` surface** — what's the minimum interface? `append`, `update`, `rewind`, `getBranches`, `getMessage` from the current SDK usage, plus a seq-number emitter. Anything else?
+- **Replacing vs keeping `Session`** — once `MessageStore` wraps it, is there a near-term reason to reimplement the tree, or is containment enough indefinitely?
+- **Gate modeling** — `permission_request` and `ask_user` become synthetic tools. Does this break anything about the permission flow on the VPS side (where the SDK tracks the gate), or is it purely a wire format change?
+- **Existing session migration** — when Phase 2 introduces the TanStack AI chat path, do in-flight sessions get upgraded, or do they finish on the old path? Probably the latter (flag-gated by session creation time).
+- **`ProjectRegistry` sharding trigger** — what's the signal that says "now shard"? Request rate threshold? P95 latency? Defer until we have metrics.
+- **Better Auth session flow** — `auth-store` is dead; is there any plan to cache tokens client-side, or is that fully delegated to Better Auth cookies?
 
 ## Sources
 
