@@ -886,12 +886,15 @@ export class SessionDO extends Agent<Env, SessionState> {
       return { ok: false, error: `Cannot stop: status is '${this.state.status}'` }
     }
 
+    // Transition unilaterally so stop unsticks sessions even when the gateway WS
+    // is half-open / dead. The gateway send is best-effort — its ack can't be
+    // trusted to arrive, so we don't gate local recovery on it.
+    this.updateState({ status: 'aborted', gate: null, error: reason ?? 'Stopped by user' })
+    this.syncStatusToRegistry()
+
     const gwConnId = this.getGatewayConnectionId()
     if (gwConnId) {
       this.sendToGateway({ type: 'stop', session_id: this.state.session_id ?? '' })
-    } else {
-      this.updateState({ status: 'idle', gate: null })
-      this.syncStatusToRegistry()
     }
 
     console.log(`[SessionDO:${this.ctx.id}] stop: ${reason ?? 'user request'}`)
