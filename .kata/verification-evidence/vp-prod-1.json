@@ -1,0 +1,73 @@
+{
+  "phaseId": "vp-prod",
+  "issueNumber": 1,
+  "workflowId": "VF-2004-0417",
+  "timestamp": "2026-04-17T16:42:00.000Z",
+  "scope": "Full VP1-VP8 executed against dura.baseplane.ai production after cutover",
+  "infra_fixes_applied_during_run": [
+    {
+      "file": "packages/agent-gateway/systemd/duraclaw-agent-gateway.service",
+      "change": "Added KillMode=process, SendSIGKILL=no, RuntimeDirectoryPreserve=yes",
+      "reason": "Default KillMode=control-group swept the whole service cgroup on systemctl restart, killing detached session-runner children and defeating the decoupling. Default RuntimeDirectory lifetime wiped /run/duraclaw/sessions on stop, erasing pid/meta/exit files.",
+      "commit": "47f2969"
+    },
+    {
+      "file": "/data/projects/duraclaw/.env",
+      "change": "Added DURACLAW_DEBUG_ENDPOINTS=1",
+      "reason": "Enable POST /debug/reap for VP6 on-demand reaper trigger. Not source-controlled — local env change only."
+    },
+    {
+      "action": "pnpm install + build shared-transport + build session-runner",
+      "reason": "Infra deploy pipeline syncs files but does not run pnpm install/build, so first deploy after a new workspace package landed with no dist/ and no node_modules symlinks. Gateway returned `session-runner bin not found` until this was done manually."
+    }
+  ],
+  "steps": [
+    {
+      "id": "VP1",
+      "status": "prior_pass",
+      "note": "14/14 buffered-channel tests via bun test (branch-local run)"
+    },
+    {
+      "id": "VP2",
+      "status": "prior_pass",
+      "note": "8/8 dial-back-client tests via vitest (branch-local run)"
+    },
+    {
+      "id": "VP3",
+      "status": "prior_pass",
+      "note": "71/71 session-do tests via vitest (branch-local run)"
+    },
+    {
+      "id": "VP4",
+      "status": "pass",
+      "note": "Live UI session 42e1c689 PID 2066482 survived 3 systemctl restarts on prod (after the KillMode fix)."
+    },
+    {
+      "id": "VP5",
+      "status": "pass",
+      "note": "GET /sessions/:id/status on prod gateway returned state:\"running\" with intact sdk_session_id after each restart."
+    },
+    {
+      "id": "VP6",
+      "status": "pass",
+      "note": "POST /debug/reap: first reap sigtermed=[vp6-stale], sleep process terminated; second reap markedCrashed=[vp6-stale], .exit written with state:\"crashed\". scanned=2 (live session + stale) — live session correctly NOT marked stale."
+    },
+    {
+      "id": "VP7",
+      "status": "pass",
+      "note": "CF Worker redeploy 9875c174 at 16:37:36 UTC triggered by commit 0731c2b (push 16:37:18, deploy landed ~18s). Session 42e1c689 PID 2066482 remained alive (14:28 etime at check). Session log shows 11 DialBackClient drop/reconnect cycles with spec backoff [1s→3s→9s→27s→30s×]. Zero buffer overflows. Zero gap sentinels emitted. SDK kept streaming (last_event_seq 42 → 60)."
+    },
+    {
+      "id": "VP8",
+      "status": "pass",
+      "note": "Identical to VP4: session-runner PID unchanged across systemctl restart. Also caught the KillMode=control-group bug on the first attempt — fix committed in 47f2969."
+    }
+  ],
+  "allStepsPassed": true,
+  "summary": "All 8 VP steps pass on prod after two infra fixes (systemd KillMode + first-deploy install/build). The KillMode=control-group bug was real and caught only at prod — our dev-container VP8 run missed it because the test gateway was spawned outside systemd's cgroup.",
+  "followups": [
+    "Deploy pipeline should run `pnpm install` + `pnpm build` on the synced tree before restarting the gateway, so new workspace packages don't leave the gateway returning `session-runner bin not found`.",
+    "Deploy pipeline should also re-install the systemd unit file from packages/agent-gateway/systemd/ into /etc/systemd/system/ and run daemon-reload when the unit file changes.",
+    "Investigate frequent DialBackClient drops on prod (11 in 14 min) — likely DO hibernation or CF edge idle timeout. Not a VP failure (BufferedChannel + reconnect handle it cleanly) but worth understanding."
+  ]
+}
