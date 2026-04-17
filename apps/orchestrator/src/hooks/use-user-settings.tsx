@@ -294,27 +294,38 @@ export function useUserSettings(): UserSettingsContextValue {
       }
     }
 
-    // Debounce the collection update (which syncs to DO)
+    // Cancel any pending debounced write for this tab
     const existing = draftTimerRef.current.get(tabId)
-    if (existing) clearTimeout(existing)
-    const timer = setTimeout(() => {
+    if (existing) {
+      clearTimeout(existing)
       draftTimerRef.current.delete(tabId)
+    }
+
+    const applyToCollection = () => {
       if (tabsCollection.has(tabId)) {
         tabsCollection.update(tabId, (draft) => {
           draft.draft = text || undefined
         })
-      } else {
-        // Sentinel record for global drafts (e.g. __new_session)
+      } else if (text) {
+        // Only create sentinel records for non-empty drafts
         tabsCollection.insert({
           id: tabId,
           project: '__draft',
           sessionId: '',
           title: '',
-          draft: text || undefined,
+          draft: text,
         } as TabItem & Record<string, unknown>)
       }
-    }, 500)
-    draftTimerRef.current.set(tabId, timer)
+    }
+
+    if (!text) {
+      // Clears run immediately so submit never leaves a stale draft
+      applyToCollection()
+    } else {
+      // Typing is debounced to avoid excessive DO syncs
+      const timer = setTimeout(applyToCollection, 500)
+      draftTimerRef.current.set(tabId, timer)
+    }
   }, [])
 
   const getDraft = useCallback(
