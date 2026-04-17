@@ -11,7 +11,7 @@
 
 import { useLiveQuery } from '@tanstack/react-db'
 import { useAgent } from 'agents/react'
-import { useCallback, useMemo, useRef, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react'
 import type { UserSettingsState } from '~/agents/user-settings-do'
 import { type TabItem, tabsCollection } from '~/db/tabs-collection'
 
@@ -56,6 +56,45 @@ function setActiveTabId(id: string | null) {
 function generateId(): string {
   return Math.random().toString(36).slice(2, 10)
 }
+
+// ── localStorage cache for instant first render ──────────────────
+// Seed the collection synchronously from localStorage so useLiveQuery
+// returns data on the very first render (no flash of empty tab bar).
+
+const TABS_CACHE_KEY = 'agent-tabs'
+
+function seedFromCache() {
+  if (typeof localStorage === 'undefined') return
+  try {
+    const raw = localStorage.getItem(TABS_CACHE_KEY)
+    if (!raw) return
+    const cached = JSON.parse(raw) as { tabs?: TabItem[]; activeTabId?: string | null }
+    if (cached.tabs?.length) {
+      for (const tab of cached.tabs) {
+        if (!tabsCollection.has(tab.id)) {
+          tabsCollection.insert(tab as TabItem & Record<string, unknown>)
+        }
+      }
+    }
+    if (cached.activeTabId) {
+      setActiveTabId(cached.activeTabId)
+    }
+  } catch {
+    // Ignore corrupt cache
+  }
+}
+
+function persistToCache(tabs: TabItem[], activeTabId: string | null) {
+  if (typeof localStorage === 'undefined') return
+  try {
+    localStorage.setItem(TABS_CACHE_KEY, JSON.stringify({ tabs, activeTabId }))
+  } catch {
+    // Quota exceeded or private browsing
+  }
+}
+
+// Seed on module load — synchronous, before any React render
+seedFromCache()
 
 // ── Module-level imperative ref ──────────────────────────────────
 
@@ -126,6 +165,13 @@ export function useUserSettings(): UserSettingsContextValue {
   const tabs = useMemo(() => allItems.filter((t) => t.project !== '__draft'), [allItems])
 
   const activeTabId = useSyncExternalStore(subscribeActive, getActiveSnapshot, () => null)
+
+  // Persist to localStorage on every change — keeps cache fresh for next cold start
+  useEffect(() => {
+    if (tabs.length > 0 || activeTabId) {
+      persistToCache(tabs, activeTabId)
+    }
+  }, [tabs, activeTabId])
 
   // Ref keeps callbacks reading fresh tabs without re-creating them
   const tabsRef = useRef(tabs)
