@@ -458,26 +458,22 @@ export function ChatThread({
 
             if (msg.role === 'assistant') {
               const nodes: ReactNode[] = []
-              let run: SessionMessagePart[] = []
-              let runStart = 0
-              const flushRun = () => {
-                if (run.length === 0) return
-                nodes.push(<ToolPillRow key={`pills-${runStart}`} parts={run} />)
-                run = []
-              }
+              const toolParts = msg.parts.filter(
+                (p) => p.type?.startsWith('tool-') && !isPendingGate(p, readOnly),
+              )
+              let pillsInserted = false
               msg.parts.forEach((part, i) => {
-                const groupable = part.type?.startsWith('tool-') && !isPendingGate(part, readOnly)
-                if (groupable) {
-                  if (run.length === 0) runStart = i
-                  run.push(part)
-                } else {
-                  flushRun()
-                  nodes.push(
-                    renderPart(part, i, gate, status, onResolveGate, readOnly, onQaResolved),
-                  )
+                const isGroupableTool =
+                  part.type?.startsWith('tool-') && !isPendingGate(part, readOnly)
+                if (isGroupableTool) {
+                  if (!pillsInserted) {
+                    nodes.push(<ToolPillRow key={`pills-${msg.id}`} parts={toolParts} />)
+                    pillsInserted = true
+                  }
+                  return
                 }
+                nodes.push(renderPart(part, i, gate, status, onResolveGate, readOnly, onQaResolved))
               })
-              flushRun()
               return (
                 <div key={msg.id} className="group relative" data-turn-index={turnIndex}>
                   <div className="space-y-2">{nodes}</div>
