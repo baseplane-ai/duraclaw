@@ -3,7 +3,7 @@
 import type { UIMessage } from 'ai'
 import { ArrowDownIcon, DownloadIcon } from 'lucide-react'
 import type { ComponentProps } from 'react'
-import { useCallback, useLayoutEffect } from 'react'
+import { useCallback, useEffect, useLayoutEffect } from 'react'
 import { StickToBottom, useStickToBottomContext } from 'use-stick-to-bottom'
 import { cn } from '../lib/utils'
 import { Button } from '../ui/button'
@@ -23,7 +23,7 @@ export const Conversation = ({ className, ...props }: ConversationProps) => (
 export type ConversationContentProps = ComponentProps<typeof StickToBottom.Content>
 
 export const ConversationContent = ({ className, ...props }: ConversationContentProps) => {
-  const { scrollRef } = useStickToBottomContext()
+  const { scrollRef, stopScroll } = useStickToBottomContext()
 
   // Scroll to bottom before first paint so the user never sees content at scrollTop=0.
   // StickToBottom's ResizeObserver fires asynchronously (after paint), causing a visible
@@ -36,6 +36,32 @@ export const ConversationContent = ({ className, ...props }: ConversationContent
       el.scrollTop = el.scrollHeight - el.clientHeight
     }
   }, [scrollRef])
+
+  // On mobile, the library detects scroll-up via handleWheel (deltaY < 0) which
+  // doesn't fire for touch scrolling. The fallback handleScroll uses setTimeout(1ms)
+  // which races against the resize="instant" animation loop (requestAnimationFrame),
+  // making it nearly impossible to escape. We track touch movement direction and call
+  // stopScroll() as soon as the user drags upward.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    let startY = 0
+    const onTouchStart = (e: TouchEvent) => {
+      startY = e.touches[0].clientY
+    }
+    const onTouchMove = (e: TouchEvent) => {
+      // Dragging finger down → scrolling up through content
+      if (e.touches[0].clientY > startY) {
+        stopScroll()
+      }
+    }
+    el.addEventListener('touchstart', onTouchStart, { passive: true })
+    el.addEventListener('touchmove', onTouchMove, { passive: true })
+    return () => {
+      el.removeEventListener('touchstart', onTouchStart)
+      el.removeEventListener('touchmove', onTouchMove)
+    }
+  }, [scrollRef, stopScroll])
 
   return <StickToBottom.Content className={cn('flex flex-col gap-8 p-4', className)} {...props} />
 }
