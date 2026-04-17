@@ -14,6 +14,12 @@ RestartSec=5
 StandardOutput=journal
 StandardError=journal
 
+# CRITICAL for session-runner decoupling (#1): only kill the gateway main PID
+# on stop/restart — do NOT sweep the whole cgroup, or detached session-runner
+# children die with the service and defeat the whole point of the decoupling.
+KillMode=process
+SendSIGKILL=no
+
 # Environment
 EnvironmentFile=/data/projects/duraclaw/.env
 Environment=NODE_ENV=production
@@ -25,8 +31,11 @@ Environment=HOME=/home/ubuntu
 # Runtime state directory — systemd creates /run/duraclaw and
 # /run/duraclaw/sessions (0700) and manages their lifetime.
 # session-runner writes its pid/meta/exit/log files under /run/duraclaw/sessions/.
+# Preserve=yes keeps the directory (and live session-runner files) across gateway
+# restarts, which is required for the post-restart resume path (VP5/VP8).
 RuntimeDirectory=duraclaw duraclaw/sessions
 RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
 
 # Security hardening
 NoNewPrivileges=true
