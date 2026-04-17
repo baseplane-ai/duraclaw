@@ -50,6 +50,35 @@ function getToolName(part: SessionMessagePart): string {
   return part.toolName || (part.type || '').replace(/^tool-/, '')
 }
 
+function getFilePath(part: SessionMessagePart): string | null {
+  const input = part.input as { file_path?: unknown; notebook_path?: unknown } | null | undefined
+  if (!input || typeof input !== 'object') return null
+  const fp = input.file_path ?? input.notebook_path
+  return typeof fp === 'string' && fp.length > 0 ? fp : null
+}
+
+function groupByFilePath(parts: SessionMessagePart[]): {
+  grouped: Array<{ filePath: string; parts: SessionMessagePart[] }>
+  ungrouped: SessionMessagePart[]
+} {
+  const byPath = new Map<string, SessionMessagePart[]>()
+  const ungrouped: SessionMessagePart[] = []
+  for (const p of parts) {
+    const fp = getFilePath(p)
+    if (fp) {
+      const arr = byPath.get(fp)
+      if (arr) arr.push(p)
+      else byPath.set(fp, [p])
+    } else {
+      ungrouped.push(p)
+    }
+  }
+  return {
+    grouped: Array.from(byPath.entries()).map(([filePath, ps]) => ({ filePath, parts: ps })),
+    ungrouped,
+  }
+}
+
 function isPendingGate(part: SessionMessagePart, readOnly: boolean | undefined): boolean {
   return (
     (part.type === 'tool-ask_user' || part.type === 'tool-permission') &&
@@ -98,6 +127,14 @@ function ToolPillRow({ parts }: { parts: SessionMessagePart[] }) {
   }, [parts])
 
   const selectedParts = selected ? groups.get(selected) : undefined
+  const selectedSplit = useMemo(
+    () => (selectedParts ? groupByFilePath(selectedParts) : null),
+    [selectedParts],
+  )
+  // When only one file group exists (and no ungrouped), expand it by default so
+  // the single-file common case doesn't force an extra click.
+  const autoExpandSingleFile =
+    !!selectedSplit && selectedSplit.grouped.length === 1 && selectedSplit.ungrouped.length === 0
 
   return (
     <>
@@ -129,8 +166,30 @@ function ToolPillRow({ parts }: { parts: SessionMessagePart[] }) {
             </SheetDescription>
           </SheetHeader>
           <div className="flex-1 space-y-3 overflow-y-auto p-4">
-            {selectedParts?.map((p, i) => (
-              <ToolCallDetail key={p.toolCallId ?? i} part={p} />
+            {selectedSplit?.grouped.map(({ filePath, parts: fileParts }) => (
+              <details
+                key={filePath}
+                open={autoExpandSingleFile || fileParts.length === 1}
+                className="rounded-md border"
+              >
+                <summary className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm hover:bg-accent/50">
+                  <FileIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                  <span className="min-w-0 flex-1 truncate font-mono">{filePath}</span>
+                  {fileParts.length > 1 && (
+                    <span className="shrink-0 text-muted-foreground text-xs">
+                      ×{fileParts.length}
+                    </span>
+                  )}
+                </summary>
+                <div className="space-y-3 border-t p-3">
+                  {fileParts.map((p, i) => (
+                    <ToolCallDetail key={p.toolCallId ?? i} part={p} />
+                  ))}
+                </div>
+              </details>
+            ))}
+            {selectedSplit?.ungrouped.map((p, i) => (
+              <ToolCallDetail key={p.toolCallId ?? `u-${i}`} part={p} />
             ))}
           </div>
         </SheetContent>
