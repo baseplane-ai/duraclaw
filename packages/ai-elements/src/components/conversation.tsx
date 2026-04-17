@@ -39,27 +39,49 @@ export const ConversationContent = ({ className, ...props }: ConversationContent
 
   // On mobile, the library detects scroll-up via handleWheel (deltaY < 0) which
   // doesn't fire for touch scrolling. The fallback handleScroll uses setTimeout(1ms)
-  // which races against the resize="instant" animation loop (requestAnimationFrame),
-  // making it nearly impossible to escape. We track touch movement direction and call
-  // stopScroll() as soon as the user drags upward.
+  // which races against the resize="instant" animation loop (requestAnimationFrame).
+  // Even calling stopScroll() on touchmove isn't enough — the library's handleScroll
+  // setTimeout can re-engage the lock between touchmove events when the user is near
+  // the bottom. We pump stopScroll() on every animation frame while the user is
+  // actively touch-scrolling upward, keeping the lock broken continuously.
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
     let startY = 0
+    let scrollingUp = false
+    let rafId = 0
+    const tick = () => {
+      if (scrollingUp) {
+        stopScroll()
+        rafId = requestAnimationFrame(tick)
+      }
+    }
     const onTouchStart = (e: TouchEvent) => {
       startY = e.touches[0].clientY
+      scrollingUp = false
     }
     const onTouchMove = (e: TouchEvent) => {
       // Dragging finger down → scrolling up through content
-      if (e.touches[0].clientY > startY) {
+      if (e.touches[0].clientY > startY && !scrollingUp) {
+        scrollingUp = true
         stopScroll()
+        rafId = requestAnimationFrame(tick)
       }
+    }
+    const onTouchEnd = () => {
+      scrollingUp = false
+      cancelAnimationFrame(rafId)
     }
     el.addEventListener('touchstart', onTouchStart, { passive: true })
     el.addEventListener('touchmove', onTouchMove, { passive: true })
+    el.addEventListener('touchend', onTouchEnd, { passive: true })
+    el.addEventListener('touchcancel', onTouchEnd, { passive: true })
     return () => {
+      cancelAnimationFrame(rafId)
       el.removeEventListener('touchstart', onTouchStart)
       el.removeEventListener('touchmove', onTouchMove)
+      el.removeEventListener('touchend', onTouchEnd)
+      el.removeEventListener('touchcancel', onTouchEnd)
     }
   }, [scrollRef, stopScroll])
 
