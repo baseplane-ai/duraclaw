@@ -38,29 +38,31 @@ const queryOpts = queryCollectionOptions({
   staleTime: Number.POSITIVE_INFINITY,
 
   onInsert: async ({ transaction }) => {
-    const items = transaction.mutations.map((m) => m.modified)
-    for (const item of items) {
-      await fetch('/api/user-settings/tabs', {
+    for (const m of transaction.mutations) {
+      const resp = await fetch('/api/user-settings/tabs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(item),
+        body: JSON.stringify(m.modified),
       })
+      if (!resp.ok) throw new Error(`Tab insert failed: ${resp.status}`)
     }
   },
 
   onUpdate: async ({ transaction }) => {
     for (const m of transaction.mutations) {
-      await fetch(`/api/user-settings/tabs/${m.key}`, {
+      const resp = await fetch(`/api/user-settings/tabs/${m.key}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(m.changes),
       })
+      if (!resp.ok) throw new Error(`Tab update failed: ${resp.status}`)
     }
   },
 
   onDelete: async ({ transaction }) => {
     for (const m of transaction.mutations) {
-      await fetch(`/api/user-settings/tabs/${m.key}`, { method: 'DELETE' })
+      const resp = await fetch(`/api/user-settings/tabs/${m.key}`, { method: 'DELETE' })
+      if (!resp.ok) throw new Error(`Tab delete failed: ${resp.status}`)
     }
   },
 })
