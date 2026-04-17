@@ -39,6 +39,7 @@ vi.mock('~/db/sessions-collection', () => ({
   sessionsCollection: {
     update: vi.fn(),
     insert: vi.fn(),
+    has: vi.fn().mockReturnValue(true),
   },
 }))
 

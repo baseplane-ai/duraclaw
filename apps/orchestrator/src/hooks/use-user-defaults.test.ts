@@ -7,10 +7,10 @@ import { useUserDefaults } from './use-user-defaults'
 
 const DEFAULTS = {
   permission_mode: 'default',
-  model: 'claude-opus-4-6',
+  model: 'claude-opus-4-7',
   max_budget: null,
   thinking_mode: 'adaptive',
-  effort: 'high',
+  effort: 'xhigh',
 }
 
 describe('useUserDefaults', () => {
@@ -122,7 +122,7 @@ describe('useUserDefaults', () => {
 
     expect(result.current.preferences.model).toBe('claude-sonnet-4-20250514')
     // Other fields remain default
-    expect(result.current.preferences.effort).toBe('high')
+    expect(result.current.preferences.effort).toBe('xhigh')
 
     // Should have called PUT
     expect(fetch).toHaveBeenCalledWith('/api/preferences', {
