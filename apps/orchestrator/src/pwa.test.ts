@@ -69,7 +69,7 @@ describe('PWA shell foundation', () => {
       expect(configSource).toContain("filename: 'sw.ts'")
     })
 
-    it('uses prompt registerType (custom update flow via SwUpdateBanner)', () => {
+    it('uses prompt registerType (user-initiated reload)', () => {
       expect(configSource).toContain("registerType: 'prompt'")
     })
 

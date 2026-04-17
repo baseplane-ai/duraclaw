@@ -1,68 +1,34 @@
 /**
- * useSwUpdate — Service worker update detection + auto-reload.
+ * useSwUpdate — Detects new deploys, lets the user choose when to reload.
  *
- * Combines two staleness signals:
- * 1. Build hash polling (fast — detects new deploys in ~30s)
- * 2. SW update detection (fallback — browser's native update check)
+ * Detection: build hash polling (~30s) triggers `reg.update()`, which
+ * installs the new SW into "waiting" state. No auto-skipWaiting.
  *
- * When either fires, triggers SW update + reload.
+ * Activation: user clicks "Reload" → SKIP_WAITING message → new SW
+ * activates → controllerchange → page reloads.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useBuildHash } from './use-build-hash'
-
-const SW_POLL_INTERVAL = 60_000 // 1 minute fallback
 
 export function useSwUpdate() {
   const [updateAvailable, setUpdateAvailable] = useState(false)
   const registrationRef = useRef<ServiceWorkerRegistration | null>(null)
   const { stale: buildStale } = useBuildHash()
 
-  // When build hash detects staleness, force an immediate SW update check
+  // Grab SW registration and watch for waiting workers
   useEffect(() => {
-    if (!buildStale) return
-    const reg = registrationRef.current
-    if (reg) {
-      reg
-        .update()
-        .then(() => {
-          // If there's already a waiting worker, signal it
-          if (reg.waiting) {
-            reg.waiting.postMessage({ type: 'SKIP_WAITING' })
-          }
-        })
-        .catch(() => {})
-    }
-    setUpdateAvailable(true)
-  }, [buildStale])
-
-  const applyUpdate = useCallback(() => {
-    const waiting = registrationRef.current?.waiting
-    if (waiting) {
-      waiting.postMessage({ type: 'SKIP_WAITING' })
-      // Fallback: if controllerchange doesn't fire within 2s, force reload.
-      // This handles the case where the SW already activated and SKIP_WAITING is a no-op.
-      setTimeout(() => window.location.reload(), 2000)
-    } else {
-      // No waiting SW — just reload to pick up new assets
-      window.location.reload()
-    }
-  }, [])
-
-  useEffect(() => {
-    if (!('serviceWorker' in navigator)) return
-
-    let interval: ReturnType<typeof setInterval> | null = null
+    if (!navigator.serviceWorker) return
 
     navigator.serviceWorker.ready.then((registration) => {
       registrationRef.current = registration
 
-      // Check if there's already a waiting worker
+      // Already a waiting worker (e.g. installed while page was idle)
       if (registration.waiting) {
         setUpdateAvailable(true)
       }
 
-      // Listen for new workers entering waiting state
+      // New SW installed → enters waiting state
       registration.addEventListener('updatefound', () => {
         const installing = registration.installing
         if (!installing) return
@@ -72,22 +38,31 @@ export function useSwUpdate() {
           }
         })
       })
-
-      // Poll for SW updates as fallback (slower than build hash, but catches edge cases)
-      interval = setInterval(() => {
-        registration.update().catch(() => {})
-      }, SW_POLL_INTERVAL)
     })
 
-    // When a new SW takes control, reload to use fresh assets
-    const onControllerChange = () => {
-      window.location.reload()
-    }
+    // When the new SW takes control, reload to use fresh assets
+    const onControllerChange = () => window.location.reload()
     navigator.serviceWorker.addEventListener('controllerchange', onControllerChange)
 
     return () => {
-      if (interval) clearInterval(interval)
       navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange)
+    }
+  }, [])
+
+  // Build hash detects new deploy → trigger SW update check immediately
+  useEffect(() => {
+    if (!buildStale) return
+    registrationRef.current?.update().catch(() => {})
+  }, [buildStale])
+
+  // User-initiated: tell waiting SW to activate
+  const applyUpdate = useCallback(() => {
+    const waiting = registrationRef.current?.waiting
+    if (waiting) {
+      waiting.postMessage({ type: 'SKIP_WAITING' })
+    } else {
+      // Edge case: no waiting SW (maybe it already activated) — just reload
+      window.location.reload()
     }
   }, [])
 

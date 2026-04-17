@@ -5,8 +5,8 @@ import { precacheAndRoute } from 'workbox-precaching'
 
 precacheAndRoute(self.__WB_MANIFEST)
 
-// Auto-activate: skipWaiting on install OR when app sends SKIP_WAITING message
-self.addEventListener('install', () => self.skipWaiting())
+// Wait for user to trigger update — no auto-skipWaiting on install.
+// The app sends SKIP_WAITING when the user clicks "Reload" in the update toast.
 self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()))
 self.addEventListener('message', (event) => {
   if (event.data?.type === 'SKIP_WAITING') self.skipWaiting()

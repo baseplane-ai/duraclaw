@@ -1,7 +1,6 @@
 import { Outlet } from '@tanstack/react-router'
 import { AppSidebar } from '~/components/layout/app-sidebar'
 import { SkipToMain } from '~/components/skip-to-main'
-
 import { SwUpdateBanner } from '~/components/sw-update-banner'
 import { SidebarInset, SidebarProvider } from '~/components/ui/sidebar'
 import { LayoutProvider } from '~/context/layout-provider'

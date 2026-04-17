@@ -1,89 +1,136 @@
 /**
  * @vitest-environment jsdom
  */
-import { renderHook } from '@testing-library/react'
-import { useEffect } from 'react'
-import { toast } from 'sonner'
+import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-// Mock sonner
-vi.mock('sonner', () => ({
-  toast: vi.fn(),
+// Mock use-build-hash
+vi.mock('./use-build-hash', () => ({
+  useBuildHash: vi.fn(() => ({ stale: false, checkNow: vi.fn() })),
 }))
 
-const mockToast = vi.mocked(toast)
+import { useBuildHash } from './use-build-hash'
+import { useSwUpdate } from './use-sw-update'
 
-describe('SW update toast pattern', () => {
+const mockUseBuildHash = vi.mocked(useBuildHash)
+
+describe('useSwUpdate', () => {
+  let mockRegistration: {
+    waiting: ServiceWorker | null
+    installing: ServiceWorker | null
+    update: ReturnType<typeof vi.fn>
+    addEventListener: ReturnType<typeof vi.fn>
+  }
+  let readyPromise: Promise<ServiceWorkerRegistration>
+  let controllerChangeHandler: (() => void) | null
+
   beforeEach(() => {
-    mockToast.mockReset()
+    controllerChangeHandler = null
+    mockRegistration = {
+      waiting: null,
+      installing: null,
+      update: vi.fn().mockResolvedValue(undefined),
+      addEventListener: vi.fn(),
+    }
+    readyPromise = Promise.resolve(mockRegistration as unknown as ServiceWorkerRegistration)
+
+    Object.defineProperty(navigator, 'serviceWorker', {
+      value: {
+        ready: readyPromise,
+        controller: {},
+        addEventListener: vi.fn((event: string, handler: () => void) => {
+          if (event === 'controllerchange') controllerChangeHandler = handler
+        }),
+        removeEventListener: vi.fn(),
+      },
+      configurable: true,
+    })
+
+    mockUseBuildHash.mockReturnValue({ stale: false, checkNow: vi.fn() })
   })
 
   afterEach(() => {
     vi.restoreAllMocks()
   })
 
-  // Test the exact pattern used in __root.tsx
-  function useSwUpdateToast(
-    needRefresh: boolean,
-    setNeedRefresh: (v: boolean) => void,
-    updateServiceWorker: (reload?: boolean) => Promise<void>,
-  ) {
-    useEffect(() => {
-      if (needRefresh) {
-        toast('New version available', {
-          description: 'Click reload to update the app.',
-          action: {
-            label: 'Reload',
-            onClick: () => updateServiceWorker(true),
-          },
-          duration: Infinity,
-          onDismiss: () => setNeedRefresh(false),
-        })
-      }
-    }, [needRefresh, setNeedRefresh, updateServiceWorker])
-  }
-
-  it('does not show toast when no refresh is needed', () => {
-    const setNeedRefresh = vi.fn()
-    const updateServiceWorker = vi.fn()
-
-    renderHook(() => useSwUpdateToast(false, setNeedRefresh, updateServiceWorker))
-    expect(mockToast).not.toHaveBeenCalled()
+  it('starts with updateAvailable false', () => {
+    const { result } = renderHook(() => useSwUpdate())
+    expect(result.current.updateAvailable).toBe(false)
   })
 
-  it('shows toast when refresh is needed', () => {
-    const setNeedRefresh = vi.fn()
-    const updateServiceWorker = vi.fn()
-
-    renderHook(() => useSwUpdateToast(true, setNeedRefresh, updateServiceWorker))
-    expect(mockToast).toHaveBeenCalledWith(
-      'New version available',
-      expect.objectContaining({
-        description: 'Click reload to update the app.',
-        duration: Infinity,
-      }),
-    )
+  it('sets updateAvailable when registration.waiting exists on mount', async () => {
+    mockRegistration.waiting = {} as ServiceWorker
+    const { result } = renderHook(() => useSwUpdate())
+    await act(async () => {
+      await readyPromise
+    })
+    expect(result.current.updateAvailable).toBe(true)
   })
 
-  it('toast action triggers updateServiceWorker(true)', () => {
-    const setNeedRefresh = vi.fn()
-    const updateServiceWorker = vi.fn()
+  it('calls reg.update() when build hash detects staleness', async () => {
+    // Start fresh (not stale), let registration resolve first
+    const { rerender } = renderHook(() => useSwUpdate())
+    await act(async () => {
+      await readyPromise
+    })
 
-    renderHook(() => useSwUpdateToast(true, setNeedRefresh, updateServiceWorker))
-
-    const options = mockToast.mock.calls[0][1] as Record<string, any>
-    options.action.onClick()
-    expect(updateServiceWorker).toHaveBeenCalledWith(true)
+    // Now set stale and re-render so the effect sees registrationRef.current
+    mockUseBuildHash.mockReturnValue({ stale: true, checkNow: vi.fn() })
+    await act(async () => {
+      rerender()
+    })
+    expect(mockRegistration.update).toHaveBeenCalled()
   })
 
-  it('toast onDismiss resets needRefresh to false', () => {
-    const setNeedRefresh = vi.fn()
-    const updateServiceWorker = vi.fn()
+  it('does not call reg.update() when build is fresh', async () => {
+    renderHook(() => useSwUpdate())
+    await act(async () => {
+      await readyPromise
+    })
+    expect(mockRegistration.update).not.toHaveBeenCalled()
+  })
 
-    renderHook(() => useSwUpdateToast(true, setNeedRefresh, updateServiceWorker))
+  it('applyUpdate sends SKIP_WAITING when waiting worker exists', async () => {
+    const postMessage = vi.fn()
+    mockRegistration.waiting = { postMessage } as unknown as ServiceWorker
 
-    const options = mockToast.mock.calls[0][1] as Record<string, any>
-    options.onDismiss()
-    expect(setNeedRefresh).toHaveBeenCalledWith(false)
+    const { result } = renderHook(() => useSwUpdate())
+    await act(async () => {
+      await readyPromise
+    })
+
+    act(() => result.current.applyUpdate())
+    expect(postMessage).toHaveBeenCalledWith({ type: 'SKIP_WAITING' })
+  })
+
+  it('applyUpdate falls back to reload when no waiting worker', async () => {
+    const reloadMock = vi.fn()
+    Object.defineProperty(window, 'location', {
+      value: { reload: reloadMock },
+      configurable: true,
+    })
+
+    const { result } = renderHook(() => useSwUpdate())
+    await act(async () => {
+      await readyPromise
+    })
+
+    act(() => result.current.applyUpdate())
+    expect(reloadMock).toHaveBeenCalled()
+  })
+
+  it('handles missing serviceWorker gracefully', () => {
+    // Simulate environment without service worker support
+    const original = navigator.serviceWorker
+    Object.defineProperty(navigator, 'serviceWorker', {
+      get: () => undefined,
+      configurable: true,
+    })
+    const { result } = renderHook(() => useSwUpdate())
+    expect(result.current.updateAvailable).toBe(false)
+    Object.defineProperty(navigator, 'serviceWorker', {
+      value: original,
+      configurable: true,
+    })
   })
 })
