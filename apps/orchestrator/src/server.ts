@@ -12,6 +12,23 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url)
 
+    // User settings DO — WS upgrade for live tab sync
+    if (
+      url.pathname === '/api/user-settings/ws' &&
+      request.headers.get('Upgrade') === 'websocket'
+    ) {
+      const authSession = await getRequestSession(env, request)
+      if (!authSession) {
+        return new Response('Unauthorized', { status: 401 })
+      }
+      const doId = env.USER_SETTINGS.idFromName(authSession.userId)
+      const stub = env.USER_SETTINGS.get(doId)
+      const headers = new Headers(request.headers)
+      headers.set('x-partykit-room', authSession.userId)
+      headers.set('x-user-id', authSession.userId)
+      return stub.fetch(new Request(request, { headers }))
+    }
+
     const wsMatch = url.pathname.match(WS_ROUTE)
     if (wsMatch && request.headers.get('Upgrade') === 'websocket') {
       const sessionId = wsMatch[1]

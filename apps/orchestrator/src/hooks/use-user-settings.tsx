@@ -1,15 +1,18 @@
 /**
- * useUserSettings -- TanStackDB-backed tab management hook.
+ * useUserSettings -- TanStackDB-backed tab management with live DO sync.
  *
- * Uses queryCollectionOptions with onInsert/onUpdate/onDelete handlers
- * for automatic optimistic mutations + DO sync. Direct collection
- * mutations (insert/update/delete) trigger handlers automatically.
+ * Data flow:
+ * 1. Collection loads from OPFS cache (instant), then queryFn fetches once
+ * 2. Mutations: collection.insert/update/delete → optimistic UI → handlers POST to DO
+ * 3. Live sync: useAgent WS receives DO state broadcasts → utils.writeBatch syncs collection
  *
  * activeTabId is per-browser (localStorage), not server-synced.
  */
 
 import { useLiveQuery } from '@tanstack/react-db'
-import { useCallback, useMemo, useRef, useSyncExternalStore } from 'react'
+import { useAgent } from 'agents/react'
+import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react'
+import type { TabRecord, UserSettingsState } from '~/agents/user-settings-do'
 import { type TabItem, tabsCollection } from '~/db/tabs-collection'
 
 // ── activeTabId in localStorage ──────────────────────────────────
@@ -30,7 +33,6 @@ function writeActiveTabId(id: string | null) {
   }
 }
 
-// Tiny pub/sub so useSyncExternalStore re-renders on activeTabId changes
 const activeListeners = new Set<() => void>()
 let activeSnapshot = readActiveTabId()
 
@@ -59,6 +61,30 @@ function generateId(): string {
 
 function collectionTabs(): TabItem[] {
   return [...(tabsCollection as Iterable<[string, TabItem]>)].map(([, t]) => t)
+}
+
+/** Sync DO state into the collection via direct writes (bypasses optimistic layer) */
+function syncFromServer(tabs: TabRecord[]) {
+  const incoming = new Map(tabs.map((t) => [t.id, t]))
+
+  tabsCollection.utils.writeBatch(() => {
+    // Remove tabs no longer on server
+    for (const [key] of tabsCollection as Iterable<[string, TabItem]>) {
+      if (!incoming.has(key)) {
+        tabsCollection.utils.writeDelete(key)
+      }
+    }
+    // Upsert server tabs
+    for (const tab of tabs) {
+      const item: TabItem = {
+        id: tab.id,
+        project: tab.project,
+        sessionId: tab.sessionId,
+        title: tab.title,
+      }
+      tabsCollection.utils.writeUpsert(item)
+    }
+  })
 }
 
 // ── Module-level imperative ref ──────────────────────────────────
@@ -105,6 +131,33 @@ export interface UserSettingsContextValue extends UserSettingsImperative {
 }
 
 export function useUserSettings(): UserSettingsContextValue {
+  // ── Live WS sync from DO ───────────────────────────────────────
+  // useAgent connects to the UserSettingsDO. On state broadcasts,
+  // we sync the server-authoritative tabs into the collection via writeBatch.
+  const agent = useAgent<UserSettingsState>({
+    agent: 'user-settings-do',
+    basePath: 'api/user-settings/ws',
+    onStateUpdate: (state) => {
+      try {
+        syncFromServer(state.tabs)
+      } catch {
+        // Collection may not be ready during SSR/init
+      }
+    },
+  })
+
+  // Sync on initial connect
+  useEffect(() => {
+    if (agent.state?.tabs) {
+      try {
+        syncFromServer(agent.state.tabs)
+      } catch {
+        // Collection not ready
+      }
+    }
+  }, [agent.state])
+
+  // ── Collection reactive reads ──────────────────────────────────
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data, isLoading } = useLiveQuery(tabsCollection as any)
 
@@ -116,13 +169,12 @@ export function useUserSettings(): UserSettingsContextValue {
   const activeTabId = useSyncExternalStore(subscribeActive, getActiveSnapshot, () => null)
 
   // ── Tab operations — direct collection mutations ─────────────
-  // The collection's onInsert/onUpdate/onDelete handlers handle server sync.
-  // Mutations are optimistic and auto-rollback on handler failure.
+  // Collection's onInsert/onUpdate/onDelete handlers POST to DO via HTTP.
+  // DO persists + broadcasts state → WS → syncFromServer → writeBatch.
 
   const addTab = useCallback((project: string, sessionId: string, title?: string) => {
     const current = collectionTabs()
 
-    // Session already has a tab — just activate (update title if needed)
     const bySession = current.find((t) => t.sessionId === sessionId)
     if (bySession) {
       if (title && title !== bySession.title) {
@@ -134,7 +186,6 @@ export function useUserSettings(): UserSettingsContextValue {
       return
     }
 
-    // Project already has a tab — replace its session
     const byProject = current.find((t) => t.project === project)
     if (byProject) {
       tabsCollection.update(byProject.id, (draft) => {
@@ -145,7 +196,6 @@ export function useUserSettings(): UserSettingsContextValue {
       return
     }
 
-    // New tab
     const id = generateId()
     tabsCollection.insert({
       id,

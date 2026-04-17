@@ -1,11 +1,12 @@
 /**
- * Tabs QueryCollection -- synced to UserSettingsDO via HTTP.
+ * Tabs QueryCollection -- synced to UserSettingsDO via WS + HTTP.
  *
  * - Collection key: 'tabs'
  * - Persisted to OPFS SQLite (schema version 1)
- * - queryFn fetches from /api/user-settings/tabs
- * - onInsert/onUpdate/onDelete handlers sync mutations to the DO
- * - Optimistic mutations with automatic rollback on error
+ * - queryFn fetches full state on cold start (no polling — WS pushes updates)
+ * - onInsert/onUpdate/onDelete handlers sync mutations to the DO via HTTP
+ * - Live sync: WS broadcasts from DO feed utils.writeBatch for server state
+ * - Optimistic mutations with automatic rollback on handler error
  */
 
 import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence'
@@ -30,8 +31,9 @@ const queryOpts = queryCollectionOptions({
   },
   queryClient,
   getKey: (item: TabItem) => item.id,
-  refetchInterval: 60_000,
-  staleTime: 30_000,
+  // No polling — WS pushes live updates via utils.writeBatch
+  refetchInterval: false,
+  staleTime: Number.POSITIVE_INFINITY,
 
   onInsert: async ({ transaction }) => {
     const items = transaction.mutations.map((m) => m.modified)
