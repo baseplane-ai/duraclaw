@@ -15,7 +15,7 @@ import type {
   SessionState,
   SpawnConfig,
 } from '~/lib/types'
-import { getSessionStatus, parseEvent } from '~/lib/vps-client'
+import { getSessionStatus, listSessions, parseEvent } from '~/lib/vps-client'
 import {
   applyToolResult,
   assistantContentToParts,
@@ -1179,12 +1179,41 @@ export class SessionDO extends Agent<Env, SessionState> {
         message: { role: 'user', content },
       })
     } else if (isResumable) {
+      // Before spawning a replacement runner, check the gateway for an
+      // orphaned runner bound to the same sdk_session_id. If one exists the
+      // new runner will exit immediately via hasLiveResume — surface a
+      // specific error instead of silently failing.
+      const sdk = this.state.sdk_session_id ?? ''
+      const gatewayUrl = this.env.CC_GATEWAY_URL
+      if (gatewayUrl && sdk) {
+        try {
+          const sessions = await listSessions(gatewayUrl, this.env.CC_GATEWAY_SECRET)
+          const orphan = sessions.find((s) => s.sdk_session_id === sdk && s.state === 'running')
+          if (orphan) {
+            const msg = `Session-runner ${orphan.session_id} is still running on the gateway with sdk_session_id ${sdk} but its WebSocket is not connected to this DO — stop that runner or wait for it to exit before sending a new message.`
+            console.error(`[SessionDO:${this.ctx.id}] sendMessage orphan: ${msg}`)
+            this.updateState({ status: 'idle', error: msg })
+            this.broadcastToClients(
+              JSON.stringify({
+                type: 'gateway_event',
+                event: { type: 'error', message: msg },
+              }),
+            )
+            return { ok: false, error: msg }
+          }
+        } catch (err) {
+          // Non-fatal: fall through to the dial attempt. If it then collides
+          // the runner will crash and the exit file makes it visible — this
+          // preflight is only a best-effort fast-path error.
+          console.warn(`[SessionDO:${this.ctx.id}] sendMessage preflight failed:`, err)
+        }
+      }
       this.updateState({ status: 'running', gate: null, error: null })
       void this.triggerGatewayDial({
         type: 'resume',
         project: this.state.project,
         prompt: content,
-        sdk_session_id: this.state.sdk_session_id ?? '',
+        sdk_session_id: sdk,
       })
     }
 

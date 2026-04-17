@@ -87,3 +87,44 @@ export async function getSessionStatus(
     return { kind: 'unreachable', reason: `parse_error:${msg}` }
   }
 }
+
+/**
+ * Entry returned by GET /sessions (B5b) — one row per live .pid file the
+ * gateway observes in SESSIONS_DIR.
+ */
+export interface SessionListEntry {
+  session_id: string
+  state: 'running' | 'completed' | 'failed' | 'aborted' | 'crashed'
+  sdk_session_id: string | null
+  last_activity_ts: number | null
+  last_event_seq: number
+  cost: { input_tokens: number; output_tokens: number; usd: number }
+  model: string | null
+  turn_count: number
+}
+
+/**
+ * List sessions currently observed by the gateway. Used by the DO to detect
+ * orphaned runners (live runner that isn't WS-connected to us) before we
+ * spawn a replacement that would collide inside session-runner's
+ * hasLiveResume guard.
+ */
+export async function listSessions(
+  gatewayUrl: string,
+  bearer: string | undefined,
+  timeoutMs = 5000,
+): Promise<SessionListEntry[]> {
+  const httpBase = gatewayUrl.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+  const url = `${httpBase.replace(/\/+$/, '')}/sessions`
+  const headers: Record<string, string> = {}
+  if (bearer) headers.Authorization = `Bearer ${bearer}`
+
+  try {
+    const resp = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) })
+    if (!resp.ok) return []
+    const body = (await resp.json()) as { ok?: boolean; sessions?: SessionListEntry[] }
+    return body.sessions ?? []
+  } catch {
+    return []
+  }
+}

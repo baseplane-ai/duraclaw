@@ -24,11 +24,11 @@ describe('parseEvent', () => {
     expect(mod).not.toHaveProperty('sendCommand')
   })
 
-  it('exports parseEvent and getSessionStatus (no dead legacy helpers)', async () => {
+  it('exports parseEvent, getSessionStatus, listSessions (no dead legacy helpers)', async () => {
     const mod = await import('./vps-client')
     const exportedKeys = Object.keys(mod).sort()
     // Intentional allow-list — guards against accidental re-introduction of
     // the old connectToExecutor/sendCommand helpers (see spec #1 P1.5).
-    expect(exportedKeys).toEqual(['getSessionStatus', 'parseEvent'])
+    expect(exportedKeys).toEqual(['getSessionStatus', 'listSessions', 'parseEvent'])
   })
 })
