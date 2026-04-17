@@ -1,0 +1,46 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/home/ubuntu/.npm-global/bin/kata\" hook session-start"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/home/ubuntu/.npm-global/bin/kata\" hook user-prompt"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/home/ubuntu/.npm-global/bin/kata\" hook stop-conditions",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/home/ubuntu/.npm-global/bin/kata\" hook pre-tool-use",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

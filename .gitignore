@@ -15,7 +15,7 @@ dist
 .wrangler
 
 # Tool state
-.claude/
+.claude/settings.local.json
 .tanstack/
 
 # IDE and editor files
