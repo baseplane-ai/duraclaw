@@ -162,10 +162,36 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           if (newState.duration_ms != null) draft.duration_ms = newState.duration_ms
         })
       }
-      // Hydrate messages on first state sync
+      // Hydrate messages on first state sync. Only flip the ref on success so
+      // that a transient empty/failed RPC doesn't permanently gate further
+      // attempts — URL-direct loads often race with DO cold-start, and the
+      // first getMessages call can return empty before gateway hydration
+      // completes on the DO side.
       if (!hydratedRef.current) {
-        hydratedRef.current = true
-        hydrateMessages(connection).catch(() => {})
+        hydrateMessages(connection)
+          .then((msgCount) => {
+            if (msgCount > 0) {
+              hydratedRef.current = true
+            } else {
+              // Session exists and should have history (sdk_session_id set) but
+              // returned empty — retry once after the DO has had a chance to
+              // populate via hydrateFromGateway.
+              const hasExistingSession = Boolean(newState.sdk_session_id)
+              if (hasExistingSession) {
+                setTimeout(() => {
+                  hydrateMessages(connection)
+                    .then((n) => {
+                      if (n > 0) hydratedRef.current = true
+                    })
+                    .catch(() => {})
+                }, 500)
+              } else {
+                // Fresh session with no prior history — gate off, nothing to retry.
+                hydratedRef.current = true
+              }
+            }
+          })
+          .catch(() => {})
       }
       // Re-hydrate when a resumed session completes
       if (prevStatus === 'running' && newState.status === 'idle') {
@@ -273,7 +299,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   })
 
   /** Fetch persisted messages, populate messages state and dedup set. */
-  async function hydrateMessages(conn: typeof connection) {
+  async function hydrateMessages(conn: typeof connection): Promise<number> {
     const hints = { session_hint: agentName }
     const serverMessages = (await conn.call('getMessages', [{ ...hints }])) as SessionMessage[]
 
@@ -294,6 +320,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       // Refresh branch info after hydration
       refreshBranchInfo(serverMessages).catch(() => {})
     }
+    return serverMessages.length
   }
 
   const spawn = useCallback(

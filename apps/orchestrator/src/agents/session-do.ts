@@ -169,14 +169,18 @@ export class SessionDO extends Agent<Env, SessionState> {
       return // No replay, no protocol messages
     }
 
-    // Browser connection: replay full message history
+    // Browser connection: replay full message history. Always send the frame
+    // (even empty) so the client has an explicit "history fetched" signal and
+    // doesn't sit gated on a `{type:'messages'}` frame that would never arrive
+    // for a session with no local history. If the DO is cold and has nothing
+    // in SQLite yet, the client's getMessages RPC will trigger gateway-side
+    // hydration as the source of truth.
     try {
       const messages = this.session.getHistory()
-      if (messages.length > 0) {
-        connection.send(JSON.stringify({ type: 'messages', messages }))
-      }
+      connection.send(JSON.stringify({ type: 'messages', messages }))
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to replay history:`, err)
+      connection.send(JSON.stringify({ type: 'messages', messages: [] }))
     }
 
     // Re-emit gate if session is waiting
