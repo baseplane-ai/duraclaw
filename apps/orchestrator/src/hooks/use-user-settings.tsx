@@ -53,26 +53,8 @@ function setActiveTabId(id: string | null) {
   for (const cb of activeListeners) cb()
 }
 
-// ── Helpers ──────────────────────────────────────────────────────
-
 function generateId(): string {
   return Math.random().toString(36).slice(2, 10)
-}
-
-/** Read current tabs from collection without creating intermediate arrays */
-function findInCollection(predicate: (t: TabItem) => boolean): TabItem | undefined {
-  for (const [, t] of tabsCollection as Iterable<[string, TabItem]>) {
-    if (predicate(t)) return t
-  }
-  return undefined
-}
-
-function collectionTabsList(): TabItem[] {
-  const result: TabItem[] = []
-  for (const [, t] of tabsCollection as Iterable<[string, TabItem]>) {
-    if (t.project !== '__draft') result.push(t)
-  }
-  return result
 }
 
 // ── Module-level imperative ref ──────────────────────────────────
@@ -145,13 +127,16 @@ export function useUserSettings(): UserSettingsContextValue {
 
   const activeTabId = useSyncExternalStore(subscribeActive, getActiveSnapshot, () => null)
 
-  // ── Tab operations — direct collection mutations ─────────────
-  // Collection's onInsert/onUpdate/onDelete handlers POST to DO via HTTP.
-  // DO persists + broadcasts state → WS → syncFromServer → writeBatch.
+  // Ref keeps callbacks reading fresh tabs without re-creating them
+  const tabsRef = useRef(tabs)
+  tabsRef.current = tabs
+
+  // ── Tab operations — use in-memory tabs list from useLiveQuery ──
 
   const addTab = useCallback((project: string, sessionId: string, title?: string) => {
-    // Use direct collection lookups — no array materialization
-    const bySession = findInCollection((t) => t.sessionId === sessionId)
+    const current = tabsRef.current
+
+    const bySession = current.find((t) => t.sessionId === sessionId)
     if (bySession) {
       if (title && title !== bySession.title) {
         tabsCollection.update(bySession.id, (draft) => {
@@ -162,7 +147,7 @@ export function useUserSettings(): UserSettingsContextValue {
       return
     }
 
-    const byProject = findInCollection((t) => t.project === project)
+    const byProject = current.find((t) => t.project === project)
     if (byProject) {
       tabsCollection.update(byProject.id, (draft) => {
         draft.sessionId = sessionId
@@ -203,7 +188,7 @@ export function useUserSettings(): UserSettingsContextValue {
   }, [])
 
   const removeTab = useCallback((tabId: string) => {
-    const current = collectionTabsList()
+    const current = tabsRef.current
     const currentActive = readActiveTabId()
     let newActive = currentActive
     if (currentActive === tabId) {
