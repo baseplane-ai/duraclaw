@@ -1,3 +1,22 @@
+import {
+  closestCenter,
+  DndContext,
+  type DragEndEvent,
+  DragOverlay,
+  type DragStartEvent,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core'
+import {
+  arrayMove,
+  horizontalListSortingStrategy,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+} from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
 import { ChevronLeftIcon, ChevronRightIcon, CopyPlusIcon, PlusIcon, X } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
@@ -37,11 +56,42 @@ export function TabBar({
   onNewSessionInTab,
   onNewTabForProject,
 }: TabBarProps) {
-  const { tabs, setActiveTab, removeTab } = useUserSettings()
+  const { tabs, setActiveTab, removeTab, reorderTabs } = useUserSettings()
   const { sessions } = useSessionsCollection()
   const scrollRef = useRef<HTMLDivElement>(null)
   const [canScrollLeft, setCanScrollLeft] = useState(false)
   const [canScrollRight, setCanScrollRight] = useState(false)
+
+  // ── Drag-to-reorder ──────────────────────────────────────────────
+  const [activeDragId, setActiveDragId] = useState<string | null>(null)
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  )
+
+  const handleDragStart = useCallback((e: DragStartEvent) => {
+    setActiveDragId(String(e.active.id))
+  }, [])
+
+  const handleDragEnd = useCallback(
+    (e: DragEndEvent) => {
+      setActiveDragId(null)
+      const { active, over } = e
+      if (!over || active.id === over.id) return
+      const oldIndex = tabs.findIndex((t) => t.id === active.id)
+      const newIndex = tabs.findIndex((t) => t.id === over.id)
+      if (oldIndex < 0 || newIndex < 0) return
+      const reordered = arrayMove(tabs, oldIndex, newIndex)
+      reorderTabs(reordered.map((t) => t.id))
+    },
+    [tabs, reorderTabs],
+  )
+
+  const activeDragTab = activeDragId ? tabs.find((t) => t.id === activeDragId) : null
+  const activeDragSession = activeDragTab
+    ? sessions.find((s) => s.id === activeDragTab.sessionId)
+    : undefined
 
   // Detect overflow on scroll + resize
   const updateOverflow = useCallback(() => {
@@ -110,60 +160,117 @@ export function TabBar({
   if (tabs.length === 0) return null
 
   return (
-    <div className="relative" data-testid="tab-bar">
-      <div
-        ref={scrollRef}
-        className="flex items-center border-b bg-background overflow-x-auto scrollbar-none"
-        onWheel={handleWheel}
-      >
-        {tabs.map((tab) => {
-          const currentSession = sessions.find((s) => s.id === tab.sessionId)
+    <DndContext
+      sensors={sensors}
+      collisionDetection={closestCenter}
+      onDragStart={handleDragStart}
+      onDragEnd={handleDragEnd}
+    >
+      <div className="relative" data-testid="tab-bar">
+        <div
+          ref={scrollRef}
+          className="flex items-center border-b bg-background overflow-x-auto scrollbar-none"
+          onWheel={handleWheel}
+        >
+          <SortableContext items={tabs.map((t) => t.id)} strategy={horizontalListSortingStrategy}>
+            {tabs.map((tab) => {
+              const currentSession = sessions.find((s) => s.id === tab.sessionId)
 
-          return (
-            <ProjectTab
-              key={tab.id}
-              tabId={tab.id}
-              project={tab.project}
-              title={tab.title}
-              isActive={tab.sessionId === activeSessionId}
-              currentSession={currentSession}
-              onSelect={() => {
-                setActiveTab(tab.id)
-                onSelectSession(tab.sessionId)
-              }}
-              onClose={() => handleClose(tab.id)}
-              onNewSessionInTab={
-                onNewSessionInTab ? () => onNewSessionInTab(tab.project) : undefined
-              }
-              onNewTabForProject={
-                onNewTabForProject ? () => onNewTabForProject(tab.project) : undefined
-              }
-            />
-          )
-        })}
+              return (
+                <SortableProjectTab
+                  key={tab.id}
+                  tabId={tab.id}
+                  project={tab.project}
+                  title={tab.title}
+                  isActive={tab.sessionId === activeSessionId}
+                  currentSession={currentSession}
+                  onSelect={() => {
+                    setActiveTab(tab.id)
+                    onSelectSession(tab.sessionId)
+                  }}
+                  onClose={() => handleClose(tab.id)}
+                  onNewSessionInTab={
+                    onNewSessionInTab ? () => onNewSessionInTab(tab.project) : undefined
+                  }
+                  onNewTabForProject={
+                    onNewTabForProject ? () => onNewTabForProject(tab.project) : undefined
+                  }
+                />
+              )
+            })}
+          </SortableContext>
+        </div>
+
+        {/* Scroll overflow arrows */}
+        {canScrollLeft && (
+          <button
+            type="button"
+            aria-label="Scroll tabs left"
+            className="absolute left-0 top-0 bottom-0 z-10 flex items-center pl-0.5 pr-1 bg-gradient-to-r from-background via-background/80 to-transparent"
+            onClick={() => scrollBy('left')}
+          >
+            <ChevronLeftIcon className="size-3.5 text-muted-foreground" />
+          </button>
+        )}
+        {canScrollRight && (
+          <button
+            type="button"
+            aria-label="Scroll tabs right"
+            className="absolute right-0 top-0 bottom-0 z-10 flex items-center pr-0.5 pl-1 bg-gradient-to-l from-background via-background/80 to-transparent"
+            onClick={() => scrollBy('right')}
+          >
+            <ChevronRightIcon className="size-3.5 text-muted-foreground" />
+          </button>
+        )}
       </div>
 
-      {/* Scroll overflow arrows */}
-      {canScrollLeft && (
-        <button
-          type="button"
-          aria-label="Scroll tabs left"
-          className="absolute left-0 top-0 bottom-0 z-10 flex items-center pl-0.5 pr-1 bg-gradient-to-r from-background via-background/80 to-transparent"
-          onClick={() => scrollBy('left')}
-        >
-          <ChevronLeftIcon className="size-3.5 text-muted-foreground" />
-        </button>
-      )}
-      {canScrollRight && (
-        <button
-          type="button"
-          aria-label="Scroll tabs right"
-          className="absolute right-0 top-0 bottom-0 z-10 flex items-center pr-0.5 pl-1 bg-gradient-to-l from-background via-background/80 to-transparent"
-          onClick={() => scrollBy('right')}
-        >
-          <ChevronRightIcon className="size-3.5 text-muted-foreground" />
-        </button>
-      )}
+      {/* Drag preview overlay — renders a floating copy of the dragged tab */}
+      <DragOverlay dropAnimation={null}>
+        {activeDragTab && (
+          <div className="rounded border bg-background shadow-lg opacity-90">
+            <ProjectTab
+              tabId={activeDragTab.id}
+              project={activeDragTab.project}
+              title={activeDragTab.title}
+              isActive={activeDragTab.sessionId === activeSessionId}
+              currentSession={activeDragSession}
+              onSelect={() => {}}
+              onClose={() => {}}
+            />
+          </div>
+        )}
+      </DragOverlay>
+    </DndContext>
+  )
+}
+
+interface ProjectTabProps {
+  tabId: string
+  project: string
+  title: string
+  isActive: boolean
+  currentSession: SessionRecord | undefined
+  onSelect: () => void
+  onClose: () => void
+  onNewSessionInTab?: () => void
+  onNewTabForProject?: () => void
+}
+
+/** Sortable wrapper — applies dnd-kit transform/transition and drag listeners */
+function SortableProjectTab(props: ProjectTabProps) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: props.tabId,
+  })
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.4 : 1,
+    position: 'relative',
+    zIndex: isDragging ? 1 : 0,
+  }
+  return (
+    <div ref={setNodeRef} style={style} {...attributes} {...listeners}>
+      <ProjectTab {...props} />
     </div>
   )
 }
@@ -178,17 +285,7 @@ function ProjectTab({
   onClose,
   onNewSessionInTab,
   onNewTabForProject,
-}: {
-  tabId: string
-  project: string
-  title: string
-  isActive: boolean
-  currentSession: SessionRecord | undefined
-  onSelect: () => void
-  onClose: () => void
-  onNewSessionInTab?: () => void
-  onNewTabForProject?: () => void
-}) {
+}: ProjectTabProps) {
   const isMobile = useIsMobile()
   const [menuOpen, setMenuOpen] = useState(false)
 

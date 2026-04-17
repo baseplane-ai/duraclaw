@@ -15,6 +15,50 @@ import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'r
 import type { UserSettingsState } from '~/agents/user-settings-do'
 import { type TabItem, tabsCollection } from '~/db/tabs-collection'
 
+// ── tab order in localStorage ────────────────────────────────────
+// Per-browser override for tab display order (same pattern as activeTabId).
+
+const TAB_ORDER_KEY = 'duraclaw-tab-order'
+
+function readTabOrder(): string[] {
+  if (typeof localStorage === 'undefined') return []
+  try {
+    const raw = localStorage.getItem(TAB_ORDER_KEY)
+    return raw ? (JSON.parse(raw) as string[]) : []
+  } catch {
+    return []
+  }
+}
+
+function writeTabOrder(ids: string[]) {
+  if (typeof localStorage === 'undefined') return
+  try {
+    localStorage.setItem(TAB_ORDER_KEY, JSON.stringify(ids))
+  } catch {
+    // Quota exceeded or private browsing
+  }
+}
+
+const orderListeners = new Set<() => void>()
+let orderSnapshot = readTabOrder()
+
+function subscribeOrder(cb: () => void) {
+  orderListeners.add(cb)
+  return () => {
+    orderListeners.delete(cb)
+  }
+}
+
+function getOrderSnapshot() {
+  return orderSnapshot
+}
+
+function setTabOrder(ids: string[]) {
+  orderSnapshot = ids
+  writeTabOrder(ids)
+  for (const cb of orderListeners) cb()
+}
+
 // ── activeTabId in localStorage ──────────────────────────────────
 
 const ACTIVE_TAB_KEY = 'duraclaw-active-tab'
@@ -112,6 +156,7 @@ interface UserSettingsImperative {
   removeTab: (tabId: string) => void
   setActiveTab: (tabId: string) => void
   updateTabTitle: (tabId: string, title: string) => void
+  reorderTabs: (orderedIds: string[]) => void
   findTabBySession: (sessionId: string) => TabItem | undefined
   findTabByProject: (project: string) => TabItem | undefined
 }
@@ -126,6 +171,7 @@ const settingsRef: { current: UserSettingsImperative } = {
     removeTab: () => {},
     setActiveTab: () => {},
     updateTabTitle: () => {},
+    reorderTabs: () => {},
     findTabBySession: () => undefined,
     findTabByProject: () => undefined,
   },
@@ -166,8 +212,29 @@ export function useUserSettings(): UserSettingsContextValue {
     return [...data] as TabItem[]
   }, [data])
 
-  // Filter out sentinel draft records (project === '__draft') from visible tabs
-  const tabs = useMemo(() => allItems.filter((t) => t.project !== '__draft'), [allItems])
+  // Filter out sentinel draft records (project === '__draft') from visible tabs,
+  // then apply local tab-order override (per-browser, localStorage-backed).
+  const tabOrder = useSyncExternalStore(subscribeOrder, getOrderSnapshot, () => [] as string[])
+
+  const tabs = useMemo(() => {
+    const filtered = allItems.filter((t) => t.project !== '__draft')
+    if (tabOrder.length === 0) return filtered
+    const byId = new Map(filtered.map((t) => [t.id, t]))
+    const ordered: TabItem[] = []
+    const seen = new Set<string>()
+    for (const id of tabOrder) {
+      const t = byId.get(id)
+      if (t) {
+        ordered.push(t)
+        seen.add(id)
+      }
+    }
+    // Append any tabs not in the order list (newly created)
+    for (const t of filtered) {
+      if (!seen.has(t.id)) ordered.push(t)
+    }
+    return ordered
+  }, [allItems, tabOrder])
 
   const activeTabId = useSyncExternalStore(subscribeActive, getActiveSnapshot, () => null)
 
@@ -266,6 +333,10 @@ export function useUserSettings(): UserSettingsContextValue {
     }
   }, [])
 
+  const reorderTabs = useCallback((orderedIds: string[]) => {
+    setTabOrder(orderedIds)
+  }, [])
+
   const findTabBySession = useCallback(
     (sessionId: string): TabItem | undefined => {
       return tabs.find((t) => t.sessionId === sessionId)
@@ -353,6 +424,7 @@ export function useUserSettings(): UserSettingsContextValue {
     removeTab,
     setActiveTab,
     updateTabTitle,
+    reorderTabs,
     findTabBySession,
     findTabByProject,
   }
@@ -367,6 +439,7 @@ export function useUserSettings(): UserSettingsContextValue {
     removeTab,
     setActiveTab,
     updateTabTitle,
+    reorderTabs,
     saveDraft,
     getDraft,
     findTabBySession,
