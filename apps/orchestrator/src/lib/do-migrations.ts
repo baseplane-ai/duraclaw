@@ -9,7 +9,12 @@ export interface Migration {
 }
 
 function readRows(result: { toArray(): unknown[] } | unknown): unknown[] {
-  if (result && typeof result === 'object' && 'toArray' in result && typeof result.toArray === 'function') {
+  if (
+    result &&
+    typeof result === 'object' &&
+    'toArray' in result &&
+    typeof result.toArray === 'function'
+  ) {
     return result.toArray()
   }
   return []

@@ -8,10 +8,10 @@ import {
   SheetHeader,
   SheetTitle,
 } from '~/components/ui/sheet'
+import { getUserSettings } from '~/hooks/use-user-settings'
 import { cn } from '~/lib/utils'
 import type { AppNotification } from '~/stores/notifications'
 import { useNotificationStore } from '~/stores/notifications'
-import { getUserSettings } from '~/hooks/use-user-settings'
 import { NotificationPreferences } from './notification-preferences'
 
 interface NotificationDrawerProps {
