@@ -16,6 +16,14 @@ export interface DialBackClientOptions {
   sessionId?: string
   /** Optional logger for structured logs. Defaults to `console`. */
   logger?: DialBackClientLogger
+  /**
+   * Called when the client gives up permanently — either the DO signalled a
+   * terminal close code (4401 invalid token / 4410 token rotated) or we hit
+   * MAX_POST_CONNECT_ATTEMPTS back-to-back reconnect failures after the
+   * initial success. The session-runner uses this to exit cleanly instead of
+   * spinning in a 30s reconnect loop forever (i.e. becoming an orphan).
+   */
+  onTerminate?: (reason: 'invalid_token' | 'token_rotated' | 'reconnect_exhausted') => void
 }
 
 const BACKOFF_BASE = 1000
@@ -23,6 +31,12 @@ const BACKOFF_MULTIPLIER = 3
 const BACKOFF_CAP = 30_000
 const STABLE_THRESHOLD = 10_000
 const STARTUP_TIMEOUT = 15 * 60 * 1000
+/** After this many post-connect reconnect attempts with no 10s-stable window
+ * in between, treat the DO as permanently unreachable and give up. */
+const MAX_POST_CONNECT_ATTEMPTS = 20
+/** WS close codes the DO uses to signal "don't reconnect, you're done". */
+const CLOSE_INVALID_TOKEN = 4401
+const CLOSE_TOKEN_ROTATED = 4410
 
 export class DialBackClient {
   private callbackUrl: string
@@ -30,6 +44,7 @@ export class DialBackClient {
   private channel: BufferedChannel
   private onCommand: (cmd: unknown) => void
   private onStateChange?: DialBackClientOptions['onStateChange']
+  private onTerminate?: DialBackClientOptions['onTerminate']
   private sessionId?: string
   private logger: DialBackClientLogger
 
@@ -49,6 +64,7 @@ export class DialBackClient {
     this.channel = options.channel
     this.onCommand = options.onCommand
     this.onStateChange = options.onStateChange
+    this.onTerminate = options.onTerminate
     this.sessionId = options.sessionId
     this.logger = options.logger ?? console
   }
@@ -118,7 +134,7 @@ export class DialBackClient {
       }, STABLE_THRESHOLD)
     }
 
-    ws.onclose = () => {
+    ws.onclose = (e: { code?: number; reason?: string } = {}) => {
       if (this.stopped || ws !== this.ws) return
       this.channel.detachWebSocket()
 
@@ -128,7 +144,19 @@ export class DialBackClient {
         this.healthTimer = null
       }
 
-      this.logger.info(`[dial-back-client] connection dropped${this.sessionSuffix()}`)
+      const code = e.code
+      const reason = e.reason ?? ''
+      this.logger.info(
+        `[dial-back-client] connection dropped${this.sessionSuffix()} code=${code ?? '?'}${reason ? ` reason=${reason}` : ''}`,
+      )
+
+      // DO-sent terminal close codes: don't reconnect, don't orphan.
+      if (code === CLOSE_INVALID_TOKEN || code === CLOSE_TOKEN_ROTATED) {
+        this.stopped = true
+        this.onStateChange?.('closed')
+        this.onTerminate?.(code === CLOSE_INVALID_TOKEN ? 'invalid_token' : 'token_rotated')
+        return
+      }
 
       this.scheduleReconnect()
     }
@@ -159,6 +187,20 @@ export class DialBackClient {
     ) {
       this.failedToConnect = true
       this.onStateChange?.('closed')
+      return
+    }
+
+    // Post-connect reconnect cap: if we connected once but have failed more
+    // than MAX_POST_CONNECT_ATTEMPTS times back-to-back without a 10s stable
+    // window resetting this.attempt, give up. Runner should exit rather than
+    // orphan on the VPS hammering the DO forever.
+    if (this.hasEverConnected && this.attempt >= MAX_POST_CONNECT_ATTEMPTS) {
+      this.stopped = true
+      this.logger.warn(
+        `[dial-back-client] reconnect exhausted${this.sessionSuffix()} attempts=${this.attempt} — giving up`,
+      )
+      this.onStateChange?.('closed')
+      this.onTerminate?.('reconnect_exhausted')
       return
     }
 

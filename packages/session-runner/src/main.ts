@@ -328,6 +328,16 @@ async function main(): Promise<void> {
     bearer: argv.bearer,
     channel,
     onCommand: (raw) => handleIncomingCommand(raw, ctx, channel),
+    // The DO owns session lifecycle via callback-token validation. When it
+    // sends a terminal close code (4401 invalid / 4410 rotated) the runner
+    // has no business staying alive — abort the SDK query so main's
+    // clean-shutdown path runs and writes the exit file. Same for reconnect
+    // exhaustion: we can no longer reach anyone.
+    onTerminate: (reason) => {
+      console.warn(`[session-runner] dial-back terminated: ${reason} — aborting SDK query`)
+      ctx.meta.state = 'aborted'
+      ctx.abortController.abort()
+    },
   })
   dialBackClient.start()
 
