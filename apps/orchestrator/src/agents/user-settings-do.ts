@@ -43,8 +43,55 @@ export class UserSettingsDO extends Agent<Env, UserSettingsState> {
 
   onConnect(connection: Connection) {
     this.ensureInit()
-    // Send current state to newly connected client
     connection.send(JSON.stringify({ type: 'state', state: this.state }))
+  }
+
+  /** HTTP API for TanStack DB queryCollection sync */
+  async onRequest(request: Request): Promise<Response> {
+    this.ensureInit()
+    const url = new URL(request.url)
+
+    // GET /tabs — list all tabs
+    if (request.method === 'GET' && url.pathname === '/tabs') {
+      return Response.json({ tabs: this.state.tabs })
+    }
+
+    // POST /tabs — add or upsert a tab
+    if (request.method === 'POST' && url.pathname === '/tabs') {
+      const body = (await request.json()) as {
+        action?: string
+        project?: string
+        sessionId?: string
+        title?: string
+        tabId?: string
+        newTab?: boolean
+      }
+      if (body.action === 'addNew' && body.project && body.sessionId) {
+        this.addNewTab(body.project, body.sessionId, body.title)
+      } else if (body.action === 'switch' && body.tabId && body.sessionId) {
+        this.switchTabSession(body.tabId, body.sessionId, body.title)
+      } else if (body.project && body.sessionId) {
+        this.addTab(body.project, body.sessionId, body.title)
+      }
+      return Response.json({ tabs: this.state.tabs })
+    }
+
+    // PATCH /tabs/:id — update title
+    if (request.method === 'PATCH' && url.pathname.startsWith('/tabs/')) {
+      const tabId = url.pathname.slice('/tabs/'.length)
+      const body = (await request.json()) as { title?: string }
+      if (body.title) this.updateTabTitle(tabId, body.title)
+      return Response.json({ tabs: this.state.tabs })
+    }
+
+    // DELETE /tabs/:id — remove tab
+    if (request.method === 'DELETE' && url.pathname.startsWith('/tabs/')) {
+      const tabId = url.pathname.slice('/tabs/'.length)
+      const result = this.removeTab(tabId)
+      return Response.json(result)
+    }
+
+    return new Response('Not found', { status: 404 })
   }
 
   // ── State persistence ──────────────────────────────────────────

@@ -31,6 +31,11 @@ function getRegistry(c: { env: ApiAppEnv['Bindings'] }) {
   return c.env.SESSION_REGISTRY.get(registryId) as any
 }
 
+function getUserSettingsDO(env: ApiAppEnv['Bindings'], userId: string) {
+  const doId = env.USER_SETTINGS.idFromName(userId)
+  return env.USER_SETTINGS.get(doId)
+}
+
 /** Resolve a session ID to a DO ID — hex IDs use idFromString, UUIDs use idFromName */
 function getSessionDoId(env: ApiAppEnv['Bindings'], sessionId: string) {
   const isHexId = /^[0-9a-f]{64}$/.test(sessionId)
@@ -245,6 +250,48 @@ export function createApiApp() {
   })
 
   app.use('/api/*', authMiddleware)
+
+  // ── User settings (tabs) — proxied to UserSettingsDO ──────────
+
+  app.get('/api/user-settings/tabs', async (c) => {
+    const stub = getUserSettingsDO(c.env, c.get('userId'))
+    const resp = await stub.fetch(new Request('https://do/tabs'))
+    return c.json(await resp.json())
+  })
+
+  app.post('/api/user-settings/tabs', async (c) => {
+    const body = await c.req.json()
+    const stub = getUserSettingsDO(c.env, c.get('userId'))
+    const resp = await stub.fetch(
+      new Request('https://do/tabs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }),
+    )
+    return c.json(await resp.json())
+  })
+
+  app.patch('/api/user-settings/tabs/:id', async (c) => {
+    const tabId = c.req.param('id')
+    const body = await c.req.json()
+    const stub = getUserSettingsDO(c.env, c.get('userId'))
+    const resp = await stub.fetch(
+      new Request(`https://do/tabs/${tabId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }),
+    )
+    return c.json(await resp.json())
+  })
+
+  app.delete('/api/user-settings/tabs/:id', async (c) => {
+    const tabId = c.req.param('id')
+    const stub = getUserSettingsDO(c.env, c.get('userId'))
+    const resp = await stub.fetch(new Request(`https://do/tabs/${tabId}`, { method: 'DELETE' }))
+    return c.json(await resp.json())
+  })
 
   app.get('/api/user/preferences', async (c) => {
     const userId = c.get('userId')
