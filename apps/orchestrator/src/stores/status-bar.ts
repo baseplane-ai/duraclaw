@@ -1,10 +1,19 @@
 import { create } from 'zustand'
-import type { KataSessionState, SessionState } from '~/lib/types'
+import type { KataSessionState, PrInfo, SessionState } from '~/lib/types'
 
 export interface ContextUsage {
   totalTokens: number
   maxTokens: number
   percentage: number
+}
+
+export interface WorktreeInfo {
+  name: string
+  branch: string
+  dirty: boolean
+  ahead: number
+  behind: number
+  pr: PrInfo | null
 }
 
 interface StatusBarStore {
@@ -15,6 +24,7 @@ interface StatusBarStore {
   onStop: ((reason: string) => void) | null
   onInterrupt: (() => void) | null
   kataState: KataSessionState | null
+  worktreeInfo: WorktreeInfo | null
   set: (patch: Partial<Omit<StatusBarStore, 'set' | 'clear'>>) => void
   clear: () => void
 }
@@ -27,6 +37,7 @@ export const useStatusBarStore = create<StatusBarStore>((set) => ({
   onStop: null,
   onInterrupt: null,
   kataState: null,
+  worktreeInfo: null,
   set: (patch) => set(patch),
   clear: () =>
     set({
@@ -37,5 +48,6 @@ export const useStatusBarStore = create<StatusBarStore>((set) => ({
       onStop: null,
       onInterrupt: null,
       kataState: null,
+      worktreeInfo: null,
     }),
 }))

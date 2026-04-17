@@ -350,6 +350,13 @@ export type BrowserCommand =
 
 // ── Project ──────────────────────────────────────────────────────────
 
+export interface PrInfo {
+  number: number
+  state: 'OPEN' | 'MERGED' | 'CLOSED'
+  draft: boolean
+  checks: { pass: number; fail: number; pending: number; total: number } | null
+}
+
 export interface ProjectInfo {
   name: string
   path: string
@@ -357,6 +364,9 @@ export interface ProjectInfo {
   dirty: boolean
   active_session: string | null
   repo_origin: string | null
+  ahead: number
+  behind: number
+  pr: PrInfo | null
 }
 
 // ── SDK Session Info (on-disk session metadata) ─────────────────────

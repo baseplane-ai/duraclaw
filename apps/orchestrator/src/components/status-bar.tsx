@@ -3,11 +3,11 @@
  * Reads from the Zustand status-bar store (populated by AgentDetailView).
  */
 
-import { Square, Zap } from 'lucide-react'
+import { GitBranchIcon, Square, Zap } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import type { KataSessionState, SessionState } from '~/lib/types'
+import type { KataSessionState, PrInfo, SessionState } from '~/lib/types'
 import { cn } from '~/lib/utils'
-import { type ContextUsage, useStatusBarStore } from '~/stores/status-bar'
+import { type ContextUsage, useStatusBarStore, type WorktreeInfo } from '~/stores/status-bar'
 import { Button } from './ui/button'
 
 function formatDuration(ms: number): string {
@@ -94,6 +94,68 @@ function getBarClasses(status: string | undefined): string {
   }
 }
 
+function PrStatusBadge({ pr }: { pr: PrInfo }) {
+  const stateLabel =
+    pr.state === 'MERGED'
+      ? 'merged'
+      : pr.state === 'CLOSED'
+        ? 'closed'
+        : pr.draft
+          ? 'draft'
+          : 'open'
+
+  const stateColor =
+    pr.state === 'MERGED'
+      ? 'text-purple-400'
+      : pr.state === 'CLOSED'
+        ? 'text-red-400'
+        : pr.draft
+          ? 'text-muted-foreground'
+          : 'text-green-400'
+
+  let checksLabel = ''
+  if (pr.checks) {
+    if (pr.checks.fail > 0) checksLabel = ` \u26A0 ${pr.checks.fail} failing`
+    else if (pr.checks.pending > 0) checksLabel = ` \u22EF pending`
+    else checksLabel = ` \u2713 ${pr.checks.pass}/${pr.checks.total}`
+  }
+
+  return (
+    <span className={cn('whitespace-nowrap', stateColor)} title={`PR #${pr.number} ${stateLabel}`}>
+      PR#{pr.number} {stateLabel}
+      {checksLabel}
+    </span>
+  )
+}
+
+function WorktreeStatusItem({ info }: { info: WorktreeInfo }) {
+  return (
+    <div className="flex items-center gap-1.5 text-muted-foreground">
+      <GitBranchIcon className="size-3" />
+      <span className="whitespace-nowrap" title={`${info.name} \u2014 ${info.branch}`}>
+        {info.name}
+      </span>
+      <span className="whitespace-nowrap">{info.branch}</span>
+      {info.dirty && (
+        <span className="text-yellow-400" title="Uncommitted changes">
+          \u25CF
+        </span>
+      )}
+      {info.ahead > 0 && (
+        <span className="whitespace-nowrap" title={`${info.ahead} commit(s) ahead`}>
+          {info.ahead}\u25B2
+        </span>
+      )}
+      {info.behind > 0 && (
+        <span className="whitespace-nowrap" title={`${info.behind} commit(s) behind`}>
+          {info.behind}\u25BC
+        </span>
+      )}
+      {info.pr && <PrStatusBadge pr={info.pr} />}
+    </div>
+  )
+}
+
 function KataStatusItem({ kataState }: { kataState: KataSessionState }) {
   const [showPopover, setShowPopover] = useState(false)
 
@@ -155,8 +217,16 @@ function KataStatusItem({ kataState }: { kataState: KataSessionState }) {
 }
 
 export function StatusBar() {
-  const { state, wsReadyState, contextUsage, sessionResult, onStop, onInterrupt, kataState } =
-    useStatusBarStore()
+  const {
+    state,
+    wsReadyState,
+    contextUsage,
+    sessionResult,
+    onStop,
+    onInterrupt,
+    kataState,
+    worktreeInfo,
+  } = useStatusBarStore()
 
   const status = state?.status
   const canStop = status === 'running' || status === 'waiting_gate'
@@ -176,6 +246,7 @@ export function StatusBar() {
         <WsDot readyState={wsReadyState} />
         <span className="text-foreground">{status}</span>
         <span className="text-muted-foreground">{state.project || '--'}</span>
+        {worktreeInfo && <WorktreeStatusItem info={worktreeInfo} />}
         <span className="text-muted-foreground">{state.model || '--'}</span>
         <span className="text-muted-foreground">{state.num_turns} turns</span>
         {sessionResult?.total_cost_usd != null && (

@@ -19,6 +19,7 @@ export type {
   PartialAssistantEvent,
   PermissionRequestEvent,
   PermissionResponseCommand,
+  PrInfo,
   ProjectInfo,
   RateLimitEvent,
   ResultEvent,

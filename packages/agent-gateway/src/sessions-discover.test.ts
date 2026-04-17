@@ -63,6 +63,9 @@ function createMockProject(name: string, branch = 'main'): ProjectInfo {
     dirty: false,
     active_session: null,
     repo_origin: null,
+    ahead: 0,
+    behind: 0,
+    pr: null,
   }
 }
 

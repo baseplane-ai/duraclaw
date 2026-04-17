@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { promisify } from 'node:util'
-import type { ProjectInfo } from './types.js'
+import type { PrInfo, ProjectInfo } from './types.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -53,6 +53,97 @@ async function isDirty(dir: string): Promise<boolean> {
   }
 }
 
+/** Get commits ahead/behind relative to upstream (origin/<branch>). */
+async function getAheadBehind(
+  dir: string,
+  branch: string,
+): Promise<{ ahead: number; behind: number }> {
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['rev-list', '--left-right', '--count', `origin/${branch}...HEAD`],
+      { cwd: dir },
+    )
+    const [behind, ahead] = stdout.trim().split(/\s+/).map(Number)
+    return { ahead: ahead || 0, behind: behind || 0 }
+  } catch {
+    return { ahead: 0, behind: 0 }
+  }
+}
+
+/** PR info cache: key = dir, value = { data, timestamp } */
+const prCache = new Map<string, { data: PrInfo | null; ts: number }>()
+const PR_CACHE_TTL = 30_000 // 30 seconds
+
+/** Get PR info for the current branch via gh CLI. */
+async function getPrInfo(dir: string, branch: string): Promise<PrInfo | null> {
+  if (branch === 'main' || branch === 'master' || branch === 'unknown') return null
+
+  const cached = prCache.get(dir)
+  if (cached && Date.now() - cached.ts < PR_CACHE_TTL) return cached.data
+
+  try {
+    const { stdout } = await execFileAsync(
+      'gh',
+      [
+        'pr',
+        'list',
+        '--head',
+        branch,
+        '--json',
+        'number,state,isDraft,statusCheckRollup',
+        '--limit',
+        '1',
+      ],
+      { cwd: dir, timeout: 5000 },
+    )
+    const prs = JSON.parse(stdout) as Array<{
+      number: number
+      state: string
+      isDraft: boolean
+      statusCheckRollup: Array<{ status: string; conclusion: string }> | null
+    }>
+    if (prs.length === 0) {
+      prCache.set(dir, { data: null, ts: Date.now() })
+      return null
+    }
+    const pr = prs[0]
+    let checks: PrInfo['checks'] = null
+    if (pr.statusCheckRollup && pr.statusCheckRollup.length > 0) {
+      let pass = 0,
+        fail = 0,
+        pending = 0
+      for (const check of pr.statusCheckRollup) {
+        if (
+          check.conclusion === 'SUCCESS' ||
+          check.conclusion === 'NEUTRAL' ||
+          check.conclusion === 'SKIPPED'
+        )
+          pass++
+        else if (
+          check.conclusion === 'FAILURE' ||
+          check.conclusion === 'ERROR' ||
+          check.conclusion === 'TIMED_OUT'
+        )
+          fail++
+        else pending++
+      }
+      checks = { pass, fail, pending, total: pr.statusCheckRollup.length }
+    }
+    const info: PrInfo = {
+      number: pr.number,
+      state: pr.state as PrInfo['state'],
+      draft: pr.isDraft,
+      checks,
+    }
+    prCache.set(dir, { data: info, ts: Date.now() })
+    return info
+  } catch {
+    prCache.set(dir, { data: null, ts: Date.now() })
+    return null
+  }
+}
+
 /**
  * Discover all git repos under /data/projects/.
  * When PROJECT_PATTERNS is set, only repos matching those prefixes are returned.
@@ -82,8 +173,12 @@ export async function discoverProjects(
     }
 
     const branch = await getBranch(fullPath)
-    const dirty = await isDirty(fullPath)
-    const repo_origin = await getRemoteOrigin(fullPath)
+    const [dirty, repo_origin, aheadBehind, pr] = await Promise.all([
+      isDirty(fullPath),
+      getRemoteOrigin(fullPath),
+      getAheadBehind(fullPath, branch),
+      getPrInfo(fullPath, branch),
+    ])
     projects.push({
       name: entry.name,
       path: fullPath,
@@ -91,6 +186,9 @@ export async function discoverProjects(
       dirty,
       active_session: activeSessions[fullPath] ?? null,
       repo_origin,
+      ahead: aheadBehind.ahead,
+      behind: aheadBehind.behind,
+      pr,
     })
   }
 

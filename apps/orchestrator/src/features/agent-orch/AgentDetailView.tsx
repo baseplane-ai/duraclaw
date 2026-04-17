@@ -2,8 +2,9 @@
  * AgentDetailView — Live status display for a single SessionDO instance.
  */
 
-import { useCallback, useEffect } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { StatusBar } from '~/components/status-bar'
+import type { ProjectInfo } from '~/lib/types'
 import { useStatusBarStore } from '~/stores/status-bar'
 import { ChatThread } from './ChatThread'
 import { ConversationDownload } from './ConversationDownload'
@@ -54,6 +55,45 @@ export function AgentDetailView({ name: _name, agent }: AgentDetailViewProps) {
   useEffect(() => {
     return () => statusBarClear()
   }, [statusBarClear])
+
+  // Fetch worktree info for the current project and keep it refreshed
+  const projectName = state?.project
+  const worktreeInterval = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  useEffect(() => {
+    if (!projectName) {
+      statusBarSet({ worktreeInfo: null })
+      return
+    }
+
+    const fetchWorktreeInfo = () => {
+      fetch('/api/gateway/projects/all')
+        .then((r) => (r.ok ? r.json() : []))
+        .then((data) => {
+          const match = (data as ProjectInfo[]).find((p) => p.name === projectName)
+          if (match) {
+            statusBarSet({
+              worktreeInfo: {
+                name: match.name,
+                branch: match.branch,
+                dirty: match.dirty,
+                ahead: match.ahead ?? 0,
+                behind: match.behind ?? 0,
+                pr: match.pr ?? null,
+              },
+            })
+          }
+        })
+        .catch(() => {})
+    }
+
+    fetchWorktreeInfo()
+    worktreeInterval.current = setInterval(fetchWorktreeInfo, 30_000)
+
+    return () => {
+      if (worktreeInterval.current) clearInterval(worktreeInterval.current)
+    }
+  }, [projectName, statusBarSet])
 
   const handleSendSuggestion = useCallback(
     (text: string) => {
