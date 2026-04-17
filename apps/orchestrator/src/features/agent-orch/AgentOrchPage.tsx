@@ -49,7 +49,16 @@ function AgentOrchContent() {
     // No URL session — restore from the last active tab (cold launch / PWA)
     const { tabs: currentTabs, activeTabId: currentActiveTabId } = settings
     if (currentActiveTabId) {
-      return currentTabs.find((t) => t.id === currentActiveTabId)?.sessionId ?? null
+      const match = currentTabs.find((t) => t.id === currentActiveTabId)
+      if (match) return match.sessionId
+    }
+    // Fallback: if tabs exist but none is marked active (e.g., stale activeTabId,
+    // notification tap that failed to set ?session=X), select the first tab rather
+    // than showing the empty "Start a conversation" state.
+    if (currentTabs.length > 0) {
+      const fallback = currentTabs[0]
+      settings.setActiveTab(fallback.id)
+      return fallback.sessionId
     }
     return null
   })
