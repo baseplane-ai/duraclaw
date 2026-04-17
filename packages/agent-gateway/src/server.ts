@@ -1,43 +1,18 @@
-import { randomUUID } from 'node:crypto'
 import { type FSWatcher, watch } from 'node:fs'
-import * as nodePath from 'node:path'
+import nodePath from 'node:path'
 import type { ServerWebSocket } from 'bun'
-import { AdapterRegistry, ClaudeAdapter, CodexAdapter, OpenCodeAdapter } from './adapters/index.js'
 import { verifyToken } from './auth.js'
-import { handleQueryCommand } from './commands.js'
-import { dialbackSessions, dialOutboundWs } from './dialback.js'
 import { handleFileContents, handleFileTree, handleGitStatus } from './files.js'
+import { handleListSessions, handleStartSession, handleStatus } from './handlers.js'
 import { findLatestKataState } from './kata.js'
 import { spec as openapiSpec } from './openapi.js'
 import { discoverProjects, resolveProject } from './projects.js'
-import { fromServerWebSocket } from './session-channel.js'
-import {
-  ClaudeSessionSource,
-  CodexSessionSource,
-  OpenCodeSessionSource,
-  SessionSourceRegistry,
-} from './session-sources/index.js'
-import { listSdkSessions } from './sessions-list.js'
-import type { GatewayCommand, GatewaySessionContext, WsData } from './types.js'
+import type { WsData } from './types.js'
 
-// ── Adapter Registry ───────────────────────────────────────────────
-
-export const registry = new AdapterRegistry()
-registry.register(new ClaudeAdapter())
-registry.register(new CodexAdapter())
-registry.register(new OpenCodeAdapter())
-
-const sessionSources = new SessionSourceRegistry()
-sessionSources.register(new ClaudeSessionSource())
-sessionSources.register(new CodexSessionSource())
-sessionSources.register(new OpenCodeSessionSource())
+// ── Config ──────────────────────────────────────────────────────────
 
 const PORT = Number(process.env.CC_GATEWAY_PORT ?? 9877)
 const startedAt = Date.now()
-
-// ── Per-Connection Session Tracking ─────────────────────────────────
-
-const sessions = new Map<ServerWebSocket<WsData>, GatewaySessionContext>()
 
 // ── Per-Connection Kata File Watchers ──────────────────────────────
 
@@ -79,58 +54,30 @@ const server = Bun.serve<WsData>({
 
     // All other routes require auth
     if (!verifyToken(req)) {
-      return json(401, { error: 'Unauthorized' })
+      return json(401, { ok: false, error: 'unauthorized' })
     }
 
-    // GET /capabilities — list available agents
-    if (req.method === 'GET' && path === '/capabilities') {
-      const agents = await registry.listCapabilities()
-      return json(200, { agents })
+    // GET /sessions — list all known sessions (B5b)
+    if (req.method === 'GET' && path === '/sessions') {
+      return handleListSessions()
     }
 
-    // GET /sessions/discover — discover sessions from all sources across all projects
-    if (req.method === 'GET' && path === '/sessions/discover') {
-      const since = url.searchParams.get('since') ?? undefined
-      const limit = Number(url.searchParams.get('limit') ?? 200)
-      const projectFilter = url.searchParams.get('project') ?? undefined
+    // GET /sessions/:id/status (B5)
+    const statusMatch = path.match(/^\/sessions\/([^/]+)\/status$/)
+    if (req.method === 'GET' && statusMatch) {
+      const [, id] = statusMatch
+      return handleStatus(id)
+    }
 
-      // Discover all projects
-      const projects = await discoverProjects({})
-      const filtered = projectFilter ? projects.filter((p) => p.name === projectFilter) : projects
-
-      const allSessions: import('./types.js').DiscoveredSession[] = []
-      const sourceSummary: Record<string, { available: boolean; session_count: number }> = {}
-
-      // Initialize source summary
-      for (const source of sessionSources.listSources()) {
-        const avail = await source.available()
-        sourceSummary[source.agent] = { available: avail, session_count: 0 }
+    // POST /sessions/start — spawn detached session-runner (B4)
+    if (req.method === 'POST' && path === '/sessions/start') {
+      let body: unknown
+      try {
+        body = await req.json()
+      } catch {
+        return json(400, { ok: false, error: 'invalid body' })
       }
-
-      // Discover sessions from each source for each project (parallel across projects)
-      const projectResults = await Promise.all(
-        filtered.map(async (project) => {
-          const projectSessions: import('./types.js').DiscoveredSession[] = []
-          for (const source of sessionSources.listSources()) {
-            if (!sourceSummary[source.agent].available) continue
-            try {
-              const sessions = await source.discoverSessions(project.path, { since, limit })
-              projectSessions.push(...sessions)
-              sourceSummary[source.agent].session_count += sessions.length
-            } catch (err) {
-              console.error(`[session-discover] ${source.agent} failed for ${project.name}:`, err)
-            }
-          }
-          return projectSessions
-        }),
-      )
-      const allDiscovered = projectResults.flat()
-      allSessions.push(...allDiscovered)
-
-      // Sort by last_activity descending
-      allSessions.sort((a, b) => (b.last_activity > a.last_activity ? 1 : -1))
-
-      return json(200, { sessions: allSessions, sources: sourceSummary })
+      return handleStartSession(body)
     }
 
     // GET /projects
@@ -176,19 +123,6 @@ const server = Bun.serve<WsData>({
       return json(200, { kata_state: kataState })
     }
 
-    // GET /projects/:name/sessions
-    const sessionsMatch = path.match(/^\/projects\/([^/]+)\/sessions$/)
-    if (req.method === 'GET' && sessionsMatch) {
-      const [, name] = sessionsMatch
-      const projectPath = await resolveProject(name)
-      if (!projectPath) {
-        return json(404, { error: `Project "${name}" not found` })
-      }
-      const limit = Number(url.searchParams.get('limit') ?? 20)
-      const sessions = await listSdkSessions(projectPath, limit)
-      return json(200, { sessions })
-    }
-
     // GET /projects/:name/sessions/:id/messages — fetch SDK session transcript
     const sessionMessagesMatch = path.match(/^\/projects\/([^/]+)\/sessions\/([^/]+)\/messages$/)
     if (req.method === 'GET' && sessionMessagesMatch) {
@@ -223,7 +157,6 @@ const server = Bun.serve<WsData>({
             const toolResultBlocks = content.filter((b: any) => b?.type === 'tool_result')
             const otherBlocks = content.filter((b: any) => b?.type !== 'tool_result')
 
-            // Emit non-tool-result content as a user message (if any)
             if (otherBlocks.length > 0) {
               events.push({
                 type: 'user' as const,
@@ -233,7 +166,6 @@ const server = Bun.serve<WsData>({
               })
             }
 
-            // Emit tool_result blocks as a tool_result event
             if (toolResultBlocks.length > 0) {
               events.push({
                 type: 'tool_result' as const,
@@ -243,7 +175,6 @@ const server = Bun.serve<WsData>({
               })
             }
           } else {
-            // String content — plain user message
             events.push({
               type: 'user' as const,
               session_id: (m as any).session_id,
@@ -258,21 +189,6 @@ const server = Bun.serve<WsData>({
           error: `Failed to read session messages: ${err instanceof Error ? err.message : String(err)}`,
         })
       }
-    }
-
-    // GET /projects/:name/sessions/latest
-    const latestSessionMatch = path.match(/^\/projects\/([^/]+)\/sessions\/latest$/)
-    if (req.method === 'GET' && latestSessionMatch) {
-      const [, name] = latestSessionMatch
-      const projectPath = await resolveProject(name)
-      if (!projectPath) {
-        return json(404, { error: `Project "${name}" not found` })
-      }
-      const sessions = await listSdkSessions(projectPath, 1)
-      if (sessions.length === 0) {
-        return json(404, { error: 'No sessions found' })
-      }
-      return json(200, sessions[0])
     }
 
     // POST /projects/:name/sessions/:id/fork
@@ -314,7 +230,7 @@ const server = Bun.serve<WsData>({
           await renameSession(sessionId, body.title as string, { dir: projectPath })
         }
         if (body.tag !== undefined) {
-          await tagSession(sessionId, body.tag as string | null, { dir: projectPath })
+          await tagSession(sessionId, body.tag as any, { dir: projectPath })
         }
         return json(200, { ok: true })
       } catch (err) {
@@ -324,56 +240,7 @@ const server = Bun.serve<WsData>({
       }
     }
 
-    // POST /sessions/start — dial-back session start (from DO)
-    if (req.method === 'POST' && path === '/sessions/start') {
-      let body: { callback_url: string; cmd: GatewayCommand }
-      try {
-        body = (await req.json()) as { callback_url: string; cmd: GatewayCommand }
-      } catch {
-        return json(400, { ok: false, error: 'Invalid JSON body' })
-      }
-
-      if (!body.callback_url || !body.cmd) {
-        return json(400, { ok: false, error: 'Missing callback_url or cmd' })
-      }
-
-      const sessionId = randomUUID()
-      const cmd = body.cmd as GatewayCommand
-
-      // Resolve adapter
-      const agentName = (cmd as any).agent ?? 'claude'
-      const adapter = registry.get(agentName)
-      if (!adapter) {
-        return json(400, {
-          ok: false,
-          error: `Agent "${agentName}" is not available. Available agents: ${registry.listNames().join(', ')}`,
-        })
-      }
-
-      const ac = new AbortController()
-      const ctx: GatewaySessionContext = {
-        sessionId,
-        orgId: cmd.type === 'execute' ? ((cmd as any).org_id ?? null) : null,
-        userId: cmd.type === 'execute' ? ((cmd as any).user_id ?? null) : null,
-        adapterName: agentName,
-        abortController: ac,
-        pendingAnswer: null,
-        pendingPermission: null,
-        messageQueue: null,
-        query: null,
-        commandQueue: [],
-      }
-
-      // Dial outbound WS to the DO's callback_url
-      const callbackUrl = body.callback_url
-      console.log(`[agent-gateway] Dialing back to ${callbackUrl} for session ${sessionId}`)
-
-      dialOutboundWs(callbackUrl, cmd, ctx, adapter, sessionId)
-
-      return json(200, { ok: true, session_id: sessionId })
-    }
-
-    // WebSocket upgrade
+    // WebSocket upgrade — kata state watching only (no session data path).
     if (req.headers.get('upgrade')?.toLowerCase() === 'websocket') {
       const project = url.searchParams.get('project') ?? null
       const upgraded = server.upgrade(req, {
@@ -392,7 +259,6 @@ const server = Bun.serve<WsData>({
     open(ws: ServerWebSocket<WsData>) {
       console.log(`[agent-gateway] WS connected (project=${ws.data.project ?? 'none'})`)
 
-      // Start watching kata state for this project
       if (ws.data.project) {
         const projectPath = nodePath.join('/data/projects', ws.data.project)
         const sessionsDir = nodePath.join(projectPath, '.kata', 'sessions')
@@ -400,7 +266,6 @@ const server = Bun.serve<WsData>({
           const watcher = watch(sessionsDir, { recursive: true }, (_event, filename) => {
             if (!filename?.endsWith('state.json')) return
 
-            // Debounce to avoid duplicate events from editor write patterns
             const existing = kataDebounceTimers.get(ws)
             if (existing) clearTimeout(existing)
             kataDebounceTimers.set(
@@ -412,7 +277,7 @@ const server = Bun.serve<WsData>({
                     ws.send(
                       JSON.stringify({
                         type: 'kata_state',
-                        session_id: sessions.get(ws)?.sessionId ?? null,
+                        session_id: null,
                         project: ws.data.project,
                         kata_state: state,
                       }),
@@ -432,249 +297,22 @@ const server = Bun.serve<WsData>({
     },
 
     async message(ws: ServerWebSocket<WsData>, raw: string | Buffer) {
-      console.log(`[agent-gateway] WS message received: ${String(raw).substring(0, 100)}`)
-      let cmd: GatewayCommand
+      // Direct-WS surface is kata-state-only now. Ack pings; ignore rest.
       try {
-        cmd = JSON.parse(typeof raw === 'string' ? raw : raw.toString('utf-8'))
-      } catch {
-        ws.send(JSON.stringify({ type: 'error', session_id: null, error: 'Invalid JSON' }))
-        return
-      }
-
-      switch (cmd.type) {
-        case 'resume':
-        case 'execute': {
-          // Only one session per WS connection
-          const existing = sessions.get(ws)
-          if (existing) {
-            existing.abortController.abort()
-            sessions.delete(ws)
-          }
-
-          // Resolve adapter
-          const agentName = cmd.agent ?? 'claude'
-          const adapter = registry.get(agentName)
-          if (!adapter) {
-            ws.send(
-              JSON.stringify({
-                type: 'error',
-                session_id: null,
-                error: `Agent "${agentName}" is not available. Available agents: ${registry.listNames().join(', ')}`,
-              }),
-            )
-            return
-          }
-
-          const sessionId = randomUUID()
-          const ac = new AbortController()
-          const ctx: GatewaySessionContext = {
-            sessionId,
-            orgId: cmd.type === 'execute' ? (cmd.org_id ?? null) : null,
-            userId: cmd.type === 'execute' ? (cmd.user_id ?? null) : null,
-            adapterName: agentName,
-            abortController: ac,
-            pendingAnswer: null,
-            pendingPermission: null,
-            messageQueue: null,
-            query: null,
-            commandQueue: [],
-          }
-          sessions.set(ws, ctx)
-
-          // Run session in background -- don't await so we can receive
-          // further messages (abort, answer, stream-input, etc.) on this same WS
-          console.log(
-            `[agent-gateway] Starting session ${sessionId} for project=${cmd.project} agent=${agentName}`,
-          )
-          const ch = fromServerWebSocket(ws)
-          const sessionPromise =
-            cmd.type === 'resume' ? adapter.resume(ch, cmd, ctx) : adapter.execute(ch, cmd, ctx)
-
-          sessionPromise
-            .then(() => {
-              console.log(`[agent-gateway] Session ${sessionId} completed`)
-            })
-            .catch((err) => {
-              console.error(`[agent-gateway] Session ${sessionId} error:`, err)
-            })
-            .finally(() => {
-              sessions.delete(ws)
-            })
-          break
+        const msg = JSON.parse(typeof raw === 'string' ? raw : raw.toString('utf-8')) as {
+          type?: unknown
         }
-
-        case 'stream-input': {
-          const ctx = sessions.get(ws)
-          if (ctx?.messageQueue) {
-            ctx.messageQueue.push(cmd.message)
-          } else {
-            ws.send(
-              JSON.stringify({
-                type: 'error',
-                session_id: ctx?.sessionId ?? null,
-                error: 'No running session to receive messages',
-              }),
-            )
-          }
-          break
-        }
-
-        case 'permission-response': {
-          const ctx = sessions.get(ws)
-          if (ctx?.pendingPermission) {
-            ctx.pendingPermission.resolve(cmd.allowed)
-            ctx.pendingPermission = null
-          } else {
-            ws.send(
-              JSON.stringify({
-                type: 'error',
-                session_id: ctx?.sessionId ?? null,
-                error: 'No pending permission prompt for this session',
-              }),
-            )
-          }
-          break
-        }
-
-        case 'abort': {
-          const ctx = sessions.get(ws)
-          if (ctx) {
-            ctx.abortController.abort()
-            sessions.delete(ws)
-          }
-          break
-        }
-
-        case 'stop': {
-          const ctx = sessions.get(ws)
-          if (ctx) {
-            // Graceful stop: signal abort but send stopped event (session is resumable)
-            const sdkSessionId = ctx.sessionId
-            ctx.abortController.abort()
-            ws.send(
-              JSON.stringify({
-                type: 'stopped',
-                session_id: ctx.sessionId,
-                sdk_session_id: sdkSessionId,
-              }),
-            )
-            sessions.delete(ws)
-          }
-          break
-        }
-
-        case 'rewind': {
-          const ctx = sessions.get(ws)
-          if (ctx?.query) {
-            try {
-              const result = await ctx.query.rewindFiles(cmd.message_id, { dryRun: cmd.dry_run })
-              ws.send(
-                JSON.stringify({
-                  type: 'rewind_result',
-                  session_id: ctx.sessionId,
-                  can_rewind: result.canRewind,
-                  error: result.error,
-                  files_changed: result.filesChanged,
-                  insertions: result.insertions,
-                  deletions: result.deletions,
-                }),
-              )
-            } catch (err) {
-              ws.send(
-                JSON.stringify({
-                  type: 'error',
-                  session_id: ctx.sessionId,
-                  error: `Rewind failed: ${err instanceof Error ? err.message : String(err)}`,
-                }),
-              )
-            }
-          } else {
-            ws.send(
-              JSON.stringify({
-                type: 'error',
-                session_id: ctx?.sessionId ?? null,
-                error: 'No active session with Query object to rewind',
-              }),
-            )
-          }
-          break
-        }
-
-        case 'interrupt':
-        case 'get-context-usage':
-        case 'set-model':
-        case 'set-permission-mode': {
-          const ctx = sessions.get(ws)
-          if (!ctx) {
-            ws.send(
-              JSON.stringify({
-                type: 'error',
-                session_id: null,
-                error: `No active session for ${cmd.type}`,
-              }),
-            )
-          } else if (ctx.query) {
-            await handleQueryCommand(ctx, cmd, fromServerWebSocket(ws))
-          } else {
-            // Queue for when Query becomes available
-            ctx.commandQueue.push(cmd)
-          }
-          break
-        }
-
-        case 'stop-task': {
-          const ctx = sessions.get(ws)
-          if (ctx?.query) {
-            await ctx.query.stopTask(cmd.task_id)
-          } else {
-            ws.send(
-              JSON.stringify({
-                type: 'error',
-                session_id: ctx?.sessionId ?? null,
-                error: 'No active session with Query object — cannot stop task',
-              }),
-            )
-          }
-          break
-        }
-
-        case 'answer': {
-          const ctx = sessions.get(ws)
-          if (ctx?.pendingAnswer) {
-            ctx.pendingAnswer.resolve(cmd.answers)
-            ctx.pendingAnswer = null
-          } else {
-            ws.send(
-              JSON.stringify({
-                type: 'error',
-                session_id: ctx?.sessionId ?? null,
-                error: 'No pending question for this session',
-              }),
-            )
-          }
-          break
-        }
-
-        case 'ping': {
+        if (msg.type === 'ping') {
           ws.send(JSON.stringify({ type: 'pong' }))
-          break
         }
-
-        default:
-          ws.send(
-            JSON.stringify({
-              type: 'error',
-              session_id: null,
-              error: `Unknown command type: ${(cmd as any).type}`,
-            }),
-          )
+      } catch {
+        /* malformed frame */
       }
     },
 
     close(ws: ServerWebSocket<WsData>) {
       console.log('[agent-gateway] WS disconnected')
 
-      // Clean up kata file watcher
       const watcher = kataWatchers.get(ws)
       if (watcher) {
         watcher.close()
@@ -684,20 +322,6 @@ const server = Bun.serve<WsData>({
       if (timer) {
         clearTimeout(timer)
         kataDebounceTimers.delete(ws)
-      }
-
-      const ctx = sessions.get(ws)
-      if (ctx) {
-        ctx.abortController.abort()
-        if (ctx.pendingAnswer) {
-          ctx.pendingAnswer.reject(new Error('WebSocket closed'))
-          ctx.pendingAnswer = null
-        }
-        if (ctx.pendingPermission) {
-          ctx.pendingPermission.reject(new Error('WebSocket closed'))
-          ctx.pendingPermission = null
-        }
-        sessions.delete(ws)
       }
     },
   },
@@ -722,7 +346,6 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.on(signal, () => {
     console.log(`\n[agent-gateway] Received ${signal}, shutting down...`)
 
-    // Close all kata file watchers
     for (const [, watcher] of kataWatchers) {
       watcher.close()
     }
@@ -731,36 +354,6 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
       clearTimeout(timer)
     }
     kataDebounceTimers.clear()
-
-    // Abort all running sessions and close WebSocket connections
-    for (const [ws, ctx] of sessions) {
-      ctx.abortController.abort()
-      if (ctx.pendingAnswer) {
-        ctx.pendingAnswer.reject(new Error('Server shutting down'))
-        ctx.pendingAnswer = null
-      }
-      if (ctx.pendingPermission) {
-        ctx.pendingPermission.reject(new Error('Server shutting down'))
-        ctx.pendingPermission = null
-      }
-      try {
-        ws.close()
-      } catch {
-        /* already closed */
-      }
-    }
-    sessions.clear()
-
-    // Clean up dial-back sessions
-    for (const [_id, entry] of dialbackSessions) {
-      entry.ctx.abortController.abort()
-      try {
-        entry.ws.close()
-      } catch {
-        /* already closed */
-      }
-    }
-    dialbackSessions.clear()
 
     server.stop()
     console.log('[agent-gateway] Server closed')

@@ -22,6 +22,12 @@ Environment=CLAUDE_CODE_ENABLE_TASKS=true
 Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.bun/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=/home/ubuntu
 
+# Runtime state directory — systemd creates /run/duraclaw and
+# /run/duraclaw/sessions (0700) and manages their lifetime.
+# session-runner writes its pid/meta/exit/log files under /run/duraclaw/sessions/.
+RuntimeDirectory=duraclaw duraclaw/sessions
+RuntimeDirectoryMode=0700
+
 # Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict

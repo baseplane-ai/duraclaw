@@ -1,5 +1,0 @@
-export { ClaudeAdapter } from './claude.js'
-export { CodexAdapter } from './codex.js'
-export { OpenCodeAdapter } from './opencode.js'
-export { AdapterRegistry } from './registry.js'
-export type { AdapterCapabilities, AgentAdapter } from './types.js'
