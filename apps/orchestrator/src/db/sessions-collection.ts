@@ -89,3 +89,24 @@ export function persistSessionsToCache(sessions: SessionRecord[]) {
     // Quota exceeded or private browsing
   }
 }
+
+/**
+ * Synchronous direct localStorage lookup — bypasses the TanStack DB
+ * collection/query layer entirely. Use this in synchronous React init
+ * (useState initializers) where collection data may not be available yet.
+ */
+export function lookupSessionInCache(
+  sessionId: string,
+): { project: string; title?: string } | null {
+  if (typeof localStorage === 'undefined') return null
+  try {
+    const raw = localStorage.getItem(SESSIONS_CACHE_KEY)
+    if (!raw) return null
+    const cached = JSON.parse(raw) as SessionRecord[]
+    const session = cached.find((s) => s.id === sessionId)
+    if (!session?.project) return null
+    return { project: session.project, title: session.title ?? undefined }
+  } catch {
+    return null
+  }
+}

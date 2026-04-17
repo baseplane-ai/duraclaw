@@ -14,6 +14,7 @@ import { PushOptInBanner } from '~/components/push-opt-in-banner'
 import { PwaInstallBanner } from '~/components/pwa-install-banner'
 import { QuickPromptInput } from '~/components/quick-prompt-input'
 import { TabBar } from '~/components/tab-bar'
+import { lookupSessionInCache } from '~/db/sessions-collection'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { useSwipeTabs } from '~/hooks/use-swipe-tabs'
 import { getUserSettings, useUserSettings } from '~/hooks/use-user-settings'
@@ -41,9 +42,15 @@ function AgentOrchContent() {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(() => {
     const settings = getUserSettings()
     if (searchSessionId) {
-      // Don't create tab yet — session data may not be loaded.
-      // Tab will be created/updated by the URL sync effect or AgentDetailWithSpawn
-      // once session metadata is available.
+      // Create/merge tab SYNCHRONOUSLY using localStorage-cached session
+      // metadata. This runs during the initial render — before any effects —
+      // so the tab bar renders correctly on the first frame even after a
+      // full page reload (push notification tap). Direct localStorage read
+      // avoids any TanStack DB collection/query-layer timing issues.
+      const cached = lookupSessionInCache(searchSessionId)
+      if (cached) {
+        settings.addTab(cached.project, searchSessionId, cached.title || cached.project)
+      }
       return searchSessionId
     }
     // No URL session — restore from the last active tab (cold launch / PWA)
