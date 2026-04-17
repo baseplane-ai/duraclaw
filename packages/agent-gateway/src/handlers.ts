@@ -176,7 +176,7 @@ export async function handleStartSession(
     const spawnFn = opts.spawnFn ?? defaultSpawn
     const child = spawnFn(
       bin,
-      [bin, sessionId, cmdFile, callbackUrl, callbackToken, pidFile, exitFile, metaFile],
+      [sessionId, cmdFile, callbackUrl, callbackToken, pidFile, exitFile, metaFile],
       {
         stdio: ['ignore', logHandle.fd, logHandle.fd],
         detached: true,
