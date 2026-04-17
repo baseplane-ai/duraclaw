@@ -20,6 +20,9 @@ vi.mock('./agents/project-registry', () => ({
 vi.mock('./agents/session-do', () => ({
   SessionDO: class {},
 }))
+vi.mock('./agents/user-settings-do', () => ({
+  UserSettingsDO: class {},
+}))
 
 import { getRequestSession } from './api/auth-session'
 import serverExport from './server'

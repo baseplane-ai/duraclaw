@@ -80,37 +80,53 @@ describe('resolveProject with HIDDEN_PROJECTS', () => {
 })
 
 describe('discoverProjects with HIDDEN_PROJECTS', () => {
-  it('excludes hidden projects from discovery results', async () => {
-    vi.stubEnv('HIDDEN_PROJECTS', 'duraclaw')
-    vi.stubEnv('PROJECT_PATTERNS', '')
-    vi.stubEnv('WORKTREE_PATTERNS', '')
-    await loadModule()
+  // discoverProjects shells out (git + gh pr list) for every directory in /data/projects.
+  // On dev hosts with many projects the default 5s timeout is too tight.
+  const TEST_TIMEOUT = 60_000
 
-    const projects = await discoverProjects({})
-    const names = projects.map((p: any) => p.name)
-    expect(names).not.toContain('duraclaw')
-  })
+  it(
+    'excludes hidden projects from discovery results',
+    async () => {
+      vi.stubEnv('HIDDEN_PROJECTS', 'duraclaw')
+      vi.stubEnv('PROJECT_PATTERNS', 'duraclaw')
+      vi.stubEnv('WORKTREE_PATTERNS', '')
+      await loadModule()
 
-  it('includes non-hidden projects in discovery results', async () => {
-    vi.stubEnv('HIDDEN_PROJECTS', 'nonexistent-project-xyz')
-    vi.stubEnv('PROJECT_PATTERNS', '')
-    vi.stubEnv('WORKTREE_PATTERNS', '')
-    await loadModule()
+      const projects = await discoverProjects({})
+      const names = projects.map((p: any) => p.name)
+      expect(names).not.toContain('duraclaw')
+    },
+    TEST_TIMEOUT,
+  )
 
-    const projects = await discoverProjects({})
-    const names = projects.map((p: any) => p.name)
-    expect(names).toContain('duraclaw')
-  })
+  it(
+    'includes non-hidden projects in discovery results',
+    async () => {
+      vi.stubEnv('HIDDEN_PROJECTS', 'nonexistent-project-xyz')
+      vi.stubEnv('PROJECT_PATTERNS', 'duraclaw')
+      vi.stubEnv('WORKTREE_PATTERNS', '')
+      await loadModule()
 
-  it('can hide multiple projects at once', async () => {
-    vi.stubEnv('HIDDEN_PROJECTS', 'duraclaw,nonexistent-abc')
-    vi.stubEnv('PROJECT_PATTERNS', '')
-    vi.stubEnv('WORKTREE_PATTERNS', '')
-    await loadModule()
+      const projects = await discoverProjects({})
+      const names = projects.map((p: any) => p.name)
+      expect(names).toContain('duraclaw')
+    },
+    TEST_TIMEOUT,
+  )
 
-    const projects = await discoverProjects({})
-    const names = projects.map((p: any) => p.name)
-    expect(names).not.toContain('duraclaw')
-    expect(names).not.toContain('nonexistent-abc')
-  })
+  it(
+    'can hide multiple projects at once',
+    async () => {
+      vi.stubEnv('HIDDEN_PROJECTS', 'duraclaw,nonexistent-abc')
+      vi.stubEnv('PROJECT_PATTERNS', 'duraclaw')
+      vi.stubEnv('WORKTREE_PATTERNS', '')
+      await loadModule()
+
+      const projects = await discoverProjects({})
+      const names = projects.map((p: any) => p.name)
+      expect(names).not.toContain('duraclaw')
+      expect(names).not.toContain('nonexistent-abc')
+    },
+    TEST_TIMEOUT,
+  )
 })
