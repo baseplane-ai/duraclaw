@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { runMigrations, type MigrationSql, type Migration } from './do-migrations'
+import { type Migration, type MigrationSql, runMigrations } from './do-migrations'
 
 class FakeSql implements MigrationSql {
   statements: Array<{ query: string; bindings: unknown[] }> = []
@@ -49,8 +49,12 @@ describe('runMigrations', () => {
     runMigrations(sql, migrations)
 
     expect(sql.appliedVersions).toEqual(new Set([1, 2]))
-    expect(sql.statements.map((statement) => statement.query)).toContain('CREATE TABLE one (id INTEGER)')
-    expect(sql.statements.map((statement) => statement.query)).toContain('ALTER TABLE one ADD COLUMN name TEXT')
+    expect(sql.statements.map((statement) => statement.query)).toContain(
+      'CREATE TABLE one (id INTEGER)',
+    )
+    expect(sql.statements.map((statement) => statement.query)).toContain(
+      'ALTER TABLE one ADD COLUMN name TEXT',
+    )
   })
 
   it('skips migrations that are already applied', () => {
@@ -59,8 +63,12 @@ describe('runMigrations', () => {
 
     runMigrations(sql, migrations)
 
-    expect(sql.statements.map((statement) => statement.query)).not.toContain('CREATE TABLE one (id INTEGER)')
-    expect(sql.statements.map((statement) => statement.query)).not.toContain('ALTER TABLE one ADD COLUMN name TEXT')
+    expect(sql.statements.map((statement) => statement.query)).not.toContain(
+      'CREATE TABLE one (id INTEGER)',
+    )
+    expect(sql.statements.map((statement) => statement.query)).not.toContain(
+      'ALTER TABLE one ADD COLUMN name TEXT',
+    )
   })
 
   it('handles an empty migration list', () => {

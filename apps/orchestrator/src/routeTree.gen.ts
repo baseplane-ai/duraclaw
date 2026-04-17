@@ -9,12 +9,12 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as LoginRouteImport } from './routes/login'
-import { Route as AuthenticatedRouteRouteImport } from './routes/_authenticated/route'
-import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/index'
-import { Route as AuthenticatedSettingsRouteImport } from './routes/_authenticated/settings'
-import { Route as AuthenticatedSessionIdRouteImport } from './routes/_authenticated/session.$id'
 import { Route as AuthenticatedAdminUsersRouteImport } from './routes/_authenticated/admin.users'
+import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/index'
+import { Route as AuthenticatedRouteRouteImport } from './routes/_authenticated/route'
+import { Route as AuthenticatedSessionIdRouteImport } from './routes/_authenticated/session.$id'
+import { Route as AuthenticatedSettingsRouteImport } from './routes/_authenticated/settings'
+import { Route as LoginRouteImport } from './routes/login'
 
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
@@ -71,19 +71,9 @@ export interface FileRoutesById {
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths:
-    | '/'
-    | '/login'
-    | '/settings'
-    | '/admin/users'
-    | '/session/$id'
+  fullPaths: '/' | '/login' | '/settings' | '/admin/users' | '/session/$id'
   fileRoutesByTo: FileRoutesByTo
-  to:
-    | '/login'
-    | '/settings'
-    | '/'
-    | '/admin/users'
-    | '/session/$id'
+  to: '/login' | '/settings' | '/' | '/admin/users' | '/session/$id'
   id:
     | '__root__'
     | '/_authenticated'
@@ -160,8 +150,9 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedSessionIdRoute: AuthenticatedSessionIdRoute,
 }
 
-const AuthenticatedRouteRouteWithChildren =
-  AuthenticatedRouteRoute._addFileChildren(AuthenticatedRouteRouteChildren)
+const AuthenticatedRouteRouteWithChildren = AuthenticatedRouteRoute._addFileChildren(
+  AuthenticatedRouteRouteChildren,
+)
 
 const rootRouteChildren: RootRouteChildren = {
   AuthenticatedRouteRoute: AuthenticatedRouteRouteWithChildren,
