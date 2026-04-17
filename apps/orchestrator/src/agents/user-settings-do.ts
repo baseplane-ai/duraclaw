@@ -67,6 +67,7 @@ export class UserSettingsDO extends Agent<Env, UserSettingsState> {
           sessionId?: string
           title?: string
           tabId?: string
+          draft?: string
         }
         if (body.action === 'addNew' && body.project && body.sessionId) {
           this.addNewTab(body.project, body.sessionId, body.title, body.id)
@@ -74,6 +75,24 @@ export class UserSettingsDO extends Agent<Env, UserSettingsState> {
           this.switchTabSession(body.tabId, body.sessionId, body.title)
         } else if (body.project && body.sessionId) {
           this.addTab(body.project, body.sessionId, body.title, body.id)
+        } else if (body.id && body.project) {
+          // Draft-only sentinel record (e.g. __new_session with no sessionId)
+          const existing = this.state.tabs.find((t) => t.id === body.id)
+          if (existing) {
+            if (body.draft !== undefined) this.saveDraft(body.id, body.draft)
+          } else {
+            const newTab: TabRecord = {
+              id: body.id,
+              project: body.project,
+              sessionId: body.sessionId || '',
+              title: body.title || '',
+              draft: body.draft,
+            }
+            const newTabs = [...this.state.tabs, newTab]
+            this.setState({ ...this.state, tabs: newTabs })
+            this.persistTabs()
+            if (body.draft) this.saveDraft(body.id, body.draft)
+          }
         }
         return Response.json({ tabs: this.state.tabs })
       }
