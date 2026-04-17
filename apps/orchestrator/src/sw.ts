@@ -15,10 +15,27 @@ self.addEventListener('message', (event) => {
 // Push event handler stub — implemented in Phase 3a
 self.addEventListener('push', (event) => {
   const data = event.data?.json()
-  if (!data) return
+  if (!data) {
+    console.log('[sw:push] received push with no data — ignoring')
+    return
+  }
+  console.log(
+    '[sw:push] received',
+    JSON.stringify({
+      title: data.title,
+      tag: data.tag,
+      sessionId: data.sessionId,
+      url: data.url,
+      hasActions: Array.isArray(data.actions) ? data.actions.length : 0,
+      hasActionToken: Boolean(data.actionToken),
+    }),
+  )
+  // Append the URL to the body so the target is visible on the notification shade.
+  // This is a debugging aid; remove once the notification-tap flow is verified.
+  const bodyWithUrl = data.url ? `${data.body}\n${data.url}` : data.body
   event.waitUntil(
     self.registration.showNotification(data.title, {
-      body: data.body,
+      body: bodyWithUrl,
       icon: '/icons/icon-192.png',
       tag: data.tag,
       data: { url: data.url, sessionId: data.sessionId, actionToken: data.actionToken },
@@ -46,24 +63,41 @@ self.addEventListener('push', (event) => {
  */
 async function openOrFocus(target: string): Promise<void> {
   const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+  console.log(
+    `[sw:openOrFocus] target=${target} existingClients=${all.length}`,
+    all.map((c) => ({
+      url: (c as WindowClient).url,
+      focused: (c as WindowClient).focused,
+      visibilityState: (c as WindowClient).visibilityState,
+    })),
+  )
   for (const client of all) {
     const win = client as WindowClient
     try {
+      console.log(`[sw:openOrFocus] postMessage+focus existing client url=${win.url}`)
       win.postMessage({ type: 'SW_NAVIGATE', url: target })
       await win.focus()
+      console.log('[sw:openOrFocus] focused existing client, done')
       return
-    } catch {
-      // Client may be gone or cross-origin — try the next one.
+    } catch (err) {
+      console.log(`[sw:openOrFocus] focus() rejected on ${win.url} — trying next`, err)
     }
   }
-  await self.clients.openWindow(target)
+  console.log('[sw:openOrFocus] no usable existing client — openWindow(target)')
+  const opened = await self.clients.openWindow(target)
+  console.log(`[sw:openOrFocus] openWindow returned url=${opened?.url ?? 'null'}`)
 }
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close()
   const { url, sessionId, actionToken } = event.notification.data ?? {}
+  console.log(
+    '[sw:click] notification clicked',
+    JSON.stringify({ action: event.action || '(default)', url, sessionId }),
+  )
 
   if ((event.action === 'approve' || event.action === 'deny') && sessionId && actionToken) {
+    console.log(`[sw:click] tool-approval action=${event.action} sessionId=${sessionId}`)
     event.waitUntil(
       fetch(`/api/sessions/${sessionId}/tool-approval`, {
         method: 'POST',
@@ -79,10 +113,13 @@ self.addEventListener('notificationclick', (event) => {
 
   // New Session action — open dashboard without session context
   if (event.action === 'new-session') {
+    console.log('[sw:click] new-session action → openOrFocus("/")')
     event.waitUntil(openOrFocus('/'))
     return
   }
 
   // Open action or default click — open the session URL
-  event.waitUntil(openOrFocus(url || '/'))
+  const target = url || '/'
+  console.log(`[sw:click] open/default → openOrFocus("${target}")`)
+  event.waitUntil(openOrFocus(target))
 })

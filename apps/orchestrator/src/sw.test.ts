@@ -77,7 +77,9 @@ describe('service worker handlers', () => {
 
       expect(event.waitUntil).toHaveBeenCalledTimes(1)
       expect(mockShowNotification).toHaveBeenCalledWith('Session Ready', {
-        body: 'Your session is waiting',
+        // URL is appended to the body as a debugging aid so the tap target
+        // is visible on the notification shade itself.
+        body: 'Your session is waiting\n/session/123',
         icon: '/icons/icon-192.png',
         tag: 'session-123',
         data: {
@@ -87,6 +89,24 @@ describe('service worker handlers', () => {
         },
         actions: [{ action: 'open', title: 'Open' }],
       })
+    })
+
+    it('does not append a trailing newline when payload has no url', () => {
+      const pushData = {
+        title: 'T',
+        body: 'Body',
+        tag: 'tag',
+        sessionId: 's',
+        actionToken: 'a',
+      }
+      const event = makePushEvent(pushData)
+
+      handlers.push(event)
+
+      expect(mockShowNotification).toHaveBeenCalledWith(
+        'T',
+        expect.objectContaining({ body: 'Body' }),
+      )
     })
 
     it('defaults actions to empty array when not provided', () => {

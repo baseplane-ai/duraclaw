@@ -821,14 +821,31 @@ export class SessionDO extends Agent<Env, SessionState> {
   }
 
   private async dispatchPush(payload: PushPayload, eventType: 'blocked' | 'completed' | 'error') {
+    const tag = `[push:dispatch ${this.ctx.id}]`
     const userId = this.state.userId
-    if (!userId) return
+    if (!userId) {
+      console.log(`${tag} no userId on state — skipping`)
+      return
+    }
+
+    console.log(
+      `${tag} begin`,
+      JSON.stringify({
+        eventType,
+        url: payload.url,
+        tag: payload.tag,
+        sessionId: payload.sessionId,
+        hasActions: payload.actions?.length ?? 0,
+        hasActionToken: Boolean(payload.actionToken),
+        userId,
+      }),
+    )
 
     const vapidPublicKey = this.env.VAPID_PUBLIC_KEY
     const vapidPrivateKey = this.env.VAPID_PRIVATE_KEY
     const vapidSubject = this.env.VAPID_SUBJECT
     if (!vapidPublicKey || !vapidPrivateKey || !vapidSubject) {
-      console.log(`[SessionDO:${this.ctx.id}] Push not configured — skipping`)
+      console.log(`${tag} VAPID not configured — skipping`)
       return
     }
 
@@ -843,14 +860,19 @@ export class SessionDO extends Agent<Env, SessionState> {
       const prefMap = new Map(prefs.results.map((r) => [r.key, r.value]))
 
       // Master toggle
-      if (prefMap.get('push.enabled') === 'false') return
+      if (prefMap.get('push.enabled') === 'false') {
+        console.log(`${tag} push.enabled=false — skipping`)
+        return
+      }
 
       // Event-specific toggle
       const prefKey = `push.${eventType}`
-      if (prefMap.get(prefKey) === 'false') return
+      if (prefMap.get(prefKey) === 'false') {
+        console.log(`${tag} ${prefKey}=false — skipping`)
+        return
+      }
     } catch (err) {
-      console.error(`[SessionDO:${this.ctx.id}] Failed to check push preferences:`, err)
-      // Continue — default is opt-in (send notification)
+      console.error(`${tag} preference lookup failed (continuing as opt-in):`, err)
     }
 
     // Fetch subscriptions
@@ -863,31 +885,32 @@ export class SessionDO extends Agent<Env, SessionState> {
         .all<{ id: string; endpoint: string; p256dh: string; auth: string }>()
       subscriptions = result.results
     } catch (err) {
-      console.error(`[SessionDO:${this.ctx.id}] Failed to fetch push subscriptions:`, err)
+      console.error(`${tag} subscription lookup failed:`, err)
       return
     }
 
+    console.log(`${tag} ${subscriptions.length} subscription(s)`)
     if (subscriptions.length === 0) return
 
     const vapid = { publicKey: vapidPublicKey, privateKey: vapidPrivateKey, subject: vapidSubject }
 
     // Send to all subscriptions (best-effort, no retry)
     for (const sub of subscriptions) {
+      const endpointSummary = sub.endpoint.slice(0, 60)
       const result = await sendPushNotification(sub, payload, vapid)
+      console.log(
+        `${tag} send sub=${sub.id} endpoint=${endpointSummary}... ok=${result.ok} status=${result.status ?? 'n/a'} gone=${Boolean(result.gone)}`,
+      )
       if (result.gone) {
         // 410 Gone — delete stale subscription
         try {
           await this.env.AUTH_DB.prepare('DELETE FROM push_subscriptions WHERE id = ?')
             .bind(sub.id)
             .run()
-          console.log(`[SessionDO:${this.ctx.id}] Deleted stale push subscription ${sub.id}`)
+          console.log(`${tag} deleted stale subscription ${sub.id}`)
         } catch (err) {
-          console.error(`[SessionDO:${this.ctx.id}] Failed to delete stale subscription:`, err)
+          console.error(`${tag} failed to delete stale subscription ${sub.id}:`, err)
         }
-      } else if (!result.ok) {
-        console.log(
-          `[SessionDO:${this.ctx.id}] Push to ${sub.endpoint.slice(0, 50)}... returned ${result.status}`,
-        )
       }
     }
   }
