@@ -2,11 +2,6 @@ import { MessagesSquare, Settings, Users } from 'lucide-react'
 import type { NavGroup, SidebarData } from '../types'
 
 export const sidebarData: SidebarData = {
-  user: {
-    name: 'User',
-    email: '',
-    avatar: '',
-  },
   navGroups: [
     {
       title: 'General',

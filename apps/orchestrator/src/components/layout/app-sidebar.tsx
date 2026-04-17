@@ -17,6 +17,7 @@ export function AppSidebar() {
   const { collapsible, variant } = useLayout()
   const { data: session } = useSession()
   const isAdmin = session?.user?.role === 'admin'
+  const user = session?.user ?? null
 
   return (
     <Sidebar collapsible={collapsible} variant={variant}>
@@ -31,7 +32,7 @@ export function AppSidebar() {
         {isAdmin && <NavGroup {...adminNavGroup} />}
       </SidebarContent>
       <SidebarFooter>
-        <NavUser user={sidebarData.user} />
+        <NavUser user={user} />
       </SidebarFooter>
       <SidebarRail />
     </Sidebar>

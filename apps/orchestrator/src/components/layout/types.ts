@@ -1,11 +1,5 @@
 import type { LinkProps } from '@tanstack/react-router'
 
-type User = {
-  name: string
-  email: string
-  avatar: string
-}
-
 type BaseNavItem = {
   title: string
   badge?: string
@@ -30,7 +24,6 @@ type NavGroup = {
 }
 
 type SidebarData = {
-  user: User
   navGroups: NavGroup[]
 }
 
