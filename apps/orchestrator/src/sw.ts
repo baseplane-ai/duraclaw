@@ -64,7 +64,34 @@ self.addEventListener('push', (event) => {
  * For cold start (no existing client), we still fall back to openWindow(target),
  * which works because it's opening a brand-new window at the correct URL.
  */
+/**
+ * Persist the target URL in Cache Storage as a durable pending-navigation
+ * record. Both the SW and the page can read/write Cache Storage, and writes
+ * survive freeze-dry / SW→client message drops. The page consumes this on
+ * visibilitychange in useSwNavigate.
+ *
+ * Key: opaque internal cache `sw-pending-nav`, single entry at `/pending-nav`.
+ * Value: plain text URL string.
+ */
+async function stashPendingNav(target: string): Promise<void> {
+  try {
+    const cache = await caches.open('sw-pending-nav')
+    await cache.put(
+      '/pending-nav',
+      new Response(target, { headers: { 'Content-Type': 'text/plain' } }),
+    )
+    console.log(`[sw:openOrFocus] stashed pending-nav in Cache Storage url=${target}`)
+  } catch (err) {
+    console.log(`[sw:openOrFocus] failed to stash pending-nav`, err)
+  }
+}
+
 async function openOrFocus(target: string): Promise<void> {
+  // STEP 1: Stash in Cache Storage first — this is the durable channel that
+  // survives freeze-dry. Even if every other mechanism fails, the app will
+  // pick it up on visibilitychange.
+  await stashPendingNav(target)
+
   const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
   console.log(
     `[sw:openOrFocus] target=${target} existingClients=${all.length}`,
@@ -77,7 +104,9 @@ async function openOrFocus(target: string): Promise<void> {
 
   if (all.length > 0) {
     // Warm path: broadcast the URL on BroadcastChannel, then focus the first
-    // usable window. The app-side listener will call TanStack Router navigate().
+    // usable window. The app-side listener will call location.assign().
+    // These are best-effort fast paths — if they fail, the Cache Storage
+    // fallback + visibilitychange handler will still deliver.
     console.log(`[sw:openOrFocus] broadcasting SW_NAVIGATE on BroadcastChannel`)
     const bc = new BroadcastChannel('sw-nav')
     bc.postMessage({ type: 'SW_NAVIGATE', url: target })

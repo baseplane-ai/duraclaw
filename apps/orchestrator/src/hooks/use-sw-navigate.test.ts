@@ -18,6 +18,25 @@ Object.defineProperty(window, 'location', {
   },
 })
 
+// Mock Cache Storage for the durable pending-nav drain path.
+let cacheEntry: string | null = null
+const mockCacheMatch = vi.fn(async (_key: string) => {
+  if (cacheEntry === null) return undefined
+  return { text: async () => cacheEntry } as unknown as Response
+})
+const mockCacheDelete = vi.fn(async () => {
+  cacheEntry = null
+  return true
+})
+const mockCachesOpen = vi.fn(async () => ({
+  match: mockCacheMatch,
+  delete: mockCacheDelete,
+}))
+Object.defineProperty(globalThis, 'caches', {
+  configurable: true,
+  value: { open: mockCachesOpen },
+})
+
 // Mock BroadcastChannel
 let bcHandler: ((event: MessageEvent) => void) | null = null
 const mockBcClose = vi.fn()
@@ -66,6 +85,10 @@ describe('useSwNavigate', () => {
   beforeEach(() => {
     mockAssign.mockClear()
     mockBcClose.mockClear()
+    mockCacheMatch.mockClear()
+    mockCacheDelete.mockClear()
+    mockCachesOpen.mockClear()
+    cacheEntry = null
     swHandler = null
     bcHandler = null
 
@@ -175,5 +198,70 @@ describe('useSwNavigate', () => {
     renderHook(() => useSwNavigate())
     fireBc({ type: 'SW_NAVIGATE', url: 'https://evil.example/?session=abc' })
     expect(mockAssign).not.toHaveBeenCalled()
+  })
+
+  // --- Cache Storage drain (durable channel) ---
+
+  it('drains Cache Storage pending-nav on mount', async () => {
+    cacheEntry = '/?session=cache-mount'
+    renderHook(() => useSwNavigate())
+    // drain is async — let microtasks settle
+    await new Promise((r) => setTimeout(r, 0))
+    expect(mockAssign).toHaveBeenCalledWith('http://localhost/?session=cache-mount')
+    expect(mockCacheDelete).toHaveBeenCalledWith('/pending-nav')
+  })
+
+  it('drains Cache Storage pending-nav on visibilitychange → visible', async () => {
+    renderHook(() => useSwNavigate())
+    await new Promise((r) => setTimeout(r, 0)) // let mount drain (empty) complete
+    mockAssign.mockClear()
+
+    cacheEntry = '/?session=cache-visible'
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      value: 'visible',
+    })
+    document.dispatchEvent(new Event('visibilitychange'))
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(mockAssign).toHaveBeenCalledWith('http://localhost/?session=cache-visible')
+    expect(mockCacheDelete).toHaveBeenCalledWith('/pending-nav')
+  })
+
+  it('does not navigate when Cache Storage is empty on mount', async () => {
+    cacheEntry = null
+    renderHook(() => useSwNavigate())
+    await new Promise((r) => setTimeout(r, 0))
+    expect(mockAssign).not.toHaveBeenCalled()
+  })
+
+  it('skips visibilitychange drain when document is hidden', async () => {
+    renderHook(() => useSwNavigate())
+    await new Promise((r) => setTimeout(r, 0))
+    mockAssign.mockClear()
+    mockCachesOpen.mockClear()
+
+    cacheEntry = '/?session=hidden'
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      value: 'hidden',
+    })
+    document.dispatchEvent(new Event('visibilitychange'))
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(mockAssign).not.toHaveBeenCalled()
+    expect(mockCachesOpen).not.toHaveBeenCalled()
+  })
+
+  it('drains Cache Storage on window focus', async () => {
+    renderHook(() => useSwNavigate())
+    await new Promise((r) => setTimeout(r, 0))
+    mockAssign.mockClear()
+
+    cacheEntry = '/?session=focus-drain'
+    window.dispatchEvent(new Event('focus'))
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(mockAssign).toHaveBeenCalledWith('http://localhost/?session=focus-drain')
   })
 })

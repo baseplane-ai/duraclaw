@@ -5,18 +5,26 @@ import { useEffect, useRef } from 'react'
  * full-page load to the target URL.
  *
  * The service worker sends SW_NAVIGATE when a push notification is tapped
- * while the PWA is already running. We listen on TWO channels for maximum
+ * while the PWA is already running. We listen on THREE channels for maximum
  * reliability across mobile browser quirks:
  *
- * 1. **BroadcastChannel('sw-nav')** — independent API, no setup requirements,
- *    doesn't care about controlled/uncontrolled clients, no startMessages().
- *    This is the primary channel.
+ * 1. **BroadcastChannel('sw-nav')** — fast path. Independent API, no setup
+ *    requirements, doesn't care about controlled/uncontrolled clients, no
+ *    startMessages().
  *
- * 2. **navigator.serviceWorker 'message' event** — belt-and-suspenders
- *    fallback via client.postMessage(). Requires startMessages() to enable
- *    the message queue.
+ * 2. **navigator.serviceWorker 'message' event** — fast path fallback via
+ *    client.postMessage(). Requires startMessages() to enable the message
+ *    queue.
  *
- * Whichever fires first wins; the second is deduplicated by a short guard.
+ * 3. **Cache Storage `sw-pending-nav` drain on visibilitychange** — durable
+ *    path. The SW writes the target URL to a well-known cache entry on
+ *    every notificationclick. When the PWA becomes visible (which always
+ *    happens after a notification tap), we read and consume the entry. This
+ *    survives SW→client messaging failures that Android Chrome standalone
+ *    PWAs exhibit when resumed from freeze-dry, where both BroadcastChannel
+ *    and postMessage silently drop messages.
+ *
+ * Whichever fires first wins; the others are deduplicated by a short guard.
  *
  * We deliberately use `window.location.assign()` rather than TanStack
  * Router's soft navigate(). On Android Chrome standalone PWAs resumed from
@@ -26,15 +34,17 @@ import { useEffect, useRef } from 'react'
  * arriving from outside the app anyway).
  */
 export function useSwNavigate() {
-  // Dedupe guard: skip duplicate navigations within 500ms
+  // Dedupe guard: skip duplicate navigations within 1500ms. Bumped up from
+  // 500ms because the visibilitychange fallback can fire up to ~1s after
+  // the SW messaging fast path.
   const lastNavRef = useRef<{ url: string; time: number } | null>(null)
 
   useEffect(() => {
     function handleNavigate(url: string, source: string) {
-      // Dedupe: if we navigated to the same URL within 500ms, skip.
+      // Dedupe: if we navigated to the same URL within 1500ms, skip.
       const now = Date.now()
       const last = lastNavRef.current
-      if (last && last.url === url && now - last.time < 500) {
+      if (last && last.url === url && now - last.time < 1500) {
         console.log(`[sw:nav] dedupe skip (${source}) url=${url}`)
         return
       }
@@ -95,6 +105,46 @@ export function useSwNavigate() {
       console.log('[sw:nav] postMessage listener installed (with startMessages)')
     }
 
+    // --- Channel 3: Cache Storage drain on visibilitychange (durable) ---
+    // This is the channel that saves us on Android Chrome standalone PWAs
+    // where SW→client messaging silently drops during freeze-dry resume.
+    // The SW writes the target URL to Cache Storage on every notificationclick;
+    // when the PWA becomes visible we read, navigate, and clear.
+    async function drainPendingNav(source: string) {
+      if (typeof caches === 'undefined') return
+      try {
+        const cache = await caches.open('sw-pending-nav')
+        const resp = await cache.match('/pending-nav')
+        if (!resp) return
+        const url = await resp.text()
+        if (!url) {
+          await cache.delete('/pending-nav')
+          return
+        }
+        console.log(`[sw:nav] drained Cache Storage pending-nav (${source}) url=${url}`)
+        await cache.delete('/pending-nav')
+        handleNavigate(url, `cache:${source}`)
+      } catch (err) {
+        console.log(`[sw:nav] Cache Storage drain failed (${source})`, err)
+      }
+    }
+
+    // Drain on mount (covers cold-open from notification).
+    drainPendingNav('mount')
+
+    // Drain on visibilitychange when the document becomes visible (covers
+    // warm-open from notification tap).
+    const visibilityHandler = () => {
+      if (document.visibilityState === 'visible') {
+        drainPendingNav('visibilitychange')
+      }
+    }
+    document.addEventListener('visibilitychange', visibilityHandler)
+    // Also drain on window focus as a belt — some Android Chrome builds
+    // don't fire visibilitychange reliably on PWA resume.
+    const focusHandler = () => drainPendingNav('focus')
+    window.addEventListener('focus', focusHandler)
+
     return () => {
       console.log('[sw:nav] cleaning up listeners')
       if (bc) {
@@ -104,6 +154,8 @@ export function useSwNavigate() {
       if (swHandler && navigator.serviceWorker) {
         navigator.serviceWorker.removeEventListener('message', swHandler)
       }
+      document.removeEventListener('visibilitychange', visibilityHandler)
+      window.removeEventListener('focus', focusHandler)
     }
   }, [])
 }
