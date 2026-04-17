@@ -21,6 +21,15 @@ export function useSwNavigate() {
     }
     console.log('[sw:nav] installing SW_NAVIGATE listener')
 
+    // CRITICAL: calling addEventListener('message', ...) does NOT enable the
+    // ServiceWorkerContainer's client message queue. Without startMessages(),
+    // postMessage calls from the service worker are silently buffered forever.
+    // https://developer.mozilla.org/en-US/docs/Web/API/ServiceWorkerContainer/startMessages
+    if (navigator.serviceWorker.startMessages) {
+      navigator.serviceWorker.startMessages()
+      console.log('[sw:nav] startMessages() called — message queue enabled')
+    }
+
     const handler = (event: MessageEvent) => {
       const data = event.data as { type?: string; url?: string } | undefined
       if (!data || data.type !== 'SW_NAVIGATE') {

@@ -28,6 +28,7 @@ describe('useSwNavigate', () => {
       removeEventListener: vi.fn((type: string, handler: (event: MessageEvent) => void) => {
         if (type === 'message' && swHandler === handler) swHandler = null
       }),
+      startMessages: vi.fn(),
     }
     Object.defineProperty(navigator, 'serviceWorker', {
       value: swMock,
@@ -48,6 +49,12 @@ describe('useSwNavigate', () => {
     expect(addSpy).toHaveBeenCalledWith('message', expect.any(Function))
     unmount()
     expect(removeSpy).toHaveBeenCalledWith('message', expect.any(Function))
+  })
+
+  it('calls startMessages() to enable the SW message queue', () => {
+    renderHook(() => useSwNavigate())
+    const sw = navigator.serviceWorker as unknown as { startMessages: ReturnType<typeof vi.fn> }
+    expect(sw.startMessages).toHaveBeenCalledTimes(1)
   })
 
   function fire(data: unknown) {
