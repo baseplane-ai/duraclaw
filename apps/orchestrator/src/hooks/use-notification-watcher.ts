@@ -41,7 +41,7 @@ export function useNotificationWatcher(sessions: SessionInfo[]) {
           sessionName: name,
           project,
           body: 'Session needs input',
-          url: `/?session=${session.id}`,
+          url: `/?session=${session.id}&project=${encodeURIComponent(session.project || '')}`,
         })
       } else if (session.status === 'idle' && prevStatus === 'running') {
         addNotification({
@@ -50,7 +50,7 @@ export function useNotificationWatcher(sessions: SessionInfo[]) {
           sessionName: name,
           project,
           body: 'Session completed',
-          url: `/?session=${session.id}`,
+          url: `/?session=${session.id}&project=${encodeURIComponent(session.project || '')}`,
         })
       }
 

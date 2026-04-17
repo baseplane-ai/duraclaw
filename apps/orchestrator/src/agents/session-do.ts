@@ -1691,7 +1691,7 @@ export class SessionDO extends Agent<Env, SessionState> {
           {
             title: this.state.project || 'Duraclaw',
             body: `Asking: ${((event.questions?.[0] as Record<string, unknown>)?.question as string)?.slice(0, 100) || 'Question'}`,
-            url: `/?session=${this.state.session_id}`,
+            url: `/?session=${this.state.session_id}&project=${encodeURIComponent(this.state.project || '')}`,
             tag: `session-${this.state.session_id}`,
             sessionId: this.state.session_id ?? '',
             actions: [{ action: 'open', title: 'Open' }],
@@ -1747,7 +1747,7 @@ export class SessionDO extends Agent<Env, SessionState> {
               {
                 title: this.state.project || 'Duraclaw',
                 body: `Needs permission: ${event.tool_name}`,
-                url: `/?session=${this.state.session_id}`,
+                url: `/?session=${this.state.session_id}&project=${encodeURIComponent(this.state.project || '')}`,
                 tag: `session-${this.state.session_id}`,
                 sessionId: this.state.session_id ?? '',
                 actionToken,
@@ -1875,7 +1875,7 @@ export class SessionDO extends Agent<Env, SessionState> {
             {
               title: this.state.project || 'Duraclaw',
               body: `Completed (${this.state.num_turns} turns, $${(this.state.total_cost_usd ?? 0).toFixed(2)})`,
-              url: `/?session=${this.state.session_id}`,
+              url: `/?session=${this.state.session_id}&project=${encodeURIComponent(this.state.project || '')}`,
               tag: `session-${this.state.session_id}`,
               sessionId: this.state.session_id ?? '',
               actions: [
@@ -1890,7 +1890,7 @@ export class SessionDO extends Agent<Env, SessionState> {
             {
               title: this.state.project || 'Duraclaw',
               body: `Failed: ${event.result || 'Session failed'}`,
-              url: `/?session=${this.state.session_id}`,
+              url: `/?session=${this.state.session_id}&project=${encodeURIComponent(this.state.project || '')}`,
               tag: `session-${this.state.session_id}`,
               sessionId: this.state.session_id ?? '',
             },
@@ -1971,7 +1971,7 @@ export class SessionDO extends Agent<Env, SessionState> {
           {
             title: this.state.project || 'Duraclaw',
             body: `Error: ${event.error}`,
-            url: `/?session=${this.state.session_id}`,
+            url: `/?session=${this.state.session_id}&project=${encodeURIComponent(this.state.project || '')}`,
             tag: `session-${this.state.session_id}`,
             sessionId: this.state.session_id ?? '',
           },

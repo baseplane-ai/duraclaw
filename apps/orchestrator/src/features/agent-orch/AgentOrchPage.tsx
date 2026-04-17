@@ -27,10 +27,11 @@ export function AgentOrchPage() {
 }
 
 function AgentOrchContent() {
-  const { sessions, isLoading: sessionsLoading, updateSession } = useSessionsCollection()
+  const { sessions, updateSession } = useSessionsCollection()
   const search = useSearch({ from: '/_authenticated/' })
   const navigate = useNavigate()
   const searchSessionId = (search as { session?: string }).session ?? null
+  const searchProject = (search as { project?: string }).project ?? null
   const searchNewSessionProject =
     (search as { newSessionProject?: string }).newSessionProject ?? null
   const searchNewTab = (search as { newTab?: boolean }).newTab ?? false
@@ -73,16 +74,21 @@ function AgentOrchContent() {
     searchNewSessionProject ? { project: searchNewSessionProject, newTab: searchNewTab } : null,
   )
 
-  // Strip the hint search params from the URL once consumed so reloads don't re-trigger them.
+  // Strip consumed hint params from the URL so reloads don't re-trigger them.
   useEffect(() => {
-    if (searchNewSessionProject) {
+    if (searchNewSessionProject || searchProject) {
       navigate({
         to: '/',
-        search: (prev) => ({ ...prev, newSessionProject: undefined, newTab: undefined }),
+        search: (prev) => ({
+          ...prev,
+          project: undefined,
+          newSessionProject: undefined,
+          newTab: undefined,
+        }),
         replace: true,
       })
     }
-  }, [searchNewSessionProject, navigate])
+  }, [searchNewSessionProject, searchProject, navigate])
   const prevSearchRef = useRef(searchSessionId)
   const didRestoreRef = useRef(false)
 
@@ -112,21 +118,14 @@ function AgentOrchContent() {
           settings.setActiveTab(matchingTab.id)
         }
       } else {
-        // Session has no tab yet — create one using real metadata so addTab's
-        // byProject branch can merge into an existing project tab.
+        // Session has no tab yet. Resolve the project from:
+        //   1. URL param (set by push notifications / SW nav)
+        //   2. sessions collection metadata
+        //   3. "unknown" fallback
         const session = sessions.find((s) => s.id === searchSessionId)
-        if (session?.project) {
-          const title = session.title || getPreviewText(session) || session.project
-          settings.addTab(session.project, searchSessionId, title)
-        } else if (!sessionsLoading) {
-          // Sessions finished loading but this one isn't in the list
-          // (archived, cross-device, etc.). Create a placeholder so the
-          // tab bar has something. The DO state sync refines it later.
-          settings.addTab('unknown', searchSessionId, searchSessionId.slice(0, 12))
-        }
-        // While sessionsLoading, skip tab creation — the effect re-runs
-        // when sessions arrives. This prevents phantom "unknown" tabs that
-        // bypass addTab's byProject merge with existing project tabs.
+        const project = session?.project || searchProject || 'unknown'
+        const title = session?.title || getPreviewText(session ?? { prompt: undefined }) || project
+        settings.addTab(project, searchSessionId, title)
       }
     }
 
@@ -146,7 +145,7 @@ function AgentOrchContent() {
       setSpawnConfig(null)
       setSelectedSessionId(null)
     }
-  }, [searchSessionId, selectedSessionId, quickPromptHint, sessions, sessionsLoading])
+  }, [searchSessionId, searchProject, selectedSessionId, quickPromptHint, sessions])
   const [projects, setProjects] = useState<
     Array<{ name: string; path: string; repo_origin?: string | null }>
   >([])
