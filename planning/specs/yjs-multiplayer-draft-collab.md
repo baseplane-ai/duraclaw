@@ -4,7 +4,7 @@ type: project
 issue_type: feature
 status: draft
 priority: high
-github_issue: null
+github_issue: 3
 created: 2026-04-17
 updated: 2026-04-17
 research: planning/research/2026-04-17-yjs-tab-and-draft-sync-feasibility.md
