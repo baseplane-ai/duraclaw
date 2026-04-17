@@ -155,8 +155,11 @@ export function CursorOverlay({
 }: CursorOverlayProps) {
   const mirrorRef = useRef<HTMLDivElement | null>(null)
   // Bump counter to force re-measure on textarea resize / scroll.
-  const [, setBump] = useState(0)
-  const bump = useCallback(() => setBump((n) => (n + 1) % 1_000_000), [])
+  // `tick` is read by the layout effect below so scroll / ResizeObserver
+  // callbacks actually re-trigger measurement (discarding the counter
+  // would leave the effect running on stale dependencies).
+  const [tick, setTick] = useState(0)
+  const bump = useCallback(() => setTick((n) => (n + 1) % 1_000_000), [])
 
   const snapshot = useSyncExternalStore(
     (cb) => subscribe(awareness, cb),
@@ -208,6 +211,11 @@ export function CursorOverlay({
   >([])
 
   useLayoutEffect(() => {
+    // Read `tick` so scroll / ResizeObserver / ytext.observe callbacks
+    // (which invoke `bump()` -> setTick) re-run this measurement effect.
+    // Without referencing it here, the dep is considered "unused" by the
+    // lint rule and measurements would run against stale layout.
+    void tick
     const textarea = textareaRef.current
     const mirror = mirrorRef.current
     if (!textarea || !mirror) {
@@ -321,7 +329,7 @@ export function CursorOverlay({
     mirror.textContent = ''
 
     setMarkers(next)
-  }, [snapshot, textareaRef, ytext, doc])
+  }, [snapshot, textareaRef, ytext, doc, tick])
 
   return (
     <div

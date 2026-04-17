@@ -143,6 +143,11 @@ export function PresenceBar({ awareness, selfClientId }: PresenceBarProps) {
   // Tick every second while ghosts are pending — once `Date.now() -
   // departedAt > GHOST_MS`, evict. Single interval shared by all ghosts.
   useEffect(() => {
+    // Read `snapshot` so this effect restarts when awareness changes
+    // (new peer departs -> need the eviction interval running). Without
+    // the reference the dep is flagged unused and the interval would
+    // either never start or tear down / recreate on every render.
+    void snapshot
     const map = ghostsRef.current
     const hasGhosts = Array.from(map.values()).some((d) => d.departedAt !== undefined)
     if (!hasGhosts) return
@@ -158,7 +163,7 @@ export function PresenceBar({ awareness, selfClientId }: PresenceBarProps) {
       if (changed) bump()
     }, 500)
     return () => clearInterval(id)
-  })
+  }, [snapshot, bump])
 
   const all = Array.from(ghostsRef.current.values())
   if (all.length === 0) return null
