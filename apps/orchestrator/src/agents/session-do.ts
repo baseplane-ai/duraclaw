@@ -1162,7 +1162,25 @@ export class SessionDO extends Agent<Env, SessionState> {
   @callable()
   async sendMessage(
     content: string | ContentBlock[],
+    opts?: { submitId?: string },
   ): Promise<{ ok: boolean; error?: string; recoverable?: 'forkWithHistory' }> {
+    // Idempotency: if a submitId was supplied and we've already accepted it,
+    // treat this as a duplicate of that prior call and no-op. Rows older than
+    // 60s are pruned on each insert to cap table growth.
+    if (opts?.submitId) {
+      const submitId = opts.submitId
+      const existing = [
+        ...this.sql<{ id: string }>`SELECT id FROM submit_ids WHERE id = ${submitId} LIMIT 1`,
+      ]
+      if (existing.length > 0) {
+        return { ok: true }
+      }
+      const now = Date.now()
+      this.sql`INSERT INTO submit_ids (id, created_at) VALUES (${submitId}, ${now})`
+      const cutoff = now - 60_000
+      this.sql`DELETE FROM submit_ids WHERE created_at < ${cutoff}`
+    }
+
     const { status } = this.state
     // A session-runner stays alive through `type=result` and blocks waiting on
     // the next stream-input (see claude-runner.ts multi-turn loop). Route by

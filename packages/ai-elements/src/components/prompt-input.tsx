@@ -876,18 +876,61 @@ export const PromptInputBody = ({ className, ...props }: PromptInputBodyProps) =
   <div className={cn('contents', className)} {...props} />
 )
 
-export type PromptInputTextareaProps = ComponentProps<typeof InputGroupTextarea>
+/**
+ * Minimal structural type for Y.Text. Kept local so this package does not
+ * take a dependency on `yjs` — consumers that want collab behavior pass in
+ * a real Y.Text, anyone else passes undefined and the old controller path
+ * runs unchanged.
+ */
+export interface YTextLike {
+  toString(): string
+  insert(index: number, content: string): void
+  delete(index: number, length: number): void
+  observe(fn: () => void): void
+  unobserve(fn: () => void): void
+  readonly doc: { transact(fn: () => void): void } | null
+}
+
+export type PromptInputTextareaProps = ComponentProps<typeof InputGroupTextarea> & {
+  /**
+   * Optional Y.Text to bind the textarea to. When provided, the textarea
+   * reflects `yText` state, observes remote changes, and sends local edits
+   * through a minimal prefix/suffix diff (not delete-all/insert-all) so
+   * concurrent CRDT merges don't jump other users' cursors. When omitted,
+   * the existing controller-based or fully uncontrolled path is used.
+   */
+  yText?: YTextLike
+}
 
 export const PromptInputTextarea = ({
   onChange,
   onKeyDown,
   className,
   placeholder = 'What would you like to know?',
+  yText,
   ...props
 }: PromptInputTextareaProps) => {
   const controller = useOptionalPromptInputController()
   const attachments = usePromptInputAttachments()
   const [isComposing, setIsComposing] = useState(false)
+  // Local mirror of the Y.Text for rendering. Only used when yText is set.
+  const [yTextValue, setYTextValue] = useState<string>(() => (yText ? yText.toString() : ''))
+  const prevYTextValueRef = useRef<string>(yTextValue)
+
+  // Observe remote Y.Text changes.
+  useEffect(() => {
+    if (!yText) return
+    const sync = () => {
+      const next = yText.toString()
+      prevYTextValueRef.current = next
+      setYTextValue(next)
+    }
+    sync()
+    yText.observe(sync)
+    return () => {
+      yText.unobserve(sync)
+    }
+  }, [yText])
 
   const handleKeyDown: KeyboardEventHandler<HTMLTextAreaElement> = useCallback(
     (e) => {
@@ -962,17 +1005,62 @@ export const PromptInputTextarea = ({
   const handleCompositionEnd = useCallback(() => setIsComposing(false), [])
   const handleCompositionStart = useCallback(() => setIsComposing(true), [])
 
-  const controlledProps = controller
+  // Apply a local textarea change as a minimal Y.Text insert/delete pair.
+  // Diff-based: compute the common prefix and suffix between the previous
+  // rendered value and the new value, then apply only the changed middle
+  // slice. Wrapped in `doc.transact` so the two ops land atomically.
+  const applyYTextLocalChange = useCallback(
+    (newVal: string) => {
+      if (!yText) return
+      const prev = prevYTextValueRef.current
+      if (prev === newVal) return
+      const mutate = () => {
+        let start = 0
+        while (start < prev.length && start < newVal.length && prev[start] === newVal[start]) {
+          start++
+        }
+        let endPrev = prev.length
+        let endNew = newVal.length
+        while (endPrev > start && endNew > start && prev[endPrev - 1] === newVal[endNew - 1]) {
+          endPrev--
+          endNew--
+        }
+        if (endPrev > start) yText.delete(start, endPrev - start)
+        if (endNew > start) yText.insert(start, newVal.slice(start, endNew))
+      }
+      if (yText.doc) {
+        yText.doc.transact(mutate)
+      } else {
+        mutate()
+      }
+      prevYTextValueRef.current = newVal
+    },
+    [yText],
+  )
+
+  const controlledProps = yText
     ? {
         onChange: (e: ChangeEvent<HTMLTextAreaElement>) => {
-          controller.textInput.setInput(e.currentTarget.value)
+          const next = e.currentTarget.value
+          applyYTextLocalChange(next)
+          // Keep React in sync optimistically — the observer will fire too
+          // but doing it here avoids a one-frame stale-cursor blip.
+          setYTextValue(next)
           onChange?.(e)
         },
-        value: controller.textInput.value,
+        value: yTextValue,
       }
-    : {
-        onChange,
-      }
+    : controller
+      ? {
+          onChange: (e: ChangeEvent<HTMLTextAreaElement>) => {
+            controller.textInput.setInput(e.currentTarget.value)
+            onChange?.(e)
+          },
+          value: controller.textInput.value,
+        }
+      : {
+          onChange,
+        }
 
   return (
     <InputGroupTextarea
