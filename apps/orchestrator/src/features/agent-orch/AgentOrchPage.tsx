@@ -112,16 +112,22 @@ function AgentOrchContent() {
           settings.setActiveTab(matchingTab.id)
         }
       } else {
-        // Session has no tab yet — create one only if we have real metadata.
-        // If sessions haven't loaded, this effect re-runs when they do.
+        // Session has no tab yet — create one UNCONDITIONALLY with whatever
+        // metadata we have, falling back to placeholders. This covers:
+        //   - sessions that are archived (filtered out of `sessions`)
+        //   - sessions that haven't synced into the local collection yet
+        //   - sessions created server-side (e.g., server pushes) the client
+        //     never saw listed
+        // The AgentDetailWithSpawn effect below updates the tab title once
+        // the DO state arrives, so "sess-abcdef" placeholders get replaced
+        // with real summaries when the WS connects.
         const session = sessions.find((s) => s.id === searchSessionId)
-        if (session?.project) {
-          settings.addTab(
-            session.project,
-            searchSessionId,
-            session.title || getPreviewText(session) || session.project,
-          )
-        }
+        const project = session?.project || 'unknown'
+        const title =
+          session?.title ||
+          getPreviewText(session ?? { prompt: undefined }) ||
+          searchSessionId.slice(0, 12)
+        settings.addTab(project, searchSessionId, title)
       }
     }
 
@@ -392,12 +398,19 @@ function AgentDetailWithSpawn({
         num_turns: agent.state.num_turns,
         error: agent.state.error,
       })
-      // Update tab title when session gets a summary
+      // Update tab title when session gets a summary, and backfill the
+      // project field if it was a placeholder (e.g., "unknown" set when
+      // a URL-delivered session had no local metadata yet).
       const title = agent.state.summary || agent.state.project
-      if (title) {
-        const settings = getUserSettings()
-        const tab = settings.findTabBySession(sessionId)
-        if (tab) settings.updateTabTitle(tab.id, title)
+      const settings = getUserSettings()
+      const tab = settings.findTabBySession(sessionId)
+      if (tab) {
+        if (title && tab.title !== title) {
+          settings.updateTabTitle(tab.id, title)
+        }
+        if (agent.state.project && tab.project !== agent.state.project) {
+          settings.updateTabProject(tab.id, agent.state.project)
+        }
       }
     }
   }, [agent.state, sessionId, onStateChange])

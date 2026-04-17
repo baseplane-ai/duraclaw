@@ -156,6 +156,7 @@ interface UserSettingsImperative {
   removeTab: (tabId: string) => void
   setActiveTab: (tabId: string) => void
   updateTabTitle: (tabId: string, title: string) => void
+  updateTabProject: (tabId: string, project: string) => void
   reorderTabs: (orderedIds: string[]) => void
   findTabBySession: (sessionId: string) => TabItem | undefined
   findTabByProject: (project: string) => TabItem | undefined
@@ -171,6 +172,7 @@ const settingsRef: { current: UserSettingsImperative } = {
     removeTab: () => {},
     setActiveTab: () => {},
     updateTabTitle: () => {},
+    updateTabProject: () => {},
     reorderTabs: () => {},
     findTabBySession: () => undefined,
     findTabByProject: () => undefined,
@@ -333,6 +335,14 @@ export function useUserSettings(): UserSettingsContextValue {
     }
   }, [])
 
+  const updateTabProject = useCallback((tabId: string, project: string) => {
+    if (tabsCollection.has(tabId)) {
+      tabsCollection.update(tabId, (draft) => {
+        draft.project = project
+      })
+    }
+  }, [])
+
   const reorderTabs = useCallback((orderedIds: string[]) => {
     // Optimistic local update (instant)
     setTabOrder(orderedIds)
@@ -431,6 +441,7 @@ export function useUserSettings(): UserSettingsContextValue {
     removeTab,
     setActiveTab,
     updateTabTitle,
+    updateTabProject,
     reorderTabs,
     findTabBySession,
     findTabByProject,
@@ -446,6 +457,7 @@ export function useUserSettings(): UserSettingsContextValue {
     removeTab,
     setActiveTab,
     updateTabTitle,
+    updateTabProject,
     reorderTabs,
     saveDraft,
     getDraft,
