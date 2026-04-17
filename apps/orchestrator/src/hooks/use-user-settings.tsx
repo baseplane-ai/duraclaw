@@ -238,6 +238,16 @@ export function useUserSettings(): UserSettingsContextValue {
   const draftTimerRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 
   const saveDraft = useCallback((tabId: string, text: string) => {
+    // Write to localStorage synchronously for instant restore on reload
+    if (typeof localStorage !== 'undefined') {
+      if (text) {
+        localStorage.setItem(`draft:${tabId}`, text)
+      } else {
+        localStorage.removeItem(`draft:${tabId}`)
+      }
+    }
+
+    // Debounce the collection update (which syncs to DO)
     const existing = draftTimerRef.current.get(tabId)
     if (existing) clearTimeout(existing)
     const timer = setTimeout(() => {
@@ -262,7 +272,11 @@ export function useUserSettings(): UserSettingsContextValue {
 
   const getDraft = useCallback(
     (tabId: string): string => {
-      return allItems.find((t) => t.id === tabId)?.draft ?? ''
+      // Collection data (synced from DO) takes priority, localStorage is sync fallback
+      const fromCollection = allItems.find((t) => t.id === tabId)?.draft
+      if (fromCollection) return fromCollection
+      if (typeof localStorage !== 'undefined') return localStorage.getItem(`draft:${tabId}`) ?? ''
+      return ''
     },
     [allItems],
   )
