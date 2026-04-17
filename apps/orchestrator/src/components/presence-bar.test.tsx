@@ -76,6 +76,27 @@ describe('PresenceBar', () => {
     expect(avatars.length).toBe(1)
   })
 
+  it('treats multi-tab self as self regardless of clientId iteration order', () => {
+    // Two awareness entries share user.id = "u-self", but the non-self
+    // clientId (99) comes *before* the self clientId (100) in iteration
+    // order. Self must still render exactly once and be treated as self.
+    const aw = fakeAwareness(
+      new Map([
+        [99, { user: { id: 'u-self', name: 'Me', color: '#f00' } }],
+        [100, { user: { id: 'u-self', name: 'Me', color: '#f00' } }],
+        [101, { user: { id: 'u-alice', name: 'Alice', color: '#0f0' } }],
+      ]),
+    )
+    render(<PresenceBar awareness={aw} selfClientId={100} />)
+    const avatars = screen.getAllByTestId('presence-avatar')
+    // Exactly one avatar for self, plus Alice.
+    const selfAvatars = avatars.filter((el) => el.getAttribute('data-user-id') === 'u-self')
+    expect(selfAvatars.length).toBe(1)
+    // Self is first (self-before-peers ordering).
+    expect(avatars[0].getAttribute('data-user-id')).toBe('u-self')
+    expect(avatars.length).toBe(2)
+  })
+
   it('renders nothing when there are no users with identity', () => {
     const aw = fakeAwareness(new Map())
     const { container } = render(<PresenceBar awareness={aw} selfClientId={1} />)

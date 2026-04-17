@@ -43,21 +43,39 @@ function subscribe(awareness: Awareness, cb: () => void): () => void {
 
 function readSnapshot(awareness: Awareness, selfClientId: number): string {
   const states = awareness.getStates() as Map<number, PeerState>
-  const seen = new Map<string, PresenceUser>()
-  let selfUser: PresenceUser | null = null
-  const peers: PresenceUser[] = []
+  const selfUserId = states.get(selfClientId)?.user?.id
+
+  // Pass 1: pick one canonical state per user.id. When two clientIds share
+  // the same user.id (multi-tab self), prefer the entry whose clientId
+  // matches selfClientId so the self user is always recognised as self
+  // regardless of Map iteration order.
+  const chosen = new Map<string, { state: PeerState; clientId: number }>()
   for (const [clientId, state] of states) {
     const id = state.user?.id
     if (!id) continue
-    if (seen.has(id)) continue
+    const existing = chosen.get(id)
+    if (!existing) {
+      chosen.set(id, { state, clientId })
+      continue
+    }
+    if (id === selfUserId && clientId === selfClientId) {
+      chosen.set(id, { state, clientId })
+    }
+  }
+
+  // Pass 2: build self + peers with preserved ordering (self first, peers
+  // sorted by id).
+  let selfUser: PresenceUser | null = null
+  const peers: PresenceUser[] = []
+  for (const [id, { state }] of chosen) {
+    const isSelf = selfUserId !== undefined && id === selfUserId
     const user: PresenceUser = {
       id,
       name: state.user?.name ?? 'Anonymous',
       color: state.user?.color ?? '#94a3b8',
-      isSelf: clientId === selfClientId,
+      isSelf,
     }
-    seen.set(id, user)
-    if (clientId === selfClientId) {
+    if (isSelf) {
       selfUser = user
     } else {
       peers.push(user)
