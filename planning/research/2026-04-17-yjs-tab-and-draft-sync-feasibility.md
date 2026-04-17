@@ -242,14 +242,150 @@ BlockNote PoC in p1 of that spec to land. At that point:
 
 ---
 
-## 6. Open questions
+## 6. Addendum: Multiplayer Chat Changes Everything
 
-1. Is concurrent same-draft editing across devices a real use case we
-   want to support? (Answer determines whether § 5.1 is sufficient.)
-2. Will spec 0008 (BlockNote/Yjs) actually get scheduled, or is it
-   drifting? (If dead, § 5.2 is moot and § 5.1 is permanent.)
-3. Should `UserSettingsDO` eventually split into a JSON-state DO and a
-   Yjs DO, or host both on one instance? (Relevant only if § 5.2 proceeds.)
+**Update (2026-04-17):** The answer to § 4.1's load-bearing question is
+**yes — multiplayer chat is a desired feature**. This changes the
+recommendation.
+
+### 6.1 What multiplayer chat means for Duraclaw
+
+In the current model, a session = a worktree = a single user's
+conversation with Claude. "Multiplayer" extends this to:
+
+- **Collaborative prompt drafting**: Multiple humans co-author a prompt
+  before sending it to the agent. Character-level merge, cursors visible.
+- **Shared session watching**: Multiple users see the agent's streaming
+  response in real time (already works via `broadcastToClients()`).
+- **Awareness/presence**: "Alice is typing…", cursor positions, who's
+  online in this session. Ephemeral state, not persisted.
+
+The first bullet — co-authoring a prompt — is the use case that *only*
+Yjs solves cleanly. LWW clocks can't merge two people typing into the
+same textarea at once.
+
+### 6.2 AI agent as a Yjs peer
+
+A compelling pattern from [ElectricSQL's April 2026 post](https://electric-sql.com/blog/2026/04/08/ai-agents-as-crdt-peers-with-yjs):
+the AI agent itself connects as a **server-side `Y.Doc` peer**. In
+Duraclaw's architecture:
+
+1. `SessionAgent DO` holds the canonical `Y.Doc` for the session.
+2. Browser clients connect via y-websocket provider → DO WS.
+3. The VPS executor's streaming response writes into a `Y.Text` in the
+   doc as tokens arrive — the agent is just another cursor.
+4. Human users see tokens appear in real time via CRDT sync, not
+   a separate `assistant` event broadcast. **One transport for
+   everything.**
+
+This eliminates the current dual-path problem where:
+- Message history is `broadcastToClients()` JSON.
+- Drafts are `tabsCollection` → TanStackDB → refetch.
+- Tab metadata is `setState()` → `onStateUpdate`.
+
+All three become CRDT state on one `Y.Doc` per session + one `Y.Doc`
+for user settings.
+
+### 6.3 Awareness protocol (ephemeral, free)
+
+Yjs awareness is **not part of the persistent doc** — it's a gossip
+protocol riding the same WS connection:
+
+```ts
+awareness.setLocalStateField('user', {
+  name: 'alice',
+  color: '#e06c75',
+})
+awareness.setLocalStateField('cursor', {
+  anchor: Y.createRelativePositionFromTypeIndex(ytext, 42),
+  head: Y.createRelativePositionFromTypeIndex(ytext, 47),
+})
+```
+
+When a user disconnects, their awareness state vanishes automatically.
+Zero storage cost, zero cleanup logic. Libraries like
+[`y-presence`](https://github.com/nimeshnayaju/y-presence) give React
+hooks: `useSelf()`, `useUsers()`.
+
+### 6.4 Revised architecture sketch
+
+```
+SessionAgent DO (1 per session)
+├── Y.Doc "session"
+│   ├── Y.Array<Y.Map>  messages    # full chat history (CRDT)
+│   ├── Y.Text           draft      # collaborative prompt input
+│   └── Y.Map            meta       # status, model, cost, etc.
+├── Awareness
+│   └── { user, cursor, typing }    # ephemeral per-connection
+└── SQLite
+    ├── y_snapshot (periodic)        # Y.encodeStateAsUpdate()
+    └── y_updates  (append-only)     # incremental since snapshot
+
+UserSettingsDO (1 per user)
+├── Y.Doc "settings"
+│   ├── Y.Array<Y.Map>  tabs       # tab list + order (CRDT)
+│   └── Y.Map            prefs     # theme, layout, etc.
+└── SQLite
+    ├── y_snapshot
+    └── y_updates
+
+Browser
+├── YWebSocketProvider → SessionAgent DO  (per active tab)
+├── YWebSocketProvider → UserSettingsDO   (singleton)
+└── awareness on both connections
+```
+
+### 6.5 Revised cost / benefit
+
+| Dimension | LWW clock fix (§ 5.1) | Yjs migration for multiplayer |
+|---|---|---|
+| Fixes the draft bug | ✅ | ✅ |
+| Multiplayer prompt co-authoring | ❌ | ✅ |
+| Awareness ("Alice is typing…") | ❌ | ✅ (free with awareness protocol) |
+| Agent streaming as CRDT peer | ❌ | ✅ (single transport) |
+| Eliminates dual sync paths | ❌ | ✅ (no more setState + collection + localStorage) |
+| Bundle cost | 0 | +~40 KB gz |
+| Effort | ~1 session | ~3 weeks |
+| Reuses for spec 0008 (BlockNote) | ❌ | ✅ (shared Y-on-DO infra) |
+
+### 6.6 Revised recommendation
+
+With multiplayer chat confirmed as a desired feature:
+
+1. **Fix the draft race now** (§ 5.1, ~10 lines) — users are hitting
+   this today and it's a 1-session fix.
+2. **Spec the Yjs migration as a feature** — don't bolt it on
+   incrementally. Write a spec covering:
+   - `SessionAgent` Y.Doc schema (messages, draft, meta)
+   - `UserSettingsDO` Y.Doc schema (tabs, prefs)
+   - WS upgrade path (separate from Agents SDK `setState` WS)
+   - Persistence strategy (snapshot + update log in DO SQLite)
+   - Awareness UX (typing indicators, cursor colors)
+   - Agent-as-CRDT-peer for streaming responses
+   - Migration from current `broadcastToClients` + TanStackDB
+3. **Sequence with spec 0008**: Yjs-on-DO infra ships first (this
+   feature), BlockNote realtime docs (0008) layers on top. The order
+   reverses from the original recommendation because multiplayer chat
+   justifies the infra independently.
+
+---
+
+## 7. Open questions (updated)
+
+1. ~~Is concurrent same-draft editing a real use case?~~ **Yes —
+   multiplayer chat is desired.**
+2. Should the agent's streaming tokens go through the Y.Doc (agent-as-
+   peer) or remain a separate broadcast? The CRDT path is cleaner but
+   adds latency from encode/decode. Needs a PoC benchmark.
+3. Auth model for multiplayer: who can join a session? Is it per-project
+   ACL, invite link, or open to all org members?
+4. Ordering guarantee: Yjs `Y.Array` for messages preserves insertion
+   order, but does the CRDT merge handle the case where two users send
+   messages "simultaneously"? (Yes — concurrent inserts at different
+   positions are deterministic, but two inserts at the *same* index
+   produce an arbitrary-but-consistent tiebreak.)
+5. Should the Yjs migration be one spec or split into "Yjs infra on DO"
+   + "multiplayer chat UX"?
 
 ## Sources
 
@@ -258,6 +394,9 @@ BlockNote PoC in p1 of that spec to land. At that point:
 - [Cloudflare Agents — Store and sync state](https://developers.cloudflare.com/agents/api-reference/store-and-sync-state/)
 - [Cloudflare Durable Objects — WebSocket hibernation](https://developers.cloudflare.com/durable-objects/examples/websocket-hibernation-server/)
 - [y-websocket](https://github.com/yjs/y-websocket)
+- [Yjs Awareness docs](https://docs.yjs.dev/getting-started/adding-awareness)
+- [y-presence — React hooks for Yjs awareness](https://github.com/nimeshnayaju/y-presence)
+- [AI agents as CRDT peers with Yjs — ElectricSQL](https://electric-sql.com/blog/2026/04/08/ai-agents-as-crdt-peers-with-yjs)
 - Local: `apps/orchestrator/src/agents/user-settings-do.ts`
 - Local: `apps/orchestrator/src/hooks/use-user-settings.tsx`
 - Local: `planning/specs/0008-yjs-blocknote-realtime-docs-sync.md`
