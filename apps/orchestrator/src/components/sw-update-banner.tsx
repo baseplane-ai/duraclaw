@@ -1,24 +1,29 @@
 /**
- * SwUpdateBanner — Non-intrusive banner when a new version is available.
- * User clicks to reload when ready — no auto-refresh.
+ * SwUpdateBanner — Shows a persistent toast when a new version is available.
+ * User clicks "Reload" button to update when ready.
  */
 
-import { RefreshCwIcon } from 'lucide-react'
+import { useEffect, useRef } from 'react'
+import { toast } from 'sonner'
 import { useSwUpdate } from '~/hooks/use-sw-update'
 
 export function SwUpdateBanner() {
   const { updateAvailable, applyUpdate } = useSwUpdate()
+  const toastShown = useRef(false)
 
-  if (!updateAvailable) return null
+  useEffect(() => {
+    if (!updateAvailable || toastShown.current) return
+    toastShown.current = true
 
-  return (
-    <button
-      type="button"
-      onClick={applyUpdate}
-      className="fixed top-2 right-2 z-[100] flex items-center gap-2 rounded-lg border bg-primary px-3 py-2 text-primary-foreground text-sm shadow-lg animate-in fade-in slide-in-from-top-2"
-    >
-      <RefreshCwIcon className="size-4" />
-      New version available — click to reload
-    </button>
-  )
+    toast('New version available', {
+      description: 'Reload to get the latest updates.',
+      duration: Infinity,
+      action: {
+        label: 'Reload',
+        onClick: () => applyUpdate(),
+      },
+    })
+  }, [updateAvailable, applyUpdate])
+
+  return null
 }
