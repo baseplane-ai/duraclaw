@@ -59,8 +59,20 @@ function generateId(): string {
   return Math.random().toString(36).slice(2, 10)
 }
 
-function collectionTabs(): TabItem[] {
-  return [...(tabsCollection as Iterable<[string, TabItem]>)].map(([, t]) => t)
+/** Read current tabs from collection without creating intermediate arrays */
+function findInCollection(predicate: (t: TabItem) => boolean): TabItem | undefined {
+  for (const [, t] of tabsCollection as Iterable<[string, TabItem]>) {
+    if (predicate(t)) return t
+  }
+  return undefined
+}
+
+function collectionTabsList(): TabItem[] {
+  const result: TabItem[] = []
+  for (const [, t] of tabsCollection as Iterable<[string, TabItem]>) {
+    if (t.project !== '__draft') result.push(t)
+  }
+  return result
 }
 
 // ── Module-level imperative ref ──────────────────────────────────
@@ -138,9 +150,8 @@ export function useUserSettings(): UserSettingsContextValue {
   // DO persists + broadcasts state → WS → syncFromServer → writeBatch.
 
   const addTab = useCallback((project: string, sessionId: string, title?: string) => {
-    const current = collectionTabs()
-
-    const bySession = current.find((t) => t.sessionId === sessionId)
+    // Use direct collection lookups — no array materialization
+    const bySession = findInCollection((t) => t.sessionId === sessionId)
     if (bySession) {
       if (title && title !== bySession.title) {
         tabsCollection.update(bySession.id, (draft) => {
@@ -151,7 +162,7 @@ export function useUserSettings(): UserSettingsContextValue {
       return
     }
 
-    const byProject = current.find((t) => t.project === project)
+    const byProject = findInCollection((t) => t.project === project)
     if (byProject) {
       tabsCollection.update(byProject.id, (draft) => {
         draft.sessionId = sessionId
@@ -192,7 +203,7 @@ export function useUserSettings(): UserSettingsContextValue {
   }, [])
 
   const removeTab = useCallback((tabId: string) => {
-    const current = collectionTabs()
+    const current = collectionTabsList()
     const currentActive = readActiveTabId()
     let newActive = currentActive
     if (currentActive === tabId) {
