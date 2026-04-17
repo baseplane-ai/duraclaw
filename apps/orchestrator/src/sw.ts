@@ -27,6 +27,41 @@ self.addEventListener('push', (event) => {
   )
 })
 
+/**
+ * Navigate an existing PWA window to `target`, or open a new one.
+ *
+ * On mobile (installed PWA in standalone mode), calling
+ * `clients.openWindow(url)` while the app is already running in the
+ * background typically focuses the existing window *without navigating*,
+ * so users tapping a push notification would land on whatever page the
+ * app last showed (usually `/`) instead of the session link. Enumerate
+ * existing same-origin clients first, navigate+focus one if present,
+ * and only fall back to openWindow when no client exists (cold start).
+ */
+async function openOrFocus(target: string): Promise<void> {
+  const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+  for (const client of all) {
+    const win = client as WindowClient
+    try {
+      const navigated = await win.navigate(target)
+      if (navigated) {
+        await (navigated as WindowClient).focus()
+        return
+      }
+    } catch {
+      // navigate() can reject for cross-origin or out-of-scope URLs —
+      // fall through to focus-without-navigate, then openWindow.
+    }
+    try {
+      await win.focus()
+      return
+    } catch {
+      // client may be gone; continue searching.
+    }
+  }
+  await self.clients.openWindow(target)
+}
+
 self.addEventListener('notificationclick', (event) => {
   event.notification.close()
   const { url, sessionId, actionToken } = event.notification.data ?? {}
@@ -47,10 +82,10 @@ self.addEventListener('notificationclick', (event) => {
 
   // New Session action — open dashboard without session context
   if (event.action === 'new-session') {
-    event.waitUntil(self.clients.openWindow('/'))
+    event.waitUntil(openOrFocus('/'))
     return
   }
 
   // Open action or default click — open the session URL
-  event.waitUntil(self.clients.openWindow(url || '/'))
+  event.waitUntil(openOrFocus(url || '/'))
 })

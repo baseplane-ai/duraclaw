@@ -9,6 +9,7 @@ vi.mock('workbox-precaching', () => ({
 const handlers: Record<string, Function> = {}
 const mockShowNotification = vi.fn(() => Promise.resolve())
 const mockOpenWindow = vi.fn(() => Promise.resolve(null))
+const mockMatchAll = vi.fn(() => Promise.resolve([] as unknown[]))
 
 // Set up ServiceWorkerGlobalScope mock
 const swSelf = {
@@ -21,6 +22,7 @@ const swSelf = {
   },
   clients: {
     openWindow: mockOpenWindow,
+    matchAll: mockMatchAll,
   },
 }
 
@@ -117,9 +119,10 @@ describe('service worker handlers', () => {
   })
 
   describe('notificationclick handler', () => {
-    function makeClickEvent(notificationData: unknown) {
+    function makeClickEvent(notificationData: unknown, action?: string) {
       const promises: Promise<unknown>[] = []
       return {
+        action,
         notification: {
           close: vi.fn(),
           data: notificationData,
@@ -129,30 +132,91 @@ describe('service worker handlers', () => {
       }
     }
 
-    it('closes notification and opens the url from notification data', () => {
-      const event = makeClickEvent({ url: '/session/456' })
+    async function flushWaitUntil(event: { _promises: Promise<unknown>[] }) {
+      await Promise.all(event._promises)
+    }
+
+    it('opens a new window via openWindow when no existing client is present (cold start)', async () => {
+      mockMatchAll.mockResolvedValueOnce([])
+      const event = makeClickEvent({ url: '/?session=456' })
 
       handlers.notificationclick(event)
+      await flushWaitUntil(event)
 
       expect(event.notification.close).toHaveBeenCalled()
       expect(event.waitUntil).toHaveBeenCalledTimes(1)
-      expect(mockOpenWindow).toHaveBeenCalledWith('/session/456')
+      expect(mockMatchAll).toHaveBeenCalledWith({ type: 'window', includeUncontrolled: true })
+      expect(mockOpenWindow).toHaveBeenCalledWith('/?session=456')
     })
 
-    it('opens root url when notification data has no url', () => {
+    it('navigates and focuses an existing client when one is present (warm PWA)', async () => {
+      const navigated = { focus: vi.fn(() => Promise.resolve()) }
+      const existing = {
+        navigate: vi.fn(() => Promise.resolve(navigated)),
+        focus: vi.fn(() => Promise.resolve()),
+      }
+      mockMatchAll.mockResolvedValueOnce([existing])
+      const event = makeClickEvent({ url: '/?session=456' })
+
+      handlers.notificationclick(event)
+      await flushWaitUntil(event)
+
+      expect(existing.navigate).toHaveBeenCalledWith('/?session=456')
+      expect(navigated.focus).toHaveBeenCalled()
+      expect(mockOpenWindow).not.toHaveBeenCalled()
+    })
+
+    it('falls back to focus when navigate() rejects (out-of-scope / cross-origin client)', async () => {
+      const existing = {
+        navigate: vi.fn(() => Promise.reject(new Error('out of scope'))),
+        focus: vi.fn(() => Promise.resolve()),
+      }
+      mockMatchAll.mockResolvedValueOnce([existing])
+      const event = makeClickEvent({ url: '/?session=456' })
+
+      handlers.notificationclick(event)
+      await flushWaitUntil(event)
+
+      expect(existing.navigate).toHaveBeenCalledWith('/?session=456')
+      expect(existing.focus).toHaveBeenCalled()
+      expect(mockOpenWindow).not.toHaveBeenCalled()
+    })
+
+    it('opens root url when notification data has no url', async () => {
+      mockMatchAll.mockResolvedValueOnce([])
       const event = makeClickEvent({})
 
       handlers.notificationclick(event)
+      await flushWaitUntil(event)
 
       expect(mockOpenWindow).toHaveBeenCalledWith('/')
     })
 
-    it('opens root url when notification data is null', () => {
+    it('opens root url when notification data is null', async () => {
+      mockMatchAll.mockResolvedValueOnce([])
       const event = makeClickEvent(null)
 
       handlers.notificationclick(event)
+      await flushWaitUntil(event)
 
       expect(mockOpenWindow).toHaveBeenCalledWith('/')
+    })
+
+    it('new-session action reuses existing client via navigate+focus', async () => {
+      const navigated = { focus: vi.fn(() => Promise.resolve()) }
+      const existing = {
+        navigate: vi.fn(() => Promise.resolve(navigated)),
+        focus: vi.fn(() => Promise.resolve()),
+      }
+      mockMatchAll.mockResolvedValueOnce([existing])
+      const event = makeClickEvent({ url: '/?session=ignored' }, 'new-session')
+
+      handlers.notificationclick(event)
+      await flushWaitUntil(event)
+
+      expect(existing.navigate).toHaveBeenCalledWith('/')
+      expect(navigated.focus).toHaveBeenCalled()
+      expect(mockOpenWindow).not.toHaveBeenCalled()
     })
   })
 })
