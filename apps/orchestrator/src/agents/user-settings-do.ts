@@ -97,11 +97,19 @@ export class UserSettingsDO extends Agent<Env, UserSettingsState> {
         return Response.json({ tabs: this.state.tabs })
       }
 
-      // PATCH /tabs/:id — update title and/or draft
+      // PATCH /tabs/:id — update sessionId, title, and/or draft
       if (request.method === 'PATCH' && url.pathname.startsWith('/tabs/')) {
         const tabId = url.pathname.slice('/tabs/'.length)
-        const body = (await request.json()) as { title?: string; draft?: string }
-        if (body.title) this.updateTabTitle(tabId, body.title)
+        const body = (await request.json()) as {
+          sessionId?: string
+          title?: string
+          draft?: string
+        }
+        if (body.sessionId) {
+          this.switchTabSession(tabId, body.sessionId, body.title)
+        } else if (body.title) {
+          this.updateTabTitle(tabId, body.title)
+        }
         if (typeof body.draft === 'string') this.saveDraft(tabId, body.draft)
         return Response.json({ tabs: this.state.tabs })
       }
