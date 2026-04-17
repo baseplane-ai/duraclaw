@@ -1,92 +1,45 @@
-import { stat } from 'node:fs/promises'
-import * as nodePath from 'node:path'
-import type { SdkSessionInfo } from './types.js'
+import fs from 'node:fs/promises'
+import {
+  defaultLivenessCheck,
+  getSessionsDir,
+  type LivenessCheck,
+  resolveSessionState,
+} from './session-state.js'
+import type { SessionStateSnapshot } from './types.js'
 
-interface SessionInfoFile {
-  session_id: string
-  user: string
-  branch: string
-  project_dir: string
-  workflow_id: string
-  started_at: string
-  summary?: string
-  tag?: string | null
-}
+const PID_SUFFIX = '.pid'
 
 /**
- * List SDK sessions found on disk for a project.
- * Uses the SDK's listSessions first (catches forked sessions), with disk scan as fallback.
+ * Scan the sessions directory for `*.pid` files and return a state snapshot
+ * per session. Missing directory → empty array. Entries whose resolver
+ * returns `found:false` (raced unlink) are dropped.
+ *
+ * `isAlive` is injected so tests can exercise live/dead pid combinations
+ * without ever actually spawning a process.
  */
-export async function listSdkSessions(projectPath: string, limit = 200): Promise<SdkSessionInfo[]> {
-  // Try SDK listSessions first — it handles forked sessions and internal session storage
+export async function listSessions(
+  sessionsDir: string = getSessionsDir(),
+  isAlive: LivenessCheck = defaultLivenessCheck,
+): Promise<SessionStateSnapshot[]> {
+  let entries: string[]
   try {
-    const { listSessions } = await import('@anthropic-ai/claude-agent-sdk')
-    const sdkSessions = await listSessions({ dir: projectPath })
-    if (Array.isArray(sdkSessions) && sdkSessions.length > 0) {
-      const sessionsDir = nodePath.join(projectPath, '.claude', 'sessions')
-      const results: SdkSessionInfo[] = await Promise.all(
-        sdkSessions.map(async (s: any) => {
-          const sessionId = s.sessionId ?? s.session_id ?? ''
-          // SDK may not provide lastActivity — fall back to session dir mtime
-          let lastActivity = s.lastActivity ?? s.last_activity ?? ''
-          if (!lastActivity && sessionId) {
-            try {
-              const dirStat = await stat(nodePath.join(sessionsDir, sessionId))
-              lastActivity = dirStat.mtime.toISOString()
-            } catch {
-              lastActivity = s.startedAt ?? s.started_at ?? ''
-            }
-          }
-          return {
-            session_id: sessionId,
-            user: s.user ?? '',
-            branch: s.branch ?? '',
-            project_dir: s.projectDir ?? s.project_dir ?? projectPath,
-            workflow_id: s.workflowId ?? s.workflow_id ?? '',
-            started_at: s.startedAt ?? s.started_at ?? '',
-            last_activity: lastActivity,
-            summary: s.summary ?? '',
-            tag: s.tag ?? null,
-          }
-        }),
-      )
-      results.sort((a, b) => (b.last_activity > a.last_activity ? 1 : -1))
-      return results.slice(0, limit)
-    }
-  } catch {
-    // SDK listSessions not available — fall back to disk scan
+    entries = await fs.readdir(sessionsDir)
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code === 'ENOENT') return []
+    throw err
   }
 
-  // Fallback: scan .claude/sessions/*/session-info.json
-  const sessionsDir = nodePath.join(projectPath, '.claude', 'sessions')
-  const glob = new Bun.Glob('*/session-info.json')
-  const results: SdkSessionInfo[] = []
+  const sessionIds = entries
+    .filter((name) => name.endsWith(PID_SUFFIX))
+    .map((name) => name.slice(0, -PID_SUFFIX.length))
 
-  for await (const match of glob.scan({ cwd: sessionsDir, onlyFiles: true })) {
-    try {
-      const fullPath = nodePath.join(sessionsDir, match)
-      const info: SessionInfoFile = await Bun.file(fullPath).json()
-      const sessionDir = nodePath.dirname(fullPath)
-      const dirStat = await stat(sessionDir)
+  const results = await Promise.all(
+    sessionIds.map(async (id) => {
+      const res = await resolveSessionState(sessionsDir, id, isAlive)
+      return res.found ? res.state : null
+    }),
+  )
 
-      results.push({
-        session_id: info.session_id,
-        user: info.user ?? '',
-        branch: info.branch ?? '',
-        project_dir: info.project_dir ?? projectPath,
-        workflow_id: info.workflow_id ?? '',
-        started_at: info.started_at ?? '',
-        last_activity: dirStat.mtime.toISOString(),
-        summary: info.summary ?? '',
-        tag: info.tag ?? null,
-      })
-    } catch {
-      // Skip malformed or unreadable entries
-    }
-  }
-
-  // Sort by last_activity descending
-  results.sort((a, b) => (b.last_activity > a.last_activity ? 1 : -1))
-
-  return results.slice(0, limit)
+  return results.filter((s): s is SessionStateSnapshot => s !== null)
 }

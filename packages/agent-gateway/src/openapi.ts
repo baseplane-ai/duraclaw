@@ -1,14 +1,18 @@
 /**
- * OpenAPI 3.1 specification for CC Gateway HTTP API.
+ * OpenAPI 3.1 specification for the Duraclaw agent-gateway.
  * Served at GET /openapi.json for auto-discovery.
+ *
+ * Gateway is a thin control-plane: spawn session-runner subprocesses, list
+ * and inspect them, expose project/git/kata helpers. The actual Claude SDK
+ * query lives in the session-runner bin.
  */
 export const spec = {
   openapi: '3.1.0',
   info: {
-    title: 'CC Gateway',
+    title: 'Duraclaw Agent Gateway',
     version: '0.1.0',
     description:
-      'HTTP API gateway for controlling Claude Code sessions across project worktrees. Wraps @anthropic-ai/claude-agent-sdk.',
+      'Control plane for Duraclaw session-runner subprocesses. Spawns detached runners, exposes status + list endpoints, and serves project/git/kata helpers.',
   },
   servers: [{ url: 'http://127.0.0.1:9877', description: 'Local default' }],
   paths: {
@@ -49,6 +53,114 @@ export const spec = {
             description: 'OpenAPI spec',
             content: { 'application/json': { schema: { type: 'object' } } },
           },
+        },
+      },
+    },
+    '/sessions/start': {
+      post: {
+        operationId: 'startSession',
+        summary: 'Spawn a detached session-runner',
+        description:
+          'Writes the command to disk, spawns a detached session-runner subprocess, and returns the assigned session_id. Returns 200 within 100ms — the runner dials back to callback_url asynchronously.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  callback_url: { type: 'string', example: 'ws://worker.example.com/cb' },
+                  callback_token: { type: 'string' },
+                  cmd: { type: 'object' },
+                },
+                required: ['callback_url', 'callback_token', 'cmd'],
+              },
+            },
+          },
+        },
+        responses: {
+          '200': {
+            description: 'Runner spawned',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    ok: { type: 'boolean', example: true },
+                    session_id: { type: 'string', format: 'uuid' },
+                  },
+                  required: ['ok', 'session_id'],
+                },
+              },
+            },
+          },
+          '400': { description: 'Invalid request body' },
+          '401': { $ref: '#/components/responses/Unauthorized' },
+          '500': { description: 'session-runner bin not found' },
+        },
+      },
+    },
+    '/sessions': {
+      get: {
+        operationId: 'listSessions',
+        summary: 'List all sessions known to the gateway',
+        description:
+          'Scans the sessions directory for pid files and returns a status snapshot per session. Replaces the old /sessions/discover endpoint.',
+        responses: {
+          '200': {
+            description: 'Known sessions',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    ok: { type: 'boolean', example: true },
+                    sessions: {
+                      type: 'array',
+                      items: { $ref: '#/components/schemas/SessionStateSnapshot' },
+                    },
+                  },
+                  required: ['ok', 'sessions'],
+                },
+              },
+            },
+          },
+          '401': { $ref: '#/components/responses/Unauthorized' },
+        },
+      },
+    },
+    '/sessions/{id}/status': {
+      get: {
+        operationId: 'getSessionStatus',
+        summary: 'Get the current state of a session',
+        parameters: [
+          {
+            name: 'id',
+            in: 'path',
+            required: true,
+            schema: { type: 'string', format: 'uuid' },
+          },
+        ],
+        responses: {
+          '200': {
+            description: 'Session state snapshot',
+            content: {
+              'application/json': {
+                schema: {
+                  allOf: [
+                    {
+                      type: 'object',
+                      properties: { ok: { type: 'boolean', example: true } },
+                      required: ['ok'],
+                    },
+                    { $ref: '#/components/schemas/SessionStateSnapshot' },
+                  ],
+                },
+              },
+            },
+          },
+          '401': { $ref: '#/components/responses/Unauthorized' },
+          '404': { description: 'No pid or exit file for this session id' },
         },
       },
     },
@@ -168,65 +280,6 @@ export const spec = {
         },
       },
     },
-    '/sessions/discover': {
-      get: {
-        operationId: 'discoverSessions',
-        summary: 'Discover sessions from all agent sources',
-        description:
-          'Iterates all discovered projects, calls each registered SessionSource, returns merged results sorted by last_activity DESC.',
-        parameters: [
-          {
-            name: 'since',
-            in: 'query',
-            schema: { type: 'string', format: 'date-time' },
-            description: 'ISO timestamp — only sessions with activity after this time',
-          },
-          {
-            name: 'limit',
-            in: 'query',
-            schema: { type: 'integer', default: 50 },
-            description: 'Max sessions per project per source',
-          },
-          {
-            name: 'project',
-            in: 'query',
-            schema: { type: 'string' },
-            description: 'Filter to a specific project name',
-          },
-        ],
-        responses: {
-          '200': {
-            description: 'Discovered sessions from all sources',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    sessions: {
-                      type: 'array',
-                      items: { $ref: '#/components/schemas/DiscoveredSession' },
-                    },
-                    sources: {
-                      type: 'object',
-                      additionalProperties: {
-                        type: 'object',
-                        properties: {
-                          available: { type: 'boolean' },
-                          session_count: { type: 'integer' },
-                        },
-                        required: ['available', 'session_count'],
-                      },
-                    },
-                  },
-                  required: ['sessions', 'sources'],
-                },
-              },
-            },
-          },
-          '401': { $ref: '#/components/responses/Unauthorized' },
-        },
-      },
-    },
     '/projects/{name}/kata-status': {
       get: {
         operationId: 'getKataStatus',
@@ -279,7 +332,7 @@ export const spec = {
           'application/json': {
             schema: {
               type: 'object',
-              properties: { error: { type: 'string' } },
+              properties: { ok: { type: 'boolean', example: false }, error: { type: 'string' } },
               required: ['error'],
             },
           },
@@ -317,31 +370,38 @@ export const spec = {
         },
         required: ['path', 'status'],
       },
-      DiscoveredSession: {
+      SessionStateSnapshot: {
         type: 'object',
         properties: {
-          sdk_session_id: { type: 'string' },
-          agent: { type: 'string', example: 'claude' },
-          project_dir: { type: 'string' },
-          project: { type: 'string' },
-          branch: { type: 'string' },
-          started_at: { type: 'string', format: 'date-time' },
-          last_activity: { type: 'string', format: 'date-time' },
-          summary: { type: 'string' },
-          tag: { type: ['string', 'null'] },
-          title: { type: ['string', 'null'] },
-          message_count: { type: ['integer', 'null'] },
-          user: { type: ['string', 'null'] },
+          session_id: { type: 'string', format: 'uuid' },
+          state: {
+            type: 'string',
+            enum: ['running', 'completed', 'failed', 'aborted', 'crashed'],
+          },
+          sdk_session_id: { type: ['string', 'null'] },
+          last_activity_ts: { type: ['integer', 'null'] },
+          last_event_seq: { type: 'integer' },
+          cost: {
+            type: 'object',
+            properties: {
+              input_tokens: { type: 'integer' },
+              output_tokens: { type: 'integer' },
+              usd: { type: 'number' },
+            },
+            required: ['input_tokens', 'output_tokens', 'usd'],
+          },
+          model: { type: ['string', 'null'] },
+          turn_count: { type: 'integer' },
         },
         required: [
+          'session_id',
+          'state',
           'sdk_session_id',
-          'agent',
-          'project_dir',
-          'project',
-          'branch',
-          'started_at',
-          'last_activity',
-          'summary',
+          'last_activity_ts',
+          'last_event_seq',
+          'cost',
+          'model',
+          'turn_count',
         ],
       },
       KataSessionState: {
