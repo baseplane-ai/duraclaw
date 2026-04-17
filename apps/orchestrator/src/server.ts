@@ -5,6 +5,7 @@ import { createApiApp } from './api'
 import { getRequestSession } from './api/auth-session'
 import type { Env } from './lib/types'
 
+// Gateway + session-runner decoupling live on prod as of 2026-04-17 (#1).
 const WS_ROUTE = /^\/(?:api\/sessions|agents\/session-agent)\/([^/]+)(?:\/(ws|agent))?$/
 const apiApp = createApiApp()
 
