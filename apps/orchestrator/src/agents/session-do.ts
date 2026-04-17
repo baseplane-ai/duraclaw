@@ -15,7 +15,7 @@ import type {
   SessionState,
   SpawnConfig,
 } from '~/lib/types'
-import { parseEvent } from '~/lib/vps-client'
+import { getSessionStatus, parseEvent } from '~/lib/vps-client'
 import {
   applyToolResult,
   assistantContentToParts,
@@ -25,9 +25,10 @@ import {
 import {
   buildGatewayCallbackUrl,
   buildGatewayStartUrl,
+  constantTimeEquals,
   getGatewayConnectionId,
   loadTurnState,
-  validateGatewayToken,
+  resolveStaleThresholdMs,
 } from './session-do-helpers'
 import { SESSION_DO_MIGRATIONS } from './session-do-migrations'
 
@@ -51,6 +52,7 @@ const DEFAULT_STATE: SessionState = {
   error: null,
   summary: null,
   sdk_session_id: null,
+  active_callback_token: undefined,
 }
 
 /**
@@ -69,8 +71,9 @@ const DEFAULT_STATE: SessionState = {
  */
 const WATCHDOG_INTERVAL_MS = 30_000
 
-/** If no gateway event arrives within this window, consider the connection dead (ms). */
-const STALE_THRESHOLD_MS = 5 * 60_000
+// Stale threshold is resolved per-alarm via resolveStaleThresholdMs(env) so
+// config changes take effect on the next DO wake without a code change.
+// Default is 90s — see DEFAULT_STALE_THRESHOLD_MS in session-do-helpers.
 
 export class SessionDO extends Agent<Env, SessionState> {
   initialState = DEFAULT_STATE
@@ -147,10 +150,13 @@ export class SessionDO extends Agent<Env, SessionState> {
     const role = url.searchParams.get('role')
 
     if (role === 'gateway') {
-      // Gateway connection: validate token
-      const token = ctx.request.headers.get('x-gateway-token')
-      if (!this.validateGatewayToken(token)) {
-        connection.close(4001, 'Invalid or expired gateway token')
+      // Gateway connection: validate per-dial callback_token minted in
+      // triggerGatewayDial. Timing-safe compare; leave token in state so
+      // subsequent reconnects by the same session-runner succeed.
+      const token = url.searchParams.get('token')
+      const active = this.state.active_callback_token
+      if (!token || !active || !constantTimeEquals(token, active)) {
+        connection.close(4401, 'invalid callback token')
         return
       }
 
@@ -186,11 +192,6 @@ export class SessionDO extends Agent<Env, SessionState> {
         }),
       )
     }
-  }
-
-  /** Validate a gateway token against stored token and TTL. */
-  private validateGatewayToken(token: string | null): boolean {
-    return validateGatewayToken(this.sql.bind(this), token)
   }
 
   /** Suppress Agent SDK protocol messages (identity, state, MCP) for gateway connections. */
@@ -231,21 +232,75 @@ export class SessionDO extends Agent<Env, SessionState> {
         /* ignore */
       }
 
-      // If session was active, the connection dropped unexpectedly
+      // If session was active, the connection dropped unexpectedly. Ask the
+      // gateway for the runner's live state before running the local recovery
+      // path — if the runner is still alive, its DialBackClient will reconnect
+      // and we should wait rather than finalizing the DO prematurely.
       if (this.state.status === 'running' || this.state.status === 'waiting_gate') {
-        this.recoverFromDroppedConnection()
+        void this.maybeRecoverAfterGatewayDrop()
       }
     }
 
     super.onClose(connection, code, reason, _wasClean)
   }
 
+  /**
+   * Implements B7 (status-aware recovery). Called from `onClose` for the
+   * gateway-role connection. Probes `GET /sessions/:id/status` with a 5s
+   * timeout and decides whether to finalize the DO or wait for a re-dial.
+   *
+   * Defensive fallback: on any unreachable / non-200 / non-404 result, run
+   * `recoverFromDroppedConnection` as the DO cannot trust the gateway's
+   * liveness signal.
+   */
+  private async maybeRecoverAfterGatewayDrop() {
+    const gatewayUrl = this.env.CC_GATEWAY_URL
+    const sessionId = this.state.session_id
+    if (!gatewayUrl || !sessionId) {
+      await this.recoverFromDroppedConnection()
+      return
+    }
+
+    const result = await getSessionStatus(gatewayUrl, this.env.CC_GATEWAY_SECRET, sessionId, 5_000)
+
+    if (result.kind === 'state') {
+      if (result.body.state === 'running') {
+        console.log(`[SessionDO:${this.ctx.id}] WS dropped, runner alive — skipping recovery`)
+        return
+      }
+      console.log(
+        `[SessionDO:${this.ctx.id}] WS dropped, runner terminal (${result.body.state}) — running recovery`,
+      )
+      await this.recoverFromDroppedConnection()
+      return
+    }
+
+    if (result.kind === 'not_found') {
+      console.log(`[SessionDO:${this.ctx.id}] WS dropped, gateway 404 — running recovery (orphan)`)
+      await this.recoverFromDroppedConnection()
+      return
+    }
+
+    console.log(
+      `[SessionDO:${this.ctx.id}] WS dropped, status unreachable (${result.reason}) — running recovery (defensive)`,
+    )
+    await this.recoverFromDroppedConnection()
+  }
+
   // ── Gateway Connection ─────────────────────────────────────────
 
   /**
    * Trigger the gateway to dial back into this DO via outbound WS.
-   * Generates a one-shot token, stores it in SQLite with 60s TTL,
-   * then POSTs to the gateway's /sessions/start endpoint.
+   *
+   * Lifecycle per B4b:
+   *   1. Mint a fresh callback_token (UUID v4).
+   *   2. If a previous token was active, close any live gateway-role WS with
+   *      code 4410 ("token rotated") BEFORE persisting the new token — this
+   *      prevents an old session-runner from continuing to stream into the DO
+   *      concurrently with the newly-spawned runner.
+   *   3. Persist the new token via setState (JSON blob — no migration).
+   *   4. POST /sessions/start with {callback_url, callback_token, cmd}.
+   *   5. On success, persist the gateway-assigned session_id.
    */
   private async triggerGatewayDial(cmd: GatewayCommand) {
     const gatewayUrl = this.env.CC_GATEWAY_URL
@@ -256,21 +311,42 @@ export class SessionDO extends Agent<Env, SessionState> {
       return
     }
 
-    // Generate one-shot token with 60s TTL
-    const token = crypto.randomUUID()
-    const expiresAt = Date.now() + 60_000
-    try {
-      this.sql`INSERT OR REPLACE INTO kv (key, value) VALUES ('gateway_token', ${token})`
-      this
-        .sql`INSERT OR REPLACE INTO kv (key, value) VALUES ('gateway_token_expires', ${String(expiresAt)})`
-    } catch (err) {
-      console.error(`[SessionDO:${this.ctx.id}] Failed to store gateway token:`, err)
-      this.updateState({ status: 'idle', error: 'Failed to store gateway token' })
-      return
+    const callback_token = crypto.randomUUID()
+
+    // Rotate: close any existing gateway-role WS on this DO with 4410 before
+    // storing the new token so old+new runners don't both stream to the DO.
+    if (this.state.active_callback_token) {
+      const oldConnId = this.getGatewayConnectionId()
+      if (oldConnId) {
+        for (const conn of this.getConnections()) {
+          if (conn.id === oldConnId) {
+            try {
+              conn.close(4410, 'token rotated')
+            } catch (err) {
+              console.error(`[SessionDO:${this.ctx.id}] Failed to close old gateway WS:`, err)
+            }
+            break
+          }
+        }
+        // Clear the connection-id cache; onClose will also clear but the new
+        // runner should not find a stale id in the meantime.
+        this.cachedGatewayConnId = null
+        try {
+          this.sql`DELETE FROM kv WHERE key = 'gateway_conn_id'`
+        } catch {
+          /* ignore */
+        }
+      }
     }
 
+    this.updateState({ active_callback_token: callback_token })
+
     // Build callback URL: wss://worker-url/agents/session-agent/<do-id>?role=gateway&token=<token>
-    const callbackUrl = buildGatewayCallbackUrl(workerPublicUrl, this.ctx.id.toString(), token)
+    const callbackUrl = buildGatewayCallbackUrl(
+      workerPublicUrl,
+      this.ctx.id.toString(),
+      callback_token,
+    )
 
     // POST to gateway to trigger dial-back
     const startUrl = buildGatewayStartUrl(gatewayUrl)
@@ -284,7 +360,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       const resp = await fetch(startUrl, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ callback_url: callbackUrl, cmd }),
+        body: JSON.stringify({ callback_url: callbackUrl, callback_token, cmd }),
       })
 
       if (!resp.ok) {
@@ -292,6 +368,20 @@ export class SessionDO extends Agent<Env, SessionState> {
         console.error(`[SessionDO:${this.ctx.id}] Gateway start failed: ${resp.status} ${errText}`)
         this.updateState({ status: 'idle', error: `Gateway start failed: ${resp.status}` })
         return
+      }
+
+      // Persist the gateway-assigned session_id so subsequent /sessions/:id/status
+      // calls use the gateway's canonical id (distinct from the DO id).
+      try {
+        const parsed = (await resp.json()) as { ok?: boolean; session_id?: string }
+        if (parsed?.session_id) {
+          this.updateState({ session_id: parsed.session_id })
+        }
+      } catch (err) {
+        console.error(
+          `[SessionDO:${this.ctx.id}] Failed to parse gateway /sessions/start body:`,
+          err,
+        )
       }
 
       this.lastGatewayActivity = Date.now()
@@ -324,10 +414,11 @@ export class SessionDO extends Agent<Env, SessionState> {
 
     const staleDuration = Date.now() - this.lastGatewayActivity
     const gwConnId = this.getGatewayConnectionId()
+    const staleThreshold = resolveStaleThresholdMs(this.env.STALE_THRESHOLD_MS)
 
-    if (staleDuration > STALE_THRESHOLD_MS && !gwConnId) {
+    if (staleDuration > staleThreshold && !gwConnId) {
       console.log(
-        `[SessionDO:${this.ctx.id}] Watchdog: stale for ${Math.round(staleDuration / 1000)}s with no gateway connection — recovering`,
+        `[SessionDO:${this.ctx.id}] Watchdog: stale for ${Math.round(staleDuration / 1000)}s with no gateway connection — recovering (threshold=${staleThreshold}ms)`,
       )
       await this.recoverFromDroppedConnection()
       return
@@ -363,11 +454,13 @@ export class SessionDO extends Agent<Env, SessionState> {
       this.persistTurnState()
     }
 
-    // Transition to idle (session may be resumable via sdk_session_id)
+    // Transition to idle (session may be resumable via sdk_session_id).
+    // Clear active_callback_token — the runner that owned it is gone.
     this.updateState({
       status: 'idle',
       gate: null,
       error: 'Gateway connection lost — session stopped. You can send a new message to resume.',
+      active_callback_token: undefined,
     })
     this.syncStatusToRegistry()
 
@@ -921,7 +1014,12 @@ export class SessionDO extends Agent<Env, SessionState> {
     // Transition unilaterally so stop unsticks sessions even when the gateway WS
     // is half-open / dead. The gateway send is best-effort — its ack can't be
     // trusted to arrive, so we don't gate local recovery on it.
-    this.updateState({ status: 'aborted', gate: null, error: reason ?? 'Stopped by user' })
+    this.updateState({
+      status: 'aborted',
+      gate: null,
+      error: reason ?? 'Stopped by user',
+      active_callback_token: undefined,
+    })
     this.syncStatusToRegistry()
 
     const gwConnId = this.getGatewayConnectionId()
@@ -939,7 +1037,12 @@ export class SessionDO extends Agent<Env, SessionState> {
       return { ok: false, error: `Cannot abort: status is '${this.state.status}'` }
     }
 
-    this.updateState({ status: 'aborted', gate: null, error: reason ?? 'Aborted by user' })
+    this.updateState({
+      status: 'aborted',
+      gate: null,
+      error: reason ?? 'Aborted by user',
+      active_callback_token: undefined,
+    })
     this.sendToGateway({ type: 'abort', session_id: this.state.session_id ?? '' })
     this.syncStatusToRegistry()
     console.log(`[SessionDO:${this.ctx.id}] abort: ${reason ?? 'user request'}`)
@@ -1568,7 +1671,8 @@ export class SessionDO extends Agent<Env, SessionState> {
           }
         }
 
-        // PRESERVE all existing side effects — always transition to idle
+        // PRESERVE all existing side effects — always transition to idle.
+        // Terminal state: clear active_callback_token (B4b).
         this.updateState({
           status: 'idle',
           completed_at: new Date().toISOString(),
@@ -1579,6 +1683,7 @@ export class SessionDO extends Agent<Env, SessionState> {
           error: event.is_error ? event.result : null,
           summary: event.sdk_summary ?? this.state.summary,
           gate: null,
+          active_callback_token: undefined,
         })
         this.syncStatusToRegistry()
         this.syncResultToRegistry()
@@ -1625,11 +1730,12 @@ export class SessionDO extends Agent<Env, SessionState> {
           this.persistTurnState()
         }
 
-        // PRESERVE existing side effects
+        // PRESERVE existing side effects; clear active_callback_token (terminal).
         this.updateState({
           status: 'idle',
           gate: null,
           completed_at: new Date().toISOString(),
+          active_callback_token: undefined,
         })
         this.syncStatusToRegistry()
         break
@@ -1671,8 +1777,13 @@ export class SessionDO extends Agent<Env, SessionState> {
         this.session.appendMessage(errorMsg)
         this.broadcastMessage(errorMsg)
 
-        // Transition to idle (not failed) — session remains interactive
-        this.updateState({ status: 'idle', error: event.error })
+        // Transition to idle (not failed) — session remains interactive.
+        // Terminal for the current runner: clear active_callback_token.
+        this.updateState({
+          status: 'idle',
+          error: event.error,
+          active_callback_token: undefined,
+        })
         this.syncStatusToRegistry()
         this.dispatchPush(
           {
