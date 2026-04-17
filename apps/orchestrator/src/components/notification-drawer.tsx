@@ -1,3 +1,4 @@
+import { useNavigate } from '@tanstack/react-router'
 import { AlertTriangle, CheckCircle, Settings, Shield } from 'lucide-react'
 import { useState } from 'react'
 import {
@@ -43,11 +44,12 @@ function relativeTime(timestamp: string): string {
 export function NotificationDrawer({ open, onOpenChange }: NotificationDrawerProps) {
   const { notifications, markRead, markAllRead, clearAll } = useNotificationStore()
   const [showPrefs, setShowPrefs] = useState(false)
+  const navigate = useNavigate()
 
   const handleClick = (n: AppNotification) => {
     markRead(n.id)
     onOpenChange(false)
-    window.location.href = n.url
+    navigate({ to: '/', search: { session: n.sessionId } })
   }
 
   return (

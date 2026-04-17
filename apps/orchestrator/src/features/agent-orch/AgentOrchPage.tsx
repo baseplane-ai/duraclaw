@@ -73,6 +73,23 @@ function AgentOrchContent() {
         setSpawnConfig(null)
         setQuickPromptHint(null)
         setSelectedSessionId(searchSessionId)
+
+        // Sync tab highlight to match the URL session
+        const tabStore = useTabStore.getState()
+        const matchingTab = tabStore.findTabBySession(searchSessionId)
+        if (matchingTab) {
+          tabStore.setActiveTab(matchingTab.id)
+        } else {
+          // Session has no tab yet — create one from available session data
+          const session = sessions.find((s) => s.id === searchSessionId)
+          if (session) {
+            tabStore.addTab(
+              session.project || 'unknown',
+              searchSessionId,
+              session.title || searchSessionId.slice(0, 12),
+            )
+          }
+        }
       }
     } else if (!searchSessionId && selectedSessionId && prev !== null) {
       // Navigated from a session URL to "/" (e.g. "New session" click) — clear selection.
@@ -80,7 +97,7 @@ function AgentOrchContent() {
       setSpawnConfig(null)
       setSelectedSessionId(null)
     }
-  }, [searchSessionId, selectedSessionId, quickPromptHint])
+  }, [searchSessionId, selectedSessionId, quickPromptHint, sessions])
   const [projects, setProjects] = useState<
     Array<{ name: string; path: string; repo_origin?: string | null }>
   >([])
