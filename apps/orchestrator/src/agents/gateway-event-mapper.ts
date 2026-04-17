@@ -26,9 +26,11 @@ export function assistantContentToParts(content: unknown[]): SessionMessagePart[
 }
 
 /**
- * Map a partial_assistant event to streaming text parts.
+ * Map a partial_assistant event to streaming parts.
  * partial_assistant has content: PartialContentBlock[] with deltas.
- * We accumulate these into a single streaming text part.
+ * Text blocks become streaming text parts; thinking blocks become streaming
+ * reasoning parts so extended-thinking traces render live alongside the
+ * assistant response.
  */
 export function partialAssistantToParts(content: unknown[]): SessionMessagePart[] {
   const parts: SessionMessagePart[] = []
@@ -36,6 +38,8 @@ export function partialAssistantToParts(content: unknown[]): SessionMessagePart[
     const b = block as Record<string, unknown>
     if (b.type === 'text') {
       parts.push({ type: 'text', text: (b.delta as string) ?? '', state: 'streaming' })
+    } else if (b.type === 'thinking') {
+      parts.push({ type: 'reasoning', text: (b.delta as string) ?? '', state: 'streaming' })
     }
   }
   return parts

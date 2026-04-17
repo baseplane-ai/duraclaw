@@ -388,22 +388,37 @@ export class ClaudeRunner {
             }
           } else if (message.type === 'stream_event') {
             // Token-level partial from the SDK. SDKPartialAssistantMessage wraps
-            // a BetaRawMessageStreamEvent — we only forward text deltas, since
-            // tool_use input deltas (input_json_delta) can't be rendered
-            // incrementally against the existing `parts` model and will arrive
-            // fully resolved in the subsequent `assistant` message.
+            // a BetaRawMessageStreamEvent. We forward both text_delta and
+            // thinking_delta so extended-thinking traces stream incrementally
+            // alongside the assistant text. input_json_delta (tool_use input)
+            // is skipped — it can't render incrementally against the existing
+            // parts model and arrives fully resolved in the final `assistant`.
             const ev = (message as any).event
-            if (ev?.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
+            if (ev?.type === 'content_block_delta' && ev.delta) {
               const idx = typeof ev.index === 'number' ? ev.index : 0
-              send(
-                ch,
-                {
-                  type: 'partial_assistant',
-                  session_id: sessionId,
-                  content: [{ type: 'text', id: `blk-${idx}`, delta: ev.delta.text ?? '' }],
-                },
-                ctx,
-              )
+              if (ev.delta.type === 'text_delta') {
+                send(
+                  ch,
+                  {
+                    type: 'partial_assistant',
+                    session_id: sessionId,
+                    content: [{ type: 'text', id: `blk-${idx}`, delta: ev.delta.text ?? '' }],
+                  },
+                  ctx,
+                )
+              } else if (ev.delta.type === 'thinking_delta') {
+                send(
+                  ch,
+                  {
+                    type: 'partial_assistant',
+                    session_id: sessionId,
+                    content: [
+                      { type: 'thinking', id: `blk-${idx}`, delta: ev.delta.thinking ?? '' },
+                    ],
+                  },
+                  ctx,
+                )
+              }
             }
           } else if (message.type === 'assistant' && (message as any).partial) {
             // Legacy path: older SDK versions emitted `assistant` with partial=true.

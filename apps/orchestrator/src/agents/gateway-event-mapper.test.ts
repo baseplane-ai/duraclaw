@@ -70,14 +70,16 @@ describe('partialAssistantToParts', () => {
     expect(parts).toEqual([{ type: 'text', text: '', state: 'streaming' }])
   })
 
-  it('ignores non-text blocks', () => {
+  it('emits streaming text + reasoning parts, ignores other block types', () => {
     const content = [
-      { type: 'thinking', delta: 'ignored' },
-      { type: 'text', delta: 'kept' },
+      { type: 'thinking', delta: 'hmm' },
+      { type: 'text', delta: 'hello' },
+      { type: 'tool_use', input_delta: '{"a":' },
     ]
     const parts = partialAssistantToParts(content)
-    expect(parts).toHaveLength(1)
-    expect(parts[0].text).toBe('kept')
+    expect(parts).toHaveLength(2)
+    expect(parts[0]).toEqual({ type: 'reasoning', text: 'hmm', state: 'streaming' })
+    expect(parts[1]).toEqual({ type: 'text', text: 'hello', state: 'streaming' })
   })
 
   it('handles empty content array', () => {

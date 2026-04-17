@@ -251,9 +251,9 @@ export interface PartialAssistantEvent {
 }
 
 export interface PartialContentBlock {
-  type: 'text' | 'tool_use'
+  type: 'text' | 'thinking' | 'tool_use'
   id: string
-  /** For text blocks: the incremental text delta */
+  /** For text and thinking blocks: the incremental text / reasoning delta */
   delta?: string
   /** For tool_use blocks: the tool name (sent on first delta) */
   tool_name?: string

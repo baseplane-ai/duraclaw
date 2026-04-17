@@ -1362,10 +1362,10 @@ export class SessionDO extends Agent<Env, SessionState> {
           // Check if message already exists (multi-response turn: assistant → tool → assistant)
           const existing = this.session.getMessage(msgId)
           if (existing) {
-            // Merge streaming text into existing parts (preserving tool results)
+            // Merge streaming text / reasoning into existing parts (preserving tool results)
             const updatedParts = [...existing.parts]
             for (const newPart of parts) {
-              if (newPart.type === 'text') {
+              if (newPart.type === 'text' || newPart.type === 'reasoning') {
                 updatedParts.push(newPart)
               }
             }
@@ -1398,17 +1398,32 @@ export class SessionDO extends Agent<Env, SessionState> {
           // Subsequent partial — update existing message with accumulated text
           const existing = this.session.getMessage(this.currentTurnMessageId)
           if (existing) {
-            // Merge streaming text: find existing streaming text parts and append
+            // Merge streaming parts: find an existing streaming text / reasoning
+            // part of the same kind and append the delta. This drives live
+            // token-by-token rendering for both the assistant text and the
+            // extended-thinking trace.
             const updatedParts = [...existing.parts]
             for (const newPart of parts) {
               if (newPart.type === 'text') {
-                const existingTextIdx = updatedParts.findIndex(
+                const existingIdx = updatedParts.findIndex(
                   (p) => p.type === 'text' && p.state === 'streaming',
                 )
-                if (existingTextIdx !== -1) {
-                  updatedParts[existingTextIdx] = {
-                    ...updatedParts[existingTextIdx],
-                    text: (updatedParts[existingTextIdx].text ?? '') + (newPart.text ?? ''),
+                if (existingIdx !== -1) {
+                  updatedParts[existingIdx] = {
+                    ...updatedParts[existingIdx],
+                    text: (updatedParts[existingIdx].text ?? '') + (newPart.text ?? ''),
+                  }
+                } else {
+                  updatedParts.push(newPart)
+                }
+              } else if (newPart.type === 'reasoning') {
+                const existingIdx = updatedParts.findIndex(
+                  (p) => p.type === 'reasoning' && p.state === 'streaming',
+                )
+                if (existingIdx !== -1) {
+                  updatedParts[existingIdx] = {
+                    ...updatedParts[existingIdx],
+                    text: (updatedParts[existingIdx].text ?? '') + (newPart.text ?? ''),
                   }
                 } else {
                   updatedParts.push(newPart)
