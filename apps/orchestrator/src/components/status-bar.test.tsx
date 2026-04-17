@@ -344,6 +344,6 @@ describe('StatusBar', () => {
 
     render(<StatusBar />)
     const bar = screen.getByTestId('status-bar')
-    expect(bar.className).toContain('h-7')
+    expect(bar.className).toContain('py-1')
   })
 })

@@ -130,25 +130,21 @@ function PrStatusBadge({ pr }: { pr: PrInfo }) {
 
 function WorktreeStatusItem({ info }: { info: WorktreeInfo }) {
   return (
-    <div className="flex items-center gap-1.5 text-muted-foreground">
-      <GitBranchIcon className="size-3" />
-      <span className="whitespace-nowrap" title={`${info.name} \u2014 ${info.branch}`}>
-        {info.name}
-      </span>
-      <span className="whitespace-nowrap">{info.branch}</span>
-      {info.dirty && (
-        <span className="text-yellow-400" title="Uncommitted changes">
-          {'●'}
-        </span>
-      )}
+    <div
+      className="flex items-center gap-1 text-muted-foreground"
+      title={`${info.name} — ${info.branch}`}
+    >
+      <GitBranchIcon className="size-3 shrink-0" />
+      <span className="truncate">{info.branch}</span>
+      {info.dirty && <span className="shrink-0 text-yellow-400">{'●'}</span>}
       {info.ahead > 0 && (
-        <span className="whitespace-nowrap" title={`${info.ahead} commit(s) ahead`}>
+        <span className="shrink-0">
           {info.ahead}
           {'▲'}
         </span>
       )}
       {info.behind > 0 && (
-        <span className="whitespace-nowrap" title={`${info.behind} commit(s) behind`}>
+        <span className="shrink-0">
           {info.behind}
           {'▼'}
         </span>
@@ -238,28 +234,30 @@ export function StatusBar() {
   return (
     <div
       className={cn(
-        'flex h-7 items-center justify-between px-2 font-mono text-xs',
+        'flex w-full flex-wrap items-center gap-x-3 gap-y-0.5 px-2 py-1 font-mono text-xs',
         getBarClasses(status),
       )}
       data-testid="status-bar"
     >
-      {/* Left section */}
-      <div className="flex min-w-0 flex-1 items-center gap-3 overflow-hidden">
+      {/* Row 1: status + project + branch + model */}
+      <div className="flex min-w-0 items-center gap-2">
         <WsDot readyState={wsReadyState} />
         <span className="text-foreground">{status}</span>
-        <span className="text-muted-foreground">{state.project || '--'}</span>
-        {worktreeInfo && <WorktreeStatusItem info={worktreeInfo} />}
-        <span className="text-muted-foreground">{state.model || '--'}</span>
-        <span className="text-muted-foreground">{state.num_turns} turns</span>
-        {sessionResult?.total_cost_usd != null && (
-          <span className="text-muted-foreground">${sessionResult.total_cost_usd.toFixed(4)}</span>
-        )}
-        {contextUsage && <ContextBar contextUsage={contextUsage} />}
-        {kataState && <KataStatusItem kataState={kataState} />}
+        <span className="truncate text-muted-foreground">{state.project || '--'}</span>
       </div>
+      {worktreeInfo && <WorktreeStatusItem info={worktreeInfo} />}
+      <span className="truncate text-muted-foreground">{state.model || '--'}</span>
 
-      {/* Right section */}
-      <div className="flex shrink-0 items-center gap-2">
+      {/* Row 2 (wraps on mobile): turns + cost + ctx + kata + timer + actions */}
+      <span className="text-muted-foreground">{state.num_turns} turns</span>
+      {sessionResult?.total_cost_usd != null && (
+        <span className="text-muted-foreground">${sessionResult.total_cost_usd.toFixed(4)}</span>
+      )}
+      {contextUsage && <ContextBar contextUsage={contextUsage} />}
+      {kataState && <KataStatusItem kataState={kataState} />}
+
+      {/* Right-aligned actions — push to end */}
+      <div className="ml-auto flex shrink-0 items-center gap-2">
         <ElapsedTimer state={state} />
         {sessionResult?.duration_ms != null && (
           <span className="text-muted-foreground">{formatDuration(sessionResult.duration_ms)}</span>

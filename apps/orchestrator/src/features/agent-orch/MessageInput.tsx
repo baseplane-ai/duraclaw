@@ -99,7 +99,7 @@ export function MessageInput({ onSend, disabled }: MessageInputProps) {
         setImages([])
         setError(null)
       }}
-      className="border-t px-4"
+      className="w-full border-t px-4"
     >
       {images.length > 0 && (
         <div className="flex gap-2 px-3 pt-2">
