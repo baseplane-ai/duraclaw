@@ -72,6 +72,13 @@ export function TabBar({
     scrollRef.current?.scrollBy({ left: dir === 'left' ? -120 : 120, behavior: 'smooth' })
   }, [])
 
+  // Translate vertical scroll-wheel → horizontal scroll in the tab strip
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    if (e.deltaY === 0) return
+    e.preventDefault()
+    scrollRef.current?.scrollBy({ left: e.deltaY })
+  }, [])
+
   // Scroll active tab into view when it changes
   useEffect(() => {
     if (!activeSessionId || !scrollRef.current) return
@@ -107,6 +114,7 @@ export function TabBar({
       <div
         ref={scrollRef}
         className="flex items-center border-b bg-background overflow-x-auto scrollbar-none"
+        onWheel={handleWheel}
       >
         {tabs.map((tab) => {
           const currentSession = sessions.find((s) => s.id === tab.sessionId)
