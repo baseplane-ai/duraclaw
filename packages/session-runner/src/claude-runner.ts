@@ -386,8 +386,28 @@ export class ClaudeRunner {
               }
               ctx.commandQueue = []
             }
+          } else if (message.type === 'stream_event') {
+            // Token-level partial from the SDK. SDKPartialAssistantMessage wraps
+            // a BetaRawMessageStreamEvent — we only forward text deltas, since
+            // tool_use input deltas (input_json_delta) can't be rendered
+            // incrementally against the existing `parts` model and will arrive
+            // fully resolved in the subsequent `assistant` message.
+            const ev = (message as any).event
+            if (ev?.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
+              const idx = typeof ev.index === 'number' ? ev.index : 0
+              send(
+                ch,
+                {
+                  type: 'partial_assistant',
+                  session_id: sessionId,
+                  content: [{ type: 'text', id: `blk-${idx}`, delta: ev.delta.text ?? '' }],
+                },
+                ctx,
+              )
+            }
           } else if (message.type === 'assistant' && (message as any).partial) {
-            // Partial assistant message -- emit incremental content
+            // Legacy path: older SDK versions emitted `assistant` with partial=true.
+            // Kept for safety; current SDK (0.2.98+) uses `stream_event` above.
             const content = (message as any).message?.content ?? []
             const blocks = content.map((block: any) => {
               if (block.type === 'text') {

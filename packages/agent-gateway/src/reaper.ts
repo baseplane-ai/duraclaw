@@ -206,6 +206,17 @@ export function createReaper(opts: ReaperOptions): Reaper {
       terminalFilesDeleted: [],
     }
 
+    // Per-session snapshot collected during the scan, emitted as a single
+    // structured log at the end. Helps reason about what's running between
+    // reaps without having to hit /sessions or tail individual session logs.
+    const inflight: Array<{
+      id: string
+      pid: number
+      ageSec: number
+      idleSec: number
+      seq: number
+    }> = []
+
     logger.info(`[reaper] scan start dir=${sessionsDir} ts=${now()}`)
 
     let entries: string[]
@@ -261,6 +272,18 @@ export function createReaper(opts: ReaperOptions): Reaper {
       const stale = lastActivityTs !== null && currentNow - lastActivityTs > staleThresholdMs
 
       if (alive && pid !== null) {
+        // Track for the inflight summary line at scan end.
+        const ageSec = pidFileStat ? Math.round((currentNow - pidFileStat.mtimeMs) / 1000) : 0
+        const idleSec =
+          lastActivityTs !== null ? Math.round((currentNow - lastActivityTs) / 1000) : -1
+        inflight.push({
+          id: sessionId,
+          pid,
+          ageSec,
+          idleSec,
+          seq: meta?.last_event_seq ?? 0,
+        })
+
         // Previously SIGTERMed and still alive? The watchdog handles escalation
         // via setTimeout; here we only need to detect NEW stale sessions.
         if (stale && !awaitingKill.has(sessionId)) {
@@ -373,6 +396,13 @@ export function createReaper(opts: ReaperOptions): Reaper {
     logger.info(
       `[reaper] scan complete scanned=${report.scanned} sigtermed=[${report.sigtermed.join(',')}] sigkilled=[${report.sigkilled.join(',')}] crashed=[${report.markedCrashed.join(',')}] cmdOrphans=[${report.cmdOrphansDeleted.join(',')}] terminalDeleted=[${report.terminalFilesDeleted.join(',')}]`,
     )
+
+    if (inflight.length > 0) {
+      const summary = inflight
+        .map((s) => `${s.id.slice(0, 8)}:pid${s.pid}/seq${s.seq}/age${s.ageSec}s/idle${s.idleSec}s`)
+        .join(' ')
+      logger.info(`[gateway] inflight=${inflight.length} ${summary}`)
+    }
 
     return report
   }

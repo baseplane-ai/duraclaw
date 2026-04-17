@@ -89,7 +89,7 @@ const server = Bun.serve<WsData>({
       } catch {
         return json(400, { ok: false, error: 'invalid body' })
       }
-      return handleStartSession(body)
+      return handleStartSession(body, { logger: console })
     }
 
     // POST /debug/reap — dev-only on-demand reaper trigger (B6). Guarded by

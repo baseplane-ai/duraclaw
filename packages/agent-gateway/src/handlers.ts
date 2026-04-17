@@ -118,6 +118,7 @@ export interface StartSessionOpts {
   spawnFn?: SpawnFn
   binResolver?: () => Promise<string | null>
   idGenerator?: () => string
+  logger?: GatewayLogger
 }
 
 /**
@@ -128,6 +129,7 @@ export async function handleStartSession(
   body: unknown,
   opts: StartSessionOpts = {},
 ): Promise<Response> {
+  const logger = opts.logger ?? { info: () => {}, warn: () => {}, error: () => {} }
   if (!body || typeof body !== 'object') {
     return json(400, { ok: false, error: 'invalid body' })
   }
@@ -168,8 +170,19 @@ export async function handleStartSession(
     (() => findSessionRunnerBin(nodePath.dirname(new URL(import.meta.url).pathname)))
   const bin = await binResolver()
   if (!bin) {
+    logger.error(
+      `[gateway] /sessions/start bin not found sessionId=${sessionId} — run pnpm install + pnpm --filter @duraclaw/session-runner build on the deploy tree`,
+    )
     return json(500, { ok: false, error: 'session-runner bin not found' })
   }
+
+  const cmdSummary =
+    (cmd as { type?: string }).type +
+    ' project=' +
+    ((cmd as { project?: string }).project ?? '?') +
+    ' worktree=' +
+    ((cmd as { worktree?: string }).worktree ?? '?')
+  logger.info(`[gateway] /sessions/start sessionId=${sessionId} ${cmdSummary}`)
 
   const logHandle = await fs.open(logFile, 'a', 0o600)
   try {
