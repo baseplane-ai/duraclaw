@@ -15,6 +15,15 @@ import { discoverProjects, resolveProject } from './projects.js'
 import { getOrCreateReaper, startReaper, stopReaper } from './reaper.js'
 import type { WsData } from './types.js'
 
+/** Decode a captured project-name URL segment (e.g. `packages%2Fnanobanana`). */
+function decodeProjectName(raw: string): string | null {
+  try {
+    return decodeURIComponent(raw)
+  } catch {
+    return null
+  }
+}
+
 // ── Config ──────────────────────────────────────────────────────────
 
 const PORT = Number(process.env.CC_GATEWAY_PORT ?? 9877)
@@ -119,10 +128,11 @@ const server = Bun.serve<WsData>({
     // GET /projects/:name/files/*path — file contents
     const projectFilesMatch = path.match(/^\/projects\/([^/]+)\/files(?:\/(.+))?$/)
     if (req.method === 'GET' && projectFilesMatch) {
-      const [, name, filePath] = projectFilesMatch
-      const projectPath = await resolveProject(name)
+      const [, rawName, filePath] = projectFilesMatch
+      const name = decodeProjectName(rawName)
+      const projectPath = name ? await resolveProject(name) : null
       if (!projectPath) {
-        return json(404, { error: `Project "${name}" not found` })
+        return json(404, { error: `Project "${name ?? rawName}" not found` })
       }
       if (filePath) {
         return handleFileContents(projectPath, filePath)
@@ -133,10 +143,11 @@ const server = Bun.serve<WsData>({
     // GET /projects/:name/git-status
     const gitStatusMatch = path.match(/^\/projects\/([^/]+)\/git-status$/)
     if (req.method === 'GET' && gitStatusMatch) {
-      const [, name] = gitStatusMatch
-      const projectPath = await resolveProject(name)
+      const [, rawName] = gitStatusMatch
+      const name = decodeProjectName(rawName)
+      const projectPath = name ? await resolveProject(name) : null
       if (!projectPath) {
-        return json(404, { error: `Project "${name}" not found` })
+        return json(404, { error: `Project "${name ?? rawName}" not found` })
       }
       return handleGitStatus(projectPath)
     }
@@ -144,10 +155,11 @@ const server = Bun.serve<WsData>({
     // GET /projects/:name/kata-status
     const kataStatusMatch = path.match(/^\/projects\/([^/]+)\/kata-status$/)
     if (req.method === 'GET' && kataStatusMatch) {
-      const [, name] = kataStatusMatch
-      const projectPath = await resolveProject(name)
+      const [, rawName] = kataStatusMatch
+      const name = decodeProjectName(rawName)
+      const projectPath = name ? await resolveProject(name) : null
       if (!projectPath) {
-        return json(404, { error: `Project "${name}" not found` })
+        return json(404, { error: `Project "${name ?? rawName}" not found` })
       }
       const kataState = await findLatestKataState(projectPath)
       return json(200, { kata_state: kataState })
@@ -156,10 +168,11 @@ const server = Bun.serve<WsData>({
     // GET /projects/:name/sessions/:id/messages — fetch SDK session transcript
     const sessionMessagesMatch = path.match(/^\/projects\/([^/]+)\/sessions\/([^/]+)\/messages$/)
     if (req.method === 'GET' && sessionMessagesMatch) {
-      const [, name, sdkSessionId] = sessionMessagesMatch
-      const projectPath = await resolveProject(name)
+      const [, rawName, sdkSessionId] = sessionMessagesMatch
+      const name = decodeProjectName(rawName)
+      const projectPath = name ? await resolveProject(name) : null
       if (!projectPath) {
-        return json(404, { error: `Project "${name}" not found` })
+        return json(404, { error: `Project "${name ?? rawName}" not found` })
       }
       try {
         const { getSessionMessages } = await import('@anthropic-ai/claude-agent-sdk')
@@ -224,10 +237,11 @@ const server = Bun.serve<WsData>({
     // POST /projects/:name/sessions/:id/fork
     const forkMatch = path.match(/^\/projects\/([^/]+)\/sessions\/([^/]+)\/fork$/)
     if (req.method === 'POST' && forkMatch) {
-      const [, name, sessionId] = forkMatch
-      const projectPath = await resolveProject(name)
+      const [, rawName, sessionId] = forkMatch
+      const name = decodeProjectName(rawName)
+      const projectPath = name ? await resolveProject(name) : null
       if (!projectPath) {
-        return json(404, { error: `Project "${name}" not found` })
+        return json(404, { error: `Project "${name ?? rawName}" not found` })
       }
       try {
         const body = (await req.json().catch(() => ({}))) as Record<string, unknown>
@@ -248,10 +262,11 @@ const server = Bun.serve<WsData>({
     // PATCH /projects/:name/sessions/:id
     const patchSessionMatch = path.match(/^\/projects\/([^/]+)\/sessions\/([^/]+)$/)
     if (req.method === 'PATCH' && patchSessionMatch) {
-      const [, name, sessionId] = patchSessionMatch
-      const projectPath = await resolveProject(name)
+      const [, rawName, sessionId] = patchSessionMatch
+      const name = decodeProjectName(rawName)
+      const projectPath = name ? await resolveProject(name) : null
       if (!projectPath) {
-        return json(404, { error: `Project "${name}" not found` })
+        return json(404, { error: `Project "${name ?? rawName}" not found` })
       }
       try {
         const body = (await req.json()) as Record<string, unknown>

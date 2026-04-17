@@ -130,3 +130,103 @@ describe('discoverProjects with HIDDEN_PROJECTS', () => {
     TEST_TIMEOUT,
   )
 })
+
+describe('nested project discovery (PROJECT_MAX_DEPTH)', () => {
+  it('discovers git repos nested one level below container directories', async () => {
+    vi.stubEnv('HIDDEN_PROJECTS', '')
+    vi.stubEnv('PROJECT_PATTERNS', '')
+    vi.stubEnv('WORKTREE_PATTERNS', '')
+    vi.stubEnv('PROJECT_MAX_DEPTH', '2')
+    await loadModule()
+
+    const projects = await discoverProjects({})
+    const names = projects.map((p: any) => p.name)
+    // /data/projects/packages is a non-git container dir holding `nanobanana`
+    expect(names).toContain('packages/nanobanana')
+  })
+
+  it('does not surface non-git container directories as projects', async () => {
+    vi.stubEnv('HIDDEN_PROJECTS', '')
+    vi.stubEnv('PROJECT_PATTERNS', '')
+    vi.stubEnv('WORKTREE_PATTERNS', '')
+    vi.stubEnv('PROJECT_MAX_DEPTH', '2')
+    await loadModule()
+
+    const projects = await discoverProjects({})
+    const names = projects.map((p: any) => p.name)
+    expect(names).not.toContain('packages')
+  })
+
+  it('skips nested discovery when PROJECT_MAX_DEPTH=1', async () => {
+    vi.stubEnv('HIDDEN_PROJECTS', '')
+    vi.stubEnv('PROJECT_PATTERNS', '')
+    vi.stubEnv('WORKTREE_PATTERNS', '')
+    vi.stubEnv('PROJECT_MAX_DEPTH', '1')
+    await loadModule()
+
+    const projects = await discoverProjects({})
+    const names = projects.map((p: any) => p.name)
+    expect(names).not.toContain('packages/nanobanana')
+    // Top-level repos still present
+    expect(names).toContain('duraclaw')
+  })
+
+  it('resolves a nested project name to its full path', async () => {
+    vi.stubEnv('HIDDEN_PROJECTS', '')
+    vi.stubEnv('PROJECT_PATTERNS', '')
+    vi.stubEnv('WORKTREE_PATTERNS', '')
+    vi.stubEnv('PROJECT_MAX_DEPTH', '2')
+    await loadModule()
+
+    const result = await resolveProject('packages/nanobanana')
+    expect(result).toBe('/data/projects/packages/nanobanana')
+  })
+
+  it('rejects absolute paths and traversal attempts', async () => {
+    vi.stubEnv('HIDDEN_PROJECTS', '')
+    vi.stubEnv('PROJECT_PATTERNS', '')
+    vi.stubEnv('WORKTREE_PATTERNS', '')
+    vi.stubEnv('PROJECT_MAX_DEPTH', '2')
+    await loadModule()
+
+    expect(await resolveProject('/etc/passwd')).toBeNull()
+    expect(await resolveProject('..')).toBeNull()
+    expect(await resolveProject('packages/../..')).toBeNull()
+    expect(await resolveProject('packages/../etc')).toBeNull()
+  })
+
+  it('rejects nested names when they exceed PROJECT_MAX_DEPTH', async () => {
+    vi.stubEnv('HIDDEN_PROJECTS', '')
+    vi.stubEnv('PROJECT_PATTERNS', '')
+    vi.stubEnv('WORKTREE_PATTERNS', '')
+    vi.stubEnv('PROJECT_MAX_DEPTH', '1')
+    await loadModule()
+
+    expect(await resolveProject('packages/nanobanana')).toBeNull()
+  })
+
+  it('hides nested projects by leaf segment name', async () => {
+    vi.stubEnv('HIDDEN_PROJECTS', 'nanobanana')
+    vi.stubEnv('PROJECT_PATTERNS', '')
+    vi.stubEnv('WORKTREE_PATTERNS', '')
+    vi.stubEnv('PROJECT_MAX_DEPTH', '2')
+    await loadModule()
+
+    const projects = await discoverProjects({})
+    const names = projects.map((p: any) => p.name)
+    expect(names).not.toContain('packages/nanobanana')
+    expect(await resolveProject('packages/nanobanana')).toBeNull()
+  })
+
+  it('hides nested projects by full relative name', async () => {
+    vi.stubEnv('HIDDEN_PROJECTS', 'packages/nanobanana')
+    vi.stubEnv('PROJECT_PATTERNS', '')
+    vi.stubEnv('WORKTREE_PATTERNS', '')
+    vi.stubEnv('PROJECT_MAX_DEPTH', '2')
+    await loadModule()
+
+    const projects = await discoverProjects({})
+    const names = projects.map((p: any) => p.name)
+    expect(names).not.toContain('packages/nanobanana')
+  })
+})

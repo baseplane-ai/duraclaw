@@ -19,6 +19,14 @@ const HIDDEN_PROJECTS = new Set(
     .filter(Boolean),
 )
 
+/**
+ * Maximum directory depth under PROJECTS_DIR to scan for git repos.
+ * Depth 1 (default legacy behavior) = direct children only.
+ * Depth 2 lets us pick up repos nested under container dirs like
+ * `/data/projects/packages/<name>`.
+ */
+const MAX_DEPTH = Math.max(1, Number(process.env.PROJECT_MAX_DEPTH ?? 2))
+
 /** Get current git branch for a directory, or "unknown". */
 async function getBranch(dir: string): Promise<string> {
   try {
@@ -144,70 +152,123 @@ async function getPrInfo(dir: string, branch: string): Promise<PrInfo | null> {
   }
 }
 
+/** Whether a directory contains a `.git` entry (file or dir — supports worktrees). */
+async function hasGit(dir: string): Promise<boolean> {
+  try {
+    await fs.access(path.join(dir, '.git'))
+    return true
+  } catch {
+    return false
+  }
+}
+
 /**
- * Discover all git repos under /data/projects/.
- * When PROJECT_PATTERNS is set, only repos matching those prefixes are returned.
+ * Walk PROJECTS_DIR up to MAX_DEPTH finding git repos.
+ * - Names are relative paths from PROJECTS_DIR (e.g. `duraclaw` or `packages/nanobanana`).
+ * - Non-git subdirectories are recursed into (so container dirs like `packages/`
+ *   don't hide the repos beneath them).
+ * - Hidden entries (dot-prefixed) and HIDDEN_PROJECTS matches are skipped.
+ * - PROJECT_PREFIXES is applied to the final relative name so callers can match
+ *   either a top-level name or a nested path prefix.
+ */
+async function walkProjectDirs(): Promise<Array<{ name: string; path: string }>> {
+  const found: Array<{ name: string; path: string }> = []
+
+  async function walk(dir: string, depth: number, relName: string): Promise<void> {
+    if (depth > MAX_DEPTH) return
+    let entries: import('node:fs').Dirent[]
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      if (entry.name.startsWith('.')) continue
+
+      const fullPath = path.join(dir, entry.name)
+      const fullName = relName ? `${relName}/${entry.name}` : entry.name
+
+      // Hidden check: match on full relative name or the leaf segment
+      if (HIDDEN_PROJECTS.has(fullName) || HIDDEN_PROJECTS.has(entry.name)) continue
+
+      if (await hasGit(fullPath)) {
+        if (
+          PROJECT_PREFIXES.length > 0 &&
+          !PROJECT_PREFIXES.some((prefix) => fullName.startsWith(prefix))
+        )
+          continue
+        found.push({ name: fullName, path: fullPath })
+      } else if (depth < MAX_DEPTH) {
+        await walk(fullPath, depth + 1, fullName)
+      }
+    }
+  }
+
+  await walk(PROJECTS_DIR, 1, '')
+  return found
+}
+
+/**
+ * Discover all git repos under /data/projects/ (up to PROJECT_MAX_DEPTH).
+ * When PROJECT_PATTERNS is set, only repos whose relative name begins with
+ * one of those prefixes are returned.
  */
 export async function discoverProjects(
   activeSessions: Record<string, string>, // project_path → session_id
 ): Promise<ProjectInfo[]> {
-  const entries = await fs.readdir(PROJECTS_DIR, { withFileTypes: true })
-  const projects: ProjectInfo[] = []
+  const discovered = await walkProjectDirs()
 
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue
-    if (
-      PROJECT_PREFIXES.length > 0 &&
-      !PROJECT_PREFIXES.some((prefix) => entry.name.startsWith(prefix))
-    )
-      continue
-    if (HIDDEN_PROJECTS.has(entry.name)) continue
-
-    const fullPath = path.join(PROJECTS_DIR, entry.name)
-
-    // Verify it's a git repo
-    try {
-      await fs.access(path.join(fullPath, '.git'))
-    } catch {
-      continue
-    }
-
-    const branch = await getBranch(fullPath)
-    const [dirty, repo_origin, aheadBehind, pr] = await Promise.all([
-      isDirty(fullPath),
-      getRemoteOrigin(fullPath),
-      getAheadBehind(fullPath, branch),
-      getPrInfo(fullPath, branch),
-    ])
-    projects.push({
-      name: entry.name,
-      path: fullPath,
-      branch,
-      dirty,
-      active_session: activeSessions[fullPath] ?? null,
-      repo_origin,
-      ahead: aheadBehind.ahead,
-      behind: aheadBehind.behind,
-      pr,
-    })
-  }
+  const projects = await Promise.all(
+    discovered.map(async ({ name, path: fullPath }) => {
+      const branch = await getBranch(fullPath)
+      const [dirty, repo_origin, aheadBehind, pr] = await Promise.all([
+        isDirty(fullPath),
+        getRemoteOrigin(fullPath),
+        getAheadBehind(fullPath, branch),
+        getPrInfo(fullPath, branch),
+      ])
+      return {
+        name,
+        path: fullPath,
+        branch,
+        dirty,
+        active_session: activeSessions[fullPath] ?? null,
+        repo_origin,
+        ahead: aheadBehind.ahead,
+        behind: aheadBehind.behind,
+        pr,
+      } satisfies ProjectInfo
+    }),
+  )
 
   return projects.sort((a, b) => a.name.localeCompare(b.name))
 }
 
-/** Resolve a project name to its full path, or null. */
+/**
+ * Resolve a project name to its full path, or null.
+ * Nested names (e.g. `packages/nanobanana`) are allowed up to MAX_DEPTH segments.
+ * Path traversal (`..`, absolute paths) is always rejected.
+ */
 export async function resolveProject(name: string): Promise<string | null> {
-  // Validate name against discovered projects to prevent path traversal
-  if (name.includes('/') || name.includes('..')) return null
-  const fullPath = path.join(PROJECTS_DIR, name)
-  try {
-    await fs.access(path.join(fullPath, '.git'))
-    // If prefixes are configured, verify project matches one
-    if (PROJECT_PREFIXES.length > 0 && !PROJECT_PREFIXES.some((prefix) => name.startsWith(prefix)))
-      return null
-    if (HIDDEN_PROJECTS.has(name)) return null
-    return fullPath
-  } catch {
-    return null
+  if (!name || name.startsWith('/') || name.includes('..') || name.includes('\0')) return null
+
+  const segments = name.split('/').filter(Boolean)
+  if (segments.length === 0 || segments.length > MAX_DEPTH) return null
+  // Reject if any segment is hidden or dot-prefixed
+  for (const seg of segments) {
+    if (seg.startsWith('.')) return null
   }
+
+  const fullPath = path.join(PROJECTS_DIR, ...segments)
+  // Defense-in-depth: ensure we didn't escape PROJECTS_DIR
+  if (fullPath !== PROJECTS_DIR && !fullPath.startsWith(`${PROJECTS_DIR}/`)) return null
+
+  if (!(await hasGit(fullPath))) return null
+
+  if (PROJECT_PREFIXES.length > 0 && !PROJECT_PREFIXES.some((prefix) => name.startsWith(prefix)))
+    return null
+  if (HIDDEN_PROJECTS.has(name) || HIDDEN_PROJECTS.has(segments[segments.length - 1])) return null
+
+  return fullPath
 }
