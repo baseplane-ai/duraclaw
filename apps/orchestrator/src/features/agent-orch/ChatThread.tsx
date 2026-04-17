@@ -32,11 +32,112 @@ import {
   FileIcon,
   HistoryIcon,
 } from 'lucide-react'
-import { useCallback, useRef, useState } from 'react'
+import { type ReactNode, useCallback, useMemo, useRef, useState } from 'react'
+import { Badge } from '~/components/ui/badge'
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from '~/components/ui/sheet'
 import { Skeleton } from '~/components/ui/skeleton'
 import { getImagePartDataUrl } from '~/lib/message-parts'
 import type { GateResponse, SessionMessage, SessionMessagePart, SessionState } from '~/lib/types'
 import { GateResolver } from './GateResolver'
+
+function getToolName(part: SessionMessagePart): string {
+  return part.toolName || (part.type || '').replace(/^tool-/, '')
+}
+
+function isPendingGate(part: SessionMessagePart, readOnly: boolean | undefined): boolean {
+  return (
+    (part.type === 'tool-ask_user' || part.type === 'tool-permission') &&
+    part.state === 'approval-requested' &&
+    !readOnly &&
+    !!part.toolCallId
+  )
+}
+
+function ToolCallDetail({ part }: { part: SessionMessagePart }) {
+  const state = (part.state as ToolHeaderProps['state']) ?? 'input-available'
+  return (
+    <Tool defaultOpen>
+      <ToolHeader
+        {...({
+          type: 'dynamic-tool',
+          toolName: getToolName(part),
+          state,
+        } as ToolHeaderProps)}
+      />
+      <ToolContent>
+        <ToolInput input={part.input} />
+        {(state === 'output-available' || state === 'output-error') && (
+          <ToolOutput
+            output={part.output}
+            errorText={state === 'output-error' ? String(part.output ?? 'Error') : undefined}
+          />
+        )}
+      </ToolContent>
+    </Tool>
+  )
+}
+
+function ToolPillRow({ parts }: { parts: SessionMessagePart[] }) {
+  const [selected, setSelected] = useState<string | null>(null)
+
+  const groups = useMemo(() => {
+    const map = new Map<string, SessionMessagePart[]>()
+    for (const p of parts) {
+      const name = getToolName(p)
+      const arr = map.get(name)
+      if (arr) arr.push(p)
+      else map.set(name, [p])
+    }
+    return map
+  }, [parts])
+
+  const selectedParts = selected ? groups.get(selected) : undefined
+
+  return (
+    <>
+      <div className="flex flex-wrap gap-1.5">
+        {Array.from(groups.entries()).map(([name, grp]) => (
+          <Badge
+            key={name}
+            asChild
+            variant="secondary"
+            className="rounded-full px-2.5 py-0.5 font-normal"
+          >
+            <button
+              type="button"
+              onClick={() => setSelected(name)}
+              aria-label={`Show ${grp.length} ${name} call${grp.length === 1 ? '' : 's'}`}
+            >
+              <span className="font-mono">{name}</span>
+              {grp.length > 1 && <span className="text-muted-foreground">×{grp.length}</span>}
+            </button>
+          </Badge>
+        ))}
+      </div>
+      <Sheet open={selected !== null} onOpenChange={(open) => !open && setSelected(null)}>
+        <SheetContent side="right" className="flex w-full flex-col gap-0 sm:max-w-2xl">
+          <SheetHeader className="border-b">
+            <SheetTitle className="font-mono">{selected}</SheetTitle>
+            <SheetDescription>
+              {selectedParts?.length ?? 0} call{(selectedParts?.length ?? 0) === 1 ? '' : 's'}
+            </SheetDescription>
+          </SheetHeader>
+          <div className="flex-1 space-y-3 overflow-y-auto p-4">
+            {selectedParts?.map((p, i) => (
+              <ToolCallDetail key={p.toolCallId ?? i} part={p} />
+            ))}
+          </div>
+        </SheetContent>
+      </Sheet>
+    </>
+  )
+}
 
 interface MessageBranchProps {
   current: number
@@ -356,13 +457,30 @@ export function ChatThread({
             }
 
             if (msg.role === 'assistant') {
+              const nodes: ReactNode[] = []
+              let run: SessionMessagePart[] = []
+              let runStart = 0
+              const flushRun = () => {
+                if (run.length === 0) return
+                nodes.push(<ToolPillRow key={`pills-${runStart}`} parts={run} />)
+                run = []
+              }
+              msg.parts.forEach((part, i) => {
+                const groupable = part.type?.startsWith('tool-') && !isPendingGate(part, readOnly)
+                if (groupable) {
+                  if (run.length === 0) runStart = i
+                  run.push(part)
+                } else {
+                  flushRun()
+                  nodes.push(
+                    renderPart(part, i, gate, status, onResolveGate, readOnly, onQaResolved),
+                  )
+                }
+              })
+              flushRun()
               return (
                 <div key={msg.id} className="group relative" data-turn-index={turnIndex}>
-                  <div className="space-y-2">
-                    {msg.parts.map((part, i) =>
-                      renderPart(part, i, gate, status, onResolveGate, readOnly, onQaResolved),
-                    )}
-                  </div>
+                  <div className="space-y-2">{nodes}</div>
                   {rewindButton}
                 </div>
               )
