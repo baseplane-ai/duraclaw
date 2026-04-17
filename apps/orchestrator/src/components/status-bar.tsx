@@ -87,8 +87,6 @@ function getBarClasses(status: string | undefined): string {
     case 'waiting_input':
     case 'waiting_permission':
       return 'bg-warning/20 border-t border-warning/50'
-    case 'aborted':
-      return 'bg-destructive/20 border-t border-destructive/50'
     default:
       return 'bg-background border-t'
   }

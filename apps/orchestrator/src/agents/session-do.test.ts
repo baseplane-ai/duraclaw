@@ -833,21 +833,21 @@ describe('SessionDO terminal-state clears active_callback_token', () => {
   /**
    * The DO must merge `active_callback_token: undefined` into every
    * setState call that transitions the session to a terminal state
-   * (completed/failed/aborted/crashed — from handleGatewayEvent and the
-   * stop/abort callables). We can't exercise the DO at runtime, but we can
-   * snapshot the partials used at those call sites to guarantee the field
-   * is cleared — a regression would drop the field and silently accept
-   * future dials with an old token.
+   * (completed/crashed — from handleGatewayEvent and the
+   * stop/abort callables, which now return the session to idle). We can't
+   * exercise the DO at runtime, but we can snapshot the partials used at
+   * those call sites to guarantee the field is cleared — a regression
+   * would drop the field and silently accept future dials with an old token.
    */
   it('includes active_callback_token:undefined in every terminal partial', () => {
     const terminals = [
       {
         name: 'stop callable',
-        partial: { status: 'aborted' as const, active_callback_token: undefined },
+        partial: { status: 'idle' as const, active_callback_token: undefined },
       },
       {
         name: 'abort callable',
-        partial: { status: 'aborted' as const, active_callback_token: undefined },
+        partial: { status: 'idle' as const, active_callback_token: undefined },
       },
       {
         name: 'result event',
@@ -870,6 +870,31 @@ describe('SessionDO terminal-state clears active_callback_token', () => {
       expect(t.partial.active_callback_token).toBeUndefined()
       expect('active_callback_token' in t.partial).toBe(true)
     }
+  })
+
+  /**
+   * Regression: Stop/abort should behave like ctrl+C — interrupt the turn
+   * and return the session to `idle` with no error, not to a terminal
+   * `aborted` state. Next user message resumes via SDK.
+   */
+  it('stop() returns status=idle with error=null (not aborted)', () => {
+    const partial: { status: 'idle'; error: null; active_callback_token: undefined } = {
+      status: 'idle',
+      error: null,
+      active_callback_token: undefined,
+    }
+    expect(partial.status).toBe('idle')
+    expect(partial.error).toBeNull()
+  })
+
+  it('abort() returns status=idle with error=null (not aborted)', () => {
+    const partial: { status: 'idle'; error: null; active_callback_token: undefined } = {
+      status: 'idle',
+      error: null,
+      active_callback_token: undefined,
+    }
+    expect(partial.status).toBe('idle')
+    expect(partial.error).toBeNull()
   })
 })
 

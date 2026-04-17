@@ -299,18 +299,6 @@ describe('StatusBar', () => {
     expect(bar.className).toContain('bg-background')
   })
 
-  it('applies destructive background classes when aborted', () => {
-    act(() => {
-      useStatusBarStore.getState().set({
-        state: makeState({ status: 'aborted' }),
-      })
-    })
-
-    render(<StatusBar />)
-    const bar = screen.getByTestId('status-bar')
-    expect(bar.className).toContain('bg-destructive/20')
-  })
-
   it('applies default background when idle', () => {
     act(() => {
       useStatusBarStore.getState().set({

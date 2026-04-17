@@ -477,7 +477,6 @@ export type SessionStatus =
   | 'waiting_input'
   | 'waiting_permission'
   | 'waiting_gate'
-  | 'aborted'
 
 export interface SessionState {
   status: SessionStatus

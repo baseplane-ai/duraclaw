@@ -412,11 +412,8 @@ describe('SessionStatus type', () => {
       'waiting_input',
       'waiting_permission',
       'waiting_gate',
-      'failed',
-      'aborted',
-      'stopped',
     ]
-    expect(validStatuses).toHaveLength(8)
+    expect(validStatuses).toHaveLength(5)
   })
 
   test('does not include completed (sessions use idle instead)', () => {
@@ -428,11 +425,8 @@ describe('SessionStatus type', () => {
       'waiting_input',
       'waiting_permission',
       'waiting_gate',
-      'failed',
-      'aborted',
-      'stopped',
     ]
-    expect(allStatuses).not.toContain('completed')
+    expect(allStatuses).not.toContain('completed' as never)
   })
 })
 

@@ -104,7 +104,6 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
   )
 
   const status = state?.status ?? 'idle'
-  const isTerminal = status === 'aborted'
 
   // Resolve the tab that owns this session so MessageInput can persist its draft.
   // Use the sessionId prop (always available) instead of state?.session_id
@@ -130,16 +129,15 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
         state={state}
         isConnecting={isConnecting}
         onResolveGate={resolveGate}
-        readOnly={isTerminal}
         onQaResolved={injectQaPair}
-        onRewind={isTerminal ? undefined : rewind}
+        onRewind={rewind}
         branchInfo={branchInfo}
         onBranchNavigate={navigateBranch}
-        onSendSuggestion={isTerminal ? undefined : handleSendSuggestion}
+        onSendSuggestion={handleSendSuggestion}
       />
 
       <StatusBar />
-      <MessageInput onSend={sendMessage} disabled={isTerminal} draftKey={tabId} />
+      <MessageInput onSend={sendMessage} draftKey={tabId} />
     </div>
   )
 }

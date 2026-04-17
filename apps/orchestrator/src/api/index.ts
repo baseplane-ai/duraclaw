@@ -791,7 +791,7 @@ export function createApiApp() {
       return c.json({ error: 'Abort failed' }, response.status === 403 ? 403 : 400)
     }
 
-    return c.json({ status: 'aborted' })
+    return c.json({ status: 'idle' })
   })
 
   app.post('/api/sessions/:id/answers', async (c) => {

@@ -93,7 +93,6 @@ export function SessionSidebar({
     }
     if (statusFilter === 'running') return s.status === 'running'
     if (statusFilter === 'completed') return s.status === 'idle'
-    if (statusFilter === 'failed') return s.status === 'aborted'
     return true
   })
 
@@ -169,11 +168,7 @@ export function SessionSidebar({
               <span
                 className={cn(
                   'size-2 rounded-full',
-                  session.status === 'running'
-                    ? 'bg-green-500'
-                    : session.status === 'aborted'
-                      ? 'bg-red-500'
-                      : 'bg-gray-400',
+                  session.status === 'running' ? 'bg-green-500' : 'bg-gray-400',
                 )}
               />
             </button>

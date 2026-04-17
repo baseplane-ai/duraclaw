@@ -87,11 +87,9 @@ export function CommandMenu() {
                       'mr-2 size-2 rounded-full',
                       s.status === 'running'
                         ? 'bg-green-500'
-                        : s.status === 'aborted'
-                          ? 'bg-red-500'
-                          : s.status === 'waiting_gate'
-                            ? 'bg-yellow-500'
-                            : 'border border-gray-400',
+                        : s.status === 'waiting_gate'
+                          ? 'bg-yellow-500'
+                          : 'border border-gray-400',
                     )}
                   />
                   <span className="flex-1 truncate">{s.title || s.id.slice(0, 12)}</span>

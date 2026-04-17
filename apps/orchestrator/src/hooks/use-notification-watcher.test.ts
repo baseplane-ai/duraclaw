@@ -57,18 +57,6 @@ describe('useNotificationWatcher', () => {
     )
   })
 
-  it('notifies when session transitions to failed', () => {
-    const { rerender } = renderHook(({ sessions }) => useNotificationWatcher(sessions), {
-      initialProps: { sessions: [{ id: 's1', status: 'running', project: 'proj' }] },
-    })
-
-    rerender({ sessions: [{ id: 's1', status: 'failed', project: 'proj' }] })
-
-    expect(mockAddNotification).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'error', sessionId: 's1' }),
-    )
-  })
-
   it('does not notify when status does not change', () => {
     const sessions = [{ id: 's1', status: 'running', project: 'proj' }]
     const { rerender } = renderHook(({ sessions }) => useNotificationWatcher(sessions), {
@@ -118,18 +106,6 @@ describe('useNotificationWatcher', () => {
     })
 
     rerender({ sessions: [{ id: 's1', status: 'idle', project: 'proj' }] })
-
-    expect(mockAddNotification).toHaveBeenCalledWith(
-      expect.objectContaining({ url: '/?session=s1' }),
-    )
-  })
-
-  it('generates error notification URLs with /?session= format', () => {
-    const { rerender } = renderHook(({ sessions }) => useNotificationWatcher(sessions), {
-      initialProps: { sessions: [{ id: 's1', status: 'running', project: 'proj' }] },
-    })
-
-    rerender({ sessions: [{ id: 's1', status: 'failed', project: 'proj' }] })
 
     expect(mockAddNotification).toHaveBeenCalledWith(
       expect.objectContaining({ url: '/?session=s1' }),

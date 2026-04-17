@@ -1028,9 +1028,9 @@ export class SessionDO extends Agent<Env, SessionState> {
     // is half-open / dead. The gateway send is best-effort — its ack can't be
     // trusted to arrive, so we don't gate local recovery on it.
     this.updateState({
-      status: 'aborted',
+      status: 'idle',
       gate: null,
-      error: reason ?? 'Stopped by user',
+      error: null,
       active_callback_token: undefined,
     })
     this.syncStatusToRegistry()
@@ -1051,9 +1051,9 @@ export class SessionDO extends Agent<Env, SessionState> {
     }
 
     this.updateState({
-      status: 'aborted',
+      status: 'idle',
       gate: null,
-      error: reason ?? 'Aborted by user',
+      error: null,
       active_callback_token: undefined,
     })
     this.sendToGateway({ type: 'abort', session_id: this.state.session_id ?? '' })
