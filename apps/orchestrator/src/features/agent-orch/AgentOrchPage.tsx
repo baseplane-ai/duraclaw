@@ -90,6 +90,32 @@ function AgentOrchContent() {
     const prev = prevSearchRef.current
     prevSearchRef.current = searchSessionId
 
+    // Tab-highlight sync: ensure the active tab matches the URL session.
+    // Runs on mount too (not just on URL changes) so cold-load from a push
+    // notification (/?session=X) activates or creates the matching tab —
+    // otherwise activeTabId stays on a stale localStorage value and the
+    // session appears with no tab focus.
+    if (searchSessionId) {
+      const settings = getUserSettings()
+      const matchingTab = settings.findTabBySession(searchSessionId)
+      if (matchingTab) {
+        if (settings.activeTabId !== matchingTab.id) {
+          settings.setActiveTab(matchingTab.id)
+        }
+      } else {
+        // Session has no tab yet — create one only if we have real metadata.
+        // If sessions haven't loaded, this effect re-runs when they do.
+        const session = sessions.find((s) => s.id === searchSessionId)
+        if (session?.project) {
+          settings.addTab(
+            session.project,
+            searchSessionId,
+            session.title || getPreviewText(session) || session.project,
+          )
+        }
+      }
+    }
+
     if (searchSessionId && searchSessionId !== selectedSessionId) {
       // URL has a session that doesn't match local state — sync from URL.
       // Skip if a quickPromptHint was just set (tab context-menu action):
@@ -99,23 +125,6 @@ function AgentOrchContent() {
         setSpawnConfig(null)
         setQuickPromptHint(null)
         setSelectedSessionId(searchSessionId)
-
-        // Sync tab highlight to match the URL session
-        const settings = getUserSettings()
-        const matchingTab = settings.findTabBySession(searchSessionId)
-        if (matchingTab) {
-          settings.setActiveTab(matchingTab.id)
-        } else {
-          // Session has no tab yet — create one only if we have real metadata
-          const session = sessions.find((s) => s.id === searchSessionId)
-          if (session?.project) {
-            settings.addTab(
-              session.project,
-              searchSessionId,
-              session.title || getPreviewText(session) || session.project,
-            )
-          }
-        }
       }
     } else if (!searchSessionId && selectedSessionId && prev !== null) {
       // Navigated from a session URL to "/" (e.g. "New session" click) — clear selection.
