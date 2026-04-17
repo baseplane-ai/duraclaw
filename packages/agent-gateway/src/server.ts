@@ -3,7 +3,12 @@ import nodePath from 'node:path'
 import type { ServerWebSocket } from 'bun'
 import { verifyToken } from './auth.js'
 import { handleFileContents, handleFileTree, handleGitStatus } from './files.js'
-import { handleListSessions, handleStartSession, handleStatus } from './handlers.js'
+import {
+  handleListSessions,
+  handleStartSession,
+  handleStatus,
+  logStatusUnauthorized,
+} from './handlers.js'
 import { findLatestKataState } from './kata.js'
 import { spec as openapiSpec } from './openapi.js'
 import { discoverProjects, resolveProject } from './projects.js'
@@ -55,6 +60,12 @@ const server = Bun.serve<WsData>({
 
     // All other routes require auth
     if (!verifyToken(req)) {
+      // Emit a structured log line when the status endpoint is hit without
+      // valid auth — downstream log processors key off this shape.
+      const statusUnauthMatch = path.match(/^\/sessions\/([^/]+)\/status$/)
+      if (req.method === 'GET' && statusUnauthMatch) {
+        logStatusUnauthorized(statusUnauthMatch[1])
+      }
       return json(401, { ok: false, error: 'unauthorized' })
     }
 

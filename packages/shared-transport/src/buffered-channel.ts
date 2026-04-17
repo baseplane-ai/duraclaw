@@ -1,7 +1,23 @@
+export interface BufferedChannelLogger {
+  info: (msg: string, ...rest: unknown[]) => void
+  warn: (msg: string, ...rest: unknown[]) => void
+  error: (msg: string, ...rest: unknown[]) => void
+}
+
 export interface BufferedChannelOptions {
   maxEvents?: number
   maxBytes?: number
   onOverflow?: (dropped: GapSentinel) => void
+  /** Optional session id included in structured log lines. Omitted if absent. */
+  sessionId?: string
+  /** Optional logger for structured logs. Defaults to `console`. */
+  logger?: BufferedChannelLogger
+  /**
+   * When true, emit a `[buffered-channel] send sessionId=... depth=...` log on
+   * every buffered send (hot path). Defaults to false to avoid drowning logs.
+   * Overflow logs are always emitted regardless of this flag.
+   */
+  verbose?: boolean
 }
 
 export interface GapSentinel {
@@ -30,11 +46,17 @@ export class BufferedChannel {
   private maxBytes: number
   private onOverflow?: (dropped: GapSentinel) => void
   private pendingGap: GapSentinel | null = null
+  private sessionId?: string
+  private logger: BufferedChannelLogger
+  private verbose: boolean
 
   constructor(options?: BufferedChannelOptions) {
     this.maxEvents = options?.maxEvents ?? 10_000
     this.maxBytes = options?.maxBytes ?? 50 * 1024 * 1024
     this.onOverflow = options?.onOverflow
+    this.sessionId = options?.sessionId
+    this.logger = options?.logger ?? console
+    this.verbose = options?.verbose ?? false
   }
 
   get depth(): number {
@@ -45,6 +67,10 @@ export class BufferedChannel {
     return this.ws !== null && this.ws.readyState === 1
   }
 
+  private sessionSuffix(): string {
+    return this.sessionId !== undefined ? ` sessionId=${this.sessionId}` : ''
+  }
+
   send(event: { seq: number; [k: string]: unknown }): void {
     const serialized = JSON.stringify(event)
     const bytes = byteLength(serialized)
@@ -53,6 +79,11 @@ export class BufferedChannel {
     if (this.ws && this.ws.readyState === 1) {
       // Oversized or not, send directly when attached
       this.ws.send(serialized)
+      if (this.verbose) {
+        this.logger.info(
+          `[buffered-channel] send${this.sessionSuffix()} depth=${this.buffer.length}`,
+        )
+      }
       return
     }
 
@@ -86,6 +117,10 @@ export class BufferedChannel {
 
     this.buffer.push({ seq: event.seq, serialized, bytes })
     this.totalBytes += bytes
+
+    if (this.verbose) {
+      this.logger.info(`[buffered-channel] send${this.sessionSuffix()} depth=${this.buffer.length}`)
+    }
   }
 
   attachWebSocket(ws: WebSocket): void {
@@ -126,6 +161,7 @@ export class BufferedChannel {
   }
 
   private recordDrop(seq: number): void {
+    const isNewGap = this.pendingGap === null
     if (this.pendingGap) {
       this.pendingGap.dropped_count++
       this.pendingGap.to_seq = seq
@@ -137,6 +173,12 @@ export class BufferedChannel {
         to_seq: seq,
       }
     }
+    // Structured overflow log — emit on every drop so coalescing is visible
+    // to operators. Unconditional (not gated on verbose) since overflow is
+    // rare and important.
+    this.logger.warn(
+      `[buffered-channel] overflow${this.sessionSuffix()} dropped_count=${this.pendingGap.dropped_count} from_seq=${this.pendingGap.from_seq} to_seq=${this.pendingGap.to_seq}${isNewGap ? ' new_gap=true' : ''}`,
+    )
     this.onOverflow?.(this.pendingGap)
   }
 }

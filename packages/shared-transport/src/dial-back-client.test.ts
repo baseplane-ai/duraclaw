@@ -173,6 +173,76 @@ describe('DialBackClient', () => {
     expect(wsInstances.length).toBe(2)
   })
 
+  it('emits structured reconnect logs with sessionId via injected logger', () => {
+    const info = vi.fn()
+    const logger = { info, warn: vi.fn(), error: vi.fn() }
+    const channel = new BufferedChannel()
+    const client = new DialBackClient({
+      callbackUrl: 'wss://example.com/ws',
+      bearer: 'tok',
+      channel,
+      onCommand: () => {},
+      sessionId: 'sid-1',
+      logger,
+    })
+
+    client.start()
+
+    const expectedDelays = [1000, 3000, 9000, 27000]
+    for (let i = 0; i < expectedDelays.length; i++) {
+      const ws = wsInstances[wsInstances.length - 1]
+      ws.simulateClose()
+      vi.advanceTimersByTime(expectedDelays[i])
+    }
+
+    const reconnectLogs = info.mock.calls
+      .map((c) => c[0] as string)
+      .filter((m) => m.includes('[dial-back-client] reconnect'))
+
+    expect(reconnectLogs.length).toBe(4)
+    expect(reconnectLogs[0]).toContain('attempt=1')
+    expect(reconnectLogs[0]).toContain('delay_ms=1000')
+    expect(reconnectLogs[0]).toContain('sessionId=sid-1')
+    expect(reconnectLogs[1]).toContain('attempt=2')
+    expect(reconnectLogs[1]).toContain('delay_ms=3000')
+    expect(reconnectLogs[2]).toContain('attempt=3')
+    expect(reconnectLogs[2]).toContain('delay_ms=9000')
+    expect(reconnectLogs[3]).toContain('attempt=4')
+    expect(reconnectLogs[3]).toContain('delay_ms=27000')
+  })
+
+  it('emits connection established + dropped logs', () => {
+    const info = vi.fn()
+    const logger = { info, warn: vi.fn(), error: vi.fn() }
+    const channel = new BufferedChannel()
+    const client = new DialBackClient({
+      callbackUrl: 'wss://example.com/ws',
+      bearer: 'tok',
+      channel,
+      onCommand: () => {},
+      sessionId: 'sid-2',
+      logger,
+    })
+
+    client.start()
+    const ws = wsInstances[0]
+    ws.simulateOpen()
+
+    const establishedLogs = info.mock.calls
+      .map((c) => c[0] as string)
+      .filter((m) => m.includes('connection established'))
+    expect(establishedLogs.length).toBe(1)
+    expect(establishedLogs[0]).toContain('sessionId=sid-2')
+    expect(establishedLogs[0]).toContain('first=true')
+
+    ws.simulateClose()
+    const droppedLogs = info.mock.calls
+      .map((c) => c[0] as string)
+      .filter((m) => m.includes('connection dropped'))
+    expect(droppedLogs.length).toBe(1)
+    expect(droppedLogs[0]).toContain('sessionId=sid-2')
+  })
+
   it('stop() closes WS and prevents reconnect', () => {
     const states: string[] = []
     const channel = new BufferedChannel()
