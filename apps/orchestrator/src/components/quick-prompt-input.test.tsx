@@ -95,4 +95,34 @@ describe('QuickPromptInput', () => {
 
     expect(onSubmit).not.toHaveBeenCalled()
   })
+
+  it('prefills the selected project when initialProject is provided', async () => {
+    const onSubmit = vi.fn()
+    render(
+      <QuickPromptInput onSubmit={onSubmit} projects={mockProjects} initialProject="baseplane" />,
+    )
+
+    // The Select's trigger should show the prefilled project instead of
+    // the first project or the loading placeholder.
+    expect(screen.getByText('baseplane')).toBeDefined()
+    // The default-first project 'duraclaw' must not be selected.
+    const triggerText = screen.getAllByRole('combobox')[0].textContent || ''
+    expect(triggerText).toContain('baseplane')
+    expect(triggerText).not.toContain('duraclaw')
+
+    const textarea = screen.getByPlaceholderText(
+      'Describe the task, paste or attach an image...',
+    ) as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: 'Fix it' } })
+    const submitButton = textarea.form?.querySelector(
+      'button[type="submit"]',
+    ) as HTMLButtonElement | null
+    if (!submitButton) throw new Error('submit button not found')
+    fireEvent.click(submitButton)
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(onSubmit).toHaveBeenCalledTimes(1)
+    expect(onSubmit.mock.calls[0][0]).toMatchObject({ project: 'baseplane' })
+  })
 })
