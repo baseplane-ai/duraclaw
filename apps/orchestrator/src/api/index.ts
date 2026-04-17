@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { validateActionToken } from '~/lib/action-token'
 import { createAuth } from '~/lib/auth'
+import { type PushPayload, sendPushNotification } from '~/lib/push'
 import type {
   ContentBlock,
   DiscoveredSession,
@@ -395,6 +396,111 @@ export function createApiApp() {
       .run()
 
     return c.body(null, 204)
+  })
+
+  /**
+   * Debug endpoint — send a test push notification to all of the caller's
+   * subscribed devices with an arbitrary session URL.
+   *
+   * Auth: authenticated user only (hits their own subscriptions).
+   *
+   * Body (all fields optional):
+   *   sessionId: string     — produces url="/?session=${sessionId}" if url omitted
+   *   url:       string     — target URL for the notification tap (overrides sessionId)
+   *   title:     string     — notification title (default "Duraclaw debug")
+   *   body:      string     — notification body (default includes target url)
+   *   tag:       string     — collapse tag (default "debug-push")
+   *   actions:   [{action, title}]  — notification action buttons (default [{open}])
+   *
+   * Returns: {
+   *   sent:      number of subscriptions we attempted
+   *   results:   per-subscription { id, endpoint, ok, status, gone }
+   *   payload:   the PushPayload that was sent
+   * }
+   *
+   * Intended for diagnosing the notification-tap → navigation flow on
+   * devices. Pair with `wrangler tail` to watch the [push:dispatch] and
+   * [sw:*] log streams end-to-end.
+   */
+  app.post('/api/debug/push', async (c) => {
+    const userId = c.get('userId')
+    const body = (await c.req.json().catch(() => ({}))) as {
+      sessionId?: string
+      url?: string
+      title?: string
+      body?: string
+      tag?: string
+      actions?: Array<{ action: string; title: string }>
+    }
+
+    const sessionId = body.sessionId ?? ''
+    const url = body.url ?? (sessionId ? `/?session=${sessionId}` : '/')
+    const title = body.title ?? 'Duraclaw debug'
+    const payloadBody = body.body ?? `Debug push → ${url}`
+    const tag = body.tag ?? 'debug-push'
+    const actions = body.actions ?? [{ action: 'open', title: 'Open' }]
+
+    const vapidPublicKey = c.env.VAPID_PUBLIC_KEY
+    const vapidPrivateKey = c.env.VAPID_PRIVATE_KEY
+    const vapidSubject = c.env.VAPID_SUBJECT
+    if (!vapidPublicKey || !vapidPrivateKey || !vapidSubject) {
+      return c.json({ error: 'VAPID not configured on this deployment' }, 500)
+    }
+
+    const subsResult = await c.env.AUTH_DB.prepare(
+      'SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ?',
+    )
+      .bind(userId)
+      .all<{ id: string; endpoint: string; p256dh: string; auth: string }>()
+
+    const subscriptions = subsResult.results
+    if (subscriptions.length === 0) {
+      return c.json(
+        { error: 'No push subscriptions for this user — subscribe in Settings first' },
+        404,
+      )
+    }
+
+    const payload: PushPayload = {
+      title,
+      body: payloadBody,
+      url,
+      tag,
+      sessionId,
+      actions,
+    }
+    const vapid = { publicKey: vapidPublicKey, privateKey: vapidPrivateKey, subject: vapidSubject }
+
+    const results: Array<{
+      id: string
+      endpoint: string
+      ok: boolean
+      status?: number
+      gone?: boolean
+    }> = []
+
+    for (const sub of subscriptions) {
+      const result = await sendPushNotification(sub, payload, vapid)
+      results.push({
+        id: sub.id,
+        endpoint: `${sub.endpoint.slice(0, 60)}...`,
+        ok: result.ok,
+        status: result.status,
+        gone: result.gone,
+      })
+      // Prune gone subscriptions so the debug endpoint self-heals stale entries.
+      if (result.gone) {
+        await c.env.AUTH_DB.prepare('DELETE FROM push_subscriptions WHERE id = ?')
+          .bind(sub.id)
+          .run()
+      }
+    }
+
+    console.log(
+      `[debug:push] userId=${userId} sent=${subscriptions.length} url=${url} results=${JSON.stringify(results)}`,
+    )
+
+    return c.json({ sent: subscriptions.length, results, payload })
   })
 
   app.get('/api/projects', async (c) => {
