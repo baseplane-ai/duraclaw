@@ -517,18 +517,23 @@ export function ChatThread({
 
             if (msg.role === 'assistant') {
               const nodes: ReactNode[] = []
-              const toolParts = msg.parts.filter(
-                (p) => p.type?.startsWith('tool-') && !isPendingGate(p, readOnly),
-              )
+              let pending: SessionMessagePart[] = []
+              const flushPending = () => {
+                if (pending.length === 0) return
+                nodes.push(<ToolPillRow key={`pills-${msg.id}-${nodes.length}`} parts={pending} />)
+                pending = []
+              }
               msg.parts.forEach((part, i) => {
                 const isGroupableTool =
                   part.type?.startsWith('tool-') && !isPendingGate(part, readOnly)
-                if (isGroupableTool) return
+                if (isGroupableTool) {
+                  pending.push(part)
+                  return
+                }
+                flushPending()
                 nodes.push(renderPart(part, i, gate, status, onResolveGate, readOnly, onQaResolved))
               })
-              if (toolParts.length > 0) {
-                nodes.push(<ToolPillRow key={`pills-${msg.id}`} parts={toolParts} />)
-              }
+              flushPending()
               return (
                 <div key={msg.id} className="group relative" data-turn-index={turnIndex}>
                   <div className="space-y-2">{nodes}</div>
