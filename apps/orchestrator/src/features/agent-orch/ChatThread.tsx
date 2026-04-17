@@ -534,6 +534,15 @@ export function ChatThread({
                 // pills (which already group by file path in the detail sheet).
                 // Skip without flushing so they don't fragment the chip run.
                 if (part.type === 'data-file-changed') return
+                // Reasoning renders inline but does not flush pending — only
+                // actual assistant text merits a message break. Short thinking
+                // blips between tool calls should not fragment the chip run.
+                if (part.type === 'reasoning') {
+                  nodes.push(
+                    renderPart(part, i, gate, status, onResolveGate, readOnly, onQaResolved),
+                  )
+                  return
+                }
                 flushPending()
                 nodes.push(renderPart(part, i, gate, status, onResolveGate, readOnly, onQaResolved))
               })
