@@ -13,7 +13,6 @@ import {
 } from '@duraclaw/ai-elements'
 import { ImageIcon, XIcon } from 'lucide-react'
 import { useCallback, useState } from 'react'
-import { useUserSettings } from '~/hooks/use-user-settings'
 import type { ContentBlock } from '~/lib/types'
 
 interface ImagePreview {
@@ -26,8 +25,9 @@ interface MessageInputProps {
   onSend: (content: string | ContentBlock[]) => void
   disabled?: boolean
   /**
-   * Optional tab id — when provided, text input is persisted (per-tab) and
-   * synced across devices via the user-settings DO.
+   * Optional tab id — kept for parity with the previous per-tab draft
+   * API. Drafts now live in the shared Y.Text on SessionCollabDO, so this
+   * key only scopes the local `PromptInputProvider` (no DO round-trip).
    */
   draftKey?: string
 }
@@ -37,8 +37,6 @@ const MAX_IMAGE_SIZE = 5 * 1024 * 1024
 export function MessageInput({ onSend, disabled, draftKey }: MessageInputProps) {
   const [images, setImages] = useState<ImagePreview[]>([])
   const [error, setError] = useState<string | null>(null)
-  const { saveDraft, getDraft } = useUserSettings()
-  const initialDraft = draftKey ? getDraft(draftKey) : ''
 
   const processFile = useCallback((file: File) => {
     if (!file.type.startsWith('image/')) return
@@ -77,7 +75,7 @@ export function MessageInput({ onSend, disabled, draftKey }: MessageInputProps) 
   }, [])
 
   return (
-    <PromptInputProvider key={draftKey ?? '__local'} initialInput={initialDraft}>
+    <PromptInputProvider key={draftKey ?? '__local'}>
       <PromptInput
         onPaste={handlePaste}
         onSubmit={(message: { text?: string }) => {
@@ -108,7 +106,6 @@ export function MessageInput({ onSend, disabled, draftKey }: MessageInputProps) 
           }
           setImages([])
           setError(null)
-          if (draftKey) saveDraft(draftKey, '')
         }}
         className="w-full border-t px-4"
       >
@@ -142,9 +139,6 @@ export function MessageInput({ onSend, disabled, draftKey }: MessageInputProps) 
           <PromptInputTextarea
             placeholder={disabled ? 'Session is not running' : 'Send a message...'}
             disabled={disabled}
-            onChange={(e) => {
-              if (draftKey) saveDraft(draftKey, e.currentTarget.value)
-            }}
           />
         </PromptInputBody>
         <PromptInputFooter>

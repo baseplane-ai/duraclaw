@@ -40,14 +40,6 @@ vi.mock('@duraclaw/ai-elements', () => ({
   ),
 }))
 
-// useUserSettings pulls in WS and DB — stub it out for these structural tests
-vi.mock('~/hooks/use-user-settings', () => ({
-  useUserSettings: () => ({
-    saveDraft: vi.fn(),
-    getDraft: () => '',
-  }),
-}))
-
 import { MessageInput } from './MessageInput'
 
 afterEach(() => {

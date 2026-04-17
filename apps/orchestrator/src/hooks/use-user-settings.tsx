@@ -15,6 +15,40 @@ import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'r
 import type { UserSettingsState } from '~/agents/user-settings-do'
 import { type TabItem, tabsCollection } from '~/db/tabs-collection'
 
+// ── Legacy draft cleanup ─────────────────────────────────────────
+// P2b removes the old localStorage draft:* + UserSettingsDO drafts
+// pipeline. Y.Text on SessionCollabDO is now the source of truth.
+// Sweep any stale keys exactly once per page load so users don't
+// carry orphaned blobs forward.
+//
+// Sentinel is keyed in sessionStorage (not localStorage) so tab
+// reloads skip the work but a fresh tab still runs the sweep.
+
+const LEGACY_DRAFT_CLEANUP_SENTINEL = '__duraclaw_legacy_draft_cleanup_done'
+
+function cleanupLegacyDrafts() {
+  if (typeof localStorage === 'undefined' || typeof sessionStorage === 'undefined') return
+  try {
+    if (sessionStorage.getItem(LEGACY_DRAFT_CLEANUP_SENTINEL)) return
+    const toRemove: string[] = []
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i)
+      if (key?.startsWith('draft:')) toRemove.push(key)
+    }
+    for (const key of toRemove) {
+      localStorage.removeItem(key)
+      const tabId = key.slice('draft:'.length)
+      console.warn(`[collab] Cleared legacy draft for tab ${tabId}`)
+    }
+    sessionStorage.setItem(LEGACY_DRAFT_CLEANUP_SENTINEL, '1')
+  } catch {
+    // Quota or private-browsing — ignore; worst case we warn next load.
+  }
+}
+
+// Run once at module load, before any React render.
+cleanupLegacyDrafts()
+
 // ── tab order in localStorage ────────────────────────────────────
 // Per-browser override for tab display order (same pattern as activeTabId).
 
@@ -188,8 +222,6 @@ export function getUserSettings(): UserSettingsImperative {
 
 export interface UserSettingsContextValue extends UserSettingsImperative {
   isLoading: boolean
-  saveDraft: (tabId: string, text: string) => void
-  getDraft: (tabId: string) => string
 }
 
 export function useUserSettings(): UserSettingsContextValue {
@@ -214,14 +246,12 @@ export function useUserSettings(): UserSettingsContextValue {
     return [...data] as TabItem[]
   }, [data])
 
-  // Filter out sentinel draft records (project === '__draft') from visible tabs,
-  // then apply local tab-order override (per-browser, localStorage-backed).
+  // Apply local tab-order override (per-browser, localStorage-backed).
   const tabOrder = useSyncExternalStore(subscribeOrder, getOrderSnapshot, () => [] as string[])
 
   const tabs = useMemo(() => {
-    const filtered = allItems.filter((t) => t.project !== '__draft')
-    if (tabOrder.length === 0) return filtered
-    const byId = new Map(filtered.map((t) => [t.id, t]))
+    if (tabOrder.length === 0) return allItems
+    const byId = new Map(allItems.map((t) => [t.id, t]))
     const ordered: TabItem[] = []
     const seen = new Set<string>()
     for (const id of tabOrder) {
@@ -232,7 +262,7 @@ export function useUserSettings(): UserSettingsContextValue {
       }
     }
     // Append any tabs not in the order list (newly created)
-    for (const t of filtered) {
+    for (const t of allItems) {
       if (!seen.has(t.id)) ordered.push(t)
     }
     return ordered
@@ -368,69 +398,6 @@ export function useUserSettings(): UserSettingsContextValue {
     [tabs],
   )
 
-  // ── Drafts (synced via collection — debounced update) ────────
-
-  const draftTimerRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
-
-  const saveDraft = useCallback((tabId: string, text: string) => {
-    // Write to localStorage synchronously for instant restore on reload
-    if (typeof localStorage !== 'undefined') {
-      if (text) {
-        localStorage.setItem(`draft:${tabId}`, text)
-      } else {
-        localStorage.removeItem(`draft:${tabId}`)
-      }
-    }
-
-    // Cancel any pending debounced write for this tab
-    const existing = draftTimerRef.current.get(tabId)
-    if (existing) {
-      clearTimeout(existing)
-      draftTimerRef.current.delete(tabId)
-    }
-
-    const applyToCollection = () => {
-      if (tabsCollection.has(tabId)) {
-        tabsCollection.update(tabId, (draft) => {
-          draft.draft = text || undefined
-        })
-      } else if (text) {
-        // Only create sentinel records for non-empty drafts
-        tabsCollection.insert({
-          id: tabId,
-          project: '__draft',
-          sessionId: '',
-          title: '',
-          draft: text,
-        } as TabItem & Record<string, unknown>)
-      }
-    }
-
-    if (!text) {
-      // Clears run immediately so submit never leaves a stale draft
-      applyToCollection()
-    } else {
-      // Typing is debounced to avoid excessive DO syncs
-      const timer = setTimeout(applyToCollection, 500)
-      draftTimerRef.current.set(tabId, timer)
-    }
-  }, [])
-
-  const getDraft = useCallback(
-    (tabId: string): string => {
-      // localStorage is always current for this device (written synchronously
-      // in saveDraft), so check it first.  Fall back to collection data which
-      // may carry a draft from another device via DO sync.
-      if (typeof localStorage !== 'undefined') {
-        const local = localStorage.getItem(`draft:${tabId}`)
-        if (local) return local
-      }
-      const fromCollection = allItems.find((t) => t.id === tabId)?.draft
-      return fromCollection || ''
-    },
-    [allItems],
-  )
-
   // Keep imperative ref in sync
   settingsRef.current = {
     tabs,
@@ -459,8 +426,6 @@ export function useUserSettings(): UserSettingsContextValue {
     updateTabTitle,
     updateTabProject,
     reorderTabs,
-    saveDraft,
-    getDraft,
     findTabBySession,
     findTabByProject,
   }
