@@ -7,6 +7,7 @@ import { handleListSessions, handleStartSession, handleStatus } from './handlers
 import { findLatestKataState } from './kata.js'
 import { spec as openapiSpec } from './openapi.js'
 import { discoverProjects, resolveProject } from './projects.js'
+import { getOrCreateReaper, startReaper, stopReaper } from './reaper.js'
 import type { WsData } from './types.js'
 
 // ── Config ──────────────────────────────────────────────────────────
@@ -78,6 +79,24 @@ const server = Bun.serve<WsData>({
         return json(400, { ok: false, error: 'invalid body' })
       }
       return handleStartSession(body)
+    }
+
+    // POST /debug/reap — dev-only on-demand reaper trigger (B6). Guarded by
+    // DURACLAW_DEBUG_ENDPOINTS=1 so production deploys never expose it.
+    if (
+      req.method === 'POST' &&
+      path === '/debug/reap' &&
+      process.env.DURACLAW_DEBUG_ENDPOINTS === '1'
+    ) {
+      try {
+        const report = await getOrCreateReaper().reapOnce()
+        return json(200, { ok: true, report })
+      } catch (err) {
+        return json(500, {
+          ok: false,
+          error: `reap failed: ${err instanceof Error ? err.message : String(err)}`,
+        })
+      }
     }
 
     // GET /projects
@@ -340,6 +359,14 @@ discoverProjects({}).then((projects) => {
 
 console.log(`[agent-gateway] Listening on http://127.0.0.1:${PORT}`)
 
+// Start the reaper (B6). Runs one pass immediately, then every 5 minutes.
+// Skip under test runs so importing server.ts from vitest doesn't schedule
+// a background interval.
+if (process.env.NODE_ENV !== 'test' && process.env.VITEST !== 'true') {
+  startReaper()
+  console.log('[agent-gateway] Reaper started')
+}
+
 // ── Graceful Shutdown ───────────────────────────────────────────────
 
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
@@ -354,6 +381,8 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
       clearTimeout(timer)
     }
     kataDebounceTimers.clear()
+
+    stopReaper()
 
     server.stop()
     console.log('[agent-gateway] Server closed')
