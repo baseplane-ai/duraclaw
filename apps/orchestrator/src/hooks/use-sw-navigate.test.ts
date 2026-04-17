@@ -12,15 +12,57 @@ vi.mock('@tanstack/react-router', () => ({
 
 import { useSwNavigate } from './use-sw-navigate'
 
+// Mock BroadcastChannel
+let bcHandler: ((event: MessageEvent) => void) | null = null
+const mockBcClose = vi.fn()
+
+class MockBroadcastChannel {
+  name: string
+  onmessage: ((event: MessageEvent) => void) | null = null
+  constructor(name: string) {
+    this.name = name
+  }
+  close() {
+    mockBcClose()
+    bcHandler = null
+  }
+}
+
+// Capture the onmessage setter so tests can fire BC messages
+const OriginalBC = globalThis.BroadcastChannel
+beforeEach(() => {
+  globalThis.BroadcastChannel = class extends MockBroadcastChannel {
+    constructor(name: string) {
+      super(name)
+      // Intercept onmessage setter
+      const self = this
+      Object.defineProperty(this, 'onmessage', {
+        set(fn) {
+          bcHandler = fn
+          Object.defineProperty(self, '_onmessage', { value: fn, writable: true })
+        },
+        get() {
+          return (self as unknown as { _onmessage: unknown })._onmessage
+        },
+        configurable: true,
+      })
+    }
+  } as unknown as typeof BroadcastChannel
+})
+
+afterEach(() => {
+  globalThis.BroadcastChannel = OriginalBC
+})
+
 describe('useSwNavigate', () => {
-  let addSpy: ReturnType<typeof vi.spyOn>
-  let removeSpy: ReturnType<typeof vi.spyOn>
   let swHandler: ((event: MessageEvent) => void) | null
 
   beforeEach(() => {
     mockNavigate.mockClear()
+    mockBcClose.mockClear()
     swHandler = null
-    // Provide a fake serviceWorker on navigator.
+    bcHandler = null
+
     const swMock = {
       addEventListener: vi.fn((type: string, handler: (event: MessageEvent) => void) => {
         if (type === 'message') swHandler = handler
@@ -34,37 +76,46 @@ describe('useSwNavigate', () => {
       value: swMock,
       configurable: true,
     })
-    addSpy = vi.spyOn(swMock, 'addEventListener')
-    removeSpy = vi.spyOn(swMock, 'removeEventListener')
-    // Ensure window.location.origin is stable for URL parsing.
-    // jsdom default is http://localhost/.
   })
 
   afterEach(() => {
     vi.restoreAllMocks()
   })
 
-  it('registers a serviceWorker message listener on mount and removes on unmount', () => {
-    const { unmount } = renderHook(() => useSwNavigate())
-    expect(addSpy).toHaveBeenCalledWith('message', expect.any(Function))
-    unmount()
-    expect(removeSpy).toHaveBeenCalledWith('message', expect.any(Function))
+  function fireBc(data: unknown) {
+    expect(bcHandler).toBeTruthy()
+    bcHandler?.({ data } as MessageEvent)
+  }
+
+  function fireSw(data: unknown) {
+    expect(swHandler).toBeTruthy()
+    swHandler?.({ data } as MessageEvent)
+  }
+
+  it('installs both BroadcastChannel and postMessage listeners', () => {
+    renderHook(() => useSwNavigate())
+    expect(bcHandler).toBeTruthy()
+    expect(swHandler).toBeTruthy()
   })
 
-  it('calls startMessages() to enable the SW message queue', () => {
+  it('cleans up both listeners on unmount', () => {
+    const { unmount } = renderHook(() => useSwNavigate())
+    unmount()
+    expect(mockBcClose).toHaveBeenCalled()
+    expect(swHandler).toBeNull() // removeEventListener was called
+  })
+
+  it('calls startMessages() for the postMessage fallback', () => {
     renderHook(() => useSwNavigate())
     const sw = navigator.serviceWorker as unknown as { startMessages: ReturnType<typeof vi.fn> }
     expect(sw.startMessages).toHaveBeenCalledTimes(1)
   })
 
-  function fire(data: unknown) {
-    expect(swHandler).toBeTruthy()
-    swHandler?.({ data } as MessageEvent)
-  }
+  // --- BroadcastChannel tests (primary) ---
 
-  it('calls navigate for SW_NAVIGATE messages with same-origin URL', () => {
+  it('navigates on BroadcastChannel SW_NAVIGATE message', () => {
     renderHook(() => useSwNavigate())
-    fire({ type: 'SW_NAVIGATE', url: '/?session=abc' })
+    fireBc({ type: 'SW_NAVIGATE', url: '/?session=abc' })
     expect(mockNavigate).toHaveBeenCalledWith({
       to: '/',
       search: { session: 'abc' },
@@ -72,9 +123,9 @@ describe('useSwNavigate', () => {
     })
   })
 
-  it('preserves multiple query params', () => {
+  it('preserves multiple query params via BroadcastChannel', () => {
     renderHook(() => useSwNavigate())
-    fire({ type: 'SW_NAVIGATE', url: '/?session=abc&foo=bar' })
+    fireBc({ type: 'SW_NAVIGATE', url: '/?session=abc&foo=bar' })
     expect(mockNavigate).toHaveBeenCalledWith({
       to: '/',
       search: { session: 'abc', foo: 'bar' },
@@ -82,30 +133,53 @@ describe('useSwNavigate', () => {
     })
   })
 
+  // --- postMessage tests (fallback) ---
+
+  it('navigates on postMessage SW_NAVIGATE message', () => {
+    renderHook(() => useSwNavigate())
+    fireSw({ type: 'SW_NAVIGATE', url: '/?session=xyz' })
+    expect(mockNavigate).toHaveBeenCalledWith({
+      to: '/',
+      search: { session: 'xyz' },
+      replace: false,
+    })
+  })
+
+  // --- deduplication ---
+
+  it('deduplicates when both channels fire the same URL', () => {
+    renderHook(() => useSwNavigate())
+    fireBc({ type: 'SW_NAVIGATE', url: '/?session=abc' })
+    fireSw({ type: 'SW_NAVIGATE', url: '/?session=abc' })
+    expect(mockNavigate).toHaveBeenCalledTimes(1)
+  })
+
+  it('does NOT dedupe different URLs', () => {
+    renderHook(() => useSwNavigate())
+    fireBc({ type: 'SW_NAVIGATE', url: '/?session=abc' })
+    fireBc({ type: 'SW_NAVIGATE', url: '/?session=def' })
+    expect(mockNavigate).toHaveBeenCalledTimes(2)
+  })
+
+  // --- rejection ---
+
   it('ignores messages that are not SW_NAVIGATE', () => {
     renderHook(() => useSwNavigate())
-    fire({ type: 'something-else', url: '/?session=abc' })
-    fire({ url: '/?session=abc' })
-    fire('plain string')
-    fire(null)
+    fireBc({ type: 'something-else', url: '/?session=abc' })
+    fireBc({ url: '/?session=abc' })
+    fireSw({ type: 'SKIP_WAITING' })
     expect(mockNavigate).not.toHaveBeenCalled()
   })
 
   it('ignores SW_NAVIGATE with non-string url', () => {
     renderHook(() => useSwNavigate())
-    fire({ type: 'SW_NAVIGATE', url: 42 })
+    fireBc({ type: 'SW_NAVIGATE', url: 42 })
     expect(mockNavigate).not.toHaveBeenCalled()
   })
 
   it('ignores cross-origin targets', () => {
     renderHook(() => useSwNavigate())
-    fire({ type: 'SW_NAVIGATE', url: 'https://evil.example/?session=abc' })
-    expect(mockNavigate).not.toHaveBeenCalled()
-  })
-
-  it('ignores unparseable urls', () => {
-    renderHook(() => useSwNavigate())
-    fire({ type: 'SW_NAVIGATE', url: 'http://' })
+    fireBc({ type: 'SW_NAVIGATE', url: 'https://evil.example/?session=abc' })
     expect(mockNavigate).not.toHaveBeenCalled()
   })
 })

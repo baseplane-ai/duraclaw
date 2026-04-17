@@ -11,6 +11,14 @@ const mockShowNotification = vi.fn(() => Promise.resolve())
 const mockOpenWindow = vi.fn(() => Promise.resolve(null))
 const mockMatchAll = vi.fn(() => Promise.resolve([] as unknown[]))
 
+// Mock BroadcastChannel in the SW context
+const mockBcPostMessage = vi.fn()
+const mockBcClose = vi.fn()
+globalThis.BroadcastChannel = class {
+  postMessage = mockBcPostMessage
+  close = mockBcClose
+} as unknown as typeof BroadcastChannel
+
 // Set up ServiceWorkerGlobalScope mock
 const swSelf = {
   __WB_MANIFEST: [],
@@ -169,7 +177,7 @@ describe('service worker handlers', () => {
       expect(mockOpenWindow).toHaveBeenCalledWith('/?session=456')
     })
 
-    it('postMessages target url to existing client and focuses it (warm PWA)', async () => {
+    it('broadcasts on BroadcastChannel AND postMessages existing client (warm PWA)', async () => {
       const existing = {
         postMessage: vi.fn(),
         focus: vi.fn(() => Promise.resolve()),
@@ -180,6 +188,14 @@ describe('service worker handlers', () => {
       handlers.notificationclick(event)
       await flushWaitUntil(event)
 
+      // Primary: BroadcastChannel
+      expect(mockBcPostMessage).toHaveBeenCalledWith({
+        type: 'SW_NAVIGATE',
+        url: '/?session=456',
+      })
+      expect(mockBcClose).toHaveBeenCalled()
+
+      // Fallback: client.postMessage
       expect(existing.postMessage).toHaveBeenCalledWith({
         type: 'SW_NAVIGATE',
         url: '/?session=456',
@@ -246,7 +262,7 @@ describe('service worker handlers', () => {
       expect(mockOpenWindow).toHaveBeenCalledWith('/')
     })
 
-    it('new-session action postMessages "/" to existing client', async () => {
+    it('new-session action broadcasts "/" to existing client', async () => {
       const existing = {
         postMessage: vi.fn(),
         focus: vi.fn(() => Promise.resolve()),
@@ -257,7 +273,7 @@ describe('service worker handlers', () => {
       handlers.notificationclick(event)
       await flushWaitUntil(event)
 
-      expect(existing.postMessage).toHaveBeenCalledWith({ type: 'SW_NAVIGATE', url: '/' })
+      expect(mockBcPostMessage).toHaveBeenCalledWith({ type: 'SW_NAVIGATE', url: '/' })
       expect(existing.focus).toHaveBeenCalled()
       expect(mockOpenWindow).not.toHaveBeenCalled()
     })

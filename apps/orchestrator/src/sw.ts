@@ -12,7 +12,7 @@ self.addEventListener('message', (event) => {
   if (event.data?.type === 'SKIP_WAITING') self.skipWaiting()
 })
 
-// Push event handler stub — implemented in Phase 3a
+// Push event handler
 self.addEventListener('push', (event) => {
   const data = event.data?.json()
   if (!data) {
@@ -31,7 +31,6 @@ self.addEventListener('push', (event) => {
     }),
   )
   // Append the URL to the body so the target is visible on the notification shade.
-  // This is a debugging aid; remove once the notification-tap flow is verified.
   const bodyWithUrl = data.url ? `${data.body}\n${data.url}` : data.body
   event.waitUntil(
     self.registration.showNotification(data.title, {
@@ -47,19 +46,23 @@ self.addEventListener('push', (event) => {
 /**
  * Route a notification tap to the target URL.
  *
- * Mobile PWA quirks we have to work around:
- *   - `clients.openWindow(url)` focuses an existing window without navigating it
- *     (so tapping a notification refocuses the app on whatever page it was on).
- *   - `WindowClient.navigate(url)` is unreliable on Android Chrome standalone
- *     PWAs: it frequently resolves to `null` or silently no-ops even when the
- *     client is controlled and the URL is in scope. Relying on its return value
- *     (as an earlier version of this helper did) leaves the app focused on the
- *     wrong page.
+ * We've tried and ruled out every "navigate from the service worker" approach:
+ *   - `clients.openWindow(url)` on Android Chrome standalone focuses the existing
+ *     window WITHOUT navigating — user sees whatever page they were last on.
+ *   - `WindowClient.navigate(url)` silently no-ops or returns null on Android Chrome
+ *     standalone PWAs, even when the client is controlled and the URL is in scope.
+ *   - `client.postMessage()` + `addEventListener('message')` requires
+ *     `navigator.serviceWorker.startMessages()` which is easy to miss, and even then
+ *     delivery is unreliable when the page is backgrounded/suspended on mobile.
  *
- * Instead, if a client exists, postMessage the target URL to it and let the SPA
- * handle routing via TanStack Router (see useSwNavigate hook). Cold-start with
- * no existing client falls back to openWindow, which DOES navigate when opening
- * a brand-new window.
+ * **BroadcastChannel** is a completely independent messaging API available in both
+ * service workers and page contexts. It has zero setup requirements (no startMessages),
+ * doesn't care about controlled vs uncontrolled clients, and reliably delivers
+ * messages to same-origin browsing contexts. The app's useSwNavigate hook listens
+ * on the same channel name and routes through TanStack Router.
+ *
+ * For cold start (no existing client), we still fall back to openWindow(target),
+ * which works because it's opening a brand-new window at the correct URL.
  */
 async function openOrFocus(target: string): Promise<void> {
   const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
@@ -71,18 +74,31 @@ async function openOrFocus(target: string): Promise<void> {
       visibilityState: (c as WindowClient).visibilityState,
     })),
   )
-  for (const client of all) {
-    const win = client as WindowClient
-    try {
-      console.log(`[sw:openOrFocus] postMessage+focus existing client url=${win.url}`)
-      win.postMessage({ type: 'SW_NAVIGATE', url: target })
-      await win.focus()
-      console.log('[sw:openOrFocus] focused existing client, done')
-      return
-    } catch (err) {
-      console.log(`[sw:openOrFocus] focus() rejected on ${win.url} — trying next`, err)
+
+  if (all.length > 0) {
+    // Warm path: broadcast the URL on BroadcastChannel, then focus the first
+    // usable window. The app-side listener will call TanStack Router navigate().
+    console.log(`[sw:openOrFocus] broadcasting SW_NAVIGATE on BroadcastChannel`)
+    const bc = new BroadcastChannel('sw-nav')
+    bc.postMessage({ type: 'SW_NAVIGATE', url: target })
+    bc.close()
+
+    // Also send via client.postMessage as a belt-and-suspenders fallback
+    // (in case BroadcastChannel is delayed on some browser versions).
+    for (const client of all) {
+      const win = client as WindowClient
+      try {
+        win.postMessage({ type: 'SW_NAVIGATE', url: target })
+        await win.focus()
+        console.log(`[sw:openOrFocus] focused existing client url=${win.url}`)
+        return
+      } catch (err) {
+        console.log(`[sw:openOrFocus] focus() rejected on ${win.url}`, err)
+      }
     }
   }
+
+  // Cold path: no existing client — openWindow works correctly for new windows.
   console.log('[sw:openOrFocus] no usable existing client — openWindow(target)')
   const opened = await self.clients.openWindow(target)
   console.log(`[sw:openOrFocus] openWindow returned url=${opened?.url ?? 'null'}`)
