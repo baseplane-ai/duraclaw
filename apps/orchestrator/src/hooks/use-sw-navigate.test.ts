@@ -4,13 +4,19 @@
 import { renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const mockNavigate = vi.fn()
-
-vi.mock('@tanstack/react-router', () => ({
-  useNavigate: () => mockNavigate,
-}))
-
 import { useSwNavigate } from './use-sw-navigate'
+
+// Spy on window.location.assign — the hook performs full-page navigation.
+const mockAssign = vi.fn()
+// Stash origin so parsed.toString() in the hook produces a predictable value.
+Object.defineProperty(window, 'location', {
+  configurable: true,
+  value: {
+    ...window.location,
+    origin: 'http://localhost',
+    assign: mockAssign,
+  },
+})
 
 // Mock BroadcastChannel
 let bcHandler: ((event: MessageEvent) => void) | null = null
@@ -58,7 +64,7 @@ describe('useSwNavigate', () => {
   let swHandler: ((event: MessageEvent) => void) | null
 
   beforeEach(() => {
-    mockNavigate.mockClear()
+    mockAssign.mockClear()
     mockBcClose.mockClear()
     swHandler = null
     bcHandler = null
@@ -116,21 +122,13 @@ describe('useSwNavigate', () => {
   it('navigates on BroadcastChannel SW_NAVIGATE message', () => {
     renderHook(() => useSwNavigate())
     fireBc({ type: 'SW_NAVIGATE', url: '/?session=abc' })
-    expect(mockNavigate).toHaveBeenCalledWith({
-      to: '/',
-      search: { session: 'abc' },
-      replace: false,
-    })
+    expect(mockAssign).toHaveBeenCalledWith('http://localhost/?session=abc')
   })
 
   it('preserves multiple query params via BroadcastChannel', () => {
     renderHook(() => useSwNavigate())
     fireBc({ type: 'SW_NAVIGATE', url: '/?session=abc&foo=bar' })
-    expect(mockNavigate).toHaveBeenCalledWith({
-      to: '/',
-      search: { session: 'abc', foo: 'bar' },
-      replace: false,
-    })
+    expect(mockAssign).toHaveBeenCalledWith('http://localhost/?session=abc&foo=bar')
   })
 
   // --- postMessage tests (fallback) ---
@@ -138,11 +136,7 @@ describe('useSwNavigate', () => {
   it('navigates on postMessage SW_NAVIGATE message', () => {
     renderHook(() => useSwNavigate())
     fireSw({ type: 'SW_NAVIGATE', url: '/?session=xyz' })
-    expect(mockNavigate).toHaveBeenCalledWith({
-      to: '/',
-      search: { session: 'xyz' },
-      replace: false,
-    })
+    expect(mockAssign).toHaveBeenCalledWith('http://localhost/?session=xyz')
   })
 
   // --- deduplication ---
@@ -151,14 +145,14 @@ describe('useSwNavigate', () => {
     renderHook(() => useSwNavigate())
     fireBc({ type: 'SW_NAVIGATE', url: '/?session=abc' })
     fireSw({ type: 'SW_NAVIGATE', url: '/?session=abc' })
-    expect(mockNavigate).toHaveBeenCalledTimes(1)
+    expect(mockAssign).toHaveBeenCalledTimes(1)
   })
 
   it('does NOT dedupe different URLs', () => {
     renderHook(() => useSwNavigate())
     fireBc({ type: 'SW_NAVIGATE', url: '/?session=abc' })
     fireBc({ type: 'SW_NAVIGATE', url: '/?session=def' })
-    expect(mockNavigate).toHaveBeenCalledTimes(2)
+    expect(mockAssign).toHaveBeenCalledTimes(2)
   })
 
   // --- rejection ---
@@ -168,18 +162,18 @@ describe('useSwNavigate', () => {
     fireBc({ type: 'something-else', url: '/?session=abc' })
     fireBc({ url: '/?session=abc' })
     fireSw({ type: 'SKIP_WAITING' })
-    expect(mockNavigate).not.toHaveBeenCalled()
+    expect(mockAssign).not.toHaveBeenCalled()
   })
 
   it('ignores SW_NAVIGATE with non-string url', () => {
     renderHook(() => useSwNavigate())
     fireBc({ type: 'SW_NAVIGATE', url: 42 })
-    expect(mockNavigate).not.toHaveBeenCalled()
+    expect(mockAssign).not.toHaveBeenCalled()
   })
 
   it('ignores cross-origin targets', () => {
     renderHook(() => useSwNavigate())
     fireBc({ type: 'SW_NAVIGATE', url: 'https://evil.example/?session=abc' })
-    expect(mockNavigate).not.toHaveBeenCalled()
+    expect(mockAssign).not.toHaveBeenCalled()
   })
 })

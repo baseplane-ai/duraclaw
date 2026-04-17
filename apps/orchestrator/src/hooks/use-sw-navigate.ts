@@ -1,9 +1,8 @@
-import { useNavigate } from '@tanstack/react-router'
 import { useEffect, useRef } from 'react'
 
 /**
- * Listen for navigation commands from the service worker and route through
- * TanStack Router.
+ * Listen for navigation commands from the service worker and perform a
+ * full-page load to the target URL.
  *
  * The service worker sends SW_NAVIGATE when a push notification is tapped
  * while the PWA is already running. We listen on TWO channels for maximum
@@ -18,9 +17,15 @@ import { useEffect, useRef } from 'react'
  *    the message queue.
  *
  * Whichever fires first wins; the second is deduplicated by a short guard.
+ *
+ * We deliberately use `window.location.assign()` rather than TanStack
+ * Router's soft navigate(). On Android Chrome standalone PWAs resumed from
+ * freeze-dry via notification tap, soft navigate frequently no-ops — the
+ * URL update is swallowed during the visibility transition. A full page
+ * load always works and costs nothing perceptible on this path (user is
+ * arriving from outside the app anyway).
  */
 export function useSwNavigate() {
-  const navigate = useNavigate()
   // Dedupe guard: skip duplicate navigations within 500ms
   const lastNavRef = useRef<{ url: string; time: number } | null>(null)
 
@@ -47,19 +52,13 @@ export function useSwNavigate() {
         return
       }
 
-      const search: Record<string, string> = {}
-      parsed.searchParams.forEach((value, key) => {
-        search[key] = value
-      })
-
       console.log(
-        `[sw:nav] navigating (${source}) → pathname=${parsed.pathname} search=${JSON.stringify(search)}`,
+        `[sw:nav] navigating (${source}) → ${parsed.pathname}${parsed.search} (full page load)`,
       )
-      navigate({
-        to: parsed.pathname as '/',
-        search: search as { session?: string },
-        replace: false,
-      })
+      // Full-page navigation — reliable across freeze-dried PWA resumes where
+      // soft-navs get swallowed. App will remount and read ?session=X from
+      // the URL on init.
+      window.location.assign(parsed.toString())
     }
 
     // --- Channel 1: BroadcastChannel (primary) ---
@@ -106,5 +105,5 @@ export function useSwNavigate() {
         navigator.serviceWorker.removeEventListener('message', swHandler)
       }
     }
-  }, [navigate])
+  }, [])
 }
