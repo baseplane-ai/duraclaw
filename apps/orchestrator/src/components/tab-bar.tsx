@@ -348,8 +348,12 @@ function ProjectTab({
     <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
       <div className="group relative flex items-center border-r select-none" data-tab-id={tabId}>
         {tabContent}
+        <DropdownMenuTrigger
+          className="absolute inset-0 appearance-none bg-transparent pointer-events-none"
+          tabIndex={-1}
+          aria-hidden
+        />
       </div>
-      <DropdownMenuTrigger className="sr-only absolute size-0 overflow-hidden" />
       <DropdownMenuContent align="start">
         {onNewSessionInTab && (
           <DropdownMenuItem onClick={() => handleMenuAction(onNewSessionInTab)}>
