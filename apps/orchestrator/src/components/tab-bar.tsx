@@ -1,4 +1,4 @@
-import { CopyPlusIcon, PlusIcon, X } from 'lucide-react'
+import { ChevronLeftIcon, ChevronRightIcon, CopyPlusIcon, PlusIcon, X } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   DropdownMenu,
@@ -37,6 +37,37 @@ export function TabBar({
   const { tabs, activeTabId, setActiveTab, removeTab } = useTabStore()
   const { sessions } = useSessionsCollection()
   const scrollRef = useRef<HTMLDivElement>(null)
+  const [canScrollLeft, setCanScrollLeft] = useState(false)
+  const [canScrollRight, setCanScrollRight] = useState(false)
+
+  // Detect overflow on scroll + resize
+  const updateOverflow = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return
+    setCanScrollLeft(el.scrollLeft > 1)
+    setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 1)
+  }, [])
+
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    updateOverflow()
+    el.addEventListener('scroll', updateOverflow, { passive: true })
+    const ro = new ResizeObserver(updateOverflow)
+    ro.observe(el)
+    return () => {
+      el.removeEventListener('scroll', updateOverflow)
+      ro.disconnect()
+    }
+  }, [updateOverflow])
+
+  // Re-check overflow when tab count changes (DOM mutation won't trigger ResizeObserver on the container)
+  // biome-ignore lint/correctness/useExhaustiveDependencies: tabs.length intentionally triggers re-check
+  useEffect(updateOverflow, [updateOverflow, tabs.length])
+
+  const scrollBy = useCallback((dir: 'left' | 'right') => {
+    scrollRef.current?.scrollBy({ left: dir === 'left' ? -120 : 120, behavior: 'smooth' })
+  }, [])
 
   // Scroll active tab into view when it changes
   useEffect(() => {
@@ -67,34 +98,59 @@ export function TabBar({
   if (tabs.length === 0) return null
 
   return (
-    <div
-      ref={scrollRef}
-      className="flex items-center border-b bg-background overflow-x-auto"
-      data-testid="tab-bar"
-    >
-      {tabs.map((tab) => {
-        const currentSession = sessions.find((s) => s.id === tab.sessionId)
+    <div className="relative" data-testid="tab-bar">
+      <div
+        ref={scrollRef}
+        className="flex items-center border-b bg-background overflow-x-auto scrollbar-none"
+      >
+        {tabs.map((tab) => {
+          const currentSession = sessions.find((s) => s.id === tab.sessionId)
 
-        return (
-          <ProjectTab
-            key={tab.id}
-            tabId={tab.id}
-            project={tab.project}
-            title={tab.title}
-            isActive={activeTabId === tab.id}
-            currentSession={currentSession}
-            onSelect={() => {
-              setActiveTab(tab.id)
-              onSelectSession(tab.sessionId)
-            }}
-            onClose={() => handleClose(tab.id)}
-            onNewSessionInTab={onNewSessionInTab ? () => onNewSessionInTab(tab.project) : undefined}
-            onNewTabForProject={
-              onNewTabForProject ? () => onNewTabForProject(tab.project) : undefined
-            }
-          />
-        )
-      })}
+          return (
+            <ProjectTab
+              key={tab.id}
+              tabId={tab.id}
+              project={tab.project}
+              title={tab.title}
+              isActive={activeTabId === tab.id}
+              currentSession={currentSession}
+              onSelect={() => {
+                setActiveTab(tab.id)
+                onSelectSession(tab.sessionId)
+              }}
+              onClose={() => handleClose(tab.id)}
+              onNewSessionInTab={
+                onNewSessionInTab ? () => onNewSessionInTab(tab.project) : undefined
+              }
+              onNewTabForProject={
+                onNewTabForProject ? () => onNewTabForProject(tab.project) : undefined
+              }
+            />
+          )
+        })}
+      </div>
+
+      {/* Scroll overflow arrows */}
+      {canScrollLeft && (
+        <button
+          type="button"
+          aria-label="Scroll tabs left"
+          className="absolute left-0 top-0 bottom-0 z-10 flex items-center pl-0.5 pr-1 bg-gradient-to-r from-background via-background/80 to-transparent"
+          onClick={() => scrollBy('left')}
+        >
+          <ChevronLeftIcon className="size-3.5 text-muted-foreground" />
+        </button>
+      )}
+      {canScrollRight && (
+        <button
+          type="button"
+          aria-label="Scroll tabs right"
+          className="absolute right-0 top-0 bottom-0 z-10 flex items-center pr-0.5 pl-1 bg-gradient-to-l from-background via-background/80 to-transparent"
+          onClick={() => scrollBy('right')}
+        >
+          <ChevronRightIcon className="size-3.5 text-muted-foreground" />
+        </button>
+      )}
     </div>
   )
 }
