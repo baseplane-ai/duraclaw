@@ -281,7 +281,7 @@ export function NavSessions() {
     (session: SessionRecord) => {
       addTab(session.project || 'unknown', session.id, getDisplayName(session))
       setOpenMobile(false)
-      navigate({ to: '/session/$id', params: { id: session.id } })
+      navigate({ to: '/', search: { session: session.id } })
     },
     [addTab, setOpenMobile, navigate],
   )
@@ -300,11 +300,10 @@ export function NavSessions() {
     [archiveSession],
   )
 
-  // Determine active session from URL
+  // Determine active session from URL. The dashboard (`/`) owns session
+  // selection via `?session=X`; legacy `/session/:id` redirects to the same.
   const searchParams = new URLSearchParams(location.searchStr)
-  const activeSessionId = location.pathname.startsWith('/session/')
-    ? location.pathname.split('/session/')[1]
-    : searchParams.get('session')
+  const activeSessionId = searchParams.get('session')
 
   return (
     <>

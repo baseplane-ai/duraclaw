@@ -65,7 +65,7 @@ function AgentOrchContent() {
   const restoredSessionId = !searchSessionId ? selectedSessionId : null
   const [spawnConfig, setSpawnConfig] = useState<SpawnConfig | null>(null)
   // Pre-fill hints for the QuickPromptInput composer, set by tab context menu actions.
-  // Seed from URL search params so the tab context menu works from /session/$id too.
+  // Seed from URL search params so the hint survives reloads / cold launches.
   const [quickPromptHint, setQuickPromptHint] = useState<{
     project: string
     newTab: boolean

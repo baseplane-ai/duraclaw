@@ -1,134 +1,20 @@
-import { createFileRoute, useNavigate } from '@tanstack/react-router'
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { Header } from '~/components/layout/header'
-import { Main } from '~/components/layout/main'
-import { TabBar } from '~/components/tab-bar'
-import { AgentDetailView } from '~/features/agent-orch/AgentDetailView'
-import { getPreviewText } from '~/features/agent-orch/session-utils'
-import { useCodingAgent } from '~/features/agent-orch/use-coding-agent'
-import { useSessionsCollection } from '~/hooks/use-sessions-collection'
-import { useSwipeTabs } from '~/hooks/use-swipe-tabs'
-import { getUserSettings, useUserSettings } from '~/hooks/use-user-settings'
+import { createFileRoute, redirect } from '@tanstack/react-router'
 
+/**
+ * Compat redirect from the legacy /session/:id path-param route to the
+ * canonical /?session=:id search-param form.
+ *
+ * The dashboard (`/`) owns session selection via a `?session=X` search param.
+ * Having a parallel path-param route caused subtle bugs:
+ *   - soft nav between /session/$id and /?session=X was getting swallowed on
+ *     Android Chrome standalone PWA resumes from freeze-dry
+ *   - duplicated "select session" logic across two routes
+ *
+ * Keeping this route as a pure redirect preserves any stale bookmarks /
+ * external links pointing at /session/:id.
+ */
 export const Route = createFileRoute('/_authenticated/session/$id')({
-  component: SessionDetailPage,
+  beforeLoad: ({ params }) => {
+    throw redirect({ to: '/', search: { session: params.id } })
+  },
 })
-
-function SessionDetailPage() {
-  const { id: sessionId } = Route.useParams()
-  const navigate = useNavigate()
-  const { sessions, updateSession } = useSessionsCollection()
-  const { addTab } = useUserSettings()
-
-  // Sync tab store on mount — only if session metadata is available
-  const [_initDone] = useState(() => {
-    const session = sessions.find((s) => s.id === sessionId)
-    if (session?.project) {
-      const title = session.title || getPreviewText(session) || session.project
-      getUserSettings().addTab(session.project, sessionId, title)
-    }
-    return true
-  })
-
-  const handleSelectSession = useCallback(
-    (sid: string) => {
-      const session = sessions.find((s) => s.id === sid)
-      const project = session?.project || 'unknown'
-      const title = session?.title || getPreviewText(session ?? { prompt: undefined }) || project
-      addTab(project, sid, title)
-      navigate({ to: '/', search: { session: sid } })
-    },
-    [navigate, addTab, sessions],
-  )
-
-  const handleLastTabClosed = useCallback(() => {
-    navigate({ to: '/' })
-  }, [navigate])
-
-  // Tab context menu → "New session in tab" / "New tab for project".
-  // Pass the intent via URL search params; AgentOrchPage seeds its quickPromptHint from them.
-  const handleNewSessionInTab = useCallback(
-    (project: string) => {
-      navigate({ to: '/', search: { newSessionProject: project, newTab: false } })
-    },
-    [navigate],
-  )
-
-  const handleNewTabForProject = useCallback(
-    (project: string) => {
-      navigate({ to: '/', search: { newSessionProject: project, newTab: true } })
-    },
-    [navigate],
-  )
-
-  const handleStateChange = useCallback(
-    (sid: string, patch: Record<string, unknown>) => {
-      updateSession(sid, patch)
-    },
-    [updateSession],
-  )
-
-  const { swipeProps, swipeDir } = useSwipeTabs(handleSelectSession, sessionId)
-
-  return (
-    <>
-      <Header fixed />
-      <Main fixed fluid className="p-0" {...swipeProps}>
-        <TabBar
-          activeSessionId={sessionId}
-          onSelectSession={handleSelectSession}
-          onLastTabClosed={handleLastTabClosed}
-          onNewSessionInTab={handleNewSessionInTab}
-          onNewTabForProject={handleNewTabForProject}
-        />
-        <div
-          className={
-            swipeDir === 'left'
-              ? 'animate-slide-out-left'
-              : swipeDir === 'right'
-                ? 'animate-slide-out-right'
-                : 'animate-slide-in'
-          }
-          style={{ flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column' }}
-        >
-          <SessionDetailWithSync
-            key={sessionId}
-            sessionId={sessionId}
-            onStateChange={handleStateChange}
-          />
-        </div>
-      </Main>
-    </>
-  )
-}
-
-function SessionDetailWithSync({
-  sessionId,
-  onStateChange,
-}: {
-  sessionId: string
-  onStateChange: (sessionId: string, patch: Record<string, unknown>) => void
-}) {
-  const agent = useCodingAgent(sessionId)
-  const prevStateRef = useRef(agent.state)
-
-  useEffect(() => {
-    if (agent.state && agent.state !== prevStateRef.current) {
-      prevStateRef.current = agent.state
-      onStateChange(sessionId, {
-        status: agent.state.status,
-        num_turns: agent.state.num_turns,
-        error: agent.state.error,
-      })
-      // Update tab title when session gets a summary
-      const title = agent.state.summary || agent.state.project
-      if (title) {
-        const settings = getUserSettings()
-        const tab = settings.findTabBySession(sessionId)
-        if (tab) settings.updateTabTitle(tab.id, title)
-      }
-    }
-  }, [agent.state, sessionId, onStateChange])
-
-  return <AgentDetailView name={sessionId} agent={agent} />
-}

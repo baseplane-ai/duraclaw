@@ -74,7 +74,7 @@ describe('service worker handlers', () => {
         title: 'Session Ready',
         body: 'Your session is waiting',
         tag: 'session-123',
-        url: '/session/123',
+        url: '/?session=123',
         sessionId: 'sess-abc',
         actionToken: 'tok-xyz',
         actions: [{ action: 'open', title: 'Open' }],
@@ -87,11 +87,11 @@ describe('service worker handlers', () => {
       expect(mockShowNotification).toHaveBeenCalledWith('Session Ready', {
         // URL is appended to the body as a debugging aid so the tap target
         // is visible on the notification shade itself.
-        body: 'Your session is waiting\n/session/123',
+        body: 'Your session is waiting\n/?session=123',
         icon: '/icons/icon-192.png',
         tag: 'session-123',
         data: {
-          url: '/session/123',
+          url: '/?session=123',
           sessionId: 'sess-abc',
           actionToken: 'tok-xyz',
         },
