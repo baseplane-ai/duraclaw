@@ -44,7 +44,7 @@ Six surfaces audited, each by a dedicated Explore agent reading the relevant fil
 | DO LLM calls | *(none today)* | TanStack AI (CF adapter) — router, classifier, titles, summaries, meta-agent |
 | Session/project index | `ProjectRegistry` DO SQLite (singleton, bottleneck) | **D1** (shared, scalable). `ProjectRegistry` DO deleted; discovery alarm → scheduled Worker cron |
 | User preferences | `ProjectRegistry` DO SQLite | **D1** (adjacent to Better Auth tables) |
-| Per-session message log | Agents SDK `Session` tables (tree with branches) | **`SessionDO` SQLite** — append-only `messages` table + `sdk_sessions` fork tree. No row mutations |
+| Per-session message log | Agents SDK `Session` tables (tree with branches) | **`SessionDO` SQLite** — append-only, linear `messages` table. No row mutations, no branching. Rewind = new session with copied prefix + D1 metadata link |
 | Server state decomposition | `SessionDO` god-object (1669 lines, 5 concerns) | `SessionDO` dissolved into: append-only log + broadcast + gateway adapter + direct LLM caller |
 | VPS transport | Dial-back WS, bearer + one-shot 60s UUID, `ReconnectableChannel` | **Unchanged** — this is the cleanest part of the stack |
 | VPS protocol | Custom `VpsCommand`/`GatewayEvent` | Same VPS side; DO side runs gateway events through a TanStack AI provider adapter |
@@ -235,7 +235,7 @@ Rather than patching the current stack surface by surface, the direction is to *
 
 ```
 Client
-  TanStack DB (OPFS)  ← materialized view of one session's message log
+  TanStack DB (OPFS)  ← materialized view of one session's linear message log
   TanStack AI chat hooks  ← single chat state machine
     │
     ├─ provider: direct          ← first-party LLM calls (router, titles, summaries, meta-agent)
@@ -245,8 +245,7 @@ Client
       │  one-way sync: "give me rows since seq N"
       ▼
 SessionDO  (extends PartyServer, one per Duraclaw session)
-  ├─ Append-only message log (SQLite, seq-numbered)
-  ├─ sdk_sessions table  ← fork tree: (sdk_session_id, parent, forked_from_turn, is_active)
+  ├─ Append-only, linear messages table (SQLite, seq-numbered)
   ├─ GatewayAdapter  ← VPS GatewayEvent → TanStack AI stream chunks + log append
   ├─ DirectLLM  ← TanStack AI (CF adapter) for first-party calls
   └─ Broadcast  ← one-way seq-numbered deltas to subscribed clients
@@ -254,7 +253,8 @@ SessionDO  (extends PartyServer, one per Duraclaw session)
       ▼
 D1 (AUTH_DB)  ← authoritative for list-shaped data
   ├─ users, auth sessions, accounts, verifications  (existing, Better Auth)
-  ├─ chat_sessions  ← the Duraclaw session index (moved from ProjectRegistry)
+  ├─ chat_sessions  ← Duraclaw session index. Includes rewound_from_session_id +
+  │                   rewound_from_turn (nullable) for rewind/duplicate metadata.
   ├─ user_preferences  (moved from ProjectRegistry)
   ├─ push_subscriptions  (existing)
   └─ hidden_projects  (existing)
@@ -265,6 +265,8 @@ Scheduled Worker (cron)  ← replaces ProjectRegistry.alarm
 
 VPS Executor  (unchanged — dial-back WS, ReconnectableChannel, Claude Agent SDK)
 ```
+
+**Rewind semantics.** Rewind is not a branching operation. It creates a **new Duraclaw session** (new `SessionDO`, new `sdk_session_id`, new row in D1) with messages 1..N of the source session **copied** into its log as the starting state. The source session stays frozen, accessible as history. The relationship is captured purely as metadata on the D1 row (`rewound_from_session_id` + `rewound_from_turn`) — no structural fork tree, no branch filtering at render time. Each `SessionDO` is a single linear log for its entire lifetime.
 
 **Write/read directions:**
 - **Client → DO:** normal RPC calls (send message, stop, rewind, etc.). No sync involvement.
@@ -283,7 +285,7 @@ VPS Executor  (unchanged — dial-back WS, ReconnectableChannel, Claude Agent SD
 6. **Gates become synthetic tool calls.** `permission_request` and `ask_user` become tools the user "responds" to via TanStack AI's isomorphic tool system. Lives inside the chat stream. Natural fit.
 7. **Telemetry stays sidecar.** `kata_state`, `context_usage`, `file_changed`, `rate_limit` are observational, not conversational. Separate typed event channel. Panels subscribe as needed.
 8. **One-way sync, not bidirectional.** Client's TanStack DB is a **read-only materialized view** of the DO's append-only message log. "Give me rows since seq N" is the whole sync API. Writes are normal RPC calls; no client mutation log, no CRDT, no conflict resolution. Reconnect is the same code path as first-connect — just a different cursor value.
-9. **Append-only everything.** The DO's message log never updates rows. Rewind is a Claude-SDK-level fork that produces a new `sdk_session_id`; the DO records it in the `sdk_sessions` fork table and keeps appending. UI filters by active branch; old branch rows stay in the log.
+9. **Append-only, linear.** The DO's message log never updates rows and never branches. Rewind creates a new Duraclaw session with prior messages copied in as starting state; the old session stays frozen. The "rewound-from" relationship is D1 metadata, not a structural property of either session's log.
 10. **Move list-shaped data to D1.** Chat session index and user preferences move out of `ProjectRegistry` DO into D1 tables adjacent to Better Auth's. `ProjectRegistry` DO is deleted. Discovery sync moves to a scheduled Worker cron.
 11. **Own the wire protocol.** Seq-numbered events, idempotency keys, append-only deltas are designed in from day one — not retrofitted.
 
@@ -295,6 +297,7 @@ Several audit findings stop being possible:
 - **Hydration ping-pong** — gone. Reconnect and first-connect are the same code path (cursor-based delta). No `{type: 'messages'}` bulk replay.
 - **Turn-counter race across 4 paths + message-ID collisions** — gone. The log is append-only with monotonic seq; there's nothing to race on.
 - **Partial state persistence (setState committed, appendMessage fails)** — gone. The log append is the commit; no secondary state to get out of sync.
+- **Branching/rewind complexity** — gone. No fork tree, no active-branch filter, no branch-tagged rows. Rewind is just "new session with copied prefix + metadata link."
 - **SessionDO god-object (1669 lines, 5 concerns)** — dissolves: append + broadcast + gateway adapter + direct LLM caller. Each small.
 - **Custom wire-event schema drift** — gone. TanStack AI chunk shape is the protocol end-to-end.
 - **Vercel AI SDK and `@cloudflare/ai-chat` dead weight** — deleted.
@@ -348,8 +351,8 @@ Shippable without touching anything else in the architecture. Kills the singleto
 
 Still inside the current stack. Swap the DO's message storage model.
 
-- Replace `this.session.appendMessage/updateMessage` calls with direct writes to a new seq-numbered `messages` table in `SessionDO` SQLite. Append-only. No row mutations.
-- Add `sdk_sessions(sdk_session_id, session_do_id, parent_sdk_session_id, forked_from_turn, is_active, created_at)` table for the fork tree.
+- Replace `this.session.appendMessage/updateMessage` calls with direct writes to a new seq-numbered `messages` table in `SessionDO` SQLite. Append-only, linear. No row mutations, no branch tagging.
+- Rewind becomes: orchestrator creates a new Duraclaw session, copies messages 1..N from the source into the new session's log, sets `rewound_from_session_id` + `rewound_from_turn` on the new D1 row. Source session stays frozen.
 - Build the one-way sync endpoint: WS `since` cursor; server responds with seq-numbered row deltas.
 - On the client, replace the `{type: 'message'}` event dedup logic with a cursor-based subscription writing into `messagesCollection`.
 - Keep the current UI reading path working against the collection.
