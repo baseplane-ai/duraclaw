@@ -5,6 +5,7 @@ import { SwUpdateBanner } from '~/components/sw-update-banner'
 import { SidebarInset, SidebarProvider } from '~/components/ui/sidebar'
 import { LayoutProvider } from '~/context/layout-provider'
 import { SearchProvider } from '~/context/search-provider'
+import { useSwNavigate } from '~/hooks/use-sw-navigate'
 import { getCookie } from '~/lib/cookies'
 import { cn } from '~/lib/utils'
 
@@ -14,6 +15,9 @@ type AuthenticatedLayoutProps = {
 
 export function AuthenticatedLayout({ children }: AuthenticatedLayoutProps) {
   const defaultOpen = getCookie('sidebar_state') !== 'false'
+  // Listen for SW_NAVIGATE messages from the service worker (push taps on an
+  // already-running PWA) and route through TanStack Router.
+  useSwNavigate()
   return (
     <SearchProvider>
       <LayoutProvider>

@@ -28,35 +28,32 @@ self.addEventListener('push', (event) => {
 })
 
 /**
- * Navigate an existing PWA window to `target`, or open a new one.
+ * Route a notification tap to the target URL.
  *
- * On mobile (installed PWA in standalone mode), calling
- * `clients.openWindow(url)` while the app is already running in the
- * background typically focuses the existing window *without navigating*,
- * so users tapping a push notification would land on whatever page the
- * app last showed (usually `/`) instead of the session link. Enumerate
- * existing same-origin clients first, navigate+focus one if present,
- * and only fall back to openWindow when no client exists (cold start).
+ * Mobile PWA quirks we have to work around:
+ *   - `clients.openWindow(url)` focuses an existing window without navigating it
+ *     (so tapping a notification refocuses the app on whatever page it was on).
+ *   - `WindowClient.navigate(url)` is unreliable on Android Chrome standalone
+ *     PWAs: it frequently resolves to `null` or silently no-ops even when the
+ *     client is controlled and the URL is in scope. Relying on its return value
+ *     (as an earlier version of this helper did) leaves the app focused on the
+ *     wrong page.
+ *
+ * Instead, if a client exists, postMessage the target URL to it and let the SPA
+ * handle routing via TanStack Router (see useSwNavigate hook). Cold-start with
+ * no existing client falls back to openWindow, which DOES navigate when opening
+ * a brand-new window.
  */
 async function openOrFocus(target: string): Promise<void> {
   const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
   for (const client of all) {
     const win = client as WindowClient
     try {
-      const navigated = await win.navigate(target)
-      if (navigated) {
-        await (navigated as WindowClient).focus()
-        return
-      }
-    } catch {
-      // navigate() can reject for cross-origin or out-of-scope URLs —
-      // fall through to focus-without-navigate, then openWindow.
-    }
-    try {
+      win.postMessage({ type: 'SW_NAVIGATE', url: target })
       await win.focus()
       return
     } catch {
-      // client may be gone; continue searching.
+      // Client may be gone or cross-origin — try the next one.
     }
   }
   await self.clients.openWindow(target)

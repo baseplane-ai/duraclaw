@@ -149,10 +149,9 @@ describe('service worker handlers', () => {
       expect(mockOpenWindow).toHaveBeenCalledWith('/?session=456')
     })
 
-    it('navigates and focuses an existing client when one is present (warm PWA)', async () => {
-      const navigated = { focus: vi.fn(() => Promise.resolve()) }
+    it('postMessages target url to existing client and focuses it (warm PWA)', async () => {
       const existing = {
-        navigate: vi.fn(() => Promise.resolve(navigated)),
+        postMessage: vi.fn(),
         focus: vi.fn(() => Promise.resolve()),
       }
       mockMatchAll.mockResolvedValueOnce([existing])
@@ -161,15 +160,19 @@ describe('service worker handlers', () => {
       handlers.notificationclick(event)
       await flushWaitUntil(event)
 
-      expect(existing.navigate).toHaveBeenCalledWith('/?session=456')
-      expect(navigated.focus).toHaveBeenCalled()
+      expect(existing.postMessage).toHaveBeenCalledWith({
+        type: 'SW_NAVIGATE',
+        url: '/?session=456',
+      })
+      expect(existing.focus).toHaveBeenCalled()
       expect(mockOpenWindow).not.toHaveBeenCalled()
     })
 
-    it('falls back to focus when navigate() rejects (out-of-scope / cross-origin client)', async () => {
+    it('does not call WindowClient.navigate (works around Android Chrome quirk)', async () => {
       const existing = {
-        navigate: vi.fn(() => Promise.reject(new Error('out of scope'))),
+        postMessage: vi.fn(),
         focus: vi.fn(() => Promise.resolve()),
+        navigate: vi.fn(() => Promise.resolve(null)),
       }
       mockMatchAll.mockResolvedValueOnce([existing])
       const event = makeClickEvent({ url: '/?session=456' })
@@ -177,8 +180,29 @@ describe('service worker handlers', () => {
       handlers.notificationclick(event)
       await flushWaitUntil(event)
 
-      expect(existing.navigate).toHaveBeenCalledWith('/?session=456')
-      expect(existing.focus).toHaveBeenCalled()
+      expect(existing.navigate).not.toHaveBeenCalled()
+    })
+
+    it('falls through to next client when focus() rejects on a stale client', async () => {
+      const stale = {
+        postMessage: vi.fn(),
+        focus: vi.fn(() => Promise.reject(new Error('stale'))),
+      }
+      const live = {
+        postMessage: vi.fn(),
+        focus: vi.fn(() => Promise.resolve()),
+      }
+      mockMatchAll.mockResolvedValueOnce([stale, live])
+      const event = makeClickEvent({ url: '/?session=456' })
+
+      handlers.notificationclick(event)
+      await flushWaitUntil(event)
+
+      expect(live.postMessage).toHaveBeenCalledWith({
+        type: 'SW_NAVIGATE',
+        url: '/?session=456',
+      })
+      expect(live.focus).toHaveBeenCalled()
       expect(mockOpenWindow).not.toHaveBeenCalled()
     })
 
@@ -202,10 +226,9 @@ describe('service worker handlers', () => {
       expect(mockOpenWindow).toHaveBeenCalledWith('/')
     })
 
-    it('new-session action reuses existing client via navigate+focus', async () => {
-      const navigated = { focus: vi.fn(() => Promise.resolve()) }
+    it('new-session action postMessages "/" to existing client', async () => {
       const existing = {
-        navigate: vi.fn(() => Promise.resolve(navigated)),
+        postMessage: vi.fn(),
         focus: vi.fn(() => Promise.resolve()),
       }
       mockMatchAll.mockResolvedValueOnce([existing])
@@ -214,8 +237,8 @@ describe('service worker handlers', () => {
       handlers.notificationclick(event)
       await flushWaitUntil(event)
 
-      expect(existing.navigate).toHaveBeenCalledWith('/')
-      expect(navigated.focus).toHaveBeenCalled()
+      expect(existing.postMessage).toHaveBeenCalledWith({ type: 'SW_NAVIGATE', url: '/' })
+      expect(existing.focus).toHaveBeenCalled()
       expect(mockOpenWindow).not.toHaveBeenCalled()
     })
   })
