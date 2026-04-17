@@ -41,9 +41,9 @@ import {
 import type { SessionRecord } from '~/db/sessions-collection'
 import { getPreviewText, StatusDot } from '~/features/agent-orch/session-utils'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
+import { useUserSettings } from '~/hooks/use-user-settings'
 import type { PrInfo, ProjectInfo } from '~/lib/types'
 import { cn } from '~/lib/utils'
-import { useTabStore } from '~/stores/tabs'
 
 /** ProjectInfo extended with the `hidden` flag added by the API route */
 interface ProjectInfoWithHidden extends ProjectInfo {
@@ -215,7 +215,7 @@ export function NavSessions() {
   const { setOpenMobile } = useSidebar()
   const location = useLocation()
   const navigate = useNavigate()
-  const addTab = useTabStore((s) => s.addTab)
+  const { addTab } = useUserSettings()
 
   // Fetch projects from gateway
   const [projects, setProjects] = useState<ProjectInfoWithHidden[]>([])

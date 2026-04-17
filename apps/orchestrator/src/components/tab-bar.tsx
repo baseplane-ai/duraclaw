@@ -18,8 +18,8 @@ import type { SessionRecord } from '~/db/sessions-collection'
 import { StatusDot } from '~/features/agent-orch/session-utils'
 import { useIsMobile } from '~/hooks/use-mobile'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
+import { useUserSettings } from '~/hooks/use-user-settings'
 import { cn } from '~/lib/utils'
-import { useTabStore } from '~/stores/tabs'
 
 interface TabBarProps {
   /** The session currently being viewed — drives tab highlighting. Derived from URL. */
@@ -37,7 +37,7 @@ export function TabBar({
   onNewSessionInTab,
   onNewTabForProject,
 }: TabBarProps) {
-  const { tabs, setActiveTab, removeTab } = useTabStore()
+  const { tabs, setActiveTab, removeTab } = useUserSettings()
   const { sessions } = useSessionsCollection()
   const scrollRef = useRef<HTMLDivElement>(null)
   const [canScrollLeft, setCanScrollLeft] = useState(false)

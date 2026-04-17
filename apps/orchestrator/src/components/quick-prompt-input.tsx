@@ -28,8 +28,8 @@ import {
   SelectValue,
 } from '~/components/ui/select'
 import { useUserDefaults } from '~/hooks/use-user-defaults'
+import { useUserSettings } from '~/hooks/use-user-settings'
 import type { ContentBlock } from '~/lib/types'
-import { useTabStore } from '~/stores/tabs'
 
 const MODEL_OPTIONS = [
   { value: 'claude-opus-4-7', label: 'claude-opus-4-7', agent: 'claude' },
@@ -88,8 +88,12 @@ export function QuickPromptInput({
   const [images, setImages] = useState<ImagePreview[]>([])
   const [imageError, setImageError] = useState<string | null>(null)
 
-  // Check if selected project already has a tab
-  const existingTab = useTabStore((s) => s.findTabByProject)(selectedProject)
+  // Check if selected project already has a tab + draft save/restore
+  const { findTabByProject, saveDraft, getDraft } = useUserSettings()
+  const existingTab = findTabByProject(selectedProject)
+
+  // Restore draft on mount
+  const initialDraft = getDraft('__new_session')
 
   // Update model when preferences load
   useEffect(() => {
@@ -182,6 +186,7 @@ export function QuickPromptInput({
 
     setImages([])
     setImageError(null)
+    saveDraft('__new_session', '')
   }
 
   return (
@@ -268,6 +273,8 @@ export function QuickPromptInput({
             <PromptInputTextarea
               placeholder="Describe the task, paste or attach an image..."
               autoFocus
+              defaultValue={initialDraft}
+              onChange={(e) => saveDraft('__new_session', e.currentTarget.value)}
             />
           </PromptInputBody>
           <PromptInputFooter>

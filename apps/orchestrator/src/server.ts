@@ -1,5 +1,6 @@
 import { ProjectRegistry } from './agents/project-registry'
 import { SessionDO } from './agents/session-do'
+import { UserSettingsDO } from './agents/user-settings-do'
 import { createApiApp } from './api'
 import { getRequestSession } from './api/auth-session'
 import type { Env } from './lib/types'
@@ -10,6 +11,21 @@ const apiApp = createApiApp()
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url)
+
+    // User settings DO — one per user, WS upgrade at /api/user-settings
+    if (url.pathname === '/api/user-settings' && request.headers.get('Upgrade') === 'websocket') {
+      const authSession = await getRequestSession(env, request)
+      if (!authSession) {
+        return new Response('Unauthorized', { status: 401 })
+      }
+      const doId = env.USER_SETTINGS.idFromName(authSession.userId)
+      const stub = env.USER_SETTINGS.get(doId)
+      const headers = new Headers(request.headers)
+      headers.set('x-partykit-room', authSession.userId)
+      headers.set('x-user-id', authSession.userId)
+      return stub.fetch(new Request(request, { headers }))
+    }
+
     const wsMatch = url.pathname.match(WS_ROUTE)
     if (wsMatch && request.headers.get('Upgrade') === 'websocket') {
       const sessionId = wsMatch[1]
@@ -61,4 +77,4 @@ export default {
   },
 }
 
-export { ProjectRegistry, SessionDO }
+export { ProjectRegistry, SessionDO, UserSettingsDO }

@@ -16,7 +16,7 @@ import { QuickPromptInput } from '~/components/quick-prompt-input'
 import { TabBar } from '~/components/tab-bar'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { useSwipeTabs } from '~/hooks/use-swipe-tabs'
-import { useTabStore } from '~/stores/tabs'
+import { getUserSettings, useUserSettings } from '~/hooks/use-user-settings'
 import { AgentDetailView } from './AgentDetailView'
 import type { SpawnFormConfig } from './SpawnAgentForm'
 import { getPreviewText } from './session-utils'
@@ -32,20 +32,19 @@ function AgentOrchContent() {
   const navigate = useNavigate()
   const searchSessionId = (search as { session?: string }).session ?? null
 
+  const { addTab, addNewTab } = useUserSettings()
+
   // Synchronous init: resolve selectedSessionId from URL or last active tab.
-  // Also sync the tab store on mount so highlight is correct from first render.
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(() => {
-    const tabStore = useTabStore.getState()
+    const settings = getUserSettings()
     if (searchSessionId) {
-      // URL has a session — activate the matching tab (or create one with minimal info).
-      // Session metadata will be patched in once sessions load via AgentDetailWithSpawn.
-      tabStore.activateSession(searchSessionId)
+      settings.addTab('unknown', searchSessionId)
       return searchSessionId
     }
     // No URL session — restore from the last active tab (cold launch / PWA)
-    const { tabs, activeTabId } = tabStore
-    if (activeTabId) {
-      return tabs.find((t) => t.id === activeTabId)?.sessionId ?? null
+    const { tabs: currentTabs, activeTabId: currentActiveTabId } = settings
+    if (currentActiveTabId) {
+      return currentTabs.find((t) => t.id === currentActiveTabId)?.sessionId ?? null
     }
     return null
   })
@@ -81,6 +80,23 @@ function AgentOrchContent() {
         setSpawnConfig(null)
         setQuickPromptHint(null)
         setSelectedSessionId(searchSessionId)
+
+        // Sync tab highlight to match the URL session
+        const settings = getUserSettings()
+        const matchingTab = settings.findTabBySession(searchSessionId)
+        if (matchingTab) {
+          settings.setActiveTab(matchingTab.id)
+        } else {
+          // Session has no tab yet — create one from available session data
+          const session = sessions.find((s) => s.id === searchSessionId)
+          if (session) {
+            settings.addTab(
+              session.project || 'unknown',
+              searchSessionId,
+              session.title || searchSessionId.slice(0, 12),
+            )
+          }
+        }
       }
     } else if (!searchSessionId && selectedSessionId && prev !== null) {
       // Navigated from a session URL to "/" (e.g. "New session" click) — clear selection.
@@ -111,8 +127,6 @@ function AgentOrchContent() {
       .catch(() => {})
       .finally(() => setProjectsLoading(false))
   }, [])
-
-  const { addTab, addNewTab } = useTabStore()
 
   const handleSpawn = useCallback(
     async (config: SpawnFormConfig & { newTab?: boolean }) => {
@@ -223,17 +237,17 @@ function AgentOrchContent() {
         if (selectedSessionId) {
           const session = sessions.find((s) => s.id === selectedSessionId)
           const project = session?.project || 'unknown'
-          useTabStore.getState().addTab(project, selectedSessionId)
+          getUserSettings().addTab(project, selectedSessionId)
         }
       }
 
       // Cmd+W: close current tab
       if (isMod && e.key === 'w') {
         e.preventDefault()
-        const { tabs, activeTabId } = useTabStore.getState()
-        if (activeTabId) {
-          useTabStore.getState().removeTab(activeTabId)
-          if (tabs.length <= 1) {
+        const settings = getUserSettings()
+        if (settings.activeTabId) {
+          settings.removeTab(settings.activeTabId)
+          if (settings.tabs.length <= 1) {
             handleLastTabClosed()
           }
         }
@@ -242,11 +256,11 @@ function AgentOrchContent() {
       // Cmd+1-9: switch to Nth tab
       if (isMod && e.key >= '1' && e.key <= '9') {
         const idx = parseInt(e.key, 10) - 1
-        const tabs = useTabStore.getState().tabs
-        if (idx < tabs.length) {
+        const settings = getUserSettings()
+        if (idx < settings.tabs.length) {
           e.preventDefault()
-          const tab = tabs[idx]
-          useTabStore.getState().setActiveTab(tab.id)
+          const tab = settings.tabs[idx]
+          settings.setActiveTab(tab.id)
           handleSelectSession(tab.sessionId)
         }
       }
@@ -344,8 +358,9 @@ function AgentDetailWithSpawn({
       // Update tab title when session gets a summary
       const title = agent.state.summary || agent.state.project
       if (title) {
-        const tab = useTabStore.getState().findTabBySession(sessionId)
-        if (tab) useTabStore.getState().updateTabTitle(tab.id, title)
+        const settings = getUserSettings()
+        const tab = settings.findTabBySession(sessionId)
+        if (tab) settings.updateTabTitle(tab.id, title)
       }
     }
   }, [agent.state, sessionId, onStateChange])

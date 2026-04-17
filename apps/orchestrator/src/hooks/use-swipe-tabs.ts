@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from 'react'
-import { useTabStore } from '~/stores/tabs'
+import { getUserSettings } from '~/hooks/use-user-settings'
 
 const EDGE_ZONE = 30
 const SWIPE_DISTANCE = 60
@@ -22,7 +22,7 @@ export function useSwipeTabs(onSelectSession: (sessionId: string) => void) {
 
   const handleSwipe = useCallback(
     (dir: 'left' | 'right') => {
-      const { tabs, activeTabId, setActiveTab } = useTabStore.getState()
+      const { tabs, activeTabId, setActiveTab } = getUserSettings()
       if (tabs.length < 2 || !activeTabId) return false
       const idx = tabs.findIndex((t) => t.id === activeTabId)
       const nextIdx = dir === 'left' ? idx + 1 : idx - 1

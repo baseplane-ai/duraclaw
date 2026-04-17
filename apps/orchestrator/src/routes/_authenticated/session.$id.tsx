@@ -8,7 +8,7 @@ import { getPreviewText } from '~/features/agent-orch/session-utils'
 import { useCodingAgent } from '~/features/agent-orch/use-coding-agent'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { useSwipeTabs } from '~/hooks/use-swipe-tabs'
-import { useTabStore } from '~/stores/tabs'
+import { getUserSettings, useUserSettings } from '~/hooks/use-user-settings'
 
 export const Route = createFileRoute('/_authenticated/session/$id')({
   component: SessionDetailPage,
@@ -18,7 +18,7 @@ function SessionDetailPage() {
   const { id: sessionId } = Route.useParams()
   const navigate = useNavigate()
   const { sessions, updateSession } = useSessionsCollection()
-  const addTab = useTabStore((s) => s.addTab)
+  const { addTab } = useUserSettings()
 
   // Sync tab store on mount — synchronous via initializer pattern
   const [_initDone] = useState(() => {
@@ -26,7 +26,7 @@ function SessionDetailPage() {
     const title =
       session?.title || getPreviewText(session ?? { prompt: undefined }) || sessionId.slice(0, 12)
     const project = session?.project || 'unknown'
-    useTabStore.getState().activateSession(sessionId, { project, title })
+    getUserSettings().addTab(project, sessionId, title)
     return true
   })
 
@@ -106,8 +106,9 @@ function SessionDetailWithSync({
       // Update tab title when session gets a summary
       const title = agent.state.summary || agent.state.project
       if (title) {
-        const tab = useTabStore.getState().findTabBySession(sessionId)
-        if (tab) useTabStore.getState().updateTabTitle(tab.id, title)
+        const settings = getUserSettings()
+        const tab = settings.findTabBySession(sessionId)
+        if (tab) settings.updateTabTitle(tab.id, title)
       }
     }
   }, [agent.state, sessionId, onStateChange])
