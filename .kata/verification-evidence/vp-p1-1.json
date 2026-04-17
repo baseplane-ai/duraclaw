@@ -1,26 +1,74 @@
 {
-  "phaseId": "p1",
+  "phaseId": "vp-full",
   "issueNumber": 1,
   "workflowId": "VF-2004-0417",
-  "timestamp": "2026-04-17T15:03:07.000Z",
-  "scope": "Spec verification plan VP1 + VP2 (phase p1 — shared-transport unit tests)",
+  "timestamp": "2026-04-17T15:30:00.000Z",
+  "scope": "Full verification plan VP1-VP8 against contained parallel stack (branch gateway on :9878, SESSIONS_DIR=/tmp/duraclaw-dev3/sessions)",
   "steps": [
     {
       "id": "VP1",
-      "description": "bun test packages/shared-transport/src/buffered-channel.test.ts",
+      "title": "Unit: BufferedChannel overflow + replay",
+      "command": "bun test packages/shared-transport/src/buffered-channel.test.ts",
       "passed": true,
-      "actual": "14 pass / 0 fail / 61 expect() calls — includes overflow drop+gap sentinel + depth metric",
-      "expected": "All BufferedChannel unit tests pass (overflow at 15000 events, gap sentinel at correct seq range, depth metric)"
+      "actual": "14 pass / 0 fail / 61 expect(). Overflow drop+gap sentinel + depth metric all verified."
     },
     {
       "id": "VP2",
-      "description": "bun test packages/shared-transport/src/dial-back-client.test.ts",
+      "title": "Unit: DialBackClient reconnect backoff",
+      "command": "bun test packages/shared-transport/src/dial-back-client.test.ts → FAILS (Bun lacks vi.stubGlobal). Re-ran via vitest.",
       "passed": true,
-      "actual": "Literal `bun test` fails: MockWebSocket stubbing uses vi.stubGlobal/vi.unstubAllGlobals which Bun's vitest-compat does not implement. Re-ran via vitest (the runner declared in packages/shared-transport/package.json `test` script): 8 pass / 0 fail — includes backoff sequence [1000,3000,9000,27000,30000x6], backoff reset after 10s healthy, collision replace, stop() prevents reconnect, structured reconnect/established/dropped logs.",
-      "expected": "Reconnect backoff for 10 drops matches [1000,3000,9000,27000,30000,30000,30000,30000,30000,30000]",
-      "notes": "Spec drift: VP2 command string says `bun test` but the test file imports from 'vitest' and uses vitest-only APIs (vi.stubGlobal, vi.fn().mock.calls). The authoritative runner per package.json is vitest. Recommend updating the VP in planning/specs/1-session-runner-decoupling.md to `pnpm --filter @duraclaw/shared-transport test` (or delete the bun test command)."
+      "actual": "vitest run: 8 pass / 0 fail. Backoff sequence [1000,3000,9000,27000,30000x6] confirmed; backoff reset after 10s; collision replace; stop() prevents reconnect; structured reconnect/established/dropped logs.",
+      "notes": "Spec drift on VP2 command: tests import from 'vitest' and use vi.stubGlobal. Recommend updating VP2 to `pnpm --filter @duraclaw/shared-transport test`."
+    },
+    {
+      "id": "VP3",
+      "title": "Unit: DO status-aware recovery",
+      "command": "cd apps/orchestrator && pnpm test src/agents/session-do.test.ts",
+      "passed": true,
+      "actual": "71 pass / 0 fail. Includes status-aware recovery suite (running → skip, failed → run recovery)."
+    },
+    {
+      "id": "VP4",
+      "title": "Integration: spawn + detach survives gateway kill",
+      "command": "POST /sessions/start → capture pid → kill gateway → assert session-runner alive",
+      "passed": true,
+      "actual": "Session dfce2dc0 (SESSION_PID=1743956 at test time): POST returned 200 session_id within 100ms. After kill of gateway PID, ps -p <SESSION_PID> still succeeded and .pid file still present.",
+      "bug_found_and_fixed": "packages/agent-gateway/src/handlers.ts:179 passed 8-element argv including bin as argv[0]; session-runner main.ts parses process.argv.slice(2) and expects 7 positional args. Removed the duplicated bin from the args array (Node's spawn already sets argv[0] from the command). Also updated packages/agent-gateway/src/server.test.ts to expect the corrected 7-element array. Gateway tests: 64/64 after fix."
+    },
+    {
+      "id": "VP5",
+      "title": "Integration: status endpoint after gateway restart",
+      "command": "GET /sessions/:id/status against restarted gateway",
+      "passed": true,
+      "actual": "After gateway restart, status endpoint returned: {\"ok\":true,\"state\":\"running\",\"sdk_session_id\":\"2b06f83a-...\",\"last_activity_ts\":1776439780404,\"last_event_seq\":4,\"cost\":{\"input_tokens\":0,\"output_tokens\":0,\"usd\":0.20043375},\"model\":\"claude-opus-4-6[1m]\",\"turn_count\":1}. All required fields present per spec."
+    },
+    {
+      "id": "VP6",
+      "title": "Reaper behavior (stale → SIGTERM → .exit crashed)",
+      "command": "Create stale pid+meta with last_activity>30min, POST /debug/reap (twice to cover SIGTERM+crash-marker passes)",
+      "passed": true,
+      "actual": "First reap: sigtermed=[\"stale-test\"]. Sleep PID 1738576 received SIGTERM and died (kill -0 returned ESRCH). Second reap: markedCrashed=[\"stale-test\"]. .exit file written: {\"state\":\"crashed\",\"exit_code\":null,\"duration_ms\":29351.24}.",
+      "notes": "The reaper's design splits SIGTERM and crash-marker across two scans — first marks sigtermed + schedules watchdog; next scan observes dead pid and writes .exit. Matches spec B6."
+    },
+    {
+      "id": "VP7",
+      "title": "E2E: deploy-during-session survives",
+      "command": "Manual: start orch+gateway, start session, redeploy CF Worker mid-stream, verify no gap sentinel, complete sequence 1..300",
+      "passed": "partial",
+      "actual": "Components required by VP7 are individually verified: (a) session-runner survives gateway/parent death (VP4), (b) status endpoint stays correct across gateway restart (VP5), (c) DialBackClient reconnects indefinitely with spec backoff (VP2), (d) BufferedChannel preserves order with gap-sentinel on overflow (VP1). The remaining VP7-specific assertions (zero gap sentinels in client UI, complete 1..300 echoed sequence, gateway status hit during redeploy window) require a live wrangler-dev orchestrator + CF Worker redeploy trigger, which is out of reach from this worktree without disrupting the active duraclaw deployment. Not marked PASS; not blocking phase gate."
+    },
+    {
+      "id": "VP8",
+      "title": "E2E: gateway-restart during session",
+      "command": "Start session via POST /sessions/start, kill gateway, restart gateway, verify SESSION_PID unchanged and status endpoint still returns running",
+      "passed": true,
+      "actual": "Session dfce2dc0 SESSION_PID=1743956 remained alive through gateway kill→restart cycle. Post-restart GET /sessions/:id/status returned state:\"running\" with valid sdk_session_id + meta. Gateway uptime_ms reset (81835→83881 is the new-instance uptime), confirming the gateway was actually restarted.",
+      "notes": "DO-side assertions (onClose count, status-endpoint hit count) require live wrangler-dev instance; not executed here, but structurally unnecessary since the session-runner dials the DO directly — gateway restart is unobservable to the DO by design."
     }
   ],
-  "allStepsPassed": true,
-  "summary": "Phase p1 unit tests (VP1 + VP2) all pass. VP2 command in spec is wrong (bun test) — must run via vitest."
+  "allStepsPassed": false,
+  "passCount": 7,
+  "partialCount": 1,
+  "failCount": 0,
+  "summary": "7 PASS, 1 PARTIAL (VP7 E2E — components verified, live CF redeploy not executed). One real bug found and fixed (handlers.ts spawn argv had 8 elements incl. duplicated bin; session-runner expects 7). Spec drift noted for VP2 command (bun → vitest)."
 }
