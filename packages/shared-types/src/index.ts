@@ -503,6 +503,13 @@ export interface SessionState {
   error: string | null
   summary: string | null
   sdk_session_id: string | null
+  /**
+   * Per-session UUID minted by the DO on each triggerGatewayDial and sent to
+   * the gateway as the WS dial-back bearer (?token=<uuid>). Validated timing-
+   * safely on gateway-role onConnect. Rotated on new dial, cleared on terminal
+   * state. Lives in the DO's setState JSON blob — no SQLite migration.
+   */
+  active_callback_token?: string
   /** @deprecated Use gate instead */
   pending_question?: {
     tool_call_id: string

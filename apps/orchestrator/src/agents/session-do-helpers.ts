@@ -1,8 +1,42 @@
+import { timingSafeEqual } from 'node:crypto'
+
 /** Minimal tagged-template SQL interface used by extracted helper functions. */
 export type SqlFn = <T>(
   strings: TemplateStringsArray,
   ...values: (string | number | boolean | null)[]
 ) => T[]
+
+/** Default stale threshold for the DO watchdog (ms). */
+export const DEFAULT_STALE_THRESHOLD_MS = 90_000
+
+/**
+ * Resolve the stale-threshold used by the DO watchdog alarm. Reads from
+ * env.STALE_THRESHOLD_MS when present and parsable as a positive integer;
+ * otherwise falls back to {@link DEFAULT_STALE_THRESHOLD_MS}.
+ */
+export function resolveStaleThresholdMs(raw: string | undefined): number {
+  if (!raw) return DEFAULT_STALE_THRESHOLD_MS
+  const n = Number.parseInt(raw, 10)
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_STALE_THRESHOLD_MS
+  return n
+}
+
+/**
+ * Constant-time string compare. Returns false if lengths differ (avoids the
+ * length-mismatch throw from Node's timingSafeEqual) and otherwise defers to
+ * node:crypto's timingSafeEqual over utf-8 bytes.
+ */
+export function constantTimeEquals(a: string, b: string): boolean {
+  if (typeof a !== 'string' || typeof b !== 'string') return false
+  const ab = Buffer.from(a, 'utf8')
+  const bb = Buffer.from(b, 'utf8')
+  if (ab.length !== bb.length) return false
+  try {
+    return timingSafeEqual(ab, bb)
+  } catch {
+    return false
+  }
+}
 
 /**
  * Load turnCounter and currentTurnMessageId from assistant_config.

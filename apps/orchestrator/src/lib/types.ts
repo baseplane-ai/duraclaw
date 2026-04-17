@@ -50,4 +50,6 @@ export interface Env {
   VAPID_PRIVATE_KEY?: string
   VAPID_SUBJECT?: string
   BOOTSTRAP_TOKEN?: string
+  /** Watchdog stale threshold in ms. Default 90_000 when unset. */
+  STALE_THRESHOLD_MS?: string
 }
