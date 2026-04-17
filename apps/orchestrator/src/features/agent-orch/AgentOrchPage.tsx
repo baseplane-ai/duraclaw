@@ -31,6 +31,9 @@ function AgentOrchContent() {
   const search = useSearch({ from: '/_authenticated/' })
   const navigate = useNavigate()
   const searchSessionId = (search as { session?: string }).session ?? null
+  const searchNewSessionProject =
+    (search as { newSessionProject?: string }).newSessionProject ?? null
+  const searchNewTab = (search as { newTab?: boolean }).newTab ?? false
 
   const { addTab, addNewTab } = useUserSettings()
 
@@ -53,10 +56,24 @@ function AgentOrchContent() {
   const restoredSessionId = !searchSessionId ? selectedSessionId : null
   const [spawnConfig, setSpawnConfig] = useState<SpawnConfig | null>(null)
   // Pre-fill hints for the QuickPromptInput composer, set by tab context menu actions.
+  // Seed from URL search params so the tab context menu works from /session/$id too.
   const [quickPromptHint, setQuickPromptHint] = useState<{
     project: string
     newTab: boolean
-  } | null>(null)
+  } | null>(() =>
+    searchNewSessionProject ? { project: searchNewSessionProject, newTab: searchNewTab } : null,
+  )
+
+  // Strip the hint search params from the URL once consumed so reloads don't re-trigger them.
+  useEffect(() => {
+    if (searchNewSessionProject) {
+      navigate({
+        to: '/',
+        search: (prev) => ({ ...prev, newSessionProject: undefined, newTab: undefined }),
+        replace: true,
+      })
+    }
+  }, [searchNewSessionProject, navigate])
   const prevSearchRef = useRef(searchSessionId)
   const didRestoreRef = useRef(false)
 

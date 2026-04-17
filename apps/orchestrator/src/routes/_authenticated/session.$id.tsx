@@ -45,6 +45,22 @@ function SessionDetailPage() {
     navigate({ to: '/' })
   }, [navigate])
 
+  // Tab context menu → "New session in tab" / "New tab for project".
+  // Pass the intent via URL search params; AgentOrchPage seeds its quickPromptHint from them.
+  const handleNewSessionInTab = useCallback(
+    (project: string) => {
+      navigate({ to: '/', search: { newSessionProject: project, newTab: false } })
+    },
+    [navigate],
+  )
+
+  const handleNewTabForProject = useCallback(
+    (project: string) => {
+      navigate({ to: '/', search: { newSessionProject: project, newTab: true } })
+    },
+    [navigate],
+  )
+
   const handleStateChange = useCallback(
     (sid: string, patch: Record<string, unknown>) => {
       updateSession(sid, patch)
@@ -62,6 +78,8 @@ function SessionDetailPage() {
           activeSessionId={sessionId}
           onSelectSession={handleSelectSession}
           onLastTabClosed={handleLastTabClosed}
+          onNewSessionInTab={handleNewSessionInTab}
+          onNewTabForProject={handleNewTabForProject}
         />
         <div
           className={
