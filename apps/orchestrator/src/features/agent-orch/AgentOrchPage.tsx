@@ -27,7 +27,7 @@ export function AgentOrchPage() {
 }
 
 function AgentOrchContent() {
-  const { sessions, updateSession } = useSessionsCollection()
+  const { sessions, isLoading: sessionsLoading, updateSession } = useSessionsCollection()
   const search = useSearch({ from: '/_authenticated/' })
   const navigate = useNavigate()
   const searchSessionId = (search as { session?: string }).session ?? null
@@ -112,22 +112,21 @@ function AgentOrchContent() {
           settings.setActiveTab(matchingTab.id)
         }
       } else {
-        // Session has no tab yet — create one UNCONDITIONALLY with whatever
-        // metadata we have, falling back to placeholders. This covers:
-        //   - sessions that are archived (filtered out of `sessions`)
-        //   - sessions that haven't synced into the local collection yet
-        //   - sessions created server-side (e.g., server pushes) the client
-        //     never saw listed
-        // The AgentDetailWithSpawn effect below updates the tab title once
-        // the DO state arrives, so "sess-abcdef" placeholders get replaced
-        // with real summaries when the WS connects.
+        // Session has no tab yet — create one using real metadata so addTab's
+        // byProject branch can merge into an existing project tab.
         const session = sessions.find((s) => s.id === searchSessionId)
-        const project = session?.project || 'unknown'
-        const title =
-          session?.title ||
-          getPreviewText(session ?? { prompt: undefined }) ||
-          searchSessionId.slice(0, 12)
-        settings.addTab(project, searchSessionId, title)
+        if (session?.project) {
+          const title = session.title || getPreviewText(session) || session.project
+          settings.addTab(session.project, searchSessionId, title)
+        } else if (!sessionsLoading) {
+          // Sessions finished loading but this one isn't in the list
+          // (archived, cross-device, etc.). Create a placeholder so the
+          // tab bar has something. The DO state sync refines it later.
+          settings.addTab('unknown', searchSessionId, searchSessionId.slice(0, 12))
+        }
+        // While sessionsLoading, skip tab creation — the effect re-runs
+        // when sessions arrives. This prevents phantom "unknown" tabs that
+        // bypass addTab's byProject merge with existing project tabs.
       }
     }
 
@@ -147,7 +146,7 @@ function AgentOrchContent() {
       setSpawnConfig(null)
       setSelectedSessionId(null)
     }
-  }, [searchSessionId, selectedSessionId, quickPromptHint, sessions])
+  }, [searchSessionId, selectedSessionId, quickPromptHint, sessions, sessionsLoading])
   const [projects, setProjects] = useState<
     Array<{ name: string; path: string; repo_origin?: string | null }>
   >([])
