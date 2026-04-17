@@ -1138,10 +1138,16 @@ export class SessionDO extends Agent<Env, SessionState> {
   @callable()
   async sendMessage(content: string | ContentBlock[]): Promise<{ ok: boolean; error?: string }> {
     const { status } = this.state
-    const isActive = status === 'running' || status === 'waiting_gate'
-    const isResumable = status === 'idle' && this.state.sdk_session_id
+    // A session-runner stays alive through `type=result` and blocks waiting on
+    // the next stream-input (see claude-runner.ts multi-turn loop). Route by
+    // connection liveness, not by DO status: if the gateway-role WS is still
+    // attached, reuse that runner — dialling a fresh one would collide with
+    // the existing sdk_session_id inside session-runner's hasLiveResume guard
+    // and nothing would happen from the user's perspective.
+    const hasLiveRunner = Boolean(this.getGatewayConnectionId())
+    const isResumable = !hasLiveRunner && status === 'idle' && this.state.sdk_session_id
 
-    if (!isActive && !isResumable) {
+    if (!hasLiveRunner && !isResumable) {
       return { ok: false, error: `Cannot send message: status is '${status}'` }
     }
 
@@ -1162,7 +1168,11 @@ export class SessionDO extends Agent<Env, SessionState> {
       console.error(`[SessionDO:${this.ctx.id}] Failed to persist user message:`, err)
     }
 
-    if (isActive) {
+    if (hasLiveRunner) {
+      // Promote state back to running so the UI reflects the new turn.
+      if (status !== 'running' && status !== 'waiting_gate') {
+        this.updateState({ status: 'running', gate: null, error: null })
+      }
       this.sendToGateway({
         type: 'stream-input',
         session_id: this.state.session_id ?? '',
@@ -1700,7 +1710,12 @@ export class SessionDO extends Agent<Env, SessionState> {
         }
 
         // PRESERVE all existing side effects — always transition to idle.
-        // Terminal state: clear active_callback_token (B4b).
+        // NOTE: `type=result` is a *turn-complete* signal from the SDK, not a
+        // session-complete signal. The session-runner stays alive waiting on
+        // stream-input for the next turn (see claude-runner multi-turn loop),
+        // so we keep active_callback_token intact — clearing it would block the
+        // runner from re-dialling if its WS flaps. The token is cleared only
+        // on true terminal transitions (stopped/failed/aborted/crashed).
         this.updateState({
           status: 'idle',
           completed_at: new Date().toISOString(),
@@ -1711,7 +1726,6 @@ export class SessionDO extends Agent<Env, SessionState> {
           error: event.is_error ? event.result : null,
           summary: event.sdk_summary ?? this.state.summary,
           gate: null,
-          active_callback_token: undefined,
         })
         this.syncStatusToRegistry()
         this.syncResultToRegistry()
