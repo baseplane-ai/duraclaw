@@ -13,40 +13,39 @@ describe('Conversation component', () => {
     expect(content).toContain('export const ConversationScrollButton')
   })
 
-  it('Conversation has initial="instant" to prevent scroll animation on load', () => {
+  it('uses custom auto-scroll context (not use-stick-to-bottom)', () => {
     const conversationPath = join(__dirname, 'conversation.tsx')
     const content = readFileSync(conversationPath, 'utf-8')
 
-    expect(content).toMatch(/initial\s*=\s*["']instant["']/)
+    // Should NOT depend on use-stick-to-bottom
+    expect(content).not.toContain("from 'use-stick-to-bottom'")
+    // Should use our own context
+    expect(content).toContain('useAutoScroll')
+    expect(content).toContain('useAutoScrollContext')
   })
 
-  it('Conversation has resize="instant" to prevent scroll animation on content resize', () => {
+  it('auto-scroll uses ResizeObserver for content growth', () => {
     const conversationPath = join(__dirname, 'conversation.tsx')
     const content = readFileSync(conversationPath, 'utf-8')
 
-    // This is critical to prevent animated scrolling when messages load
-    expect(content).toMatch(/resize\s*=\s*["']instant["']/)
+    expect(content).toContain('ResizeObserver')
   })
 
-  it('StickToBottom is imported from use-stick-to-bottom', () => {
+  it('respects user scroll-up via escaped ref', () => {
     const conversationPath = join(__dirname, 'conversation.tsx')
     const content = readFileSync(conversationPath, 'utf-8')
 
-    expect(content).toContain("from 'use-stick-to-bottom'")
-    expect(content).toContain('StickToBottom')
+    // The scroll handler should detect upward scrolling
+    expect(content).toContain('escaped.current = true')
+    // And re-engage when near bottom
+    expect(content).toContain('escaped.current = false')
   })
 
-  it('ConversationContent uses StickToBottom.Content', () => {
+  it('ConversationContent scrolls to bottom on mount via useLayoutEffect', () => {
     const conversationPath = join(__dirname, 'conversation.tsx')
     const content = readFileSync(conversationPath, 'utf-8')
 
-    expect(content).toContain('StickToBottom.Content')
-  })
-
-  it('ConversationScrollButton uses useStickToBottomContext', () => {
-    const conversationPath = join(__dirname, 'conversation.tsx')
-    const content = readFileSync(conversationPath, 'utf-8')
-
-    expect(content).toContain('useStickToBottomContext')
+    expect(content).toContain('useLayoutEffect')
+    expect(content).toContain('el.scrollTop = el.scrollHeight - el.clientHeight')
   })
 })

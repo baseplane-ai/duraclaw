@@ -2,90 +2,166 @@
 
 import type { UIMessage } from 'ai'
 import { ArrowDownIcon, DownloadIcon } from 'lucide-react'
-import type { ComponentProps } from 'react'
-import { useCallback, useEffect, useLayoutEffect } from 'react'
-import { StickToBottom, useStickToBottomContext } from 'use-stick-to-bottom'
+import {
+  type ComponentProps,
+  createContext,
+  type RefCallback,
+  useCallback,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react'
 import { cn } from '../lib/utils'
 import { Button } from '../ui/button'
 
-export type ConversationProps = ComponentProps<typeof StickToBottom>
+// ---------------------------------------------------------------------------
+// Auto-scroll context — replaces use-stick-to-bottom with a simple, touch-
+// friendly implementation.  Rules:
+//   1. When content grows and user is "at bottom", scroll to bottom instantly.
+//   2. When user scrolls up, stop auto-scrolling (set escapedFromLock).
+//   3. When user scrolls back near bottom, re-engage auto-scroll.
+//   4. scrollToBottom() manually re-engages from the scroll button.
+// ---------------------------------------------------------------------------
 
-export const Conversation = ({ className, ...props }: ConversationProps) => (
-  <StickToBottom
-    className={cn('relative flex-1 overflow-y-hidden', className)}
-    initial="instant"
-    resize="instant"
-    role="log"
-    {...props}
-  />
-)
+const NEAR_BOTTOM_PX = 70
 
-export type ConversationContentProps = ComponentProps<typeof StickToBottom.Content>
+interface AutoScrollContext {
+  scrollRef: RefCallback<HTMLDivElement>
+  contentRef: RefCallback<HTMLDivElement>
+  isAtBottom: boolean
+  scrollToBottom: () => void
+}
 
-export const ConversationContent = ({ className, ...props }: ConversationContentProps) => {
-  const { scrollRef, stopScroll } = useStickToBottomContext()
+const Ctx = createContext<AutoScrollContext | null>(null)
 
-  // Scroll to bottom before first paint so the user never sees content at scrollTop=0.
-  // StickToBottom's ResizeObserver fires asynchronously (after paint), causing a visible
-  // one-frame flash of content scrolled to the top on remount. This layout effect runs
-  // before paint on mount only — running on every render would override the library's
-  // scroll-up escape and lock the user to the bottom.
+function useAutoScrollContext() {
+  const ctx = useContext(Ctx)
+  if (!ctx) throw new Error('useAutoScrollContext must be used within <Conversation>')
+  return ctx
+}
+
+function useAutoScroll() {
+  const [isAtBottom, setIsAtBottom] = useState(true)
+  const scrollEl = useRef<HTMLDivElement | null>(null)
+  const contentEl = useRef<HTMLDivElement | null>(null)
+  const escaped = useRef(false)
+
+  // Scroll listener — detect user scroll direction
+  useEffect(() => {
+    const el = scrollEl.current
+    if (!el) return
+    let lastTop = el.scrollTop
+
+    const onScroll = () => {
+      const { scrollTop, scrollHeight, clientHeight } = el
+      const nearBottom = scrollHeight - scrollTop - clientHeight < NEAR_BOTTOM_PX
+
+      if (scrollTop < lastTop && !nearBottom) {
+        // Scrolling up and away from bottom
+        escaped.current = true
+      }
+
+      if (nearBottom) {
+        escaped.current = false
+      }
+
+      setIsAtBottom(nearBottom)
+      lastTop = scrollTop
+    }
+
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => el.removeEventListener('scroll', onScroll)
+  }, [])
+
+  // ResizeObserver — auto-scroll when content grows and user hasn't scrolled up
+  useEffect(() => {
+    const content = contentEl.current
+    const scroll = scrollEl.current
+    if (!content || !scroll) return
+
+    const ro = new ResizeObserver(() => {
+      if (!escaped.current) {
+        scroll.scrollTop = scroll.scrollHeight
+      }
+    })
+    ro.observe(content)
+    return () => ro.disconnect()
+  }, [])
+
+  const scrollToBottom = useCallback(() => {
+    escaped.current = false
+    const el = scrollEl.current
+    if (el) {
+      el.scrollTop = el.scrollHeight
+      setIsAtBottom(true)
+    }
+  }, [])
+
+  // Ref callbacks that wire up the elements
+  const scrollRef: RefCallback<HTMLDivElement> = useCallback((node) => {
+    scrollEl.current = node
+  }, [])
+
+  const contentRef: RefCallback<HTMLDivElement> = useCallback((node) => {
+    contentEl.current = node
+  }, [])
+
+  return { scrollRef, contentRef, isAtBottom, scrollToBottom }
+}
+
+// ---------------------------------------------------------------------------
+// Public components — same API as before
+// ---------------------------------------------------------------------------
+
+export type ConversationProps = ComponentProps<'div'>
+
+export const Conversation = ({ className, children, ...props }: ConversationProps) => {
+  const ctx = useAutoScroll()
+  return (
+    <Ctx.Provider value={ctx}>
+      <div className={cn('relative flex-1 overflow-y-clip', className)} role="log" {...props}>
+        {children}
+      </div>
+    </Ctx.Provider>
+  )
+}
+
+export type ConversationContentProps = ComponentProps<'div'>
+
+export const ConversationContent = ({
+  className,
+  children,
+  ...props
+}: ConversationContentProps) => {
+  const { scrollRef, contentRef } = useAutoScrollContext()
+  const scrollNode = useRef<HTMLDivElement | null>(null)
+
+  // Wire up the ref callback and keep a local ref for the layout effect
+  const mergedScrollRef: RefCallback<HTMLDivElement> = useCallback(
+    (node) => {
+      scrollNode.current = node
+      scrollRef(node)
+    },
+    [scrollRef],
+  )
+
+  // Scroll to bottom before first paint to avoid a flash of content at scrollTop=0
   useLayoutEffect(() => {
-    const el = scrollRef.current
+    const el = scrollNode.current
     if (el) {
       el.scrollTop = el.scrollHeight - el.clientHeight
     }
-  }, [scrollRef])
+  }, [])
 
-  // On mobile, the library detects scroll-up via handleWheel (deltaY < 0) which
-  // doesn't fire for touch scrolling. The fallback handleScroll uses setTimeout(1ms)
-  // which races against the resize="instant" animation loop (requestAnimationFrame).
-  // Even calling stopScroll() on touchmove isn't enough — the library's handleScroll
-  // setTimeout can re-engage the lock between touchmove events when the user is near
-  // the bottom. We pump stopScroll() on every animation frame while the user is
-  // actively touch-scrolling upward, keeping the lock broken continuously.
-  useEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-    let startY = 0
-    let scrollingUp = false
-    let rafId = 0
-    const tick = () => {
-      if (scrollingUp) {
-        stopScroll()
-        rafId = requestAnimationFrame(tick)
-      }
-    }
-    const onTouchStart = (e: TouchEvent) => {
-      startY = e.touches[0].clientY
-      scrollingUp = false
-    }
-    const onTouchMove = (e: TouchEvent) => {
-      // Dragging finger down → scrolling up through content
-      if (e.touches[0].clientY > startY && !scrollingUp) {
-        scrollingUp = true
-        stopScroll()
-        rafId = requestAnimationFrame(tick)
-      }
-    }
-    const onTouchEnd = () => {
-      scrollingUp = false
-      cancelAnimationFrame(rafId)
-    }
-    el.addEventListener('touchstart', onTouchStart, { passive: true })
-    el.addEventListener('touchmove', onTouchMove, { passive: true })
-    el.addEventListener('touchend', onTouchEnd, { passive: true })
-    el.addEventListener('touchcancel', onTouchEnd, { passive: true })
-    return () => {
-      cancelAnimationFrame(rafId)
-      el.removeEventListener('touchstart', onTouchStart)
-      el.removeEventListener('touchmove', onTouchMove)
-      el.removeEventListener('touchend', onTouchEnd)
-      el.removeEventListener('touchcancel', onTouchEnd)
-    }
-  }, [scrollRef, stopScroll])
-
-  return <StickToBottom.Content className={cn('flex flex-col gap-8 p-4', className)} {...props} />
+  return (
+    <div ref={mergedScrollRef} style={{ height: '100%', width: '100%', overflowY: 'auto' }}>
+      <div ref={contentRef} className={cn('flex flex-col gap-8 p-4', className)} {...props}>
+        {children}
+      </div>
+    </div>
+  )
 }
 
 export type ConversationEmptyStateProps = ComponentProps<'div'> & {
@@ -127,11 +203,7 @@ export const ConversationScrollButton = ({
   className,
   ...props
 }: ConversationScrollButtonProps) => {
-  const { isAtBottom, scrollToBottom } = useStickToBottomContext()
-
-  const handleScrollToBottom = useCallback(() => {
-    scrollToBottom()
-  }, [scrollToBottom])
+  const { isAtBottom, scrollToBottom } = useAutoScrollContext()
 
   return (
     !isAtBottom && (
@@ -140,7 +212,7 @@ export const ConversationScrollButton = ({
           'absolute bottom-4 left-[50%] translate-x-[-50%] rounded-full dark:bg-background dark:hover:bg-muted',
           className,
         )}
-        onClick={handleScrollToBottom}
+        onClick={scrollToBottom}
         size="icon"
         type="button"
         variant="outline"

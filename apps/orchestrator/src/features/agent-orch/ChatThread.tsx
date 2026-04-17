@@ -242,7 +242,7 @@ export function ChatThread({
   onSendSuggestion,
 }: ChatThreadProps) {
   return (
-    <Conversation className="min-h-0 min-w-0 flex-1 overflow-x-hidden">
+    <Conversation className="min-h-0 min-w-0 flex-1 overflow-x-clip">
       <ConversationContent className="min-w-0 overflow-x-hidden [&_pre]:overflow-x-auto [&_pre]:max-w-full">
         {messages.length === 0 && isConnecting ? (
           <div className="space-y-6 p-6">
