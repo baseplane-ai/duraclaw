@@ -33,11 +33,13 @@ export function useNotificationWatcher(sessions: SessionInfo[]) {
       if (prevStatus === session.status) continue
 
       // Generate notification based on new status
+      const project = session.project || undefined
       if (session.status === 'waiting_gate') {
         addNotification({
           type: 'gate',
           sessionId: session.id,
           sessionName: name,
+          project,
           body: 'Session needs input',
           url: `/?session=${session.id}`,
         })
@@ -46,6 +48,7 @@ export function useNotificationWatcher(sessions: SessionInfo[]) {
           type: 'completed',
           sessionId: session.id,
           sessionName: name,
+          project,
           body: 'Session completed',
           url: `/?session=${session.id}`,
         })
@@ -54,6 +57,7 @@ export function useNotificationWatcher(sessions: SessionInfo[]) {
           type: 'error',
           sessionId: session.id,
           sessionName: name,
+          project,
           body: session.status === 'failed' ? 'Session failed' : 'Session aborted',
           url: `/?session=${session.id}`,
         })

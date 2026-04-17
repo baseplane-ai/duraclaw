@@ -17,6 +17,13 @@ interface TabStore {
   /** Force a new tab even if one exists for this project (used by "new tab" option). */
   addNewTab: (project: string, sessionId: string, title?: string) => void
 
+  /**
+   * Synchronous find-or-create: activate the tab for this session.
+   * If a tab exists, just activates it. Otherwise creates a minimal tab.
+   * Call this at every navigation call-site BEFORE navigate() — no effects needed.
+   */
+  activateSession: (sessionId: string, meta?: { project?: string; title?: string }) => void
+
   /** Switch which session a tab is displaying (from the dropdown). */
   switchTabSession: (tabId: string, sessionId: string, title?: string) => void
 
@@ -104,6 +111,27 @@ export const useTabStore = create<TabStore>((set, get) => ({
     const { tabs } = get()
     const id = generateId()
     const newTabs = [...tabs, { id, project, sessionId, title: title || sessionId.slice(0, 12) }]
+    set({ tabs: newTabs, activeTabId: id })
+    saveTabs(newTabs, id)
+  },
+
+  activateSession: (sessionId, meta) => {
+    const { tabs } = get()
+    const existing = tabs.find((t) => t.sessionId === sessionId)
+    if (existing) {
+      const newTabs =
+        meta?.title && meta.title !== existing.title
+          ? tabs.map((t) => (t.id === existing.id ? { ...t, title: meta.title as string } : t))
+          : tabs
+      set({ tabs: newTabs, activeTabId: existing.id })
+      saveTabs(newTabs, existing.id)
+      return
+    }
+    // No tab for this session — create a minimal one
+    const id = generateId()
+    const project = meta?.project || 'unknown'
+    const title = meta?.title || sessionId.slice(0, 12)
+    const newTabs = [...tabs, { id, project, sessionId, title }]
     set({ tabs: newTabs, activeTabId: id })
     saveTabs(newTabs, id)
   },

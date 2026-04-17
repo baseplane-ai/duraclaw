@@ -32,16 +32,24 @@ function AgentOrchContent() {
   const navigate = useNavigate()
   const searchSessionId = (search as { session?: string }).session ?? null
 
-  // On cold launch (PWA / refresh) with no ?session param, restore the active tab's session
-  const { tabs, activeTabId } = useTabStore()
-  const initialRestoredRef = useRef(() => {
-    if (searchSessionId || !activeTabId) return null
-    return tabs.find((t) => t.id === activeTabId)?.sessionId ?? null
+  // Synchronous init: resolve selectedSessionId from URL or last active tab.
+  // Also sync the tab store on mount so highlight is correct from first render.
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(() => {
+    const tabStore = useTabStore.getState()
+    if (searchSessionId) {
+      // URL has a session — activate the matching tab (or create one with minimal info).
+      // Session metadata will be patched in once sessions load via AgentDetailWithSpawn.
+      tabStore.activateSession(searchSessionId)
+      return searchSessionId
+    }
+    // No URL session — restore from the last active tab (cold launch / PWA)
+    const { tabs, activeTabId } = tabStore
+    if (activeTabId) {
+      return tabs.find((t) => t.id === activeTabId)?.sessionId ?? null
+    }
+    return null
   })
-  const restoredSessionId = useState(() => initialRestoredRef.current())[0]
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
-    searchSessionId ?? restoredSessionId,
-  )
+  const restoredSessionId = !searchSessionId ? selectedSessionId : null
   const [spawnConfig, setSpawnConfig] = useState<SpawnConfig | null>(null)
   // Pre-fill hints for the QuickPromptInput composer, set by tab context menu actions.
   const [quickPromptHint, setQuickPromptHint] = useState<{
@@ -73,23 +81,6 @@ function AgentOrchContent() {
         setSpawnConfig(null)
         setQuickPromptHint(null)
         setSelectedSessionId(searchSessionId)
-
-        // Sync tab highlight to match the URL session
-        const tabStore = useTabStore.getState()
-        const matchingTab = tabStore.findTabBySession(searchSessionId)
-        if (matchingTab) {
-          tabStore.setActiveTab(matchingTab.id)
-        } else {
-          // Session has no tab yet — create one from available session data
-          const session = sessions.find((s) => s.id === searchSessionId)
-          if (session) {
-            tabStore.addTab(
-              session.project || 'unknown',
-              searchSessionId,
-              session.title || searchSessionId.slice(0, 12),
-            )
-          }
-        }
       }
     } else if (!searchSessionId && selectedSessionId && prev !== null) {
       // Navigated from a session URL to "/" (e.g. "New session" click) — clear selection.
@@ -97,7 +88,7 @@ function AgentOrchContent() {
       setSpawnConfig(null)
       setSelectedSessionId(null)
     }
-  }, [searchSessionId, selectedSessionId, quickPromptHint, sessions])
+  }, [searchSessionId, selectedSessionId, quickPromptHint])
   const [projects, setProjects] = useState<
     Array<{ name: string; path: string; repo_origin?: string | null }>
   >([])
@@ -272,6 +263,7 @@ function AgentOrchContent() {
         <PwaInstallBanner />
         <PushOptInBanner />
         <TabBar
+          activeSessionId={selectedSessionId}
           onSelectSession={handleSelectSession}
           onLastTabClosed={handleLastTabClosed}
           onNewSessionInTab={handleNewSessionInTab}

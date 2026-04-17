@@ -6,6 +6,8 @@ export interface AppNotification {
   type: 'gate' | 'completed' | 'error'
   sessionId: string
   sessionName: string
+  /** Project name for tab creation on click */
+  project?: string
   body: string
   timestamp: string
   read: boolean

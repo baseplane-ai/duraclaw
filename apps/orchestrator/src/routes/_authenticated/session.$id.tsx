@@ -1,5 +1,5 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Header } from '~/components/layout/header'
 import { Main } from '~/components/layout/main'
 import { TabBar } from '~/components/tab-bar'
@@ -20,13 +20,15 @@ function SessionDetailPage() {
   const { sessions, updateSession } = useSessionsCollection()
   const addTab = useTabStore((s) => s.addTab)
 
-  useEffect(() => {
+  // Sync tab store on mount — synchronous via initializer pattern
+  const [_initDone] = useState(() => {
     const session = sessions.find((s) => s.id === sessionId)
     const title =
       session?.title || getPreviewText(session ?? { prompt: undefined }) || sessionId.slice(0, 12)
     const project = session?.project || 'unknown'
-    addTab(project, sessionId, title)
-  }, [sessionId, addTab, sessions])
+    useTabStore.getState().activateSession(sessionId, { project, title })
+    return true
+  })
 
   const handleSelectSession = useCallback(
     (sid: string) => {
@@ -57,7 +59,11 @@ function SessionDetailPage() {
     <>
       <Header fixed />
       <Main fixed fluid className="p-0" {...swipeProps}>
-        <TabBar onSelectSession={handleSelectSession} onLastTabClosed={handleLastTabClosed} />
+        <TabBar
+          activeSessionId={sessionId}
+          onSelectSession={handleSelectSession}
+          onLastTabClosed={handleLastTabClosed}
+        />
         <div
           className={
             swipeDir === 'left'

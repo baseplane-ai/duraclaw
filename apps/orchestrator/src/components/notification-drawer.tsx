@@ -11,6 +11,7 @@ import {
 import { cn } from '~/lib/utils'
 import type { AppNotification } from '~/stores/notifications'
 import { useNotificationStore } from '~/stores/notifications'
+import { useTabStore } from '~/stores/tabs'
 import { NotificationPreferences } from './notification-preferences'
 
 interface NotificationDrawerProps {
@@ -49,6 +50,11 @@ export function NotificationDrawer({ open, onOpenChange }: NotificationDrawerPro
   const handleClick = (n: AppNotification) => {
     markRead(n.id)
     onOpenChange(false)
+    // Sync tab store synchronously BEFORE navigate — zero race conditions
+    useTabStore.getState().activateSession(n.sessionId, {
+      project: n.project,
+      title: n.sessionName,
+    })
     navigate({ to: '/', search: { session: n.sessionId } })
   }
 

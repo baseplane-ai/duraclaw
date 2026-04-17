@@ -22,6 +22,8 @@ import { cn } from '~/lib/utils'
 import { useTabStore } from '~/stores/tabs'
 
 interface TabBarProps {
+  /** The session currently being viewed — drives tab highlighting. Derived from URL. */
+  activeSessionId: string | null
   onSelectSession: (sessionId: string) => void
   onLastTabClosed?: () => void
   onNewSessionInTab?: (project: string) => void
@@ -29,12 +31,13 @@ interface TabBarProps {
 }
 
 export function TabBar({
+  activeSessionId,
   onSelectSession,
   onLastTabClosed,
   onNewSessionInTab,
   onNewTabForProject,
 }: TabBarProps) {
-  const { tabs, activeTabId, setActiveTab, removeTab } = useTabStore()
+  const { tabs, setActiveTab, removeTab } = useTabStore()
   const { sessions } = useSessionsCollection()
   const scrollRef = useRef<HTMLDivElement>(null)
   const [canScrollLeft, setCanScrollLeft] = useState(false)
@@ -71,10 +74,12 @@ export function TabBar({
 
   // Scroll active tab into view when it changes
   useEffect(() => {
-    if (!activeTabId || !scrollRef.current) return
-    const el = scrollRef.current.querySelector(`[data-tab-id="${activeTabId}"]`) as HTMLElement
+    if (!activeSessionId || !scrollRef.current) return
+    const activeTab = tabs.find((t) => t.sessionId === activeSessionId)
+    if (!activeTab) return
+    const el = scrollRef.current.querySelector(`[data-tab-id="${activeTab.id}"]`) as HTMLElement
     el?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' })
-  }, [activeTabId])
+  }, [activeSessionId, tabs])
 
   const handleClose = useCallback(
     (tabId: string) => {
@@ -112,7 +117,7 @@ export function TabBar({
               tabId={tab.id}
               project={tab.project}
               title={tab.title}
-              isActive={activeTabId === tab.id}
+              isActive={tab.sessionId === activeSessionId}
               currentSession={currentSession}
               onSelect={() => {
                 setActiveTab(tab.id)
