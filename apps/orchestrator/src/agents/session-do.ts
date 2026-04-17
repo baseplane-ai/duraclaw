@@ -1153,7 +1153,32 @@ export class SessionDO extends Agent<Env, SessionState> {
       return { ok: false, error: `Cannot send message: status is '${status}'` }
     }
 
-    // Persist user message
+    // If we're about to take the resume path, preflight for an orphan
+    // runner that would hijack the sdk_session_id. If found, auto-fork to a
+    // fresh SDK session so the user doesn't see silent failure.
+    if (!hasLiveRunner && isResumable) {
+      const sdk = this.state.sdk_session_id ?? ''
+      const gatewayUrl = this.env.CC_GATEWAY_URL
+      if (gatewayUrl && sdk) {
+        try {
+          const sessions = await listSessions(gatewayUrl, this.env.CC_GATEWAY_SECRET)
+          const orphan = sessions.find((s) => s.sdk_session_id === sdk && s.state === 'running')
+          if (orphan) {
+            console.warn(
+              `[SessionDO:${this.ctx.id}] sendMessage: orphan runner ${orphan.session_id} holds sdk_session_id ${sdk} — auto-forking with transcript`,
+            )
+            return this.forkWithHistory(content)
+          }
+        } catch (err) {
+          // Non-fatal: fall through to the dial attempt. If it then collides
+          // the runner will crash and the exit file makes it visible.
+          console.warn(`[SessionDO:${this.ctx.id}] sendMessage preflight failed:`, err)
+        }
+      }
+    }
+
+    // Persist user message (only after orphan preflight so we don't have to
+    // roll it back on the auto-fork branch — forkWithHistory appends itself).
     this.turnCounter++
     const userMsgId = `usr-${this.turnCounter}`
     const userMsg: SessionMessage = {
@@ -1181,48 +1206,12 @@ export class SessionDO extends Agent<Env, SessionState> {
         message: { role: 'user', content },
       })
     } else if (isResumable) {
-      // Before spawning a replacement runner, check the gateway for an
-      // orphaned runner bound to the same sdk_session_id. If one exists the
-      // new runner will exit immediately via hasLiveResume — surface a
-      // specific error instead of silently failing.
-      const sdk = this.state.sdk_session_id ?? ''
-      const gatewayUrl = this.env.CC_GATEWAY_URL
-      if (gatewayUrl && sdk) {
-        try {
-          const sessions = await listSessions(gatewayUrl, this.env.CC_GATEWAY_SECRET)
-          const orphan = sessions.find((s) => s.sdk_session_id === sdk && s.state === 'running')
-          if (orphan) {
-            const msg = `Session-runner ${orphan.session_id} is still running on the gateway with sdk_session_id ${sdk} but its WebSocket is not connected to this DO. Stop that runner, wait for it to exit, or call forkWithHistory to spawn a fresh SDK session seeded with the existing transcript.`
-            console.error(`[SessionDO:${this.ctx.id}] sendMessage orphan: ${msg}`)
-            this.updateState({ status: 'idle', error: msg })
-            this.broadcastToClients(
-              JSON.stringify({
-                type: 'gateway_event',
-                event: {
-                  type: 'error',
-                  message: msg,
-                  // Action hint for the UI: offer a one-click fork to bypass
-                  // the orphan by starting a new sdk_session_id with history.
-                  recoverable: 'forkWithHistory',
-                  orphan_session_id: orphan.session_id,
-                },
-              }),
-            )
-            return { ok: false, error: msg, recoverable: 'forkWithHistory' }
-          }
-        } catch (err) {
-          // Non-fatal: fall through to the dial attempt. If it then collides
-          // the runner will crash and the exit file makes it visible — this
-          // preflight is only a best-effort fast-path error.
-          console.warn(`[SessionDO:${this.ctx.id}] sendMessage preflight failed:`, err)
-        }
-      }
       this.updateState({ status: 'running', gate: null, error: null })
       void this.triggerGatewayDial({
         type: 'resume',
         project: this.state.project,
         prompt: content,
-        sdk_session_id: sdk,
+        sdk_session_id: this.state.sdk_session_id ?? '',
       })
     }
 
