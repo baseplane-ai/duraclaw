@@ -2,21 +2,35 @@
 
 ## Project Overview
 
-Duraclaw orchestrates Claude Code sessions across multiple VPS worktrees. It consists of a Cloudflare Workers frontend (orchestrator) that manages session lifecycle via Durable Objects, and a VPS-side executor that runs the Claude Agent SDK.
+Duraclaw orchestrates Claude Code sessions across multiple VPS worktrees. A Cloudflare Workers frontend (orchestrator) owns session lifecycle via Durable Objects, and a VPS-side `agent-gateway` spawns per-session `session-runner` processes that each own one Claude Agent SDK query and dial the DO directly.
 
 ## Architecture
 
 ```
 Browser
-  |
-TanStack Start (CF Worker) -- React UI + API routes
-  |
-SessionAgent DO (1 per session) -- state, scheduling, client sync
-  | WebSocket over CF tunnel
-VPS Executor (Bun) -- Claude Agent SDK execution only
-  |
-Worktrees (baseplane-dev1..dev6)
+  │
+  ▼
+CF Worker (TanStack Start) ─── React UI + API routes
+  │
+  ▼
+SessionDO (1 per session) ─── state + SQLite message history
+  ▲          │
+  │          │ HTTPS POST /sessions/start
+  │          ▼
+  │      ┌─ agent-gateway (VPS, systemd) ─ spawn/list/status/reap
+  │      │            │
+  │      │            │ spawn detached, passes callback_url + token
+  │      │            ▼
+  │      └── session-runner (per session) ── owns Claude SDK query()
+  │                   │                      uses BufferedChannel ring (10K/50MB)
+  └───────────────────┘
+         dial-back WSS — direct to DO, reconnects with 1/3/9/27/30s backoff
 ```
+
+Key invariants:
+- `agent-gateway` never runs the SDK. It's a spawn/list/reap control plane.
+- `session-runner` never embeds the DO. It dials `CC_GATEWAY_URL`'s partner `WORKER_PUBLIC_URL` (`wss://dura…/agents/session-agent/<do-id>?role=gateway&token=…`).
+- Gateway restart / CF Worker redeploy are non-events for an in-flight runner; the BufferedChannel buffers while the WS is down, replays on reconnect, emits a single gap sentinel only on overflow.
 
 ## Monorepo Structure
 
@@ -24,7 +38,11 @@ Worktrees (baseplane-dev1..dev6)
 apps/
   orchestrator/          # CF Workers + TanStack Start (React 19, Vite 7)
 packages/
-  agent-gateway/         # VPS executor (Bun WebSocket server)
+  agent-gateway/         # VPS control plane (Bun HTTP server, systemd)
+  session-runner/        # Per-session SDK owner (spawned by gateway)
+  shared-transport/      # BufferedChannel + DialBackClient (runner → DO WS)
+  shared-types/          # GatewayCommand / GatewayEvent / SessionState types
+  ai-elements/           # Shared UI component library
   kata/                  # Workflow management CLI
 planning/
   spec-templates/        # Feature, bug, epic spec templates
@@ -36,45 +54,63 @@ planning/
 - **Monorepo**: pnpm workspaces + Turbo
 - **Orchestrator**: Cloudflare Workers, Durable Objects (Agents SDK v0.7), TanStack Start
 - **Auth**: Better Auth with D1 (Drizzle adapter)
-- **Executor**: Bun WebSocket server wrapping `@anthropic-ai/claude-agent-sdk`
+- **Gateway**: Bun HTTP server — spawn/list/status/reap only
+- **Session-runner**: Bun-executable that wraps `@anthropic-ai/claude-agent-sdk` and dials the DO via `shared-transport`
 - **Linting**: Biome (spaces, no semicolons, single quotes in biome-managed files)
 
 ## Key Commands
 
 ```bash
-pnpm build              # Build all packages
+pnpm build              # Build all packages (tsup for workspace libs)
 pnpm typecheck          # Typecheck all packages
+pnpm test               # Run vitest suites across the workspace
 pnpm dev                # Dev mode (all packages)
 
 # Orchestrator
 cd apps/orchestrator
 pnpm dev                # Local dev (Vite + miniflare)
-pnpm ship               # Build + wrangler deploy
+pnpm ship               # Build + wrangler deploy (do NOT run manually — see Deployment)
 
-# Executor
+# Gateway (local)
 cd packages/agent-gateway
-bun run src/server.ts   # Run executor locally
+bun run src/server.ts   # Starts on 127.0.0.1:$CC_GATEWAY_PORT (default 9877)
+
+# Session-runner binary build
+pnpm --filter @duraclaw/session-runner build   # Emits dist/main.js with #!/usr/bin/env bun shebang
 ```
 
 ## Packages
 
 ### apps/orchestrator (CF Workers)
 
-- **Durable Objects**: `SessionAgent` (1 per session, owns state + SQLite message history), `SessionRegistry` (singleton, worktree locks + session index)
+- **Durable Objects**: `SessionDO` (1 per session, owns state + SQLite message history + `active_callback_token` for runner auth), `ProjectRegistry` (singleton, worktree locks + session index), `UserSettingsDO`
 - **Auth**: Better Auth with D1 via Drizzle. Per-request auth instance (D1 only available in request context). Login at `/login`, API at `/api/auth/*`
-- **Environment** (wrangler secrets): `CC_GATEWAY_URL`, `CC_GATEWAY_SECRET`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`
-- **D1 Database**: `duraclaw-auth` (placeholder ID in wrangler.toml — needs `wrangler d1 create`)
+- **Environment** (wrangler secrets): `CC_GATEWAY_URL` (http(s) URL to gateway), `CC_GATEWAY_SECRET` (bearer matched by gateway), `WORKER_PUBLIC_URL` (wss base the runner uses to dial the DO), `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`
+- **D1 Database**: `duraclaw-auth`
 - **Entry point**: `src/server.ts` exports DO classes + TanStack Start default handler
 
-### packages/agent-gateway (VPS Executor)
+### packages/agent-gateway (VPS control plane)
 
-- **Transport**: Bun WebSocket server on `127.0.0.1:9877`
-- **Protocol**: Receives `VpsCommand` JSON messages, streams back `VpsEvent` messages. Each WS = one session.
-- **Auth**: Bearer token on WS upgrade (timing-safe compare). Optional — open if `CC_GATEWAY_API_TOKEN` not set.
-- **HTTP endpoints**: `GET /health` (no auth), `GET /worktrees` (auth required)
-- **Worktree discovery**: Configurable via `WORKTREE_PATTERNS` env var (comma-separated prefixes, default: `baseplane`)
-- **Systemd**: `duraclaw-agent-gateway.service`, install via `./packages/agent-gateway/systemd/install.sh`
-- **SDK mode**: `bypassPermissions`, strips `CLAUDECODE*` env vars to prevent nested sessions
+- **Not the SDK host anymore** — that moved to `session-runner`. Gateway just spawns detached runners and exposes HTTP endpoints for the DO.
+- **HTTP endpoints**: `POST /sessions/start` (spawn detached runner), `GET /sessions` (list all known), `GET /sessions/:id/status` (exit > pid+live > pid+dead > 404), `GET /health` (no auth), `POST /debug/reap` (dev-only, behind `DURACLAW_DEBUG_ENDPOINTS=1`), plus project-browsing endpoints for UI/debug.
+- **Auth**: Bearer token; timing-safe compare. Open if `CC_GATEWAY_API_TOKEN` not set.
+- **Session files** under `$SESSIONS_DIR` (default `/run/duraclaw/sessions`, tmpfs, `0700`): `{id}.cmd` (gateway writes, runner reads), `{id}.pid` (runner writes), `{id}.meta.json` (runner writes every 10s), `{id}.exit` (single-writer via `link`+EEXIST), `{id}.log` (gateway-opened stdout/stderr).
+- **Reaper**: 5-minute interval + startup pass. Stale (>30min since `last_activity_ts`) → SIGTERM → 10s grace → SIGKILL → markedCrashed. `.cmd` orphans >5min unlinked; terminal files >1h past `.exit` mtime GC'd together with `.log`.
+- **Observability**: on each reaper pass logs `[gateway] inflight=N <id:pid/seq/age/idle>` and on each spawn logs `[gateway] /sessions/start sessionId=… execute project=… worktree=…`.
+- **Systemd**: `duraclaw-agent-gateway.service` requires `KillMode=process` + `SendSIGKILL=no` + `RuntimeDirectoryPreserve=yes` so restarts don't sweep the detached runner cgroup and `/run/duraclaw/sessions` survives. Install via `./packages/agent-gateway/systemd/install.sh`.
+
+### packages/session-runner (per-session SDK owner)
+
+- One process per session. Spawned detached by gateway with 7 positional argv: `sessionId cmdFile callback_url bearer pidFile exitFile metaFile`.
+- Writes `.pid` at startup, reads `.cmd`, dials the DO via `DialBackClient` (from `shared-transport`), then runs `query()` / `query({resume:sdk_session_id})` from `@anthropic-ai/claude-agent-sdk`.
+- Emits `session.init` / `partial_assistant` (from `stream_event.content_block_delta.text_delta` and `thinking_delta`) / `assistant` / `tool_result` / `result` / etc. via the channel, assigning monotonic `ctx.nextSeq` to every event.
+- Stays alive across turns — after `type=result` it blocks on `queue.waitForNext()` for the next `stream-input` from the DO.
+- Exits cleanly on: SDK abort, SIGTERM (2s watchdog), or DialBackClient terminal (`4401 invalid_token`, `4410 token_rotated`, or post-connect reconnect cap exhausted).
+
+### packages/shared-transport
+
+- **`BufferedChannel`**: ring buffer (10K events / 50MB) that sends directly when the WS is attached and queues otherwise. On overflow drops oldest and emits a single `{type:'gap',dropped_count,from_seq,to_seq}` sentinel on next replay.
+- **`DialBackClient`**: WS client that dials `callbackUrl?token=<bearer>`, exposes `send()` / `onCommand()`, reconnects with `[1s, 3s, 9s, 27s, 30s×]` backoff. Resets `attempt` after 10s of stable connection. Terminates (fires `onTerminate`) on close codes `4401` / `4410` or after 20 post-connect failures without stability.
 
 ### packages/kata (Workflow CLI)
 
@@ -82,21 +118,28 @@ bun run src/server.ts   # Run executor locally
 - Phase tracking, stop condition gates, session persistence
 - Run via `kata enter <mode>`
 
+## Session lifecycle & resume
+
+1. **New session** — browser calls DO `spawn()` → DO `triggerGatewayDial({type:'execute', …})` → `POST /sessions/start` → gateway spawns detached runner → runner dials DO at `wss://…/agents/session-agent/<do-id>?role=gateway&token=…` → DO validates token (timing-safe) against `active_callback_token` → accept → SDK runs → events stream.
+2. **Follow-up message, runner still connected** (normal path) — `sendMessage` sees `getGatewayConnectionId()` → sends `stream-input` over existing WS → runner's command queue wakes the multi-turn loop. No re-spawn.
+3. **Follow-up after >30min idle** — reaper has killed the runner; DO state is `idle` with persisted `sdk_session_id`. `sendMessage` falls through to `triggerGatewayDial({type:'resume', sdk_session_id})` → new runner, SDK `resume` reads the on-disk transcript (`@anthropic-ai/claude-agent-sdk` session file in the project dir).
+4. **Orphan case** — runner alive on VPS but unreachable from DO. `sendMessage` preflights `GET /sessions` on the gateway, finds the orphan by `sdk_session_id`, auto-delegates to `forkWithHistory(content)`: the DO serialises local history as `<prior_conversation>…</prior_conversation>`, drops `sdk_session_id` (forces a fresh one — no `hasLiveResume` collision), and spawns a new `execute` with the transcript-prefixed prompt. User-visible UX is a normal send.
+
+The orphan case is self-healing from the runner side too: on close code `4401`/`4410` from the DO, the runner aborts and exits rather than squatting on the sdk_session_id.
+
 ## VPS Communication Protocol
 
-**VpsCommand** (orchestrator -> executor):
-- `execute`: Run new session in worktree
-- `resume`: Resume with `sdk_session_id`
-- `abort`: Signal AbortController
-- `answer`: Resolve pending AskUserQuestion
+Transport: runner → DO over wss, and gateway → DO via HTTP only (spawn/status). Shapes live in `packages/shared-types/src/index.ts`.
 
-**VpsEvent** (executor -> orchestrator):
-- `session.init`: SDK initialized, returns model + tools
-- `assistant`: Assistant message content
-- `tool_result`: Tool execution results
-- `user_question`: AskUserQuestion intercepted
-- `result`: Session completed/failed with duration + cost
-- `error`: Fatal error
+**GatewayCommand** (DO → runner, over dial-back WS):
+- `stream-input` — inject a user turn into the live SDK query
+- `interrupt`, `rewind`, `get-context-usage` — mid-session controls
+- `resolve-gate` — answer to `ask_user` / `permission_request`
+
+**GatewayEvent** (runner → DO, over dial-back WS):
+- `session.init`, `partial_assistant` (streaming text / reasoning deltas), `assistant` (finalised turn), `tool_use_summary`, `tool_result`, `ask_user`, `permission_request`, `task_started`/`progress`/`notification`, `rate_limit`, `result`, `heartbeat`, `error`
+
+Every event is stamped with a monotonic `seq` by the runner's BufferedChannel so the DO can detect and act on gap sentinels.
 
 ## Deployment
 
