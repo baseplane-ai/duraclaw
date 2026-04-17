@@ -18,6 +18,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '~/components/ui/card'
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -247,6 +248,9 @@ function AdminUsersPage() {
           <DialogContent>
             <DialogHeader>
               <DialogTitle>Create User</DialogTitle>
+              <DialogDescription className="sr-only">
+                Add a new user account with name, email, password, and role
+              </DialogDescription>
             </DialogHeader>
             <form className="space-y-4" onSubmit={handleCreate}>
               <div>
@@ -336,6 +340,9 @@ function AdminUsersPage() {
               <DialogTitle>
                 Set password for {passwordTarget?.name ?? passwordTarget?.email}
               </DialogTitle>
+              <DialogDescription className="sr-only">
+                Replace the user's password with a new one
+              </DialogDescription>
             </DialogHeader>
             <form className="space-y-4" onSubmit={handleSetPassword}>
               <div>

@@ -206,7 +206,7 @@ export function QuickPromptInput({
               }
               return Array.from(grouped.entries()).map(([origin, groupProjects]) => (
                 <SelectGroup key={origin}>
-                  <SelectLabel className="text-[10px] font-medium text-muted-foreground">
+                  <SelectLabel className="text-[11px] font-medium text-muted-foreground">
                     {extractRepoName(origin)}
                   </SelectLabel>
                   {groupProjects.map((p) => (

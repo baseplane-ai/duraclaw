@@ -1,6 +1,12 @@
 import { AlertTriangle, CheckCircle, Settings, Shield } from 'lucide-react'
 import { useState } from 'react'
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from '~/components/ui/sheet'
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from '~/components/ui/sheet'
 import { cn } from '~/lib/utils'
 import type { AppNotification } from '~/stores/notifications'
 import { useNotificationStore } from '~/stores/notifications'
@@ -49,6 +55,9 @@ export function NotificationDrawer({ open, onOpenChange }: NotificationDrawerPro
       <SheetContent side="right" className="w-[380px] sm:w-[420px]">
         <SheetHeader className="flex flex-row items-center justify-between space-y-0 pb-4">
           <SheetTitle>Notifications</SheetTitle>
+          <SheetDescription className="sr-only">
+            Recent notifications and alerts from your sessions
+          </SheetDescription>
           <button
             type="button"
             onClick={() => setShowPrefs((p) => !p)}

@@ -7,7 +7,13 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '~/components/ui/dropdown-menu'
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from '~/components/ui/sheet'
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from '~/components/ui/sheet'
 import type { SessionRecord } from '~/db/sessions-collection'
 import { StatusDot } from '~/features/agent-orch/session-utils'
 import { useIsMobile } from '~/hooks/use-mobile'
@@ -199,7 +205,7 @@ function ProjectTab({
           />
         )}
         <div className="flex flex-col items-start min-w-0">
-          <span className="text-[10px] text-muted-foreground leading-tight font-normal">
+          <span className="text-[11px] text-muted-foreground leading-tight font-normal">
             {project}
           </span>
           <span className="max-w-32 truncate leading-tight">{title}</span>
@@ -227,6 +233,7 @@ function ProjectTab({
                 <span className="text-muted-foreground font-normal">{project} · </span>
                 {title}
               </SheetTitle>
+              <SheetDescription className="sr-only">Tab actions</SheetDescription>
             </SheetHeader>
             <div className="flex flex-col gap-1 px-2 pb-2">
               {onNewSessionInTab && (

@@ -15,6 +15,7 @@ import {
   Dialog,
   DialogClose,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -289,6 +290,7 @@ export function SessionListItem({
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
             <DialogTitle>Rename session</DialogTitle>
+            <DialogDescription className="sr-only">Edit the session title</DialogDescription>
           </DialogHeader>
           <Input
             ref={renameInputRef}
@@ -318,6 +320,9 @@ export function SessionListItem({
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
             <DialogTitle>{session.tag ? 'Edit tag' : 'Add tag'}</DialogTitle>
+            <DialogDescription className="sr-only">
+              Assign or update a tag for this session
+            </DialogDescription>
           </DialogHeader>
           <Input
             ref={tagInputRef}

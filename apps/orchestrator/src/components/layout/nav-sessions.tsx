@@ -104,7 +104,11 @@ function SessionContextMenu({
         {children}
       </span>
       <DropdownMenu open={open} onOpenChange={setOpen}>
-        <DropdownMenuTrigger className="sr-only absolute size-0 overflow-hidden" />
+        <DropdownMenuTrigger
+          aria-label="Session actions"
+          tabIndex={-1}
+          className="sr-only absolute size-0 overflow-hidden"
+        />
         <DropdownMenuContent align="start" side="right">
           <DropdownMenuItem onClick={handleRename}>
             <EditIcon className="mr-2 size-3" />
@@ -215,7 +219,7 @@ export function NavSessions() {
                     <span className="truncate text-sm leading-tight">
                       {getDisplayName(session)}
                     </span>
-                    <span className="truncate text-[10px] text-muted-foreground leading-tight">
+                    <span className="truncate text-[11px] text-muted-foreground leading-tight">
                       {session.project}
                     </span>
                   </div>
@@ -435,7 +439,7 @@ function AllProjectsBrowser() {
                       <SidebarMenuSubButton className={project.hidden ? 'opacity-40' : undefined}>
                         <div className="flex min-w-0 flex-1 flex-col">
                           <span className="truncate text-sm leading-tight">{project.name}</span>
-                          <span className="flex items-center gap-1 truncate text-[10px] text-muted-foreground leading-tight">
+                          <span className="flex items-center gap-1 truncate text-[11px] text-muted-foreground leading-tight">
                             <GitBranchIcon className="size-2.5" />
                             {project.branch}
                           </span>
