@@ -551,13 +551,25 @@ export class SessionDO extends Agent<Env, SessionState> {
 
       let persisted = 0
       let lastMsgId: string | null = null
+      // Tracks the in-progress assistant message across multi-cycle turns so
+      // that consecutive SDK `assistant` events (text → tool_use per cycle)
+      // merge into a single local message, matching live-stream behavior.
+      // Reset on every `user` event (turn boundary).
+      let currentAssistantMsgId: string | null = null
 
       // If we have local messages, set lastMsgId to the latest one so new
-      // messages get appended to the end of the existing tree.
+      // messages get appended to the end of the existing tree. If the tail is
+      // an assistant message, treat it as the in-progress turn accumulator so
+      // new assistant events from the transcript merge into it (multi-cycle
+      // turns where live streaming already built a merged message).
       if (localHistory > 0) {
         const history = this.session.getHistory()
         if (history.length > 0) {
-          lastMsgId = history[history.length - 1].id
+          const tail = history[history.length - 1]
+          lastMsgId = tail.id
+          if (tail.role === 'assistant') {
+            currentAssistantMsgId = tail.id
+          }
         }
       }
 
@@ -615,18 +627,38 @@ export class SessionDO extends Agent<Env, SessionState> {
           }
           await this.session.appendMessage(sessionMsg, lastMsgId)
           lastMsgId = msgId
+          // A new user message ends any in-progress assistant turn — reset the
+          // accumulator so the next assistant event starts a fresh message.
+          currentAssistantMsgId = null
           persisted++
         } else if (msg.type === 'assistant') {
+          const newParts = assistantContentToParts(msg.content)
+          if (currentAssistantMsgId) {
+            // Same turn as the previous assistant event (multi-cycle Claude
+            // response) — merge parts into the existing message to mirror the
+            // live-streaming merge behavior. Otherwise tool pills get split
+            // across N messages and lose their grouping in the UI.
+            const existing = this.session.getMessage(currentAssistantMsgId)
+            if (existing) {
+              this.session.updateMessage({
+                ...existing,
+                parts: [...existing.parts, ...newParts],
+              })
+              persisted++
+              continue
+            }
+          }
           this.turnCounter++
           const msgId = `msg-${this.turnCounter}`
           const sessionMsg: SessionMessage = {
             id: msgId,
             role: 'assistant',
-            parts: assistantContentToParts(msg.content),
+            parts: newParts,
             createdAt: new Date(),
           }
           await this.session.appendMessage(sessionMsg, lastMsgId)
           lastMsgId = msgId
+          currentAssistantMsgId = msgId
           persisted++
         } else if (msg.type === 'tool_result') {
           // Apply tool results to the last assistant message
