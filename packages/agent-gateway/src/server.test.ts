@@ -88,12 +88,12 @@ describe('POST /sessions/start', () => {
       prompt: 'hello',
     })
 
-    // Spawn argv: [bin, sessionId, cmdFile, callbackUrl, callbackToken, pidFile, exitFile, metaFile]
+    // Spawn argv (7 positional, per session-runner/src/main.ts):
+    // [sessionId, cmdFile, callbackUrl, callbackToken, pidFile, exitFile, metaFile]
     expect(spy.calls).toHaveLength(1)
     const call = spy.calls[0]
     expect(call.bin).toBe('/fake/bin/session-runner')
     expect(call.args).toEqual([
-      '/fake/bin/session-runner',
       'SESSION-ABC',
       nodePath.join(tmpDir, 'SESSION-ABC.cmd'),
       'ws://example.com/cb',
