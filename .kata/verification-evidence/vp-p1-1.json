@@ -1,0 +1,26 @@
+{
+  "phaseId": "p1",
+  "issueNumber": 1,
+  "workflowId": "VF-2004-0417",
+  "timestamp": "2026-04-17T15:03:07.000Z",
+  "scope": "Spec verification plan VP1 + VP2 (phase p1 — shared-transport unit tests)",
+  "steps": [
+    {
+      "id": "VP1",
+      "description": "bun test packages/shared-transport/src/buffered-channel.test.ts",
+      "passed": true,
+      "actual": "14 pass / 0 fail / 61 expect() calls — includes overflow drop+gap sentinel + depth metric",
+      "expected": "All BufferedChannel unit tests pass (overflow at 15000 events, gap sentinel at correct seq range, depth metric)"
+    },
+    {
+      "id": "VP2",
+      "description": "bun test packages/shared-transport/src/dial-back-client.test.ts",
+      "passed": true,
+      "actual": "Literal `bun test` fails: MockWebSocket stubbing uses vi.stubGlobal/vi.unstubAllGlobals which Bun's vitest-compat does not implement. Re-ran via vitest (the runner declared in packages/shared-transport/package.json `test` script): 8 pass / 0 fail — includes backoff sequence [1000,3000,9000,27000,30000x6], backoff reset after 10s healthy, collision replace, stop() prevents reconnect, structured reconnect/established/dropped logs.",
+      "expected": "Reconnect backoff for 10 drops matches [1000,3000,9000,27000,30000,30000,30000,30000,30000,30000]",
+      "notes": "Spec drift: VP2 command string says `bun test` but the test file imports from 'vitest' and uses vitest-only APIs (vi.stubGlobal, vi.fn().mock.calls). The authoritative runner per package.json is vitest. Recommend updating the VP in planning/specs/1-session-runner-decoupling.md to `pnpm --filter @duraclaw/shared-transport test` (or delete the bun test command)."
+    }
+  ],
+  "allStepsPassed": true,
+  "summary": "Phase p1 unit tests (VP1 + VP2) all pass. VP2 command in spec is wrong (bun test) — must run via vitest."
+}
