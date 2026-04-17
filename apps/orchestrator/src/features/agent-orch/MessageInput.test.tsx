@@ -25,6 +25,9 @@ vi.mock('@duraclaw/ai-elements', () => ({
   PromptInputFooter: ({ children }: Record<string, unknown>) => (
     <div data-testid="prompt-input-footer">{children as React.ReactNode}</div>
   ),
+  PromptInputProvider: ({ children }: Record<string, unknown>) => (
+    <div data-testid="prompt-input-provider">{children as React.ReactNode}</div>
+  ),
   PromptInputSubmit: ({ disabled }: Record<string, unknown>) => (
     <button type="submit" data-testid="prompt-input-submit" disabled={disabled as boolean} />
   ),
@@ -35,6 +38,14 @@ vi.mock('@duraclaw/ai-elements', () => ({
       disabled={disabled as boolean}
     />
   ),
+}))
+
+// useUserSettings pulls in WS and DB — stub it out for these structural tests
+vi.mock('~/hooks/use-user-settings', () => ({
+  useUserSettings: () => ({
+    saveDraft: vi.fn(),
+    getDraft: () => '',
+  }),
 }))
 
 import { MessageInput } from './MessageInput'

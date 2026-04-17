@@ -11,7 +11,6 @@ import {
   PromptInput,
   PromptInputBody,
   PromptInputFooter,
-  PromptInputProvider,
   PromptInputSubmit,
   PromptInputTextarea,
 } from '@duraclaw/ai-elements'
@@ -89,12 +88,9 @@ export function QuickPromptInput({
   const [images, setImages] = useState<ImagePreview[]>([])
   const [imageError, setImageError] = useState<string | null>(null)
 
-  // Check if selected project already has a tab + draft save/restore
-  const { findTabByProject, saveDraft, getDraft } = useUserSettings()
+  // Check if selected project already has a tab
+  const { findTabByProject } = useUserSettings()
   const existingTab = findTabByProject(selectedProject)
-
-  // Restore draft on mount
-  const initialDraft = getDraft('__new_session')
 
   // Update model when preferences load
   useEffect(() => {
@@ -187,7 +183,6 @@ export function QuickPromptInput({
 
     setImages([])
     setImageError(null)
-    saveDraft('__new_session', '')
   }
 
   return (
@@ -239,66 +234,63 @@ export function QuickPromptInput({
         </Select>
       </div>
       <div className="w-full max-w-lg">
-        <PromptInputProvider initialInput={initialDraft}>
-          <PromptInput
-            onPaste={handlePaste}
-            onSubmit={handleSubmit}
-            className="rounded-lg border bg-background shadow-sm"
-          >
-            {images.length > 0 && (
-              <div className="flex gap-2 px-3 pt-2">
-                {images.map((img, i) => (
-                  <div
-                    key={img.thumbnail.slice(-20)}
-                    className="group relative"
-                    data-testid="image-preview-chip"
+        <PromptInput
+          onPaste={handlePaste}
+          onSubmit={handleSubmit}
+          className="rounded-lg border bg-background shadow-sm"
+        >
+          {images.length > 0 && (
+            <div className="flex gap-2 px-3 pt-2">
+              {images.map((img, i) => (
+                <div
+                  key={img.thumbnail.slice(-20)}
+                  className="group relative"
+                  data-testid="image-preview-chip"
+                >
+                  <img
+                    src={img.thumbnail}
+                    alt="Preview"
+                    className="size-12 rounded border object-cover"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeImage(i)}
+                    aria-label="Remove image"
+                    className="absolute -right-1 -top-1 rounded-full bg-destructive p-0.5 text-destructive-foreground opacity-0 transition-opacity group-hover:opacity-100"
                   >
-                    <img
-                      src={img.thumbnail}
-                      alt="Preview"
-                      className="size-12 rounded border object-cover"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => removeImage(i)}
-                      aria-label="Remove image"
-                      className="absolute -right-1 -top-1 rounded-full bg-destructive p-0.5 text-destructive-foreground opacity-0 transition-opacity group-hover:opacity-100"
-                    >
-                      <XIcon className="size-3" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-            {imageError && <p className="px-3 pt-1 text-xs text-destructive">{imageError}</p>}
-            <PromptInputBody>
-              <PromptInputTextarea
-                placeholder="Describe the task, paste or attach an image..."
-                autoFocus
-                onChange={(e) => saveDraft('__new_session', e.currentTarget.value)}
+                    <XIcon className="size-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {imageError && <p className="px-3 pt-1 text-xs text-destructive">{imageError}</p>}
+          <PromptInputBody>
+            <PromptInputTextarea
+              placeholder="Describe the task, paste or attach an image..."
+              autoFocus
+            />
+          </PromptInputBody>
+          <PromptInputFooter>
+            <label
+              className="inline-flex size-7 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              aria-label="Attach image"
+            >
+              <input
+                type="file"
+                accept="image/*"
+                className="sr-only"
+                onChange={(e) => {
+                  const file = e.target.files?.[0]
+                  if (file) processFile(file)
+                  e.target.value = ''
+                }}
               />
-            </PromptInputBody>
-            <PromptInputFooter>
-              <label
-                className="inline-flex size-7 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                aria-label="Attach image"
-              >
-                <input
-                  type="file"
-                  accept="image/*"
-                  className="sr-only"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0]
-                    if (file) processFile(file)
-                    e.target.value = ''
-                  }}
-                />
-                <ImageIcon className="size-4" />
-              </label>
-              <PromptInputSubmit disabled={!selectedProject} />
-            </PromptInputFooter>
-          </PromptInput>
-        </PromptInputProvider>
+              <ImageIcon className="size-4" />
+            </label>
+            <PromptInputSubmit disabled={!selectedProject} />
+          </PromptInputFooter>
+        </PromptInput>
       </div>
       {existingTab && (
         <div className="flex items-center gap-2">

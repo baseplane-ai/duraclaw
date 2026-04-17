@@ -4,6 +4,7 @@
 
 import { useCallback, useEffect, useRef } from 'react'
 import { StatusBar } from '~/components/status-bar'
+import { useUserSettings } from '~/hooks/use-user-settings'
 import type { ProjectInfo } from '~/lib/types'
 import { useStatusBarStore } from '~/stores/status-bar'
 import { ChatThread } from './ChatThread'
@@ -105,6 +106,10 @@ export function AgentDetailView({ name: _name, agent }: AgentDetailViewProps) {
   const status = state?.status ?? 'idle'
   const isTerminal = status === 'aborted'
 
+  // Resolve the tab that owns this session so MessageInput can persist its draft.
+  const { findTabBySession } = useUserSettings()
+  const tabId = state?.session_id ? findTabBySession(state.session_id)?.id : undefined
+
   return (
     <div
       className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden"
@@ -132,7 +137,7 @@ export function AgentDetailView({ name: _name, agent }: AgentDetailViewProps) {
       />
 
       <StatusBar />
-      <MessageInput onSend={sendMessage} disabled={isTerminal} />
+      <MessageInput onSend={sendMessage} disabled={isTerminal} draftKey={tabId} />
     </div>
   )
 }
