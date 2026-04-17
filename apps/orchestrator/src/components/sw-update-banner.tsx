@@ -1,6 +1,6 @@
 /**
  * SwUpdateBanner — Shows a persistent toast when a new version is available.
- * User clicks "Reload" button to update when ready.
+ * User clicks "Reload" to hard-refresh when ready.
  */
 
 import { useEffect, useRef } from 'react'
@@ -8,7 +8,7 @@ import { toast } from 'sonner'
 import { useSwUpdate } from '~/hooks/use-sw-update'
 
 export function SwUpdateBanner() {
-  const { updateAvailable, applyUpdate } = useSwUpdate()
+  const { updateAvailable } = useSwUpdate()
   const toastShown = useRef(false)
 
   useEffect(() => {
@@ -20,10 +20,10 @@ export function SwUpdateBanner() {
       duration: Infinity,
       action: {
         label: 'Reload',
-        onClick: () => applyUpdate(),
+        onClick: () => window.location.reload(),
       },
     })
-  }, [updateAvailable, applyUpdate])
+  }, [updateAvailable])
 
   return null
 }

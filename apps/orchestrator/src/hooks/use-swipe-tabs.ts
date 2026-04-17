@@ -15,16 +15,23 @@ export type SwipeDir = 'left' | 'right' | null
  * `swipeDir` is set briefly on successful swipe for CSS animation,
  * then cleared after the transition completes.
  */
-export function useSwipeTabs(onSelectSession: (sessionId: string) => void) {
+export function useSwipeTabs(
+  onSelectSession: (sessionId: string) => void,
+  activeSessionId?: string | null,
+) {
   const touchStart = useRef<{ x: number; y: number } | null>(null)
   const [swipeDir, setSwipeDir] = useState<SwipeDir>(null)
   const animTimer = useRef<ReturnType<typeof setTimeout>>(null)
 
   const handleSwipe = useCallback(
     (dir: 'left' | 'right') => {
-      const { tabs, activeTabId, setActiveTab } = getUserSettings()
-      if (tabs.length < 2 || !activeTabId) return false
-      const idx = tabs.findIndex((t) => t.id === activeTabId)
+      const { tabs, setActiveTab } = getUserSettings()
+      if (tabs.length < 2) return false
+
+      // Find current tab by session being viewed, not by activeTabId
+      const idx = activeSessionId ? tabs.findIndex((t) => t.sessionId === activeSessionId) : -1
+      if (idx === -1) return false
+
       const nextIdx = dir === 'left' ? idx + 1 : idx - 1
       if (nextIdx < 0 || nextIdx >= tabs.length) return false
       const next = tabs[nextIdx]
@@ -43,7 +50,7 @@ export function useSwipeTabs(onSelectSession: (sessionId: string) => void) {
 
       return true
     },
-    [onSelectSession],
+    [onSelectSession, activeSessionId],
   )
 
   const onTouchStart = useCallback((e: React.TouchEvent) => {

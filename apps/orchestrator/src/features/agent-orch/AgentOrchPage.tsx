@@ -227,7 +227,7 @@ function AgentOrchContent() {
     [updateSession],
   )
 
-  const { swipeProps, swipeDir } = useSwipeTabs(handleSelectSession)
+  const { swipeProps, swipeDir } = useSwipeTabs(handleSelectSession, selectedSessionId)
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {

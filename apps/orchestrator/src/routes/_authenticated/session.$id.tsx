@@ -52,7 +52,7 @@ function SessionDetailPage() {
     [updateSession],
   )
 
-  const { swipeProps, swipeDir } = useSwipeTabs(handleSelectSession)
+  const { swipeProps, swipeDir } = useSwipeTabs(handleSelectSession, sessionId)
 
   return (
     <>
