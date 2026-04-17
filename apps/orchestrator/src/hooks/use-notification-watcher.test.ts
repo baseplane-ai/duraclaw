@@ -96,7 +96,7 @@ describe('useNotificationWatcher', () => {
     rerender({ sessions: [{ id: 's1', status: 'waiting_gate', project: 'proj' }] })
 
     expect(mockAddNotification).toHaveBeenCalledWith(
-      expect.objectContaining({ url: '/?session=s1&project=proj' }),
+      expect.objectContaining({ url: '/?session=s1' }),
     )
   })
 
@@ -108,7 +108,7 @@ describe('useNotificationWatcher', () => {
     rerender({ sessions: [{ id: 's1', status: 'idle', project: 'proj' }] })
 
     expect(mockAddNotification).toHaveBeenCalledWith(
-      expect.objectContaining({ url: '/?session=s1&project=proj' }),
+      expect.objectContaining({ url: '/?session=s1' }),
     )
   })
 

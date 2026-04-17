@@ -38,6 +38,7 @@ vi.mock('~/db/sessions-collection', () => ({
     has: vi.fn().mockReturnValue(true),
     utils: { refetch: vi.fn().mockResolvedValue([]) },
   },
+  persistSessionsToCache: vi.fn(),
 }))
 
 vi.mock('~/hooks/use-notification-watcher', () => ({

@@ -5,6 +5,7 @@
  * - Refetch interval: 30s
  * - Stale time: 15s
  * - Persisted to OPFS SQLite (schema version 1)
+ * - localStorage seed for instant first render (same pattern as tabs)
  */
 
 import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence'
@@ -50,3 +51,41 @@ function createSessionsCollection() {
 }
 
 export const sessionsCollection = createSessionsCollection()
+
+// ── localStorage seed for instant first render ──────────────────
+// Mirrors the pattern in tabs-collection: on module load, seed from
+// localStorage so useLiveQuery returns data on the very first render.
+// The queryFn reconciles with the server when it completes.
+
+const SESSIONS_CACHE_KEY = 'duraclaw-sessions'
+
+function seedFromCache() {
+  if (typeof localStorage === 'undefined') return
+  try {
+    const raw = localStorage.getItem(SESSIONS_CACHE_KEY)
+    if (!raw) return
+    const cached = JSON.parse(raw) as SessionRecord[]
+    if (!Array.isArray(cached) || cached.length === 0) return
+    sessionsCollection.utils.writeBatch(() => {
+      for (const session of cached) {
+        if (!sessionsCollection.has(session.id)) {
+          sessionsCollection.utils.writeInsert(session)
+        }
+      }
+    })
+  } catch {
+    // Ignore corrupt cache
+  }
+}
+
+seedFromCache()
+
+/** Persist current sessions to localStorage for next cold start. */
+export function persistSessionsToCache(sessions: SessionRecord[]) {
+  if (typeof localStorage === 'undefined') return
+  try {
+    localStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify(sessions))
+  } catch {
+    // Quota exceeded or private browsing
+  }
+}

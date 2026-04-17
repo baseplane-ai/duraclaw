@@ -31,7 +31,6 @@ function AgentOrchContent() {
   const search = useSearch({ from: '/_authenticated/' })
   const navigate = useNavigate()
   const searchSessionId = (search as { session?: string }).session ?? null
-  const searchProject = (search as { project?: string }).project ?? null
   const searchNewSessionProject =
     (search as { newSessionProject?: string }).newSessionProject ?? null
   const searchNewTab = (search as { newTab?: boolean }).newTab ?? false
@@ -74,21 +73,16 @@ function AgentOrchContent() {
     searchNewSessionProject ? { project: searchNewSessionProject, newTab: searchNewTab } : null,
   )
 
-  // Strip consumed hint params from the URL so reloads don't re-trigger them.
+  // Strip the hint search params from the URL once consumed so reloads don't re-trigger them.
   useEffect(() => {
-    if (searchNewSessionProject || searchProject) {
+    if (searchNewSessionProject) {
       navigate({
         to: '/',
-        search: (prev) => ({
-          ...prev,
-          project: undefined,
-          newSessionProject: undefined,
-          newTab: undefined,
-        }),
+        search: (prev) => ({ ...prev, newSessionProject: undefined, newTab: undefined }),
         replace: true,
       })
     }
-  }, [searchNewSessionProject, searchProject, navigate])
+  }, [searchNewSessionProject, navigate])
   const prevSearchRef = useRef(searchSessionId)
   const didRestoreRef = useRef(false)
 
@@ -118,12 +112,10 @@ function AgentOrchContent() {
           settings.setActiveTab(matchingTab.id)
         }
       } else {
-        // Session has no tab yet. Resolve the project from:
-        //   1. URL param (set by push notifications / SW nav)
-        //   2. sessions collection metadata
-        //   3. "unknown" fallback
+        // Session has no tab. Sessions collection is seeded from localStorage
+        // on module load, so data is available synchronously on first render.
         const session = sessions.find((s) => s.id === searchSessionId)
-        const project = session?.project || searchProject || 'unknown'
+        const project = session?.project || 'unknown'
         const title = session?.title || getPreviewText(session ?? { prompt: undefined }) || project
         settings.addTab(project, searchSessionId, title)
       }
@@ -145,7 +137,7 @@ function AgentOrchContent() {
       setSpawnConfig(null)
       setSelectedSessionId(null)
     }
-  }, [searchSessionId, searchProject, selectedSessionId, quickPromptHint, sessions])
+  }, [searchSessionId, selectedSessionId, quickPromptHint, sessions])
   const [projects, setProjects] = useState<
     Array<{ name: string; path: string; repo_origin?: string | null }>
   >([])

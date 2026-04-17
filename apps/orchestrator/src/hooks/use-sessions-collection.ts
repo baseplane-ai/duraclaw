@@ -7,8 +7,12 @@
 
 import { createTransaction } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
-import { useCallback, useMemo } from 'react'
-import { type SessionRecord, sessionsCollection } from '~/db/sessions-collection'
+import { useCallback, useEffect, useMemo } from 'react'
+import {
+  persistSessionsToCache,
+  type SessionRecord,
+  sessionsCollection,
+} from '~/db/sessions-collection'
 import { useNotificationWatcher } from '~/hooks/use-notification-watcher'
 
 export interface UseSessionsCollectionResult {
@@ -45,6 +49,15 @@ export function useSessionsCollection(): UseSessionsCollectionResult {
         const bTime = new Date(b.last_activity ?? b.updated_at).getTime()
         return bTime - aTime
       })
+  }, [data])
+
+  // Persist to localStorage on every change — instant data on next cold start.
+  // Cache ALL sessions (including archived) so the URL sync effect can always
+  // resolve session→project without waiting for the server fetch.
+  useEffect(() => {
+    if (data && (data as SessionRecord[]).length > 0) {
+      persistSessionsToCache([...(data as SessionRecord[])])
+    }
   }, [data])
 
   useNotificationWatcher(sessions)
