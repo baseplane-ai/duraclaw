@@ -1,0 +1,32 @@
+{
+  "name": "@duraclaw/session-runner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "session-runner": "./dist/main.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.91",
+    "@duraclaw/shared-transport": "workspace:*",
+    "@duraclaw/shared-types": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "bun-types": "^1.3.11",
+    "tsup": "^8.3.5",
+    "typescript": "~5.8.3",
+    "vitest": "^4.1.2"
+  }
+}
