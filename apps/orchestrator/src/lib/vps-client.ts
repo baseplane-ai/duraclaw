@@ -44,6 +44,14 @@ export type SessionStatusResult =
  *   - HTTP 404 → `not_found`
  *   - HTTP non-2xx other than 404 → `unreachable:http_<status>`
  *   - HTTP 2xx that fails JSON parse → `unreachable:parse_error`
+ *
+ * @remarks
+ * Fetches the session's live state from the agent-gateway.
+ *
+ * @param gatewayUrl — Expected format: `ws://HOST[:PORT]` or
+ *   `wss://HOST[:PORT]`, with NO trailing path segment. The helper
+ *   strips a trailing slash but does not handle mounted prefixes
+ *   (e.g. `wss://gw.example.com/v1/` is unsupported).
  */
 export async function getSessionStatus(
   gatewayUrl: string,

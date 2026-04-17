@@ -237,7 +237,9 @@ export class SessionDO extends Agent<Env, SessionState> {
       // path — if the runner is still alive, its DialBackClient will reconnect
       // and we should wait rather than finalizing the DO prematurely.
       if (this.state.status === 'running' || this.state.status === 'waiting_gate') {
-        void this.maybeRecoverAfterGatewayDrop()
+        this.maybeRecoverAfterGatewayDrop().catch((err) => {
+          console.error(`[SessionDO:${this.ctx.id}] maybeRecoverAfterGatewayDrop failed:`, err)
+        })
       }
     }
 
@@ -313,6 +315,13 @@ export class SessionDO extends Agent<Env, SessionState> {
 
     const callback_token = crypto.randomUUID()
 
+    // Ordering invariant: close the old gateway WS FIRST, then rotate the
+    // token via updateState, then POST. If onClose races us during this
+    // window, maybeRecoverAfterGatewayDrop probes gateway status — it does
+    // not read active_callback_token directly, so a stale token in state
+    // cannot cause a wrong branch. The close-first-then-rotate order
+    // matters anyway so a reconnect from the old runner can't slip in
+    // between the token swap and the POST.
     // Rotate: close any existing gateway-role WS on this DO with 4410 before
     // storing the new token so old+new runners don't both stream to the DO.
     if (this.state.active_callback_token) {

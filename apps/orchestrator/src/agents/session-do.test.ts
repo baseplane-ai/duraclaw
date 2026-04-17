@@ -695,6 +695,7 @@ describe('SessionDO gateway-role onConnect token validation', () => {
   }
 
   /** Mirrors the exact logic in session-do.ts onConnect gateway-role branch. */
+  // Mirrors SessionDO.onConnect gateway-role branch (session-do.ts search: `role === 'gateway'` inside onConnect).
   function simulateOnConnect(
     connection: ReturnType<typeof createFakeConnection>,
     url: URL,
@@ -774,6 +775,7 @@ describe('SessionDO triggerGatewayDial rotation', () => {
    * gateway-role WS with code 4410 BEFORE storing the new token — otherwise
    * an old runner could continue to stream into the DO alongside the new one.
    */
+  // Mirrors SessionDO.triggerGatewayDial's token-rotation block (session-do.ts search: `code === 4410`).
   function simulateRotate(
     state: { active_callback_token?: string },
     connections: Array<{ id: string; close: (c: number, r: string) => void }>,
@@ -890,6 +892,7 @@ describe('SessionDO status-aware recovery', () => {
    * implementation is identical; here we assert the decision tree so a spy
    * can witness when recovery fires.
    */
+  // Mirrors SessionDO.onClose → maybeRecoverAfterGatewayDrop branching (session-do.ts search: `maybeRecoverAfterGatewayDrop`).
   async function simulateMaybeRecover(
     gatewayUrl: string | undefined,
     sessionId: string | null,

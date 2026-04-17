@@ -25,6 +25,13 @@ export function resolveStaleThresholdMs(raw: string | undefined): number {
  * Constant-time string compare. Returns false if lengths differ (avoids the
  * length-mismatch throw from Node's timingSafeEqual) and otherwise defers to
  * node:crypto's timingSafeEqual over utf-8 bytes.
+ *
+ * Constant-time string comparison using `crypto.timingSafeEqual`.
+ *
+ * Returns false immediately when lengths differ, so this helper leaks the
+ * EXPECTED length — it does not hide it. Acceptable for fixed-length
+ * secrets (UUIDs, hex hashes of known size) because the attacker already
+ * knows that length. For variable-length secrets, pad before comparing.
  */
 export function constantTimeEquals(a: string, b: string): boolean {
   if (typeof a !== 'string' || typeof b !== 'string') return false
