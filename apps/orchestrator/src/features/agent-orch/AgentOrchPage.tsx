@@ -65,16 +65,22 @@ function AgentOrchContent() {
     prevSearchRef.current = searchSessionId
 
     if (searchSessionId && searchSessionId !== selectedSessionId) {
-      setSpawnConfig(null)
-      setQuickPromptHint(null)
-      setSelectedSessionId(searchSessionId)
+      // URL has a session that doesn't match local state — sync from URL.
+      // Skip if a quickPromptHint was just set (tab context-menu action):
+      // navigate({ to: '/' }) may not update searchSessionId synchronously,
+      // so the stale URL param can race with the freshly-set hint and clear it.
+      if (!quickPromptHint) {
+        setSpawnConfig(null)
+        setQuickPromptHint(null)
+        setSelectedSessionId(searchSessionId)
+      }
     } else if (!searchSessionId && selectedSessionId && prev !== null) {
       // Navigated from a session URL to "/" (e.g. "New session" click) — clear selection.
       // Skips cold launch where prev is also null (restore case).
       setSpawnConfig(null)
       setSelectedSessionId(null)
     }
-  }, [searchSessionId, selectedSessionId])
+  }, [searchSessionId, selectedSessionId, quickPromptHint])
   const [projects, setProjects] = useState<
     Array<{ name: string; path: string; repo_origin?: string | null }>
   >([])
