@@ -919,10 +919,10 @@ export class SessionDO extends Agent<Env, SessionState> {
     gateId: string,
     response: GateResponse,
   ): Promise<{ ok: boolean; error?: string }> {
-    if (this.state.status !== 'waiting_gate') {
+    if (this.state.status !== 'waiting_gate' && this.state.status !== 'idle') {
       return {
         ok: false,
-        error: `Cannot resolve gate: status is '${this.state.status}', expected 'waiting_gate'`,
+        error: `Cannot resolve gate: status is '${this.state.status}', expected 'waiting_gate' or 'idle'`,
       }
     }
 
