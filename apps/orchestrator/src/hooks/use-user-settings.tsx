@@ -334,7 +334,14 @@ export function useUserSettings(): UserSettingsContextValue {
   }, [])
 
   const reorderTabs = useCallback((orderedIds: string[]) => {
+    // Optimistic local update (instant)
     setTabOrder(orderedIds)
+    // Persist to server
+    fetch('/api/user-settings/tabs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'reorder', orderedIds }),
+    }).catch(() => {})
   }, [])
 
   const findTabBySession = useCallback(

@@ -58,7 +58,7 @@ export class UserSettingsDO extends Agent<Env, UserSettingsState> {
         return Response.json({ tabs: this.state.tabs })
       }
 
-      // POST /tabs — add or upsert a tab
+      // POST /tabs — add, upsert, or reorder tabs
       if (request.method === 'POST' && url.pathname === '/tabs') {
         const body = (await request.json()) as {
           action?: string
@@ -68,6 +68,11 @@ export class UserSettingsDO extends Agent<Env, UserSettingsState> {
           title?: string
           tabId?: string
           draft?: string
+          orderedIds?: string[]
+        }
+        if (body.action === 'reorder' && body.orderedIds) {
+          this.reorderTabs(body.orderedIds)
+          return Response.json({ tabs: this.state.tabs })
         }
         if (body.action === 'addNew' && body.project && body.sessionId) {
           this.addNewTab(body.project, body.sessionId, body.title, body.id)
@@ -290,6 +295,28 @@ export class UserSettingsDO extends Agent<Env, UserSettingsState> {
     this.ensureInit()
     const newTabs = this.state.tabs.map((t) => (t.id === tabId ? { ...t, title } : t))
     this.setState({ ...this.state, tabs: newTabs })
+    this.persistTabs()
+    return this.state.tabs
+  }
+
+  @callable()
+  reorderTabs(orderedIds: string[]): TabRecord[] {
+    this.ensureInit()
+    const byId = new Map(this.state.tabs.map((t) => [t.id, t]))
+    const reordered: TabRecord[] = []
+    const seen = new Set<string>()
+    for (const id of orderedIds) {
+      const t = byId.get(id)
+      if (t) {
+        reordered.push(t)
+        seen.add(id)
+      }
+    }
+    // Append any tabs not in the provided list (safety net)
+    for (const t of this.state.tabs) {
+      if (!seen.has(t.id)) reordered.push(t)
+    }
+    this.setState({ ...this.state, tabs: reordered })
     this.persistTabs()
     return this.state.tabs
   }
