@@ -1,11 +1,11 @@
 /**
- * Tabs QueryCollection -- wraps GET /api/user-settings/tabs with TanStackDB.
+ * Tabs QueryCollection -- synced to UserSettingsDO via HTTP.
  *
  * - Collection key: 'tabs'
- * - Refetch interval: 60s (tabs change less often than sessions)
- * - Stale time: 30s
  * - Persisted to OPFS SQLite (schema version 1)
- * - Mutations use createTransaction for optimistic local-first updates
+ * - queryFn fetches from /api/user-settings/tabs
+ * - onInsert/onUpdate/onDelete handlers sync mutations to the DO
+ * - Optimistic mutations with automatic rollback on error
  */
 
 import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence'
@@ -32,6 +32,33 @@ const queryOpts = queryCollectionOptions({
   getKey: (item: TabItem) => item.id,
   refetchInterval: 60_000,
   staleTime: 30_000,
+
+  onInsert: async ({ transaction }) => {
+    const items = transaction.mutations.map((m) => m.modified)
+    for (const item of items) {
+      await fetch('/api/user-settings/tabs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(item),
+      })
+    }
+  },
+
+  onUpdate: async ({ transaction }) => {
+    for (const m of transaction.mutations) {
+      await fetch(`/api/user-settings/tabs/${m.key}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(m.changes),
+      })
+    }
+  },
+
+  onDelete: async ({ transaction }) => {
+    for (const m of transaction.mutations) {
+      await fetch(`/api/user-settings/tabs/${m.key}`, { method: 'DELETE' })
+    }
+  },
 })
 
 function createTabsCollection() {

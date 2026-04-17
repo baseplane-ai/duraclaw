@@ -1,14 +1,13 @@
 /**
  * useUserSettings -- TanStackDB-backed tab management hook.
  *
- * Local-first: reads from OPFS-persisted collection, mutations are optimistic
- * via createTransaction. Server sync via queryCollection polling.
- * No WebSocket dependency — works offline from OPFS cache.
+ * Uses queryCollectionOptions with onInsert/onUpdate/onDelete handlers
+ * for automatic optimistic mutations + DO sync. Direct collection
+ * mutations (insert/update/delete) trigger handlers automatically.
  *
  * activeTabId is per-browser (localStorage), not server-synced.
  */
 
-import { createTransaction } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
 import { useCallback, useMemo, useRef, useSyncExternalStore } from 'react'
 import { type TabItem, tabsCollection } from '~/db/tabs-collection'
@@ -56,6 +55,10 @@ function setActiveTabId(id: string | null) {
 
 function generateId(): string {
   return Math.random().toString(36).slice(2, 10)
+}
+
+function collectionTabs(): TabItem[] {
+  return [...(tabsCollection as Iterable<[string, TabItem]>)].map(([, t]) => t)
 }
 
 // ── Module-level imperative ref ──────────────────────────────────
@@ -112,134 +115,80 @@ export function useUserSettings(): UserSettingsContextValue {
 
   const activeTabId = useSyncExternalStore(subscribeActive, getActiveSnapshot, () => null)
 
-  // ── Tab operations (optimistic + server) ─────────────────────
+  // ── Tab operations — direct collection mutations ─────────────
+  // The collection's onInsert/onUpdate/onDelete handlers handle server sync.
+  // Mutations are optimistic and auto-rollback on handler failure.
 
   const addTab = useCallback((project: string, sessionId: string, title?: string) => {
-    // Check existing tabs from collection
-    const currentTabs = [...(tabsCollection as Iterable<[string, TabItem]>)]
-    const bySession = currentTabs.find(([, t]) => t.sessionId === sessionId)
+    const current = collectionTabs()
+
+    // Session already has a tab — just activate (update title if needed)
+    const bySession = current.find((t) => t.sessionId === sessionId)
     if (bySession) {
-      const [, existing] = bySession
-      if (title && title !== existing.title) {
-        // Update title optimistically
-        const tx = createTransaction({
-          mutationFn: async () => {
-            await fetch(`/api/user-settings/tabs/${existing.id}`, {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ title }),
-            })
-          },
-        })
-        tx.mutate(() => {
-          tabsCollection.update(existing.id, (draft) => {
-            draft.title = title
-          })
+      if (title && title !== bySession.title) {
+        tabsCollection.update(bySession.id, (draft) => {
+          draft.title = title
         })
       }
-      setActiveTabId(existing.id)
+      setActiveTabId(bySession.id)
       return
     }
 
-    const byProject = currentTabs.find(([, t]) => t.project === project)
+    // Project already has a tab — replace its session
+    const byProject = current.find((t) => t.project === project)
     if (byProject) {
-      const [, existing] = byProject
-      const tx = createTransaction({
-        mutationFn: async () => {
-          await fetch('/api/user-settings/tabs', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ project, sessionId, title }),
-          })
-        },
+      tabsCollection.update(byProject.id, (draft) => {
+        draft.sessionId = sessionId
+        draft.title = title || sessionId.slice(0, 12)
       })
-      tx.mutate(() => {
-        tabsCollection.update(existing.id, (draft) => {
-          draft.sessionId = sessionId
-          draft.title = title || sessionId.slice(0, 12)
-        })
-      })
-      setActiveTabId(existing.id)
+      setActiveTabId(byProject.id)
       return
     }
 
     // New tab
     const id = generateId()
-    const newTab: TabItem = { id, project, sessionId, title: title || sessionId.slice(0, 12) }
-    const tx = createTransaction({
-      mutationFn: async () => {
-        await fetch('/api/user-settings/tabs', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ project, sessionId, title }),
-        })
-      },
-    })
-    tx.mutate(() => {
-      tabsCollection.insert(newTab as TabItem & Record<string, unknown>)
-    })
+    tabsCollection.insert({
+      id,
+      project,
+      sessionId,
+      title: title || sessionId.slice(0, 12),
+    } as TabItem & Record<string, unknown>)
     setActiveTabId(id)
   }, [])
 
   const addNewTab = useCallback((project: string, sessionId: string, title?: string) => {
     const id = generateId()
-    const newTab: TabItem = { id, project, sessionId, title: title || sessionId.slice(0, 12) }
-    const tx = createTransaction({
-      mutationFn: async () => {
-        await fetch('/api/user-settings/tabs', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'addNew', project, sessionId, title }),
-        })
-      },
-    })
-    tx.mutate(() => {
-      tabsCollection.insert(newTab as TabItem & Record<string, unknown>)
-    })
+    tabsCollection.insert({
+      id,
+      project,
+      sessionId,
+      title: title || sessionId.slice(0, 12),
+    } as TabItem & Record<string, unknown>)
     setActiveTabId(id)
   }, [])
 
   const switchTabSession = useCallback((tabId: string, sessionId: string, title?: string) => {
-    const tx = createTransaction({
-      mutationFn: async () => {
-        await fetch('/api/user-settings/tabs', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'switch', tabId, sessionId, title }),
-        })
-      },
-    })
-    tx.mutate(() => {
-      if (tabsCollection.has(tabId)) {
-        tabsCollection.update(tabId, (draft) => {
-          draft.sessionId = sessionId
-          draft.title = title || sessionId.slice(0, 12)
-        })
-      }
-    })
+    if (tabsCollection.has(tabId)) {
+      tabsCollection.update(tabId, (draft) => {
+        draft.sessionId = sessionId
+        draft.title = title || sessionId.slice(0, 12)
+      })
+    }
   }, [])
 
   const removeTab = useCallback((tabId: string) => {
-    // Compute next active tab before removing
-    const currentTabs = [...(tabsCollection as Iterable<[string, TabItem]>)].map(([, t]) => t)
+    const current = collectionTabs()
     const currentActive = readActiveTabId()
     let newActive = currentActive
     if (currentActive === tabId) {
-      const idx = currentTabs.findIndex((t) => t.id === tabId)
-      const remaining = currentTabs.filter((t) => t.id !== tabId)
+      const idx = current.findIndex((t) => t.id === tabId)
+      const remaining = current.filter((t) => t.id !== tabId)
       newActive = remaining[Math.min(idx, remaining.length - 1)]?.id ?? null
     }
 
-    const tx = createTransaction({
-      mutationFn: async () => {
-        await fetch(`/api/user-settings/tabs/${tabId}`, { method: 'DELETE' })
-      },
-    })
-    tx.mutate(() => {
-      if (tabsCollection.has(tabId)) {
-        tabsCollection.delete([tabId])
-      }
-    })
+    if (tabsCollection.has(tabId)) {
+      tabsCollection.delete([tabId])
+    }
     setActiveTabId(newActive)
   }, [])
 
@@ -248,22 +197,11 @@ export function useUserSettings(): UserSettingsContextValue {
   }, [])
 
   const updateTabTitle = useCallback((tabId: string, title: string) => {
-    const tx = createTransaction({
-      mutationFn: async () => {
-        await fetch(`/api/user-settings/tabs/${tabId}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title }),
-        })
-      },
-    })
-    tx.mutate(() => {
-      if (tabsCollection.has(tabId)) {
-        tabsCollection.update(tabId, (draft) => {
-          draft.title = title
-        })
-      }
-    })
+    if (tabsCollection.has(tabId)) {
+      tabsCollection.update(tabId, (draft) => {
+        draft.title = title
+      })
+    }
   }, [])
 
   const findTabBySession = useCallback(
@@ -280,7 +218,7 @@ export function useUserSettings(): UserSettingsContextValue {
     [tabs],
   )
 
-  // ── Drafts (localStorage only, no server) ────────────────────
+  // ── Drafts (localStorage only) ───────────────────────────────
 
   const draftTimerRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 
