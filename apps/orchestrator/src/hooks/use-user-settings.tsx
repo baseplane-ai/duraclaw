@@ -70,11 +70,16 @@ function seedFromCache() {
     if (!raw) return
     const cached = JSON.parse(raw) as { tabs?: TabItem[]; activeTabId?: string | null }
     if (cached.tabs?.length) {
-      for (const tab of cached.tabs) {
-        if (!tabsCollection.has(tab.id)) {
-          tabsCollection.insert(tab as TabItem & Record<string, unknown>)
+      // Use writeBatch + writeInsert — bypasses optimistic layer and handlers.
+      // These are pre-synced data, not new mutations. queryFn will reconcile
+      // with server state when it completes (deletes stale, upserts fresh).
+      tabsCollection.utils.writeBatch(() => {
+        for (const tab of cached.tabs ?? []) {
+          if (!tabsCollection.has(tab.id)) {
+            tabsCollection.utils.writeInsert(tab)
+          }
         }
-      }
+      })
     }
     if (cached.activeTabId) {
       setActiveTabId(cached.activeTabId)
