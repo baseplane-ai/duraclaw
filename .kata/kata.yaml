@@ -22,9 +22,9 @@ global_rules:
     When a task instruction says 'Invoke /skill-name', use the Skill tool to invoke that skill before starting work on
     the task.
   - >-
-    Git workflow: commit and push directly to main at session close. Do NOT create pull requests. CI runs remotely after
-    push — no local CI gate. If kata-close or any step template tells you to run `gh pr create`, SKIP that step; run
-    `git push origin main` instead.
+    Default git workflow: commit and push directly to main at session close. CI runs remotely after push — no local CI
+    gate. Implementation mode may use a PR workflow for large features (see mode rules); all other modes push directly
+    to main.
 task_rules:
   - Tasks are pre-created by kata enter. Do NOT create new tasks with TaskCreate.
   - Run TaskList FIRST to discover pre-created tasks and their dependency chains.
@@ -86,6 +86,11 @@ modes:
       - 'Run quality gates after each phase: build, typecheck, tests (/test-protocol), then review (/code-review).'
       - One spec phase at a time. Complete IMPL + TEST + REVIEW before moving to the next phase.
       - Read the spec first — understand ALL phases before writing any code. Spec non-goals are off-limits.
+      - >-
+        Git workflow: large features use a PR workflow — work on a feature branch and open a PR at session close via
+        `gh pr create`. Smaller changes commit and push directly to main. Judge size by scope: multi-phase specs,
+        cross-cutting changes, or risky/breaking work → PR. Single-phase, contained, low-risk changes → direct push.
+        When in doubt, prefer a PR.
     issue_handling: required
     issue_label: feature
     stop_conditions:
@@ -183,4 +188,4 @@ modes:
     workflow_prefix: DB
     aliases:
       - investigate
-kata_version: 0.5.0
+kata_version: 0.5.1
