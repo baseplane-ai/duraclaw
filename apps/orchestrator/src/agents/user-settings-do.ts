@@ -62,17 +62,18 @@ export class UserSettingsDO extends Agent<Env, UserSettingsState> {
       if (request.method === 'POST' && url.pathname === '/tabs') {
         const body = (await request.json()) as {
           action?: string
+          id?: string
           project?: string
           sessionId?: string
           title?: string
           tabId?: string
         }
         if (body.action === 'addNew' && body.project && body.sessionId) {
-          this.addNewTab(body.project, body.sessionId, body.title)
+          this.addNewTab(body.project, body.sessionId, body.title, body.id)
         } else if (body.action === 'switch' && body.tabId && body.sessionId) {
           this.switchTabSession(body.tabId, body.sessionId, body.title)
         } else if (body.project && body.sessionId) {
-          this.addTab(body.project, body.sessionId, body.title)
+          this.addTab(body.project, body.sessionId, body.title, body.id)
         }
         return Response.json({ tabs: this.state.tabs })
       }
@@ -165,7 +166,7 @@ export class UserSettingsDO extends Agent<Env, UserSettingsState> {
   // ── RPC methods ────────────────────────────────────────────────
 
   @callable()
-  addTab(project: string, sessionId: string, title?: string): TabRecord[] {
+  addTab(project: string, sessionId: string, title?: string, clientId?: string): TabRecord[] {
     this.ensureInit()
     const { tabs } = this.state
 
@@ -192,8 +193,8 @@ export class UserSettingsDO extends Agent<Env, UserSettingsState> {
       return this.state.tabs
     }
 
-    // New tab
-    const id = crypto.randomUUID().slice(0, 8)
+    // New tab — use client-provided ID if available for consistency
+    const id = clientId || crypto.randomUUID().slice(0, 8)
     const newTab: TabRecord = { id, project, sessionId, title: title || sessionId.slice(0, 12) }
     const newTabs = [...tabs, newTab]
     this.setState({ ...this.state, tabs: newTabs, activeTabId: id })
@@ -202,9 +203,9 @@ export class UserSettingsDO extends Agent<Env, UserSettingsState> {
   }
 
   @callable()
-  addNewTab(project: string, sessionId: string, title?: string): TabRecord[] {
+  addNewTab(project: string, sessionId: string, title?: string, clientId?: string): TabRecord[] {
     this.ensureInit()
-    const id = crypto.randomUUID().slice(0, 8)
+    const id = clientId || crypto.randomUUID().slice(0, 8)
     const newTab: TabRecord = { id, project, sessionId, title: title || sessionId.slice(0, 12) }
     const newTabs = [...this.state.tabs, newTab]
     this.setState({ ...this.state, tabs: newTabs, activeTabId: id })
