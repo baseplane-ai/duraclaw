@@ -138,17 +138,19 @@ function WorktreeStatusItem({ info }: { info: WorktreeInfo }) {
       <span className="whitespace-nowrap">{info.branch}</span>
       {info.dirty && (
         <span className="text-yellow-400" title="Uncommitted changes">
-          \u25CF
+          {'●'}
         </span>
       )}
       {info.ahead > 0 && (
         <span className="whitespace-nowrap" title={`${info.ahead} commit(s) ahead`}>
-          {info.ahead}\u25B2
+          {info.ahead}
+          {'▲'}
         </span>
       )}
       {info.behind > 0 && (
         <span className="whitespace-nowrap" title={`${info.behind} commit(s) behind`}>
-          {info.behind}\u25BC
+          {info.behind}
+          {'▼'}
         </span>
       )}
       {info.pr && <PrStatusBadge pr={info.pr} />}

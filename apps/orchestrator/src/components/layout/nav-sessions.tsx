@@ -181,15 +181,16 @@ function PrBadge({ pr }: { pr: PrInfo }) {
 
 function WorktreeIndicators({ project }: { project: ProjectInfo }) {
   return (
-    <span className="ml-auto flex shrink-0 items-center gap-1 text-[10px]">
+    <span className="flex shrink-0 items-center gap-1 text-[10px]">
       {project.dirty && (
         <span className="text-yellow-400" title="Uncommitted changes">
-          \u25CF
+          {'●'}
         </span>
       )}
       {project.ahead > 0 && (
         <span className="text-muted-foreground" title={`${project.ahead} ahead`}>
-          {project.ahead}\u25B2
+          {project.ahead}
+          {'▲'}
         </span>
       )}
       {project.pr && <PrBadge pr={project.pr} />}
@@ -492,12 +493,14 @@ function WorktreeNode({
     return (
       <SidebarMenuSubItem>
         <SidebarMenuSubButton className={cn('group/wt', isHidden && 'opacity-40')}>
-          <GitBranchIcon className="size-3 shrink-0" />
-          <div className="flex min-w-0 flex-1 items-center gap-1.5">
+          <GitBranchIcon className="size-3 shrink-0 mt-0.5" />
+          <div className="flex min-w-0 flex-1 flex-col">
             <span className="truncate text-sm leading-tight">{project.name}</span>
-            <span className="truncate text-[10px] text-muted-foreground">{project.branch}</span>
+            <span className="flex items-center gap-1 truncate text-[11px] text-muted-foreground leading-tight">
+              {project.branch}
+              <WorktreeIndicators project={project} />
+            </span>
           </div>
-          <WorktreeIndicators project={project} />
           <button
             type="button"
             className="ml-1 shrink-0 p-0.5 text-muted-foreground opacity-0 hover:text-foreground group-hover/wt:opacity-100"
@@ -519,14 +522,16 @@ function WorktreeNode({
       <SidebarMenuSubItem>
         <CollapsibleTrigger asChild>
           <SidebarMenuSubButton className={cn(isHidden && 'opacity-40')}>
-            <GitBranchIcon className="size-3 shrink-0" />
-            <div className="flex min-w-0 flex-1 items-center gap-1.5">
+            <GitBranchIcon className="size-3 shrink-0 mt-0.5" />
+            <div className="flex min-w-0 flex-1 flex-col">
               <span className="truncate text-sm leading-tight">{project.name}</span>
-              <span className="truncate text-[10px] text-muted-foreground">{project.branch}</span>
+              <span className="flex items-center gap-1 truncate text-[11px] text-muted-foreground leading-tight">
+                {project.branch}
+                <WorktreeIndicators project={project} />
+              </span>
             </div>
-            <WorktreeIndicators project={project} />
-            <span className="ml-1 text-[10px] text-muted-foreground">{sessions.length}</span>
-            <ChevronRight className="ml-0.5 size-2.5 transition-transform duration-200 group-data-[state=open]/wt-col:rotate-90" />
+            <span className="shrink-0 text-[10px] text-muted-foreground">{sessions.length}</span>
+            <ChevronRight className="ml-0.5 size-2.5 shrink-0 transition-transform duration-200 group-data-[state=open]/wt-col:rotate-90" />
           </SidebarMenuSubButton>
         </CollapsibleTrigger>
         <CollapsibleContent>
