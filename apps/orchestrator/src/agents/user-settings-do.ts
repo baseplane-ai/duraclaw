@@ -10,6 +10,7 @@ export interface TabRecord {
   project: string
   sessionId: string
   title: string
+  draft?: string
 }
 
 export interface UserSettingsState {
@@ -76,11 +77,12 @@ export class UserSettingsDO extends Agent<Env, UserSettingsState> {
         return Response.json({ tabs: this.state.tabs })
       }
 
-      // PATCH /tabs/:id — update title
+      // PATCH /tabs/:id — update title and/or draft
       if (request.method === 'PATCH' && url.pathname.startsWith('/tabs/')) {
         const tabId = url.pathname.slice('/tabs/'.length)
-        const body = (await request.json()) as { title?: string }
+        const body = (await request.json()) as { title?: string; draft?: string }
         if (body.title) this.updateTabTitle(tabId, body.title)
+        if (typeof body.draft === 'string') this.saveDraft(tabId, body.draft)
         return Response.json({ tabs: this.state.tabs })
       }
 
@@ -107,25 +109,31 @@ export class UserSettingsDO extends Agent<Env, UserSettingsState> {
       .exec(`SELECT id, project, session_id, title FROM tabs ORDER BY position ASC`)
       .toArray() as Array<{ id: string; project: string; session_id: string; title: string }>
 
+    // Load drafts and join into tab records
+    const draftRows = this.ctx.storage.sql
+      .exec(`SELECT tab_id, text FROM drafts`)
+      .toArray() as Array<{ tab_id: string; text: string }>
+    const draftMap = new Map<string, string>()
+    const drafts: Record<string, string> = {}
+    for (const d of draftRows) {
+      if (d.text) {
+        draftMap.set(d.tab_id, d.text)
+        drafts[d.tab_id] = d.text
+      }
+    }
+
     const tabs: TabRecord[] = tabRows.map((r) => ({
       id: r.id,
       project: r.project,
       sessionId: r.session_id,
       title: r.title,
+      draft: draftMap.get(r.id) || undefined,
     }))
 
     const activeRow = this.ctx.storage.sql
       .exec(`SELECT value FROM tab_state WHERE key = 'activeTabId'`)
       .toArray() as Array<{ value: string | null }>
     const activeTabId = activeRow[0]?.value ?? null
-
-    const draftRows = this.ctx.storage.sql
-      .exec(`SELECT tab_id, text FROM drafts`)
-      .toArray() as Array<{ tab_id: string; text: string }>
-    const drafts: Record<string, string> = {}
-    for (const d of draftRows) {
-      if (d.text) drafts[d.tab_id] = d.text
-    }
 
     this.setState({ tabs, activeTabId, drafts })
   }
@@ -278,7 +286,11 @@ export class UserSettingsDO extends Agent<Env, UserSettingsState> {
     } else {
       delete newDrafts[tabId]
     }
-    this.setState({ ...this.state, drafts: newDrafts })
+    // Update draft on tab record too so it flows through the collection
+    const newTabs = this.state.tabs.map((t) =>
+      t.id === tabId ? { ...t, draft: text || undefined } : t,
+    )
+    this.setState({ ...this.state, tabs: newTabs, drafts: newDrafts })
   }
 
   @callable()

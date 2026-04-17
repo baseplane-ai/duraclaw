@@ -74,13 +74,14 @@ function syncFromServer(tabs: TabRecord[]) {
         tabsCollection.utils.writeDelete(key)
       }
     }
-    // Upsert server tabs
+    // Upsert server tabs (including draft)
     for (const tab of tabs) {
       const item: TabItem = {
         id: tab.id,
         project: tab.project,
         sessionId: tab.sessionId,
         title: tab.title,
+        draft: tab.draft,
       }
       tabsCollection.utils.writeUpsert(item)
     }
@@ -161,10 +162,13 @@ export function useUserSettings(): UserSettingsContextValue {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data, isLoading } = useLiveQuery(tabsCollection as any)
 
-  const tabs = useMemo(() => {
+  const allItems = useMemo(() => {
     if (!data) return [] as TabItem[]
     return [...data] as TabItem[]
   }, [data])
+
+  // Filter out sentinel draft records (project === '__draft') from visible tabs
+  const tabs = useMemo(() => allItems.filter((t) => t.project !== '__draft'), [allItems])
 
   const activeTabId = useSyncExternalStore(subscribeActive, getActiveSnapshot, () => null)
 
@@ -268,7 +272,7 @@ export function useUserSettings(): UserSettingsContextValue {
     [tabs],
   )
 
-  // ── Drafts (localStorage only) ───────────────────────────────
+  // ── Drafts (synced via collection — debounced update) ────────
 
   const draftTimerRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 
@@ -277,21 +281,30 @@ export function useUserSettings(): UserSettingsContextValue {
     if (existing) clearTimeout(existing)
     const timer = setTimeout(() => {
       draftTimerRef.current.delete(tabId)
-      if (typeof localStorage !== 'undefined') {
-        if (text) {
-          localStorage.setItem(`draft:${tabId}`, text)
-        } else {
-          localStorage.removeItem(`draft:${tabId}`)
-        }
+      if (tabsCollection.has(tabId)) {
+        tabsCollection.update(tabId, (draft) => {
+          draft.draft = text || undefined
+        })
+      } else {
+        // Sentinel record for global drafts (e.g. __new_session)
+        tabsCollection.insert({
+          id: tabId,
+          project: '__draft',
+          sessionId: '',
+          title: '',
+          draft: text || undefined,
+        } as TabItem & Record<string, unknown>)
       }
     }, 500)
     draftTimerRef.current.set(tabId, timer)
   }, [])
 
-  const getDraft = useCallback((tabId: string): string => {
-    if (typeof localStorage === 'undefined') return ''
-    return localStorage.getItem(`draft:${tabId}`) ?? ''
-  }, [])
+  const getDraft = useCallback(
+    (tabId: string): string => {
+      return allItems.find((t) => t.id === tabId)?.draft ?? ''
+    },
+    [allItems],
+  )
 
   // Keep imperative ref in sync
   settingsRef.current = {

@@ -19,6 +19,8 @@ export interface TabItem {
   project: string
   sessionId: string
   title: string
+  /** Synced input draft text (debounced save to DO) */
+  draft?: string
 }
 
 const queryOpts = queryCollectionOptions({
