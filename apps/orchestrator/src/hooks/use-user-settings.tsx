@@ -194,7 +194,7 @@ export function useUserSettings(): UserSettingsContextValue {
     if (byProject) {
       tabsCollection.update(byProject.id, (draft) => {
         draft.sessionId = sessionId
-        draft.title = title || sessionId.slice(0, 12)
+        draft.title = title || project
       })
       setActiveTabId(byProject.id)
       return
@@ -205,7 +205,7 @@ export function useUserSettings(): UserSettingsContextValue {
       id,
       project,
       sessionId,
-      title: title || sessionId.slice(0, 12),
+      title: title || project,
     } as TabItem & Record<string, unknown>)
     setActiveTabId(id)
   }, [])
@@ -216,7 +216,7 @@ export function useUserSettings(): UserSettingsContextValue {
       id,
       project,
       sessionId,
-      title: title || sessionId.slice(0, 12),
+      title: title || project,
     } as TabItem & Record<string, unknown>)
     setActiveTabId(id)
   }, [])
@@ -225,7 +225,7 @@ export function useUserSettings(): UserSettingsContextValue {
     if (tabsCollection.has(tabId)) {
       tabsCollection.update(tabId, (draft) => {
         draft.sessionId = sessionId
-        draft.title = title || sessionId.slice(0, 12)
+        if (title) draft.title = title
       })
     }
   }, [])

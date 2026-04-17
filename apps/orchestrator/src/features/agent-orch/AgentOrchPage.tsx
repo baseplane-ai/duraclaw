@@ -38,7 +38,9 @@ function AgentOrchContent() {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(() => {
     const settings = getUserSettings()
     if (searchSessionId) {
-      settings.addTab('unknown', searchSessionId)
+      // Don't create tab yet — session data may not be loaded.
+      // Tab will be created/updated by the URL sync effect or AgentDetailWithSpawn
+      // once session metadata is available.
       return searchSessionId
     }
     // No URL session — restore from the last active tab (cold launch / PWA)
@@ -87,13 +89,13 @@ function AgentOrchContent() {
         if (matchingTab) {
           settings.setActiveTab(matchingTab.id)
         } else {
-          // Session has no tab yet — create one from available session data
+          // Session has no tab yet — create one only if we have real metadata
           const session = sessions.find((s) => s.id === searchSessionId)
-          if (session) {
+          if (session?.project) {
             settings.addTab(
-              session.project || 'unknown',
+              session.project,
               searchSessionId,
-              session.title || searchSessionId.slice(0, 12),
+              session.title || getPreviewText(session) || session.project,
             )
           }
         }
@@ -104,7 +106,7 @@ function AgentOrchContent() {
       setSpawnConfig(null)
       setSelectedSessionId(null)
     }
-  }, [searchSessionId, selectedSessionId, quickPromptHint])
+  }, [searchSessionId, selectedSessionId, quickPromptHint, sessions])
   const [projects, setProjects] = useState<
     Array<{ name: string; path: string; repo_origin?: string | null }>
   >([])

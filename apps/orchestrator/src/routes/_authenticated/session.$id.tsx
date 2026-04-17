@@ -20,22 +20,21 @@ function SessionDetailPage() {
   const { sessions, updateSession } = useSessionsCollection()
   const { addTab } = useUserSettings()
 
-  // Sync tab store on mount — synchronous via initializer pattern
+  // Sync tab store on mount — only if session metadata is available
   const [_initDone] = useState(() => {
     const session = sessions.find((s) => s.id === sessionId)
-    const title =
-      session?.title || getPreviewText(session ?? { prompt: undefined }) || sessionId.slice(0, 12)
-    const project = session?.project || 'unknown'
-    getUserSettings().addTab(project, sessionId, title)
+    if (session?.project) {
+      const title = session.title || getPreviewText(session) || session.project
+      getUserSettings().addTab(session.project, sessionId, title)
+    }
     return true
   })
 
   const handleSelectSession = useCallback(
     (sid: string) => {
       const session = sessions.find((s) => s.id === sid)
-      const title =
-        session?.title || getPreviewText(session ?? { prompt: undefined }) || sid.slice(0, 12)
       const project = session?.project || 'unknown'
+      const title = session?.title || getPreviewText(session ?? { prompt: undefined }) || project
       addTab(project, sid, title)
       navigate({ to: '/', search: { session: sid } })
     },
