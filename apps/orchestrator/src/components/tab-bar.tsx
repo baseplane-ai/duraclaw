@@ -249,6 +249,7 @@ interface ProjectTabProps {
   project: string
   title: string
   isActive: boolean
+  isDragging?: boolean
   currentSession: SessionRecord | undefined
   onSelect: () => void
   onClose: () => void
@@ -270,7 +271,7 @@ function SortableProjectTab(props: ProjectTabProps) {
   }
   return (
     <div ref={setNodeRef} style={style} {...attributes} {...listeners}>
-      <ProjectTab {...props} />
+      <ProjectTab {...props} isDragging={isDragging} />
     </div>
   )
 }
@@ -280,6 +281,7 @@ function ProjectTab({
   project,
   title,
   isActive,
+  isDragging,
   currentSession,
   onSelect,
   onClose,
@@ -288,6 +290,11 @@ function ProjectTab({
 }: ProjectTabProps) {
   const isMobile = useIsMobile()
   const [menuOpen, setMenuOpen] = useState(false)
+
+  // Close context menu when a drag starts (long-press may have opened it)
+  useEffect(() => {
+    if (isDragging) setMenuOpen(false)
+  }, [isDragging])
 
   // --- Long-press + right-click menu trigger ---
   const LONG_PRESS_MS = 500
