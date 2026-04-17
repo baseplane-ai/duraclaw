@@ -176,14 +176,14 @@ Six surfaces audited, each by a dedicated Explore agent reading the relevant fil
 
 **Auth.** Bearer token from env (`CC_GATEWAY_API_TOKEN`), timing-safe compared at `auth.ts:3–11`. Static — no rotation.
 
-**Heartbeat.** `HeartbeatEvent` type is **defined** in `shared-types` but **never emitted** (verified in `dialback.ts`). The DO watchdog treats 5 minutes without any gateway message as stale → recovery fires. A legitimate long model think exceeding 5 min will trigger false recovery.
+**Heartbeat.** `HeartbeatEvent` type is **defined** in `shared-types` but **never emitted**. This is a leftover from the previous outbound-WS design; under the current dial-back model the `ReconnectableChannel` already keeps the session alive across WS drops, so heartbeats aren't needed. The type is dead code. The 5-minute watchdog threshold is a separate concern (see risks).
 
 **Backpressure.** `messageQueue` is an unbounded array (`server.ts:506–520`). A client flooding `stream-input` can OOM the gateway. `partial_assistant` deltas trigger `session.updateMessage()` on every delta — SQLite write amplification under heavy streaming.
 
 **Top risks:**
 - (HIGH) No idempotency on `execute`/`resume`/`stream-input` → retries double-spawn or duplicate-send.
 - (HIGH) Concurrent `resume` of the same `sdk_session_id` is not prevented → SDK file corruption.
-- (MED) `HeartbeatEvent` unused → false stale detection on long-running turns.
+- (MED) 5-minute watchdog threshold in `SessionDO` can false-trigger on legitimately long model thinks; threshold should probably be config-driven or scoped by session activity.
 
 ## Cross-cutting observations
 
@@ -223,7 +223,7 @@ What's actually good and worth preserving:
 ### Tier 3 — structural
 
 7. **Break up `SessionDO` (1669 lines / 5 concerns).** Extract `GatewayClient` (dial/send/token), `EventDispatcher` (handleGatewayEvent), `RecoveryManager` (watchdog + hydrate), `RegistrySync` (5 sync methods). Eliminates several concurrency hazards as a side effect.
-8. **Emit `HeartbeatEvent` from VPS** (type already defined). Bump `STALE_THRESHOLD_MS` into env config. Fixes false stale detection.
+8. **Delete `HeartbeatEvent` type** (legacy from the pre-dial-back design; no longer needed since `ReconnectableChannel` handles drops). Make `STALE_THRESHOLD_MS` env-configurable and consider scoping it to gate-state vs active-streaming so long model thinks don't false-trigger recovery.
 9. **Client-state cleanup:**
    - Delete `auth-store.ts`.
    - Add `typeof window` guard to `tabs.ts:38`.
