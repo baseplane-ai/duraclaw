@@ -46,6 +46,13 @@ export interface UseSessionCollabResult {
    * `TYPING_DEBOUNCE_MS` of quiet. Safe to call on every keystroke.
    */
   notifyTyping: () => void
+  /**
+   * Publish the local caret / selection to awareness as two
+   * `Y.RelativePosition`s (anchor + head). Passing `null` clears the
+   * awareness `cursor` field. Positions survive remote edits because
+   * they're resolved against the current Y.Text on each render.
+   */
+  setCursor: (sel: { anchor: number; head: number } | null) => void
 }
 
 export const TYPING_DEBOUNCE_MS = 2000
@@ -114,13 +121,45 @@ export function useSessionCollab(opts: { sessionId: string }): UseSessionCollabR
     }
     awareness.setLocalStateField('user', user)
     awareness.setLocalStateField('typing', false)
+    // `activeSessionId` is implicit — if we're writing awareness, we're
+    // connected to this session. Peers read it to distinguish "viewing
+    // here" vs "connected but backgrounded". Per B9, background tabs
+    // actually disconnect (YProvider tears down on unmount), so the
+    // natural unmount flow handles absence — we only set it here.
+    awareness.setLocalStateField('activeSessionId', sessionId)
     return () => {
       // Clear our own fields; y-protocols will also drop the full state
       // when the WS closes, but doing this eagerly avoids a stale "typing"
       // flag being visible to peers during a tab switch.
       awareness.setLocalState(null)
     }
-  }, [provider, userId, userName])
+  }, [provider, userId, userName, sessionId])
+
+  // Cursor broadcast. Convert absolute textarea indices to
+  // Y.RelativePosition so the marker tracks the intended character even
+  // across concurrent inserts/deletes. Null clears the field so peers
+  // drop our marker (e.g. on blur).
+  const setCursor = useCallback(
+    (sel: { anchor: number; head: number } | null) => {
+      if (!provider) return
+      const awareness = provider.awareness
+      if (sel === null) {
+        awareness.setLocalStateField('cursor', null)
+        return
+      }
+      const len = ytext.length
+      const anchorIdx = Math.max(0, Math.min(len, sel.anchor))
+      const headIdx = Math.max(0, Math.min(len, sel.head))
+      const anchor = Y.createRelativePositionFromTypeIndex(ytext, anchorIdx)
+      const head = Y.createRelativePositionFromTypeIndex(ytext, headIdx)
+      // Encode via Y helpers so the awareness payload is plain JSON.
+      awareness.setLocalStateField('cursor', {
+        anchor: Y.relativePositionToJSON(anchor),
+        head: Y.relativePositionToJSON(head),
+      })
+    },
+    [provider, ytext],
+  )
 
   // Typing indicator debounce timer. Local-only — a timer per client, not
   // an awareness field, so hibernation-safe.
@@ -162,5 +201,5 @@ export function useSessionCollab(opts: { sessionId: string }): UseSessionCollabR
   const awareness = provider?.awareness ?? null
   const selfClientId = provider?.awareness?.clientID ?? null
 
-  return { doc, provider, status, ytext, awareness, selfClientId, notifyTyping }
+  return { doc, provider, status, ytext, awareness, selfClientId, notifyTyping, setCursor }
 }

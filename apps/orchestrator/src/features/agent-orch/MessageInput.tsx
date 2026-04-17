@@ -17,8 +17,9 @@ import {
   PromptInputTextarea,
 } from '@duraclaw/ai-elements'
 import { ImageIcon, XIcon } from 'lucide-react'
-import { useCallback, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { toast } from 'sonner'
+import { CursorOverlay } from '~/components/cursor-overlay'
 import { PresenceBar } from '~/components/presence-bar'
 import { TypingIndicator } from '~/components/typing-indicator'
 import { useSessionCollab } from '~/hooks/use-session-collab'
@@ -79,7 +80,16 @@ export function MessageInput({
   // local-only "standalone" room so the hook's invariants still hold but
   // there's nothing to sync.
   const collab = useSessionCollab({ sessionId: sessionId ?? '__standalone' })
-  const { ytext, awareness, selfClientId, status: collabStatus, notifyTyping } = collab
+  const {
+    doc,
+    ytext,
+    awareness,
+    selfClientId,
+    status: collabStatus,
+    notifyTyping,
+    setCursor,
+  } = collab
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
 
   const collabActive = Boolean(sessionId)
   const isConnecting = collabActive && collabStatus === 'connecting'
@@ -231,12 +241,25 @@ export function MessageInput({
         )}
         {error && <p className="px-3 pt-1 text-xs text-destructive">{error}</p>}
         <PromptInputBody>
-          <PromptInputTextarea
-            placeholder={textareaPlaceholder}
-            disabled={textareaDisabled}
-            yText={collabActive ? ytext : undefined}
-            onInput={collabActive ? notifyTyping : undefined}
-          />
+          <div style={{ position: 'relative' }}>
+            <PromptInputTextarea
+              ref={textareaRef}
+              placeholder={textareaPlaceholder}
+              disabled={textareaDisabled}
+              yText={collabActive ? ytext : undefined}
+              onInput={collabActive ? notifyTyping : undefined}
+              onCursorChange={collabActive ? setCursor : undefined}
+            />
+            {collabActive && awareness && selfClientId !== null && (
+              <CursorOverlay
+                awareness={awareness}
+                selfClientId={selfClientId}
+                textareaRef={textareaRef}
+                doc={doc}
+                ytext={ytext}
+              />
+            )}
+          </div>
         </PromptInputBody>
         <PromptInputFooter>
           <label

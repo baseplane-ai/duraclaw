@@ -900,6 +900,20 @@ export type PromptInputTextareaProps = ComponentProps<typeof InputGroupTextarea>
    * the existing controller-based or fully uncontrolled path is used.
    */
   yText?: YTextLike
+  /**
+   * Called when the local caret/selection changes while `yText` is set.
+   * Consumers wire this to awareness so peers can render cursor overlays
+   * (B7). Fires on selectionchange / focus / keyup / mouseup; receives
+   * `null` on blur so peers drop the marker. No-op when absent.
+   */
+  onCursorChange?: (sel: { anchor: number; head: number } | null) => void
+  /**
+   * Optional ref to the underlying `<textarea>`. Used by the cursor
+   * overlay to measure pixel positions of peer cursors. Accepted as a
+   * plain prop (React 19) rather than via `forwardRef` so consumers can
+   * pass it alongside other props without wrapping.
+   */
+  ref?: RefObject<HTMLTextAreaElement | null>
 }
 
 export const PromptInputTextarea = ({
@@ -908,6 +922,8 @@ export const PromptInputTextarea = ({
   className,
   placeholder = 'What would you like to know?',
   yText,
+  onCursorChange,
+  ref,
   ...props
 }: PromptInputTextareaProps) => {
   const controller = useOptionalPromptInputController()
@@ -1005,6 +1021,49 @@ export const PromptInputTextarea = ({
   const handleCompositionEnd = useCallback(() => setIsComposing(false), [])
   const handleCompositionStart = useCallback(() => setIsComposing(true), [])
 
+  // Emit caret / selection snapshots for awareness. We only wire these
+  // when both `yText` and `onCursorChange` are provided — otherwise this
+  // is a plain textarea and there's nothing remote to tell.
+  const emitCursor = useCallback(
+    (el: HTMLTextAreaElement) => {
+      if (!yText || !onCursorChange) return
+      const anchor =
+        el.selectionDirection === 'backward' ? (el.selectionEnd ?? 0) : (el.selectionStart ?? 0)
+      const head =
+        el.selectionDirection === 'backward' ? (el.selectionStart ?? 0) : (el.selectionEnd ?? 0)
+      onCursorChange({ anchor, head })
+    },
+    [yText, onCursorChange],
+  )
+
+  const handleSelect = useCallback(
+    (e: React.SyntheticEvent<HTMLTextAreaElement>) => {
+      emitCursor(e.currentTarget)
+    },
+    [emitCursor],
+  )
+  const handleFocus = useCallback(
+    (e: React.FocusEvent<HTMLTextAreaElement>) => {
+      emitCursor(e.currentTarget)
+    },
+    [emitCursor],
+  )
+  const handleBlur = useCallback(() => {
+    if (yText && onCursorChange) onCursorChange(null)
+  }, [yText, onCursorChange])
+  const handleKeyUp = useCallback(
+    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      emitCursor(e.currentTarget)
+    },
+    [emitCursor],
+  )
+  const handleMouseUp = useCallback(
+    (e: React.MouseEvent<HTMLTextAreaElement>) => {
+      emitCursor(e.currentTarget)
+    },
+    [emitCursor],
+  )
+
   // Apply a local textarea change as a minimal Y.Text insert/delete pair.
   // Diff-based: compute the common prefix and suffix between the previous
   // rendered value and the new value, then apply only the changed middle
@@ -1062,6 +1121,17 @@ export const PromptInputTextarea = ({
           onChange,
         }
 
+  const cursorHandlers =
+    yText && onCursorChange
+      ? {
+          onSelect: handleSelect,
+          onFocus: handleFocus,
+          onBlur: handleBlur,
+          onKeyUp: handleKeyUp,
+          onMouseUp: handleMouseUp,
+        }
+      : null
+
   return (
     <InputGroupTextarea
       className={cn('field-sizing-content max-h-48 min-h-16', className)}
@@ -1071,8 +1141,10 @@ export const PromptInputTextarea = ({
       onKeyDown={handleKeyDown}
       onPaste={handlePaste}
       placeholder={placeholder}
+      ref={ref}
       {...props}
       {...controlledProps}
+      {...cursorHandlers}
     />
   )
 }

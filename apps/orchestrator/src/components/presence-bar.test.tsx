@@ -1,7 +1,7 @@
 /**
  * @vitest-environment jsdom
  */
-import { cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Awareness } from 'y-protocols/awareness'
 import { PresenceBar } from './presence-bar'
@@ -9,10 +9,20 @@ import { PresenceBar } from './presence-bar'
 function fakeAwareness(
   states: Map<number, { user?: { id?: string; name?: string; color?: string } }>,
 ): Awareness {
+  const listeners: Array<() => void> = []
   return {
     getStates: () => states,
-    on: () => {},
-    off: () => {},
+    on: (_evt: string, cb: () => void) => {
+      listeners.push(cb)
+    },
+    off: (_evt: string, cb: () => void) => {
+      const i = listeners.indexOf(cb)
+      if (i >= 0) listeners.splice(i, 1)
+    },
+    // Test-only helper for firing awareness changes.
+    __emit: () => {
+      for (const cb of listeners) cb()
+    },
   } as unknown as Awareness
 }
 
@@ -70,5 +80,27 @@ describe('PresenceBar', () => {
     const aw = fakeAwareness(new Map())
     const { container } = render(<PresenceBar awareness={aw} selfClientId={1} />)
     expect(container.innerHTML).toBe('')
+  })
+
+  it('keeps a departed peer rendered as a ghost with "Left recently" tooltip', () => {
+    const states = new Map<number, { user?: { id?: string; name?: string; color?: string } }>([
+      [1, { user: { id: 'u-self', name: 'Me', color: '#f00' } }],
+      [2, { user: { id: 'u-alice', name: 'Alice', color: '#0f0' } }],
+    ])
+    const aw = fakeAwareness(states)
+    render(<PresenceBar awareness={aw} selfClientId={1} />)
+    expect(screen.getAllByTestId('presence-avatar').length).toBe(2)
+
+    // Alice leaves.
+    act(() => {
+      states.delete(2)
+      ;(aw as unknown as { __emit: () => void }).__emit()
+    })
+
+    const avatars = screen.getAllByTestId('presence-avatar')
+    expect(avatars.length).toBe(2)
+    const ghost = avatars.find((el) => el.getAttribute('data-user-id') === 'u-alice')
+    expect(ghost).toBeTruthy()
+    expect(ghost?.getAttribute('data-ghost')).toBe('true')
   })
 })
