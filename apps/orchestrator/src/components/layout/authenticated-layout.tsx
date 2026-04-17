@@ -25,13 +25,15 @@ export function AuthenticatedLayout({ children }: AuthenticatedLayoutProps) {
               // Set content container, so we can use container queries
               '@container/content',
 
-              // If layout is fixed, constrain to viewport and prevent overflow
-              'has-data-[layout=fixed]:h-svh',
+              // If layout is fixed, constrain to viewport and prevent overflow.
+              // Use dvh (dynamic viewport height) so the layout shrinks when the
+              // mobile keyboard opens, keeping the input visible.
+              'has-data-[layout=fixed]:h-dvh',
               'has-data-[layout=fixed]:overflow-hidden',
 
               // If layout is fixed and sidebar is inset,
-              // set the height to 100svh - spacing (total margins) to prevent overflow
-              'peer-data-[variant=inset]:has-data-[layout=fixed]:h-[calc(100svh-(var(--spacing)*4))]',
+              // set the height to 100dvh - spacing (total margins) to prevent overflow
+              'peer-data-[variant=inset]:has-data-[layout=fixed]:h-[calc(100dvh-(var(--spacing)*4))]',
             )}
           >
             {children ?? <Outlet />}

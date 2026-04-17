@@ -75,14 +75,22 @@ function useAutoScroll() {
     return () => el.removeEventListener('scroll', onScroll)
   }, [])
 
-  // ResizeObserver — auto-scroll when content grows and user hasn't scrolled up
+  // ResizeObserver — auto-scroll when content grows and user hasn't scrolled up.
+  // Track the previous content height so we only scroll when the content actually
+  // grew (new messages), not when the container shrinks (e.g. mobile keyboard opening).
   useEffect(() => {
     const content = contentEl.current
     const scroll = scrollEl.current
     if (!content || !scroll) return
 
+    let prevHeight = content.getBoundingClientRect().height
+
     const ro = new ResizeObserver(() => {
-      if (!escaped.current) {
+      const currentHeight = content.getBoundingClientRect().height
+      const grew = currentHeight > prevHeight
+      prevHeight = currentHeight
+
+      if (grew && !escaped.current) {
         scroll.scrollTop = scroll.scrollHeight
       }
     })
