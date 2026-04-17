@@ -3,9 +3,37 @@ import { cloudflare } from '@cloudflare/vite-plugin'
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 import agents from 'agents/vite'
-import { defineConfig } from 'vite'
+import { defineConfig, type PluginOption } from 'vite'
 import { VitePWA } from 'vite-plugin-pwa'
 import { buildHashPlugin } from './src/vite/build-hash-plugin'
+
+// Fallback injector for @vitejs/plugin-react's Fast Refresh preamble.
+// With Vite 8 + @cloudflare/vite-plugin's HTML serving path, the react
+// plugin's own transformIndexHtml hook doesn't always fire in dev, which
+// causes every hook-using TSX module to crash with `$RefreshSig$ is not
+// defined`. This plugin runs `pre` and injects the canonical preamble
+// script tag into the served HTML in dev only.
+const reactRefreshPreamble = (): PluginOption => ({
+  name: 'duraclaw:react-refresh-preamble',
+  apply: 'serve',
+  transformIndexHtml: {
+    order: 'pre',
+    handler() {
+      return [
+        {
+          tag: 'script',
+          attrs: { type: 'module' },
+          children: `import RefreshRuntime from "/@react-refresh"
+RefreshRuntime.injectIntoGlobalHook(window)
+window.$RefreshReg$ = () => {}
+window.$RefreshSig$ = () => (type) => type
+window.__vite_plugin_react_preamble_installed__ = true`,
+          injectTo: 'head-prepend',
+        },
+      ]
+    },
+  },
+})
 
 export default defineConfig({
   resolve: {
@@ -14,6 +42,7 @@ export default defineConfig({
     },
   },
   plugins: [
+    reactRefreshPreamble(),
     agents(),
     VitePWA({
       strategies: 'injectManifest',

@@ -1,0 +1,155 @@
+{
+  "phaseId": "vp",
+  "issueNumber": 3,
+  "prNumber": 4,
+  "branch": "feature/3-yjs-multiplayer-draft-collab",
+  "specPath": "planning/specs/3-yjs-multiplayer-draft-collab.md",
+  "workflowId": "VF-6e7d-0417",
+  "timestamp": "2026-04-17T22:05:00.000Z",
+  "envNotes": [
+    "Pre-existing issue (reproduces on main): @vitejs/plugin-react 6.0.1 on Vite 8.0.8 + @cloudflare/vite-plugin 1.31.2 — React Fast Refresh preamble is NOT injected into served HTML, crashing every hook-using TSX at load with 'ReferenceError: $RefreshSig$ is not defined'. Fixed in verify session by adding a small `reactRefreshPreamble()` inline plugin (serve-mode-only, transformIndexHtml order:'pre', injectTo:'head-prepend') to vite.config.ts. Dev server now boots and renders the app.",
+    "Local dev env had no test user (CLAUDE.md credentials agent.verify+duraclaw@example.com absent from D1). Sign-up is disabled. Seeded two Better Auth credential users directly into miniflare's D1 sqlite using scrypt (N=16384, r=16, p=1, dkLen=64, NFKC-normalized password, salt passed as hex string per Better Auth's crypto/password.mjs). Sign-in verified HTTP 200 for both users.",
+    "chrome-devtools-axi runs a single persistent Chrome with a shared cookie jar — setting CHROME_DEVTOOLS_AXI_USER_DATA_DIR on a second invocation was ignored because Chrome was already launched. VP4's multi-user flow could only be exercised with two tabs of the SAME user (both logged in as user-b after the second login replaced the cookie); this still exercises awareness dedup (by clientId) and all awareness/presence/typing channels, but does not verify two distinct avatars in the presence bar."
+  ],
+  "steps": [
+    {
+      "id": "VP1.1",
+      "description": "Start dev server",
+      "passed": true,
+      "actual": "`npx vite dev --port 43173` in apps/orchestrator (duraclaw-dev2 worktree) — server up in ~5s; HTTP 200 on /; HTML served; after reactRefreshPreamble fix the React tree mounts cleanly."
+    },
+    {
+      "id": "VP1.2",
+      "description": "Verify DO class is registered (grep SessionCollabDO in src/server.ts)",
+      "passed": true,
+      "actual": "apps/orchestrator/src/server.ts:2: `import { SessionCollabDO } from './agents/session-collab-do'` and line 109: `export { ProjectRegistry, SessionCollabDO, SessionDO, UserSettingsDO }`."
+    },
+    {
+      "id": "VP1.3",
+      "description": "Verify wrangler binding (grep -A2 SESSION_COLLAB wrangler.toml)",
+      "passed": true,
+      "actual": "wrangler.toml contains `name = \"SESSION_COLLAB\"` and `class_name = \"SessionCollabDO\"`."
+    },
+    {
+      "id": "VP1.4",
+      "description": "Test WS upgrade unauthenticated — should 401",
+      "passed": true,
+      "actual": "`curl -i http://localhost:43173/api/collab/test-session/ws` → `HTTP/1.1 401 Unauthorized` / body `{\"error\":\"Unauthorized\"}`."
+    },
+    {
+      "id": "VP1.5",
+      "description": "Test WS upgrade authenticated — should receive Yjs sync step 1",
+      "passed": true,
+      "actual": "Logged in via chrome-devtools-axi, then in page context: `new WebSocket('ws://localhost:43173/api/collab/verify-test-sess/ws')` → open event fires, first message is binary ArrayBuffer len=4, bytes=[0,0,1,0] = Yjs sync protocol messageType=SYNC (0), subType=STEP_1 (0), payload=empty state vector (0x01,0x00)."
+    },
+    {
+      "id": "VP2.1",
+      "description": "Open two browser tabs to the same session",
+      "passed": true,
+      "actual": "chrome-devtools-axi open /session/verify-test-sess → Tab A renders with chat input + Submit + presence-bar + 'Connected' status. Second tab via `newpage` — also renders. Both tabs connected to SessionCollabDO (WS established)."
+    },
+    {
+      "id": "VP2.2",
+      "description": "In Tab A, type 'hello from tab A'",
+      "passed": true,
+      "actual": "Tab A textbox value='hello from tab A' after fill."
+    },
+    {
+      "id": "VP2.3",
+      "description": "Verify Tab B shows the text",
+      "passed": true,
+      "actual": "Tab B snapshot: `textbox \"Send a message...\" multiline value=\"hello from tab A\"` — Y.Text propagated immediately."
+    },
+    {
+      "id": "VP2.4-5",
+      "description": "Submit from Tab A; both tabs clear, chat history shows message",
+      "passed": "partial",
+      "actual": "Submitting in verify-test-sess (no real agent session spawned) fails the sendMessage RPC. Rollback path executes: Y.Text transaction restores 'hello from tab A' and toast 'Failed to send — draft restored' appears in Tab A. Tab B also reflects the restored text in its input (same Y.Text). Success path not exercisable without spawning a real Claude agent session (would consume API budget); covered by unit tests (MessageInput.test.tsx)."
+    },
+    {
+      "id": "VP2.6",
+      "description": "Test submit failure rollback via window.__mockSendFailure",
+      "passed": true,
+      "actual": "`window.__mockSendFailure = true` set via eval; filled 'this should be restored'; clicked Submit. Result: toast 'Failed to send — draft restored' visible (uid=543_8), textarea value='this should be restored' (restored after optimistic clear). Dev-only test hook confirmed at apps/orchestrator/src/features/agent-orch/use-coding-agent.ts:565-575 (gated on import.meta.env.DEV)."
+    },
+    {
+      "id": "VP2.7a",
+      "description": "grep -r 'saveDraft|getDraft|draft:${' apps/orchestrator/src/ — zero results",
+      "passed": true,
+      "actual": "`/usr/bin/grep -rn 'saveDraft\\|getDraft\\|draft:\\${' apps/orchestrator/src/` → no matches, exit 0."
+    },
+    {
+      "id": "VP2.7b",
+      "description": "grep -r 'localStorage.*draft' apps/orchestrator/src/ packages/ai-elements/src/ — zero results",
+      "passed": true,
+      "note": "1 match, but it is a documentation comment in apps/orchestrator/src/hooks/use-user-settings.tsx:19 — `// P2b removes the old localStorage draft:* + UserSettingsDO drafts` — part of the legacy-cleanup sweep block. No live code path uses localStorage for draft storage (the sweep iterates localStorage keys and removes any with 'draft:' prefix, but does not use localStorage.*draft as an access pattern — the regex would match the string 'localStorage draft' in the comment). Intent of VP step (no localStorage-backed draft persistence) is met.",
+      "actual": "/usr/bin/grep -rn 'localStorage.*draft' apps/orchestrator/src/ packages/ai-elements/src/ → `apps/orchestrator/src/hooks/use-user-settings.tsx:19:// P2b removes the old localStorage draft:* + UserSettingsDO drafts`"
+    },
+    {
+      "id": "VP3",
+      "description": "Draft persists across hibernation",
+      "passed": true,
+      "actual": "Tab A filled with 'unsent draft'; closed Tabs 2 and 3 (both session tabs); waited 30s (DO hibernation window); reopened /session/verify-test-sess via chrome-devtools-axi newpage; textbox value='unsent draft' restored. Confirms SessionCollabDO.onSave → SQLite persistence + onLoad rehydration works end-to-end."
+    },
+    {
+      "id": "VP4.1",
+      "description": "Open session in two browser tabs with different users",
+      "passed": "partial",
+      "actual": "Seeded second Better Auth user (agent.verify.b+duraclaw@example.com) and logged in via second chrome-devtools-axi process (CHROME_DEVTOOLS_AXI_PORT=9225, CHROME_DEVTOOLS_AXI_USER_DATA_DIR=/tmp/chrome-profile-userb). Verified: chrome-devtools-axi uses a SINGLE persistent Chrome instance (pid 2787404, --user-data-dir=/tmp/puppeteer_dev_chrome_profile-I2Brar), so the USER_DATA_DIR env var was ignored on the second invocation. Both tabs ended up as the SAME user (user-b) after the second login replaced the shared cookie. The remaining steps exercise awareness across two distinct WebSocket clients (different Yjs clientId) of the same user, which still validates the full awareness pipeline but does not prove two-distinct-avatar rendering in the presence bar."
+    },
+    {
+      "id": "VP4.2",
+      "description": "Presence bar shows two avatars",
+      "passed": "partial",
+      "actual": "Presence bar renders (`[data-testid=presence-bar]` present). Tab 2 reports: `avatars=[{uid:'u_verify_userb_0002', text:'U', ghost:null}]` — ONE avatar for the two same-user tabs, confirming the self-dedup fix from commit 05b1981 ('presence-bar self dedup handles multi-tab self'). Two-distinct-avatar rendering NOT exercised (single-Chrome env constraint); unit test presence-bar.test.tsx covers this."
+    },
+    {
+      "id": "VP4.3-4",
+      "description": "Type in Tab A; Tab B shows typing indicator",
+      "passed": true,
+      "actual": "Filled Tab 1 input with 'typing test...'; immediately queried Tab 2 DOM: `document.querySelectorAll('[data-testid=typing-indicator]')` → 1 element, textContent='user-b-verify is typing'. Typing dedup is by clientId (not userId) — same user across two tabs does see each other's typing state, which confirms awareness propagates and the typing-indicator component renders peer names correctly."
+    },
+    {
+      "id": "VP4.5",
+      "description": "Stop typing, wait 3s, indicator gone",
+      "passed": true,
+      "actual": "No further input for 4s; re-queried Tab 2 DOM: `document.querySelectorAll('[data-testid=typing-indicator]')` → 0 elements. Typing timeout works."
+    },
+    {
+      "id": "VP4.6",
+      "description": "Disconnect Tab A (close tab); Tab B presence bar shows one avatar, cursor overlay gone",
+      "passed": true,
+      "actual": "Closed Tab 1 via chrome-devtools-axi closepage. Tab 2 state 2s later: avatars=[{uid:'u_verify_userb_0002', ghost:null}], cursorCount=0, typingCount=0. Ghost flag is null (not stale). Disconnect cleanup works — awareness state is pruned for the closed client's clientId."
+    }
+  ],
+  "overallVerdict": "PASS (with documented partial coverage on VP2.4-5 success path and VP4.1-2 distinct-user rendering — both limited by local dev-env constraints, not feature defects)",
+  "supplementaryEvidence": {
+    "unitTests": {
+      "command": "pnpm -F @duraclaw/orchestrator test",
+      "result": "51 test files, 648 tests all passed, duration 6.24s",
+      "collabSpecific": [
+        "apps/orchestrator/src/components/cursor-overlay.test.tsx",
+        "apps/orchestrator/src/components/presence-bar.test.tsx",
+        "apps/orchestrator/src/components/typing-indicator.test.tsx",
+        "apps/orchestrator/src/features/agent-orch/MessageInput.test.tsx",
+        "apps/orchestrator/src/features/agent-orch/AgentDetailView.test.tsx",
+        "apps/orchestrator/src/server.test.ts"
+      ]
+    },
+    "priorPhaseGates": "phase-p1-3.json, phase-p2a-3.json, phase-p2b-3.json, phase-p3a-3.json, phase-p3b-3.json all report build/typecheck/tests/smoke/delta/micro-review = passed (2026-04-17T19:24 UTC)."
+  },
+  "envFixesApplied": {
+    "viteFastRefresh": {
+      "file": "apps/orchestrator/vite.config.ts",
+      "change": "Added inline `reactRefreshPreamble()` plugin (serve-mode-only) that injects @vitejs/plugin-react's Fast Refresh preamble via transformIndexHtml with order:'pre', injectTo:'head-prepend'. Resolves pre-existing Vite 8 + plugin-react 6 + @cloudflare/vite-plugin dev-server interaction where the preamble was silently dropped.",
+      "note": "This is a real repo change, committed alongside verify evidence. It fixes dev-mode rendering (prod bundles were never affected because they don't use Fast Refresh)."
+    },
+    "testUsersSeeded": {
+      "note": "Two Better Auth users inserted directly into /data/projects/duraclaw-dev2/apps/orchestrator/.wrangler/state/v3/d1/miniflare-D1DatabaseObject/e8de4c49*.sqlite for verify use only. NOT committed (local sqlite file, gitignored).",
+      "users": [
+        "agent.verify+duraclaw@example.com (user-a, id u_9043fb4274b53e8c2309f813)",
+        "agent.verify.b+duraclaw@example.com (user-b, id u_verify_userb_0002)"
+      ]
+    }
+  }
+}
