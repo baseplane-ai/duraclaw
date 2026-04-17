@@ -1136,7 +1136,9 @@ export class SessionDO extends Agent<Env, SessionState> {
   }
 
   @callable()
-  async sendMessage(content: string | ContentBlock[]): Promise<{ ok: boolean; error?: string }> {
+  async sendMessage(
+    content: string | ContentBlock[],
+  ): Promise<{ ok: boolean; error?: string; recoverable?: 'forkWithHistory' }> {
     const { status } = this.state
     // A session-runner stays alive through `type=result` and blocks waiting on
     // the next stream-input (see claude-runner.ts multi-turn loop). Route by
@@ -1190,16 +1192,23 @@ export class SessionDO extends Agent<Env, SessionState> {
           const sessions = await listSessions(gatewayUrl, this.env.CC_GATEWAY_SECRET)
           const orphan = sessions.find((s) => s.sdk_session_id === sdk && s.state === 'running')
           if (orphan) {
-            const msg = `Session-runner ${orphan.session_id} is still running on the gateway with sdk_session_id ${sdk} but its WebSocket is not connected to this DO — stop that runner or wait for it to exit before sending a new message.`
+            const msg = `Session-runner ${orphan.session_id} is still running on the gateway with sdk_session_id ${sdk} but its WebSocket is not connected to this DO. Stop that runner, wait for it to exit, or call forkWithHistory to spawn a fresh SDK session seeded with the existing transcript.`
             console.error(`[SessionDO:${this.ctx.id}] sendMessage orphan: ${msg}`)
             this.updateState({ status: 'idle', error: msg })
             this.broadcastToClients(
               JSON.stringify({
                 type: 'gateway_event',
-                event: { type: 'error', message: msg },
+                event: {
+                  type: 'error',
+                  message: msg,
+                  // Action hint for the UI: offer a one-click fork to bypass
+                  // the orphan by starting a new sdk_session_id with history.
+                  recoverable: 'forkWithHistory',
+                  orphan_session_id: orphan.session_id,
+                },
               }),
             )
-            return { ok: false, error: msg }
+            return { ok: false, error: msg, recoverable: 'forkWithHistory' }
           }
         } catch (err) {
           // Non-fatal: fall through to the dial attempt. If it then collides
@@ -1216,6 +1225,96 @@ export class SessionDO extends Agent<Env, SessionState> {
         sdk_session_id: sdk,
       })
     }
+
+    return { ok: true }
+  }
+
+  /**
+   * Spawn a fresh SDK session (new sdk_session_id) seeded with a transcript
+   * of the prior conversation. Feels like a resume from the user's POV but
+   * sidesteps SDK `resume` entirely — useful when the prior sdk_session_id
+   * is orphaned by a stuck session-runner, unresumable, or we just want a
+   * clean context window without losing the thread.
+   */
+  @callable()
+  async forkWithHistory(
+    content: string | ContentBlock[],
+  ): Promise<{ ok: boolean; error?: string }> {
+    if (!this.state.project) {
+      return { ok: false, error: 'Session has no project — cannot fork.' }
+    }
+
+    // Build a compact transcript from local history (safe to read even when
+    // the DO has lost WS contact with its session-runner).
+    const history = this.session.getHistory()
+    const transcript = history
+      .map((m) => {
+        const role = m.role === 'user' ? 'User' : m.role === 'assistant' ? 'Assistant' : m.role
+        const text = m.parts
+          .map((p) => {
+            if (p.type === 'text') return p.text ?? ''
+            if (p.type === 'reasoning') return `[thinking] ${p.text ?? ''}`
+            if (typeof p.type === 'string' && p.type.startsWith('tool-')) {
+              const name = (p as { toolName?: string }).toolName ?? p.type.slice(5)
+              return `[used tool: ${name}]`
+            }
+            return ''
+          })
+          .filter(Boolean)
+          .join('\n')
+        return text ? `${role}: ${text}` : ''
+      })
+      .filter(Boolean)
+      .join('\n\n')
+
+    const nextText =
+      typeof content === 'string'
+        ? content
+        : content
+            .map((b) => {
+              const bl = b as { type?: string; text?: string }
+              return bl.type === 'text' ? (bl.text ?? '') : ''
+            })
+            .filter(Boolean)
+            .join('\n')
+
+    const forkedPrompt = transcript
+      ? `<prior_conversation>\n${transcript}\n</prior_conversation>\n\nContinuing the conversation above. New user message follows.\n\n${nextText}`
+      : nextText
+
+    // Persist the user's new message in local history exactly as sendMessage
+    // would, so the UI reflects the turn boundary. We do NOT persist the
+    // transcript prefix — that's only for the SDK's fresh context.
+    this.turnCounter++
+    const userMsgId = `usr-${this.turnCounter}`
+    const userMsg: SessionMessage = {
+      id: userMsgId,
+      role: 'user',
+      parts: contentToParts(content),
+      createdAt: new Date(),
+    }
+    try {
+      await this.session.appendMessage(userMsg)
+      this.persistTurnState()
+      this.broadcastMessage(userMsg)
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] forkWithHistory: persist user msg failed:`, err)
+    }
+
+    // Drop the old sdk_session_id so the new runner gets a brand-new one
+    // (guarantees no hasLiveResume collision with any orphan).
+    this.updateState({
+      status: 'running',
+      gate: null,
+      error: null,
+      sdk_session_id: null,
+    })
+
+    void this.triggerGatewayDial({
+      type: 'execute',
+      project: this.state.project,
+      prompt: forkedPrompt,
+    })
 
     return { ok: true }
   }

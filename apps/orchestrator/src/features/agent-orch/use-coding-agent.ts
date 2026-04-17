@@ -54,6 +54,13 @@ export interface UseCodingAgentResult {
   getContextUsage: () => Promise<unknown>
   resolveGate: (gateId: string, response: GateResponse) => Promise<unknown>
   sendMessage: (content: string | ContentBlock[]) => Promise<unknown>
+  /**
+   * Spawn a fresh SDK session with the current conversation transcript
+   * prepended as context. Use to recover from an orphaned sdk_session_id
+   * (sendMessage surfaces `{recoverable: 'forkWithHistory'}` in that case)
+   * or whenever the user wants a clean context window without losing thread.
+   */
+  forkWithHistory: (content: string | ContentBlock[]) => Promise<unknown>
   rewind: (turnIndex: number) => Promise<{ ok: boolean; error?: string }>
   injectQaPair: (question: string, answer: string) => void
   branchInfo: Map<string, { current: number; total: number; siblings: string[] }>
@@ -502,6 +509,32 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     [connection],
   )
 
+  const forkWithHistory = useCallback(
+    async (content: string | ContentBlock[]) => {
+      const optimisticId = `usr-optimistic-${Date.now()}`
+      optimisticIdsRef.current.add(optimisticId)
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: optimisticId,
+          role: 'user',
+          parts: contentToParts(content),
+          createdAt: new Date(),
+        },
+      ])
+      const result = (await connection.call('forkWithHistory', [content])) as {
+        ok: boolean
+        error?: string
+      }
+      if (!result.ok) {
+        optimisticIdsRef.current.delete(optimisticId)
+        setMessages((prev) => prev.filter((m) => m.id !== optimisticId))
+      }
+      return result
+    },
+    [connection],
+  )
+
   return {
     state,
     events,
@@ -518,6 +551,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     getContextUsage,
     resolveGate,
     sendMessage,
+    forkWithHistory,
     rewind,
     injectQaPair,
     branchInfo,
