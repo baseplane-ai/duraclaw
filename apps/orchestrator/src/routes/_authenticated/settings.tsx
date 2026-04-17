@@ -16,6 +16,7 @@ import {
 } from '~/components/ui/select'
 import { useLayout } from '~/context/layout-provider'
 import { useTheme } from '~/context/theme-provider'
+import { useSwUpdate } from '~/hooks/use-sw-update'
 import { useUserDefaults } from '~/hooks/use-user-defaults'
 import { signOut } from '~/lib/auth-client'
 
@@ -71,6 +72,7 @@ function SettingsPage() {
           <DefaultsSection />
           <NotificationsSection />
           <AppearanceSection />
+          <SystemSection />
         </div>
       </Main>
     </>
@@ -288,6 +290,30 @@ function AppearanceSection() {
             </SelectContent>
           </Select>
         </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function SystemSection() {
+  const { updateAvailable, applyUpdate } = useSwUpdate()
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>System</CardTitle>
+        <CardDescription>Application version and maintenance.</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {updateAvailable && (
+          <p className="text-sm text-muted-foreground">A new version is available.</p>
+        )}
+        <Button variant="outline" onClick={() => applyUpdate()}>
+          Force Refresh
+        </Button>
+        <p className="text-xs text-muted-foreground">
+          Reload the app with the latest deployed version, clearing cached assets.
+        </p>
       </CardContent>
     </Card>
   )
