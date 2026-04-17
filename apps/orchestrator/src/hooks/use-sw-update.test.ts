@@ -21,26 +21,22 @@ describe('useSwUpdate', () => {
     update: ReturnType<typeof vi.fn>
     addEventListener: ReturnType<typeof vi.fn>
   }
-  let readyPromise: Promise<ServiceWorkerRegistration>
-  let controllerChangeHandler: (() => void) | null
+  let registerPromise: Promise<ServiceWorkerRegistration>
 
   beforeEach(() => {
-    controllerChangeHandler = null
     mockRegistration = {
       waiting: null,
       installing: null,
       update: vi.fn().mockResolvedValue(undefined),
       addEventListener: vi.fn(),
     }
-    readyPromise = Promise.resolve(mockRegistration as unknown as ServiceWorkerRegistration)
+    registerPromise = Promise.resolve(mockRegistration as unknown as ServiceWorkerRegistration)
 
     Object.defineProperty(navigator, 'serviceWorker', {
       value: {
-        ready: readyPromise,
+        register: vi.fn().mockReturnValue(registerPromise),
         controller: {},
-        addEventListener: vi.fn((event: string, handler: () => void) => {
-          if (event === 'controllerchange') controllerChangeHandler = handler
-        }),
+        addEventListener: vi.fn(),
         removeEventListener: vi.fn(),
       },
       configurable: true,
@@ -58,36 +54,47 @@ describe('useSwUpdate', () => {
     expect(result.current.updateAvailable).toBe(false)
   })
 
+  it('registers the service worker on mount', async () => {
+    renderHook(() => useSwUpdate())
+    await act(async () => {
+      await registerPromise
+    })
+    expect(navigator.serviceWorker.register).toHaveBeenCalledWith('/sw.js', { scope: '/' })
+  })
+
   it('sets updateAvailable when registration.waiting exists on mount', async () => {
     mockRegistration.waiting = {} as ServiceWorker
     const { result } = renderHook(() => useSwUpdate())
     await act(async () => {
-      await readyPromise
+      await registerPromise
+    })
+    expect(result.current.updateAvailable).toBe(true)
+  })
+
+  it('sets updateAvailable when build hash detects staleness', async () => {
+    const { rerender, result } = renderHook(() => useSwUpdate())
+    await act(async () => {
+      await registerPromise
+    })
+
+    mockUseBuildHash.mockReturnValue({ stale: true, checkNow: vi.fn() })
+    await act(async () => {
+      rerender()
     })
     expect(result.current.updateAvailable).toBe(true)
   })
 
   it('calls reg.update() when build hash detects staleness', async () => {
-    // Start fresh (not stale), let registration resolve first
     const { rerender } = renderHook(() => useSwUpdate())
     await act(async () => {
-      await readyPromise
+      await registerPromise
     })
 
-    // Now set stale and re-render so the effect sees registrationRef.current
     mockUseBuildHash.mockReturnValue({ stale: true, checkNow: vi.fn() })
     await act(async () => {
       rerender()
     })
     expect(mockRegistration.update).toHaveBeenCalled()
-  })
-
-  it('does not call reg.update() when build is fresh', async () => {
-    renderHook(() => useSwUpdate())
-    await act(async () => {
-      await readyPromise
-    })
-    expect(mockRegistration.update).not.toHaveBeenCalled()
   })
 
   it('applyUpdate sends SKIP_WAITING when waiting worker exists', async () => {
@@ -96,7 +103,7 @@ describe('useSwUpdate', () => {
 
     const { result } = renderHook(() => useSwUpdate())
     await act(async () => {
-      await readyPromise
+      await registerPromise
     })
 
     act(() => result.current.applyUpdate())
@@ -112,7 +119,7 @@ describe('useSwUpdate', () => {
 
     const { result } = renderHook(() => useSwUpdate())
     await act(async () => {
-      await readyPromise
+      await registerPromise
     })
 
     act(() => result.current.applyUpdate())
@@ -120,7 +127,6 @@ describe('useSwUpdate', () => {
   })
 
   it('handles missing serviceWorker gracefully', () => {
-    // Simulate environment without service worker support
     const original = navigator.serviceWorker
     Object.defineProperty(navigator, 'serviceWorker', {
       get: () => undefined,

@@ -1,11 +1,11 @@
 /**
  * useSwUpdate — Detects new deploys, lets the user choose when to reload.
  *
- * Detection: build hash polling (~30s) triggers `reg.update()`, which
- * installs the new SW into "waiting" state. No auto-skipWaiting.
+ * Detection: build hash polling (~30s) detects new deploy.
+ * Activation: user clicks "Reload" → page reloads with fresh assets.
  *
- * Activation: user clicks "Reload" → SKIP_WAITING message → new SW
- * activates → controllerchange → page reloads.
+ * Also registers the service worker and triggers SW update checks
+ * when a new build is detected, so the new precache is ready.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -16,31 +16,36 @@ export function useSwUpdate() {
   const registrationRef = useRef<ServiceWorkerRegistration | null>(null)
   const { stale: buildStale } = useBuildHash()
 
-  // Grab SW registration and watch for waiting workers
+  // Register SW and grab registration
   useEffect(() => {
     if (!navigator.serviceWorker) return
 
-    navigator.serviceWorker.ready.then((registration) => {
-      registrationRef.current = registration
+    navigator.serviceWorker
+      .register('/sw.js', { scope: '/' })
+      .then((registration) => {
+        registrationRef.current = registration
 
-      // Already a waiting worker (e.g. installed while page was idle)
-      if (registration.waiting) {
-        setUpdateAvailable(true)
-      }
+        // Already a waiting worker (e.g. installed while page was idle)
+        if (registration.waiting) {
+          setUpdateAvailable(true)
+        }
 
-      // New SW installed → enters waiting state
-      registration.addEventListener('updatefound', () => {
-        const installing = registration.installing
-        if (!installing) return
-        installing.addEventListener('statechange', () => {
-          if (installing.state === 'installed' && navigator.serviceWorker.controller) {
-            setUpdateAvailable(true)
-          }
+        // New SW installed → enters waiting state
+        registration.addEventListener('updatefound', () => {
+          const installing = registration.installing
+          if (!installing) return
+          installing.addEventListener('statechange', () => {
+            if (installing.state === 'installed' && navigator.serviceWorker.controller) {
+              setUpdateAvailable(true)
+            }
+          })
         })
       })
-    })
+      .catch(() => {
+        // SW registration failed (e.g. dev mode, unsupported) — detection still works via build hash
+      })
 
-    // When the new SW takes control, reload to use fresh assets
+    // When a new SW takes control, reload to use fresh assets
     const onControllerChange = () => window.location.reload()
     navigator.serviceWorker.addEventListener('controllerchange', onControllerChange)
 
@@ -49,19 +54,20 @@ export function useSwUpdate() {
     }
   }, [])
 
-  // Build hash detects new deploy → trigger SW update check immediately
+  // Build hash detects new deploy → mark update available + trigger SW update check
   useEffect(() => {
     if (!buildStale) return
+    setUpdateAvailable(true)
     registrationRef.current?.update().catch(() => {})
   }, [buildStale])
 
-  // User-initiated: tell waiting SW to activate
+  // User-initiated: tell waiting SW to activate, or just reload
   const applyUpdate = useCallback(() => {
     const waiting = registrationRef.current?.waiting
     if (waiting) {
       waiting.postMessage({ type: 'SKIP_WAITING' })
+      // controllerchange listener will reload
     } else {
-      // Edge case: no waiting SW (maybe it already activated) — just reload
       window.location.reload()
     }
   }, [])
