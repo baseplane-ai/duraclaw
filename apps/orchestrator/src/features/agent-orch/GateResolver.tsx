@@ -51,10 +51,8 @@ export function GateResolver({ gate, onResolve, onResolved }: GateResolverProps)
       typeof gate.detail === 'string' ? gate.detail : JSON.stringify(gate.detail, null, 2)
 
     return (
-      <div className="min-w-0 space-y-3 rounded-lg border border-yellow-500/30 bg-yellow-500/5 p-3">
-        <div className="text-sm font-medium text-yellow-600 dark:text-yellow-400">
-          Permission Request
-        </div>
+      <div className="min-w-0 space-y-3 rounded-lg border border-warning/30 bg-warning/5 p-3">
+        <div className="text-sm font-medium text-warning">Permission Request</div>
         <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs">
           {detail}
         </pre>
@@ -99,8 +97,8 @@ export function GateResolver({ gate, onResolve, onResolved }: GateResolverProps)
       }
 
       return (
-        <div className="min-w-0 space-y-3 rounded-lg border border-blue-500/30 bg-blue-500/5 p-3">
-          <div className="text-sm font-medium text-blue-600 dark:text-blue-400">Agent Question</div>
+        <div className="min-w-0 space-y-3 rounded-lg border border-info/30 bg-info/5 p-3">
+          <div className="text-sm font-medium text-info">Agent Question</div>
           <p className="break-words text-sm">{question}</p>
           <Label className="sr-only" htmlFor="gate-answer">
             Answer
@@ -174,8 +172,8 @@ export function GateResolver({ gate, onResolve, onResolved }: GateResolverProps)
     }
 
     return (
-      <div className="min-w-0 space-y-3 rounded-lg border border-blue-500/30 bg-blue-500/5 p-3">
-        <div className="text-sm font-medium text-blue-600 dark:text-blue-400">Agent Question</div>
+      <div className="min-w-0 space-y-3 rounded-lg border border-info/30 bg-info/5 p-3">
+        <div className="text-sm font-medium text-info">Agent Question</div>
 
         {questions.map((q, qIndex) => (
           <div key={q.header} className="space-y-2">
@@ -197,7 +195,7 @@ export function GateResolver({ gate, onResolve, onResolved }: GateResolverProps)
                     aria-pressed={selected}
                     className={cn(
                       'h-auto min-h-8 w-full justify-start whitespace-normal px-3 py-2 text-left sm:w-auto sm:max-w-xs',
-                      selected && 'border-blue-500 ring-2 ring-blue-500',
+                      selected && 'border-info ring-2 ring-info',
                     )}
                     onClick={() => toggleSelection(qIndex, opt.label, q.multiSelect)}
                   >

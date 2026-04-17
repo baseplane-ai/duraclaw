@@ -82,13 +82,13 @@ function getBarClasses(status: string | undefined): string {
   if (!status) return 'bg-background border-t'
   switch (status) {
     case 'running':
-      return 'bg-blue-950/50 border-t border-blue-800'
+      return 'bg-info/20 border-t border-info/50'
     case 'waiting_gate':
     case 'waiting_input':
     case 'waiting_permission':
-      return 'bg-amber-950/50 border-t border-amber-800'
+      return 'bg-warning/20 border-t border-warning/50'
     case 'aborted':
-      return 'bg-red-950/50 border-t border-red-800'
+      return 'bg-destructive/20 border-t border-destructive/50'
     default:
       return 'bg-background border-t'
   }

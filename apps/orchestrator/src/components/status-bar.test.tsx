@@ -270,11 +270,11 @@ describe('StatusBar', () => {
 
     render(<StatusBar />)
     const bar = screen.getByTestId('status-bar')
-    expect(bar.className).toContain('bg-blue-950/50')
-    expect(bar.className).toContain('border-blue-800')
+    expect(bar.className).toContain('bg-info/20')
+    expect(bar.className).toContain('border-info/50')
   })
 
-  it('applies amber background classes when waiting_gate', () => {
+  it('applies warning background classes when waiting_gate', () => {
     act(() => {
       useStatusBarStore.getState().set({
         state: makeState({ status: 'waiting_gate' }),
@@ -283,8 +283,8 @@ describe('StatusBar', () => {
 
     render(<StatusBar />)
     const bar = screen.getByTestId('status-bar')
-    expect(bar.className).toContain('bg-amber-950/50')
-    expect(bar.className).toContain('border-amber-800')
+    expect(bar.className).toContain('bg-warning/20')
+    expect(bar.className).toContain('border-warning/50')
   })
 
   it('applies default background when failed (only aborted is styled red)', () => {
@@ -299,7 +299,7 @@ describe('StatusBar', () => {
     expect(bar.className).toContain('bg-background')
   })
 
-  it('applies red background classes when aborted', () => {
+  it('applies destructive background classes when aborted', () => {
     act(() => {
       useStatusBarStore.getState().set({
         state: makeState({ status: 'aborted' }),
@@ -308,7 +308,7 @@ describe('StatusBar', () => {
 
     render(<StatusBar />)
     const bar = screen.getByTestId('status-bar')
-    expect(bar.className).toContain('bg-red-950/50')
+    expect(bar.className).toContain('bg-destructive/20')
   })
 
   it('applies default background when idle', () => {
@@ -323,7 +323,7 @@ describe('StatusBar', () => {
     expect(bar.className).toContain('bg-background')
   })
 
-  it('applies amber background for waiting_input', () => {
+  it('applies warning background for waiting_input', () => {
     act(() => {
       useStatusBarStore.getState().set({
         state: makeState({ status: 'waiting_input' }),
@@ -332,7 +332,7 @@ describe('StatusBar', () => {
 
     render(<StatusBar />)
     const bar = screen.getByTestId('status-bar')
-    expect(bar.className).toContain('bg-amber-950/50')
+    expect(bar.className).toContain('bg-warning/20')
   })
 
   it('has correct height', () => {

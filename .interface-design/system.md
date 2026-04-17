@@ -12,7 +12,7 @@ Neutral utility — a control panel for orchestrating long-running agent session
 
 All colors come from `apps/orchestrator/src/styles/theme.css`. OKLCH primitives, dual light/dark, mapped via `@theme inline` to Tailwind utilities.
 
-Semantic tokens: `background`, `foreground`, `card`, `popover`, `primary`, `secondary`, `muted`, `accent`, `destructive`, `border`, `input`, `ring`, `chart-1..5`, `sidebar-*`.
+Semantic tokens: `background`, `foreground`, `card`, `popover`, `primary`, `secondary`, `muted`, `accent`, `destructive`, `info`, `warning`, `success`, `border`, `input`, `ring`, `chart-1..5`, `sidebar-*`. Each of `destructive` / `info` / `warning` / `success` has a paired `-foreground` for text on the solid surface.
 
 **Rule:** never reach for raw Tailwind palette utilities (`bg-blue-500`, `text-gray-400`, etc.) for structural surfaces, text, or borders. Use the semantic tokens. The only allowed exception is intentional status color encoding (see Status Colors below).
 
@@ -111,14 +111,17 @@ Used **only** for live session status encoding (e.g. `ActiveStrip.tsx`):
 
 Anywhere else, raw palette colors are drift — flag them.
 
-## System Gaps
+## Callout Patterns
 
-The current token set has **no `info`, `warning`, or `success` semantics** — only `destructive`. Several components reach for raw palette tints (`bg-blue-500/5`, `bg-yellow-500/5`, `bg-amber-950/50`) to fill that gap. Two ways out:
+Semantic status surfaces use fixed opacity combos so every callout looks like a family member:
 
-- Add `info` / `warning` / `success` semantic tokens (foreground + background pair, light + dark) to `theme.css`.
-- Or formally bless the raw-palette pattern with documented opacities (e.g. always `/5` background + `/30` border) so it's a system, not drift.
+| Weight | Use | Pattern |
+|--------|-----|---------|
+| Subtle callout (inline, transient) | GateResolver panels, ChatThread Q&A rail | `bg-{t}/5 border-{t}/30` + `text-{t}` label |
+| Persistent ambient bar (always-on state) | StatusBar running/waiting/aborted | `bg-{t}/20 border-{t}/50` |
+| Solid banner (blocking signal) | OfflineBanner | `bg-{t} text-{t}-foreground` |
 
-Until one of those happens, "info/warning callouts" are an open question whenever they appear.
+Where `{t}` is `info` / `warning` / `success` / `destructive`. Raw palette tints (`bg-blue-500/5`, `bg-amber-950/50`) outside the status-encoding contract are drift.
 
 ## Drift to Watch
 

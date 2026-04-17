@@ -304,7 +304,7 @@ export function ChatThread({
               const textPart = msg.parts.find((p) => p.type === 'text')
               return (
                 <div key={msg.id} className="group relative" data-turn-index={turnIndex}>
-                  <div className="min-w-0 space-y-1 rounded-lg border-l-2 border-blue-500/30 bg-blue-500/5 p-3">
+                  <div className="min-w-0 space-y-1 rounded-lg border-l-2 border-info/30 bg-info/5 p-3">
                     <p className="break-words text-sm">{textPart?.text || ''}</p>
                   </div>
                   {rewindButton}
