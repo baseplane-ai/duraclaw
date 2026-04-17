@@ -330,11 +330,15 @@ export function useUserSettings(): UserSettingsContextValue {
 
   const getDraft = useCallback(
     (tabId: string): string => {
-      // Collection data (synced from DO) takes priority, localStorage is sync fallback
+      // localStorage is always current for this device (written synchronously
+      // in saveDraft), so check it first.  Fall back to collection data which
+      // may carry a draft from another device via DO sync.
+      if (typeof localStorage !== 'undefined') {
+        const local = localStorage.getItem(`draft:${tabId}`)
+        if (local) return local
+      }
       const fromCollection = allItems.find((t) => t.id === tabId)?.draft
-      if (fromCollection) return fromCollection
-      if (typeof localStorage !== 'undefined') return localStorage.getItem(`draft:${tabId}`) ?? ''
-      return ''
+      return fromCollection || ''
     },
     [allItems],
   )

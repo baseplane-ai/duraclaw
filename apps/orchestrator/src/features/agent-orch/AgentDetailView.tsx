@@ -18,7 +18,7 @@ interface AgentDetailViewProps {
   agent: UseCodingAgentResult
 }
 
-export function AgentDetailView({ name: _name, agent }: AgentDetailViewProps) {
+export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps) {
   const {
     state,
     messages,
@@ -107,8 +107,10 @@ export function AgentDetailView({ name: _name, agent }: AgentDetailViewProps) {
   const isTerminal = status === 'aborted'
 
   // Resolve the tab that owns this session so MessageInput can persist its draft.
+  // Use the sessionId prop (always available) instead of state?.session_id
+  // (requires WS) to avoid a key-change remount that would lose typed text.
   const { findTabBySession } = useUserSettings()
-  const tabId = state?.session_id ? findTabBySession(state.session_id)?.id : undefined
+  const tabId = findTabBySession(sessionId)?.id
 
   return (
     <div
