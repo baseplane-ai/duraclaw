@@ -28,13 +28,14 @@ export const ConversationContent = ({ className, ...props }: ConversationContent
   // Scroll to bottom before first paint so the user never sees content at scrollTop=0.
   // StickToBottom's ResizeObserver fires asynchronously (after paint), causing a visible
   // one-frame flash of content scrolled to the top on remount. This layout effect runs
-  // before paint, eliminating the flash.
+  // before paint on mount only — running on every render would override the library's
+  // scroll-up escape and lock the user to the bottom.
   useLayoutEffect(() => {
     const el = scrollRef.current
     if (el) {
       el.scrollTop = el.scrollHeight - el.clientHeight
     }
-  })
+  }, [scrollRef])
 
   return <StickToBottom.Content className={cn('flex flex-col gap-8 p-4', className)} {...props} />
 }
