@@ -40,11 +40,13 @@ export function useSwUpdate() {
     const waiting = registrationRef.current?.waiting
     if (waiting) {
       waiting.postMessage({ type: 'SKIP_WAITING' })
+      // Fallback: if controllerchange doesn't fire within 2s, force reload.
+      // This handles the case where the SW already activated and SKIP_WAITING is a no-op.
+      setTimeout(() => window.location.reload(), 2000)
     } else {
       // No waiting SW — just reload to pick up new assets
       window.location.reload()
     }
-    // controllerchange listener below handles the reload when SW takes over
   }, [])
 
   useEffect(() => {
