@@ -94,11 +94,13 @@ interface DisplayUser extends PresenceUser {
 }
 
 export function PresenceBar({ awareness, selfClientId }: PresenceBarProps) {
-  const snapshot = useSyncExternalStore(
-    (cb) => subscribe(awareness, cb),
+  const sub = useCallback((cb: () => void) => subscribe(awareness, cb), [awareness])
+  const getSnapshot = useCallback(
     () => readSnapshot(awareness, selfClientId),
-    () => '[]',
+    [awareness, selfClientId],
   )
+  const getServerSnapshot = useCallback(() => '[]', [])
+  const snapshot = useSyncExternalStore(sub, getSnapshot, getServerSnapshot)
 
   // Internal map: userId -> { user, departedAt? }. Persisted across
   // renders via a ref. We mirror it into state so React re-renders when

@@ -3,6 +3,7 @@ import { getSessionStatus } from '~/lib/vps-client'
 import {
   buildGatewayCallbackUrl,
   buildGatewayStartUrl,
+  claimSubmitId,
   constantTimeEquals,
   DEFAULT_STALE_THRESHOLD_MS,
   getGatewayConnectionId,
@@ -1034,5 +1035,98 @@ describe('SessionDO watchdog env threshold', () => {
   it('does not trigger recovery while a gateway conn is still present', () => {
     const env = { STALE_THRESHOLD_MS: '60000' }
     expect(wouldRecover(env, 120_000, true)).toBe(false)
+  })
+})
+
+// ── claimSubmitId (sendMessage idempotency) ────────────────────
+
+/**
+ * Fake sql tagged template backed by an in-memory `submit_ids` row list.
+ * Parses only the subset of statements claimSubmitId issues:
+ *   - SELECT id FROM submit_ids WHERE id = ?
+ *   - INSERT INTO submit_ids (id, created_at) VALUES (?, ?)
+ *   - DELETE FROM submit_ids WHERE created_at < ?
+ */
+function createSubmitIdsSql() {
+  const rows: Array<{ id: string; created_at: number }> = []
+  function fakeSql<T>(strings: TemplateStringsArray, ...values: unknown[]): T[] {
+    const query = strings.join('?').trim()
+    if (query.startsWith('SELECT id FROM submit_ids')) {
+      const id = values[0] as string
+      const hit = rows.find((r) => r.id === id)
+      return (hit ? [{ id: hit.id }] : []) as T[]
+    }
+    if (query.startsWith('INSERT INTO submit_ids')) {
+      rows.push({ id: values[0] as string, created_at: values[1] as number })
+      return [] as T[]
+    }
+    if (query.startsWith('DELETE FROM submit_ids')) {
+      const cutoff = values[0] as number
+      for (let i = rows.length - 1; i >= 0; i--) {
+        if (rows[i].created_at < cutoff) rows.splice(i, 1)
+      }
+      return [] as T[]
+    }
+    return [] as T[]
+  }
+  return { sql: fakeSql, rows }
+}
+
+describe('claimSubmitId', () => {
+  it('returns duplicate=false on first use, duplicate=true on the same id', () => {
+    const { sql, rows } = createSubmitIdsSql()
+    const first = claimSubmitId(sql, 'abc-123', 1_000)
+    expect(first).toEqual({ ok: true, duplicate: false })
+    expect(rows).toHaveLength(1)
+
+    const second = claimSubmitId(sql, 'abc-123', 1_100)
+    expect(second).toEqual({ ok: true, duplicate: true })
+    // Second call must NOT insert a duplicate row — only one user message
+    // would be persisted.
+    expect(rows).toHaveLength(1)
+  })
+
+  it('persists distinct submitIds independently', () => {
+    const { sql, rows } = createSubmitIdsSql()
+    expect(claimSubmitId(sql, 'id-A', 1_000)).toEqual({ ok: true, duplicate: false })
+    expect(claimSubmitId(sql, 'id-B', 1_100)).toEqual({ ok: true, duplicate: false })
+    expect(rows.map((r) => r.id).sort()).toEqual(['id-A', 'id-B'])
+  })
+
+  it('rejects oversized submitIds (> 64 chars) without touching SQL', () => {
+    const { sql, rows } = createSubmitIdsSql()
+    const oversized = 'x'.repeat(65)
+    const result = claimSubmitId(sql, oversized, 1_000)
+    expect(result).toEqual({ ok: false, error: 'invalid submitId' })
+    expect(rows).toHaveLength(0)
+  })
+
+  it('rejects empty-string and non-string submitIds', () => {
+    const { sql } = createSubmitIdsSql()
+    expect(claimSubmitId(sql, '', 1_000)).toEqual({ ok: false, error: 'invalid submitId' })
+    expect(claimSubmitId(sql, 123 as unknown, 1_000)).toEqual({
+      ok: false,
+      error: 'invalid submitId',
+    })
+    expect(claimSubmitId(sql, null, 1_000)).toEqual({ ok: false, error: 'invalid submitId' })
+    expect(claimSubmitId(sql, undefined, 1_000)).toEqual({
+      ok: false,
+      error: 'invalid submitId',
+    })
+  })
+
+  it('accepts submitIds at exactly the 64 char boundary', () => {
+    const { sql } = createSubmitIdsSql()
+    const boundary = 'y'.repeat(64)
+    expect(claimSubmitId(sql, boundary, 1_000)).toEqual({ ok: true, duplicate: false })
+  })
+
+  it('prunes rows older than the 60s TTL', () => {
+    const { sql, rows } = createSubmitIdsSql()
+    claimSubmitId(sql, 'old', 1_000)
+    expect(rows).toHaveLength(1)
+    // Insert at now = 62_000 → cutoff 2_000 → 'old' (created_at 1_000) evicted.
+    claimSubmitId(sql, 'new', 62_000)
+    expect(rows.map((r) => r.id)).toEqual(['new'])
   })
 })

@@ -26,6 +26,7 @@ import {
 import {
   buildGatewayCallbackUrl,
   buildGatewayStartUrl,
+  claimSubmitId,
   constantTimeEquals,
   getGatewayConnectionId,
   loadTurnState,
@@ -1167,18 +1168,18 @@ export class SessionDO extends Agent<Env, SessionState> {
     // Idempotency: if a submitId was supplied and we've already accepted it,
     // treat this as a duplicate of that prior call and no-op. Rows older than
     // 60s are pruned on each insert to cap table growth.
-    if (opts?.submitId) {
+    if (opts?.submitId !== undefined) {
       const submitId = opts.submitId
-      const existing = [
-        ...this.sql<{ id: string }>`SELECT id FROM submit_ids WHERE id = ${submitId} LIMIT 1`,
-      ]
-      if (existing.length > 0) {
+      if (typeof submitId !== 'string' || submitId.length === 0 || submitId.length > 64) {
+        return { ok: false, error: 'invalid submitId' }
+      }
+      const claim = claimSubmitId(this.sql.bind(this), submitId)
+      if (!claim.ok) {
+        return { ok: false, error: claim.error }
+      }
+      if (claim.duplicate) {
         return { ok: true }
       }
-      const now = Date.now()
-      this.sql`INSERT INTO submit_ids (id, created_at) VALUES (${submitId}, ${now})`
-      const cutoff = now - 60_000
-      this.sql`DELETE FROM submit_ids WHERE created_at < ${cutoff}`
     }
 
     const { status } = this.state

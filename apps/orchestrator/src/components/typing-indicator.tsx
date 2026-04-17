@@ -10,7 +10,7 @@
  * also dedupe by `user.id` when collapsing the list.
  */
 
-import { useSyncExternalStore } from 'react'
+import { useCallback, useSyncExternalStore } from 'react'
 import type { Awareness } from 'y-protocols/awareness'
 
 interface PeerState {
@@ -52,11 +52,13 @@ function readSnapshot(awareness: Awareness, selfClientId: number): string {
 }
 
 export function TypingIndicator({ awareness, selfClientId }: TypingIndicatorProps) {
-  const snapshot = useSyncExternalStore(
-    (cb) => subscribe(awareness, cb),
+  const sub = useCallback((cb: () => void) => subscribe(awareness, cb), [awareness])
+  const getSnapshot = useCallback(
     () => readSnapshot(awareness, selfClientId),
-    () => '[]',
+    [awareness, selfClientId],
   )
+  const getServerSnapshot = useCallback(() => '[]', [])
+  const snapshot = useSyncExternalStore(sub, getSnapshot, getServerSnapshot)
   const typists = JSON.parse(snapshot) as Array<{ id: string; name: string }>
 
   if (typists.length === 0) return null
