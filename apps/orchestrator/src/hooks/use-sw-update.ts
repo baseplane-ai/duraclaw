@@ -13,7 +13,7 @@ import { useBuildHash } from './use-build-hash'
 
 export function useSwUpdate() {
   const registrationRef = useRef<ServiceWorkerRegistration | null>(null)
-  const { stale: buildStale } = useBuildHash()
+  const { stale: buildStale, localHash, remoteHash } = useBuildHash()
 
   // Register SW on mount
   useEffect(() => {
@@ -43,5 +43,5 @@ export function useSwUpdate() {
     window.location.reload()
   }, [])
 
-  return { updateAvailable: buildStale, applyUpdate }
+  return { updateAvailable: buildStale, localHash, remoteHash, applyUpdate }
 }

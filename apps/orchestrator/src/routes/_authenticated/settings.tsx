@@ -296,7 +296,8 @@ function AppearanceSection() {
 }
 
 function SystemSection() {
-  const { updateAvailable, applyUpdate } = useSwUpdate()
+  const { updateAvailable, localHash, remoteHash, applyUpdate } = useSwUpdate()
+  const matched = localHash && remoteHash && localHash === remoteHash
 
   return (
     <Card>
@@ -305,9 +306,22 @@ function SystemSection() {
         <CardDescription>Application version and maintenance.</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        {updateAvailable && (
-          <p className="text-sm text-muted-foreground">A new version is available.</p>
-        )}
+        <div className="space-y-2 rounded-md border p-3 font-mono text-xs">
+          <div className="flex items-center justify-between gap-4">
+            <span className="text-muted-foreground">Running</span>
+            <span>{localHash ?? '...'}</span>
+          </div>
+          <div className="flex items-center justify-between gap-4">
+            <span className="text-muted-foreground">Deployed</span>
+            <span>{remoteHash ?? '...'}</span>
+          </div>
+          <div className="flex items-center justify-between gap-4">
+            <span className="text-muted-foreground">Status</span>
+            <span className={matched ? 'text-green-500' : updateAvailable ? 'text-amber-500' : ''}>
+              {matched ? 'Up to date' : updateAvailable ? 'Update available' : 'Checking...'}
+            </span>
+          </div>
+        </div>
         <Button variant="outline" onClick={() => applyUpdate()}>
           Force Refresh
         </Button>

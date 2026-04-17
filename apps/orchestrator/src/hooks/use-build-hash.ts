@@ -18,6 +18,10 @@ const INITIAL_DELAY = 5_000 // Wait 5s after mount before first check
 interface BuildHashState {
   /** A new build has been deployed */
   stale: boolean
+  /** Hash the running app was loaded with */
+  localHash: string | null
+  /** Latest hash from the server (null until first fetch) */
+  remoteHash: string | null
   /** Trigger immediate check */
   checkNow: () => void
 }
@@ -38,6 +42,8 @@ async function fetchBuildHash(): Promise<string | null> {
 
 export function useBuildHash(): BuildHashState {
   const [stale, setStale] = useState(false)
+  const [localHash, setLocalHash] = useState<string | null>(null)
+  const [remoteHash, setRemoteHash] = useState<string | null>(null)
   const initialHash = useRef<string | null>(null)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -45,9 +51,12 @@ export function useBuildHash(): BuildHashState {
     const hash = await fetchBuildHash()
     if (!hash) return
 
+    setRemoteHash(hash)
+
     // First successful fetch — store as baseline
     if (initialHash.current === null) {
       initialHash.current = hash
+      setLocalHash(hash)
       return
     }
 
@@ -82,5 +91,5 @@ export function useBuildHash(): BuildHashState {
     }
   }, [stale])
 
-  return { stale, checkNow: check }
+  return { stale, localHash, remoteHash, checkNow: check }
 }
