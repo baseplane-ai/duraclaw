@@ -11,8 +11,8 @@
 
 import { useLiveQuery } from '@tanstack/react-db'
 import { useAgent } from 'agents/react'
-import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react'
-import type { TabRecord, UserSettingsState } from '~/agents/user-settings-do'
+import { useCallback, useMemo, useRef, useSyncExternalStore } from 'react'
+import type { UserSettingsState } from '~/agents/user-settings-do'
 import { type TabItem, tabsCollection } from '~/db/tabs-collection'
 
 // ── activeTabId in localStorage ──────────────────────────────────
@@ -63,31 +63,6 @@ function collectionTabs(): TabItem[] {
   return [...(tabsCollection as Iterable<[string, TabItem]>)].map(([, t]) => t)
 }
 
-/** Sync DO state into the collection via direct writes (bypasses optimistic layer) */
-function syncFromServer(tabs: TabRecord[]) {
-  const incoming = new Map(tabs.map((t) => [t.id, t]))
-
-  tabsCollection.utils.writeBatch(() => {
-    // Remove tabs no longer on server
-    for (const [key] of tabsCollection as Iterable<[string, TabItem]>) {
-      if (!incoming.has(key)) {
-        tabsCollection.utils.writeDelete(key)
-      }
-    }
-    // Upsert server tabs (including draft)
-    for (const tab of tabs) {
-      const item: TabItem = {
-        id: tab.id,
-        project: tab.project,
-        sessionId: tab.sessionId,
-        title: tab.title,
-        draft: tab.draft,
-      }
-      tabsCollection.utils.writeUpsert(item)
-    }
-  })
-}
-
 // ── Module-level imperative ref ──────────────────────────────────
 
 interface UserSettingsImperative {
@@ -132,31 +107,17 @@ export interface UserSettingsContextValue extends UserSettingsImperative {
 }
 
 export function useUserSettings(): UserSettingsContextValue {
-  // ── Live WS sync from DO ───────────────────────────────────────
+  // ── Live WS invalidation from DO ────────────────────────────────
   // useAgent connects to the UserSettingsDO. On state broadcasts,
-  // we sync the server-authoritative tabs into the collection via writeBatch.
-  const agent = useAgent<UserSettingsState>({
+  // we invalidate the query so queryFn refetches from the HTTP endpoint.
+  // The collection's own reconciliation handles the diff cleanly.
+  useAgent<UserSettingsState>({
     agent: 'user-settings-do',
     basePath: 'api/user-settings/ws',
-    onStateUpdate: (state) => {
-      try {
-        syncFromServer(state.tabs)
-      } catch {
-        // Collection may not be ready during SSR/init
-      }
+    onStateUpdate: () => {
+      tabsCollection.utils.refetch().catch(() => {})
     },
   })
-
-  // Sync on initial connect
-  useEffect(() => {
-    if (agent.state?.tabs) {
-      try {
-        syncFromServer(agent.state.tabs)
-      } catch {
-        // Collection not ready
-      }
-    }
-  }, [agent.state])
 
   // ── Collection reactive reads ──────────────────────────────────
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
