@@ -530,6 +530,10 @@ export function ChatThread({
                   pending.push(part)
                   return
                 }
+                // data-file-changed narration rows are redundant with the tool
+                // pills (which already group by file path in the detail sheet).
+                // Skip without flushing so they don't fragment the chip run.
+                if (part.type === 'data-file-changed') return
                 flushPending()
                 nodes.push(renderPart(part, i, gate, status, onResolveGate, readOnly, onQaResolved))
               })
