@@ -231,22 +231,70 @@ the Chrome profile directly — no fragile snapshot-ref scraping.
 
 ### Verify-mode local stack
 
-`scripts/verify/dev-up.sh` starts a local orchestrator (miniflare, port
-43173) and local agent-gateway (port 9877) for the current worktree. For
-the gateway→DO dispatch loop to close end-to-end, the orchestrator's
-`apps/orchestrator/.dev.vars` MUST define all four variables:
+`scripts/verify/dev-up.sh` starts a local orchestrator (miniflare) and
+local agent-gateway for the current worktree — each on a **worktree-
+derived port pair** so parallel worktrees don't collide. The pair comes
+from `cksum($VERIFY_ROOT) % 800`, giving every checkout a stable slot in
+`43000–43799` (orchestrator) + `9800–10599` (gateway) without manual
+allocation.
+
+`scripts/verify/common.sh`:
+
+- Derives `VERIFY_ORCH_PORT` and `CC_GATEWAY_PORT` from the worktree path.
+- `VERIFY_GATEWAY_PORT` (NOT `CC_GATEWAY_PORT`) is the override knob —
+  `CC_GATEWAY_PORT` is commonly exported by the prod/main-worktree shell
+  profile at `9877`, and letting that leak into a peer worktree hijacks
+  gateway dispatch. The wrapper always **re-exports** `CC_GATEWAY_PORT`
+  from the derived/overridden value so the spawned gateway binds the
+  right port no matter what the parent shell shipped.
+- `sync_dev_vars()` regenerates `apps/orchestrator/.dev.vars` every
+  `dev-up.sh` run — `BETTER_AUTH_URL`, `CC_GATEWAY_URL`,
+  `CC_GATEWAY_SECRET`, `WORKER_PUBLIC_URL`, and (if present in `.env`)
+  `BOOTSTRAP_TOKEN`. Pre-existing keys like `BETTER_AUTH_SECRET` /
+  `VAPID_*` are preserved. `.dev.vars` is a generated artifact — don't
+  hand-edit, override via `$VERIFY_ROOT/.env` instead.
+
+Expected generated `.dev.vars` shape (ports auto-derived):
 
 ```
-CC_GATEWAY_URL=ws://127.0.0.1:9877
-CC_GATEWAY_SECRET=<matches .env in the gateway's cwd>
-WORKER_PUBLIC_URL=http://127.0.0.1:43173
-BETTER_AUTH_URL=http://localhost:43173
+BETTER_AUTH_URL=http://127.0.0.1:<orch>
+CC_GATEWAY_URL=ws://127.0.0.1:<gateway>
+CC_GATEWAY_SECRET=<from .env>
+WORKER_PUBLIC_URL=http://127.0.0.1:<orch>
+BOOTSTRAP_TOKEN=<from .env, optional — enables /api/bootstrap seeding>
 ```
 
 Missing `WORKER_PUBLIC_URL` causes the classic "message lands in history,
 no assistant turn" silent-fail (GH#8). `sendMessage` now preflights this
 and returns an explicit error instead of persisting into limbo — if you see
 `Gateway not configured for this worker`, fill in `.dev.vars`.
+
+**Dual-browser bridge isolation** (`axi-a` / `axi-b`):
+`chrome-devtools-axi` tracks its bridge via a PID file at
+`$HOME/.chrome-devtools-axi/bridge.pid` — a SINGLE path, so two concurrent
+wrappers sharing one `$HOME` clobber each other and every invocation ends
+up routed to whichever bridge the PID file currently points at (regardless
+of `CHROME_DEVTOOLS_AXI_BROWSER_URL`). `axi-a` and `axi-b` give each
+wrapper its own `$HOME` (`/tmp/duraclaw-axi-a-state`,
+`/tmp/duraclaw-axi-b-state`) and pin `CHROME_DEVTOOLS_AXI_PORT` to `9224`
+/ `9225` so both bridges can stay alive in parallel and drive their own
+Chrome without cross-talk. Override via `AXI_A_STATE` / `AXI_B_STATE` /
+`AXI_A_BRIDGE_PORT` / `AXI_B_BRIDGE_PORT` if you need different values.
+
+**User seeding**: `/api/auth/sign-up/email` is disabled by default. Use
+the token-protected `/api/bootstrap` endpoint (enabled when
+`BOOTSTRAP_TOKEN` is present in `.dev.vars`) to seed the `+a` and `+b`
+users in a fresh worktree:
+
+```bash
+source .env
+for u in a b; do
+  curl -s -X POST http://127.0.0.1:$VERIFY_ORCH_PORT/api/bootstrap \
+    -H "Authorization: Bearer $BOOTSTRAP_TOKEN" \
+    -H 'Content-Type: application/json' \
+    -d "{\"email\":\"agent.verify+$u@example.com\",\"password\":\"duraclaw-test-password-$u\",\"name\":\"agent-verify-$u\"}"
+done
+```
 
 Gateway-side project resolution is governed by `PROJECT_PATTERNS` /
 `WORKTREE_PATTERNS` (comma-separated prefixes). Leaving them unset accepts
@@ -306,4 +354,11 @@ in `planning/research/2026-04-18-verify-infra-issue-8.md`.
 - Commit messages: `type(scope): description` (feat, fix, chore, refactor, docs, test)
 - Biome formatting: 2-space indent, 100 char line width, LF endings
 - Path alias: `~/` maps to `./src/` in orchestrator
-- Git workflow: commit and push directly to `main` on `origin` (github.com/baseplane-ai/duraclaw). No PR workflow — CI runs remotely after push.
+- Git workflow: commit and push to **the currently checked-out branch**
+  on `origin` (github.com/baseplane-ai/duraclaw). Never switch branches to
+  push elsewhere — respect whatever branch the human/session left you on.
+  On `main` this means direct-to-main (no PR workflow, CI runs remotely
+  after push); on any feature branch (e.g. `feature/3-yjs-...`,
+  `feat/...`, `fix/...`) push to that branch so the open PR updates in
+  place. If a rebase has rewritten branch history, push with
+  `--force-with-lease` (never plain `--force`).

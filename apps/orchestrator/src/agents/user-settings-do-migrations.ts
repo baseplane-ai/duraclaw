@@ -27,4 +27,11 @@ export const USER_SETTINGS_MIGRATIONS: Migration[] = [
       )`)
     },
   },
+  {
+    version: 2,
+    description: 'Drop legacy drafts table — Y.Text on SessionCollabDO is the source of truth',
+    up: (sql) => {
+      sql.exec(`DROP TABLE IF EXISTS drafts`)
+    },
+  },
 ]

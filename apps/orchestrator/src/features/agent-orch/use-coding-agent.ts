@@ -9,6 +9,7 @@
 
 import { useAgent } from 'agents/react'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import type * as Y from 'yjs'
 import { type CachedMessage, messagesCollection } from '~/db/messages-collection'
 import { sessionsCollection } from '~/db/sessions-collection'
 import { useMessagesCollection } from '~/hooks/use-messages-collection'
@@ -54,6 +55,16 @@ export interface UseCodingAgentResult {
   getContextUsage: () => Promise<unknown>
   resolveGate: (gateId: string, response: GateResponse) => Promise<unknown>
   sendMessage: (content: string | ContentBlock[]) => Promise<unknown>
+  /**
+   * Submit a collaborative draft held in a shared Y.Text.
+   *
+   * Snapshots the text, optimistically clears it in a Y.Doc transaction so
+   * every connected peer sees the textarea empty immediately, then calls
+   * `sendMessage` with a fresh submitId for server-side idempotency. If the
+   * RPC fails, the original text is re-inserted in another transaction so
+   * the draft reappears for all peers.
+   */
+  submitDraft: (yText: Y.Text) => Promise<{ ok: boolean; error?: string; sent?: boolean }>
   /**
    * Spawn a fresh SDK session with the current conversation transcript
    * prepended as context. Use to recover from an orphaned sdk_session_id
@@ -158,16 +169,23 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       const prevStatus = prevStatusRef.current
       prevStatusRef.current = newState.status
       setState(newState)
-      // WS bridge: update sessions collection with fresh status.
-      // Skip if record not yet synced — next refetch will pick up the new state.
+      // WS bridge: update sessions collection with fresh status. This is a
+      // local-only mirror of the WS state (no server round-trip), so we use
+      // utils.writeUpdate — the direct .update() API requires an onUpdate
+      // mutation handler and queryCollectionOptions doesn't configure one
+      // (it's a read-only query collection; writes go straight to synced
+      // state). Skip if record not yet synced — next refetch will pick up
+      // the new state naturally.
       if (sessionsCollection.has(agentName)) {
-        sessionsCollection.update(agentName, (draft) => {
-          draft.status = newState.status
-          draft.updated_at = new Date().toISOString()
-          if (newState.num_turns != null) draft.num_turns = newState.num_turns
-          if (newState.total_cost_usd != null) draft.total_cost_usd = newState.total_cost_usd
-          if (newState.duration_ms != null) draft.duration_ms = newState.duration_ms
-        })
+        const patch: Partial<import('~/db/sessions-collection').SessionRecord> = {
+          id: agentName,
+          status: newState.status,
+          updated_at: new Date().toISOString(),
+        }
+        if (newState.num_turns != null) patch.num_turns = newState.num_turns
+        if (newState.total_cost_usd != null) patch.total_cost_usd = newState.total_cost_usd
+        if (newState.duration_ms != null) patch.duration_ms = newState.duration_ms
+        sessionsCollection.utils.writeUpdate(patch)
       }
       // Hydrate messages on first state sync. Only flip the ref on success so
       // that a transient empty/failed RPC doesn't permanently gate further
@@ -484,7 +502,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   )
 
   const sendMessage = useCallback(
-    async (content: string | ContentBlock[]) => {
+    async (content: string | ContentBlock[], opts?: { submitId?: string }) => {
       const optimisticId = `usr-optimistic-${Date.now()}`
       optimisticIdsRef.current.add(optimisticId)
       setMessages((prev) => [
@@ -496,7 +514,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           createdAt: new Date(),
         },
       ])
-      const result = (await connection.call('sendMessage', [content])) as {
+      const result = (await connection.call('sendMessage', [content, opts])) as {
         ok: boolean
         error?: string
       }
@@ -505,6 +523,100 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         setMessages((prev) => prev.filter((m) => m.id !== optimisticId))
       }
       return result
+    },
+    [connection],
+  )
+
+  /**
+   * Draft submit wrapper that clears a shared Y.Text optimistically and
+   * restores it on RPC failure. Honors `window.__mockSendFailure` in dev
+   * mode so VP2's failure-rollback test can be exercised without mocking
+   * the WebSocket layer.
+   *
+   * Callers typically obtain `yText` from `useSessionCollab`'s returned doc
+   * via `yDoc.getText("draft")` — the conventional name for the shared
+   * chat-input Y.Text on each session's collab room.
+   */
+  const submitDraft = useCallback(
+    async (yText: Y.Text) => {
+      const text = yText.toString()
+      if (text.length === 0) {
+        return { ok: true, sent: false }
+      }
+      const doc = yText.doc
+      // Snapshot + optimistic clear. Wrap both ends in a transaction so
+      // peers see a single atomic update.
+      const clear = () => {
+        const len = yText.length
+        if (len > 0) yText.delete(0, len)
+      }
+      const restore = () => {
+        // Only re-insert if nobody has typed anything in the meantime;
+        // otherwise we'd double-insert. If the text is non-empty, leave
+        // whatever the users have since written in place and drop the
+        // snapshot — the user will see the toast and can retry.
+        if (yText.length === 0) yText.insert(0, text)
+      }
+      if (doc) doc.transact(clear)
+      else clear()
+
+      const submitId =
+        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : `sub-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+
+      // Dev-only test hook for VP2 (draft-restored-on-failure verification).
+      // Skip the RPC entirely and treat it as a failure so the rollback
+      // path runs end-to-end. Gated on the vite DEV flag + the window flag
+      // so production bundles can't accidentally skip sends.
+      const viteEnv = (import.meta as unknown as { env?: { DEV?: boolean } }).env
+      const mockFailure =
+        viteEnv?.DEV === true &&
+        typeof window !== 'undefined' &&
+        (window as unknown as { __mockSendFailure?: boolean }).__mockSendFailure === true
+
+      if (mockFailure) {
+        if (doc) doc.transact(restore)
+        else restore()
+        return { ok: false, sent: false, error: 'mock failure' }
+      }
+
+      const optimisticId = `usr-optimistic-${Date.now()}`
+      optimisticIdsRef.current.add(optimisticId)
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: optimisticId,
+          role: 'user',
+          parts: contentToParts(text),
+          createdAt: new Date(),
+        },
+      ])
+
+      try {
+        const result = (await connection.call('sendMessage', [text, { submitId }])) as {
+          ok: boolean
+          error?: string
+        }
+        if (!result.ok) {
+          optimisticIdsRef.current.delete(optimisticId)
+          setMessages((prev) => prev.filter((m) => m.id !== optimisticId))
+          if (doc) doc.transact(restore)
+          else restore()
+          return { ok: false, sent: false, error: result.error }
+        }
+        return { ok: true, sent: true }
+      } catch (err) {
+        optimisticIdsRef.current.delete(optimisticId)
+        setMessages((prev) => prev.filter((m) => m.id !== optimisticId))
+        if (doc) doc.transact(restore)
+        else restore()
+        return {
+          ok: false,
+          sent: false,
+          error: err instanceof Error ? err.message : 'send failed',
+        }
+      }
     },
     [connection],
   )
@@ -551,6 +663,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     getContextUsage,
     resolveGate,
     sendMessage,
+    submitDraft,
     forkWithHistory,
     rewind,
     injectQaPair,

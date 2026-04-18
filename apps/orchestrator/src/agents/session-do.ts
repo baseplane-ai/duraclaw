@@ -26,6 +26,7 @@ import {
 import {
   buildGatewayCallbackUrl,
   buildGatewayStartUrl,
+  claimSubmitId,
   constantTimeEquals,
   getGatewayConnectionId,
   loadTurnState,
@@ -1162,7 +1163,25 @@ export class SessionDO extends Agent<Env, SessionState> {
   @callable()
   async sendMessage(
     content: string | ContentBlock[],
+    opts?: { submitId?: string },
   ): Promise<{ ok: boolean; error?: string; recoverable?: 'forkWithHistory' }> {
+    // Idempotency: if a submitId was supplied and we've already accepted it,
+    // treat this as a duplicate of that prior call and no-op. Rows older than
+    // 60s are pruned on each insert to cap table growth.
+    if (opts?.submitId !== undefined) {
+      const submitId = opts.submitId
+      if (typeof submitId !== 'string' || submitId.length === 0 || submitId.length > 64) {
+        return { ok: false, error: 'invalid submitId' }
+      }
+      const claim = claimSubmitId(this.sql.bind(this), submitId)
+      if (!claim.ok) {
+        return { ok: false, error: claim.error }
+      }
+      if (claim.duplicate) {
+        return { ok: true }
+      }
+    }
+
     const { status } = this.state
     // A session-runner stays alive through `type=result` and blocks waiting on
     // the next stream-input (see claude-runner.ts multi-turn loop). Route by

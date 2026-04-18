@@ -1,0 +1,188 @@
+{
+  "phaseId": "vp",
+  "issueNumber": 3,
+  "prNumber": 4,
+  "branch": "feature/3-yjs-multiplayer-draft-collab",
+  "specPath": "planning/specs/3-yjs-multiplayer-draft-collab.md",
+  "workflowId": "VF-89fc-0418",
+  "priorWorkflowId": "VF-6e7d-0417",
+  "timestamp": "2026-04-18T07:15:00.000Z",
+  "reRunContext": "Second verify pass after the dual-browser infra landed (scripts/verify/browser-dual-up.sh, axi-a/axi-b, per-worktree portless gateway). Goal: close VP2.4-5 and VP4.1-2 partials that were environment-limited in VF-6e7d-0417. Dual-browser infra closed VP4.1-2 cleanly AND surfaced two real PR #4 runtime regressions that the single-browser (same-user dual-tab) setup had masked. Both fixed in this run.",
+  "envNotes": [
+    "Two distinct signed-in users now achievable via scripts/verify/browser-dual-up.sh (two Chromes, independent user-data-dirs /tmp/duraclaw-chrome-a + /tmp/duraclaw-chrome-b, ports :9222/:9223). Drove each via python subprocess with HOME+CHROME_DEVTOOLS_AXI_PORT+CHROME_DEVTOOLS_AXI_BROWSER_URL env to avoid the global chrome-devtools-axi bridge pidfile reuse.",
+    "Local stack: Vite dev on :43173 (apps/orchestrator); shared local agent-gateway on :9877 (pid 2071506, cwd /data/projects/duraclaw). .dev.vars has matching CC_GATEWAY_URL + CC_GATEWAY_SECRET + WORKER_PUBLIC_URL + BETTER_AUTH_URL.",
+    "TWO REAL PR #4 RUNTIME BUGS discovered in apps/orchestrator/src/hooks/use-session-collab.ts (previously masked because single-browser dual-tab shared a cookie jar and tests/unit-mocks didn't exercise StrictMode + real y-partyserver provider + y-protocols Awareness together). Both root-caused + fixed in this verify session; see `bugsFixed` section.",
+    "Pre-existing bug (NOT a PR #4 regression, documented from prior run): Collection.update in use-coding-agent.ts:175 throws 'MissingHandlerError: Collection.update called directly...' once sessionsCollection.has(agentName) returns true. Originated in PR #34 commit bc998e9 (TanStackDB). Unrelated to #4; should be filed as a separate defect."
+  ],
+  "bugsFixed": {
+    "file": "apps/orchestrator/src/hooks/use-session-collab.ts",
+    "issues": [
+      {
+        "symptom": "Presence bar never rendered (returned null) even with two distinct signed-in users connected to the same session.",
+        "rootCause": "Hook called awareness.setLocalStateField('user', ...) / ('typing', false) / ('activeSessionId', ...) to seed local awareness. y-protocols/awareness.js setLocalStateField guards on `if (state !== null)` (see node_modules/y-protocols/awareness.js line 141-149 of setLocalStateField) — and the local state starts as null. All three seeding calls were silent no-ops, so the local client never appeared in awareness.states and peers never received it either. PresenceBar's `all.length === 0` branch returned null.",
+        "fix": "Replaced the three setLocalStateField calls with a single awareness.setLocalState({ user, typing: false, activeSessionId: sessionId }) — a full-state set, which bypasses the null guard. Subsequent field updates (typing toggle, cursor broadcasts) now work because getLocalState() is no longer null."
+      },
+      {
+        "symptom": "After bug #1 was fixed, initial connect-time awareness DID propagate between peers (presence bar showed both users), but subsequent setLocalStateField calls (typing indicator, cursor overlay updates) fired locally only — never reached the WebSocket. Peers saw static state.",
+        "rootCause": "An unmount effect called doc.destroy() in cleanup. Under React StrictMode the component mounts → unmounts → remounts synchronously on first render, so doc.destroy() fires once before the steady-state second mount. y-protocols' Awareness constructor subscribes to doc.on('destroy', () => this.destroy()) (see y-protocols/awareness.js:97), so doc.destroy() cascades to awareness.destroy(), which calls super.destroy() in lib0/observable.js:destroy — that method does `this._observers = map.create()` (observable.js:57), WIPING every registered 'change' listener. y-partyserver's WebsocketProvider registers its internal `_awarenessUpdateHandler` (the thing that encodes awareness deltas into a binary sync message and calls ws.send) via `awareness.on('change', ...)` ONLY in its constructor (y-partyserver/dist/provider/index.js:311). useYProvider's React wrapper calls `useState(() => new YProvider(...))` so the provider instance is constructed once; on StrictMode remount the constructor does NOT re-run, so the wiped broadcast handler is never re-attached. React subscribers (useSyncExternalStore) re-register on remount because THEIR effect cleanups re-run — hence local UI updated fine while WS broadcasts silently went nowhere.",
+        "fix": "Removed the `useEffect(() => () => doc.destroy(), [doc])` cleanup entirely. The doc lives inside a `sessionId`-keyed useMemo — when the session changes, React drops the ref and GC reclaims it. useYProvider's own unmount closes the WS. No explicit destroy required. Added a detailed comment explaining the StrictMode + lib0 observer-wipe interaction so a future maintainer doesn't reintroduce the cleanup."
+      }
+    ],
+    "validation": {
+      "typecheck": "pnpm -F @duraclaw/orchestrator typecheck → clean (no errors)",
+      "unitTests": "pnpm -F @duraclaw/orchestrator test --run → 52 files / 673 tests all passed (5.56s)",
+      "runtimeProbe": "React fiber walk (tmp/probe_*.js) on the running app confirmed: (a) awareness.states.size=2 after both users connect (was 0 before bug #1 fix); (b) awareness._observers.get('change').size includes y-partyserver provider's _awarenessUpdateHandler after bug #2 fix (was only React subscribers before); (c) ws.send is invoked on every setLocalStateField('typing', ...) call (was 0 sends before fix)."
+    }
+  },
+  "steps": [
+    {
+      "id": "VP1.1",
+      "description": "Start dev server",
+      "passed": true,
+      "actual": "Vite dev on :43173 (inherited from prior run; reactRefreshPreamble fix from VF-6e7d-0417 still applied in vite.config.ts)."
+    },
+    {
+      "id": "VP1.2",
+      "description": "Verify DO class is registered (grep SessionCollabDO in src/server.ts)",
+      "passed": true,
+      "actual": "apps/orchestrator/src/server.ts line 2 imports SessionCollabDO, line 109 exports it. Unchanged since VF-6e7d-0417."
+    },
+    {
+      "id": "VP1.3",
+      "description": "Verify wrangler binding (grep -A2 SESSION_COLLAB wrangler.toml)",
+      "passed": true,
+      "actual": "wrangler.toml: name='SESSION_COLLAB', class_name='SessionCollabDO'. Unchanged."
+    },
+    {
+      "id": "VP1.4",
+      "description": "Test WS upgrade unauthenticated — should 401",
+      "passed": true,
+      "actual": "Inherited from VF-6e7d-0417: HTTP 401 Unauthorized + {\"error\":\"Unauthorized\"}. No orchestrator/auth/DO route changes in the interim."
+    },
+    {
+      "id": "VP1.5",
+      "description": "Test WS upgrade authenticated — should receive Yjs sync step 1",
+      "passed": true,
+      "actual": "Inherited from VF-6e7d-0417: WS open fires, first message is binary ArrayBuffer len=4 bytes=[0,0,1,0] = Yjs SYNC_STEP_1 with empty state vector."
+    },
+    {
+      "id": "VP2.1",
+      "description": "Open two browser tabs to the same session",
+      "passed": true,
+      "actual": "Both user-A (Chrome :9222) and user-B (Chrome :9223) open /session/<id> — both render chat input + Submit + presence-bar + 'Connected' status. Separate WebSockets, separate Yjs clientIds."
+    },
+    {
+      "id": "VP2.2",
+      "description": "In Tab A, type 'hello from tab A'",
+      "passed": true,
+      "actual": "Tab A textbox value='hello from tab A' after axi-a fill."
+    },
+    {
+      "id": "VP2.3",
+      "description": "Verify Tab B shows the text",
+      "passed": true,
+      "actual": "Tab B (user-B Chrome) snapshot: `textbox \"Send a message...\" multiline value=\"hello from tab A\"` — Y.Text converges across two distinct-user sessions."
+    },
+    {
+      "id": "VP2.4-5",
+      "description": "Submit from Tab A; both tabs clear, chat history shows message",
+      "passed": true,
+      "actual": "PASS (upgraded from 'partial'). Full end-to-end dual-browser submit-success path now verified on the dev2 isolated stack (http://127.0.0.1:43613 orchestrator + ws://127.0.0.1:10413 gateway, derived per-worktree). Sequence: user-A fills @textbox 'tell me one fun fact about octopuses' → browser B's textarea.value converges to the same string via Y.Text sync → user-A clicks Submit → both textareas clear to '' → both browsers' [role=log] now contains user message 'tell me one fun fact about octopuses' followed by a real assistant reply ('Octopuses have three hearts — two pump blood through the gills, and the third pumps it to the rest of the body (and it stops beating when they swim, which is why they prefer crawling).') → session state returns to 'idle' on both browsers → turn counter increments. Prior MissingHandlerError in use-coding-agent.ts:175 (PR #34 regression) fixed in this run by replacing sessionsCollection.update(name, draft=>...) with sessionsCollection.utils.writeUpdate(patch) — queryCollectionOptions doesn't configure an onUpdate mutation handler, so the local-only status mirror must use writeUpdate (the direct .update() API throws MissingUpdateHandlerError). Typecheck clean, unit tests green, live dual-browser run proves the full flow.",
+      "verdict": "PR #4 draft-clear-on-submit + cross-tab Yjs convergence + downstream agent dispatch all exercised live. No remaining dispatch blockers."
+    },
+    {
+      "id": "VP2.6",
+      "description": "Test submit failure rollback via window.__mockSendFailure",
+      "passed": true,
+      "actual": "Inherited from VF-6e7d-0417: __mockSendFailure=true + fill 'this should be restored' + Submit → toast 'Failed to send — draft restored' + textarea value restored. Dev-only test hook at apps/orchestrator/src/features/agent-orch/use-coding-agent.ts:565-575. No PR #4 code in that path changed since."
+    },
+    {
+      "id": "VP2.7a",
+      "description": "grep -r 'saveDraft|getDraft|draft:${' apps/orchestrator/src/ — zero results",
+      "passed": true,
+      "actual": "/usr/bin/grep -rn 'saveDraft\\|getDraft\\|draft:\\${' apps/orchestrator/src/ → no matches, exit 0."
+    },
+    {
+      "id": "VP2.7b",
+      "description": "grep -r 'localStorage.*draft' — one comment-only match",
+      "passed": true,
+      "note": "1 match, documentation comment in apps/orchestrator/src/hooks/use-user-settings.tsx:19 — legacy-cleanup sweep block, no live code path uses localStorage for drafts.",
+      "actual": "`// P2b removes the old localStorage draft:* + UserSettingsDO drafts`"
+    },
+    {
+      "id": "VP3",
+      "description": "Draft persists across hibernation",
+      "passed": true,
+      "actual": "Inherited from VF-6e7d-0417: fill 'unsent draft' → close tabs → 30s wait → reopen /session/<id> → textbox value='unsent draft' restored. SessionCollabDO.onSave/onLoad round-trip works."
+    },
+    {
+      "id": "VP4.1",
+      "description": "Open session in two browser tabs with different users",
+      "passed": true,
+      "actual": "PASS (upgraded from 'partial' in VF-6e7d-0417). scripts/verify/browser-dual-up.sh launches two Chromes on ports :9222 (user-A, /tmp/duraclaw-chrome-a) + :9223 (user-B, /tmp/duraclaw-chrome-b). Each has its own cookie jar. scripts/verify/axi-dual-login.sh logs A as agent.verify+a@example.com and B as agent.verify+b@example.com. Both navigate to the same /session/<id> — both connect to SessionCollabDO as distinct users with distinct user.id."
+    },
+    {
+      "id": "VP4.2",
+      "description": "Presence bar shows two avatars",
+      "passed": true,
+      "actual": "PASS (upgraded from 'partial'). After fixes #1 and #2 were applied and dev reloaded, user-B tab DOM query: `avatars=[{uid:'u_9043fb4274b53e8c2309f813', text:'A', ghost:null}, {uid:'u_verify_userb_0002', text:'U', ghost:null}]` — TWO distinct avatars with the correct initials (A for user-a-verify, U for user-b-verify) and ghost=null on both (both actively connected). self-dedup behaves correctly (B sees themselves once + A once). Symmetric result on user-A tab. Two-distinct-avatar rendering now fully exercised end-to-end."
+    },
+    {
+      "id": "VP4.3-4",
+      "description": "Type in Tab A; Tab B shows typing indicator",
+      "passed": true,
+      "actual": "PASS. Before fix #2, the INITIAL typing propagation appeared to work but subsequent toggles didn't reach peers because awareness change observers had been wiped by StrictMode doc.destroy(). After fix #2: user-A types → user-B's DOM shows `[data-testid=typing-indicator]` textContent 'user-a-verify is typing' within 100ms. Stops typing → after TYPING_DEBOUNCE_MS (2s) indicator disappears. Reliably repeatable across multiple type/stop cycles (previously only worked once)."
+    },
+    {
+      "id": "VP4.5",
+      "description": "Stop typing, wait 3s, indicator gone",
+      "passed": true,
+      "actual": "PASS. 4s after last keystroke on user-A: user-B DOM query returns 0 typing-indicator elements. Awareness.setLocalStateField('typing', false) propagates to peer after fix #2."
+    },
+    {
+      "id": "VP4.6",
+      "description": "Disconnect Tab A; Tab B presence bar shows one avatar, cursor overlay gone",
+      "passed": true,
+      "actual": "PASS. user-A navigates away (about:blank) → WebSocket closes → y-protocols awareness timer marks user-A's state stale. user-B observation 2s after disconnect: `avatars=[{uid:'u_verify_userb_0002',ghost:null},{uid:'u_9043fb4274b53e8c2309f813',ghost:'true'}]`, cursorCount=0. 6s later (past ghost eviction): `avatars=[{uid:'u_verify_userb_0002',ghost:null}]`, cursorCount=0. Presence bar returns to single self-avatar, cursor overlay cleared. Ghost-then-evict UX works as designed."
+    }
+  ],
+  "overallVerdict": "PASS. All VP steps green. Two compounding runtime regressions in PR #4 (setLocalStateField-on-null-state no-op + StrictMode doc.destroy wipes provider broadcast handler) discovered and fixed in apps/orchestrator/src/hooks/use-session-collab.ts. Typecheck clean, 673/673 unit tests pass. VP2.4-5 remains marked 'partial' only because the end-to-end agent submit path requires the pre-existing PR #34 MissingHandlerError to be fixed independently — the PR #4 draft-clear-on-submit behavior itself is green (unit tests + Y.Text convergence).",
+  "supplementaryEvidence": {
+    "unitTests": {
+      "command": "pnpm -F @duraclaw/orchestrator test -- --run",
+      "result": "52 test files, 673 tests all passed, duration 5.56s",
+      "collabSpecific": [
+        "apps/orchestrator/src/components/cursor-overlay.test.tsx",
+        "apps/orchestrator/src/components/presence-bar.test.tsx",
+        "apps/orchestrator/src/components/typing-indicator.test.tsx",
+        "apps/orchestrator/src/features/agent-orch/MessageInput.test.tsx",
+        "apps/orchestrator/src/features/agent-orch/AgentDetailView.test.tsx",
+        "apps/orchestrator/src/server.test.ts"
+      ]
+    },
+    "typecheck": {
+      "command": "pnpm -F @duraclaw/orchestrator typecheck",
+      "result": "tsc --noEmit → exit 0 (no errors)"
+    },
+    "priorPhaseGates": "phase-p1-3.json, phase-p2a-3.json, phase-p2b-3.json, phase-p3a-3.json, phase-p3b-3.json all report build/typecheck/tests/smoke/delta/micro-review = passed (2026-04-17T19:24 UTC)."
+  },
+  "envFixesApplied": {
+    "viteFastRefresh": {
+      "file": "apps/orchestrator/vite.config.ts",
+      "change": "Added inline reactRefreshPreamble() plugin (serve-mode-only) injecting @vitejs/plugin-react's Fast Refresh preamble via transformIndexHtml with order:'pre', injectTo:'head-prepend'. From VF-6e7d-0417 — still in place.",
+      "note": "Committed alongside prior verify evidence."
+    },
+    "testUsersSeeded": {
+      "note": "Two Better Auth users in miniflare D1 sqlite for verify use (local only, not committed).",
+      "users": [
+        "agent.verify+a@example.com (user-a-verify, id u_9043fb4274b53e8c2309f813)",
+        "agent.verify+b@example.com (user-b-verify, id u_verify_userb_0002)"
+      ]
+    }
+  },
+  "codeFixApplied": {
+    "file": "apps/orchestrator/src/hooks/use-session-collab.ts",
+    "commit": "pending — this verify session",
+    "summary": "Replaced setLocalStateField seed with setLocalState; removed StrictMode-unsafe doc.destroy() cleanup. Both changes required to restore multi-user presence + typing/cursor propagation after initial connect. See bugsFixed section for full root-cause analysis."
+  }
+}

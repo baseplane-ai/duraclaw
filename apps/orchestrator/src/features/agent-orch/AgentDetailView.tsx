@@ -31,6 +31,7 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
     interrupt,
     resolveGate,
     sendMessage,
+    submitDraft,
     rewind,
     injectQaPair,
     branchInfo,
@@ -137,7 +138,12 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
       />
 
       <StatusBar />
-      <MessageInput onSend={sendMessage} draftKey={tabId} />
+      <MessageInput
+        onSend={sendMessage}
+        submitDraft={submitDraft}
+        sessionId={sessionId}
+        draftKey={tabId}
+      />
     </div>
   )
 }

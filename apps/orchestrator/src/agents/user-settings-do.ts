@@ -10,19 +10,16 @@ export interface TabRecord {
   project: string
   sessionId: string
   title: string
-  draft?: string
 }
 
 export interface UserSettingsState {
   tabs: TabRecord[]
   activeTabId: string | null
-  drafts: Record<string, string>
 }
 
 const DEFAULT_STATE: UserSettingsState = {
   tabs: [],
   activeTabId: null,
-  drafts: {},
 }
 
 // ── DO ───────────────────────────────────────────────────────────
@@ -67,7 +64,6 @@ export class UserSettingsDO extends Agent<Env, UserSettingsState> {
           sessionId?: string
           title?: string
           tabId?: string
-          draft?: string
           orderedIds?: string[]
         }
         if (body.action === 'reorder' && body.orderedIds) {
@@ -80,42 +76,22 @@ export class UserSettingsDO extends Agent<Env, UserSettingsState> {
           this.switchTabSession(body.tabId, body.sessionId, body.title)
         } else if (body.project && body.sessionId) {
           this.addTab(body.project, body.sessionId, body.title, body.id)
-        } else if (body.id && body.project) {
-          // Draft-only sentinel record (e.g. __new_session with no sessionId)
-          const existing = this.state.tabs.find((t) => t.id === body.id)
-          if (existing) {
-            if (body.draft !== undefined) this.saveDraft(body.id, body.draft)
-          } else {
-            const newTab: TabRecord = {
-              id: body.id,
-              project: body.project,
-              sessionId: body.sessionId || '',
-              title: body.title || '',
-              draft: body.draft,
-            }
-            const newTabs = [...this.state.tabs, newTab]
-            this.setState({ ...this.state, tabs: newTabs })
-            this.persistTabs()
-            if (body.draft) this.saveDraft(body.id, body.draft)
-          }
         }
         return Response.json({ tabs: this.state.tabs })
       }
 
-      // PATCH /tabs/:id — update sessionId, title, and/or draft
+      // PATCH /tabs/:id — update sessionId and/or title
       if (request.method === 'PATCH' && url.pathname.startsWith('/tabs/')) {
         const tabId = url.pathname.slice('/tabs/'.length)
         const body = (await request.json()) as {
           sessionId?: string
           title?: string
-          draft?: string
         }
         if (body.sessionId) {
           this.switchTabSession(tabId, body.sessionId, body.title)
         } else if (body.title) {
           this.updateTabTitle(tabId, body.title)
         }
-        if (typeof body.draft === 'string') this.saveDraft(tabId, body.draft)
         return Response.json({ tabs: this.state.tabs })
       }
 
@@ -142,25 +118,11 @@ export class UserSettingsDO extends Agent<Env, UserSettingsState> {
       .exec(`SELECT id, project, session_id, title FROM tabs ORDER BY position ASC`)
       .toArray() as Array<{ id: string; project: string; session_id: string; title: string }>
 
-    // Load drafts and join into tab records
-    const draftRows = this.ctx.storage.sql
-      .exec(`SELECT tab_id, text FROM drafts`)
-      .toArray() as Array<{ tab_id: string; text: string }>
-    const draftMap = new Map<string, string>()
-    const drafts: Record<string, string> = {}
-    for (const d of draftRows) {
-      if (d.text) {
-        draftMap.set(d.tab_id, d.text)
-        drafts[d.tab_id] = d.text
-      }
-    }
-
     const tabs: TabRecord[] = tabRows.map((r) => ({
       id: r.id,
       project: r.project,
       sessionId: r.session_id,
       title: r.title,
-      draft: draftMap.get(r.id) || undefined,
     }))
 
     const activeRow = this.ctx.storage.sql
@@ -168,7 +130,7 @@ export class UserSettingsDO extends Agent<Env, UserSettingsState> {
       .toArray() as Array<{ value: string | null }>
     const activeTabId = activeRow[0]?.value ?? null
 
-    this.setState({ tabs, activeTabId, drafts })
+    this.setState({ tabs, activeTabId })
   }
 
   private persistTabs() {
@@ -269,13 +231,6 @@ export class UserSettingsDO extends Agent<Env, UserSettingsState> {
     this.setState({ ...this.state, tabs: newTabs, activeTabId: newActive })
     this.persistTabs()
 
-    // Clean up draft for removed tab
-    this.ctx.storage.sql.exec(`DELETE FROM drafts WHERE tab_id = ?`, tabId)
-    const { drafts, ...rest } = this.state
-    const newDrafts = { ...drafts }
-    delete newDrafts[tabId]
-    this.setState({ ...rest, drafts: newDrafts })
-
     return { tabs: this.state.tabs, activeTabId: this.state.activeTabId }
   }
 
@@ -319,38 +274,5 @@ export class UserSettingsDO extends Agent<Env, UserSettingsState> {
     this.setState({ ...this.state, tabs: reordered })
     this.persistTabs()
     return this.state.tabs
-  }
-
-  @callable()
-  saveDraft(tabId: string, text: string): void {
-    this.ensureInit()
-    const now = new Date().toISOString()
-    if (text) {
-      this.ctx.storage.sql.exec(
-        `INSERT OR REPLACE INTO drafts (tab_id, text, updated_at) VALUES (?, ?, ?)`,
-        tabId,
-        text,
-        now,
-      )
-    } else {
-      this.ctx.storage.sql.exec(`DELETE FROM drafts WHERE tab_id = ?`, tabId)
-    }
-    const newDrafts = { ...this.state.drafts }
-    if (text) {
-      newDrafts[tabId] = text
-    } else {
-      delete newDrafts[tabId]
-    }
-    // Update draft on tab record too so it flows through the collection
-    const newTabs = this.state.tabs.map((t) =>
-      t.id === tabId ? { ...t, draft: text || undefined } : t,
-    )
-    this.setState({ ...this.state, tabs: newTabs, drafts: newDrafts })
-  }
-
-  @callable()
-  getDraft(tabId: string): string {
-    this.ensureInit()
-    return this.state.drafts[tabId] ?? ''
   }
 }

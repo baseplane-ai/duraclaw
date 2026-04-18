@@ -56,4 +56,14 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
       // kv table stays — still used for kata_state
     },
   },
+  {
+    version: 5,
+    description: 'Add submit_ids table for sendMessage idempotency (yjs multiplayer draft)',
+    up: (sql) => {
+      sql.exec(`CREATE TABLE IF NOT EXISTS submit_ids (
+        id TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL
+      )`)
+    },
+  },
 ]

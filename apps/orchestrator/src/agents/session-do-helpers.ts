@@ -136,3 +136,50 @@ export function buildGatewayStartUrl(gatewayUrl: string): string {
   const httpBase = gatewayUrl.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
   return `${httpBase}/sessions/start`
 }
+
+/** How long a submitId stays in submit_ids before being pruned. */
+export const SUBMIT_ID_TTL_MS = 60_000
+/** Max allowed length for a submitId. */
+export const SUBMIT_ID_MAX_LEN = 64
+
+export type SubmitIdResult =
+  | { ok: true; duplicate: boolean }
+  | { ok: false; error: 'invalid submitId' }
+
+/**
+ * Validate and claim a submitId for idempotent message submission.
+ *
+ * - Rejects non-string, empty, or >64 char submitIds with
+ *   `{ ok: false, error: 'invalid submitId' }`.
+ * - If the submitId already exists in `submit_ids`, returns
+ *   `{ ok: true, duplicate: true }` — the caller should short-circuit.
+ * - Otherwise inserts the id, prunes rows older than {@link SUBMIT_ID_TTL_MS},
+ *   and returns `{ ok: true, duplicate: false }`.
+ *
+ * Extracted from SessionDO.sendMessage so it can be exercised by unit
+ * tests without standing up the full DO (decorators can't be parsed by
+ * vitest/oxc).
+ */
+export function claimSubmitId(
+  sql: SqlFn,
+  submitId: unknown,
+  now: number = Date.now(),
+): SubmitIdResult {
+  if (
+    typeof submitId !== 'string' ||
+    submitId.length === 0 ||
+    submitId.length > SUBMIT_ID_MAX_LEN
+  ) {
+    return { ok: false, error: 'invalid submitId' }
+  }
+  const existing = [
+    ...sql<{ id: string }>`SELECT id FROM submit_ids WHERE id = ${submitId} LIMIT 1`,
+  ]
+  if (existing.length > 0) {
+    return { ok: true, duplicate: true }
+  }
+  sql`INSERT INTO submit_ids (id, created_at) VALUES (${submitId}, ${now})`
+  const cutoff = now - SUBMIT_ID_TTL_MS
+  sql`DELETE FROM submit_ids WHERE created_at < ${cutoff}`
+  return { ok: true, duplicate: false }
+}

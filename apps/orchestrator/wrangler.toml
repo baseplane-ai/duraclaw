@@ -29,6 +29,10 @@ class_name = "ProjectRegistry"
 name = "USER_SETTINGS"
 class_name = "UserSettingsDO"
 
+[[durable_objects.bindings]]
+name = "SESSION_COLLAB"
+class_name = "SessionCollabDO"
+
 # DO migrations — collapsed for fresh deploy on baseplane-ai account.
 # The old worker (on the codevibesmatter account) held the prior v1..v5 chain;
 # here we start at the final SQLite-backed shape.
@@ -39,6 +43,10 @@ new_sqlite_classes = ["SessionDO", "ProjectRegistry"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["UserSettingsDO"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["SessionCollabDO"]
 
 # D1 database for auth
 [[d1_databases]]

@@ -11,7 +11,35 @@
 
 set -euo pipefail
 
+# Source common.sh for PATH shimming (picks up ~/.npm-global/bin so
+# chrome-devtools-axi is resolvable even when the parent shell profile
+# was skipped, e.g. agent harness invocations).
+source "$(dirname "$0")/common.sh" >/dev/null 2>&1 || true
+
 BROWSER_A_PORT="${BROWSER_A_PORT:-9222}"
 export CHROME_DEVTOOLS_AXI_BROWSER_URL="http://127.0.0.1:${BROWSER_A_PORT}"
+# Each wrapper needs its OWN bridge, and chrome-devtools-axi finds its
+# already-running bridge via a PID file at ~/.chrome-devtools-axi/
+# bridge.pid — a SINGLE shared path, which means two concurrent wrappers
+# on one $HOME clobber each other (last writer wins, the other's bridge
+# becomes unreachable and re-invocations get routed to whichever bridge
+# the PID file currently points at).
+#
+# Fix: give each wrapper its own HOME so each has its own state dir.
+# We also pin CHROME_DEVTOOLS_AXI_PORT so the bridge never collides with
+# the peer wrapper when both happen to start fresh.
+_AXI_A_STATE="${AXI_A_STATE:-/tmp/duraclaw-axi-a-state}"
+mkdir -p "$_AXI_A_STATE"
+export HOME="$_AXI_A_STATE"
+export CHROME_DEVTOOLS_AXI_PORT="${AXI_A_BRIDGE_PORT:-9224}"
 
-exec chrome-devtools-axi "$@"
+# Prefer the on-PATH binary but fall back to the known global path so the
+# script keeps working on a barely-configured machine.
+if command -v chrome-devtools-axi >/dev/null 2>&1; then
+  exec chrome-devtools-axi "$@"
+elif [[ -x "$HOME/.npm-global/bin/chrome-devtools-axi" ]]; then
+  exec "$HOME/.npm-global/bin/chrome-devtools-axi" "$@"
+else
+  echo "axi-a: chrome-devtools-axi not found on PATH or ~/.npm-global/bin" >&2
+  exit 127
+fi

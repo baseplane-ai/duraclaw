@@ -77,6 +77,8 @@ function makeAgent(overrides: Partial<UseCodingAgentResult> = {}): UseCodingAgen
     getContextUsage: vi.fn(),
     resolveGate: vi.fn(),
     sendMessage: vi.fn(),
+    submitDraft: vi.fn(async () => ({ ok: true, sent: true })),
+    forkWithHistory: vi.fn(),
     rewind: vi.fn(),
     injectQaPair: vi.fn(),
     branchInfo: new Map(),

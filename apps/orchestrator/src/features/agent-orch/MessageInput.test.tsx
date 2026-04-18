@@ -40,11 +40,27 @@ vi.mock('@duraclaw/ai-elements', () => ({
   ),
 }))
 
-// useUserSettings pulls in WS and DB — stub it out for these structural tests
-vi.mock('~/hooks/use-user-settings', () => ({
-  useUserSettings: () => ({
-    saveDraft: vi.fn(),
-    getDraft: () => '',
+// Stub the collab hook — MessageInput's behavior is orthogonal to the
+// collab wiring at the unit level. With no sessionId prop the hook's
+// return is ignored at render time, but we still need the import to
+// resolve without making a real WS connection.
+vi.mock('~/hooks/use-session-collab', () => ({
+  useSessionCollab: () => ({
+    doc: { destroy: () => {} },
+    provider: null,
+    status: 'connecting',
+    ytext: {
+      toString: () => '',
+      insert: () => {},
+      delete: () => {},
+      observe: () => {},
+      unobserve: () => {},
+      length: 0,
+      doc: null,
+    },
+    awareness: null,
+    selfClientId: null,
+    notifyTyping: () => {},
   }),
 }))
 

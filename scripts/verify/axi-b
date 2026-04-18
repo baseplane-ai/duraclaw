@@ -1,11 +1,40 @@
 #!/usr/bin/env bash
 #
-# GH#8: Thin wrapper that invokes `chrome-devtools-axi` against Browser B.
-# See axi-a for the full pattern.
+# GH#8: Thin wrapper that invokes `chrome-devtools-axi` against Browser B
+# (the CDP endpoint launched by scripts/verify/browser-dual-up.sh).
+#
+# Usage: same as chrome-devtools-axi itself.
+#     scripts/verify/axi-b open http://localhost:43173/login
+#     scripts/verify/axi-b snapshot
+#
+# Paired with scripts/verify/axi-a for Browser A.
 
 set -euo pipefail
 
+# Source common.sh for PATH shimming (picks up ~/.npm-global/bin so
+# chrome-devtools-axi is resolvable even when the parent shell profile
+# was skipped, e.g. agent harness invocations).
+source "$(dirname "$0")/common.sh" >/dev/null 2>&1 || true
+
 BROWSER_B_PORT="${BROWSER_B_PORT:-9223}"
 export CHROME_DEVTOOLS_AXI_BROWSER_URL="http://127.0.0.1:${BROWSER_B_PORT}"
+# See axi-a for the full rationale: chrome-devtools-axi tracks its
+# running bridge via a PID file under $HOME/.chrome-devtools-axi, so
+# parallel wrappers MUST have distinct HOMEs to avoid clobbering each
+# other. Pin CHROME_DEVTOOLS_AXI_PORT to a peer-distinct value so the
+# two bridges never fight for the same listen socket either.
+_AXI_B_STATE="${AXI_B_STATE:-/tmp/duraclaw-axi-b-state}"
+mkdir -p "$_AXI_B_STATE"
+export HOME="$_AXI_B_STATE"
+export CHROME_DEVTOOLS_AXI_PORT="${AXI_B_BRIDGE_PORT:-9225}"
 
-exec chrome-devtools-axi "$@"
+# Prefer the on-PATH binary but fall back to the known global path so the
+# script keeps working on a barely-configured machine.
+if command -v chrome-devtools-axi >/dev/null 2>&1; then
+  exec chrome-devtools-axi "$@"
+elif [[ -x "$HOME/.npm-global/bin/chrome-devtools-axi" ]]; then
+  exec "$HOME/.npm-global/bin/chrome-devtools-axi" "$@"
+else
+  echo "axi-b: chrome-devtools-axi not found on PATH or ~/.npm-global/bin" >&2
+  exit 127
+fi

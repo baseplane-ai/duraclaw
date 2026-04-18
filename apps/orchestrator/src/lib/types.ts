@@ -39,6 +39,7 @@ export interface Env {
   SESSION_AGENT: DurableObjectNamespace
   SESSION_REGISTRY: DurableObjectNamespace
   USER_SETTINGS: DurableObjectNamespace
+  SESSION_COLLAB: DurableObjectNamespace
   ASSETS: Fetcher
   CC_GATEWAY_URL?: string
   CC_GATEWAY_SECRET?: string
