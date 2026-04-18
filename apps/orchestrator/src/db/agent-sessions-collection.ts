@@ -2,8 +2,8 @@
  * Agent Sessions QueryCollection -- wraps GET /api/sessions with TanStackDB.
  *
  * - Collection id: 'agent_sessions' (renamed from 'sessions' per B-CLIENT-3)
- * - Persisted to OPFS SQLite (schemaVersion 2 — bump from 1 drops the old
- *   `sessions` table on first cold start; rows repopulated by queryFn)
+ * - Persisted to OPFS SQLite (schemaVersion 3 — bump from 2 drops stale
+ *   snake_case rows after SessionSummary camelCase refactor; repopulated by queryFn)
  * - Refetch interval: 30s
  * - Stale time: 15s
  *
@@ -45,7 +45,7 @@ function createAgentSessionsCollection() {
     const opts = persistedCollectionOptions({
       ...queryOpts,
       persistence,
-      schemaVersion: 2,
+      schemaVersion: 3,
     })
     // TanStackDB beta: persistedCollectionOptions adds a schema type that
     // conflicts with createCollection overloads. Runtime behavior is correct.
