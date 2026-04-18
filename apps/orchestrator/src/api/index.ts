@@ -1,3 +1,4 @@
+import type { SessionSummary } from '@duraclaw/shared-types'
 import { and, asc, desc, eq, inArray, like, or, sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import { Hono } from 'hono'
@@ -29,6 +30,39 @@ interface CreateSessionBody {
 }
 
 const ACTIVE_STATUSES = ['running', 'waiting_input', 'waiting_permission'] as const
+
+/**
+ * Convert Drizzle camelCase row to the SessionSummary snake_case contract
+ * that the UI (shared-types) expects. Without this mapping, properties like
+ * `last_activity`, `updated_at`, and `num_turns` are undefined on the client.
+ */
+function toSessionSummary(row: AgentSessionRow): SessionSummary {
+  return {
+    id: row.id,
+    userId: row.userId,
+    project: row.project,
+    status: row.status as SessionSummary['status'],
+    model: row.model,
+    created_at: row.createdAt,
+    updated_at: row.updatedAt,
+    last_activity: row.lastActivity,
+    num_turns: row.numTurns,
+    prompt: row.prompt ?? undefined,
+    summary: row.summary ?? undefined,
+    title: row.title,
+    tag: row.tag,
+    origin: row.origin,
+    agent: row.agent,
+    archived: row.archived,
+    duration_ms: row.durationMs,
+    total_cost_usd: row.totalCostUsd,
+    message_count: row.messageCount,
+    sdk_session_id: row.sdkSessionId,
+    kata_mode: row.kataMode,
+    kata_issue: row.kataIssue,
+    kata_phase: row.kataPhase,
+  }
+}
 
 const SESSION_PATCH_KEYS = new Set([
   'title',
@@ -699,7 +733,7 @@ export function createApiApp() {
             .from(agentSessions)
             .where(and(eq(agentSessions.userId, userId), eq(agentSessions.project, project.name)))
             .orderBy(desc(agentSessions.lastActivity))
-          return { ...project, sessions: sessions as AgentSessionRow[] }
+          return { ...project, sessions: (sessions as AgentSessionRow[]).map(toSessionSummary) }
         }),
       )
 
@@ -719,7 +753,7 @@ export function createApiApp() {
       .where(eq(agentSessions.userId, userId))
       .orderBy(desc(agentSessions.lastActivity))
       .limit(200)
-    return c.json({ sessions: rows as AgentSessionRow[] })
+    return c.json({ sessions: (rows as AgentSessionRow[]).map(toSessionSummary) })
   })
 
   app.get('/api/sessions/active', async (c) => {
@@ -732,7 +766,7 @@ export function createApiApp() {
         and(eq(agentSessions.userId, userId), inArray(agentSessions.status, [...ACTIVE_STATUSES])),
       )
       .orderBy(desc(agentSessions.lastActivity))
-    return c.json({ sessions: rows as AgentSessionRow[] })
+    return c.json({ sessions: (rows as AgentSessionRow[]).map(toSessionSummary) })
   })
 
   app.get('/api/sessions/search', async (c) => {
@@ -760,7 +794,7 @@ export function createApiApp() {
       )
       .orderBy(desc(agentSessions.lastActivity))
       .limit(200)
-    return c.json({ sessions: rows as AgentSessionRow[] })
+    return c.json({ sessions: (rows as AgentSessionRow[]).map(toSessionSummary) })
   })
 
   app.get('/api/sessions/history', async (c) => {
@@ -807,7 +841,7 @@ export function createApiApp() {
       .offset(offset)
 
     return c.json({
-      sessions: rows as AgentSessionRow[],
+      sessions: (rows as AgentSessionRow[]).map(toSessionSummary),
       nextOffset: rows.length === limit ? offset + limit : null,
     })
   })
@@ -1014,7 +1048,7 @@ export function createApiApp() {
     }
 
     const doState = (await response.json()) as Record<string, unknown>
-    return c.json({ session: { ...ownership.session, ...doState } })
+    return c.json({ session: { ...toSessionSummary(ownership.session), ...doState } })
   })
 
   app.get('/api/sessions/:id/messages', async (c) => {
@@ -1075,7 +1109,7 @@ export function createApiApp() {
     }
 
     await notifyInvalidation(c.env, userId, 'agent_sessions')
-    return c.json({ session: updated[0] as AgentSessionRow })
+    return c.json({ session: toSessionSummary(updated[0] as AgentSessionRow) })
   })
 
   app.get('/api/gateway/projects', async (c) => {
