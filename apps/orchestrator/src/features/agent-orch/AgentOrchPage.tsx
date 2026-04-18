@@ -34,7 +34,8 @@ function AgentOrchContent() {
     (search as { newSessionProject?: string }).newSessionProject ?? null
   const searchNewTab = (search as { newTab?: boolean }).newTab ?? false
 
-  const { openTabs, activeSessionId, openTab, closeTab, setActive, reorder } = useTabSync()
+  const { openTabs, activeSessionId, hydrated, openTab, closeTab, setActive, reorder } =
+    useTabSync()
 
   // Deep-link: URL has ?session=X → open & activate that tab.
   // Only creates a tab if the session exists in the collection (has a
@@ -219,15 +220,17 @@ function AgentOrchContent() {
       <Main fixed fluid className="p-0" {...swipeProps}>
         <PwaInstallBanner />
         <PushOptInBanner />
-        <TabBar
-          openTabs={openTabs}
-          activeSessionId={activeSessionId}
-          onSelectSession={handleSelectSession}
-          onCloseTab={handleCloseTab}
-          onReorder={reorder}
-          onNewSessionInTab={handleNewSessionInTab}
-          onNewTabForProject={handleNewTabForProject}
-        />
+        {hydrated && (
+          <TabBar
+            openTabs={openTabs}
+            activeSessionId={activeSessionId}
+            onSelectSession={handleSelectSession}
+            onCloseTab={handleCloseTab}
+            onReorder={reorder}
+            onNewSessionInTab={handleNewSessionInTab}
+            onNewTabForProject={handleNewTabForProject}
+          />
+        )}
         <div
           className={
             swipeDir === 'left'

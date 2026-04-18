@@ -53,6 +53,8 @@ export interface UseTabSyncResult {
   closeTab: (sessionId: string) => string | null
   /** Set the active session (local only). */
   setActive: (sessionId: string | null) => void
+  /** True once IndexedDB has loaded local Y.Doc state. */
+  hydrated: boolean
   /** Reorder: move the tab at fromIndex to toIndex. */
   reorder: (fromIndex: number, toIndex: number) => void
   /** Yjs provider connection status. */
@@ -136,13 +138,24 @@ export function useTabSync(): UseTabSyncResult {
   })
 
   // IndexedDB persistence for offline cold-start.
+  // `hydrated` signals when local state has been loaded so the UI can
+  // avoid rendering an empty tab bar that flashes before data arrives.
+  const [hydrated, setHydrated] = useState(false)
   useEffect(() => {
     if (!userId || !doc) return
+    setHydrated(false)
+    let destroyed = false
     let idb: { destroy: () => void } | null = null
     import('y-indexeddb').then(({ IndexeddbPersistence }) => {
-      idb = new IndexeddbPersistence(`user-settings:${userId}`, doc)
+      if (destroyed) return
+      const persistence = new IndexeddbPersistence(`user-settings:${userId}`, doc)
+      idb = persistence
+      persistence.once('synced', () => {
+        if (!destroyed) setHydrated(true)
+      })
     })
     return () => {
+      destroyed = true
       idb?.destroy()
     }
   }, [userId, doc])
@@ -285,5 +298,5 @@ export function useTabSync(): UseTabSyncResult {
     [doc, tabsY],
   )
 
-  return { openTabs, activeSessionId, openTab, closeTab, setActive, reorder, status }
+  return { openTabs, activeSessionId, hydrated, openTab, closeTab, setActive, reorder, status }
 }
