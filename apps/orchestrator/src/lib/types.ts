@@ -4,7 +4,6 @@
 export type {
   BrowserCommand,
   ContentBlock,
-  DiscoveredSession,
   GateResponse,
   GatewayCommand,
   GatewayEvent,

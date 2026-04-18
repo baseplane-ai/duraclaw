@@ -9,7 +9,6 @@ import { type PushPayload, sendPushNotification } from '~/lib/push'
 import type {
   AgentSessionRow,
   ContentBlock,
-  DiscoveredSession,
   ProjectInfo,
   UserPreferencesRow,
   UserTabRow,
@@ -820,88 +819,74 @@ export function createApiApp() {
     }
 
     const httpBase = c.env.CC_GATEWAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
-    const discoverUrl = new URL('/sessions/discover', httpBase)
+    const sessionsUrl = new URL('/sessions', httpBase)
     const headers: Record<string, string> = {}
     if (c.env.CC_GATEWAY_SECRET) {
       headers.Authorization = `Bearer ${c.env.CC_GATEWAY_SECRET}`
     }
 
-    let sessions: DiscoveredSession[]
+    interface GatewaySnapshot {
+      session_id: string
+      state: string
+      sdk_session_id: string | null
+      last_activity_ts: number | null
+      cost: { input_tokens: number; output_tokens: number; usd: number }
+      model: string | null
+      turn_count: number
+    }
+
+    let snapshots: GatewaySnapshot[]
     try {
-      const resp = await fetch(discoverUrl.toString(), { headers })
+      const resp = await fetch(sessionsUrl.toString(), { headers })
       if (!resp.ok) {
         return c.json({ error: `Gateway returned ${resp.status}` }, 502)
       }
-      const data = (await resp.json()) as { sessions: DiscoveredSession[] }
-      sessions = data.sessions ?? []
+      const data = (await resp.json()) as { ok?: boolean; sessions?: GatewaySnapshot[] }
+      snapshots = data.sessions ?? []
     } catch {
       return c.json({ error: 'Gateway unreachable' }, 502)
     }
 
     const db = getDb(c.env)
     const now = new Date().toISOString()
-    let inserted = 0
     let updated = 0
+    let skipped = 0
 
+    // Update existing D1 rows with fresh gateway data (cost, status, model).
+    // Does not insert — the gateway's thin response lacks project/prompt info.
     await db.transaction(async (tx) => {
-      for (const s of sessions) {
-        const ownerId = (s as DiscoveredSession & { user?: string }).user || userId
-        const existing = await tx
-          .select({ id: agentSessions.id })
-          .from(agentSessions)
-          .where(eq(agentSessions.sdkSessionId, s.sdk_session_id))
-          .limit(1)
-
-        const row = {
-          id: s.sdk_session_id,
-          userId: ownerId,
-          project: s.project,
-          status: 'idle',
-          model: null as string | null,
-          sdkSessionId: s.sdk_session_id,
-          createdAt: s.started_at || now,
-          updatedAt: s.last_activity || now,
-          lastActivity: s.last_activity || now,
-          numTurns: null as number | null,
-          prompt: null as string | null,
-          summary: s.summary || null,
-          title: s.title ?? null,
-          tag: s.tag ?? null,
-          origin: 'discovered',
-          agent: s.agent ?? 'claude',
-          archived: false,
-          durationMs: null as number | null,
-          totalCostUsd: null as number | null,
-          messageCount: s.message_count ?? null,
-          kataMode: null as string | null,
-          kataIssue: null as number | null,
-          kataPhase: null as string | null,
+      for (const s of snapshots) {
+        if (!s.sdk_session_id) {
+          skipped++
+          continue
         }
 
-        await tx
-          .insert(agentSessions)
-          .values(row)
-          .onConflictDoUpdate({
-            target: agentSessions.sdkSessionId,
-            set: {
-              project: row.project,
-              lastActivity: row.lastActivity,
-              updatedAt: row.updatedAt,
-              summary: row.summary,
-              title: row.title,
-              tag: row.tag,
-              messageCount: row.messageCount,
-              agent: row.agent,
-            },
-          })
+        const lastActivity = s.last_activity_ts ? new Date(s.last_activity_ts).toISOString() : now
 
-        if (existing.length > 0) updated++
-        else inserted++
+        const status = s.state === 'running' ? 'running' : 'idle'
+
+        try {
+          await tx
+            .update(agentSessions)
+            .set({
+              status,
+              model: s.model ?? undefined,
+              updatedAt: now,
+              lastActivity: lastActivity,
+              numTurns: s.turn_count || undefined,
+              totalCostUsd: s.cost.usd || undefined,
+            })
+            .where(eq(agentSessions.sdkSessionId, s.sdk_session_id))
+          updated++
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          console.warn(`[sync] update failed for ${s.sdk_session_id}: ${message}`)
+        }
       }
     })
 
     await notifyInvalidation(c.env, userId, 'agent_sessions')
-    return c.json({ inserted, updated })
+    return c.json({ updated, skipped, total: snapshots.length })
   })
 
   app.post('/api/sessions', async (c) => {
