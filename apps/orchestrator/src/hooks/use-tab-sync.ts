@@ -9,6 +9,11 @@
  * renders immediately before the WS connects. CRDT merge handles any drift
  * between IndexedDB cache and server state.
  *
+ * One-tab-per-project: when a `projectResolver` is provided, `openTab`
+ * automatically replaces an existing tab for the same project instead of
+ * opening a duplicate. This is the single enforcement point — callers never
+ * need to check for project conflicts themselves.
+ *
  * Replaces: userTabsCollection, useActiveTab, ensureTabForSession, tab CRUD
  * API endpoints, and the entire optimistic-insert / server-dedup race surface.
  */
@@ -18,13 +23,33 @@ import useYProvider from 'y-partyserver/react'
 import * as Y from 'yjs'
 import { useSession } from '~/lib/auth-client'
 
+export interface OpenTabOptions {
+  /** Activate the tab after opening. Default: true. */
+  activate?: boolean
+  /** Force a new tab even if another tab for the same project exists. */
+  forceNewTab?: boolean
+}
+
+export interface UseTabSyncOptions {
+  /**
+   * Maps sessionId → project name. When provided, openTab enforces
+   * one-tab-per-project: if a tab for the same project already exists,
+   * the new session replaces it in-place.
+   */
+  projectResolver?: (sessionId: string) => string | undefined
+}
+
 export interface UseTabSyncResult {
   /** Ordered list of open session IDs (reactive). */
   openTabs: string[]
   /** Currently focused session ID (reactive). */
   activeSessionId: string | null
-  /** Add a session to open tabs (idempotent) and optionally activate it. */
-  openTab: (sessionId: string, activate?: boolean) => void
+  /**
+   * Add a session to open tabs. Idempotent by session ID; when a
+   * projectResolver is configured, also enforces one-tab-per-project
+   * (replaces existing tab for same project unless forceNewTab is set).
+   */
+  openTab: (sessionId: string, options?: OpenTabOptions) => void
   /** Replace one session with another in the same tab position. */
   replaceTab: (oldSessionId: string, newSessionId: string) => void
   /** Remove a session from open tabs. Returns the next active session ID. */
@@ -57,7 +82,10 @@ export function getTabSyncSnapshot(): {
 let sharedDoc: Y.Doc | null = null
 let sharedDocMountCount = 0
 
-export function useTabSync(): UseTabSyncResult {
+export function useTabSync(options?: UseTabSyncOptions): UseTabSyncResult {
+  // Store resolver in a ref so it doesn't destabilize callbacks.
+  const projectResolverRef = useRef(options?.projectResolver)
+  projectResolverRef.current = options?.projectResolver
   const { data: session } = useSession() as {
     data: { user?: { id?: string } } | null | undefined
   }
@@ -173,16 +201,38 @@ export function useTabSync(): UseTabSyncResult {
   // ── Actions ─────────────────────────────────────────────────────────
 
   const openTab = useCallback(
-    (sessionId: string, activate = true) => {
+    (sessionId: string, opts?: OpenTabOptions) => {
+      const activate = opts?.activate ?? true
+      const forceNewTab = opts?.forceNewTab ?? false
       if (!doc || !openTabsY || !workspaceY) return
       doc.transact(() => {
         const arr = openTabsY.toArray()
-        if (!arr.includes(sessionId)) {
-          openTabsY.push([sessionId])
+
+        // Already open — just activate.
+        if (arr.includes(sessionId)) {
+          if (activate) workspaceY.set('activeSessionId', sessionId)
+          return
         }
-        if (activate) {
-          workspaceY.set('activeSessionId', sessionId)
+
+        // One-tab-per-project: if a resolver is configured and another tab
+        // for the same project exists, replace it in-place.
+        const resolver = projectResolverRef.current
+        if (!forceNewTab && resolver) {
+          const project = resolver(sessionId)
+          if (project) {
+            const existingIdx = arr.findIndex((id) => resolver(id) === project)
+            if (existingIdx !== -1) {
+              openTabsY.delete(existingIdx, 1)
+              openTabsY.insert(existingIdx, [sessionId])
+              if (activate) workspaceY.set('activeSessionId', sessionId)
+              return
+            }
+          }
         }
+
+        // No conflict — append.
+        openTabsY.push([sessionId])
+        if (activate) workspaceY.set('activeSessionId', sessionId)
       })
     },
     [doc, openTabsY, workspaceY],

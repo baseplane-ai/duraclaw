@@ -35,37 +35,31 @@ function AgentOrchContent() {
     (search as { newSessionProject?: string }).newSessionProject ?? null
   const searchNewTab = (search as { newTab?: boolean }).newTab ?? false
 
-  // ── Yjs tab sync — replaces userTabsCollection + ensureTabForSession ──
-  const { openTabs, activeSessionId, openTab, replaceTab, closeTab, setActive, reorder } =
-    useTabSync()
-
-  // Session→project lookup for one-tab-per-project enforcement.
-  const sessionsMap = useMemo(() => {
+  // Session→project resolver for one-tab-per-project enforcement inside useTabSync.
+  const sessionProjectMap = useMemo(() => {
     const m = new Map<string, string>()
     for (const s of sessions) {
       if (s.project) m.set(s.id, s.project)
     }
     return m
   }, [sessions])
-
-  /**
-   * Find the session ID of an already-open tab whose session belongs to `project`.
-   * Returns undefined if no open tab matches.
-   */
-  const findOpenTabForProject = useCallback(
-    (project: string): string | undefined => {
-      return openTabs.find((id) => sessionsMap.get(id) === project)
-    },
-    [openTabs, sessionsMap],
+  const projectResolver = useCallback(
+    (sessionId: string) => sessionProjectMap.get(sessionId),
+    [sessionProjectMap],
   )
 
+  // ── Yjs tab sync — one-tab-per-project enforced inside the hook ──
+  const { openTabs, activeSessionId, openTab, closeTab, setActive, reorder } = useTabSync({
+    projectResolver,
+  })
+
   // Deep-link: if URL has ?session=X, ensure it's in open tabs + activate.
-  // One-shot effect — only fires on mount or when searchSessionId changes.
+  // One-tab-per-project is handled automatically by openTab's projectResolver.
   const deepLinkedRef = useRef<string | null>(null)
   useEffect(() => {
     if (searchSessionId && searchSessionId !== deepLinkedRef.current) {
       deepLinkedRef.current = searchSessionId
-      openTab(searchSessionId, true)
+      openTab(searchSessionId)
     }
   }, [searchSessionId, openTab])
 
@@ -136,43 +130,26 @@ function AgentOrchContent() {
         })
         setQuickPromptHint(null)
 
-        // One-tab-per-project: if a tab already exists for this project,
-        // replace its session in-place. "New tab for project" passes
-        // newTab=true to force a separate tab.
-        const existingTabSession = config.newTab ? undefined : findOpenTabForProject(config.project)
-        if (existingTabSession) {
-          replaceTab(existingTabSession, sessionId)
-        } else {
-          openTab(sessionId, true)
-        }
+        // openTab handles one-tab-per-project automatically; "New tab for
+        // project" passes forceNewTab to explicitly create a second tab.
+        openTab(sessionId, { forceNewTab: config.newTab })
         navigate({ to: '/', search: { session: sessionId } })
       } catch (err) {
         console.error('[AgentOrch] Spawn failed:', err)
       }
     },
-    [navigate, openTab, replaceTab, findOpenTabForProject],
+    [navigate, openTab],
   )
 
   const handleSelectSession = useCallback(
     (sessionId: string) => {
-      // If this session is already open, just activate it.
-      if (openTabs.includes(sessionId)) {
-        setActive(sessionId)
-      } else {
-        // One-tab-per-project: if another session for the same project
-        // is already open, replace it in-place.
-        const project = sessionsMap.get(sessionId)
-        const existingTabSession = project ? findOpenTabForProject(project) : undefined
-        if (existingTabSession) {
-          replaceTab(existingTabSession, sessionId)
-        } else {
-          openTab(sessionId, true)
-        }
-      }
+      // openTab is idempotent (no-op + activate if already open) and
+      // handles one-tab-per-project replacement automatically.
+      openTab(sessionId)
       setSpawnConfig(null)
       navigate({ to: '/', search: { session: sessionId } })
     },
-    [navigate, openTabs, openTab, replaceTab, setActive, sessionsMap, findOpenTabForProject],
+    [navigate, openTab],
   )
 
   const handleCloseTab = useCallback(
