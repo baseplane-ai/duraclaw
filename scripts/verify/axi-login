@@ -63,16 +63,31 @@ label="$(echo "$side" | tr '[:lower:]' '[:upper:]')"
 # Step 2: check whether there's already a valid session for this email.
 # Passing JSON via axi `eval` requires embedding it in a JS expression; we
 # use a here-doc + fetch().then() chain that resolves to a plain string.
-existing_session_email="$("$wrapper" eval "await (async () => {
+existing_session_email="$("$wrapper" eval "(async function() {
   const res = await fetch('/api/auth/get-session', { credentials: 'include' });
   if (!res.ok) return '';
-  const body = await res.json().catch(() => ({}));
+  const body = await res.json().catch(function() { return {}; });
   return body && body.user && body.user.email ? body.user.email : '';
 })()" 2>/dev/null || printf '')"
 
-# axi eval prints the return value (often quoted). Strip surrounding
-# whitespace + quotes for comparison.
-existing_session_email="$(printf '%s' "$existing_session_email" | tr -d '"' | tr -d "\n\r " )"
+# axi eval prints the return value as `result: <encoded>` followed by
+# help lines. chrome-devtools-axi double-JSON-encodes the value — once
+# when stringifying for inspect and once in the display wrapper — so a
+# returned string "foo" shows up as:   result: "\"foo\""
+# Undo both layers with two rounds of jq -r. Non-JSON-parseable values
+# (e.g. `undefined`) fall through to the raw first-line payload.
+_extract_axi_result() {
+  local first
+  first="$(printf '%s' "$1" | awk 'NR==1 { sub(/^result:[[:space:]]*/, ""); print; exit }')"
+  # First decode: unwrap the outer JSON string literal.
+  local once
+  once="$(printf '%s' "$first" | jq -r . 2>/dev/null || printf '%s' "$first")"
+  # Second decode: if the inner is still a JSON string, unwrap again.
+  # Otherwise return the first-pass result verbatim.
+  printf '%s' "$once" | jq -r . 2>/dev/null || printf '%s' "$once"
+}
+
+existing_session_email="$(_extract_axi_result "$existing_session_email")"
 
 if [[ "$existing_session_email" == "$email" ]]; then
   echo "[axi-login $label] already signed in as $email"
@@ -82,7 +97,7 @@ fi
 
 if [[ -n "$existing_session_email" ]]; then
   echo "[axi-login $label] signed in as $existing_session_email — signing out first"
-  "$wrapper" eval "await fetch('/api/auth/sign-out', { method: 'POST', credentials: 'include' })" >/dev/null || true
+  "$wrapper" eval "fetch('/api/auth/sign-out', { method: 'POST', credentials: 'include' }).then(r => r.status)" >/dev/null || true
 fi
 
 # Step 3: run the sign-in call inside the page. JSON.stringify on the
@@ -92,7 +107,7 @@ fi
 js_payload="$(jq -nc --arg email "$email" --arg password "$password" \
   '{email: $email, password: $password, rememberMe: false}')"
 
-sign_in_status="$("$wrapper" eval "await (async () => {
+sign_in_status="$("$wrapper" eval "(async function() {
   const res = await fetch('/api/auth/sign-in/email', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -102,7 +117,7 @@ sign_in_status="$("$wrapper" eval "await (async () => {
   return String(res.status);
 })()" 2>/dev/null || printf 'error')"
 
-sign_in_status="$(printf '%s' "$sign_in_status" | tr -d '"' | tr -d "\n\r " )"
+sign_in_status="$(_extract_axi_result "$sign_in_status")"
 
 if [[ "$sign_in_status" != "200" ]]; then
   # Fall back to sign-up (first run of a fresh profile / new seed). If
@@ -115,7 +130,7 @@ if [[ "$sign_in_status" != "200" ]]; then
     --arg password "$password" \
     '{name: $name, email: $email, password: $password, rememberMe: false}')"
 
-  signup_status="$("$wrapper" eval "await (async () => {
+  signup_status="$("$wrapper" eval "(async function() {
     const res = await fetch('/api/auth/sign-up/email', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -125,7 +140,7 @@ if [[ "$sign_in_status" != "200" ]]; then
     return String(res.status);
   })()" 2>/dev/null || printf 'error')"
 
-  signup_status="$(printf '%s' "$signup_status" | tr -d '"' | tr -d "\n\r " )"
+  signup_status="$(_extract_axi_result "$signup_status")"
 
   if [[ "$signup_status" != "200" ]]; then
     echo "[axi-login $label] sign-up also failed (status=$signup_status)" >&2
@@ -135,14 +150,14 @@ fi
 
 # Step 4: verify the session cookie is now live, then land on the app root
 # so the caller can immediately snapshot/click.
-verify_email="$("$wrapper" eval "await (async () => {
+verify_email="$("$wrapper" eval "(async function() {
   const res = await fetch('/api/auth/get-session', { credentials: 'include' });
   if (!res.ok) return '';
-  const body = await res.json().catch(() => ({}));
+  const body = await res.json().catch(function() { return {}; });
   return body && body.user && body.user.email ? body.user.email : '';
 })()" 2>/dev/null || printf '')"
 
-verify_email="$(printf '%s' "$verify_email" | tr -d '"' | tr -d "\n\r " )"
+verify_email="$(_extract_axi_result "$verify_email")"
 
 if [[ "$verify_email" != "$email" ]]; then
   echo "[axi-login $label] post-login session check failed (expected=$email got=$verify_email)" >&2

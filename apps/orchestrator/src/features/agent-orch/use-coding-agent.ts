@@ -169,16 +169,23 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       const prevStatus = prevStatusRef.current
       prevStatusRef.current = newState.status
       setState(newState)
-      // WS bridge: update sessions collection with fresh status.
-      // Skip if record not yet synced — next refetch will pick up the new state.
+      // WS bridge: update sessions collection with fresh status. This is a
+      // local-only mirror of the WS state (no server round-trip), so we use
+      // utils.writeUpdate — the direct .update() API requires an onUpdate
+      // mutation handler and queryCollectionOptions doesn't configure one
+      // (it's a read-only query collection; writes go straight to synced
+      // state). Skip if record not yet synced — next refetch will pick up
+      // the new state naturally.
       if (sessionsCollection.has(agentName)) {
-        sessionsCollection.update(agentName, (draft) => {
-          draft.status = newState.status
-          draft.updated_at = new Date().toISOString()
-          if (newState.num_turns != null) draft.num_turns = newState.num_turns
-          if (newState.total_cost_usd != null) draft.total_cost_usd = newState.total_cost_usd
-          if (newState.duration_ms != null) draft.duration_ms = newState.duration_ms
-        })
+        const patch: Partial<import('~/db/sessions-collection').SessionRecord> = {
+          id: agentName,
+          status: newState.status,
+          updated_at: new Date().toISOString(),
+        }
+        if (newState.num_turns != null) patch.num_turns = newState.num_turns
+        if (newState.total_cost_usd != null) patch.total_cost_usd = newState.total_cost_usd
+        if (newState.duration_ms != null) patch.duration_ms = newState.duration_ms
+        sessionsCollection.utils.writeUpdate(patch)
       }
       // Hydrate messages on first state sync. Only flip the ref on success so
       // that a transient empty/failed RPC doesn't permanently gate further

@@ -131,6 +131,11 @@ else
 fi
 
 print_section "orchestrator"
+# Regenerate .dev.vars to match the current (possibly auto-derived) ports
+# before booting Vite/miniflare — otherwise the DO still reads last run's
+# hard-coded URLs and the browser ↔ gateway loop silently misroutes.
+sync_dev_vars
+
 if curl --silent --show-error --fail "$VERIFY_ORCH_READY_URL" >/dev/null 2>&1; then
   echo "Orchestrator already responding at $VERIFY_ORCH_URL"
 elif tmux has-session -t "$ORCH_TMUX_SESSION" 2>/dev/null; then
