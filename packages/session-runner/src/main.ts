@@ -149,8 +149,33 @@ function handleIncomingCommand(msg: unknown, ctx: RunnerSessionContext, ch: Buff
   const m = msg as Record<string, unknown>
   switch (m.type) {
     case 'stream-input': {
-      if (ctx.messageQueue && m.message) {
-        ctx.messageQueue.push(m.message as { role: 'user'; content: string })
+      if (!m.message) break
+      const msg = m.message as { role: 'user'; content: string }
+
+      // Mid-flight steering: if the SDK query is actively running (not
+      // between turns waiting on waitForNext), inject directly via
+      // streamInput() so the model sees the user message immediately —
+      // same mechanism the CLI uses for mid-generation steering.
+      if (ctx.query) {
+        const sdkMsg = {
+          type: 'user' as const,
+          message: { role: 'user' as const, content: msg.content },
+          parent_tool_use_id: null,
+          priority: 'now' as const,
+        }
+        async function* singleMessage() {
+          yield sdkMsg
+        }
+        ctx.query.streamInput(singleMessage()).catch((err: unknown) => {
+          console.error(
+            `[session-runner] streamInput error: ${err instanceof Error ? err.message : String(err)}`,
+          )
+          // Fall back to queue so the message isn't lost
+          ctx.messageQueue?.push(msg)
+        })
+      } else if (ctx.messageQueue) {
+        // Between turns — queue for the next waitForNext() call
+        ctx.messageQueue.push(msg)
       }
       break
     }
