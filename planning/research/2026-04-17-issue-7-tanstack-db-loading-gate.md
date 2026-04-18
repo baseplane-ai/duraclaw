@@ -336,7 +336,105 @@ The `db-core/custom-adapter/SKILL.md` bundled with `@tanstack/db` reinforces thi
 
 Reaffirms the decision in §5: issue #7's "skeleton, ~1ms" gate doesn't exist in the library as shipped. Reject the gate; proceed with #5.
 
-## 9. Sources
+## 9. Second correction — TanStack DB's joins make zustand redundant
+
+Further pushback, steelmanned: **"TanStack DB can do joins client-side when everything is in collections. There's no reason to use zustand. Move all metadata out of the Durable Objects into SQL (D1), then use TanStack DB's sync path. That's the beauty of it."**
+
+This is a better architecture than §7(a) or §7(b). The "gate vs zustand" framing was a false dichotomy created by the original placeholder-tab-metadata problem. Once joins are in the picture, the problem dissolves without either workaround.
+
+### 9.1 The join API, verified
+
+`@tanstack/db/src/query/builder/index.ts:188-344` exposes `join`, `leftJoin`, `rightJoin`, `innerJoin`, `fullJoin` on the query builder. Both operands are collections; the join is evaluated client-side over their `syncedData`. Example from the library JSDoc (`index.ts:174`):
+
+```ts
+query
+  .from({ users: usersCollection })
+  .join({ posts: postsCollection }, ({users, posts}) => eq(users.id, posts.userId))
+```
+
+Types propagate — `MergeContextWithJoinType` at `index.ts:198` gives full inference for inner/left/right/full semantics. Subquery joins are supported (`index.ts:182-186`).
+
+For our case, the tab-bar query becomes a one-liner:
+
+```ts
+const { data: rows, isReady } = useLiveQuery(q =>
+  q.from({ tab: tabsCollection })
+   .leftJoin({ session: sessionsCollection }, ({tab, session}) =>
+     eq(tab.sessionId, session.id))
+   .orderBy(({tab}) => tab.order)
+)
+// rows: Array<{ tab: TabRef, session: SessionRecord | undefined }>
+```
+
+Every tab renders from its joined session. No embedded `project`, no embedded `title`, no placeholder `"unknown"`, no backfill effect. The join output reactively updates when either side changes — a WS push to `sessionsCollection` propagates to tab labels with no explicit plumbing.
+
+### 9.2 The full architecture this unlocks
+
+| Layer | As-built | Preferred |
+|---|---|---|
+| Session index | `ProjectRegistry` DO SQLite (singleton) | **D1 table** (`chat_sessions`) |
+| User settings (tabs, drafts, prefs, tab order) | `UserSettingsDO` (per-user) | **D1 tables** (`user_tabs`, `user_drafts`, `user_preferences`) |
+| Client-side replica | Mixed: TanStack DB (sessions), manual zustand (UserSettingsDO mirror), localStorage band-aids | **TanStack DB collections for all of the above, via `queryCollectionOptions` + OPFS persistence** |
+| Client render path | `useState` init + `lookupSessionInCache` + effect chain + WS broadcast patches | `useLiveQuery(q => q.from(tabs).leftJoin(sessions))` — one query, reactively joined, OPFS-hydrated |
+| Cross-device sync | Custom UserSettingsDO HTTP + WS protocol | Normal HTTP CRUD against D1-backed endpoints + standard `queryCollectionOptions` refetch / optional WS push |
+| Loading state | Ad-hoc (null checks, "unknown" sentinels) | `isReady` from the loopback (OPFS open, 5–50 ms warm) |
+
+This is strictly the architecture the state-management audit (`2026-04-16-state-management-audit.md` §Target architecture) already pointed at, minus the zustand detour that §5's root-cause doc proposed. The zustand proposal was a defensible response to *"TanStack DB isn't actually giving us a synchronous store"*, which was true only because (a) joins were unused and (b) OPFS persistence was unwired. Fix both and the zustand layer has no job left to do.
+
+### 9.3 Why zustand falls out of the picture
+
+Issue #5's design put zustand in front as the synchronous store, with TanStack DB reduced to a catalog reader. The reasons zustand was winning that comparison were:
+
+1. Synchronous hydration (`persist` runs during `create`).
+2. Holds derived/joined data (tab → session metadata lookup).
+3. Keyboard shortcuts / non-hook callers read state synchronously via `getState()`.
+
+Under the join architecture, each reason dissolves:
+
+1. **Synchronous hydration:** `persistedCollectionOptions` + the fixed OPFS wiring hydrates collections from SQLite before `markReady` fires (§7 correction). Sub-50 ms warm, sub-30 ms first-open — the same order of magnitude as zustand's `localStorage.getItem` + `JSON.parse`. The timing gap that made zustand look decisive is ~20 ms at most, and it's on the skeleton path — no visible flash.
+2. **Derived data:** that's what the join query is for. Joins are reactive and type-safe; manual store-projections are neither.
+3. **Synchronous non-hook access:** `collection.get(key)` / `collection.values()` / `collection.toArray()` are synchronous reads from `syncedData`. Keyboard shortcuts at `AgentOrchPage.tsx:270-311` that currently call `getUserSettings()` can equally well call `tabsCollection.get(activeId)` or run an in-memory query. No hook required.
+
+And there's a downside to keeping zustand: you now have two stores of truth for tab state. Either (a) zustand is authoritative and TanStack DB becomes a catalog-only dependency that's worse than a direct fetch, or (b) TanStack DB is authoritative and zustand is a mirror that must stay in sync — precisely the band-aid problem in different clothing.
+
+### 9.4 What this does and doesn't solve, compared to §7(a)/(b)
+
+| Failure mode | §7(a) gate-only | §7(b) zustand | §9 joins + D1 |
+|---|---|---|---|
+| Push-notification tap shows "unknown" badge | Hidden behind skeleton | Eliminated (synchronous cache) | **Eliminated by construction** (no per-tab metadata to be stale) |
+| Placeholder tab persists after sessions load | Hidden behind skeleton | Eliminated (no placeholder written) | **Eliminated** (tab has no `project`/`title` field) |
+| Archived-session deep link | Hidden behind skeleton | Eliminated (sessions slice covers archived) | **Eliminated** (join reads from sessions regardless of archived filter on the sidebar view) |
+| Two-writer race: queryFn vs WS broadcast for tabs | Not addressed | Eliminated (zustand is sole writer) | **Eliminated** (D1 is sole source; WS patches `sessionsCollection`, not `tabsCollection`) |
+| Cross-device tab sync | Not addressed | Write-through to UserSettingsDO | **Trivial** — D1 tables, optionally with a WS invalidation channel for live propagation |
+| Offline tab mutation durability | Not addressed | Manual queue work | **Free** — `queryCollectionOptions` optimistic mutation pattern already provides it |
+| Cold-load first-ever skeleton | ~5–30 ms (OPFS open) then empty `[]` | Sub-ms localStorage parse then empty `[]` | ~5–30 ms OPFS open then empty `[]` (network populates) |
+
+The join architecture wins or ties on every row and introduces no new failure class.
+
+### 9.5 Revised recommendation (final)
+
+Land three changes in order, each shippable independently:
+
+1. **Fix OPFS wiring** (`await dbReady` in entry — §2.3 option A). Precondition for everything. Also delete the false "Persisted to OPFS SQLite" comments from collection files or update them to reflect the fixed behaviour.
+2. **Migrate session index + user settings (tabs, drafts, prefs, tab order) to D1.** This is state-management-audit Phase 1, expanded to cover UserSettingsDO as well. Endpoints become Drizzle queries against D1; `queryCollectionOptions` points at them. Delete `ProjectRegistry` DO and `UserSettingsDO` HTTP/WS plumbing.
+3. **Rewrite `AgentOrchPage` and tab-bar components around join queries.** Drop `seedFromCache`, `lookupSessionInCache`, the entire URL-sync effect chain (`AgentOrchPage.tsx:83-147, 388-413`), and the placeholder tab-creation logic. Replace with: one `useLiveQuery` join for the tab bar, one `useLiveQuery` for the sidebar session list, one `history.replaceState` subscription for URL sync.
+
+Step 1 alone closes issue #7's immediate symptom (gates collapse to ≤50 ms warm). Steps 2+3 close the architectural root cause. Skip the zustand refactor proposed in #5 — the join architecture supersedes it.
+
+### 9.6 Corrections propagated
+
+- §5 "Loading gate fix: reject" → **further revised: gate is moot under the join architecture**; `isReady` arrives fast enough on warm load that no explicit gate is needed — just render the joined rows directly and let the skeleton be the 1-frame natural loading state.
+- §5 "#5's refactor: proceed" → **superseded**: the join architecture delivers the same guarantees without the zustand layer. Recommend redirecting #5 to "migrate metadata to D1, rewrite tab-bar around a join query."
+- §3.1 "Mismatch — tabs have no queries/joins, plain zustand is simpler" → **wrong call in hindsight**: the tab collection *does* have a query (the join against sessions), once you allow yourself to use joins. I missed that in the first pass because the current code embeds metadata on the tab, avoiding the join.
+
+### 9.7 Residual open questions
+
+- **OPFS availability on the mobile PWA path**: iOS Safari's OPFS support is spotty in older WebKit builds. If we ship joins + OPFS-required synchrony, confirm the fallback (in-memory + server fetch) degrades gracefully. Today the app already falls back (memory-only), so baseline survives; only the "instant warm reload" property is browser-dependent.
+- **WS push into D1-backed collections**: D1 has no native push. Two options — (a) polling at 15–30 s (current `refetchInterval`) is fine for session-status freshness since the hot path is the DO WS anyway; (b) add a thin WS invalidation channel (per-user) that triggers `collection.utils.refetch()` when another device writes. Option (a) is the cheaper default.
+- **Drafts with per-keystroke writes**: drafts live in `user_drafts` in D1. The existing debounce pattern applies. No functional change from today.
+- **Archive filter for sidebar vs tab bar**: sidebar filters `!archived`; tab bar does not (an archived session in an active tab stays usable). The filter is a `.where` clause on the sidebar's `useLiveQuery`, applied after the same join. Same data, different view.
+
+## 10. Sources
 
 - `apps/orchestrator/src/db/sessions-collection.ts` (full)
 - `apps/orchestrator/src/db/tabs-collection.ts` (full)
