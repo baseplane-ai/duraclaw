@@ -30,7 +30,7 @@ PENDING_DIR="$ORCHESTRATOR_DIR/migrations/pending"
 PENDING_0009="$PENDING_DIR/0009_drop_user_preferences_legacy.sql"
 DEPLOYED_0009="$ORCHESTRATOR_DIR/migrations/0009_drop_user_preferences_legacy.sql"
 
-banner "Step 1/9 — Pre-flight"
+banner "Step 1/10 — Pre-flight"
 if [ ! -f "$DUMP_PATH" ]; then
   echo "ERROR: dump file '$DUMP_PATH' not found."
   echo "  Produce one with scripts/dump-my-state.sh first."
@@ -47,13 +47,21 @@ fi
 echo "OK — dump='$DUMP_PATH'"
 pause
 
-banner "Step 2/9 — Wipe local D1"
-echo "Ensuring local DB exists, then dropping all tables."
+banner "Step 2/10 — Wipe local D1"
+echo "Removing local D1 sqlite files to get a clean slate."
+echo "(PRAGMA writable_schema is denied by miniflare — physical rm is the only way.)"
 pause
+D1_DIR="$ORCHESTRATOR_DIR/.wrangler/state/v3/d1/miniflare-D1DatabaseObject"
+if [ -d "$D1_DIR" ]; then
+  rm -f "$D1_DIR"/*.sqlite "$D1_DIR"/*.sqlite-shm "$D1_DIR"/*.sqlite-wal
+  echo "Wiped $(ls "$D1_DIR" 2>/dev/null | wc -l) remaining files in $D1_DIR"
+else
+  echo "No local D1 state dir yet — will be created on first migrate."
+fi
+# Touch the DB so wrangler knows it exists.
 wrangler d1 execute duraclaw-auth --local --command "SELECT 1" >/dev/null
-wrangler d1 execute duraclaw-auth --local --command "PRAGMA writable_schema=1; DELETE FROM sqlite_master; PRAGMA writable_schema=0; VACUUM;"
 
-banner "Step 3/9 — Apply migrations through 0008"
+banner "Step 3/10 — Apply migrations through 0008"
 echo "0009 must NOT be in migrations/ yet (mirrors cutover.sh step 4)."
 if [ -f "$DEPLOYED_0009" ]; then
   echo "ERROR: $DEPLOYED_0009 already exists — would apply 0009 too early."
@@ -63,16 +71,40 @@ fi
 pause
 wrangler d1 migrations apply duraclaw-auth --local
 
-banner "Step 4/9 — Generate export.sql from dump"
+banner "Step 4/10 — Seed users from dump"
+echo "The wipe removed all tables including 'users'. export.sql references"
+echo "user_ids via FK, so we must seed users before loading."
+echo "Extracting distinct user_ids from the dump and inserting stub rows."
+pause
+# Pull distinct user_ids from all three arrays in the dump, dedup, and
+# insert stub rows. jq produces one id per line; the loop builds INSERTs.
+USER_IDS=$(jq -r '
+  [ (.agent_sessions // [] | .[].user_id),
+    (.user_tabs // [] | .[].user_id),
+    (.user_preferences // [] | .[].user_id) ] | unique | .[]
+' "$DUMP_PATH")
+USER_SQL=""
+NOW=$(date +%s)
+for uid in $USER_IDS; do
+  USER_SQL="${USER_SQL}INSERT OR IGNORE INTO users (id, name, email, email_verified, created_at, updated_at) VALUES ('${uid}', 'rehearsal-user', '${uid}@rehearsal.local', 0, ${NOW}, ${NOW});"
+done
+if [ -n "$USER_SQL" ]; then
+  wrangler d1 execute duraclaw-auth --local --command "$USER_SQL"
+  echo "Seeded $(echo "$USER_IDS" | wc -l | tr -d ' ') user stub(s)."
+else
+  echo "No user_ids found in dump — skipping."
+fi
+
+banner "Step 5/10 — Generate export.sql from dump"
 echo "pnpm tsx scripts/export-do-state.ts $DUMP_PATH > export.sql"
 pause
 pnpm tsx scripts/export-do-state.ts "$DUMP_PATH" > export.sql
 
-banner "Step 5/9 — Load export.sql into local D1"
+banner "Step 6/10 — Load export.sql into local D1"
 pause
 wrangler d1 execute duraclaw-auth --local --file=export.sql
 
-banner "Step 6/9 — Verify columnar tables populated"
+banner "Step 7/10 — Verify columnar tables populated"
 echo "Run these in another terminal and confirm the counts match the dump:"
 echo
 echo "  wrangler d1 execute duraclaw-auth --local \\"
@@ -87,7 +119,7 @@ echo
 echo "Press Ctrl-C to abort if anything looks off."
 pause
 
-banner "Step 7/9 — Stage and apply 0009 (drop user_preferences_legacy)"
+banner "Step 8/10 — Stage and apply 0009 (drop user_preferences_legacy)"
 if [ ! -f "$PENDING_0009" ]; then
   echo "ERROR: $PENDING_0009 is missing. Cannot stage 0009."
   exit 1
@@ -100,7 +132,7 @@ wrangler d1 migrations apply duraclaw-auth --local
 # it must stay in pending/ for the prod cutover to stage it itself.
 rm "$DEPLOYED_0009"
 
-banner "Step 8/9 — Smoke test"
+banner "Step 9/10 — Smoke test"
 echo "In another terminal:"
 echo "  pnpm --filter @duraclaw/orchestrator dev"
 echo
@@ -112,5 +144,5 @@ echo
 echo "Press enter once smoke test passes."
 pause
 
-banner "Step 9/9 — Done"
+banner "Step 10/10 — Done"
 echo "✅ Rehearsal passed — safe to run cutover.sh against prod."
