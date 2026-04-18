@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+#
+# GH#8: Run the same `chrome-devtools-axi` command against Browser A and B
+# in parallel, with [A] / [B] prefixed output so you can eyeball both at
+# once. Exits non-zero if either side fails.
+#
+# Usage:
+#     scripts/verify/axi-both snapshot
+#     scripts/verify/axi-both open http://localhost:43173/login
+#     scripts/verify/axi-both eval 'location.pathname'
+#
+# Notes:
+# - Pair with browser-dual-up.sh so both Chromes exist.
+# - Output is line-interleaved (both processes stream concurrently); use
+#   `scripts/verify/axi-a` / `axi-b` directly when you need ordered output.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [[ $# -eq 0 ]]; then
+  echo "Usage: $(basename "$0") <axi-command> [args...]" >&2
+  exit 2
+fi
+
+# Run each side in the background, prefixing every output line with its
+# label. We capture exit codes via named FIFOs (simplest cross-shell way to
+# avoid a temp-file race).
+TMPDIR_RUN="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR_RUN"' EXIT
+
+run_side() {
+  local label="$1"
+  local wrapper="$2"
+  shift 2
+
+  {
+    "$wrapper" "$@" 2>&1 | sed -u "s/^/[$label] /"
+    echo "${PIPESTATUS[0]}" >"$TMPDIR_RUN/$label.rc"
+  } &
+}
+
+run_side "A" "$SCRIPT_DIR/axi-a" "$@"
+run_side "B" "$SCRIPT_DIR/axi-b" "$@"
+
+wait
+
+rc_a="$(cat "$TMPDIR_RUN/A.rc" 2>/dev/null || echo 1)"
+rc_b="$(cat "$TMPDIR_RUN/B.rc" 2>/dev/null || echo 1)"
+
+if [[ "$rc_a" != "0" || "$rc_b" != "0" ]]; then
+  echo "[axi-both] A=$rc_a B=$rc_b — one or both sides failed" >&2
+  exit 1
+fi

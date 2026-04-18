@@ -39,6 +39,15 @@ VERIFY_AUTH_PASSWORD="${VERIFY_AUTH_PASSWORD:-duraclaw-test-password}"
 VERIFY_AUTH_NAME="${VERIFY_AUTH_NAME:-agent-verify}"
 VERIFY_COOKIE_JAR="${VERIFY_COOKIE_JAR:-$VERIFY_STATE_DIR/auth.cookies.txt}"
 
+# GH#8: dual-browser / multi-user defaults. `+a` / `+b` subaddressing keeps
+# the accounts distinct at the auth layer without needing extra mailboxes.
+VERIFY_USER_A_EMAIL="${VERIFY_USER_A_EMAIL:-agent.verify+a@example.com}"
+VERIFY_USER_A_PASSWORD="${VERIFY_USER_A_PASSWORD:-duraclaw-test-password-a}"
+VERIFY_USER_A_NAME="${VERIFY_USER_A_NAME:-agent-verify-a}"
+VERIFY_USER_B_EMAIL="${VERIFY_USER_B_EMAIL:-agent.verify+b@example.com}"
+VERIFY_USER_B_PASSWORD="${VERIFY_USER_B_PASSWORD:-duraclaw-test-password-b}"
+VERIFY_USER_B_NAME="${VERIFY_USER_B_NAME:-agent-verify-b}"
+
 VERIFY_BROWSER_SESSION="${VERIFY_BROWSER_SESSION:-duraclaw-verify}"
 VERIFY_BROWSER_SNAPSHOT="${VERIFY_BROWSER_SNAPSHOT:-$VERIFY_LOG_DIR/browser-snapshot.txt}"
 VERIFY_BROWSER_SCREENSHOT="${VERIFY_BROWSER_SCREENSHOT:-$VERIFY_LOG_DIR/browser-login.png}"

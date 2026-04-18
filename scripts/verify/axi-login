@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+#
+# GH#8: Sign a named browser (A or B) in as a given user. Uses the Better
+# Auth `/api/auth/sign-in/email` endpoint invoked *inside the page context*
+# via `axi eval`, so the resulting Set-Cookie is persisted in the Chrome
+# user-data-dir and survives reloads. No fragile @ref scraping.
+#
+# Usage:
+#     scripts/verify/axi-login <a|b> [email] [password] [orch_url]
+#
+# Defaults are pulled from common.sh:
+#   - a → $VERIFY_USER_A_EMAIL / $VERIFY_USER_A_PASSWORD
+#   - b → $VERIFY_USER_B_EMAIL / $VERIFY_USER_B_PASSWORD
+#   - orch_url → $VERIFY_ORCH_URL
+#
+# Idempotent: if the browser already has a valid session for the requested
+# email, skips the sign-in call. Leaves the page on the app root (`/`) on
+# success.
+
+set -euo pipefail
+
+source "$(dirname "$0")/common.sh"
+
+require_cmd jq
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: $(basename "$0") <a|b> [email] [password] [orch_url]" >&2
+  exit 2
+fi
+
+side="$1"
+case "$side" in
+  a|A)
+    wrapper="$SCRIPT_DIR/axi-a"
+    default_email="$VERIFY_USER_A_EMAIL"
+    default_password="$VERIFY_USER_A_PASSWORD"
+    ;;
+  b|B)
+    wrapper="$SCRIPT_DIR/axi-b"
+    default_email="$VERIFY_USER_B_EMAIL"
+    default_password="$VERIFY_USER_B_PASSWORD"
+    ;;
+  *)
+    echo "First argument must be 'a' or 'b' (got: $side)" >&2
+    exit 2
+    ;;
+esac
+
+email="${2:-$default_email}"
+password="${3:-$default_password}"
+orch_url="${4:-$VERIFY_ORCH_URL}"
+
+label="$(echo "$side" | tr '[:lower:]' '[:upper:]')"
+
+# Step 1: make sure the browser is on an origin where it can set cookies
+# for the orchestrator. We navigate to the login page (cheap, always
+# exists). If we're already on the right origin with a valid session we'll
+# short-circuit below.
+"$wrapper" open "$orch_url/login" >/dev/null
+
+# Step 2: check whether there's already a valid session for this email.
+# Passing JSON via axi `eval` requires embedding it in a JS expression; we
+# use a here-doc + fetch().then() chain that resolves to a plain string.
+existing_session_email="$("$wrapper" eval "await (async () => {
+  const res = await fetch('/api/auth/get-session', { credentials: 'include' });
+  if (!res.ok) return '';
+  const body = await res.json().catch(() => ({}));
+  return body && body.user && body.user.email ? body.user.email : '';
+})()" 2>/dev/null || printf '')"
+
+# axi eval prints the return value (often quoted). Strip surrounding
+# whitespace + quotes for comparison.
+existing_session_email="$(printf '%s' "$existing_session_email" | tr -d '"' | tr -d "\n\r " )"
+
+if [[ "$existing_session_email" == "$email" ]]; then
+  echo "[axi-login $label] already signed in as $email"
+  "$wrapper" open "$orch_url/" >/dev/null
+  exit 0
+fi
+
+if [[ -n "$existing_session_email" ]]; then
+  echo "[axi-login $label] signed in as $existing_session_email — signing out first"
+  "$wrapper" eval "await fetch('/api/auth/sign-out', { method: 'POST', credentials: 'include' })" >/dev/null || true
+fi
+
+# Step 3: run the sign-in call inside the page. JSON.stringify on the
+# credentials keeps any quoting/escaping headaches out of the shell layer.
+# We capture the HTTP status so the script surfaces auth failures loudly
+# instead of leaving the browser on a phantom "success".
+js_payload="$(jq -nc --arg email "$email" --arg password "$password" \
+  '{email: $email, password: $password, rememberMe: false}')"
+
+sign_in_status="$("$wrapper" eval "await (async () => {
+  const res = await fetch('/api/auth/sign-in/email', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify($js_payload),
+  });
+  return String(res.status);
+})()" 2>/dev/null || printf 'error')"
+
+sign_in_status="$(printf '%s' "$sign_in_status" | tr -d '"' | tr -d "\n\r " )"
+
+if [[ "$sign_in_status" != "200" ]]; then
+  # Fall back to sign-up (first run of a fresh profile / new seed). If
+  # that fails too, the user genuinely doesn't exist and the caller needs
+  # to seed them.
+  echo "[axi-login $label] sign-in returned $sign_in_status — attempting sign-up"
+  js_signup_payload="$(jq -nc \
+    --arg name "verify-$email" \
+    --arg email "$email" \
+    --arg password "$password" \
+    '{name: $name, email: $email, password: $password, rememberMe: false}')"
+
+  signup_status="$("$wrapper" eval "await (async () => {
+    const res = await fetch('/api/auth/sign-up/email', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify($js_signup_payload),
+    });
+    return String(res.status);
+  })()" 2>/dev/null || printf 'error')"
+
+  signup_status="$(printf '%s' "$signup_status" | tr -d '"' | tr -d "\n\r " )"
+
+  if [[ "$signup_status" != "200" ]]; then
+    echo "[axi-login $label] sign-up also failed (status=$signup_status)" >&2
+    exit 1
+  fi
+fi
+
+# Step 4: verify the session cookie is now live, then land on the app root
+# so the caller can immediately snapshot/click.
+verify_email="$("$wrapper" eval "await (async () => {
+  const res = await fetch('/api/auth/get-session', { credentials: 'include' });
+  if (!res.ok) return '';
+  const body = await res.json().catch(() => ({}));
+  return body && body.user && body.user.email ? body.user.email : '';
+})()" 2>/dev/null || printf '')"
+
+verify_email="$(printf '%s' "$verify_email" | tr -d '"' | tr -d "\n\r " )"
+
+if [[ "$verify_email" != "$email" ]]; then
+  echo "[axi-login $label] post-login session check failed (expected=$email got=$verify_email)" >&2
+  exit 1
+fi
+
+"$wrapper" open "$orch_url/" >/dev/null
+echo "[axi-login $label] signed in as $email"

@@ -200,6 +200,35 @@ Profiles live at `/tmp/duraclaw-chrome-a` and `/tmp/duraclaw-chrome-b` — each
 has its own cookie jar, so sign-in state doesn't cross-contaminate. Headed
 mode via `BROWSER_HEADED=1 scripts/verify/browser-dual-up.sh`.
 
+**Ergonomic multi-user helpers** (prefer these over raw `axi-a` / `axi-b`
+whenever both users are involved):
+
+```bash
+# One-shot: launch both Chromes, seed both accounts, log each in.
+scripts/verify/axi-dual-login.sh
+
+# Log one browser in as a specific user (idempotent — no-op if already
+# signed in; falls back to sign-up if the user doesn't exist yet).
+scripts/verify/axi-login a                      # default $VERIFY_USER_A_*
+scripts/verify/axi-login b alt@example.com pw   # override email/password
+
+# Run the same axi command against both browsers in parallel, with
+# [A] / [B] prefixed output.
+scripts/verify/axi-both snapshot
+scripts/verify/axi-both eval 'location.pathname'
+```
+
+Defaults come from `scripts/verify/common.sh`:
+
+- User A: `agent.verify+a@example.com` / `duraclaw-test-password-a`
+- User B: `agent.verify+b@example.com` / `duraclaw-test-password-b`
+
+Override via `VERIFY_USER_A_EMAIL`, `VERIFY_USER_A_PASSWORD`,
+`VERIFY_USER_B_EMAIL`, `VERIFY_USER_B_PASSWORD` if you need different
+credentials. Sign-in uses Better Auth's `/api/auth/sign-in/email` called
+from inside the page context (via `axi eval`), so the Set-Cookie lands in
+the Chrome profile directly — no fragile snapshot-ref scraping.
+
 ### Verify-mode local stack
 
 `scripts/verify/dev-up.sh` starts a local orchestrator (miniflare, port
