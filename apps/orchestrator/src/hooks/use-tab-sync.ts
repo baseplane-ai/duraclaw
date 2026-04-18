@@ -53,13 +53,6 @@ export interface UseTabSyncResult {
   closeTab: (sessionId: string) => string | null
   /** Set the active session (local only). */
   setActive: (sessionId: string | null) => void
-  /**
-   * Fill in missing project names on Y.Map entries. Call once after
-   * sessions have loaded. Entries migrated from the old Y.Array have
-   * no project field — without it, one-tab-per-project can't detect
-   * conflicts and phantom duplicates accumulate.
-   */
-  backfillProjects: (lookup: Map<string, string>) => void
   /** Reorder: move the tab at fromIndex to toIndex. */
   reorder: (fromIndex: number, toIndex: number) => void
   /** Yjs provider connection status. */
@@ -292,55 +285,5 @@ export function useTabSync(): UseTabSyncResult {
     [doc, tabsY],
   )
 
-  const backfillProjects = useCallback(
-    (lookup: Map<string, string>) => {
-      if (!doc || !tabsY || lookup.size === 0) return
-      let updated = 0
-      doc.transact(() => {
-        tabsY.forEach((val, key) => {
-          const entry = parseEntry(val)
-          if (!entry.project) {
-            const project = lookup.get(key)
-            if (project) {
-              tabsY.set(key, JSON.stringify({ ...entry, project }))
-              updated++
-            }
-          }
-        })
-      })
-      if (updated > 0) {
-        // Now that projects are filled in, run one-tab-per-project dedup.
-        doc.transact(() => {
-          const seen = new Map<string, string>() // project → first sessionId
-          const toRemove: string[] = []
-          // Iterate in order so we keep the first tab for each project.
-          const sorted = sortedTabIds(tabsY)
-          for (const id of sorted) {
-            const entry = parseEntry(tabsY.get(id))
-            if (!entry.project) continue
-            if (seen.has(entry.project)) {
-              toRemove.push(id)
-            } else {
-              seen.set(entry.project, id)
-            }
-          }
-          for (const id of toRemove) {
-            tabsY.delete(id)
-          }
-        })
-      }
-    },
-    [doc, tabsY],
-  )
-
-  return {
-    openTabs,
-    activeSessionId,
-    openTab,
-    closeTab,
-    setActive,
-    backfillProjects,
-    reorder,
-    status,
-  }
+  return { openTabs, activeSessionId, openTab, closeTab, setActive, reorder, status }
 }

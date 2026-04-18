@@ -60,9 +60,9 @@ export class UserSettingsDO extends YServer {
 
   /**
    * One-time migration: copy session IDs from the legacy Y.Array "openTabs"
-   * into the new Y.Map "tabs" with sequential order values.
+   * into the new Y.Map "tabs" with project names from D1.
    */
-  private migrateArrayToMap() {
+  private async migrateArrayToMap() {
     const tabs = this.document.getMap<string>('tabs')
     if (tabs.size > 0) return // Already migrated.
 
@@ -70,20 +70,45 @@ export class UserSettingsDO extends YServer {
       const oldArray = this.document.getArray<string>('openTabs')
       if (oldArray.length === 0) return
 
+      const items = oldArray.toArray()
       const seen = new Set<string>()
+      const unique = items.filter((id) => {
+        if (seen.has(id)) return false
+        seen.add(id)
+        return true
+      })
+
+      // Look up project names from D1 so one-tab-per-project works.
+      const projectMap = new Map<string, string>()
+      try {
+        const env = this.env as unknown as Env
+        if (env.AUTH_DB && unique.length > 0) {
+          const placeholders = unique.map(() => '?').join(',')
+          const result = await env.AUTH_DB.prepare(
+            `SELECT id, project FROM agent_sessions WHERE id IN (${placeholders})`,
+          )
+            .bind(...unique)
+            .all()
+          for (const row of result.results ?? []) {
+            if (row.id && row.project) {
+              projectMap.set(row.id as string, row.project as string)
+            }
+          }
+        }
+      } catch {
+        // Best-effort — tabs without project still work, just no dedup.
+      }
+
       this.document.transact(() => {
-        const items = oldArray.toArray()
         let order = 1
-        for (const sessionId of items) {
-          if (seen.has(sessionId)) continue // Skip duplicates.
-          seen.add(sessionId)
-          tabs.set(sessionId, JSON.stringify({ order }))
+        for (const sessionId of unique) {
+          const project = projectMap.get(sessionId)
+          tabs.set(sessionId, JSON.stringify({ project, order }))
           order++
         }
-        // Clear the old array to avoid re-migration.
         oldArray.delete(0, oldArray.length)
       })
-      console.log(`[UserSettingsDO] Migrated ${seen.size} tabs from Y.Array to Y.Map`)
+      console.log(`[UserSettingsDO] Migrated ${unique.length} tabs from Y.Array to Y.Map`)
     } catch {
       // No legacy array or type mismatch — nothing to do.
     }

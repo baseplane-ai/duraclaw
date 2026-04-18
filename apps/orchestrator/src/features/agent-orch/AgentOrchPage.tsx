@@ -34,19 +34,7 @@ function AgentOrchContent() {
     (search as { newSessionProject?: string }).newSessionProject ?? null
   const searchNewTab = (search as { newTab?: boolean }).newTab ?? false
 
-  const { openTabs, activeSessionId, openTab, closeTab, setActive, backfillProjects, reorder } =
-    useTabSync()
-
-  // Backfill project names on Y.Map entries migrated from the old Y.Array.
-  // Without project info, one-tab-per-project can't detect conflicts.
-  useEffect(() => {
-    if (sessions.length === 0) return
-    const lookup = new Map<string, string>()
-    for (const s of sessions) {
-      if (s.project) lookup.set(s.id, s.project)
-    }
-    backfillProjects(lookup)
-  }, [sessions, backfillProjects])
+  const { openTabs, activeSessionId, openTab, closeTab, setActive, reorder } = useTabSync()
 
   // Deep-link: URL has ?session=X → open & activate that tab.
   // activeSessionId is local (localStorage), so no Yjs↔URL fight.
