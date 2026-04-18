@@ -225,9 +225,52 @@ every git repo under `/data/projects/`. If you set them, ensure the prefix
 covers the worktree you'll dispatch into — the runner logs a verbose miss
 line (`[session-runner] project miss: name=...`) when filtered out.
 
-Design rationale and Phase-2/3 follow-ups (portless-style multi-worktree
-URL routing, assistant-visible runner errors) are documented in
-`planning/research/2026-04-18-verify-infra-issue-8.md`.
+### Portless mode (stable subdomains, multi-worktree-safe)
+
+Direct-port mode (`dev-up.sh`) collides between worktrees because both
+`43173` (orchestrator) and `9877` (gateway) are fixed. Portless mode runs
+each service behind a stable `.localhost` subdomain so `.dev.vars` is
+portable and parallel worktrees can each bring up their own stack.
+
+One-time setup:
+
+```bash
+npm install -g portless         # global CLI
+portless proxy start            # prompts sudo once (binds 443, trusts CA)
+portless hosts sync             # adds *.localhost entries to /etc/hosts
+```
+
+Then per-session:
+
+```bash
+scripts/verify/portless-up.sh       # launches both under portless
+scripts/verify/portless-down.sh     # teardown
+```
+
+Subdomain contract:
+
+- Orchestrator: `https://duraclaw-orch.localhost`
+- Gateway:      `https://duraclaw-gw.localhost` (WS: `wss://duraclaw-gw.localhost`)
+
+`.dev.vars` in portless mode:
+
+```
+BETTER_AUTH_URL=https://duraclaw-orch.localhost
+CC_GATEWAY_URL=wss://duraclaw-gw.localhost
+WORKER_PUBLIC_URL=https://duraclaw-orch.localhost
+CC_GATEWAY_SECRET=<unchanged>
+```
+
+The gateway honours portless's injected `PORT` env var (see
+`packages/agent-gateway/src/server.ts` — `PORT ?? CC_GATEWAY_PORT ?? 9877`),
+so no service-side changes are needed to opt in.
+
+Both scripts write `VERIFY_*` runtime URLs into the shared verify state
+file so the existing `scripts/verify/*.sh` suite continues to work against
+the portless URLs without modification.
+
+Design rationale and Phase-3 follow-up (assistant-visible runner errors)
+in `planning/research/2026-04-18-verify-infra-issue-8.md`.
 
 ## Conventions
 

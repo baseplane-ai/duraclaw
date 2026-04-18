@@ -1,0 +1,31 @@
+# Orchestrator local dev vars. Copy to `.dev.vars` and fill in.
+#
+# Two supported modes — pick one.
+
+# ── Mode A: direct-port (default / single-worktree) ────────────────────
+# Used by `scripts/verify/dev-up.sh`. All URLs hard-coded to loopback
+# ports; simple but doesn't survive parallel worktrees because 43173/9877
+# collide.
+
+BETTER_AUTH_SECRET=dev-secret-change-me-in-production
+BETTER_AUTH_URL=http://localhost:43173
+CC_GATEWAY_URL=ws://127.0.0.1:9877
+CC_GATEWAY_SECRET=<paste gateway .env secret here>
+WORKER_PUBLIC_URL=http://127.0.0.1:43173
+
+# Push-notification keys — copy from any working worktree or generate new
+# ones (they're shared across dev).
+VAPID_PUBLIC_KEY=
+VAPID_PRIVATE_KEY=
+
+# ── Mode B: portless (multi-worktree-safe / GH#8 Phase 2) ──────────────
+# Used by `scripts/verify/portless-up.sh`. Subdomains are stable, so the
+# same .dev.vars works in every worktree. Requires portless installed +
+# proxy running (see CLAUDE.md "Portless mode"). Replace Mode A block
+# above with:
+#
+# BETTER_AUTH_URL=https://duraclaw-orch.localhost
+# CC_GATEWAY_URL=wss://duraclaw-gw.localhost
+# WORKER_PUBLIC_URL=https://duraclaw-orch.localhost
+#
+# CC_GATEWAY_SECRET stays the same (it's a bearer token, not URL-dependent).

@@ -26,7 +26,11 @@ function decodeProjectName(raw: string): string | null {
 
 // ── Config ──────────────────────────────────────────────────────────
 
-const PORT = Number(process.env.CC_GATEWAY_PORT ?? 9877)
+// GH#8: portless injects PORT when the gateway runs under
+// `portless gateway.duraclaw <cmd>`. Honour it first so stable-subdomain dev
+// works without editing the systemd unit. Falls back to CC_GATEWAY_PORT for
+// the prod/direct path, then to 9877 as the legacy default.
+const PORT = Number(process.env.PORT ?? process.env.CC_GATEWAY_PORT ?? 9877)
 const startedAt = Date.now()
 
 // ── Per-Connection Kata File Watchers ──────────────────────────────
