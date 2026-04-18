@@ -37,15 +37,27 @@ function AgentOrchContent() {
   const { openTabs, activeSessionId, openTab, closeTab, setActive, reorder } = useTabSync()
 
   // Deep-link: URL has ?session=X → open & activate that tab.
-  // activeSessionId is local (localStorage), so no Yjs↔URL fight.
+  // Only creates a tab if the session exists in the collection (has a
+  // project). If it's already in the Y.Map, just activates it. If
+  // sessions haven't loaded yet, waits — the effect re-runs when they do.
   const deepLinkedRef = useRef<string | null>(null)
   useEffect(() => {
-    if (searchSessionId && searchSessionId !== deepLinkedRef.current) {
+    if (!searchSessionId || searchSessionId === deepLinkedRef.current) return
+    // Already in tabs? Just activate, no validation needed.
+    if (openTabs.includes(searchSessionId)) {
       deepLinkedRef.current = searchSessionId
-      const session = sessions.find((s) => s.id === searchSessionId)
-      openTab(searchSessionId, { project: session?.project })
+      setActive(searchSessionId)
+      return
     }
-  }, [searchSessionId, openTab, sessions])
+    // Not in tabs — only create if session is known (has project).
+    const session = sessions.find((s) => s.id === searchSessionId)
+    if (session?.project) {
+      deepLinkedRef.current = searchSessionId
+      openTab(searchSessionId, { project: session.project })
+    }
+    // If sessions haven't loaded yet, this is a no-op. The effect
+    // re-runs when `sessions` changes and picks it up then.
+  }, [searchSessionId, openTab, setActive, sessions, openTabs])
 
   // Cold-start: page loaded at "/" with no ?session, but localStorage
   // has a remembered active tab — restore it in the URL (one-shot).
