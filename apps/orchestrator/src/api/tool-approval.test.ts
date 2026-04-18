@@ -39,10 +39,6 @@ function createMockSessionDO(fetchResponse?: Response) {
 
 function createMockEnv(sessionDO?: ReturnType<typeof createMockSessionDO>) {
   return {
-    SESSION_REGISTRY: {
-      idFromName: vi.fn().mockReturnValue('registry-id'),
-      get: vi.fn().mockReturnValue({}),
-    },
     SESSION_AGENT: {
       newUniqueId: vi.fn(),
       idFromString: vi.fn().mockReturnValue('do-id'),

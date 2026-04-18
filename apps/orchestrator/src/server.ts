@@ -1,5 +1,4 @@
 import { routePartykitRequest } from 'partyserver'
-import { ProjectRegistry } from './agents/project-registry'
 import { SessionCollabDO } from './agents/session-collab-do'
 import { SessionDO } from './agents/session-do'
 import { UserSettingsDO } from './agents/user-settings-do'
@@ -20,6 +19,17 @@ const apiApp = createApiApp()
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url)
+
+    // Maintenance-mode short-circuit (#7 cutover, B-INFRA-4). Operators flip
+    // MAINTENANCE_MODE=1 via wrangler secret to drain traffic during the
+    // big-bang DB switchover. /login and /api/health stay open so the
+    // operator can validate auth + worker health pre-flip.
+    if (env.MAINTENANCE_MODE === '1') {
+      if (!url.pathname.startsWith('/login') && url.pathname !== '/api/health') {
+        const html = `<!DOCTYPE html><html><body><div style="text-align:center;padding:48px;font-family:system-ui"><h1>Migration in progress</h1><p style="color:#666">We're upgrading our storage. Back in about 15 minutes.</p></div></body></html>`
+        return new Response(html, { status: 503, headers: { 'content-type': 'text/html' } })
+      }
+    }
 
     // PartyKit-style routing for /parties/user-settings/:userId — the
     // browser WS for cache-invalidation fanout (issue #7 p3, B-API-4b).
@@ -105,4 +115,4 @@ export default {
   scheduled,
 }
 
-export { ProjectRegistry, SessionCollabDO, SessionDO, UserSettingsDO }
+export { SessionCollabDO, SessionDO, UserSettingsDO }

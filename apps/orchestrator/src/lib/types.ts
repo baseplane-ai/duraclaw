@@ -37,9 +37,10 @@ export interface ChatMessage {
 
 export interface Env {
   SESSION_AGENT: DurableObjectNamespace
-  SESSION_REGISTRY: DurableObjectNamespace
   USER_SETTINGS: DurableObjectNamespace
   SESSION_COLLAB: DurableObjectNamespace
+  /** Set to '1' via wrangler secret to short-circuit all non-/login traffic to a 503 maintenance page (#7 cutover). */
+  MAINTENANCE_MODE?: string
   ASSETS: Fetcher
   CC_GATEWAY_URL?: string
   CC_GATEWAY_SECRET?: string

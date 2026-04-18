@@ -18,7 +18,6 @@ function makeEnv(overrides: Record<string, unknown> = {}) {
     AUTH_DB: {},
     CC_GATEWAY_URL: 'https://gateway.test',
     CC_GATEWAY_SECRET: 'gw-secret',
-    SESSION_REGISTRY: {} as any,
     SESSION_AGENT: {} as any,
     USER_SETTINGS: {} as any,
     BETTER_AUTH_SECRET: 'test',

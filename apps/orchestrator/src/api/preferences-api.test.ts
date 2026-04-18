@@ -25,10 +25,6 @@ const mockedGetRequestSession = vi.mocked(getRequestSession)
 
 function createMockEnv() {
   return {
-    SESSION_REGISTRY: {
-      idFromName: vi.fn().mockReturnValue('registry-id'),
-      get: vi.fn().mockReturnValue({}),
-    },
     SESSION_AGENT: {
       newUniqueId: vi.fn(),
       idFromString: vi.fn(),

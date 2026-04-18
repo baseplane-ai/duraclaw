@@ -2,8 +2,8 @@
  * AgentOrchPage — Main page for spawning and observing sessions.
  *
  * Layout: sidebar (session list + spawn form) + main area (selected agent detail view).
- * Adapted from baseplane: uses ProjectRegistry instead of DataForge,
- * duraclaw's TanStack Router, and SessionDO instead of CodingAgent.
+ * Adapted from baseplane: session metadata is read from D1 via the
+ * sessions collection, with duraclaw's TanStack Router and SessionDO.
  */
 
 import { useNavigate, useSearch } from '@tanstack/react-router'

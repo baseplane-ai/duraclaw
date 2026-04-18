@@ -481,7 +481,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       error: 'Gateway connection lost — session stopped. You can send a new message to resume.',
       active_callback_token: undefined,
     })
-    this.syncStatusToRegistry()
+    this.syncStatusToD1(new Date().toISOString())
 
     // Notify connected clients
     this.broadcastToClients(
@@ -537,9 +537,8 @@ export class SessionDO extends Agent<Env, SessionState> {
 
   /**
    * Drizzle handle scoped to this DO's request env. Lazy-init per call so
-   * the binding is always fresh. The fan-out writes here mirror the
-   * SESSION_REGISTRY DO writes below — both are kept until p6 deletes the
-   * registry binding so any stale reader sees the same data on either side.
+   * the binding is always fresh. As of #7 p6 D1 is the sole metadata
+   * source of truth — the previous SESSION_REGISTRY DO fan-out is gone.
    */
   private get d1() {
     return drizzle(this.env.AUTH_DB, { schema })
@@ -603,95 +602,6 @@ export class SessionDO extends Agent<Env, SessionState> {
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to sync kata to D1:`, err)
     }
-  }
-
-  private async syncStatusToRegistry() {
-    const now = new Date().toISOString()
-    try {
-      const registryId = this.env.SESSION_REGISTRY.idFromName('default')
-      const registry = this.env.SESSION_REGISTRY.get(registryId) as any
-      await registry.updateSessionStatus(
-        this.state.session_id ?? this.ctx.id.toString(),
-        this.state.status,
-      )
-    } catch (err) {
-      console.error(`[SessionDO:${this.ctx.id}] Failed to sync status to registry:`, err)
-    }
-    await this.syncStatusToD1(now)
-  }
-
-  private async syncResultToRegistry() {
-    const now = new Date().toISOString()
-    try {
-      const registryId = this.env.SESSION_REGISTRY.idFromName('default')
-      const registry = this.env.SESSION_REGISTRY.get(registryId) as any
-      await registry.updateSessionResult(this.state.session_id ?? this.ctx.id.toString(), {
-        summary: this.state.summary,
-        duration_ms: this.state.duration_ms,
-        total_cost_usd: this.state.total_cost_usd,
-        num_turns: this.state.num_turns,
-      })
-    } catch (err) {
-      console.error(`[SessionDO:${this.ctx.id}] Failed to sync result to registry:`, err)
-    }
-    await this.syncResultToD1(now)
-  }
-
-  private async syncSdkSessionIdToRegistry(sdkSessionId: string) {
-    const now = new Date().toISOString()
-    try {
-      const sessionId = this.state.session_id ?? this.ctx.id.toString()
-      const registryId = this.env.SESSION_REGISTRY.idFromName('default')
-      const registry = this.env.SESSION_REGISTRY.get(registryId) as any
-      await registry.updateSession(sessionId, { sdk_session_id: sdkSessionId })
-    } catch (err) {
-      console.error(`[SessionDO:${this.ctx.id}] Failed to sync sdk_session_id to registry:`, err)
-    }
-    await this.syncSdkSessionIdToD1(sdkSessionId, now)
-  }
-
-  private async syncDiscoveredToRegistry() {
-    try {
-      // Only sync if we have an sdk_session_id — otherwise there's nothing to link
-      if (!this.state.sdk_session_id) return
-
-      const registryId = this.env.SESSION_REGISTRY.idFromName('default')
-      const registry = this.env.SESSION_REGISTRY.get(registryId) as any
-      await registry.syncDiscoveredSessions(this.state.userId ?? 'system', [
-        {
-          sdk_session_id: this.state.sdk_session_id,
-          agent: 'claude',
-          project_dir: this.state.project_path || '',
-          project: this.state.project || '',
-          branch: '',
-          started_at: this.state.started_at || this.state.created_at || new Date().toISOString(),
-          last_activity: new Date().toISOString(),
-          summary: this.state.summary || '',
-          tag: null,
-          title: null,
-          message_count: this.state.num_turns,
-          user: this.state.userId,
-        },
-      ])
-    } catch (err) {
-      console.error(`[SessionDO:${this.ctx.id}] Failed to sync discovered session:`, err)
-    }
-  }
-
-  private async syncKataToRegistry(kataState: KataSessionState | null) {
-    const now = new Date().toISOString()
-    try {
-      const registryId = this.env.SESSION_REGISTRY.idFromName('default')
-      const registry = this.env.SESSION_REGISTRY.get(registryId) as any
-      await registry.updateSession(this.state.session_id ?? this.ctx.id.toString(), {
-        kata_mode: kataState?.currentMode ?? null,
-        kata_issue: kataState?.issueNumber ?? null,
-        kata_phase: kataState?.currentPhase ?? null,
-      })
-    } catch (err) {
-      console.error(`[SessionDO:${this.ctx.id}] Failed to sync kata state to registry:`, err)
-    }
-    await this.syncKataToD1(kataState, now)
   }
 
   /**
@@ -1140,7 +1050,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       error: null,
       active_callback_token: undefined,
     })
-    this.syncStatusToRegistry()
+    this.syncStatusToD1(new Date().toISOString())
 
     const gwConnId = this.getGatewayConnectionId()
     if (gwConnId) {
@@ -1164,7 +1074,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       active_callback_token: undefined,
     })
     this.sendToGateway({ type: 'abort', session_id: this.state.session_id ?? '' })
-    this.syncStatusToRegistry()
+    this.syncStatusToD1(new Date().toISOString())
     console.log(`[SessionDO:${this.ctx.id}] abort: ${reason ?? 'user request'}`)
     return { ok: true }
   }
@@ -1488,24 +1398,30 @@ export class SessionDO extends Agent<Env, SessionState> {
     session_hint?: string
     leafId?: string
   }) {
-    // Self-initialize from registry for discovered sessions
+    // Self-initialize from D1 for discovered sessions (#7 p6). The cron in
+    // src/api/scheduled.ts UPSERTs gateway-discovered rows into agent_sessions
+    // every 5 minutes; this just rehydrates a cold DO from that row when the
+    // browser hits a session whose DO has no in-memory state yet.
     if (!this.state.sdk_session_id && opts?.session_hint) {
       try {
-        const registryId = this.env.SESSION_REGISTRY.idFromName('default')
-        const registry = this.env.SESSION_REGISTRY.get(registryId) as any
-        const session = await registry.getSession(opts.session_hint)
-        if (session?.sdk_session_id) {
+        const rows = await this.d1
+          .select()
+          .from(agentSessions)
+          .where(eq(agentSessions.id, opts.session_hint))
+          .limit(1)
+        const row = rows[0]
+        if (row?.sdkSessionId) {
           this.updateState({
-            sdk_session_id: session.sdk_session_id,
-            project: session.project ?? '',
-            session_id: session.id,
-            summary: session.summary ?? null,
-            started_at: session.created_at || this.state.created_at || new Date().toISOString(),
-            created_at: session.created_at || this.state.created_at || new Date().toISOString(),
+            sdk_session_id: row.sdkSessionId,
+            project: row.project ?? '',
+            session_id: row.id,
+            summary: row.summary ?? null,
+            started_at: row.createdAt || this.state.created_at || new Date().toISOString(),
+            created_at: row.createdAt || this.state.created_at || new Date().toISOString(),
           })
         }
       } catch (err) {
-        console.error(`[SessionDO:${this.ctx.id}] Failed to init from registry:`, err)
+        console.error(`[SessionDO:${this.ctx.id}] Failed to init from D1:`, err)
       }
     }
 
@@ -1619,8 +1535,10 @@ export class SessionDO extends Agent<Env, SessionState> {
     switch (event.type) {
       case 'session.init':
         this.updateState({ sdk_session_id: event.sdk_session_id, model: event.model })
-        // Sync sdk_session_id to registry so discovery won't create a duplicate row
-        if (event.sdk_session_id) this.syncSdkSessionIdToRegistry(event.sdk_session_id)
+        // Sync sdk_session_id to D1 so discovery won't create a duplicate row.
+        if (event.sdk_session_id) {
+          this.syncSdkSessionIdToD1(event.sdk_session_id, new Date().toISOString())
+        }
         break
 
       case 'partial_assistant': {
@@ -1803,7 +1721,7 @@ export class SessionDO extends Agent<Env, SessionState> {
             detail: { questions: event.questions },
           },
         })
-        this.syncStatusToRegistry()
+        this.syncStatusToD1(new Date().toISOString())
         this.dispatchPush(
           {
             title: this.state.project || 'Duraclaw',
@@ -1843,7 +1761,7 @@ export class SessionDO extends Agent<Env, SessionState> {
           }
         }
 
-        // PRESERVE all existing side effects (state update, registry sync, action token, push)
+        // PRESERVE all existing side effects (state update, D1 sync, action token, push)
         this.updateState({
           status: 'waiting_gate',
           gate: {
@@ -1852,7 +1770,7 @@ export class SessionDO extends Agent<Env, SessionState> {
             detail: { tool_name: event.tool_name, input: event.input },
           },
         })
-        this.syncStatusToRegistry()
+        this.syncStatusToD1(new Date().toISOString())
         ;(async () => {
           try {
             const actionToken = await generateActionToken(
@@ -1984,9 +1902,13 @@ export class SessionDO extends Agent<Env, SessionState> {
           summary: event.sdk_summary ?? this.state.summary,
           gate: null,
         })
-        this.syncStatusToRegistry()
-        this.syncResultToRegistry()
-        this.syncDiscoveredToRegistry()
+        {
+          const _now = new Date().toISOString()
+          this.syncStatusToD1(_now)
+          this.syncResultToD1(_now)
+        }
+        // Discovered-session fan-out is now owned by the cron in
+        // src/api/scheduled.ts (#7 p6); SessionDO no longer mirrors here.
         if (!event.is_error) {
           this.dispatchPush(
             {
@@ -2036,19 +1958,19 @@ export class SessionDO extends Agent<Env, SessionState> {
           completed_at: new Date().toISOString(),
           active_callback_token: undefined,
         })
-        this.syncStatusToRegistry()
+        this.syncStatusToD1(new Date().toISOString())
         break
       }
 
       case 'kata_state': {
-        // PRESERVE existing side effects — store in kv and sync to registry
+        // PRESERVE existing side effects — store in kv and sync to D1.
         try {
           this
             .sql`INSERT OR REPLACE INTO kv (key, value) VALUES ('kata_state', ${JSON.stringify(event.kata_state)})`
         } catch (err) {
           console.error(`[SessionDO:${this.ctx.id}] Failed to persist kata state:`, err)
         }
-        this.syncKataToRegistry(event.kata_state)
+        this.syncKataToD1(event.kata_state, new Date().toISOString())
         break
       }
 
@@ -2083,7 +2005,7 @@ export class SessionDO extends Agent<Env, SessionState> {
           error: event.error,
           active_callback_token: undefined,
         })
-        this.syncStatusToRegistry()
+        this.syncStatusToD1(new Date().toISOString())
         this.dispatchPush(
           {
             title: this.state.project || 'Duraclaw',

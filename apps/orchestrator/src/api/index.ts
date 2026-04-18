@@ -60,16 +60,6 @@ function getDb(env: ApiAppEnv['Bindings']) {
   return drizzle(env.AUTH_DB, { schema })
 }
 
-/**
- * Retained for backward compatibility — the SessionDO write fan-out
- * (and any other DO-internal callers) still goes through SESSION_REGISTRY
- * until p6 removes the binding. User-facing API routes no longer call this.
- */
-export function getRegistry(c: { env: ApiAppEnv['Bindings'] }) {
-  const registryId = c.env.SESSION_REGISTRY.idFromName('default')
-  return c.env.SESSION_REGISTRY.get(registryId) as any
-}
-
 /** Resolve a session ID to a DO ID — hex IDs use idFromString, UUIDs use idFromName */
 function getSessionDoId(env: ApiAppEnv['Bindings'], sessionId: string) {
   const isHexId = /^[0-9a-f]{64}$/.test(sessionId)
