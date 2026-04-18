@@ -226,14 +226,19 @@ function ReasoningPillRow({ parts }: { parts: SessionMessagePart[] }) {
           </SheetHeader>
           <div className="flex-1 space-y-3 overflow-y-auto p-4">
             {parts.map((p, i) => (
-              <Reasoning
-                key={p.toolCallId ?? i}
-                isStreaming={p.state === 'streaming'}
-                defaultOpen={true}
+              <div
+                // biome-ignore lint/suspicious/noArrayIndexKey: reasoning parts share no stable id; order is fixed
+                key={i}
+                className="rounded-md border bg-muted/30 p-3"
               >
-                <ReasoningTrigger />
-                <ReasoningContent>{p.text || ''}</ReasoningContent>
-              </Reasoning>
+                <div className="mb-2 flex items-center gap-1.5 text-muted-foreground text-xs">
+                  <BrainIcon className="size-3" />
+                  <span>Thought #{i + 1}</span>
+                </div>
+                <div className="whitespace-pre-wrap break-words text-sm text-muted-foreground">
+                  {p.text || '(empty)'}
+                </div>
+              </div>
             ))}
           </div>
         </SheetContent>
