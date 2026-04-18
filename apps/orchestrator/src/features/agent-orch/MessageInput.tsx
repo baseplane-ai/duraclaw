@@ -92,7 +92,7 @@ export function MessageInput({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
 
   const collabActive = Boolean(sessionId)
-  const isConnecting = collabActive && collabStatus === 'connecting'
+  const collabReady = collabActive && collabStatus === 'connected'
   const isAuthFailed = collabActive && collabStatus === 'auth-failed'
 
   const processFile = useCallback((file: File) => {
@@ -131,17 +131,13 @@ export function MessageInput({
     setError(null)
   }, [])
 
-  const textareaPlaceholder = disabled
-    ? 'Session is not running'
-    : isConnecting
-      ? 'Connecting to collab...'
-      : 'Send a message...'
+  const textareaPlaceholder = disabled ? 'Session is not running' : 'Send a message...'
 
-  const textareaDisabled = Boolean(disabled) || isConnecting || isAuthFailed
+  const textareaDisabled = Boolean(disabled)
 
   return (
     <PromptInputProvider key={draftKey ?? '__local'}>
-      {collabActive && awareness && selfClientId !== null && (
+      {collabReady && awareness && selfClientId !== null && (
         <PresenceBar awareness={awareness} selfClientId={selfClientId} />
       )}
       {isAuthFailed && (
@@ -162,7 +158,7 @@ export function MessageInput({
           if (images.length > 0) {
             // Prefer the textarea's on-form text when no collab is active;
             // otherwise pull from the Y.Text snapshot.
-            const text = collabActive ? ytext.toString().trim() : message.text?.trim()
+            const text = collabReady ? ytext.toString().trim() : message.text?.trim()
             const blocks: ContentBlock[] = [
               ...images.map(
                 (img): ContentBlock => ({
@@ -182,7 +178,7 @@ export function MessageInput({
             ]
             onSend(blocks)
             // Clear the shared draft after an image-accompanied submit.
-            if (collabActive && ytext.length > 0) {
+            if (collabReady && ytext.length > 0) {
               const doc = ytext.doc
               const clear = () => ytext.delete(0, ytext.length)
               if (doc) doc.transact(clear)
@@ -195,7 +191,7 @@ export function MessageInput({
 
           // Plain-text path: prefer collaborative submit so the clear +
           // failure-rollback round-trips through the Y.Doc.
-          if (collabActive && submitDraft) {
+          if (collabReady && submitDraft) {
             const result = await submitDraft(ytext)
             if (!result.ok) {
               toast.error('Failed to send — draft restored')
@@ -245,11 +241,11 @@ export function MessageInput({
             ref={textareaRef}
             placeholder={textareaPlaceholder}
             disabled={textareaDisabled}
-            yText={collabActive ? ytext : undefined}
-            onInput={collabActive ? notifyTyping : undefined}
-            onCursorChange={collabActive ? setCursor : undefined}
+            yText={collabReady ? ytext : undefined}
+            onInput={collabReady ? notifyTyping : undefined}
+            onCursorChange={collabReady ? setCursor : undefined}
           />
-          {collabActive && awareness && selfClientId !== null && (
+          {collabReady && awareness && selfClientId !== null && (
             <CursorOverlay
               awareness={awareness}
               selfClientId={selfClientId}
@@ -279,7 +275,7 @@ export function MessageInput({
           <PromptInputSubmit disabled={textareaDisabled} />
         </PromptInputFooter>
       </PromptInput>
-      {collabActive && awareness && selfClientId !== null && (
+      {collabReady && awareness && selfClientId !== null && (
         <TypingIndicator awareness={awareness} selfClientId={selfClientId} />
       )}
     </PromptInputProvider>
