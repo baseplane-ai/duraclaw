@@ -14,10 +14,9 @@ import {
   PromptInputSubmit,
   PromptInputTextarea,
 } from '@duraclaw/ai-elements'
-import { eq } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
 import { ImageIcon, XIcon } from 'lucide-react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Checkbox } from '~/components/ui/checkbox'
 import { Label } from '~/components/ui/label'
 import {
@@ -30,7 +29,7 @@ import {
   SelectValue,
 } from '~/components/ui/select'
 import { agentSessionsCollection } from '~/db/agent-sessions-collection'
-import { userTabsCollection } from '~/db/user-tabs-collection'
+import { useTabSync } from '~/hooks/use-tab-sync'
 import { useUserDefaults } from '~/hooks/use-user-defaults'
 import type { ContentBlock } from '~/lib/types'
 
@@ -91,19 +90,24 @@ export function QuickPromptInput({
   const [images, setImages] = useState<ImagePreview[]>([])
   const [imageError, setImageError] = useState<string | null>(null)
 
-  // Check if selected project already has a tab — derive from a join so we
-  // get session.project (the field that drives the existing-tab check).
+  // Check if selected project already has an open tab — read from Yjs open
+  // tabs + sessions collection to see if any open tab's session matches the
+  // selected project.
+  const { openTabs: openTabIds } = useTabSync()
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data: tabsWithSessions } = useLiveQuery((q: any) =>
-    q
-      .from({ tab: userTabsCollection })
-      .leftJoin({ session: agentSessionsCollection }, ({ tab, session }: any) =>
-        eq(tab.sessionId, session.id),
-      ),
+  const { data: allSessions } = useLiveQuery((q: any) =>
+    q.from({ session: agentSessionsCollection }),
   )
-  const existingTab = ((tabsWithSessions ?? []) as Array<{ session?: { project?: string } }>).find(
-    (row) => row.session?.project === selectedProject,
-  )
+  const existingTab = useMemo(() => {
+    if (!allSessions) return undefined
+    const sessionsMap = new Map<string, { project?: string }>()
+    for (const row of allSessions as Array<{ session: { id: string; project?: string } }>) {
+      sessionsMap.set(row.session.id, row.session)
+    }
+    return openTabIds.find((id) => sessionsMap.get(id)?.project === selectedProject)
+      ? true
+      : undefined
+  }, [openTabIds, allSessions, selectedProject])
 
   // Update model when preferences load
   useEffect(() => {

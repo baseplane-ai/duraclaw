@@ -2,8 +2,9 @@
  * AgentOrchPage — Main page for spawning and observing sessions.
  *
  * Layout: sidebar (session list + spawn form) + main area (selected agent detail view).
- * Adapted from baseplane: session metadata is read from D1 via the
- * sessions collection, with duraclaw's TanStack Router and SessionDO.
+ * Tab state is Yjs-backed via useTabSync — no TanStack QueryCollection, no
+ * optimistic inserts, no server dedup. The Y.Array<string> of session IDs IS
+ * the tab list; display metadata comes from agentSessionsCollection join.
  */
 
 import { useNavigate, useSearch } from '@tanstack/react-router'
@@ -14,12 +15,9 @@ import { PushOptInBanner } from '~/components/push-opt-in-banner'
 import { PwaInstallBanner } from '~/components/pwa-install-banner'
 import { QuickPromptInput } from '~/components/quick-prompt-input'
 import { TabBar } from '~/components/tab-bar'
-import { userTabsCollection } from '~/db/user-tabs-collection'
-import { getActiveTabId, setActiveTabId } from '~/hooks/use-active-tab'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { useSwipeTabs } from '~/hooks/use-swipe-tabs'
-import { ensureTabForSession } from '~/lib/tab-utils'
-import type { UserTabRow } from '~/lib/types'
+import { getTabSyncSnapshot, useTabSync } from '~/hooks/use-tab-sync'
 import { AgentDetailView } from './AgentDetailView'
 import type { SpawnFormConfig } from './SpawnAgentForm'
 import { type SpawnConfig, useCodingAgent } from './use-coding-agent'
@@ -27,11 +25,6 @@ import { type SpawnConfig, useCodingAgent } from './use-coding-agent'
 export function AgentOrchPage() {
   return <AgentOrchContent />
 }
-
-// ── Helpers ───────────────────────────────────────────────────────
-// Tab utilities (newTabId, nextPosition, ensureTabForSession) are in
-// ~/lib/tab-utils.ts — shared across AgentOrchPage, nav-sessions, and
-// notification-drawer to avoid duplicate insert-or-find logic.
 
 function AgentOrchContent() {
   const { updateSession } = useSessionsCollection()
@@ -42,38 +35,30 @@ function AgentOrchContent() {
     (search as { newSessionProject?: string }).newSessionProject ?? null
   const searchNewTab = (search as { newTab?: boolean }).newTab ?? false
 
-  // Synchronous init: resolve selectedSessionId from URL or last active tab.
-  // Tabs live in `userTabsCollection` (D1-synced, OPFS-cached) — `.toArray()`
-  // returns the hydrated rows synchronously on cold start. The init effect
-  // also seeds an optimistic tab row for URL-delivered sessions so the tab
-  // bar renders on the first frame.
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(() => {
-    if (searchSessionId) {
-      // Notification deep-link / shared URL: ensure a tab exists for this
-      // session id so the tab bar shows it on the very first frame. The tab
-      // initially has no joined session row; the join skeleton renders until
-      // agentSessionsCollection hydrates.
-      ensureTabForSession(searchSessionId)
-      return searchSessionId
+  // ── Yjs tab sync — replaces userTabsCollection + ensureTabForSession ──
+  const { openTabs, activeSessionId, openTab, closeTab, setActive, reorder } = useTabSync()
+
+  // Deep-link: if URL has ?session=X, ensure it's in open tabs + activate.
+  // One-shot effect — only fires on mount or when searchSessionId changes.
+  const deepLinkedRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (searchSessionId && searchSessionId !== deepLinkedRef.current) {
+      deepLinkedRef.current = searchSessionId
+      openTab(searchSessionId, true)
     }
-    // Cold launch fallback: prefer the persisted active tab; else the first tab.
-    const tabs = userTabsCollection.toArray as unknown as UserTabRow[]
-    const activeId = getActiveTabId()
-    if (activeId) {
-      const match = tabs.find((t) => t.id === activeId)
-      if (match?.sessionId) return match.sessionId
+  }, [searchSessionId, openTab])
+
+  // Sync URL when activeSessionId changes (Yjs → URL).
+  useEffect(() => {
+    const currentUrlSession = (search as { session?: string }).session ?? null
+    if (activeSessionId && activeSessionId !== currentUrlSession) {
+      navigate({ to: '/', search: { session: activeSessionId }, replace: true })
+    } else if (!activeSessionId && currentUrlSession) {
+      navigate({ to: '/', search: {}, replace: true })
     }
-    if (tabs.length > 0) {
-      const fallback = tabs[0]
-      setActiveTabId(fallback.id)
-      return fallback.sessionId ?? null
-    }
-    return null
-  })
+  }, [activeSessionId, search, navigate])
 
   const [spawnConfig, setSpawnConfig] = useState<SpawnConfig | null>(null)
-  // Pre-fill hints for the QuickPromptInput composer, set by tab context menu actions.
-  // Seed from URL search params so the hint survives reloads / cold launches.
   const [quickPromptHint, setQuickPromptHint] = useState<{
     project: string
     newTab: boolean
@@ -106,7 +91,6 @@ function AgentOrchContent() {
 
   const handleSpawn = useCallback(
     async (config: SpawnFormConfig & { newTab?: boolean }) => {
-      // Create session via the existing POST /api/sessions route
       try {
         const resp = await fetch('/api/sessions', {
           method: 'POST',
@@ -123,7 +107,6 @@ function AgentOrchContent() {
         const data = (await resp.json()) as { session_id: string }
         const sessionId = data.session_id
 
-        // Set spawn config for auto-spawn in AgentDetailWithSpawn
         setSpawnConfig({
           project: config.project,
           prompt: config.prompt,
@@ -131,54 +114,59 @@ function AgentOrchContent() {
           agent: config.agent,
         })
         setQuickPromptHint(null)
-        setSelectedSessionId(sessionId)
 
-        // Ensure a tab exists for this session (find-or-create).
-        ensureTabForSession(sessionId)
-
+        // Add to Yjs tabs + activate — syncs cross-device automatically.
+        openTab(sessionId, true)
         navigate({ to: '/', search: { session: sessionId } })
       } catch (err) {
         console.error('[AgentOrch] Spawn failed:', err)
       }
     },
-    [navigate],
+    [navigate, openTab],
   )
 
   const handleSelectSession = useCallback(
     (sessionId: string) => {
-      ensureTabForSession(sessionId)
+      openTab(sessionId, true)
       setSpawnConfig(null)
-      setSelectedSessionId(sessionId)
       navigate({ to: '/', search: { session: sessionId } })
     },
-    [navigate],
+    [navigate, openTab],
   )
 
-  const handleLastTabClosed = useCallback(() => {
-    setSpawnConfig(null)
-    setQuickPromptHint(null)
-    setSelectedSessionId(null)
-    navigate({ to: '/' })
-  }, [navigate])
+  const handleCloseTab = useCallback(
+    (sessionId: string) => {
+      const isLastTab = openTabs.length === 1
+      const nextActive = closeTab(sessionId)
+      if (isLastTab || !nextActive) {
+        setSpawnConfig(null)
+        setQuickPromptHint(null)
+        navigate({ to: '/' })
+      } else {
+        navigate({ to: '/', search: { session: nextActive } })
+      }
+    },
+    [openTabs, closeTab, navigate],
+  )
 
   const handleNewSessionInTab = useCallback(
     (project: string) => {
       setSpawnConfig(null)
-      setSelectedSessionId(null)
+      setActive(null)
       setQuickPromptHint({ project, newTab: false })
       navigate({ to: '/' })
     },
-    [navigate],
+    [navigate, setActive],
   )
 
   const handleNewTabForProject = useCallback(
     (project: string) => {
       setSpawnConfig(null)
-      setSelectedSessionId(null)
+      setActive(null)
       setQuickPromptHint({ project, newTab: true })
       navigate({ to: '/' })
     },
-    [navigate],
+    [navigate, setActive],
   )
 
   const handleStateChange = useCallback(
@@ -188,54 +176,42 @@ function AgentOrchContent() {
     [updateSession],
   )
 
-  const { swipeProps, swipeDir } = useSwipeTabs(handleSelectSession, selectedSessionId)
+  const { swipeProps, swipeDir } = useSwipeTabs(handleSelectSession, activeSessionId)
 
   // ── Keyboard shortcuts ───────────────────────────────────────────
-  // Reads userTabsCollection / getActiveTabId synchronously inside the handler
-  // so the listener never needs to depend on tab state — a single listener
-  // registration for the lifetime of the component.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const isMod = e.metaKey || e.ctrlKey
 
-      // Cmd+T: ensure a tab exists for the current session (no-op otherwise)
+      // Cmd+T: no-op for now (browser intercepts); could open new session
       if (isMod && e.key === 't') {
         e.preventDefault()
-        if (selectedSessionId) {
-          ensureTabForSession(selectedSessionId)
-        }
       }
 
       // Cmd+W: close active tab
       if (isMod && e.key === 'w') {
         e.preventDefault()
-        const activeId = getActiveTabId()
-        if (activeId && userTabsCollection.has(activeId)) {
-          userTabsCollection.delete([activeId])
-          if (userTabsCollection.size <= 1) {
-            handleLastTabClosed()
-          }
+        const { activeSessionId: active } = getTabSyncSnapshot()
+        if (active) {
+          handleCloseTab(active)
         }
       }
 
       // Cmd+1-9: switch to Nth tab
       if (isMod && e.key >= '1' && e.key <= '9') {
         const idx = parseInt(e.key, 10) - 1
-        const tabs = userTabsCollection.toArray as unknown as UserTabRow[]
-        const tab = tabs[idx]
-        if (tab) {
+        const { openTabs: tabs } = getTabSyncSnapshot()
+        const sessionId = tabs[idx]
+        if (sessionId) {
           e.preventDefault()
-          setActiveTabId(tab.id)
-          if (tab.sessionId) {
-            handleSelectSession(tab.sessionId)
-          }
+          handleSelectSession(sessionId)
         }
       }
     }
 
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [selectedSessionId, handleSelectSession, handleLastTabClosed])
+  }, [handleSelectSession, handleCloseTab])
 
   return (
     <>
@@ -244,9 +220,11 @@ function AgentOrchContent() {
         <PwaInstallBanner />
         <PushOptInBanner />
         <TabBar
-          activeSessionId={selectedSessionId}
+          openTabs={openTabs}
+          activeSessionId={activeSessionId}
           onSelectSession={handleSelectSession}
-          onLastTabClosed={handleLastTabClosed}
+          onCloseTab={handleCloseTab}
+          onReorder={reorder}
           onNewSessionInTab={handleNewSessionInTab}
           onNewTabForProject={handleNewTabForProject}
         />
@@ -260,10 +238,10 @@ function AgentOrchContent() {
           }
           style={{ flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column' }}
         >
-          {selectedSessionId ? (
+          {activeSessionId ? (
             <AgentDetailWithSpawn
-              key={selectedSessionId}
-              sessionId={selectedSessionId}
+              key={activeSessionId}
+              sessionId={activeSessionId}
               spawnConfig={spawnConfig}
               onStateChange={handleStateChange}
             />
@@ -302,7 +280,6 @@ function AgentDetailWithSpawn({
   const agent = useCodingAgent(sessionId)
   const spawnedRef = useRef(false)
 
-  // Spawn once we have state (WS is connected and synced)
   useEffect(() => {
     if (spawnConfig && agent.state && !spawnedRef.current) {
       spawnedRef.current = true
@@ -312,9 +289,6 @@ function AgentDetailWithSpawn({
     }
   }, [spawnConfig, agent.state, agent.spawn])
 
-  // Sync DO state changes to the sessions collection. Tab title/project come
-  // from the join with agentSessionsCollection (B-UI-1) — no per-tab title or
-  // project fields any more, so this effect just forwards the patch.
   const prevStateRef = useRef(agent.state)
   useEffect(() => {
     if (agent.state && agent.state !== prevStateRef.current) {

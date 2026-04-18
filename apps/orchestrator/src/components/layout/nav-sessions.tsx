@@ -41,7 +41,6 @@ import {
 import type { SessionRecord } from '~/db/sessions-collection'
 import { getPreviewText, StatusDot } from '~/features/agent-orch/session-utils'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
-import { ensureTabForSession } from '~/lib/tab-utils'
 import type { PrInfo, ProjectInfo } from '~/lib/types'
 import { cn } from '~/lib/utils'
 
@@ -278,7 +277,8 @@ export function NavSessions() {
 
   const handleSelect = useCallback(
     (session: SessionRecord) => {
-      ensureTabForSession(session.id)
+      // Navigation to /?session=X triggers AgentOrchPage's deep-link effect,
+      // which calls openTab() on the Yjs Y.Array. No direct tab manipulation needed.
       setOpenMobile(false)
       navigate({ to: '/', search: { session: session.id } })
     },

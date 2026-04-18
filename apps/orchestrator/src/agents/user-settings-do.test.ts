@@ -1,34 +1,39 @@
-// UserSettingsDO unit tests — issue #7 p3.
+// UserSettingsDO unit tests — updated for YServer-based implementation.
 //
-// The DO extends `partyserver.Server`, which extends `DurableObject` from
-// `cloudflare:workers`. Vitest runs in node, so we mock the partyserver
-// `Server` base class with a tiny shim that exposes `this.env`,
-// `this.name`, and `this.getConnections()`. The methods under test
-// (`onConnect`, `onRequest`, `onClose`) are pure logic on top of those
-// primitives so the shim is sufficient.
+// The DO now extends y-partyserver's `YServer` (which extends
+// partyserver's `Server`). We mock both to provide the test shim with
+// `this.env`, `this.name`, `this.getConnections()`, and `this.document`.
+// Auth and /notify are pure logic on top of those primitives.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import * as Y from 'yjs'
 
-vi.mock('partyserver', () => {
-  class Server<TEnv> {
-    env: TEnv
+// Mock y-partyserver's YServer with a shim that exposes what our DO needs.
+vi.mock('y-partyserver', () => {
+  class YServer {
+    env: any
     name: string = ''
+    document: Y.Doc = new Y.Doc()
+    ctx: any
     private _connections: any[] = []
-    constructor(_ctx: unknown, env: TEnv) {
+    constructor(ctx: unknown, env: any) {
       this.env = env
+      this.ctx = ctx
     }
     getConnections(): Iterable<any> {
       return this._connections
     }
-    // Test-only: seed the connection set for broadcast tests.
+    // Test-only helpers
     _setConnections(conns: any[]) {
       this._connections = conns
     }
     _setName(name: string) {
       this.name = name
     }
+    // onConnect stub — YServer's base does nothing we need for tests
+    async onConnect(_conn: any, _ctx: any) {}
   }
-  return { Server }
+  return { YServer }
 })
 
 vi.mock('~/api/auth-session', () => ({
@@ -42,7 +47,9 @@ const mockedGetRequestSession = vi.mocked(getRequestSession)
 
 function makeDO(name: string = 'user-1'): UserSettingsDO {
   const env = {} as any
-  const ctx = {} as any
+  // Provide a ctx with storage.sql for the ensureTable/onLoad/onSave path.
+  const sqlExec = vi.fn(() => ({ toArray: () => [] }))
+  const ctx = { storage: { sql: { exec: sqlExec } } } as any
   const instance = new UserSettingsDO(ctx, env)
   ;(instance as any)._setName(name)
   return instance
@@ -122,7 +129,7 @@ describe('UserSettingsDO.onRequest', () => {
     const c2 = makeConn()
     ;(doInst as any)._setConnections([c1, c2])
 
-    const payload = JSON.stringify({ type: 'invalidate', collection: 'user_tabs' })
+    const payload = JSON.stringify({ type: 'invalidate', collection: 'agent_sessions' })
     const req = new Request('http://do/notify', { method: 'POST', body: payload })
 
     const res = await doInst.onRequest(req)
@@ -163,14 +170,26 @@ describe('UserSettingsDO.onRequest', () => {
   })
 })
 
-describe('UserSettingsDO statelessness', () => {
-  it('never reads or writes this.storage', () => {
-    // Compile-time + runtime assertion: the DO never accesses .storage.
-    // Reading the source file would be circular; instead we assert that
-    // a fresh instance has no `storage` property of its own and never
-    // attempts to dereference one (any access via `this.storage` would
-    // throw TypeError on undefined inside the methods we exercise above).
+describe('UserSettingsDO Y.Doc', () => {
+  it('has a Y.Doc with openTabs array and workspace map', async () => {
     const doInst = makeDO('user-1')
-    expect((doInst as any).storage).toBeUndefined()
+    // onLoad creates the y_state table and restores from snapshot
+    await doInst.onLoad()
+    const doc = (doInst as any).document as Y.Doc
+    expect(doc.getArray('openTabs')).toBeDefined()
+    expect(doc.getMap('workspace')).toBeDefined()
+  })
+
+  it('onSave snapshots the Y.Doc to SQL', async () => {
+    const doInst = makeDO('user-1')
+    const sqlExec = (doInst as any).ctx.storage.sql.exec
+    await doInst.onLoad()
+    // Add a tab to the doc
+    const doc = (doInst as any).document as Y.Doc
+    doc.getArray<string>('openTabs').push(['session-1'])
+    await doInst.onSave()
+    // Should have called exec with INSERT OR REPLACE
+    const lastCall = sqlExec.mock.calls[sqlExec.mock.calls.length - 1]
+    expect(lastCall[0]).toContain('INSERT OR REPLACE')
   })
 })

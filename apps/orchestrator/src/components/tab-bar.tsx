@@ -10,14 +10,12 @@ import {
   useSensors,
 } from '@dnd-kit/core'
 import {
-  arrayMove,
   horizontalListSortingStrategy,
   SortableContext,
   sortableKeyboardCoordinates,
   useSortable,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { eq } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
 import { ChevronLeftIcon, ChevronRightIcon, CopyPlusIcon, PlusIcon, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -36,51 +34,56 @@ import {
   SheetTitle,
 } from '~/components/ui/sheet'
 import { agentSessionsCollection, type SessionRecord } from '~/db/agent-sessions-collection'
-import { userTabsCollection } from '~/db/user-tabs-collection'
 import { StatusDot } from '~/features/agent-orch/session-utils'
-import { setActiveTabId } from '~/hooks/use-active-tab'
 import { useIsMobile } from '~/hooks/use-mobile'
-import type { UserTabRow } from '~/lib/types'
 import { cn } from '~/lib/utils'
 
 interface TabBarProps {
-  /** The session currently being viewed — drives tab highlighting. Derived from URL. */
+  /** Ordered list of session IDs from Yjs Y.Array. */
+  openTabs: string[]
+  /** The session currently being viewed. */
   activeSessionId: string | null
   onSelectSession: (sessionId: string) => void
-  onLastTabClosed?: () => void
+  onCloseTab: (sessionId: string) => void
+  onReorder: (fromIndex: number, toIndex: number) => void
   onNewSessionInTab?: (project: string) => void
   onNewTabForProject?: (project: string) => void
 }
 
-interface JoinedRow {
-  tab: UserTabRow
+interface TabRow {
+  sessionId: string
   session: SessionRecord | undefined
 }
 
 export function TabBar({
+  openTabs,
   activeSessionId,
   onSelectSession,
-  onLastTabClosed,
+  onCloseTab,
+  onReorder,
   onNewSessionInTab,
   onNewTabForProject,
 }: TabBarProps) {
-  // Live join: tab × session (LEFT JOIN — session may be undefined while
-  // agentSessionsCollection is hydrating). Sorted by tab.position so user
-  // drag-reordering is reflected without per-render sort work.
+  // Fetch all sessions for display metadata join.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data: joinData } = useLiveQuery((q: any) =>
-    q
-      .from({ tab: userTabsCollection })
-      .leftJoin({ session: agentSessionsCollection }, ({ tab, session }: any) =>
-        eq(tab.sessionId, session.id),
-      )
-      .orderBy(({ tab }: any) => tab.position),
+  const { data: allSessions } = useLiveQuery((q: any) =>
+    q.from({ session: agentSessionsCollection }),
   )
 
-  const rows = useMemo<JoinedRow[]>(() => {
-    if (!joinData) return []
-    return joinData as unknown as JoinedRow[]
-  }, [joinData])
+  const sessionsMap = useMemo(() => {
+    const m = new Map<string, SessionRecord>()
+    if (!allSessions) return m
+    for (const row of allSessions as Array<{ session: SessionRecord }>) {
+      m.set(row.session.id, row.session)
+    }
+    return m
+  }, [allSessions])
+
+  // Build tab rows by joining openTabs with sessions.
+  const rows = useMemo<TabRow[]>(
+    () => openTabs.map((sessionId) => ({ sessionId, session: sessionsMap.get(sessionId) })),
+    [openTabs, sessionsMap],
+  )
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const [canScrollLeft, setCanScrollLeft] = useState(false)
@@ -103,29 +106,15 @@ export function TabBar({
       setActiveDragId(null)
       const { active, over } = e
       if (!over || active.id === over.id) return
-      const oldIndex = rows.findIndex((r) => r.tab.id === active.id)
-      const newIndex = rows.findIndex((r) => r.tab.id === over.id)
+      const oldIndex = rows.findIndex((r) => r.sessionId === active.id)
+      const newIndex = rows.findIndex((r) => r.sessionId === over.id)
       if (oldIndex < 0 || newIndex < 0) return
-      const reordered = arrayMove(rows, oldIndex, newIndex)
-      const orderedIds = reordered.map((r) => r.tab.id)
-      // Persist via the dedicated reorder endpoint, then refetch so positions
-      // resync from D1. Optimistic UI is provided by dnd-kit's transform.
-      fetch('/api/user-settings/tabs/reorder', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orderedIds }),
-      })
-        .then((resp) => {
-          if (resp.ok) {
-            userTabsCollection.utils.refetch().catch(() => {})
-          }
-        })
-        .catch(() => {})
+      onReorder(oldIndex, newIndex)
     },
-    [rows],
+    [rows, onReorder],
   )
 
-  const activeDragRow = activeDragId ? rows.find((r) => r.tab.id === activeDragId) : null
+  const activeDragRow = activeDragId ? rows.find((r) => r.sessionId === activeDragId) : null
 
   // Detect overflow on scroll + resize
   const updateOverflow = useCallback(() => {
@@ -148,7 +137,7 @@ export function TabBar({
     }
   }, [updateOverflow])
 
-  // Re-check overflow when tab count changes (DOM mutation won't trigger ResizeObserver on the container)
+  // Re-check overflow when tab count changes
   // biome-ignore lint/correctness/useExhaustiveDependencies: rows.length intentionally triggers re-check
   useEffect(updateOverflow, [updateOverflow, rows.length])
 
@@ -166,36 +155,11 @@ export function TabBar({
   // Scroll active tab into view when it changes
   useEffect(() => {
     if (!activeSessionId || !scrollRef.current) return
-    const activeRow = rows.find((r) => r.tab.sessionId === activeSessionId)
-    if (!activeRow) return
     const el = scrollRef.current.querySelector(
-      `[data-tab-id="${activeRow.tab.id}"]`,
+      `[data-tab-id="${activeSessionId}"]`,
     ) as HTMLElement | null
     el?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' })
-  }, [activeSessionId, rows])
-
-  const handleClose = useCallback(
-    (tabId: string) => {
-      const isLastTab = rows.length === 1
-      if (userTabsCollection.has(tabId)) {
-        userTabsCollection.delete([tabId])
-      }
-      if (isLastTab && onLastTabClosed) {
-        onLastTabClosed()
-      } else {
-        const remaining = rows.filter((r) => r.tab.id !== tabId)
-        if (remaining.length > 0) {
-          const idx = rows.findIndex((r) => r.tab.id === tabId)
-          const next = remaining[Math.min(idx, remaining.length - 1)]
-          setActiveTabId(next.tab.id)
-          if (next.tab.sessionId) {
-            onSelectSession(next.tab.sessionId)
-          }
-        }
-      }
-    },
-    [rows, onSelectSession, onLastTabClosed],
-  )
+  }, [activeSessionId])
 
   if (rows.length === 0) return null
 
@@ -212,24 +176,15 @@ export function TabBar({
           className="flex items-center border-b bg-background overflow-x-auto scrollbar-none"
           onWheel={handleWheel}
         >
-          <SortableContext
-            items={rows.map((r) => r.tab.id)}
-            strategy={horizontalListSortingStrategy}
-          >
+          <SortableContext items={openTabs} strategy={horizontalListSortingStrategy}>
             {rows.map((row) => (
               <SortableProjectTab
-                key={row.tab.id}
-                tabId={row.tab.id}
-                sessionId={row.tab.sessionId}
+                key={row.sessionId}
+                sessionId={row.sessionId}
                 session={row.session}
-                isActive={row.tab.sessionId === activeSessionId}
-                onSelect={() => {
-                  setActiveTabId(row.tab.id)
-                  if (row.tab.sessionId) {
-                    onSelectSession(row.tab.sessionId)
-                  }
-                }}
-                onClose={() => handleClose(row.tab.id)}
+                isActive={row.sessionId === activeSessionId}
+                onSelect={() => onSelectSession(row.sessionId)}
+                onClose={() => onCloseTab(row.sessionId)}
                 onNewSessionInTab={
                   onNewSessionInTab && row.session?.project
                     ? () => onNewSessionInTab(row.session?.project as string)
@@ -268,15 +223,14 @@ export function TabBar({
         )}
       </div>
 
-      {/* Drag preview overlay — renders a floating copy of the dragged tab */}
+      {/* Drag preview overlay */}
       <DragOverlay dropAnimation={null}>
         {activeDragRow && (
           <div className="rounded border bg-background shadow-lg opacity-90">
             <ProjectTab
-              tabId={activeDragRow.tab.id}
-              sessionId={activeDragRow.tab.sessionId}
+              sessionId={activeDragRow.sessionId}
               session={activeDragRow.session}
-              isActive={activeDragRow.tab.sessionId === activeSessionId}
+              isActive={activeDragRow.sessionId === activeSessionId}
               onSelect={() => {}}
               onClose={() => {}}
             />
@@ -288,8 +242,7 @@ export function TabBar({
 }
 
 interface ProjectTabProps {
-  tabId: string
-  sessionId: string | null
+  sessionId: string
   session: SessionRecord | undefined
   isActive: boolean
   isDragging?: boolean
@@ -299,10 +252,10 @@ interface ProjectTabProps {
   onNewTabForProject?: () => void
 }
 
-/** Sortable wrapper — applies dnd-kit transform/transition and drag listeners */
+/** Sortable wrapper */
 function SortableProjectTab(props: ProjectTabProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
-    id: props.tabId,
+    id: props.sessionId,
   })
   const style: React.CSSProperties = {
     transform: CSS.Transform.toString(transform),
@@ -319,7 +272,6 @@ function SortableProjectTab(props: ProjectTabProps) {
 }
 
 function ProjectTab({
-  tabId,
   sessionId,
   session,
   isActive,
@@ -332,7 +284,6 @@ function ProjectTab({
   const isMobile = useIsMobile()
   const [menuOpen, setMenuOpen] = useState(false)
 
-  // Close context menu when a drag starts (long-press may have opened it)
   useEffect(() => {
     if (isDragging) setMenuOpen(false)
   }, [isDragging])
@@ -389,7 +340,6 @@ function ProjectTab({
   }, [clearLongPress])
 
   const handleSelectClick = useCallback(() => {
-    // Swallow the click that follows a long-press so we don't also select the tab.
     if (longPressedRef.current) {
       longPressedRef.current = false
       return
@@ -397,47 +347,42 @@ function ProjectTab({
     onSelect()
   }, [onSelect])
 
-  // Skeleton state: tab row exists but the joined session hasn't hydrated yet
-  // (or `tab.sessionId` is null). Render a shimmer placeholder so the tab bar
-  // never shows the literal word "unknown" or the raw session id.
-  const a11yLabel = sessionId ? `tab ${sessionId.slice(0, 8)}` : `tab ${tabId.slice(0, 8)}`
+  const a11yLabel = `tab ${sessionId.slice(0, 8)}`
 
   const tabContent = (
-    <>
-      <button
-        type="button"
-        className={cn(
-          'flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors hover:bg-accent',
-          isActive && 'bg-accent text-accent-foreground',
-        )}
-        onClick={handleSelectClick}
-        onContextMenu={handleContextMenu}
-        onTouchStart={handleTouchStart}
-        onTouchMove={handleTouchMove}
-        onTouchEnd={handleTouchEnd}
-        onTouchCancel={handleTouchEnd}
-        aria-label={a11yLabel}
-      >
-        {session ? (
-          <>
-            <StatusDot status={session.status || 'idle'} numTurns={session.numTurns ?? 0} />
-            <div className="flex flex-col items-start min-w-0">
-              <span className="text-[11px] text-muted-foreground leading-tight font-normal">
-                {session.project}
-              </span>
-              <span className="max-w-32 truncate leading-tight">
-                {session.title || session.project}
-              </span>
-            </div>
-          </>
-        ) : (
-          <div className="flex flex-col items-start min-w-0 gap-1 py-0.5">
-            <div className="animate-pulse bg-muted h-2 w-12 rounded" />
-            <div className="animate-pulse bg-muted h-3 w-20 rounded" />
+    <button
+      type="button"
+      className={cn(
+        'flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors hover:bg-accent',
+        isActive && 'bg-accent text-accent-foreground',
+      )}
+      onClick={handleSelectClick}
+      onContextMenu={handleContextMenu}
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
+      onTouchCancel={handleTouchEnd}
+      aria-label={a11yLabel}
+    >
+      {session ? (
+        <>
+          <StatusDot status={session.status || 'idle'} numTurns={session.numTurns ?? 0} />
+          <div className="flex flex-col items-start min-w-0">
+            <span className="text-[11px] text-muted-foreground leading-tight font-normal">
+              {session.project}
+            </span>
+            <span className="max-w-32 truncate leading-tight">
+              {session.title || session.project}
+            </span>
           </div>
-        )}
-      </button>
-    </>
+        </>
+      ) : (
+        <div className="flex flex-col items-start min-w-0 gap-1 py-0.5">
+          <div className="animate-pulse bg-muted h-2 w-12 rounded" />
+          <div className="animate-pulse bg-muted h-3 w-20 rounded" />
+        </div>
+      )}
+    </button>
   )
 
   const handleMenuAction = useCallback((action: (() => void) | undefined) => {
@@ -445,16 +390,16 @@ function ProjectTab({
     action?.()
   }, [])
 
-  // Heading text used in mobile sheet / context menu — avoids the word "unknown"
-  // when the session hasn't hydrated yet by falling back to the tab id snippet.
   const headingProject = session?.project ?? null
-  const headingTitle = session?.title || session?.project || tabId.slice(0, 8)
+  const headingTitle = session?.title || session?.project || sessionId.slice(0, 8)
 
-  // On mobile, render a bottom Sheet (popup modal) for easier viewing / tapping.
   if (isMobile) {
     return (
       <>
-        <div className="group relative flex items-center border-r select-none" data-tab-id={tabId}>
+        <div
+          className="group relative flex items-center border-r select-none"
+          data-tab-id={sessionId}
+        >
           {tabContent}
         </div>
         <Sheet open={menuOpen} onOpenChange={setMenuOpen}>
@@ -505,12 +450,12 @@ function ProjectTab({
     )
   }
 
-  // Desktop: right-click dropdown menu.
-  // Use a hidden trigger so Radix doesn't add click-to-open on the tab itself.
-  // The menu is controlled entirely via the `open` state set by onContextMenu / long-press.
   return (
     <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
-      <div className="group relative flex items-center border-r select-none" data-tab-id={tabId}>
+      <div
+        className="group relative flex items-center border-r select-none"
+        data-tab-id={sessionId}
+      >
         {tabContent}
         <DropdownMenuTrigger
           className="absolute inset-0 appearance-none bg-transparent pointer-events-none"

@@ -17,15 +17,14 @@ import usePartySocket from 'partysocket/react'
 import { useCallback } from 'react'
 import { agentSessionsCollection } from '~/db/agent-sessions-collection'
 import { userPreferencesCollection } from '~/db/user-preferences-collection'
-import { userTabsCollection } from '~/db/user-tabs-collection'
 import { useSession } from '~/lib/auth-client'
 
 interface InvalidatableCollection {
   utils: { refetch: () => Promise<unknown> }
 }
 
+// user_tabs removed — tabs are now Yjs-synced via UserSettingsDO Y.Doc.
 const COLLECTIONS_BY_NAME: Record<string, InvalidatableCollection> = {
-  user_tabs: userTabsCollection as unknown as InvalidatableCollection,
   agent_sessions: agentSessionsCollection as unknown as InvalidatableCollection,
   user_preferences: userPreferencesCollection as unknown as InvalidatableCollection,
 }

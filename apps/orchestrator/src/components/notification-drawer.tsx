@@ -8,7 +8,6 @@ import {
   SheetHeader,
   SheetTitle,
 } from '~/components/ui/sheet'
-import { ensureTabForSession } from '~/lib/tab-utils'
 import { cn } from '~/lib/utils'
 import type { AppNotification } from '~/stores/notifications'
 import { useNotificationStore } from '~/stores/notifications'
@@ -50,7 +49,8 @@ export function NotificationDrawer({ open, onOpenChange }: NotificationDrawerPro
   const handleClick = (n: AppNotification) => {
     markRead(n.id)
     onOpenChange(false)
-    ensureTabForSession(n.sessionId)
+    // Navigation to /?session=X triggers AgentOrchPage's deep-link effect,
+    // which calls openTab() on the Yjs Y.Array.
     navigate({ to: '/', search: { session: n.sessionId } })
   }
 

@@ -200,6 +200,9 @@ importers:
       workbox-window:
         specifier: ^7.4.0
         version: 7.4.0
+      y-indexeddb:
+        specifier: ^9.0.12
+        version: 9.0.12(yjs@13.6.30)
       y-partyserver:
         specifier: ^2.1.4
         version: 2.1.4(@cloudflare/workers-types@4.20260410.1)(partyserver@0.0.71(@cloudflare/workers-types@4.20260410.1))(yjs@13.6.30)
@@ -6954,6 +6957,12 @@ packages:
 
   xmlchars@2.2.0:
     resolution: {integrity: sha512-JZnDKK8B0RCDw84FNdDAIpZK+JuJw+s7Lz8nksI7SIuU3UXJJslUthsi+uWBUYOwPFwW7W7PRLRfUKpxjtjFCw==}
+
+  y-indexeddb@9.0.12:
+    resolution: {integrity: sha512-9oCFRSPPzBK7/w5vOkJBaVCQZKHXB/v6SIT+WYhnJxlEC61juqG0hBrAf+y3gmSMLFLwICNH9nQ53uscuse6Hg==}
+    engines: {node: '>=16.0.0', npm: '>=8.0.0'}
+    peerDependencies:
+      yjs: ^13.0.0
 
   y-partyserver@2.1.4:
     resolution: {integrity: sha512-u+FFUIzgTrUfKHxt45ZmkGoatEzXPxGx+gEkwbDIG/Aczy/tdayNjpRXG0Ei933U9juD998T5RDYKV8kumdFzg==}
@@ -14012,6 +14021,11 @@ snapshots:
     optional: true
 
   xmlchars@2.2.0: {}
+
+  y-indexeddb@9.0.12(yjs@13.6.30):
+    dependencies:
+      lib0: 0.2.117
+      yjs: 13.6.30
 
   y-partyserver@2.1.4(@cloudflare/workers-types@4.20260410.1)(partyserver@0.0.71(@cloudflare/workers-types@4.20260410.1))(yjs@13.6.30):
     dependencies:

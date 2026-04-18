@@ -1,7 +1,5 @@
 import { useCallback, useRef, useState } from 'react'
-import { userTabsCollection } from '~/db/user-tabs-collection'
-import { setActiveTabId } from '~/hooks/use-active-tab'
-import type { UserTabRow } from '~/lib/types'
+import { getTabSyncSnapshot } from '~/hooks/use-tab-sync'
 
 const EDGE_ZONE = 30
 const SWIPE_DISTANCE = 60
@@ -45,17 +43,15 @@ export function useSwipeTabs(
 
   const handleSwipe = useCallback(
     (dir: 'left' | 'right') => {
-      const tabs = userTabsCollection.toArray as unknown as UserTabRow[]
-      if (tabs.length < 2) return false
+      const { openTabs } = getTabSyncSnapshot()
+      if (openTabs.length < 2) return false
 
-      // Find current tab by session being viewed, not by activeTabId
-      const idx = activeSessionId ? tabs.findIndex((t) => t.sessionId === activeSessionId) : -1
+      const idx = activeSessionId ? openTabs.indexOf(activeSessionId) : -1
       if (idx === -1) return false
 
       const nextIdx = dir === 'left' ? idx + 1 : idx - 1
-      if (nextIdx < 0 || nextIdx >= tabs.length) return false
-      const next = tabs[nextIdx]
-      if (!next.sessionId) return false
+      if (nextIdx < 0 || nextIdx >= openTabs.length) return false
+      const nextSessionId = openTabs[nextIdx]
 
       // Trigger slide-out animation
       setSwipeDir(dir)
@@ -63,10 +59,7 @@ export function useSwipeTabs(
 
       // After slide-out, switch tab and slide-in
       animTimer.current = setTimeout(() => {
-        setActiveTabId(next.id)
-        if (next.sessionId) {
-          onSelectSession(next.sessionId)
-        }
+        onSelectSession(nextSessionId)
         // Brief delay then clear for slide-in
         setTimeout(() => setSwipeDir(null), 20)
       }, 150)
@@ -94,8 +87,6 @@ export function useSwipeTabs(
 
       const target = e.target as HTMLElement
       if (target.closest('input, textarea, [contenteditable], [data-testid="tab-bar"]')) return
-      // Don't steal horizontal swipes from streamdown tables, code blocks, or
-      // any other horiz-scrollable content inside the message stream.
       if (isInsideHorizontalScroller(target)) return
       if (sx < EDGE_ZONE || sx > window.innerWidth - EDGE_ZONE) return
       if (absDx < SWIPE_DISTANCE) return
@@ -109,12 +100,6 @@ export function useSwipeTabs(
   const swipeProps = {
     onTouchStart,
     onTouchEnd,
-    // `pan-y` alone forbids browser-native horizontal pan on ALL descendants
-    // (touch-action intersects down the tree), which breaks horizontal scroll
-    // inside streamdown tables / code blocks. `pan-x pan-y` keeps vertical
-    // page scroll working AND lets horiz-scrollable children scroll natively;
-    // the JS handler still sees the touch events to drive tab swipes on
-    // non-scrollable areas.
     style: { touchAction: 'pan-x pan-y' } as React.CSSProperties,
   }
 
