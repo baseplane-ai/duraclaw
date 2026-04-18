@@ -241,7 +241,7 @@ export function MessageInput({
         )}
         {error && <p className="px-3 pt-1 text-xs text-destructive">{error}</p>}
         <PromptInputBody>
-          <div style={{ position: 'relative' }}>
+          <div style={{ position: 'relative', overflow: 'hidden' }}>
             <PromptInputTextarea
               ref={textareaRef}
               placeholder={textareaPlaceholder}

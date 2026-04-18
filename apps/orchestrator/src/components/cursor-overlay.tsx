@@ -80,10 +80,6 @@ const MIRROR_STYLE_PROPS: readonly (keyof CSSStyleDeclaration)[] = [
   'textIndent',
   'textTransform',
   'wordSpacing',
-  'borderBottomWidth',
-  'borderLeftWidth',
-  'borderRightWidth',
-  'borderTopWidth',
 ] as const
 
 function subscribe(awareness: Awareness, cb: () => void): () => void {
@@ -136,6 +132,13 @@ function syncMirrorStyle(mirror: HTMLDivElement, textarea: HTMLTextAreaElement) 
   }
   mirror.style.width = `${textarea.clientWidth}px`
   mirror.style.height = `${textarea.clientHeight}px`
+  // Zero out borders — they don't affect text flow and keeping them
+  // makes the content area narrower than the textarea's (clientWidth
+  // excludes borders, but border-box width includes them).
+  mirror.style.borderLeftWidth = '0'
+  mirror.style.borderRightWidth = '0'
+  mirror.style.borderTopWidth = '0'
+  mirror.style.borderBottomWidth = '0'
   mirror.style.whiteSpace = 'pre-wrap'
   mirror.style.wordWrap = 'break-word'
   mirror.style.overflow = 'hidden'
