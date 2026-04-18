@@ -27,7 +27,7 @@ export function AgentOrchPage() {
 }
 
 function AgentOrchContent() {
-  const { sessions, updateSession } = useSessionsCollection()
+  const { sessions } = useSessionsCollection()
   const search = useSearch({ from: '/_authenticated/' })
   const navigate = useNavigate()
   const searchSessionId = (search as { session?: string }).session ?? null
@@ -210,13 +210,6 @@ function AgentOrchContent() {
     [navigate, setActive],
   )
 
-  const handleStateChange = useCallback(
-    (sessionId: string, patch: Record<string, unknown>) => {
-      updateSession(sessionId, patch)
-    },
-    [updateSession],
-  )
-
   const { swipeProps, swipeDir } = useSwipeTabs(handleSelectSession, activeSessionId)
 
   // ── Keyboard shortcuts ───────────────────────────────────────────
@@ -284,7 +277,6 @@ function AgentOrchContent() {
               key={activeSessionId}
               sessionId={activeSessionId}
               spawnConfig={spawnConfig}
-              onStateChange={handleStateChange}
             />
           ) : (
             <QuickPromptInput
@@ -312,11 +304,9 @@ function AgentOrchContent() {
 function AgentDetailWithSpawn({
   sessionId,
   spawnConfig,
-  onStateChange,
 }: {
   sessionId: string
   spawnConfig: SpawnConfig | null
-  onStateChange: (sessionId: string, patch: Record<string, unknown>) => void
 }) {
   const agent = useCodingAgent(sessionId)
   const spawnedRef = useRef(false)
@@ -329,18 +319,6 @@ function AgentDetailWithSpawn({
       })
     }
   }, [spawnConfig, agent.state, agent.spawn])
-
-  const prevStateRef = useRef(agent.state)
-  useEffect(() => {
-    if (agent.state && agent.state !== prevStateRef.current) {
-      prevStateRef.current = agent.state
-      onStateChange(sessionId, {
-        status: agent.state.status,
-        num_turns: agent.state.num_turns,
-        error: agent.state.error,
-      })
-    }
-  }, [agent.state, sessionId, onStateChange])
 
   return <AgentDetailView name={sessionId} agent={agent} />
 }
