@@ -1,3 +1,4 @@
+import { routePartykitRequest } from 'partyserver'
 import { ProjectRegistry } from './agents/project-registry'
 import { SessionCollabDO } from './agents/session-collab-do'
 import { SessionDO } from './agents/session-do'
@@ -20,21 +21,17 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url)
 
-    // User settings DO — WS upgrade for live tab sync
-    if (
-      url.pathname === '/api/user-settings/ws' &&
-      request.headers.get('Upgrade') === 'websocket'
-    ) {
-      const authSession = await getRequestSession(env, request)
-      if (!authSession) {
-        return new Response('Unauthorized', { status: 401 })
-      }
-      const doId = env.USER_SETTINGS.idFromName(authSession.userId)
-      const stub = env.USER_SETTINGS.get(doId)
-      const headers = new Headers(request.headers)
-      headers.set('x-partykit-room', authSession.userId)
-      headers.set('x-user-id', authSession.userId)
-      return stub.fetch(new Request(request, { headers }))
+    // PartyKit-style routing for /parties/user-settings/:userId — the
+    // browser WS for cache-invalidation fanout (issue #7 p3, B-API-4b).
+    // routePartykitRequest kebab-cases the binding name, so USER_SETTINGS
+    // is reachable as the `user-settings` party. Auth (cookie userId ==
+    // path userId) is enforced inside the DO's onConnect.
+    if (url.pathname.startsWith('/parties/')) {
+      const partyResp = await routePartykitRequest(
+        request,
+        env as unknown as Record<string, unknown>,
+      )
+      if (partyResp) return partyResp
     }
 
     // Session collab DO — WS upgrade for Yjs multiplayer draft sync

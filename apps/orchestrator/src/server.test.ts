@@ -27,6 +27,12 @@ vi.mock('./agents/session-collab-do', () => ({
   SessionCollabDO: class {},
 }))
 
+// partyserver imports `cloudflare:workers` which the node ESM loader
+// can't resolve. Stub the only export server.ts uses.
+vi.mock('partyserver', () => ({
+  routePartykitRequest: vi.fn().mockResolvedValue(null),
+}))
+
 import { getRequestSession } from './api/auth-session'
 import serverExport from './server'
 

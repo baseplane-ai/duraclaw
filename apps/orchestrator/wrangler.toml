@@ -53,6 +53,12 @@ new_sqlite_classes = ["UserSettingsDO"]
 tag = "v3"
 new_sqlite_classes = ["SessionCollabDO"]
 
+# Issue #7 p3: UserSettingsDO is now a stateless PartyServer fanout.
+# The class no longer touches its SQLite — storage from the v2
+# Agent-based implementation is orphaned and harmlessly reaped.
+[[migrations]]
+tag = "v4"
+
 # D1 database for auth
 [[d1_databases]]
 binding = "AUTH_DB"
