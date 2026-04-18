@@ -9,6 +9,24 @@ const SWIPE_RATIO = 1.5
 export type SwipeDir = 'left' | 'right' | null
 
 /**
+ * Returns true if `el` is inside (or is itself) an element that can be
+ * horizontally scrolled — i.e. an ancestor has `overflow-x: auto|scroll`
+ * AND actual horizontal overflow. Used to exempt streamdown tables, code
+ * blocks, and other horiz-scrollable content from the tab-swipe gesture.
+ */
+function isInsideHorizontalScroller(el: HTMLElement | null): boolean {
+  let node: HTMLElement | null = el
+  while (node && node !== document.body && node !== document.documentElement) {
+    if (node.scrollWidth > node.clientWidth) {
+      const overflowX = getComputedStyle(node).overflowX
+      if (overflowX === 'auto' || overflowX === 'scroll') return true
+    }
+    node = node.parentElement
+  }
+  return false
+}
+
+/**
  * Returns props to spread onto a container element + swipe animation state.
  * Detects horizontal swipe gestures to switch tabs.
  *
@@ -71,6 +89,9 @@ export function useSwipeTabs(
 
       const target = e.target as HTMLElement
       if (target.closest('input, textarea, [contenteditable], [data-testid="tab-bar"]')) return
+      // Don't steal horizontal swipes from streamdown tables, code blocks, or
+      // any other horiz-scrollable content inside the message stream.
+      if (isInsideHorizontalScroller(target)) return
       if (sx < EDGE_ZONE || sx > window.innerWidth - EDGE_ZONE) return
       if (absDx < SWIPE_DISTANCE) return
       if (absDx < absDy * SWIPE_RATIO) return
@@ -83,7 +104,13 @@ export function useSwipeTabs(
   const swipeProps = {
     onTouchStart,
     onTouchEnd,
-    style: { touchAction: 'pan-y' } as React.CSSProperties,
+    // `pan-y` alone forbids browser-native horizontal pan on ALL descendants
+    // (touch-action intersects down the tree), which breaks horizontal scroll
+    // inside streamdown tables / code blocks. `pan-x pan-y` keeps vertical
+    // page scroll working AND lets horiz-scrollable children scroll natively;
+    // the JS handler still sees the touch events to drive tab swipes on
+    // non-scrollable areas.
+    style: { touchAction: 'pan-x pan-y' } as React.CSSProperties,
   }
 
   return { swipeProps, swipeDir }
