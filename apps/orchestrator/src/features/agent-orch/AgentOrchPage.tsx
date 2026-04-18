@@ -36,9 +36,14 @@ function AgentOrchContent() {
 
   const { openTabs, activeSessionId, openTab, closeTab, setActive, reorder } = useTabSync()
 
-  // Deep-link: if URL has ?session=X, open it. Y.Map keys are inherently
-  // unique so this can't create duplicates even if it fires before
-  // IndexedDB hydration — set() on the same key converges to one entry.
+  // Deep-link: URL has ?session=X → open & activate that tab.
+  // Y.Map keys can't duplicate, so this is safe even before hydration.
+  //
+  // There is intentionally NO separate "sync URL from activeSessionId"
+  // effect. Two effects that both read and write the URL fight each other
+  // (deep-link sets Yjs state for the NEXT render, while URL-sync reads
+  // the CURRENT render's stale activeSessionId and navigates backward).
+  // Instead, every action that changes tabs also navigates explicitly.
   const deepLinkedRef = useRef<string | null>(null)
   useEffect(() => {
     if (searchSessionId && searchSessionId !== deepLinkedRef.current) {
@@ -48,15 +53,16 @@ function AgentOrchContent() {
     }
   }, [searchSessionId, openTab, sessions])
 
-  // Sync URL when activeSessionId changes (Yjs → URL).
+  // Cold-start restore: page loaded at bare "/" but Yjs has an active
+  // session from storage — reflect it in the URL (one-shot).
+  const coldStartedRef = useRef(false)
   useEffect(() => {
-    const currentUrlSession = (search as { session?: string }).session ?? null
-    if (activeSessionId && activeSessionId !== currentUrlSession) {
+    if (coldStartedRef.current || searchSessionId) return
+    if (activeSessionId) {
+      coldStartedRef.current = true
       navigate({ to: '/', search: { session: activeSessionId }, replace: true })
-    } else if (!activeSessionId && currentUrlSession) {
-      navigate({ to: '/', search: {}, replace: true })
     }
-  }, [activeSessionId, search, navigate])
+  }, [activeSessionId, navigate, searchSessionId])
 
   const [spawnConfig, setSpawnConfig] = useState<SpawnConfig | null>(null)
   const [quickPromptHint, setQuickPromptHint] = useState<{
