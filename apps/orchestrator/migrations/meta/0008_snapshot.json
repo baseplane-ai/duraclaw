@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "28917499-f7f9-4b07-a3ee-dcb8b543336b",
-  "prevId": "00000000-0000-0000-0000-000000000000",
+  "id": "f4ba8057-39b6-4b89-8700-a17e2bdf3e5e",
+  "prevId": "28917499-f7f9-4b07-a3ee-dcb8b543336b",
   "tables": {
     "accounts": {
       "name": "accounts",
@@ -530,6 +530,13 @@
           "notNull": false,
           "autoincrement": false,
           "default": "'high'"
+        },
+        "hidden_projects_json": {
+          "name": "hidden_projects_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         },
         "updated_at": {
           "name": "updated_at",

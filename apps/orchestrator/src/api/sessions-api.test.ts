@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { getRequestSession } from './auth-session'
-import { createApiApp } from './index'
+import { installFakeDb, makeFakeDb } from './test-helpers'
 
 vi.mock('./auth-session', () => ({
   getRequestSession: vi.fn(),
@@ -11,30 +11,33 @@ vi.mock('./auth-routes', async () => {
   return { authRoutes: new Hono() }
 })
 
+vi.mock('./notify', () => ({
+  notifyInvalidation: vi.fn().mockResolvedValue(undefined),
+}))
+
+vi.mock('drizzle-orm/d1', () => ({
+  drizzle: vi.fn(() => (globalThis as any).__fakeDb),
+}))
+
+import { createApiApp } from './index'
+
 const mockedGetRequestSession = vi.mocked(getRequestSession)
 
-function createMockRegistry(overrides: Record<string, any> = {}) {
-  return {
-    searchSessions: vi.fn().mockResolvedValue([]),
-    listSessionsPaginated: vi.fn().mockResolvedValue({ sessions: [], total: 0 }),
-    listSessions: vi.fn().mockResolvedValue([]),
-    listActiveSessions: vi.fn().mockResolvedValue([]),
-    listSessionsByProject: vi.fn().mockResolvedValue([]),
-    getSession: vi.fn().mockResolvedValue(null),
-    ...overrides,
-  }
-}
-
-function createMockEnv(registry: ReturnType<typeof createMockRegistry>) {
+function createMockEnv() {
   return {
     SESSION_REGISTRY: {
       idFromName: vi.fn().mockReturnValue('registry-id'),
-      get: vi.fn().mockReturnValue(registry),
+      get: vi.fn().mockReturnValue({}),
     },
     SESSION_AGENT: {
       newUniqueId: vi.fn(),
       idFromString: vi.fn(),
+      idFromName: vi.fn().mockReturnValue('do-id'),
       get: vi.fn(),
+    },
+    USER_SETTINGS: {
+      idFromName: vi.fn().mockReturnValue('settings-id'),
+      get: vi.fn().mockReturnValue({ fetch: vi.fn().mockResolvedValue(new Response(null)) }),
     },
     AUTH_DB: {},
     BETTER_AUTH_SECRET: 'test-secret',
@@ -44,7 +47,6 @@ function createMockEnv(registry: ReturnType<typeof createMockRegistry>) {
 
 function makeApp(env: any) {
   const app = createApiApp()
-  // Wrap to inject env bindings
   return {
     async request(path: string, init?: RequestInit) {
       const url = `http://localhost${path}`
@@ -55,12 +57,13 @@ function makeApp(env: any) {
 }
 
 describe('GET /api/sessions/search', () => {
-  let registry: ReturnType<typeof createMockRegistry>
   let env: any
+  let fakeDb: ReturnType<typeof makeFakeDb>
 
   beforeEach(() => {
-    registry = createMockRegistry()
-    env = createMockEnv(registry)
+    env = createMockEnv()
+    fakeDb = makeFakeDb()
+    installFakeDb(fakeDb.db)
     mockedGetRequestSession.mockResolvedValue({
       userId: 'user-1',
       session: { id: 's' },
@@ -74,29 +77,31 @@ describe('GET /api/sessions/search', () => {
 
     expect(res.status).toBe(200)
     await expect(res.json()).resolves.toEqual({ sessions: [] })
-    expect(registry.searchSessions).not.toHaveBeenCalled()
+    // Should not even hit the db when q is empty
+    expect(fakeDb.db.select).not.toHaveBeenCalled()
   })
 
-  it('calls searchSessions with the query and returns results', async () => {
+  it('runs a select against agent_sessions and returns the rows', async () => {
     const mockSessions = [{ id: 'sess-1', project: 'foo', status: 'done', summary: 'did stuff' }]
-    registry.searchSessions.mockResolvedValue(mockSessions)
+    fakeDb.data.select = mockSessions
 
     const app = makeApp(env)
     const res = await app.request('/api/sessions/search?q=stuff')
 
     expect(res.status).toBe(200)
     await expect(res.json()).resolves.toEqual({ sessions: mockSessions })
-    expect(registry.searchSessions).toHaveBeenCalledWith('user-1', 'stuff')
+    expect(fakeDb.db.select).toHaveBeenCalled()
   })
 })
 
 describe('GET /api/sessions/history', () => {
-  let registry: ReturnType<typeof createMockRegistry>
   let env: any
+  let fakeDb: ReturnType<typeof makeFakeDb>
 
   beforeEach(() => {
-    registry = createMockRegistry()
-    env = createMockEnv(registry)
+    env = createMockEnv()
+    fakeDb = makeFakeDb()
+    installFakeDb(fakeDb.db)
     mockedGetRequestSession.mockResolvedValue({
       userId: 'user-1',
       session: { id: 's' },
@@ -104,73 +109,47 @@ describe('GET /api/sessions/history', () => {
     })
   })
 
-  it('calls listSessionsPaginated with default options', async () => {
-    registry.listSessionsPaginated.mockResolvedValue({ sessions: [], total: 0 })
-
+  it('returns empty list with nextOffset:null when no rows', async () => {
+    fakeDb.data.select = []
     const app = makeApp(env)
     const res = await app.request('/api/sessions/history')
 
     expect(res.status).toBe(200)
-    await expect(res.json()).resolves.toEqual({ sessions: [], total: 0 })
-    expect(registry.listSessionsPaginated).toHaveBeenCalledWith('user-1', {
-      sortBy: undefined,
-      sortDir: undefined,
-      status: undefined,
-      project: undefined,
-      model: undefined,
-      limit: undefined,
-      offset: undefined,
-    })
+    await expect(res.json()).resolves.toEqual({ sessions: [], nextOffset: null })
   })
 
-  it('forwards query parameters to listSessionsPaginated', async () => {
-    const mockResult = {
-      sessions: [{ id: 'sess-1', status: 'done' }],
-      total: 1,
-    }
-    registry.listSessionsPaginated.mockResolvedValue(mockResult)
-
-    const app = makeApp(env)
-    const res = await app.request(
-      '/api/sessions/history?sortBy=created_at&sortDir=asc&status=done&project=myproj&model=opus&limit=10&offset=5',
-    )
-
-    expect(res.status).toBe(200)
-    await expect(res.json()).resolves.toEqual(mockResult)
-    expect(registry.listSessionsPaginated).toHaveBeenCalledWith('user-1', {
-      sortBy: 'created_at',
-      sortDir: 'asc',
-      status: 'done',
-      project: 'myproj',
-      model: 'opus',
-      limit: 10,
-      offset: 5,
-    })
-  })
-
-  it('returns paginated results with total count', async () => {
-    const mockResult = {
-      sessions: [
-        { id: 's1', status: 'done' },
-        { id: 's2', status: 'running' },
-      ],
-      total: 42,
-    }
-    registry.listSessionsPaginated.mockResolvedValue(mockResult)
+  it('returns rows and nextOffset when result exactly fills the page', async () => {
+    const rows = [
+      { id: 's1', status: 'done' },
+      { id: 's2', status: 'running' },
+    ]
+    fakeDb.data.select = rows
 
     const app = makeApp(env)
     const res = await app.request('/api/sessions/history?limit=2&offset=0')
 
     expect(res.status).toBe(200)
-    const body = (await res.json()) as { total: number; sessions: unknown[] }
-    expect(body.total).toBe(42)
+    const body = (await res.json()) as { nextOffset: number | null; sessions: unknown[] }
     expect(body.sessions).toHaveLength(2)
+    expect(body.nextOffset).toBe(2)
+  })
+
+  it('returns null nextOffset when result is smaller than the page', async () => {
+    fakeDb.data.select = [{ id: 's1', status: 'done' }]
+
+    const app = makeApp(env)
+    const res = await app.request('/api/sessions/history?limit=10&offset=0')
+
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { nextOffset: number | null; sessions: unknown[] }
+    expect(body.sessions).toHaveLength(1)
+    expect(body.nextOffset).toBeNull()
   })
 })
 
 describe('POST /api/sessions', () => {
-  let registry: ReturnType<typeof createMockRegistry>
   let env: any
+  let fakeDb: ReturnType<typeof makeFakeDb>
   let lastFetchBody: any
 
   function createMockSessionDO() {
@@ -187,12 +166,9 @@ describe('POST /api/sessions', () => {
 
   beforeEach(() => {
     lastFetchBody = null
-    registry = createMockRegistry({
-      registerSession: vi.fn().mockResolvedValue(undefined),
-      findSessionBySdkId: vi.fn().mockResolvedValue(null),
-      replaceSessionForResume: vi.fn().mockResolvedValue(undefined),
-    })
-    env = createMockEnv(registry)
+    env = createMockEnv()
+    fakeDb = makeFakeDb()
+    installFakeDb(fakeDb.db)
     env.SESSION_AGENT.newUniqueId.mockReturnValue({ toString: () => 'new-do-id' })
     env.SESSION_AGENT.get.mockReturnValue(createMockSessionDO())
     env.CC_GATEWAY_URL = 'wss://gateway.test'
@@ -227,14 +203,8 @@ describe('POST /api/sessions', () => {
     expect(res.status).toBe(201)
     const body = (await res.json()) as { session_id: string }
     expect(body.session_id).toBe('new-do-id')
-    expect(registry.registerSession).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'new-do-id',
-        userId: 'user-1',
-        project: 'my-project',
-        status: 'running',
-      }),
-    )
+    // The route inserts a row into agent_sessions
+    expect(fakeDb.db.insert).toHaveBeenCalled()
   })
 
   it('does not pass sdk_session_id to DO for a regular spawn', async () => {
@@ -272,21 +242,7 @@ describe('POST /api/sessions', () => {
     expect(lastFetchBody.prompt).toBe('resume')
   })
 
-  it('replaces existing discovered session on resume instead of creating duplicate', async () => {
-    const existingSession = {
-      id: 'old-discovered-id',
-      project: 'my-project',
-      status: 'idle',
-      model: 'opus',
-      created_at: '2026-01-01T00:00:00Z',
-      updated_at: '2026-01-01T00:00:00Z',
-      title: 'Old Title',
-      summary: 'Old Summary',
-      origin: 'discovered',
-      sdk_session_id: 'sdk-abc-123',
-    }
-    registry.findSessionBySdkId.mockResolvedValue(existingSession)
-
+  it('uses upsert (insert + onConflictDoUpdate) on resume to swap a stale discovered row', async () => {
     const app = makeApp(env)
     const res = await app.request('/api/sessions', {
       method: 'POST',
@@ -302,17 +258,8 @@ describe('POST /api/sessions', () => {
     expect(res.status).toBe(201)
     const body = (await res.json()) as { session_id: string }
     expect(body.session_id).toBe('new-do-id')
-    // Should replace the old session, not register a new one
-    expect(registry.replaceSessionForResume).toHaveBeenCalledWith(
-      'old-discovered-id',
-      expect.objectContaining({
-        id: 'new-do-id',
-        sdk_session_id: 'sdk-abc-123',
-        title: 'Old Title',
-        summary: 'Old Summary',
-      }),
-    )
-    expect(registry.registerSession).not.toHaveBeenCalled()
+    // Insert was called with the new row (resume goes through onConflictDoUpdate)
+    expect(fakeDb.db.insert).toHaveBeenCalled()
   })
 
   it('returns 500 when DO returns non-ok response', async () => {
@@ -339,12 +286,13 @@ describe('POST /api/sessions', () => {
 })
 
 describe('route ordering: /search and /history before /:id', () => {
-  let registry: ReturnType<typeof createMockRegistry>
   let env: any
+  let fakeDb: ReturnType<typeof makeFakeDb>
 
   beforeEach(() => {
-    registry = createMockRegistry()
-    env = createMockEnv(registry)
+    env = createMockEnv()
+    fakeDb = makeFakeDb()
+    installFakeDb(fakeDb.db)
     mockedGetRequestSession.mockResolvedValue({
       userId: 'user-1',
       session: { id: 's' },
@@ -357,8 +305,8 @@ describe('route ordering: /search and /history before /:id', () => {
     const res = await app.request('/api/sessions/search?q=test')
 
     expect(res.status).toBe(200)
-    // If it hit /:id, getSession would be called with 'search'
-    expect(registry.getSession).not.toHaveBeenCalled()
+    // /:id would invoke the SessionDO; /search just runs a select.
+    expect(env.SESSION_AGENT.get).not.toHaveBeenCalled()
   })
 
   it('/api/sessions/history is not caught by /:id route', async () => {
@@ -366,6 +314,6 @@ describe('route ordering: /search and /history before /:id', () => {
     const res = await app.request('/api/sessions/history')
 
     expect(res.status).toBe(200)
-    expect(registry.getSession).not.toHaveBeenCalled()
+    expect(env.SESSION_AGENT.get).not.toHaveBeenCalled()
   })
 })

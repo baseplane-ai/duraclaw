@@ -4,6 +4,7 @@ import { SessionDO } from './agents/session-do'
 import { UserSettingsDO } from './agents/user-settings-do'
 import { createApiApp } from './api'
 import { getRequestSession } from './api/auth-session'
+import { scheduled } from './api/scheduled'
 import type { Env } from './lib/types'
 
 // Gateway + session-runner decoupling live on prod as of 2026-04-17 (#1).
@@ -104,6 +105,7 @@ export default {
 
     return env.ASSETS.fetch(new Request(new URL('/', request.url), request))
   },
+  scheduled,
 }
 
 export { ProjectRegistry, SessionCollabDO, SessionDO, UserSettingsDO }

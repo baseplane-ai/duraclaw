@@ -1,6 +1,10 @@
 import { Agent, type Connection, type ConnectionContext, callable } from 'agents'
 import type { SessionMessage, SessionMessagePart } from 'agents/experimental/memory/session'
 import { Session } from 'agents/experimental/memory/session'
+import { eq } from 'drizzle-orm'
+import { drizzle } from 'drizzle-orm/d1'
+import * as schema from '~/db/schema'
+import { agentSessions } from '~/db/schema'
 import { generateActionToken } from '~/lib/action-token'
 import { runMigrations } from '~/lib/do-migrations'
 import { contentToParts } from '~/lib/message-parts'
@@ -531,7 +535,78 @@ export class SessionDO extends Agent<Env, SessionState> {
     }
   }
 
+  /**
+   * Drizzle handle scoped to this DO's request env. Lazy-init per call so
+   * the binding is always fresh. The fan-out writes here mirror the
+   * SESSION_REGISTRY DO writes below — both are kept until p6 deletes the
+   * registry binding so any stale reader sees the same data on either side.
+   */
+  private get d1() {
+    return drizzle(this.env.AUTH_DB, { schema })
+  }
+
+  private async syncStatusToD1(updatedAt: string) {
+    try {
+      const sessionId = this.state.session_id ?? this.ctx.id.toString()
+      await this.d1
+        .update(agentSessions)
+        .set({ status: this.state.status, updatedAt, lastActivity: updatedAt })
+        .where(eq(agentSessions.id, sessionId))
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Failed to sync status to D1:`, err)
+    }
+  }
+
+  private async syncResultToD1(updatedAt: string) {
+    try {
+      const sessionId = this.state.session_id ?? this.ctx.id.toString()
+      await this.d1
+        .update(agentSessions)
+        .set({
+          summary: this.state.summary,
+          durationMs: this.state.duration_ms,
+          totalCostUsd: this.state.total_cost_usd,
+          numTurns: this.state.num_turns,
+          updatedAt,
+          lastActivity: updatedAt,
+        })
+        .where(eq(agentSessions.id, sessionId))
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Failed to sync result to D1:`, err)
+    }
+  }
+
+  private async syncSdkSessionIdToD1(sdkSessionId: string, updatedAt: string) {
+    try {
+      const sessionId = this.state.session_id ?? this.ctx.id.toString()
+      await this.d1
+        .update(agentSessions)
+        .set({ sdkSessionId, updatedAt })
+        .where(eq(agentSessions.id, sessionId))
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Failed to sync sdk_session_id to D1:`, err)
+    }
+  }
+
+  private async syncKataToD1(kataState: KataSessionState | null, updatedAt: string) {
+    try {
+      const sessionId = this.state.session_id ?? this.ctx.id.toString()
+      await this.d1
+        .update(agentSessions)
+        .set({
+          kataMode: kataState?.currentMode ?? null,
+          kataIssue: kataState?.issueNumber ?? null,
+          kataPhase: kataState?.currentPhase ?? null,
+          updatedAt,
+        })
+        .where(eq(agentSessions.id, sessionId))
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Failed to sync kata to D1:`, err)
+    }
+  }
+
   private async syncStatusToRegistry() {
+    const now = new Date().toISOString()
     try {
       const registryId = this.env.SESSION_REGISTRY.idFromName('default')
       const registry = this.env.SESSION_REGISTRY.get(registryId) as any
@@ -542,9 +617,11 @@ export class SessionDO extends Agent<Env, SessionState> {
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to sync status to registry:`, err)
     }
+    await this.syncStatusToD1(now)
   }
 
   private async syncResultToRegistry() {
+    const now = new Date().toISOString()
     try {
       const registryId = this.env.SESSION_REGISTRY.idFromName('default')
       const registry = this.env.SESSION_REGISTRY.get(registryId) as any
@@ -557,9 +634,11 @@ export class SessionDO extends Agent<Env, SessionState> {
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to sync result to registry:`, err)
     }
+    await this.syncResultToD1(now)
   }
 
   private async syncSdkSessionIdToRegistry(sdkSessionId: string) {
+    const now = new Date().toISOString()
     try {
       const sessionId = this.state.session_id ?? this.ctx.id.toString()
       const registryId = this.env.SESSION_REGISTRY.idFromName('default')
@@ -568,6 +647,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to sync sdk_session_id to registry:`, err)
     }
+    await this.syncSdkSessionIdToD1(sdkSessionId, now)
   }
 
   private async syncDiscoveredToRegistry() {
@@ -599,6 +679,7 @@ export class SessionDO extends Agent<Env, SessionState> {
   }
 
   private async syncKataToRegistry(kataState: KataSessionState | null) {
+    const now = new Date().toISOString()
     try {
       const registryId = this.env.SESSION_REGISTRY.idFromName('default')
       const registry = this.env.SESSION_REGISTRY.get(registryId) as any
@@ -610,6 +691,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to sync kata state to registry:`, err)
     }
+    await this.syncKataToD1(kataState, now)
   }
 
   /**

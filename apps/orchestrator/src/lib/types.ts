@@ -54,3 +54,56 @@ export interface Env {
   /** Watchdog stale threshold in ms. Default 90_000 when unset. */
   STALE_THRESHOLD_MS?: string
 }
+
+// ── D1 row response shapes (issue #7 p2) ───────────────────────────
+
+/**
+ * Response envelope for /api/sessions* — a row from the D1 agent_sessions
+ * table mapped through Drizzle, so keys are camelCase. The schema's
+ * `archived` column is stored as integer 0/1 but Drizzle returns it as a
+ * boolean via `{ mode: 'boolean' }` in the schema definition.
+ */
+export interface AgentSessionRow {
+  id: string
+  userId: string
+  project: string
+  status: string
+  model: string | null
+  sdkSessionId: string | null
+  createdAt: string
+  updatedAt: string
+  lastActivity: string | null
+  numTurns: number | null
+  prompt: string | null
+  summary: string | null
+  title: string | null
+  tag: string | null
+  origin: string | null
+  agent: string | null
+  archived: boolean
+  durationMs: number | null
+  totalCostUsd: number | null
+  messageCount: number | null
+  kataMode: string | null
+  kataIssue: number | null
+  kataPhase: string | null
+}
+
+export interface UserTabRow {
+  id: string
+  userId: string
+  sessionId: string | null
+  position: number
+  createdAt: string
+}
+
+export interface UserPreferencesRow {
+  userId: string
+  permissionMode: string | null
+  model: string | null
+  maxBudget: number | null
+  thinkingMode: string | null
+  effort: string | null
+  hiddenProjects: string | null
+  updatedAt: string
+}

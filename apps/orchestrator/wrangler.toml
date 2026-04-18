@@ -12,6 +12,11 @@ custom_domain = true
 [observability]
 enabled = true
 
+# Cron triggers — replaces the in-DO discovery alarm (issue #7 p2).
+# Calls the `scheduled` handler in src/server.ts every 5 minutes.
+[triggers]
+crons = ['*/5 * * * *']
+
 [assets]
 binding = "ASSETS"
 directory = "./dist/client"

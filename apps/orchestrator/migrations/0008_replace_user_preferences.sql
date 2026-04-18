@@ -11,6 +11,7 @@ CREATE TABLE `user_preferences` (
 	`max_budget` real,
 	`thinking_mode` text DEFAULT 'adaptive',
 	`effort` text DEFAULT 'high',
+	`hidden_projects_json` text,
 	`updated_at` text NOT NULL,
 	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE cascade
 );
