@@ -25,6 +25,7 @@ import {
   ToolOutput,
 } from '@duraclaw/ai-elements'
 import {
+  BrainIcon,
   CheckIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
@@ -190,6 +191,49 @@ function ToolPillRow({ parts }: { parts: SessionMessagePart[] }) {
             ))}
             {selectedSplit?.ungrouped.map((p, i) => (
               <ToolCallDetail key={p.toolCallId ?? `u-${i}`} part={p} />
+            ))}
+          </div>
+        </SheetContent>
+      </Sheet>
+    </>
+  )
+}
+
+function ReasoningPillRow({ parts }: { parts: SessionMessagePart[] }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <>
+      <div className="flex flex-wrap gap-1.5">
+        <Badge asChild variant="secondary" className="rounded-full px-2.5 py-0.5 font-normal">
+          <button
+            type="button"
+            onClick={() => setOpen(true)}
+            aria-label={`Show ${parts.length} thought${parts.length === 1 ? '' : 's'}`}
+          >
+            <BrainIcon className="mr-1 size-3" />
+            <span>Thought for a few seconds</span>
+            {parts.length > 1 && <span className="text-muted-foreground">×{parts.length}</span>}
+          </button>
+        </Badge>
+      </div>
+      <Sheet open={open} onOpenChange={setOpen}>
+        <SheetContent side="right" className="flex w-full flex-col gap-0 sm:max-w-2xl">
+          <SheetHeader className="border-b">
+            <SheetTitle>Reasoning</SheetTitle>
+            <SheetDescription>
+              {parts.length} thought{parts.length === 1 ? '' : 's'}
+            </SheetDescription>
+          </SheetHeader>
+          <div className="flex-1 space-y-3 overflow-y-auto p-4">
+            {parts.map((p, i) => (
+              <Reasoning
+                key={p.toolCallId ?? i}
+                isStreaming={p.state === 'streaming'}
+                defaultOpen={true}
+              >
+                <ReasoningTrigger />
+                <ReasoningContent>{p.text || ''}</ReasoningContent>
+              </Reasoning>
             ))}
           </div>
         </SheetContent>
@@ -518,6 +562,17 @@ export function ChatThread({
             if (msg.role === 'assistant') {
               const nodes: ReactNode[] = []
               let pending: SessionMessagePart[] = []
+              let reasoningBuf: SessionMessagePart[] = []
+              const flushReasoning = () => {
+                if (reasoningBuf.length === 0) return
+                nodes.push(
+                  <ReasoningPillRow
+                    key={`thoughts-${msg.id}-${nodes.length}`}
+                    parts={reasoningBuf}
+                  />,
+                )
+                reasoningBuf = []
+              }
               const flushPending = () => {
                 if (pending.length === 0) return
                 nodes.push(<ToolPillRow key={`pills-${msg.id}-${nodes.length}`} parts={pending} />)
@@ -527,6 +582,9 @@ export function ChatThread({
                 const isGroupableTool =
                   part.type?.startsWith('tool-') && !isPendingGate(part, readOnly)
                 if (isGroupableTool) {
+                  // Reasoning precedes its tools visually, so flush the thought
+                  // chip before starting/continuing a tool run.
+                  flushReasoning()
                   pending.push(part)
                   return
                 }
@@ -534,18 +592,19 @@ export function ChatThread({
                 // pills (which already group by file path in the detail sheet).
                 // Skip without flushing so they don't fragment the chip run.
                 if (part.type === 'data-file-changed') return
-                // Reasoning renders inline but does not flush pending — only
-                // actual assistant text merits a message break. Short thinking
-                // blips between tool calls should not fragment the chip run.
+                // Collapse consecutive reasoning parts into a single chip
+                // rather than emitting one "Thought for a few seconds" block
+                // per thought. Does not flush the pending tool buffer.
                 if (part.type === 'reasoning') {
-                  nodes.push(
-                    renderPart(part, i, gate, status, onResolveGate, readOnly, onQaResolved),
-                  )
+                  reasoningBuf.push(part)
                   return
                 }
+                // text / gate / error / etc. — real message break.
+                flushReasoning()
                 flushPending()
                 nodes.push(renderPart(part, i, gate, status, onResolveGate, readOnly, onQaResolved))
               })
+              flushReasoning()
               flushPending()
               return (
                 <div key={msg.id} className="group relative" data-turn-index={turnIndex}>
