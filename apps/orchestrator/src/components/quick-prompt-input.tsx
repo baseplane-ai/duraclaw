@@ -101,8 +101,8 @@ export function QuickPromptInput({
   const existingTab = useMemo(() => {
     if (!allSessions) return undefined
     const sessionsMap = new Map<string, { project?: string }>()
-    for (const row of allSessions as Array<{ session: { id: string; project?: string } }>) {
-      sessionsMap.set(row.session.id, row.session)
+    for (const row of allSessions as Array<{ id: string; project?: string }>) {
+      sessionsMap.set(row.id, row)
     }
     return openTabIds.find((id) => sessionsMap.get(id)?.project === selectedProject)
       ? true

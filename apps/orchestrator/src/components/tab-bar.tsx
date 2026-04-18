@@ -73,8 +73,8 @@ export function TabBar({
   const sessionsMap = useMemo(() => {
     const m = new Map<string, SessionRecord>()
     if (!allSessions) return m
-    for (const row of allSessions as Array<{ session: SessionRecord }>) {
-      m.set(row.session.id, row.session)
+    for (const row of allSessions as SessionRecord[]) {
+      m.set(row.id, row)
     }
     return m
   }, [allSessions])
