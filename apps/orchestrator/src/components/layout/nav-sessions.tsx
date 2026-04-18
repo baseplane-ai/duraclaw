@@ -39,11 +39,10 @@ import {
   useSidebar,
 } from '~/components/ui/sidebar'
 import type { SessionRecord } from '~/db/sessions-collection'
-import { userTabsCollection } from '~/db/user-tabs-collection'
 import { getPreviewText, StatusDot } from '~/features/agent-orch/session-utils'
-import { setActiveTabId } from '~/hooks/use-active-tab'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
-import type { PrInfo, ProjectInfo, UserTabRow } from '~/lib/types'
+import { ensureTabForSession } from '~/lib/tab-utils'
+import type { PrInfo, ProjectInfo } from '~/lib/types'
 import { cn } from '~/lib/utils'
 
 /** ProjectInfo extended with the `hidden` flag added by the API route */
@@ -279,28 +278,7 @@ export function NavSessions() {
 
   const handleSelect = useCallback(
     (session: SessionRecord) => {
-      // Insert-or-activate: reuse the existing tab for this session if one
-      // exists; else open a fresh tab. Tab title/project come from the join
-      // with agentSessionsCollection so we only need to seed the row shape.
-      const tabs = userTabsCollection.toArray as unknown as UserTabRow[]
-      const existing = tabs.find((t) => t.sessionId === session.id)
-      if (existing) {
-        setActiveTabId(existing.id)
-      } else {
-        const id =
-          typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-            ? crypto.randomUUID().slice(0, 8)
-            : Math.random().toString(36).slice(2, 10)
-        const nextPos = tabs.length === 0 ? 0 : Math.max(0, ...tabs.map((t) => t.position)) + 1
-        userTabsCollection.insert({
-          id,
-          userId: '',
-          sessionId: session.id,
-          position: nextPos,
-          createdAt: new Date().toISOString(),
-        } as UserTabRow & Record<string, unknown>)
-        setActiveTabId(id)
-      }
+      ensureTabForSession(session.id)
       setOpenMobile(false)
       navigate({ to: '/', search: { session: session.id } })
     },

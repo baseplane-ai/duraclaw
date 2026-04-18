@@ -318,6 +318,7 @@ export function createApiApp() {
   app.post('/api/user-settings/tabs', async (c) => {
     const userId = c.get('userId')
     const body = (await c.req.json().catch(() => null)) as {
+      id?: string
       sessionId?: string | null
       position?: number
     } | null
@@ -336,7 +337,7 @@ export function createApiApp() {
       position = typeof max === 'number' ? max + 1 : 0
     }
 
-    const id = crypto.randomUUID()
+    const id = typeof body.id === 'string' && body.id.length > 0 ? body.id : crypto.randomUUID()
     const createdAt = new Date().toISOString()
     const inserted = await db
       .insert(userTabs)

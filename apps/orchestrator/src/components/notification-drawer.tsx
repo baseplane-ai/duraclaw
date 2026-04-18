@@ -8,9 +8,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from '~/components/ui/sheet'
-import { userTabsCollection } from '~/db/user-tabs-collection'
-import { setActiveTabId } from '~/hooks/use-active-tab'
-import type { UserTabRow } from '~/lib/types'
+import { ensureTabForSession } from '~/lib/tab-utils'
 import { cn } from '~/lib/utils'
 import type { AppNotification } from '~/stores/notifications'
 import { useNotificationStore } from '~/stores/notifications'
@@ -52,27 +50,7 @@ export function NotificationDrawer({ open, onOpenChange }: NotificationDrawerPro
   const handleClick = (n: AppNotification) => {
     markRead(n.id)
     onOpenChange(false)
-    // Insert-or-activate the tab synchronously BEFORE navigate so the tab bar
-    // already shows the session on the next render — no race with the URL change.
-    const tabs = userTabsCollection.toArray as unknown as UserTabRow[]
-    const existing = tabs.find((t) => t.sessionId === n.sessionId)
-    if (existing) {
-      setActiveTabId(existing.id)
-    } else {
-      const id =
-        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-          ? crypto.randomUUID().slice(0, 8)
-          : Math.random().toString(36).slice(2, 10)
-      const nextPos = tabs.length === 0 ? 0 : Math.max(0, ...tabs.map((t) => t.position)) + 1
-      userTabsCollection.insert({
-        id,
-        userId: '',
-        sessionId: n.sessionId,
-        position: nextPos,
-        createdAt: new Date().toISOString(),
-      } as UserTabRow & Record<string, unknown>)
-      setActiveTabId(id)
-    }
+    ensureTabForSession(n.sessionId)
     navigate({ to: '/', search: { session: n.sessionId } })
   }
 
