@@ -15,16 +15,6 @@ import { type Connection, type ConnectionContext, Server } from 'partyserver'
 import { getRequestSession } from '~/api/auth-session'
 import type { Env } from '~/lib/types'
 
-// Back-compat type re-export — the legacy `useUserSettings` hook
-// (`src/hooks/use-user-settings.tsx`) still references this type. The hook
-// is being deleted in #7 p4; until then this empty shape keeps typecheck
-// green without re-introducing any state into the DO.
-export interface UserSettingsState {
-  tabs: Array<{ id: string; project: string; sessionId: string; title: string; draft?: string }>
-  activeTabId: string | null
-  drafts: Record<string, string>
-}
-
 export class UserSettingsDO extends Server<Env> {
   async onConnect(conn: Connection, ctx: ConnectionContext) {
     const session = await getRequestSession(this.env, ctx.request)

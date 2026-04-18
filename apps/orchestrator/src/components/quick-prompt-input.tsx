@@ -14,6 +14,8 @@ import {
   PromptInputSubmit,
   PromptInputTextarea,
 } from '@duraclaw/ai-elements'
+import { eq } from '@tanstack/db'
+import { useLiveQuery } from '@tanstack/react-db'
 import { ImageIcon, XIcon } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Checkbox } from '~/components/ui/checkbox'
@@ -27,8 +29,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from '~/components/ui/select'
+import { agentSessionsCollection } from '~/db/agent-sessions-collection'
+import { userTabsCollection } from '~/db/user-tabs-collection'
 import { useUserDefaults } from '~/hooks/use-user-defaults'
-import { useUserSettings } from '~/hooks/use-user-settings'
 import type { ContentBlock } from '~/lib/types'
 
 const MODEL_OPTIONS = [
@@ -88,9 +91,19 @@ export function QuickPromptInput({
   const [images, setImages] = useState<ImagePreview[]>([])
   const [imageError, setImageError] = useState<string | null>(null)
 
-  // Check if selected project already has a tab
-  const { findTabByProject } = useUserSettings()
-  const existingTab = findTabByProject(selectedProject)
+  // Check if selected project already has a tab — derive from a join so we
+  // get session.project (the field that drives the existing-tab check).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: tabsWithSessions } = useLiveQuery((q: any) =>
+    q
+      .from({ tab: userTabsCollection })
+      .leftJoin({ session: agentSessionsCollection }, ({ tab, session }: any) =>
+        eq(tab.sessionId, session.id),
+      ),
+  )
+  const existingTab = ((tabsWithSessions ?? []) as Array<{ session?: { project?: string } }>).find(
+    (row) => row.session?.project === selectedProject,
+  )
 
   // Update model when preferences load
   useEffect(() => {

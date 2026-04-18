@@ -9,8 +9,8 @@
  *
  * Row shape matches the D1 `user_tabs` table after p1 / p2:
  * `{id, userId, sessionId, position, createdAt}` — no `project`, `title`, or
- * `draft`. Consumers that still read those legacy fields go through the
- * `tabs-collection.ts` compat shim until p5 retires it.
+ * `draft`. Consumers join with `agentSessionsCollection` to derive display
+ * fields (project / title) reactively.
  */
 
 import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence'

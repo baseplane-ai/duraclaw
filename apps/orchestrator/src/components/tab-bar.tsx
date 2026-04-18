@@ -17,8 +17,10 @@ import {
   useSortable,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
+import { eq } from '@tanstack/db'
+import { useLiveQuery } from '@tanstack/react-db'
 import { ChevronLeftIcon, ChevronRightIcon, CopyPlusIcon, PlusIcon, X } from 'lucide-react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -33,11 +35,12 @@ import {
   SheetHeader,
   SheetTitle,
 } from '~/components/ui/sheet'
-import type { SessionRecord } from '~/db/sessions-collection'
+import { agentSessionsCollection, type SessionRecord } from '~/db/agent-sessions-collection'
+import { userTabsCollection } from '~/db/user-tabs-collection'
 import { StatusDot } from '~/features/agent-orch/session-utils'
+import { setActiveTabId } from '~/hooks/use-active-tab'
 import { useIsMobile } from '~/hooks/use-mobile'
-import { useSessionsCollection } from '~/hooks/use-sessions-collection'
-import { useUserSettings } from '~/hooks/use-user-settings'
+import type { UserTabRow } from '~/lib/types'
 import { cn } from '~/lib/utils'
 
 interface TabBarProps {
@@ -49,6 +52,11 @@ interface TabBarProps {
   onNewTabForProject?: (project: string) => void
 }
 
+interface JoinedRow {
+  tab: UserTabRow
+  session: SessionRecord | undefined
+}
+
 export function TabBar({
   activeSessionId,
   onSelectSession,
@@ -56,8 +64,24 @@ export function TabBar({
   onNewSessionInTab,
   onNewTabForProject,
 }: TabBarProps) {
-  const { tabs, setActiveTab, removeTab, reorderTabs } = useUserSettings()
-  const { sessions } = useSessionsCollection()
+  // Live join: tab × session (LEFT JOIN — session may be undefined while
+  // agentSessionsCollection is hydrating). Sorted by tab.position so user
+  // drag-reordering is reflected without per-render sort work.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: joinData } = useLiveQuery((q: any) =>
+    q
+      .from({ tab: userTabsCollection })
+      .leftJoin({ session: agentSessionsCollection }, ({ tab, session }: any) =>
+        eq(tab.sessionId, session.id),
+      )
+      .orderBy(({ tab }: any) => tab.position),
+  )
+
+  const rows = useMemo<JoinedRow[]>(() => {
+    if (!joinData) return []
+    return joinData as unknown as JoinedRow[]
+  }, [joinData])
+
   const scrollRef = useRef<HTMLDivElement>(null)
   const [canScrollLeft, setCanScrollLeft] = useState(false)
   const [canScrollRight, setCanScrollRight] = useState(false)
@@ -79,19 +103,29 @@ export function TabBar({
       setActiveDragId(null)
       const { active, over } = e
       if (!over || active.id === over.id) return
-      const oldIndex = tabs.findIndex((t) => t.id === active.id)
-      const newIndex = tabs.findIndex((t) => t.id === over.id)
+      const oldIndex = rows.findIndex((r) => r.tab.id === active.id)
+      const newIndex = rows.findIndex((r) => r.tab.id === over.id)
       if (oldIndex < 0 || newIndex < 0) return
-      const reordered = arrayMove(tabs, oldIndex, newIndex)
-      reorderTabs(reordered.map((t) => t.id))
+      const reordered = arrayMove(rows, oldIndex, newIndex)
+      const orderedIds = reordered.map((r) => r.tab.id)
+      // Persist via the dedicated reorder endpoint, then refetch so positions
+      // resync from D1. Optimistic UI is provided by dnd-kit's transform.
+      fetch('/api/user-settings/tabs/reorder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orderedIds }),
+      })
+        .then((resp) => {
+          if (resp.ok) {
+            userTabsCollection.utils.refetch().catch(() => {})
+          }
+        })
+        .catch(() => {})
     },
-    [tabs, reorderTabs],
+    [rows],
   )
 
-  const activeDragTab = activeDragId ? tabs.find((t) => t.id === activeDragId) : null
-  const activeDragSession = activeDragTab
-    ? sessions.find((s) => s.id === activeDragTab.sessionId)
-    : undefined
+  const activeDragRow = activeDragId ? rows.find((r) => r.tab.id === activeDragId) : null
 
   // Detect overflow on scroll + resize
   const updateOverflow = useCallback(() => {
@@ -115,8 +149,8 @@ export function TabBar({
   }, [updateOverflow])
 
   // Re-check overflow when tab count changes (DOM mutation won't trigger ResizeObserver on the container)
-  // biome-ignore lint/correctness/useExhaustiveDependencies: tabs.length intentionally triggers re-check
-  useEffect(updateOverflow, [updateOverflow, tabs.length])
+  // biome-ignore lint/correctness/useExhaustiveDependencies: rows.length intentionally triggers re-check
+  useEffect(updateOverflow, [updateOverflow, rows.length])
 
   const scrollBy = useCallback((dir: 'left' | 'right') => {
     scrollRef.current?.scrollBy({ left: dir === 'left' ? -120 : 120, behavior: 'smooth' })
@@ -132,32 +166,38 @@ export function TabBar({
   // Scroll active tab into view when it changes
   useEffect(() => {
     if (!activeSessionId || !scrollRef.current) return
-    const activeTab = tabs.find((t) => t.sessionId === activeSessionId)
-    if (!activeTab) return
-    const el = scrollRef.current.querySelector(`[data-tab-id="${activeTab.id}"]`) as HTMLElement
+    const activeRow = rows.find((r) => r.tab.sessionId === activeSessionId)
+    if (!activeRow) return
+    const el = scrollRef.current.querySelector(
+      `[data-tab-id="${activeRow.tab.id}"]`,
+    ) as HTMLElement | null
     el?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' })
-  }, [activeSessionId, tabs])
+  }, [activeSessionId, rows])
 
   const handleClose = useCallback(
     (tabId: string) => {
-      const isLastTab = tabs.length === 1
-      removeTab(tabId)
+      const isLastTab = rows.length === 1
+      if (userTabsCollection.has(tabId)) {
+        userTabsCollection.delete([tabId])
+      }
       if (isLastTab && onLastTabClosed) {
         onLastTabClosed()
       } else {
-        const remaining = tabs.filter((t) => t.id !== tabId)
+        const remaining = rows.filter((r) => r.tab.id !== tabId)
         if (remaining.length > 0) {
-          const idx = tabs.findIndex((t) => t.id === tabId)
+          const idx = rows.findIndex((r) => r.tab.id === tabId)
           const next = remaining[Math.min(idx, remaining.length - 1)]
-          setActiveTab(next.id)
-          onSelectSession(next.sessionId)
+          setActiveTabId(next.tab.id)
+          if (next.tab.sessionId) {
+            onSelectSession(next.tab.sessionId)
+          }
         }
       }
     },
-    [tabs, removeTab, setActiveTab, onSelectSession, onLastTabClosed],
+    [rows, onSelectSession, onLastTabClosed],
   )
 
-  if (tabs.length === 0) return null
+  if (rows.length === 0) return null
 
   return (
     <DndContext
@@ -172,32 +212,36 @@ export function TabBar({
           className="flex items-center border-b bg-background overflow-x-auto scrollbar-none"
           onWheel={handleWheel}
         >
-          <SortableContext items={tabs.map((t) => t.id)} strategy={horizontalListSortingStrategy}>
-            {tabs.map((tab) => {
-              const currentSession = sessions.find((s) => s.id === tab.sessionId)
-
-              return (
-                <SortableProjectTab
-                  key={tab.id}
-                  tabId={tab.id}
-                  project={tab.project}
-                  title={tab.title}
-                  isActive={tab.sessionId === activeSessionId}
-                  currentSession={currentSession}
-                  onSelect={() => {
-                    setActiveTab(tab.id)
-                    onSelectSession(tab.sessionId)
-                  }}
-                  onClose={() => handleClose(tab.id)}
-                  onNewSessionInTab={
-                    onNewSessionInTab ? () => onNewSessionInTab(tab.project) : undefined
+          <SortableContext
+            items={rows.map((r) => r.tab.id)}
+            strategy={horizontalListSortingStrategy}
+          >
+            {rows.map((row) => (
+              <SortableProjectTab
+                key={row.tab.id}
+                tabId={row.tab.id}
+                sessionId={row.tab.sessionId}
+                session={row.session}
+                isActive={row.tab.sessionId === activeSessionId}
+                onSelect={() => {
+                  setActiveTabId(row.tab.id)
+                  if (row.tab.sessionId) {
+                    onSelectSession(row.tab.sessionId)
                   }
-                  onNewTabForProject={
-                    onNewTabForProject ? () => onNewTabForProject(tab.project) : undefined
-                  }
-                />
-              )
-            })}
+                }}
+                onClose={() => handleClose(row.tab.id)}
+                onNewSessionInTab={
+                  onNewSessionInTab && row.session?.project
+                    ? () => onNewSessionInTab(row.session?.project as string)
+                    : undefined
+                }
+                onNewTabForProject={
+                  onNewTabForProject && row.session?.project
+                    ? () => onNewTabForProject(row.session?.project as string)
+                    : undefined
+                }
+              />
+            ))}
           </SortableContext>
         </div>
 
@@ -226,14 +270,13 @@ export function TabBar({
 
       {/* Drag preview overlay — renders a floating copy of the dragged tab */}
       <DragOverlay dropAnimation={null}>
-        {activeDragTab && (
+        {activeDragRow && (
           <div className="rounded border bg-background shadow-lg opacity-90">
             <ProjectTab
-              tabId={activeDragTab.id}
-              project={activeDragTab.project}
-              title={activeDragTab.title}
-              isActive={activeDragTab.sessionId === activeSessionId}
-              currentSession={activeDragSession}
+              tabId={activeDragRow.tab.id}
+              sessionId={activeDragRow.tab.sessionId}
+              session={activeDragRow.session}
+              isActive={activeDragRow.tab.sessionId === activeSessionId}
               onSelect={() => {}}
               onClose={() => {}}
             />
@@ -246,11 +289,10 @@ export function TabBar({
 
 interface ProjectTabProps {
   tabId: string
-  project: string
-  title: string
+  sessionId: string | null
+  session: SessionRecord | undefined
   isActive: boolean
   isDragging?: boolean
-  currentSession: SessionRecord | undefined
   onSelect: () => void
   onClose: () => void
   onNewSessionInTab?: () => void
@@ -278,11 +320,10 @@ function SortableProjectTab(props: ProjectTabProps) {
 
 function ProjectTab({
   tabId,
-  project,
-  title,
+  sessionId,
+  session,
   isActive,
   isDragging,
-  currentSession,
   onSelect,
   onClose,
   onNewSessionInTab,
@@ -356,6 +397,11 @@ function ProjectTab({
     onSelect()
   }, [onSelect])
 
+  // Skeleton state: tab row exists but the joined session hasn't hydrated yet
+  // (or `tab.sessionId` is null). Render a shimmer placeholder so the tab bar
+  // never shows the literal word "unknown" or the raw session id.
+  const a11yLabel = sessionId ? `tab ${sessionId.slice(0, 8)}` : `tab ${tabId.slice(0, 8)}`
+
   const tabContent = (
     <>
       <button
@@ -370,19 +416,26 @@ function ProjectTab({
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
         onTouchCancel={handleTouchEnd}
+        aria-label={a11yLabel}
       >
-        {currentSession && (
-          <StatusDot
-            status={currentSession.status || 'idle'}
-            numTurns={currentSession.num_turns ?? 0}
-          />
+        {session ? (
+          <>
+            <StatusDot status={session.status || 'idle'} numTurns={session.num_turns ?? 0} />
+            <div className="flex flex-col items-start min-w-0">
+              <span className="text-[11px] text-muted-foreground leading-tight font-normal">
+                {session.project}
+              </span>
+              <span className="max-w-32 truncate leading-tight">
+                {session.title || session.project}
+              </span>
+            </div>
+          </>
+        ) : (
+          <div className="flex flex-col items-start min-w-0 gap-1 py-0.5">
+            <div className="animate-pulse bg-muted h-2 w-12 rounded" />
+            <div className="animate-pulse bg-muted h-3 w-20 rounded" />
+          </div>
         )}
-        <div className="flex flex-col items-start min-w-0">
-          <span className="text-[11px] text-muted-foreground leading-tight font-normal">
-            {project}
-          </span>
-          <span className="max-w-32 truncate leading-tight">{title}</span>
-        </div>
       </button>
     </>
   )
@@ -391,6 +444,11 @@ function ProjectTab({
     setMenuOpen(false)
     action?.()
   }, [])
+
+  // Heading text used in mobile sheet / context menu — avoids the word "unknown"
+  // when the session hasn't hydrated yet by falling back to the tab id snippet.
+  const headingProject = session?.project ?? null
+  const headingTitle = session?.title || session?.project || tabId.slice(0, 8)
 
   // On mobile, render a bottom Sheet (popup modal) for easier viewing / tapping.
   if (isMobile) {
@@ -403,8 +461,10 @@ function ProjectTab({
           <SheetContent side="bottom" className="pb-6">
             <SheetHeader>
               <SheetTitle className="text-sm">
-                <span className="text-muted-foreground font-normal">{project} · </span>
-                {title}
+                {headingProject && (
+                  <span className="text-muted-foreground font-normal">{headingProject} · </span>
+                )}
+                {headingTitle}
               </SheetTitle>
               <SheetDescription className="sr-only">Tab actions</SheetDescription>
             </SheetHeader>
