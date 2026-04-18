@@ -1,19 +1,19 @@
 /**
- * useTabSync — Yjs-backed tab state, synced cross-device via UserSettingsDO.
+ * useTabSync — Yjs-backed tab list, local active tab.
  *
- * Y.Doc schema:
- *   - Y.Map "openTabs"  — key: sessionId, value: JSON { project, order }
- *   - Y.Map "workspace" — { activeSessionId: string | null }
+ * Y.Doc schema (synced cross-device via UserSettingsDO):
+ *   - Y.Map<string> "tabs" — key: sessionId, value: JSON { project, order }
+ *
+ * Active tab is LOCAL (useState + localStorage). Cross-device tab *list*
+ * sync is the useful part; cross-device active-tab sync creates fights
+ * (device A's click yanks device B's focus) and effect ping-pong loops
+ * (deep-link reads URL → sets Yjs → URL-sync reads Yjs → navigates →
+ * deep-link fires again).
  *
  * Why Y.Map instead of Y.Array:
- * Y.Array is a list, not a set. Every push() creates a unique CRDT item.
- * When the deep-link effect fires before IndexedDB hydration, push() into
- * the empty array creates a NEW operation. When IndexedDB then loads the
- * old entries, CRDT merge keeps both — duplicating on every refresh.
- *
- * Y.Map keys are inherently unique. set("X", ...) from two sources (local
- * + IndexedDB) converges to one entry via last-writer-wins. The hydration
- * race becomes a non-issue. No ready gate, no dedup effect needed.
+ * Y.Array push() creates unique CRDT items. Push before IndexedDB
+ * hydration + hydration load = two items for the same session.
+ * Y.Map.set() on the same key converges to one entry. No duplicates.
  *
  * One-tab-per-project: openTab scans the map for an existing entry with
  * the same project name and removes it before inserting the new one.
@@ -36,10 +36,12 @@ interface TabEntry {
   order: number
 }
 
+const ACTIVE_TAB_KEY = 'duraclaw-active-session'
+
 export interface UseTabSyncResult {
   /** Ordered list of open session IDs (reactive, sorted by order). */
   openTabs: string[]
-  /** Currently focused session ID (reactive). */
+  /** Currently focused session ID (local, not synced cross-device). */
   activeSessionId: string | null
   /**
    * Open or activate a tab. Idempotent — Y.Map keys can't duplicate.
@@ -49,7 +51,7 @@ export interface UseTabSyncResult {
   openTab: (sessionId: string, options?: OpenTabOptions) => void
   /** Remove a session from open tabs. Returns the next active session ID. */
   closeTab: (sessionId: string) => string | null
-  /** Set the active session. */
+  /** Set the active session (local only). */
   setActive: (sessionId: string | null) => void
   /** Reorder: move the tab at fromIndex to toIndex. */
   reorder: (fromIndex: number, toIndex: number) => void
@@ -67,7 +69,7 @@ export function getTabSyncSnapshot(): {
   if (!sharedDoc) return { openTabs: [], activeSessionId: null }
   return {
     openTabs: sortedTabIds(sharedDoc.getMap<string>('tabs')),
-    activeSessionId: (sharedDoc.getMap('workspace').get('activeSessionId') as string) ?? null,
+    activeSessionId: localStorage.getItem(ACTIVE_TAB_KEY),
   }
 }
 
@@ -120,11 +122,8 @@ export function useTabSync(): UseTabSyncResult {
     }
   }, [doc])
 
-  // "tabs" (Y.Map) replaces the old "openTabs" (Y.Array). Different name
-  // avoids Yjs type conflicts. Server-side migration in UserSettingsDO
-  // copies Y.Array "openTabs" → Y.Map "tabs" on first load.
+  // "tabs" Y.Map — synced cross-device.
   const tabsY = useMemo(() => doc?.getMap<string>('tabs') ?? null, [doc])
-  const workspaceY = useMemo(() => doc?.getMap('workspace') ?? null, [doc])
 
   const host = typeof window !== 'undefined' && window.location ? window.location.host : ''
 
@@ -164,11 +163,9 @@ export function useTabSync(): UseTabSyncResult {
     }
   }, [provider])
 
-  // Reactive state from Y.Doc observers.
+  // ── Tab list (Yjs-synced, reactive) ─────────────────────────────────
+
   const [openTabs, setOpenTabs] = useState<string[]>(() => (tabsY ? sortedTabIds(tabsY) : []))
-  const [activeSessionId, setActiveState] = useState<string | null>(
-    () => (workspaceY?.get('activeSessionId') as string) ?? null,
-  )
 
   useEffect(() => {
     if (!tabsY) return
@@ -178,15 +175,20 @@ export function useTabSync(): UseTabSyncResult {
     return () => tabsY.unobserve(handler)
   }, [tabsY])
 
-  useEffect(() => {
-    if (!workspaceY) return
-    const handler = () => {
-      setActiveState((workspaceY.get('activeSessionId') as string) ?? null)
+  // ── Active tab (local, persisted to localStorage) ───────────────────
+
+  const [activeSessionId, setActiveState] = useState<string | null>(() =>
+    localStorage.getItem(ACTIVE_TAB_KEY),
+  )
+
+  const setActive = useCallback((sessionId: string | null) => {
+    setActiveState(sessionId)
+    if (sessionId) {
+      localStorage.setItem(ACTIVE_TAB_KEY, sessionId)
+    } else {
+      localStorage.removeItem(ACTIVE_TAB_KEY)
     }
-    workspaceY.observe(handler)
-    handler()
-    return () => workspaceY.unobserve(handler)
-  }, [workspaceY])
+  }, [])
 
   // ── Actions ─────────────────────────────────────────────────────────
 
@@ -194,26 +196,26 @@ export function useTabSync(): UseTabSyncResult {
     (sessionId: string, opts?: OpenTabOptions) => {
       const project = opts?.project
       const forceNewTab = opts?.forceNewTab ?? false
-      if (!doc || !tabsY || !workspaceY) return
+      if (!doc || !tabsY) return
 
       doc.transact(() => {
         const existing = tabsY.get(sessionId)
 
         if (existing) {
-          // Already open — update project if newly known, then activate.
+          // Already open — update project if newly known.
           if (project) {
             const entry = parseEntry(existing)
             if (entry.project !== project) {
               tabsY.set(sessionId, JSON.stringify({ ...entry, project }))
             }
           }
-          workspaceY.set('activeSessionId', sessionId)
+          // Activate (local).
+          setActive(sessionId)
           return
         }
 
-        // Resolve project for one-tab-per-project check.
+        // One-tab-per-project: remove existing tab for same project.
         if (!forceNewTab && project) {
-          // Find existing tab for the same project and remove it.
           tabsY.forEach((val, key) => {
             const entry = parseEntry(val)
             if (entry.project === project) {
@@ -230,15 +232,17 @@ export function useTabSync(): UseTabSyncResult {
         })
 
         tabsY.set(sessionId, JSON.stringify({ project, order: maxOrder + 1 }))
-        workspaceY.set('activeSessionId', sessionId)
       })
+
+      // Activate (local, outside transaction).
+      setActive(sessionId)
     },
-    [doc, tabsY, workspaceY],
+    [doc, tabsY, setActive],
   )
 
   const closeTab = useCallback(
     (sessionId: string): string | null => {
-      if (!doc || !tabsY || !workspaceY) return null
+      if (!doc || !tabsY) return null
       let nextActive: string | null = null
       doc.transact(() => {
         if (!tabsY.has(sessionId)) return
@@ -246,23 +250,18 @@ export function useTabSync(): UseTabSyncResult {
         const idx = sorted.indexOf(sessionId)
         tabsY.delete(sessionId)
 
-        const current = workspaceY.get('activeSessionId')
-        if (current === sessionId) {
+        if (activeSessionId === sessionId) {
           const remaining = sorted.filter((id) => id !== sessionId)
           nextActive = remaining[Math.min(idx, remaining.length - 1)] ?? null
-          workspaceY.set('activeSessionId', nextActive)
         }
       })
+
+      if (activeSessionId === sessionId) {
+        setActive(nextActive)
+      }
       return nextActive
     },
-    [doc, tabsY, workspaceY],
-  )
-
-  const setActive = useCallback(
-    (sessionId: string | null) => {
-      workspaceY?.set('activeSessionId', sessionId)
-    },
-    [workspaceY],
+    [doc, tabsY, activeSessionId, setActive],
   )
 
   const reorder = useCallback(
@@ -273,11 +272,9 @@ export function useTabSync(): UseTabSyncResult {
         if (fromIndex < 0 || fromIndex >= sorted.length) return
         if (toIndex < 0 || toIndex >= sorted.length) return
 
-        // Remove from old position, insert at new.
         const moved = sorted.splice(fromIndex, 1)[0]
         sorted.splice(toIndex, 0, moved)
 
-        // Reassign sequential order values.
         for (let i = 0; i < sorted.length; i++) {
           const id = sorted[i]
           const entry = parseEntry(tabsY.get(id))

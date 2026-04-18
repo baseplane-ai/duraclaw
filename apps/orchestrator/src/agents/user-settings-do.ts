@@ -1,8 +1,10 @@
 // UserSettingsDO — Yjs-backed per-user tab sync + invalidation fanout.
 //
 // Extends y-partyserver's YServer to hold a Y.Doc per user with:
-//   - Y.Map<string> "tabs"        — key: sessionId, value: JSON { project, order }
-//   - Y.Map         "workspace"   — { activeSessionId: string | null }
+//   - Y.Map<string> "tabs" — key: sessionId, value: JSON { project, order }
+//
+// Active tab is local-only (localStorage on the client). The Y.Doc syncs
+// the tab list cross-device; active tab is per-device.
 //
 // Also keeps the POST /notify invalidation fanout for agent_sessions
 // and user_preferences (those collections still live in D1).
@@ -115,7 +117,6 @@ export class UserSettingsDO extends YServer {
 
       if (result.results && result.results.length > 0) {
         const tabs = this.document.getMap<string>('tabs')
-        const workspace = this.document.getMap('workspace')
         this.document.transact(() => {
           let order = 1
           for (const row of result.results) {
@@ -124,10 +125,6 @@ export class UserSettingsDO extends YServer {
               tabs.set(sessionId, JSON.stringify({ order }))
               order++
             }
-          }
-          const firstSessionId = result.results[0]?.session_id as string | undefined
-          if (firstSessionId) {
-            workspace.set('activeSessionId', firstSessionId)
           }
         })
       }

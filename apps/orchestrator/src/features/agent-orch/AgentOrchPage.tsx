@@ -37,13 +37,7 @@ function AgentOrchContent() {
   const { openTabs, activeSessionId, openTab, closeTab, setActive, reorder } = useTabSync()
 
   // Deep-link: URL has ?session=X → open & activate that tab.
-  // Y.Map keys can't duplicate, so this is safe even before hydration.
-  //
-  // There is intentionally NO separate "sync URL from activeSessionId"
-  // effect. Two effects that both read and write the URL fight each other
-  // (deep-link sets Yjs state for the NEXT render, while URL-sync reads
-  // the CURRENT render's stale activeSessionId and navigates backward).
-  // Instead, every action that changes tabs also navigates explicitly.
+  // activeSessionId is local (localStorage), so no Yjs↔URL fight.
   const deepLinkedRef = useRef<string | null>(null)
   useEffect(() => {
     if (searchSessionId && searchSessionId !== deepLinkedRef.current) {
@@ -53,8 +47,8 @@ function AgentOrchContent() {
     }
   }, [searchSessionId, openTab, sessions])
 
-  // Cold-start restore: page loaded at bare "/" but Yjs has an active
-  // session from storage — reflect it in the URL (one-shot).
+  // Cold-start: page loaded at "/" with no ?session, but localStorage
+  // has a remembered active tab — restore it in the URL (one-shot).
   const coldStartedRef = useRef(false)
   useEffect(() => {
     if (coldStartedRef.current || searchSessionId) return
