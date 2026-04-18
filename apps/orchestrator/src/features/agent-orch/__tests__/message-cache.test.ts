@@ -34,6 +34,9 @@ vi.mock('agents/react', () => ({
 
 vi.mock('~/db/sessions-collection', () => ({
   sessionsCollection: {
+    // Production code writes through utils.writeUpdate (the
+    // queryCollectionOptions doesn't expose a direct .update).
+    utils: { writeUpdate: vi.fn() },
     update: vi.fn(),
     has: vi.fn().mockReturnValue(true),
   },
@@ -44,28 +47,80 @@ vi.mock('~/db/sessions-collection', () => ({
 const mockInsert = vi.fn()
 const mockCollectionEntries: Array<[string, Record<string, unknown>]> = []
 
+// Subscribers for the reactive useMessagesCollection mock below. Every
+// mutation bumps each subscriber's forceUpdate so renderHook observes the
+// new message list (mirrors the live-query re-render production uses).
+const collectionSubs = new Set<() => void>()
+const bumpCollection = () => {
+  for (const cb of collectionSubs) cb()
+}
+
 vi.mock('~/db/messages-collection', () => ({
   messagesCollection: {
-    insert: (...args: unknown[]) => mockInsert(...args),
+    insert: (...args: unknown[]) => {
+      mockInsert(...args)
+      const row = args[0] as { id: string } & Record<string, unknown>
+      if (row && row.id) {
+        const existingIdx = mockCollectionEntries.findIndex(([k]) => k === row.id)
+        if (existingIdx === -1) {
+          mockCollectionEntries.push([row.id, row])
+        }
+      }
+      bumpCollection()
+    },
+    has: (id: string) => mockCollectionEntries.some(([k]) => k === id),
+    update: (id: string, patcher: (draft: Record<string, unknown>) => void) => {
+      const idx = mockCollectionEntries.findIndex(([k]) => k === id)
+      if (idx === -1) return
+      const draft = { ...mockCollectionEntries[idx][1] }
+      patcher(draft)
+      mockCollectionEntries[idx] = [id, draft]
+      bumpCollection()
+    },
+    delete: (keys: string | string[]) => {
+      const ids = new Set(Array.isArray(keys) ? keys : [keys])
+      for (let i = mockCollectionEntries.length - 1; i >= 0; i--) {
+        if (ids.has(mockCollectionEntries[i][0])) mockCollectionEntries.splice(i, 1)
+      }
+      bumpCollection()
+    },
     [Symbol.iterator]: () => mockCollectionEntries[Symbol.iterator](),
   },
 }))
 
-// Mock useMessagesCollection to return filtered/sorted cached messages
-// This avoids the useLiveQuery + TanStack Collection requirement
-vi.mock('~/hooks/use-messages-collection', () => ({
-  useMessagesCollection: (sessionId: string) => {
-    const filtered = mockCollectionEntries
-      .map(([, msg]) => msg)
-      .filter((m) => m.sessionId === sessionId)
-      .sort((a, b) => {
-        const aTime = a.createdAt ? new Date(a.createdAt as string).getTime() : 0
-        const bTime = b.createdAt ? new Date(b.createdAt as string).getTime() : 0
-        return aTime - bTime
-      })
-    return { messages: filtered, isLoading: false }
-  },
-}))
+// Reactive live-query mock — subscribes to mutation bumps and re-renders
+// the consuming hook. Wraps iteration in try/catch so the
+// `handles collection iteration error gracefully` test (which swaps the
+// iterator to throw) still passes.
+vi.mock('~/hooks/use-messages-collection', async () => {
+  const React = await import('react')
+  return {
+    useMessagesCollection: (sessionId: string) => {
+      const [, setV] = React.useState(0)
+      React.useEffect(() => {
+        const cb = () => setV((v: number) => v + 1)
+        collectionSubs.add(cb)
+        return () => {
+          collectionSubs.delete(cb)
+        }
+      }, [])
+      let rows: Array<Record<string, unknown>> = []
+      try {
+        rows = mockCollectionEntries.map(([, msg]) => msg)
+      } catch {
+        rows = []
+      }
+      const filtered = rows
+        .filter((m) => m.sessionId === sessionId)
+        .sort((a, b) => {
+          const aTime = a.createdAt ? new Date(a.createdAt as string).getTime() : 0
+          const bTime = b.createdAt ? new Date(b.createdAt as string).getTime() : 0
+          return aTime - bTime
+        })
+      return { messages: filtered, isLoading: false }
+    },
+  }
+})
 
 // Import after mocks
 import { useCodingAgent } from '../use-coding-agent'

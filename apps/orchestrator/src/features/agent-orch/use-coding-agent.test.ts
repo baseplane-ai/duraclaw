@@ -21,43 +21,83 @@ import type { CachedMessage } from '~/db/messages-collection'
 
 const cachedMessagesStore = new Map<string, CachedMessage>()
 
+// Subscribers for the reactive useMessagesCollection mock below. Mutations
+// notify subscribers so renderHook observes the new message list (mirrors
+// the live-query re-render production uses).
+const collectionSubs = new Set<() => void>()
+const bumpCollection = () => {
+  for (const cb of collectionSubs) cb()
+}
+
 // ── Mocks ────────────────────────────────────────────────────────────
 
-// Mock messagesCollection as an iterable map with insert
+// Mock messagesCollection as an iterable map with full mutation surface
 const mockInsert = vi.fn((msg: CachedMessage) => {
-  cachedMessagesStore.set(msg.id, msg)
+  if (!cachedMessagesStore.has(msg.id)) {
+    cachedMessagesStore.set(msg.id, msg)
+  }
+  bumpCollection()
+})
+const mockUpdate = vi.fn((id: string, patcher: (draft: CachedMessage) => void) => {
+  const existing = cachedMessagesStore.get(id)
+  if (!existing) return
+  const draft = { ...existing }
+  patcher(draft)
+  cachedMessagesStore.set(id, draft)
+  bumpCollection()
+})
+const mockDelete = vi.fn((keys: string | string[]) => {
+  const ids = Array.isArray(keys) ? keys : [keys]
+  for (const id of ids) cachedMessagesStore.delete(id)
+  bumpCollection()
 })
 
 vi.mock('~/db/messages-collection', () => ({
   messagesCollection: {
     [Symbol.iterator]: () => cachedMessagesStore.entries(),
+    has: (id: string) => cachedMessagesStore.has(id),
     insert: (...args: unknown[]) => mockInsert(...(args as [CachedMessage])),
+    update: (...args: unknown[]) => mockUpdate(...(args as [string, (d: CachedMessage) => void])),
+    delete: (...args: unknown[]) => mockDelete(...(args as [string | string[]])),
   },
 }))
 
 vi.mock('~/db/sessions-collection', () => ({
   sessionsCollection: {
+    // Production code writes through utils.writeUpdate.
+    utils: { writeUpdate: vi.fn() },
     update: vi.fn(),
     insert: vi.fn(),
     has: vi.fn().mockReturnValue(true),
   },
 }))
 
-// Mock useMessagesCollection to return filtered/sorted cached messages
-// This avoids the useLiveQuery + TanStack Collection requirement
-vi.mock('~/hooks/use-messages-collection', () => ({
-  useMessagesCollection: (sessionId: string) => {
-    const all = Array.from(cachedMessagesStore.values())
-    const filtered = all
-      .filter((m) => m.sessionId === sessionId)
-      .sort((a, b) => {
-        const aTime = a.createdAt ? new Date(a.createdAt as string).getTime() : 0
-        const bTime = b.createdAt ? new Date(b.createdAt as string).getTime() : 0
-        return aTime - bTime
-      })
-    return { messages: filtered, isLoading: false }
-  },
-}))
+// Reactive useMessagesCollection mock — subscribes to mutation bumps so
+// `result.current.messages` reflects collection writes between act() calls.
+vi.mock('~/hooks/use-messages-collection', async () => {
+  const React = await import('react')
+  return {
+    useMessagesCollection: (sessionId: string) => {
+      const [, setV] = React.useState(0)
+      React.useEffect(() => {
+        const cb = () => setV((v: number) => v + 1)
+        collectionSubs.add(cb)
+        return () => {
+          collectionSubs.delete(cb)
+        }
+      }, [])
+      const all = Array.from(cachedMessagesStore.values())
+      const filtered = all
+        .filter((m) => m.sessionId === sessionId)
+        .sort((a, b) => {
+          const aTime = a.createdAt ? new Date(a.createdAt as string).getTime() : 0
+          const bTime = b.createdAt ? new Date(b.createdAt as string).getTime() : 0
+          return aTime - bTime
+        })
+      return { messages: filtered, isLoading: false }
+    },
+  }
+})
 
 // Capture the useAgent config so we can inspect/invoke callbacks
 let capturedUseAgentConfig: {
