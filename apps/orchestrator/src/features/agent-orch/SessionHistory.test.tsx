@@ -43,8 +43,8 @@ function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
     project: 'test-project',
     status: 'idle',
     model: 'claude-sonnet-4-20250514',
-    created_at: '2026-04-10T00:00:00Z',
-    updated_at: '2026-04-10T01:00:00Z',
+    createdAt: '2026-04-10T00:00:00Z',
+    updatedAt: '2026-04-10T01:00:00Z',
     archived: false,
     ...overrides,
   }
@@ -53,7 +53,7 @@ function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
 function makeDiscoveredSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return makeSession({
     id: 'discovered-1',
-    sdk_session_id: 'sdk-abc-123',
+    sdkSessionId: 'sdk-abc-123',
     agent: 'claude',
     origin: 'discovered',
     ...overrides,
@@ -186,14 +186,14 @@ describe('SessionHistory client-side sorting', () => {
       makeSession({
         id: 's1',
         title: 'Older',
-        created_at: '2026-04-08T00:00:00Z',
-        updated_at: '2026-04-08T00:00:00Z',
+        createdAt: '2026-04-08T00:00:00Z',
+        updatedAt: '2026-04-08T00:00:00Z',
       }),
       makeSession({
         id: 's2',
         title: 'Newer',
-        created_at: '2026-04-10T00:00:00Z',
-        updated_at: '2026-04-10T00:00:00Z',
+        createdAt: '2026-04-10T00:00:00Z',
+        updatedAt: '2026-04-10T00:00:00Z',
       }),
     ]
     render(<SessionHistory />)
@@ -219,14 +219,14 @@ describe('SessionHistory client-side sorting', () => {
       makeSession({
         id: 's1',
         title: 'Cheap',
-        total_cost_usd: 0.5,
-        updated_at: '2026-04-10T00:00:00Z',
+        totalCostUsd: 0.5,
+        updatedAt: '2026-04-10T00:00:00Z',
       }),
       makeSession({
         id: 's2',
         title: 'Expensive',
-        total_cost_usd: 5.0,
-        updated_at: '2026-04-10T00:00:00Z',
+        totalCostUsd: 5.0,
+        updatedAt: '2026-04-10T00:00:00Z',
       }),
     ]
     render(<SessionHistory />)
@@ -243,14 +243,14 @@ describe('SessionHistory client-side sorting', () => {
       makeSession({
         id: 's1',
         title: 'Few Turns',
-        num_turns: 3,
-        updated_at: '2026-04-10T00:00:00Z',
+        numTurns: 3,
+        updatedAt: '2026-04-10T00:00:00Z',
       }),
       makeSession({
         id: 's2',
         title: 'Many Turns',
-        num_turns: 50,
-        updated_at: '2026-04-10T00:00:00Z',
+        numTurns: 50,
+        updatedAt: '2026-04-10T00:00:00Z',
       }),
     ]
     render(<SessionHistory />)

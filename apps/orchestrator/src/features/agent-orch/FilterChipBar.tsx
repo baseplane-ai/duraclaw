@@ -182,7 +182,7 @@ export function getRecentAndOlder(
   const recent: SessionRecord[] = []
   const older: SessionRecord[] = []
   for (const s of sessions) {
-    if (isInDateRange(s.created_at, dateRange)) {
+    if (isInDateRange(s.createdAt, dateRange)) {
       recent.push(s)
     } else {
       older.push(s)

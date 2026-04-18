@@ -19,8 +19,8 @@ function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
     project: 'test-project',
     status: 'idle',
     model: null,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
     archived: false,
     ...overrides,
   }
@@ -38,28 +38,28 @@ describe('combined session filtering', () => {
       id: 'running-today',
       status: 'running',
       project: 'proj-a',
-      created_at: now.toISOString(),
-      updated_at: now.toISOString(),
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
     }),
     makeSession({
       id: 'idle-yesterday',
       status: 'idle',
       project: 'proj-a',
-      created_at: yesterday.toISOString(),
-      updated_at: yesterday.toISOString(),
+      createdAt: yesterday.toISOString(),
+      updatedAt: yesterday.toISOString(),
     }),
     makeSession({
       id: 'failed-old',
       status: 'failed',
       project: 'proj-b',
-      created_at: twoWeeksAgo.toISOString(),
-      updated_at: twoWeeksAgo.toISOString(),
+      createdAt: twoWeeksAgo.toISOString(),
+      updatedAt: twoWeeksAgo.toISOString(),
     }),
     makeSession({
       id: 'archived-today',
       status: 'idle',
       project: 'proj-a',
-      created_at: now.toISOString(),
+      createdAt: now.toISOString(),
       archived: true,
     }),
   ]
@@ -132,8 +132,8 @@ describe('active strip + filter interaction', () => {
   it('active strip qualifies running sessions regardless of recency', () => {
     const oldRunning = makeSession({
       status: 'running',
-      created_at: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString(),
-      updated_at: new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString(),
+      createdAt: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString(),
+      updatedAt: new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString(),
     })
     // Running always qualifies for strip
     expect(isQualifyingSession(oldRunning)).toBe(true)
@@ -145,8 +145,8 @@ describe('active strip + filter interaction', () => {
   it('idle session within 2h qualifies for strip but may be in older by creation date', () => {
     const recentIdleOldCreation = makeSession({
       status: 'idle',
-      created_at: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString(),
-      updated_at: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+      createdAt: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString(),
+      updatedAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
     })
     expect(isQualifyingSession(recentIdleOldCreation)).toBe(true)
     // But by creation date, it's old

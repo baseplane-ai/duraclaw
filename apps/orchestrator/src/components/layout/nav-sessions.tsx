@@ -128,13 +128,13 @@ function SessionContextMenu({
   )
 }
 
-/** Sort by last_activity DESC, NULLs last (fall back to updated_at within NULL group) */
+/** Sort by lastActivity DESC, NULLs last (fall back to updated_at within NULL group) */
 function byActivity(a: SessionRecord, b: SessionRecord): number {
-  const aHas = !!a.last_activity
-  const bHas = !!b.last_activity
+  const aHas = !!a.lastActivity
+  const bHas = !!b.lastActivity
   if (aHas !== bHas) return aHas ? -1 : 1
-  const aTime = new Date(a.last_activity ?? a.updated_at).getTime()
-  const bTime = new Date(b.last_activity ?? b.updated_at).getTime()
+  const aTime = new Date(a.lastActivity ?? a.updatedAt).getTime()
+  const bTime = new Date(b.lastActivity ?? b.updatedAt).getTime()
   return bTime - aTime
 }
 
@@ -245,7 +245,7 @@ export function NavSessions() {
 
   const visible = sessions.filter((s) => !s.archived)
 
-  // Recent: last 5 sessions by last_activity
+  // Recent: last 5 sessions by lastActivity
   const recent = [...visible].sort(byActivity).slice(0, 5)
 
   // Build session lookup by project name
@@ -330,7 +330,7 @@ export function NavSessions() {
                   tooltip={`${getDisplayName(session)} — ${session.project}`}
                   onClick={() => handleSelect(session)}
                 >
-                  <StatusDot status={session.status || 'idle'} numTurns={session.num_turns ?? 0} />
+                  <StatusDot status={session.status || 'idle'} numTurns={session.numTurns ?? 0} />
                   <div className="flex min-w-0 flex-col">
                     <span className="truncate text-sm leading-tight">
                       {getDisplayName(session)}
@@ -541,10 +541,7 @@ function WorktreeNode({
                     isActive={activeSessionId === session.id}
                     onClick={() => onSelect(session)}
                   >
-                    <StatusDot
-                      status={session.status || 'idle'}
-                      numTurns={session.num_turns ?? 0}
-                    />
+                    <StatusDot status={session.status || 'idle'} numTurns={session.numTurns ?? 0} />
                     <span className="truncate">{getDisplayName(session)}</span>
                   </SidebarMenuSubButton>
                 </SessionContextMenu>
@@ -612,10 +609,7 @@ function OrphanProjectGroup({
                     isActive={activeSessionId === session.id}
                     onClick={() => onSelect(session)}
                   >
-                    <StatusDot
-                      status={session.status || 'idle'}
-                      numTurns={session.num_turns ?? 0}
-                    />
+                    <StatusDot status={session.status || 'idle'} numTurns={session.numTurns ?? 0} />
                     <span className="truncate">{getDisplayName(session)}</span>
                   </SidebarMenuSubButton>
                 </SessionContextMenu>

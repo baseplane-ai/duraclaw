@@ -180,11 +180,11 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         const patch: Partial<import('~/db/sessions-collection').SessionRecord> = {
           id: agentName,
           status: newState.status,
-          updated_at: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
         }
-        if (newState.num_turns != null) patch.num_turns = newState.num_turns
-        if (newState.total_cost_usd != null) patch.total_cost_usd = newState.total_cost_usd
-        if (newState.duration_ms != null) patch.duration_ms = newState.duration_ms
+        if (newState.num_turns != null) patch.numTurns = newState.num_turns
+        if (newState.total_cost_usd != null) patch.totalCostUsd = newState.total_cost_usd
+        if (newState.duration_ms != null) patch.durationMs = newState.duration_ms
         sessionsCollection.utils.writeUpdate(patch)
       }
       // Hydrate messages on first state sync. Only flip the ref on success so

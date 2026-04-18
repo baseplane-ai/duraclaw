@@ -37,12 +37,12 @@ export function useSessionsCollection(): UseSessionsCollectionResult {
     return ([...data] as SessionRecord[])
       .filter((s) => !s.archived)
       .sort((a, b) => {
-        // Sessions with real last_activity (from gateway) sort first, NULLs last
-        const aHas = !!a.last_activity
-        const bHas = !!b.last_activity
+        // Sessions with real lastActivity (from gateway) sort first, NULLs last
+        const aHas = !!a.lastActivity
+        const bHas = !!b.lastActivity
         if (aHas !== bHas) return aHas ? -1 : 1
-        const aTime = new Date(a.last_activity ?? a.updated_at).getTime()
-        const bTime = new Date(b.last_activity ?? b.updated_at).getTime()
+        const aTime = new Date(a.lastActivity ?? a.updatedAt).getTime()
+        const bTime = new Date(b.lastActivity ?? b.updatedAt).getTime()
         return bTime - aTime
       })
   }, [data])
@@ -61,8 +61,8 @@ export function useSessionsCollection(): UseSessionsCollectionResult {
         project: input.project,
         status: 'idle',
         model: input.model,
-        created_at: now,
-        updated_at: now,
+        createdAt: now,
+        updatedAt: now,
         prompt: input.prompt,
         archived: false,
       }

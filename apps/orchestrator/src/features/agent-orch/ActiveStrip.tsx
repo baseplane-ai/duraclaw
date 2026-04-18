@@ -13,8 +13,8 @@ const IDLE_RECENCY_MS = 2 * 60 * 60 * 1000 // 2 hours
 
 export function isQualifyingSession(session: SessionRecord): boolean {
   if (ACTIVE_STATUSES.has(session.status || 'idle')) return true
-  if (session.status === 'idle' && session.updated_at) {
-    const elapsed = Date.now() - new Date(session.updated_at).getTime()
+  if (session.status === 'idle' && session.updatedAt) {
+    const elapsed = Date.now() - new Date(session.updatedAt).getTime()
     return elapsed < IDLE_RECENCY_MS
   }
   return false
@@ -22,7 +22,7 @@ export function isQualifyingSession(session: SessionRecord): boolean {
 
 function getStatusColor(session: SessionRecord): string {
   const status = session.status || 'idle'
-  const numTurns = session.num_turns ?? 0
+  const numTurns = session.numTurns ?? 0
   // Spawning: running with 0 turns
   if (status === 'running' && numTurns === 0) return 'bg-blue-500'
   if (status === 'running') return 'bg-green-500'

@@ -52,7 +52,7 @@ export function SessionListItem({
   onFork,
 }: SessionListItemProps) {
   const status = session.status || 'idle'
-  const numTurns = session.num_turns ?? 0
+  const numTurns = session.numTurns ?? 0
   const [menuOpen, setMenuOpen] = useState(false)
   const [renameOpen, setRenameOpen] = useState(false)
   const [tagOpen, setTagOpen] = useState(false)
@@ -259,9 +259,9 @@ export function SessionListItem({
                 </Badge>
               )}
               {session.archived && <span className="text-xs text-muted-foreground">archived</span>}
-              {session.updated_at && (
+              {session.updatedAt && (
                 <span className="text-xs text-muted-foreground">
-                  {formatTimeAgo(session.updated_at)}
+                  {formatTimeAgo(session.updatedAt)}
                 </span>
               )}
             </div>
@@ -277,8 +277,8 @@ export function SessionListItem({
             {!preview && <span className="min-w-0 flex-1" />}
             <div className="ml-auto flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
               {numTurns > 0 && <span>{numTurns} turns</span>}
-              {session.total_cost_usd != null && session.total_cost_usd > 0 && (
-                <span>{formatCost(session.total_cost_usd)}</span>
+              {session.totalCostUsd != null && session.totalCostUsd > 0 && (
+                <span>{formatCost(session.totalCostUsd)}</span>
               )}
             </div>
           </div>

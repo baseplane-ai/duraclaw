@@ -57,7 +57,7 @@ describe('isInDateRange', () => {
 
 describe('getRecentAndOlder', () => {
   it('puts all sessions in recent when range is "all"', () => {
-    const sessions = [{ created_at: '2020-01-01' }] as any
+    const sessions = [{ createdAt: '2020-01-01' }] as any
     const { recent, older } = getRecentAndOlder(sessions, 'all')
     expect(recent).toHaveLength(1)
     expect(older).toHaveLength(0)
@@ -67,7 +67,7 @@ describe('getRecentAndOlder', () => {
     const now = new Date()
     const old = new Date()
     old.setDate(old.getDate() - 30)
-    const sessions = [{ created_at: now.toISOString() }, { created_at: old.toISOString() }] as any
+    const sessions = [{ createdAt: now.toISOString() }, { createdAt: old.toISOString() }] as any
     const { recent, older } = getRecentAndOlder(sessions, 'this-week')
     expect(recent).toHaveLength(1)
     expect(older).toHaveLength(1)

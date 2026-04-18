@@ -27,7 +27,7 @@ import {
 } from '~/components/ui/table'
 import { type SessionRecord, sessionsCollection } from '~/db/sessions-collection'
 
-type SortField = 'updated_at' | 'created_at' | 'total_cost_usd' | 'duration_ms' | 'num_turns'
+type SortField = 'updatedAt' | 'createdAt' | 'totalCostUsd' | 'durationMs' | 'numTurns'
 type SortDir = 'asc' | 'desc'
 
 const STATUS_VARIANTS: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
@@ -64,7 +64,7 @@ function formatDate(dateStr: string): string {
 export function SessionHistory() {
   const navigate = useNavigate()
 
-  const [sortBy, setSortBy] = useState<SortField>('updated_at')
+  const [sortBy, setSortBy] = useState<SortField>('updatedAt')
   const [sortDir, setSortDir] = useState<SortDir>('desc')
   const [statusFilter, setStatusFilter] = useState<string>('')
   const [projectFilter, setProjectFilter] = useState<string>('')
@@ -183,31 +183,31 @@ export function SessionHistory() {
             <TableHead>Status</TableHead>
             <TableHead
               className="cursor-pointer select-none"
-              onClick={() => toggleSort('created_at')}
+              onClick={() => toggleSort('createdAt')}
             >
               Created
-              <SortIcon field="created_at" />
+              <SortIcon field="createdAt" />
             </TableHead>
             <TableHead
               className="cursor-pointer select-none"
-              onClick={() => toggleSort('duration_ms')}
+              onClick={() => toggleSort('durationMs')}
             >
               Duration
-              <SortIcon field="duration_ms" />
+              <SortIcon field="durationMs" />
             </TableHead>
             <TableHead
               className="cursor-pointer select-none"
-              onClick={() => toggleSort('total_cost_usd')}
+              onClick={() => toggleSort('totalCostUsd')}
             >
               Cost
-              <SortIcon field="total_cost_usd" />
+              <SortIcon field="totalCostUsd" />
             </TableHead>
             <TableHead
               className="cursor-pointer select-none"
-              onClick={() => toggleSort('num_turns')}
+              onClick={() => toggleSort('numTurns')}
             >
               Turns
-              <SortIcon field="num_turns" />
+              <SortIcon field="numTurns" />
             </TableHead>
             <TableHead className="w-[80px]" />
           </TableRow>
@@ -261,12 +261,12 @@ export function SessionHistory() {
                       {session.status}
                     </Badge>
                   </TableCell>
-                  <TableCell>{formatDate(session.created_at)}</TableCell>
-                  <TableCell>{formatDuration(session.duration_ms)}</TableCell>
-                  <TableCell>{formatCost(session.total_cost_usd)}</TableCell>
-                  <TableCell>{session.num_turns ?? session.message_count ?? '-'}</TableCell>
+                  <TableCell>{formatDate(session.createdAt)}</TableCell>
+                  <TableCell>{formatDuration(session.durationMs)}</TableCell>
+                  <TableCell>{formatCost(session.totalCostUsd)}</TableCell>
+                  <TableCell>{session.numTurns ?? session.messageCount ?? '-'}</TableCell>
                   <TableCell>
-                    {session.sdk_session_id &&
+                    {session.sdkSessionId &&
                       session.agent === 'claude' &&
                       session.origin === 'discovered' && (
                         <Button
@@ -281,7 +281,7 @@ export function SessionHistory() {
                                 body: JSON.stringify({
                                   project: session.project,
                                   prompt: 'resume',
-                                  sdk_session_id: session.sdk_session_id,
+                                  sdk_session_id: session.sdkSessionId,
                                   agent: session.agent ?? 'claude',
                                 }),
                               })

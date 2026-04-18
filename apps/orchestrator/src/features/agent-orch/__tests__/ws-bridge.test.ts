@@ -2,7 +2,7 @@
  * Tests for the WS bridge in useCodingAgent.
  *
  * Validates that onStateUpdate calls sessionsCollection.update
- * with the correct status, updated_at, and num_turns fields.
+ * with the correct status, updatedAt, and numTurns fields.
  *
  * @vitest-environment jsdom
  */
@@ -67,13 +67,13 @@ describe('WS bridge in useCodingAgent', () => {
     expect(mockCollectionUpdate).toHaveBeenCalledWith('test-session', expect.any(Function))
 
     // Execute the draft updater to verify its behavior
-    const draft: Record<string, unknown> = { status: 'idle', updated_at: '', num_turns: 0 }
+    const draft: Record<string, unknown> = { status: 'idle', updatedAt: '', numTurns: 0 }
     const updater = mockCollectionUpdate.mock.calls[0][1] as (d: Record<string, unknown>) => void
     updater(draft)
 
     expect(draft.status).toBe('running')
-    expect(draft.updated_at).toBe('2026-04-13T12:00:00.000Z')
-    expect(draft.num_turns).toBe(5)
+    expect(draft.updatedAt).toBe('2026-04-13T12:00:00.000Z')
+    expect(draft.numTurns).toBe(5)
   })
 
   test('onStateUpdate skips num_turns when null', () => {
@@ -83,13 +83,13 @@ describe('WS bridge in useCodingAgent', () => {
       capturedOnStateUpdate!({ status: 'idle', num_turns: null })
     })
 
-    const draft: Record<string, unknown> = { status: 'running', updated_at: '', num_turns: 3 }
+    const draft: Record<string, unknown> = { status: 'running', updatedAt: '', numTurns: 3 }
     const updater = mockCollectionUpdate.mock.calls[0][1] as (d: Record<string, unknown>) => void
     updater(draft)
 
     expect(draft.status).toBe('idle')
     // num_turns should not be updated when null
-    expect(draft.num_turns).toBe(3)
+    expect(draft.numTurns).toBe(3)
   })
 
   test('onStateUpdate skips num_turns when undefined', () => {
@@ -99,11 +99,11 @@ describe('WS bridge in useCodingAgent', () => {
       capturedOnStateUpdate!({ status: 'running' })
     })
 
-    const draft: Record<string, unknown> = { status: 'idle', updated_at: '', num_turns: 7 }
+    const draft: Record<string, unknown> = { status: 'idle', updatedAt: '', numTurns: 7 }
     const updater = mockCollectionUpdate.mock.calls[0][1] as (d: Record<string, unknown>) => void
     updater(draft)
 
-    expect(draft.num_turns).toBe(7)
+    expect(draft.numTurns).toBe(7)
   })
 
   test('onStateUpdate skips update when collection item does not exist', () => {

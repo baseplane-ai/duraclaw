@@ -546,12 +546,12 @@ export interface SessionSummary {
   project: string
   status: SessionStatus
   model: string | null
-  created_at: string
-  updated_at: string
-  last_activity?: string | null
-  duration_ms?: number | null
-  total_cost_usd?: number | null
-  num_turns?: number | null
+  createdAt: string
+  updatedAt: string
+  lastActivity?: string | null
+  durationMs?: number | null
+  totalCostUsd?: number | null
+  numTurns?: number | null
   prompt?: string
   summary?: string
   title?: string | null
@@ -559,11 +559,11 @@ export interface SessionSummary {
   archived?: boolean
   origin?: string | null
   agent?: string | null
-  message_count?: number | null
-  sdk_session_id?: string | null
-  kata_mode?: string | null
-  kata_issue?: number | null
-  kata_phase?: string | null
+  messageCount?: number | null
+  sdkSessionId?: string | null
+  kataMode?: string | null
+  kataIssue?: number | null
+  kataPhase?: string | null
 }
 
 // ── Stored Message (for SQLite persistence) ─────────────────────────

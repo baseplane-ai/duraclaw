@@ -25,9 +25,9 @@ interface SessionCardListProps {
 }
 
 function KataBadge({ session }: { session: SessionRecord }) {
-  const mode = session.kata_mode
-  const issue = session.kata_issue
-  const phase = session.kata_phase
+  const mode = session.kataMode
+  const issue = session.kataIssue
+  const phase = session.kataPhase
   if (!mode) return null
   const label = [mode, issue != null ? `#${issue}` : null, phase?.toUpperCase()]
     .filter(Boolean)
@@ -86,7 +86,7 @@ function SwipeableCard({
   }
 
   const status = session.status || 'idle'
-  const numTurns = session.num_turns ?? 0
+  const numTurns = session.numTurns ?? 0
   const displayName = session.title || getPreviewText(session) || session.id.slice(0, 8)
 
   return (
@@ -113,7 +113,7 @@ function SwipeableCard({
         data-session-card
         role="button"
         tabIndex={0}
-        aria-label={`${displayName}, ${status}, ${session.updated_at ? formatTimeAgo(session.updated_at) : ''}`}
+        aria-label={`${displayName}, ${status}, ${session.updatedAt ? formatTimeAgo(session.updatedAt) : ''}`}
         className={cn(
           'relative z-10 w-full rounded-lg border bg-card p-3 text-left transition-colors',
           isSelected && 'border-primary bg-accent',
@@ -123,9 +123,9 @@ function SwipeableCard({
         <div className="flex items-center gap-2">
           <StatusDot status={status} numTurns={numTurns} />
           <span className="min-w-0 flex-1 truncate font-medium text-sm">{displayName}</span>
-          {session.updated_at && (
+          {session.updatedAt && (
             <span className="shrink-0 text-xs text-muted-foreground">
-              {formatTimeAgo(session.updated_at)}
+              {formatTimeAgo(session.updatedAt)}
             </span>
           )}
         </div>
@@ -165,7 +165,7 @@ export function SessionCardList({
   // Group by date
   const groups = new Map<string, SessionRecord[]>()
   for (const session of recentSessions) {
-    const key = getDateGroup(session.created_at)
+    const key = getDateGroup(session.createdAt)
     if (!groups.has(key)) groups.set(key, [])
     groups.get(key)?.push(session)
   }
@@ -247,16 +247,13 @@ export function SessionCardList({
                     onClick={() => handleCardClick(session.id)}
                     className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent"
                   >
-                    <StatusDot
-                      status={session.status || 'idle'}
-                      numTurns={session.num_turns ?? 0}
-                    />
+                    <StatusDot status={session.status || 'idle'} numTurns={session.numTurns ?? 0} />
                     <span className="min-w-0 flex-1 truncate">
                       {session.title || getPreviewText(session) || session.id.slice(0, 8)}
                     </span>
-                    {session.updated_at && (
+                    {session.updatedAt && (
                       <span className="shrink-0 text-xs text-muted-foreground">
-                        {formatTimeAgo(session.updated_at)}
+                        {formatTimeAgo(session.updatedAt)}
                       </span>
                     )}
                   </button>

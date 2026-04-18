@@ -129,8 +129,8 @@ describe('shared-types rename: worktree→project', () => {
       project: 'dev1',
       status: 'idle',
       model: null,
-      created_at: '',
-      updated_at: '',
+      createdAt: '',
+      updatedAt: '',
       summary: 'Added OAuth flow',
     }
     expect(summary.project).toBe('dev1')
@@ -552,22 +552,22 @@ describe('shared-types: session discovery (#27)', () => {
 })
 
 describe('shared-types: kata state fields (#29)', () => {
-  test('SessionSummary accepts kata_mode, kata_issue, kata_phase', () => {
+  test('SessionSummary accepts kataMode, kataIssue, kataPhase', () => {
     const summary: SessionSummary = {
       id: '123',
       userId: 'user-1',
       project: 'dev1',
       status: 'running',
       model: 'claude-opus-4-6',
-      created_at: '2026-04-13T00:00:00Z',
-      updated_at: '2026-04-13T01:00:00Z',
-      kata_mode: 'implementation',
-      kata_issue: 29,
-      kata_phase: 'p1',
+      createdAt: '2026-04-13T00:00:00Z',
+      updatedAt: '2026-04-13T01:00:00Z',
+      kataMode: 'implementation',
+      kataIssue: 29,
+      kataPhase: 'p1',
     }
-    expect(summary.kata_mode).toBe('implementation')
-    expect(summary.kata_issue).toBe(29)
-    expect(summary.kata_phase).toBe('p1')
+    expect(summary.kataMode).toBe('implementation')
+    expect(summary.kataIssue).toBe(29)
+    expect(summary.kataPhase).toBe('p1')
   })
 
   test('SessionSummary kata fields are optional', () => {
@@ -577,12 +577,12 @@ describe('shared-types: kata state fields (#29)', () => {
       project: 'dev2',
       status: 'idle',
       model: null,
-      created_at: '',
-      updated_at: '',
+      createdAt: '',
+      updatedAt: '',
     }
-    expect(summary.kata_mode).toBeUndefined()
-    expect(summary.kata_issue).toBeUndefined()
-    expect(summary.kata_phase).toBeUndefined()
+    expect(summary.kataMode).toBeUndefined()
+    expect(summary.kataIssue).toBeUndefined()
+    expect(summary.kataPhase).toBeUndefined()
   })
 
   test('SessionSummary kata fields accept null', () => {
@@ -592,15 +592,15 @@ describe('shared-types: kata state fields (#29)', () => {
       project: 'dev3',
       status: 'idle',
       model: null,
-      created_at: '',
-      updated_at: '',
-      kata_mode: null,
-      kata_issue: null,
-      kata_phase: null,
+      createdAt: '',
+      updatedAt: '',
+      kataMode: null,
+      kataIssue: null,
+      kataPhase: null,
     }
-    expect(summary.kata_mode).toBeNull()
-    expect(summary.kata_issue).toBeNull()
-    expect(summary.kata_phase).toBeNull()
+    expect(summary.kataMode).toBeNull()
+    expect(summary.kataIssue).toBeNull()
+    expect(summary.kataPhase).toBeNull()
   })
 
   test('KataSessionState has expected shape', () => {

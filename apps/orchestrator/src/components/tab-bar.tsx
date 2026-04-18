@@ -420,7 +420,7 @@ function ProjectTab({
       >
         {session ? (
           <>
-            <StatusDot status={session.status || 'idle'} numTurns={session.num_turns ?? 0} />
+            <StatusDot status={session.status || 'idle'} numTurns={session.numTurns ?? 0} />
             <div className="flex flex-col items-start min-w-0">
               <span className="text-[11px] text-muted-foreground leading-tight font-normal">
                 {session.project}

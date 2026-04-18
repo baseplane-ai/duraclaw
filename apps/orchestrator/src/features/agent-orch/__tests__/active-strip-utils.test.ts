@@ -9,8 +9,8 @@ function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
     project: 'test-project',
     status: 'idle',
     model: null,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
     archived: false,
     ...overrides,
   }
@@ -35,12 +35,12 @@ describe('isQualifyingSession', () => {
 
   it('returns true for idle sessions updated within 2 hours', () => {
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString()
-    expect(isQualifyingSession(makeSession({ status: 'idle', updated_at: oneHourAgo }))).toBe(true)
+    expect(isQualifyingSession(makeSession({ status: 'idle', updatedAt: oneHourAgo }))).toBe(true)
   })
 
   it('returns false for idle sessions updated more than 2 hours ago', () => {
     const threeHoursAgo = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString()
-    expect(isQualifyingSession(makeSession({ status: 'idle', updated_at: threeHoursAgo }))).toBe(
+    expect(isQualifyingSession(makeSession({ status: 'idle', updatedAt: threeHoursAgo }))).toBe(
       false,
     )
   })

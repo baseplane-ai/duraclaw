@@ -103,7 +103,7 @@ export function SessionSidebar({
 
   const groups = new Map<string, SessionRecord[]>()
   for (const session of recentSessions) {
-    const key = groupBy === 'date' ? getDateGroup(session.created_at) : session.project || 'unknown'
+    const key = groupBy === 'date' ? getDateGroup(session.createdAt) : session.project || 'unknown'
     if (!groups.has(key)) groups.set(key, [])
     groups.get(key)?.push(session)
   }

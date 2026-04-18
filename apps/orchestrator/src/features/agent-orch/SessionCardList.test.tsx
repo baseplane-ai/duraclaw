@@ -100,8 +100,8 @@ function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
     project: 'test-project',
     status: 'idle',
     model: 'claude-sonnet-4-20250514',
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
     archived: false,
     ...overrides,
   }
@@ -199,9 +199,9 @@ describe('SessionCardList', () => {
       makeSession({
         id: 's1',
         title: 'Kata Session',
-        kata_mode: 'implementation',
-        kata_issue: 29,
-        kata_phase: 'p1',
+        kataMode: 'implementation',
+        kataIssue: 29,
+        kataPhase: 'p1',
       }),
     ]
     render(
@@ -226,11 +226,11 @@ describe('SessionCardList', () => {
     const yesterday = new Date(now)
     yesterday.setDate(yesterday.getDate() - 1)
     const sessions = [
-      makeSession({ id: 's1', title: 'Today Session', created_at: now.toISOString() }),
+      makeSession({ id: 's1', title: 'Today Session', createdAt: now.toISOString() }),
       makeSession({
         id: 's2',
         title: 'Yesterday Session',
-        created_at: yesterday.toISOString(),
+        createdAt: yesterday.toISOString(),
       }),
     ]
     render(

@@ -55,8 +55,8 @@ function makeSession(overrides: Record<string, unknown> = {}) {
     project: 'proj',
     status: 'idle',
     model: null,
-    created_at: '2026-01-01T00:00:00Z',
-    updated_at: '2026-01-01T00:00:00Z',
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: '2026-01-01T00:00:00Z',
     archived: false,
     ...overrides,
   }
@@ -103,9 +103,9 @@ describe('useSessionsCollection', () => {
 
   it('sorts sessions by updated_at desc', () => {
     mockLiveQueryData = [
-      makeSession({ id: 'old', updated_at: '2026-01-01T00:00:00Z' }),
-      makeSession({ id: 'new', updated_at: '2026-01-03T00:00:00Z' }),
-      makeSession({ id: 'mid', updated_at: '2026-01-02T00:00:00Z' }),
+      makeSession({ id: 'old', updatedAt: '2026-01-01T00:00:00Z' }),
+      makeSession({ id: 'new', updatedAt: '2026-01-03T00:00:00Z' }),
+      makeSession({ id: 'mid', updatedAt: '2026-01-02T00:00:00Z' }),
     ]
 
     const { result } = renderHook(() => useSessionsCollection())
