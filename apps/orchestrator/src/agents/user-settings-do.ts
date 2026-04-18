@@ -1,8 +1,8 @@
 // UserSettingsDO — Yjs-backed per-user tab sync + invalidation fanout.
 //
 // Extends y-partyserver's YServer to hold a Y.Doc per user with:
-//   - Y.Array<string> "openTabs"   — ordered session IDs
-//   - Y.Map "workspace"            — { activeSessionId: string | null }
+//   - Y.Map<string> "tabs"        — key: sessionId, value: JSON { project, order }
+//   - Y.Map         "workspace"   — { activeSessionId: string | null }
 //
 // Also keeps the POST /notify invalidation fanout for agent_sessions
 // and user_preferences (those collections still live in D1).
@@ -46,10 +46,44 @@ export class UserSettingsDO extends YServer {
       Y.applyUpdate(this.document, bytes)
     }
 
-    // One-time migration: seed from D1 user_tabs if Y.Doc is empty.
-    const openTabs = this.document.getArray<string>('openTabs')
-    if (openTabs.length === 0) {
+    // Migrate: Y.Array "openTabs" → Y.Map "tabs" (one-time).
+    this.migrateArrayToMap()
+
+    // If Y.Map "tabs" is still empty, seed from D1.
+    const tabs = this.document.getMap<string>('tabs')
+    if (tabs.size === 0) {
       await this.seedFromD1()
+    }
+  }
+
+  /**
+   * One-time migration: copy session IDs from the legacy Y.Array "openTabs"
+   * into the new Y.Map "tabs" with sequential order values.
+   */
+  private migrateArrayToMap() {
+    const tabs = this.document.getMap<string>('tabs')
+    if (tabs.size > 0) return // Already migrated.
+
+    try {
+      const oldArray = this.document.getArray<string>('openTabs')
+      if (oldArray.length === 0) return
+
+      const seen = new Set<string>()
+      this.document.transact(() => {
+        const items = oldArray.toArray()
+        let order = 1
+        for (const sessionId of items) {
+          if (seen.has(sessionId)) continue // Skip duplicates.
+          seen.add(sessionId)
+          tabs.set(sessionId, JSON.stringify({ order }))
+          order++
+        }
+        // Clear the old array to avoid re-migration.
+        oldArray.delete(0, oldArray.length)
+      })
+      console.log(`[UserSettingsDO] Migrated ${seen.size} tabs from Y.Array to Y.Map`)
+    } catch {
+      // No legacy array or type mismatch — nothing to do.
     }
   }
 
@@ -65,7 +99,7 @@ export class UserSettingsDO extends YServer {
 
   /**
    * One-time migration: read the user's D1 tabs and populate the Y.Doc.
-   * Runs only when openTabs is empty (first connect after upgrade).
+   * Runs only when tabs map is empty (first connect after upgrade).
    */
   private async seedFromD1() {
     try {
@@ -80,12 +114,16 @@ export class UserSettingsDO extends YServer {
         .all()
 
       if (result.results && result.results.length > 0) {
-        const openTabs = this.document.getArray<string>('openTabs')
+        const tabs = this.document.getMap<string>('tabs')
         const workspace = this.document.getMap('workspace')
         this.document.transact(() => {
+          let order = 1
           for (const row of result.results) {
             const sessionId = row.session_id as string
-            if (sessionId) openTabs.push([sessionId])
+            if (sessionId) {
+              tabs.set(sessionId, JSON.stringify({ order }))
+              order++
+            }
           }
           const firstSessionId = result.results[0]?.session_id as string | undefined
           if (firstSessionId) {

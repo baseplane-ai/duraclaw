@@ -36,9 +36,9 @@ function AgentOrchContent() {
 
   const { openTabs, activeSessionId, openTab, closeTab, setActive, reorder } = useTabSync()
 
-  // Deep-link: if URL has ?session=X, open it. Project lookup from
-  // sessions list lets the hook enforce one-tab-per-project; if sessions
-  // haven't loaded yet the hook falls back to its own Y.Map data.
+  // Deep-link: if URL has ?session=X, open it. Y.Map keys are inherently
+  // unique so this can't create duplicates even if it fires before
+  // IndexedDB hydration — set() on the same key converges to one entry.
   const deepLinkedRef = useRef<string | null>(null)
   useEffect(() => {
     if (searchSessionId && searchSessionId !== deepLinkedRef.current) {
