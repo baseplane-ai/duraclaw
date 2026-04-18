@@ -25,6 +25,8 @@ export interface UseTabSyncResult {
   activeSessionId: string | null
   /** Add a session to open tabs (idempotent) and optionally activate it. */
   openTab: (sessionId: string, activate?: boolean) => void
+  /** Replace one session with another in the same tab position. */
+  replaceTab: (oldSessionId: string, newSessionId: string) => void
   /** Remove a session from open tabs. Returns the next active session ID. */
   closeTab: (sessionId: string) => string | null
   /** Set the active session. */
@@ -186,6 +188,26 @@ export function useTabSync(): UseTabSyncResult {
     [doc, openTabsY, workspaceY],
   )
 
+  const replaceTab = useCallback(
+    (oldSessionId: string, newSessionId: string) => {
+      if (!doc || !openTabsY || !workspaceY) return
+      doc.transact(() => {
+        const arr = openTabsY.toArray()
+        const idx = arr.indexOf(oldSessionId)
+        if (idx === -1) {
+          // Old session not found — just append.
+          if (!arr.includes(newSessionId)) openTabsY.push([newSessionId])
+        } else {
+          // Replace in-place: delete old, insert new at same position.
+          openTabsY.delete(idx, 1)
+          openTabsY.insert(idx, [newSessionId])
+        }
+        workspaceY.set('activeSessionId', newSessionId)
+      })
+    },
+    [doc, openTabsY, workspaceY],
+  )
+
   const closeTab = useCallback(
     (sessionId: string): string | null => {
       if (!doc || !openTabsY || !workspaceY) return null
@@ -227,5 +249,5 @@ export function useTabSync(): UseTabSyncResult {
     [doc, openTabsY],
   )
 
-  return { openTabs, activeSessionId, openTab, closeTab, setActive, reorder, status }
+  return { openTabs, activeSessionId, openTab, replaceTab, closeTab, setActive, reorder, status }
 }

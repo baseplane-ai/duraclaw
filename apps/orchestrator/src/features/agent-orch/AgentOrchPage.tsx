@@ -8,7 +8,7 @@
  */
 
 import { useNavigate, useSearch } from '@tanstack/react-router'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Header } from '~/components/layout/header'
 import { Main } from '~/components/layout/main'
 import { PushOptInBanner } from '~/components/push-opt-in-banner'
@@ -27,7 +27,7 @@ export function AgentOrchPage() {
 }
 
 function AgentOrchContent() {
-  const { updateSession } = useSessionsCollection()
+  const { sessions, updateSession } = useSessionsCollection()
   const search = useSearch({ from: '/_authenticated/' })
   const navigate = useNavigate()
   const searchSessionId = (search as { session?: string }).session ?? null
@@ -36,7 +36,28 @@ function AgentOrchContent() {
   const searchNewTab = (search as { newTab?: boolean }).newTab ?? false
 
   // ── Yjs tab sync — replaces userTabsCollection + ensureTabForSession ──
-  const { openTabs, activeSessionId, openTab, closeTab, setActive, reorder } = useTabSync()
+  const { openTabs, activeSessionId, openTab, replaceTab, closeTab, setActive, reorder } =
+    useTabSync()
+
+  // Session→project lookup for one-tab-per-project enforcement.
+  const sessionsMap = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const s of sessions) {
+      if (s.project) m.set(s.id, s.project)
+    }
+    return m
+  }, [sessions])
+
+  /**
+   * Find the session ID of an already-open tab whose session belongs to `project`.
+   * Returns undefined if no open tab matches.
+   */
+  const findOpenTabForProject = useCallback(
+    (project: string): string | undefined => {
+      return openTabs.find((id) => sessionsMap.get(id) === project)
+    },
+    [openTabs, sessionsMap],
+  )
 
   // Deep-link: if URL has ?session=X, ensure it's in open tabs + activate.
   // One-shot effect — only fires on mount or when searchSessionId changes.
@@ -115,23 +136,43 @@ function AgentOrchContent() {
         })
         setQuickPromptHint(null)
 
-        // Add to Yjs tabs + activate — syncs cross-device automatically.
-        openTab(sessionId, true)
+        // One-tab-per-project: if a tab already exists for this project,
+        // replace its session in-place. "New tab for project" passes
+        // newTab=true to force a separate tab.
+        const existingTabSession = config.newTab ? undefined : findOpenTabForProject(config.project)
+        if (existingTabSession) {
+          replaceTab(existingTabSession, sessionId)
+        } else {
+          openTab(sessionId, true)
+        }
         navigate({ to: '/', search: { session: sessionId } })
       } catch (err) {
         console.error('[AgentOrch] Spawn failed:', err)
       }
     },
-    [navigate, openTab],
+    [navigate, openTab, replaceTab, findOpenTabForProject],
   )
 
   const handleSelectSession = useCallback(
     (sessionId: string) => {
-      openTab(sessionId, true)
+      // If this session is already open, just activate it.
+      if (openTabs.includes(sessionId)) {
+        setActive(sessionId)
+      } else {
+        // One-tab-per-project: if another session for the same project
+        // is already open, replace it in-place.
+        const project = sessionsMap.get(sessionId)
+        const existingTabSession = project ? findOpenTabForProject(project) : undefined
+        if (existingTabSession) {
+          replaceTab(existingTabSession, sessionId)
+        } else {
+          openTab(sessionId, true)
+        }
+      }
       setSpawnConfig(null)
       navigate({ to: '/', search: { session: sessionId } })
     },
-    [navigate, openTab],
+    [navigate, openTabs, openTab, replaceTab, setActive, sessionsMap, findOpenTabForProject],
   )
 
   const handleCloseTab = useCallback(
