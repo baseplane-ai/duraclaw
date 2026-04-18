@@ -45,9 +45,9 @@
  * arrays above is silently ignored so the script tolerates partial dumps.
  *
  * The SQL output is safe to re-run: each statement uses ON CONFLICT to
- * UPDATE in place. agent_sessions conflicts are keyed on sdk_session_id
- * (the unique index from the p1 schema); user_tabs on (id) and
- * user_preferences on (user_id).
+ * UPDATE in place. agent_sessions conflicts are keyed on `id` (the PK — so
+ * NULL sdk_session_id rows still upsert deterministically); user_tabs on
+ * (id) and user_preferences on (user_id).
  */
 
 import { readFileSync } from 'node:fs'
@@ -93,7 +93,7 @@ interface UserPreferencesDump {
   max_budget: number | null
   thinking_mode: string | null
   effort: string | null
-  hidden_projects: string | null
+  hidden_projects_json: string | null
   updated_at: string
 }
 
@@ -164,15 +164,19 @@ function emitAgentSessions(rows: AgentSessionDump[]): string[] {
       sqlEscape(r.kata_issue),
       sqlEscape(r.kata_phase),
     ]
-    // ON CONFLICT(sdk_session_id) — matches the unique index from p1 so a
-    // resume that swapped the DO id does not double-insert.
+    // ON CONFLICT(id) — keyed on the primary key so re-running the script is
+    // deterministic even for rows where sdk_session_id IS NULL. We previously
+    // keyed on sdk_session_id, but SQL's NULL ≠ NULL means a NULL row would
+    // bypass the upsert and hit a PRIMARY KEY violation on `id` instead.
+    // sdk_session_id is still written as a regular column value (and updated
+    // from excluded on subsequent runs).
     const updateAssignments = cols
-      .filter((c) => c !== 'sdk_session_id')
+      .filter((c) => c !== 'id')
       .map((c) => `${c} = excluded.${c}`)
       .join(', ')
     out.push(
       `INSERT INTO agent_sessions (${cols.join(', ')}) VALUES (${vals.join(', ')}) ` +
-        `ON CONFLICT(sdk_session_id) DO UPDATE SET ${updateAssignments};`,
+        `ON CONFLICT(id) DO UPDATE SET ${updateAssignments};`,
     )
   }
   return out
@@ -211,7 +215,7 @@ function emitUserPreferences(rows: UserPreferencesDump[]): string[] {
       'max_budget',
       'thinking_mode',
       'effort',
-      'hidden_projects',
+      'hidden_projects_json',
       'updated_at',
     ]
     const vals = [
@@ -221,7 +225,7 @@ function emitUserPreferences(rows: UserPreferencesDump[]): string[] {
       sqlEscape(r.max_budget),
       sqlEscape(r.thinking_mode),
       sqlEscape(r.effort),
-      sqlEscape(r.hidden_projects),
+      sqlEscape(r.hidden_projects_json),
       sqlEscape(r.updated_at),
     ]
     const updateAssignments = cols
