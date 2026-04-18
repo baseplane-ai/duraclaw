@@ -2,7 +2,7 @@ import { betterAuth } from 'better-auth'
 import { drizzleAdapter } from 'better-auth/adapters/drizzle'
 import { admin } from 'better-auth/plugins'
 import { drizzle } from 'drizzle-orm/d1'
-import * as schema from './auth-schema'
+import * as schema from '~/db/schema'
 
 /**
  * Create a Better Auth instance for the current request.

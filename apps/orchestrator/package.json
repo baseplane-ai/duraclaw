@@ -9,7 +9,10 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "ship": "set -a && . ../../.env && set +a && wrangler deploy",
-    "cf-typegen": "wrangler types"
+    "cf-typegen": "wrangler types",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "wrangler d1 migrations apply duraclaw-auth",
+    "db:studio": "drizzle-kit studio"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
