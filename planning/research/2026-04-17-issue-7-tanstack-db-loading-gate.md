@@ -209,7 +209,90 @@ First-ever load has no cache and no useful data regardless of approach. A skelet
 - Does TanStack DB expose an `acknowledgeInitial()` / `markReadyFromSeed()` primitive on `queryCollectionOptions` in later versions? Worth checking before retrying any `isLoading`-based approach in future. As of 0.6.4 the answer is no.
 - Is there appetite to upstream a "cache-first ready" option? Out of scope for this research, but the pattern (seed from cache → report ready → reconcile with server in background) is general and would benefit more than Duraclaw.
 
-## 7. Addendum — confirmed against the public `useLiveQuery` docs
+## 7. Correction — `persistedCollectionOptions` DOES fast-track `markReady`
+
+**The original analysis below misread the library.** After a further source trace (prompted by pushback — "if the collection has ever been loaded it will be insanely fast"), this correction changes the recommendation materially.
+
+### What I missed
+
+The `markReady` calls I cited earlier (`@tanstack/query-db-collection/src/query.ts:1328, 1390`) are the ones that fire when the **inner query sync** resolves — i.e. when `queryFn` returns. That path is real, but it is **not the sync that the persisted collection registers with the lifecycle.**
+
+`@tanstack/db-sqlite-persistence-core/src/persisted.ts:2721-2725` returns a `PersistedSyncOptionsResult` whose `sync` is **not** the wrapped `queryCollectionOptions`; it is a **loopback**:
+
+```ts
+return {
+  ...localOnlyOptions,
+  id: collectionId,
+  persistence,
+  sync: createLoopbackSyncConfig(runtime),   // ← this is the collection's real sync
+  // ...
+}
+```
+
+And `createLoopbackSyncConfig` (`persisted.ts:2522-2563`) calls `markReady()` as soon as `runtime.ensureStarted()` resolves:
+
+```ts
+function createLoopbackSyncConfig(runtime) {
+  return {
+    sync: (params) => {
+      runtime.setSyncControls({ begin: params.begin, write: params.write, commit: params.commit, … })
+      void runtime.ensureStarted()                           // OPFS DB open + rows loaded
+        .then(() => { params.markReady() })                  // ← mark ready from OPFS, NOT from queryFn
+        .catch(() => { params.markReady() })
+      // …
+    },
+    getSyncMetadata: () => ({ source: `persisted-phase-2-loopback` }),
+  }
+}
+```
+
+In the two-phase architecture ("phase 1" is the `queryFn`-backed source sync feeding OPFS; "phase 2" is the loopback that the collection actually registers), **readiness is gated on OPFS hydration, not on `queryFn` settling.** The query sync's own `markReady` call (at `query.ts:1328`) gets wrapped (`persisted.ts:2242-2253`) and serves a different role — signalling that the "source" has produced its first result, used internally for retention maintenance — not the collection's overall readiness.
+
+### What this means concretely
+
+For a `persistedCollectionOptions({ persistence, ...queryCollectionOptions(...) })` collection:
+
+| Case | Time to `isReady: true` | `data` at that moment |
+|---|---|---|
+| Warm load, OPFS has cached rows | OPFS DB open + row load (typically 5–50 ms) | Populated from OPFS |
+| First-ever load (empty OPFS) | OPFS DB open (typically 5–30 ms) | `[]` |
+| OPFS unavailable (fallback path) | Falls back to non-persisted sync → `queryFn` round-trip | whatever `queryFn` returned |
+
+So issue #7's core premise — *"~1ms one imperceptible frame between module load and cache resolution"* — is **approximately correct for warm loads** once OPFS is actually wired up. A sub-50 ms skeleton on warm reload is a defensible UX, and the "hundreds of ms to seconds" concern in §1.2 applies only to the broken-OPFS path that Duraclaw is currently on (per §2).
+
+### What DOES still block issue #7 today
+
+**The OPFS bug from §2.** As long as `persistence` is `null` at collection-creation time, `persistedCollectionOptions` is never applied, so the loopback sync never exists, so `markReady` falls through to the query-db-collection path (`query.ts:1328`) which genuinely does wait for `queryFn`. **Until that bug is fixed, the gate proposed in #7 behaves exactly as §1 describes — a network-bounded skeleton, not a one-frame gate.** The library isn't the bottleneck; our wiring is.
+
+### Revised recommendation
+
+Two viable shapes, different risk profiles. Both assume fixing the OPFS wiring first.
+
+**(a) Fix OPFS wiring + implement issue #7's gate** (fastest path to closing #7)
+
+1. Land the OPFS fix (`await dbReady` in entry-client — §2.3 option A). This is the precondition for anything.
+2. Verify empirically (DevTools performance profile) that `isReady: true` fires within ≤50 ms on warm reload after a prior session.
+3. Replace the `useState` init + `lookupSessionInCache` + URL-sync effect chain with the gate from the issue: `if (!isReady) return <AppShell />`. Sessions + tabs then arrive together with valid data.
+4. Keep the first-ever-load skeleton. No cache means `isReady` fires early with empty `data`; render accordingly.
+5. First-ever load: `data` is still `[]` when `isReady` fires. Component must handle "ready but empty" as a distinct state from "loading" (show empty tab bar, spawn form, etc.). This is the same state the app already reaches after the queryFn returns an empty array, so it's not new UX territory.
+
+**(b) Ship issue #5's zustand refactor** (deeper, structural, closes more failure modes)
+
+Everything §2–§6 of the sibling root-cause doc argues for still applies. The refactor removes a whole class of races structurally, not just "makes them fast enough to not fire." It also doesn't depend on OPFS working. Considerations beyond pure timing — the two-writer races between queryFn and WS broadcast for tabs, the archived-session deep-link, cross-device tab sync — are not solved by the gate alone.
+
+**My now-corrected take.** The gate really is the cheaper fix if the only goal is closing #7 in the common warm-reload case. But it still leaves the underlying architecture (tabs in TanStack DB, placeholder-tab logic, URL↔state effect chain) intact, and those remain the root cause of the non-timing failure modes. If we believe the issue #5 refactor is landing on its merits anyway, the gate is make-work; if we want the fastest possible patch to stabilize the current UX before #5 is ready, the gate is reasonable — but it requires the OPFS fix first.
+
+Either way, **the OPFS wiring bug is the highest-leverage fix** — it's currently eating its bundle cost for zero runtime value, and it unblocks this whole conversation.
+
+### Corrections to earlier sections
+
+- §0 TL;DR line "the cheap one-frame gate doesn't exist" — **corrected: the one-frame gate exists in the library, but only when `persistedCollectionOptions` actually wraps the collection, which today it does not.**
+- §1.1 table "writeBatch/OPFS rehydrate: isLoading → false? No" — **corrected for the persisted code path:** OPFS rehydrate (via `createLoopbackSyncConfig.ensureStarted().then(markReady)`) DOES flip `isLoading` to `false`. `writeBatch` still does not.
+- §1.2 "full network round-trip, 50–200 ms best-case" — **applies only to the currently-broken OPFS path.** With OPFS wired up, warm-load gate is 5–50 ms.
+- §4 Q1 "N/A. OPFS is not resolving our collections at all" — still accurate today, but the library-semantics answer would change once OPFS is wired: warm-load hydration is indeed ≈1 frame on modern browsers.
+- §5 Decision "Loading gate fix: reject" — **revised: reject as currently architected (OPFS broken); would be viable after OPFS fix.** #5's refactor still preferred on architectural grounds beyond timing.
+
+## 8. Addendum — confirmed against the public `useLiveQuery` docs
 
 Verified at https://tanstack.com/db/latest/docs/framework/react/reference/functions/useLiveQuery (2026-04-17):
 
@@ -253,7 +336,7 @@ The `db-core/custom-adapter/SKILL.md` bundled with `@tanstack/db` reinforces thi
 
 Reaffirms the decision in §5: issue #7's "skeleton, ~1ms" gate doesn't exist in the library as shipped. Reject the gate; proceed with #5.
 
-## 8. Sources
+## 9. Sources
 
 - `apps/orchestrator/src/db/sessions-collection.ts` (full)
 - `apps/orchestrator/src/db/tabs-collection.ts` (full)
@@ -268,3 +351,4 @@ Reaffirms the decision in §5: issue #7's "skeleton, ~1ms" gate doesn't exist in
 - `node_modules/@tanstack/browser-db-sqlite-persistence/README.md`
 - `planning/research/2026-04-17-issue-5-session-tab-state-root-cause.md`
 - `planning/research/2026-04-16-state-management-audit.md`
+- `node_modules/.pnpm/@tanstack+db-sqlite-persistence-core@0.1.8_typescript@5.8.3/.../persisted.ts:2210-2563, 2721-2733` (the correction in §7)
