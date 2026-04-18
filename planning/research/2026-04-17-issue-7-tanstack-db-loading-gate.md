@@ -434,7 +434,107 @@ Step 1 alone closes issue #7's immediate symptom (gates collapse to ≤50 ms war
 - **Drafts with per-keystroke writes**: drafts live in `user_drafts` in D1. The existing debounce pattern applies. No functional change from today.
 - **Archive filter for sidebar vs tab bar**: sidebar filters `!archived`; tab bar does not (an archived session in an active tab stays usable). The filter is a `.where` clause on the sidebar's `useLiveQuery`, applied after the same join. Same data, different view.
 
-## 10. Sources
+## 10. Third refinement — UserSettingsDO becomes an invalidation event bus
+
+Further pushback, steelmanned: **"UserSettingsDO just becomes an event bus for cache invalidation."**
+
+This closes §9.7 open question (b) and is the right shape. The DO keeps its seat at the table but stops pretending to be a store. It becomes a per-user authenticated WebSocket fanout — Cloudflare's natural strength — and nothing more.
+
+### 10.1 The separation of concerns
+
+| Concern | Owner | Why |
+|---|---|---|
+| Source of truth for tabs/drafts/prefs/sessions | **D1** | Relational, queryable, cheap reads, joinable, indexed |
+| Client replica + reactive render | **TanStack DB collections** (OPFS-persisted) | Optimistic mutations, joins, live queries |
+| Cross-device/-tab propagation | **UserSettingsDO** | Per-user auth envelope + stateful WebSocket fanout |
+| Mutation path | Client → HTTP POST/PATCH → Worker → D1 → notify DO | Single-writer path, RESTful, cacheable, auditable |
+
+The DO's `storage` API stays empty (or used only for presence/heartbeats). Its code surface shrinks to: accept WebSocket upgrades, authenticate, maintain a `Set<WebSocket>` of the user's connected clients, broadcast invalidation messages posted to it by the Worker after a D1 commit.
+
+### 10.2 Wire protocol
+
+DO → client, over the per-user WebSocket:
+
+```ts
+type InvalidationEvent =
+  | { type: 'invalidate', collection: 'tabs' | 'drafts' | 'preferences' | 'sessions' }
+  | { type: 'invalidate', collection: string, keys: string[] }  // fine-grained
+  | { type: 'hello', connectedCount: number }                     // presence
+```
+
+Worker → DO (internal, via DO stub), on every mutation:
+
+```ts
+await env.UserSettings.idFromName(userId).fetch('https://do/notify', {
+  method: 'POST',
+  body: JSON.stringify({ collection: 'tabs', keys: [tabId] }),
+})
+```
+
+Client handler:
+
+```ts
+socket.onmessage = (ev) => {
+  const msg = JSON.parse(ev.data)
+  if (msg.type === 'invalidate') {
+    const c = collectionsByName[msg.collection]
+    if (msg.keys) c.utils.refetchKeys?.(msg.keys) ?? c.utils.refetch()
+    else c.utils.refetch()
+  }
+}
+```
+
+No payload replication in the broadcast — just "something changed, go refetch." That keeps the DO's message size bounded and avoids the DO ever becoming a cache that must stay consistent with D1.
+
+### 10.3 Why this is strictly better than the alternatives
+
+- **vs. polling (§9.7 option a):** sub-100 ms cross-device propagation instead of 15–30 s. Fewer redundant D1 reads (polls only fire when something actually changed). No change to the "happy path" bundle size — we already have a WS to the SessionDO for hot chat traffic; this is a second, long-lived per-user connection with trivial CPU cost.
+- **vs. today's UserSettingsDO-holds-state:** eliminates the DO's biggest liability — it's a single-writer store for list-shaped data that D1 models natively. Migrations, indexing, full-text search, admin queries all become normal SQL. The DO stops being a data-gravity trap.
+- **vs. TinyBase-style CRDT sync (issue #6):** no CRDT merge logic, no schema duplication on the DO side, no third sync system. D1 is authoritative; last-writer-wins on conflicting writes is fine for tab order and draft snapshots (and drafts already have the Yjs path for sub-keystroke granularity via #4).
+- **vs. broadcasting full deltas:** no risk of DO and D1 drifting. The DO literally cannot know stale data because it never holds any.
+
+### 10.4 DO footprint after the refactor
+
+```ts
+export class UserSettingsDO {
+  sockets = new Set<WebSocket>()
+
+  async fetch(req: Request) {
+    const url = new URL(req.url)
+    if (url.pathname === '/ws') return this.handleUpgrade(req)
+    if (url.pathname === '/notify') {
+      const msg = await req.text()
+      for (const ws of this.sockets) try { ws.send(msg) } catch {}
+      return new Response(null, { status: 204 })
+    }
+    return new Response('not found', { status: 404 })
+  }
+
+  handleUpgrade(req: Request) { /* standard WS upgrade + auth */ }
+}
+```
+
+Everything else — `getUserSettings`, `patchUserTabs`, `saveDraft`, all the current persisted state — is deleted. Those paths become D1 queries in normal TanStack Start API routes. The DO goes from a few hundred lines of storage logic + schema migrations to ~40 lines of WebSocket fanout.
+
+### 10.5 Migration ordering
+
+1. **OPFS wiring fix** (unchanged, still step 1 — precondition for everything).
+2. **Add D1 tables** `user_tabs`, `user_drafts`, `user_preferences`. Create Drizzle schemas + endpoints.
+3. **Add the notify channel on UserSettingsDO**, no-op on clients yet. Worker mutation endpoints start firing `/notify` after D1 commits.
+4. **Client adds the WS subscription** and refetch handler. At this point invalidations flow but clients still read from the old UserSettingsDO storage.
+5. **Dual-write window**: mutations go to both D1 and UserSettingsDO storage. Reads still come from DO.
+6. **Flip reads to D1-backed collections.** Remove dual-write. Delete the DO storage code and schema migrations. DO is now just the fanout.
+7. **Rewrite tab bar around the join query** (§9 step 3).
+
+Steps 3-6 are the classic expand/migrate/contract pattern and can ship incrementally without a feature flag if we accept a short dual-write period.
+
+### 10.6 Corrections propagated
+
+- §9.7 open question (b) "add a thin WS invalidation channel" → **that's exactly what UserSettingsDO becomes**; not a new piece of infra, a repurposing of existing infra.
+- §9.2 architecture table, "User settings" row → revised: D1 is the store, **UserSettingsDO is the invalidation event bus**, not "deleted."
+- Issue #6 "Unify storage to D1 + TinyBase real-time sync via UserSettingsDO" → **reframed**: the title is right, but TinyBase isn't needed. D1 + per-user WS invalidation channel through the same DO is a smaller, simpler shape that achieves the same goal.
+
+## 11. Sources
 
 - `apps/orchestrator/src/db/sessions-collection.ts` (full)
 - `apps/orchestrator/src/db/tabs-collection.ts` (full)
