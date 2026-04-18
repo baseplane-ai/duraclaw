@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as AuthenticatedAdminUsersRouteImport } from './routes/_authenticated/admin.users'
+import { Route as AuthenticatedDebugSessionCollectionRouteImport } from './routes/_authenticated/debug.session-collection'
 import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/index'
 import { Route as AuthenticatedRouteRouteImport } from './routes/_authenticated/route'
 import { Route as AuthenticatedSessionIdRouteImport } from './routes/_authenticated/session.$id'
@@ -51,6 +52,11 @@ const AuthenticatedAdminUsersRoute = AuthenticatedAdminUsersRouteImport.update({
   path: '/admin/users',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
+const AuthenticatedDebugSessionCollectionRoute = AuthenticatedDebugSessionCollectionRouteImport.update({
+  id: '/debug/session-collection',
+  path: '/debug/session-collection',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AuthenticatedIndexRoute
@@ -58,6 +64,7 @@ export interface FileRoutesByFullPath {
   '/maintenance': typeof MaintenanceRoute
   '/settings': typeof AuthenticatedSettingsRoute
   '/admin/users': typeof AuthenticatedAdminUsersRoute
+  '/debug/session-collection': typeof AuthenticatedDebugSessionCollectionRoute
   '/session/$id': typeof AuthenticatedSessionIdRoute
 }
 export interface FileRoutesByTo {
@@ -66,6 +73,7 @@ export interface FileRoutesByTo {
   '/settings': typeof AuthenticatedSettingsRoute
   '/': typeof AuthenticatedIndexRoute
   '/admin/users': typeof AuthenticatedAdminUsersRoute
+  '/debug/session-collection': typeof AuthenticatedDebugSessionCollectionRoute
   '/session/$id': typeof AuthenticatedSessionIdRoute
 }
 export interface FileRoutesById {
@@ -76,13 +84,14 @@ export interface FileRoutesById {
   '/_authenticated/settings': typeof AuthenticatedSettingsRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
   '/_authenticated/admin/users': typeof AuthenticatedAdminUsersRoute
+  '/_authenticated/debug/session-collection': typeof AuthenticatedDebugSessionCollectionRoute
   '/_authenticated/session/$id': typeof AuthenticatedSessionIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/login' | '/maintenance' | '/settings' | '/admin/users' | '/session/$id'
+  fullPaths: '/' | '/login' | '/maintenance' | '/settings' | '/admin/users' | '/debug/session-collection' | '/session/$id'
   fileRoutesByTo: FileRoutesByTo
-  to: '/login' | '/maintenance' | '/settings' | '/' | '/admin/users' | '/session/$id'
+  to: '/login' | '/maintenance' | '/settings' | '/' | '/admin/users' | '/debug/session-collection' | '/session/$id'
   id:
     | '__root__'
     | '/_authenticated'
@@ -91,6 +100,7 @@ export interface FileRouteTypes {
     | '/_authenticated/settings'
     | '/_authenticated/'
     | '/_authenticated/admin/users'
+    | '/_authenticated/debug/session-collection'
     | '/_authenticated/session/$id'
   fileRoutesById: FileRoutesById
 }
@@ -151,6 +161,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedAdminUsersRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/debug/session-collection': {
+      id: '/_authenticated/debug/session-collection'
+      path: '/debug/session-collection'
+      fullPath: '/debug/session-collection'
+      preLoaderRoute: typeof AuthenticatedDebugSessionCollectionRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
   }
 }
 
@@ -158,6 +175,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedSettingsRoute: typeof AuthenticatedSettingsRoute
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
   AuthenticatedAdminUsersRoute: typeof AuthenticatedAdminUsersRoute
+  AuthenticatedDebugSessionCollectionRoute: typeof AuthenticatedDebugSessionCollectionRoute
   AuthenticatedSessionIdRoute: typeof AuthenticatedSessionIdRoute
 }
 
@@ -165,6 +183,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedSettingsRoute: AuthenticatedSettingsRoute,
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
   AuthenticatedAdminUsersRoute: AuthenticatedAdminUsersRoute,
+  AuthenticatedDebugSessionCollectionRoute: AuthenticatedDebugSessionCollectionRoute,
   AuthenticatedSessionIdRoute: AuthenticatedSessionIdRoute,
 }
 
