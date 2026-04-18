@@ -2,20 +2,18 @@
  * useTabSync — Yjs-backed tab state, synced cross-device via UserSettingsDO.
  *
  * The Y.Doc holds:
- *   - Y.Array<string> "openTabs"   — ordered session IDs
- *   - Y.Map "workspace"            — { activeSessionId: string | null }
+ *   - Y.Array<string> "openTabs"    — ordered session IDs
+ *   - Y.Map<string>   "tabProjects" — sessionId → project name
+ *   - Y.Map           "workspace"   — { activeSessionId: string | null }
  *
- * Client-side persistence: y-indexeddb gives offline cold-start so the tab bar
- * renders immediately before the WS connects. CRDT merge handles any drift
- * between IndexedDB cache and server state.
+ * One-tab-per-project: openTab stores the project in the Y.Doc and
+ * automatically replaces an existing tab for the same project. The
+ * invariant is self-contained — no external resolver or session lookup.
  *
- * One-tab-per-project: when a `projectResolver` is provided, `openTab`
- * automatically replaces an existing tab for the same project instead of
- * opening a duplicate. This is the single enforcement point — callers never
- * need to check for project conflicts themselves.
- *
- * Replaces: userTabsCollection, useActiveTab, ensureTabForSession, tab CRUD
- * API endpoints, and the entire optimistic-insert / server-dedup race surface.
+ * Client-side persistence: y-indexeddb gives offline cold-start so the
+ * tab bar renders immediately before the WS connects. CRDT merge handles
+ * any drift between IndexedDB cache and server state. A reactive dedup
+ * effect cleans up legacy duplicates from both sources.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -24,19 +22,10 @@ import * as Y from 'yjs'
 import { useSession } from '~/lib/auth-client'
 
 export interface OpenTabOptions {
-  /** Activate the tab after opening. Default: true. */
-  activate?: boolean
+  /** Project name for one-tab-per-project enforcement. */
+  project?: string
   /** Force a new tab even if another tab for the same project exists. */
   forceNewTab?: boolean
-}
-
-export interface UseTabSyncOptions {
-  /**
-   * Maps sessionId → project name. When provided, openTab enforces
-   * one-tab-per-project: if a tab for the same project already exists,
-   * the new session replaces it in-place.
-   */
-  projectResolver?: (sessionId: string) => string | undefined
 }
 
 export interface UseTabSyncResult {
@@ -45,13 +34,11 @@ export interface UseTabSyncResult {
   /** Currently focused session ID (reactive). */
   activeSessionId: string | null
   /**
-   * Add a session to open tabs. Idempotent by session ID; when a
-   * projectResolver is configured, also enforces one-tab-per-project
-   * (replaces existing tab for same project unless forceNewTab is set).
+   * Open or activate a tab. Idempotent by session ID. When a project is
+   * provided, enforces one-tab-per-project (replaces existing tab for the
+   * same project unless forceNewTab is set). Always activates the tab.
    */
   openTab: (sessionId: string, options?: OpenTabOptions) => void
-  /** Replace one session with another in the same tab position. */
-  replaceTab: (oldSessionId: string, newSessionId: string) => void
   /** Remove a session from open tabs. Returns the next active session ID. */
   closeTab: (sessionId: string) => string | null
   /** Set the active session. */
@@ -78,14 +65,10 @@ export function getTabSyncSnapshot(): {
 }
 
 // Module-level Y.Doc reference for imperative reads (getTabSyncSnapshot).
-// Set by the first useTabSync mount; cleared on unmount if no other mounts remain.
 let sharedDoc: Y.Doc | null = null
 let sharedDocMountCount = 0
 
-export function useTabSync(options?: UseTabSyncOptions): UseTabSyncResult {
-  // Store resolver in a ref so it doesn't destabilize callbacks.
-  const projectResolverRef = useRef(options?.projectResolver)
-  projectResolverRef.current = options?.projectResolver
+export function useTabSync(): UseTabSyncResult {
   const { data: session } = useSession() as {
     data: { user?: { id?: string } } | null | undefined
   }
@@ -111,12 +94,13 @@ export function useTabSync(options?: UseTabSyncOptions): UseTabSyncResult {
   }, [doc])
 
   const openTabsY = useMemo(() => doc?.getArray<string>('openTabs') ?? null, [doc])
+  const tabProjectsY = useMemo(() => doc?.getMap<string>('tabProjects') ?? null, [doc])
   const workspaceY = useMemo(() => doc?.getMap('workspace') ?? null, [doc])
 
   const host = typeof window !== 'undefined' && window.location ? window.location.host : ''
 
   // y-partyserver provider — WS sync, auto-reconnect, hibernation-safe.
-  const provider = useYProvider({
+  useYProvider({
     host,
     room: userId ?? '',
     party: 'user-settings',
@@ -128,7 +112,6 @@ export function useTabSync(options?: UseTabSyncOptions): UseTabSyncResult {
   useEffect(() => {
     if (!userId || !doc) return
     let idb: { destroy: () => void } | null = null
-    // Dynamic import to avoid SSR issues — y-indexeddb uses browser APIs.
     import('y-indexeddb').then(({ IndexeddbPersistence }) => {
       idb = new IndexeddbPersistence(`user-settings:${userId}`, doc)
     })
@@ -140,6 +123,8 @@ export function useTabSync(options?: UseTabSyncOptions): UseTabSyncResult {
   // Connection status tracking.
   const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting')
   useEffect(() => {
+    if (!doc) return
+    const provider = (doc as any).wsProvider
     if (!provider) return
     const onStatus = (payload: { status?: string } | undefined) => {
       const next = payload?.status
@@ -148,10 +133,8 @@ export function useTabSync(options?: UseTabSyncOptions): UseTabSyncResult {
       }
     }
     provider.on('status', onStatus as never)
-    return () => {
-      provider.off('status', onStatus as never)
-    }
-  }, [provider])
+    return () => provider.off('status', onStatus as never)
+  }, [doc])
 
   // Reactive state from Y.Doc observers.
   const [openTabs, setOpenTabs] = useState<string[]>(() => openTabsY?.toArray() ?? [])
@@ -163,7 +146,6 @@ export function useTabSync(options?: UseTabSyncOptions): UseTabSyncResult {
     if (!openTabsY) return
     const handler = () => setOpenTabs(openTabsY.toArray())
     openTabsY.observe(handler)
-    // Sync initial state (IndexedDB may have hydrated by now).
     setOpenTabs(openTabsY.toArray())
     return () => openTabsY.unobserve(handler)
   }, [openTabsY])
@@ -178,8 +160,7 @@ export function useTabSync(options?: UseTabSyncOptions): UseTabSyncResult {
     return () => workspaceY.unobserve(handler)
   }, [workspaceY])
 
-  // One-time migration: if Y.Doc has no active session but localStorage does,
-  // carry the legacy activeTabId forward then delete the legacy key.
+  // One-time migration: legacy localStorage activeTab.
   const migratedRef = useRef(false)
   useEffect(() => {
     if (!workspaceY || !openTabsY || migratedRef.current) return
@@ -187,8 +168,6 @@ export function useTabSync(options?: UseTabSyncOptions): UseTabSyncResult {
     if (!workspaceY.get('activeSessionId')) {
       const legacyActiveTab = localStorage.getItem('duraclaw-active-tab')
       if (legacyActiveTab) {
-        // We can't translate tab ID to session ID without the old collection,
-        // so just activate the first open tab.
         const tabs = openTabsY.toArray()
         if (tabs.length > 0) {
           workspaceY.set('activeSessionId', tabs[0])
@@ -198,76 +177,103 @@ export function useTabSync(options?: UseTabSyncOptions): UseTabSyncResult {
     }
   }, [workspaceY, openTabsY])
 
+  // Self-healing dedup: remove duplicate-project tabs using the Y.Map.
+  // Runs reactively after Yjs sync so it cleans legacy state from both
+  // IndexedDB and the server-side Y.Doc.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: openTabs dep triggers re-check after Yjs sync
+  useEffect(() => {
+    if (!doc || !openTabsY || !tabProjectsY) return
+    const arr = openTabsY.toArray()
+    if (arr.length < 2) return
+
+    const projectIndices = new Map<string, number[]>()
+    for (let i = 0; i < arr.length; i++) {
+      const project = tabProjectsY.get(arr[i]) as string | undefined
+      if (!project) continue
+      const indices = projectIndices.get(project)
+      if (indices) indices.push(i)
+      else projectIndices.set(project, [i])
+    }
+
+    const toRemove: number[] = []
+    for (const indices of projectIndices.values()) {
+      if (indices.length > 1) {
+        toRemove.push(...indices.slice(0, -1))
+      }
+    }
+    if (toRemove.length === 0) return
+
+    doc.transact(() => {
+      for (const idx of toRemove.sort((a, b) => b - a)) {
+        const removedId = openTabsY.get(idx)
+        openTabsY.delete(idx, 1)
+        // Clean up project mapping for removed entry.
+        tabProjectsY.delete(removedId)
+      }
+    })
+  }, [doc, openTabsY, tabProjectsY, openTabs])
+
   // ── Actions ─────────────────────────────────────────────────────────
 
   const openTab = useCallback(
     (sessionId: string, opts?: OpenTabOptions) => {
-      const activate = opts?.activate ?? true
+      const project = opts?.project
       const forceNewTab = opts?.forceNewTab ?? false
-      if (!doc || !openTabsY || !workspaceY) return
+      if (!doc || !openTabsY || !tabProjectsY || !workspaceY) return
+
       doc.transact(() => {
         const arr = openTabsY.toArray()
 
+        // Store project mapping (update even if tab exists — project
+        // may not have been known on a previous openTab call).
+        if (project) tabProjectsY.set(sessionId, project)
+
         // Already open — just activate.
         if (arr.includes(sessionId)) {
-          if (activate) workspaceY.set('activeSessionId', sessionId)
+          workspaceY.set('activeSessionId', sessionId)
           return
         }
 
-        // One-tab-per-project: if a resolver is configured and another tab
-        // for the same project exists, replace it in-place.
-        const resolver = projectResolverRef.current
-        if (!forceNewTab && resolver) {
-          const project = resolver(sessionId)
-          if (project) {
-            const existingIdx = arr.findIndex((id) => resolver(id) === project)
-            if (existingIdx !== -1) {
-              openTabsY.delete(existingIdx, 1)
-              openTabsY.insert(existingIdx, [sessionId])
-              if (activate) workspaceY.set('activeSessionId', sessionId)
-              return
+        // Resolve project: prefer explicit arg, fall back to Y.Map.
+        const resolvedProject = project ?? (tabProjectsY.get(sessionId) as string | undefined)
+
+        // One-tab-per-project: find and replace existing tab.
+        if (!forceNewTab && resolvedProject) {
+          const existingIdx = arr.findIndex(
+            (id) => (tabProjectsY.get(id) as string | undefined) === resolvedProject,
+          )
+          if (existingIdx !== -1) {
+            const oldId = arr[existingIdx]
+            openTabsY.delete(existingIdx, 1)
+            openTabsY.insert(existingIdx, [sessionId])
+            // Clean up old mapping, but only if the old session isn't
+            // elsewhere in the array (shouldn't be, but be safe).
+            if (!openTabsY.toArray().includes(oldId)) {
+              tabProjectsY.delete(oldId)
             }
+            workspaceY.set('activeSessionId', sessionId)
+            return
           }
         }
 
         // No conflict — append.
         openTabsY.push([sessionId])
-        if (activate) workspaceY.set('activeSessionId', sessionId)
+        workspaceY.set('activeSessionId', sessionId)
       })
     },
-    [doc, openTabsY, workspaceY],
-  )
-
-  const replaceTab = useCallback(
-    (oldSessionId: string, newSessionId: string) => {
-      if (!doc || !openTabsY || !workspaceY) return
-      doc.transact(() => {
-        const arr = openTabsY.toArray()
-        const idx = arr.indexOf(oldSessionId)
-        if (idx === -1) {
-          // Old session not found — just append.
-          if (!arr.includes(newSessionId)) openTabsY.push([newSessionId])
-        } else {
-          // Replace in-place: delete old, insert new at same position.
-          openTabsY.delete(idx, 1)
-          openTabsY.insert(idx, [newSessionId])
-        }
-        workspaceY.set('activeSessionId', newSessionId)
-      })
-    },
-    [doc, openTabsY, workspaceY],
+    [doc, openTabsY, tabProjectsY, workspaceY],
   )
 
   const closeTab = useCallback(
     (sessionId: string): string | null => {
-      if (!doc || !openTabsY || !workspaceY) return null
+      if (!doc || !openTabsY || !tabProjectsY || !workspaceY) return null
       let nextActive: string | null = null
       doc.transact(() => {
         const arr = openTabsY.toArray()
         const idx = arr.indexOf(sessionId)
         if (idx === -1) return
         openTabsY.delete(idx, 1)
-        // If closing the active tab, pick adjacent.
+        tabProjectsY.delete(sessionId)
         const current = workspaceY.get('activeSessionId')
         if (current === sessionId) {
           const remaining = openTabsY.toArray()
@@ -277,7 +283,7 @@ export function useTabSync(options?: UseTabSyncOptions): UseTabSyncResult {
       })
       return nextActive
     },
-    [doc, openTabsY, workspaceY],
+    [doc, openTabsY, tabProjectsY, workspaceY],
   )
 
   const setActive = useCallback(
@@ -299,5 +305,5 @@ export function useTabSync(options?: UseTabSyncOptions): UseTabSyncResult {
     [doc, openTabsY],
   )
 
-  return { openTabs, activeSessionId, openTab, replaceTab, closeTab, setActive, reorder, status }
+  return { openTabs, activeSessionId, openTab, closeTab, setActive, reorder, status }
 }

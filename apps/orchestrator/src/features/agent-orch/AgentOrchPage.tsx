@@ -1,14 +1,13 @@
 /**
  * AgentOrchPage — Main page for spawning and observing sessions.
  *
- * Layout: sidebar (session list + spawn form) + main area (selected agent detail view).
- * Tab state is Yjs-backed via useTabSync — no TanStack QueryCollection, no
- * optimistic inserts, no server dedup. The Y.Array<string> of session IDs IS
- * the tab list; display metadata comes from agentSessionsCollection join.
+ * Layout: tab bar + main area (selected agent detail view or quick prompt).
+ * Tab state is Yjs-backed via useTabSync — one-tab-per-project is enforced
+ * inside the hook, so callers just pass `project` when opening tabs.
  */
 
 import { useNavigate, useSearch } from '@tanstack/react-router'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Header } from '~/components/layout/header'
 import { Main } from '~/components/layout/main'
 import { PushOptInBanner } from '~/components/push-opt-in-banner'
@@ -35,33 +34,19 @@ function AgentOrchContent() {
     (search as { newSessionProject?: string }).newSessionProject ?? null
   const searchNewTab = (search as { newTab?: boolean }).newTab ?? false
 
-  // Session→project resolver for one-tab-per-project enforcement inside useTabSync.
-  const sessionProjectMap = useMemo(() => {
-    const m = new Map<string, string>()
-    for (const s of sessions) {
-      if (s.project) m.set(s.id, s.project)
-    }
-    return m
-  }, [sessions])
-  const projectResolver = useCallback(
-    (sessionId: string) => sessionProjectMap.get(sessionId),
-    [sessionProjectMap],
-  )
+  const { openTabs, activeSessionId, openTab, closeTab, setActive, reorder } = useTabSync()
 
-  // ── Yjs tab sync — one-tab-per-project enforced inside the hook ──
-  const { openTabs, activeSessionId, openTab, closeTab, setActive, reorder } = useTabSync({
-    projectResolver,
-  })
-
-  // Deep-link: if URL has ?session=X, ensure it's in open tabs + activate.
-  // One-tab-per-project is handled automatically by openTab's projectResolver.
+  // Deep-link: if URL has ?session=X, open it. Project lookup from
+  // sessions list lets the hook enforce one-tab-per-project; if sessions
+  // haven't loaded yet the hook falls back to its own Y.Map data.
   const deepLinkedRef = useRef<string | null>(null)
   useEffect(() => {
     if (searchSessionId && searchSessionId !== deepLinkedRef.current) {
       deepLinkedRef.current = searchSessionId
-      openTab(searchSessionId)
+      const session = sessions.find((s) => s.id === searchSessionId)
+      openTab(searchSessionId, { project: session?.project })
     }
-  }, [searchSessionId, openTab])
+  }, [searchSessionId, openTab, sessions])
 
   // Sync URL when activeSessionId changes (Yjs → URL).
   useEffect(() => {
@@ -130,9 +115,7 @@ function AgentOrchContent() {
         })
         setQuickPromptHint(null)
 
-        // openTab handles one-tab-per-project automatically; "New tab for
-        // project" passes forceNewTab to explicitly create a second tab.
-        openTab(sessionId, { forceNewTab: config.newTab })
+        openTab(sessionId, { project: config.project, forceNewTab: config.newTab })
         navigate({ to: '/', search: { session: sessionId } })
       } catch (err) {
         console.error('[AgentOrch] Spawn failed:', err)
@@ -143,13 +126,12 @@ function AgentOrchContent() {
 
   const handleSelectSession = useCallback(
     (sessionId: string) => {
-      // openTab is idempotent (no-op + activate if already open) and
-      // handles one-tab-per-project replacement automatically.
-      openTab(sessionId)
+      const session = sessions.find((s) => s.id === sessionId)
+      openTab(sessionId, { project: session?.project })
       setSpawnConfig(null)
       navigate({ to: '/', search: { session: sessionId } })
     },
-    [navigate, openTab],
+    [navigate, openTab, sessions],
   )
 
   const handleCloseTab = useCallback(
@@ -194,21 +176,16 @@ function AgentOrchContent() {
     const handler = (e: KeyboardEvent) => {
       const isMod = e.metaKey || e.ctrlKey
 
-      // Cmd+T: no-op for now (browser intercepts); could open new session
       if (isMod && e.key === 't') {
         e.preventDefault()
       }
 
-      // Cmd+W: close active tab
       if (isMod && e.key === 'w') {
         e.preventDefault()
         const { activeSessionId: active } = getTabSyncSnapshot()
-        if (active) {
-          handleCloseTab(active)
-        }
+        if (active) handleCloseTab(active)
       }
 
-      // Cmd+1-9: switch to Nth tab
       if (isMod && e.key >= '1' && e.key <= '9') {
         const idx = parseInt(e.key, 10) - 1
         const { openTabs: tabs } = getTabSyncSnapshot()
