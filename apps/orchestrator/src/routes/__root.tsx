@@ -3,6 +3,7 @@ import { useEffect } from 'react'
 import { OfflineBanner } from '~/components/offline-banner'
 import { Toaster } from '~/components/ui/sonner'
 import { ThemeProvider } from '~/context/theme-provider'
+import { useInvalidationChannel } from '~/hooks/use-invalidation-channel'
 import { useSession } from '~/lib/auth-client'
 import '~/styles.css'
 
@@ -15,6 +16,10 @@ function RootComponent() {
   const navigate = useNavigate()
   const { data: session, isPending } = useSession()
   const isLogin = location.pathname === '/login'
+
+  // PartyKit invalidation channel — opens once a userId is available, no-op
+  // until then. Sole subscriber to D1 row-change broadcasts (B-CLIENT-5).
+  useInvalidationChannel()
 
   useEffect(() => {
     if (isPending) return

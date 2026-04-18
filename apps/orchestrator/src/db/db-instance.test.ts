@@ -18,12 +18,6 @@ describe('db-instance', () => {
     expect(typeof mod.queryClient.fetchQuery).toBe('function')
   })
 
-  it('exports persistence as null initially', async () => {
-    const mod = await import('./db-instance')
-    // Before dbReady resolves, persistence starts null
-    expect(mod.persistence).toBeNull()
-  })
-
   it('exports dbReady as a promise', async () => {
     const mod = await import('./db-instance')
     expect(mod.dbReady).toBeInstanceOf(Promise)
@@ -37,7 +31,6 @@ describe('db-instance', () => {
 
     // jsdom does not support OPFS, so persistence should be null
     expect(result).toBeNull()
-    expect(mod.persistence).toBeNull()
     // Should have warned about fallback
     expect(warnSpy).toHaveBeenCalledWith(
       '[duraclaw-db] OPFS not available, using memory-only storage',
@@ -53,11 +46,17 @@ describe('db-instance', () => {
       vi.resetModules()
       const mod = await import('./db-instance')
       const result = await mod.dbReady
-
       expect(result).toBeNull()
-      expect(mod.persistence).toBeNull()
     } finally {
       globalThis.navigator = originalNavigator
     }
+  })
+
+  it('getPersistence resolves to the same value as dbReady', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const mod = await import('./db-instance')
+    const a = await mod.dbReady
+    const b = await mod.getPersistence()
+    expect(b).toBe(a)
   })
 })

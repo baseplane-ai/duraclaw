@@ -2,16 +2,20 @@
  * Messages LocalOnlyCollection -- caches chat messages in OPFS SQLite.
  *
  * - Collection key: 'messages'
- * - Persisted to OPFS SQLite (schema version 1)
+ * - Persisted to OPFS SQLite (schema version 2)
  * - Cache-behind: messages written after WS delivery
  * - Cache-first: loaded before WS hydration on session open
  * - 30-day age-based eviction
+ *
+ * NOTE: top-level await `dbReady` so the persisted branch is taken whenever
+ * OPFS is available (B-CLIENT-1 — was reading the stale `let persistence`
+ * export and silently falling back to in-memory).
  */
 
 import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence'
 import { createCollection, localOnlyCollectionOptions } from '@tanstack/db'
 import type { SessionMessagePart } from '~/lib/types'
-import { persistence } from './db-instance'
+import { dbReady } from './db-instance'
 
 /** Message stored in the local cache with session context */
 export interface CachedMessage {
@@ -21,6 +25,8 @@ export interface CachedMessage {
   parts: SessionMessagePart[]
   createdAt?: Date | string
 }
+
+const persistence = await dbReady
 
 function createMessagesCollection() {
   const localOpts = localOnlyCollectionOptions<CachedMessage, string>({

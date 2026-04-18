@@ -2,9 +2,15 @@
  * TanStackDB persistence instance with OPFS SQLite fallback.
  *
  * - OPFS detection: checks `navigator.storage?.getDirectory` existence
- * - Non-blocking: app renders before DB init completes
+ * - Blocking: `dbReady` MUST be top-level-awaited by every collection module
+ *   so `createCollection` always sees a non-null persistence on the OPFS path.
  * - SSR-safe: guards against `typeof navigator === 'undefined'`
  * - Console warning on fallback to memory-only storage
+ *
+ * NOTE: do NOT export a mutable `let persistence`. The original race had
+ * `sessions-collection.ts` and `tabs-collection.ts` reading `persistence` at
+ * module load — which was always `null` because `dbReady` had not resolved.
+ * Result: OPFS cache silently disabled. See B-CLIENT-1.
  */
 
 import {
@@ -14,8 +20,6 @@ import {
 import { QueryClient } from '@tanstack/query-core'
 
 type Persistence = Awaited<ReturnType<typeof createBrowserWASQLitePersistence>>
-
-let persistence: Persistence | null = null
 
 /** Shared QueryClient instance for TanStackDB collections */
 export const queryClient = new QueryClient()
@@ -31,17 +35,20 @@ async function initPersistence(): Promise<Persistence | null> {
       databaseName: 'duraclaw',
     })
 
-    const p = createBrowserWASQLitePersistence({ database })
-    return p
+    return createBrowserWASQLitePersistence({ database })
   } catch {
     console.warn('[duraclaw-db] OPFS not available, using memory-only storage')
     return null
   }
 }
 
-export const dbReady = initPersistence().then((p) => {
-  persistence = p
-  return p
-})
+/**
+ * Resolved persistence handle (or null if OPFS unavailable).
+ * Top-level await this in every collection module so createCollection
+ * always sees a non-null persistence on the OPFS path.
+ */
+export const dbReady: Promise<Persistence | null> = initPersistence()
 
-export { persistence }
+export async function getPersistence(): Promise<Persistence | null> {
+  return dbReady
+}

@@ -1,82 +1,35 @@
-/**
- * Tabs QueryCollection -- synced to UserSettingsDO via WS + HTTP.
- *
- * - Collection key: 'tabs'
- * - Persisted to OPFS SQLite (schema version 1)
- * - queryFn fetches full state on cold start (no polling — WS pushes updates)
- * - onInsert/onUpdate/onDelete handlers sync mutations to the DO via HTTP
- * - Live sync: WS broadcasts from DO feed utils.writeBatch for server state
- * - Optimistic mutations with automatic rollback on handler error
- */
+// TODO(#7 p5): delete this file; consumers should use `userTabsCollection`
+// (from `~/db/user-tabs-collection`) directly via `useLiveQuery` joined with
+// `agentSessionsCollection` per B-UI-1.
+//
+// Compat shim — keeps p4's diff small. The new `userTabsCollection` has the
+// strict D1 row shape `{id, userId, sessionId: string|null, position,
+// createdAt}` (no project/title/draft). P4 consumers (tab-bar.tsx,
+// AgentOrchPage.tsx, use-swipe-tabs.ts, etc.) still treat `tab.project`,
+// `tab.title`, `tab.sessionId` as `string`. To keep typecheck green WITHOUT
+// touching those files (which p5 owns), this shim:
+//
+//   - re-exports `userTabsCollection` as `tabsCollection`
+//   - widens `TabItem` so consumers see `project`/`title`/`sessionId` as
+//     plain `string` (matching the legacy shape) — at runtime these may be
+//     `undefined`/`null`, which is acceptable because:
+//       * the old `tabsCollection` shape was `tab.project: string,
+//         tab.title: string, tab.sessionId: string` — never undefined,
+//       * p5 rewires the consumers to read from the
+//         `userTabsCollection × agentSessionsCollection` join, where the
+//         join handles missing rows with a skeleton state.
 
-import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence'
-import { createCollection } from '@tanstack/db'
-import { queryCollectionOptions } from '@tanstack/query-db-collection'
-import { persistence, queryClient } from './db-instance'
+import type { UserTabRow } from '~/lib/types'
+import { userTabsCollection } from './user-tabs-collection'
 
-export interface TabItem {
-  id: string
-  project: string
+export interface TabItem extends Omit<UserTabRow, 'sessionId'> {
+  /** Legacy: was always `string` in the old shape. P5 consumers move to the
+   *  join shape and will see `string | null` from D1. */
   sessionId: string
+  /** Legacy field — undefined at runtime; populated by p5 join. */
+  project: string
+  /** Legacy field — undefined at runtime; populated by p5 join. */
   title: string
 }
 
-const queryOpts = queryCollectionOptions({
-  queryKey: ['tabs'] as const,
-  queryFn: async () => {
-    const resp = await fetch('/api/user-settings/tabs')
-    if (!resp.ok) return []
-    const json = (await resp.json()) as { tabs: TabItem[] }
-    return json.tabs
-  },
-  queryClient,
-  getKey: (item: TabItem) => item.id,
-  // No polling — WS pushes live updates via utils.writeBatch
-  refetchInterval: false,
-  staleTime: Number.POSITIVE_INFINITY,
-
-  onInsert: async ({ transaction }) => {
-    for (const m of transaction.mutations) {
-      const resp = await fetch('/api/user-settings/tabs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(m.modified),
-      })
-      if (!resp.ok) throw new Error(`Tab insert failed: ${resp.status}`)
-    }
-  },
-
-  onUpdate: async ({ transaction }) => {
-    for (const m of transaction.mutations) {
-      const resp = await fetch(`/api/user-settings/tabs/${m.key}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(m.changes),
-      })
-      if (!resp.ok) throw new Error(`Tab update failed: ${resp.status}`)
-    }
-  },
-
-  onDelete: async ({ transaction }) => {
-    for (const m of transaction.mutations) {
-      const resp = await fetch(`/api/user-settings/tabs/${m.key}`, { method: 'DELETE' })
-      if (!resp.ok) throw new Error(`Tab delete failed: ${resp.status}`)
-    }
-  },
-})
-
-function createTabsCollection() {
-  if (persistence) {
-    const opts = persistedCollectionOptions({
-      ...queryOpts,
-      persistence,
-      schemaVersion: 1,
-    })
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return createCollection(opts as any)
-  }
-
-  return createCollection(queryOpts)
-}
-
-export const tabsCollection = createTabsCollection()
+export const tabsCollection = userTabsCollection
