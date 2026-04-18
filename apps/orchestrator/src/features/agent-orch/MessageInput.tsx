@@ -241,30 +241,23 @@ export function MessageInput({
         )}
         {error && <p className="px-3 pt-1 text-xs text-destructive">{error}</p>}
         <PromptInputBody>
-          <div style={{ position: 'relative', overflow: 'hidden' }}>
-            <PromptInputTextarea
-              ref={textareaRef}
-              placeholder={textareaPlaceholder}
-              disabled={textareaDisabled}
-              yText={collabActive ? ytext : undefined}
-              onInput={collabActive ? notifyTyping : undefined}
-              onCursorChange={collabActive ? setCursor : undefined}
-              style={
-                collabActive
-                  ? { fieldSizing: 'fixed', height: '5rem', overflowY: 'auto' }
-                  : undefined
-              }
+          <PromptInputTextarea
+            ref={textareaRef}
+            placeholder={textareaPlaceholder}
+            disabled={textareaDisabled}
+            yText={collabActive ? ytext : undefined}
+            onInput={collabActive ? notifyTyping : undefined}
+            onCursorChange={collabActive ? setCursor : undefined}
+          />
+          {collabActive && awareness && selfClientId !== null && (
+            <CursorOverlay
+              awareness={awareness}
+              selfClientId={selfClientId}
+              textareaRef={textareaRef}
+              doc={doc}
+              ytext={ytext}
             />
-            {collabActive && awareness && selfClientId !== null && (
-              <CursorOverlay
-                awareness={awareness}
-                selfClientId={selfClientId}
-                textareaRef={textareaRef}
-                doc={doc}
-                ytext={ytext}
-              />
-            )}
-          </div>
+          )}
         </PromptInputBody>
         <PromptInputFooter>
           <label

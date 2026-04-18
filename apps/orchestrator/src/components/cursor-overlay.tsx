@@ -336,13 +336,40 @@ export function CursorOverlay({
     setMarkers(next)
   }, [snapshot, textareaRef, ytext, doc, tick])
 
+  // Position the overlay to match the textarea within the nearest
+  // positioned ancestor (InputGroup has position: relative).
+  const [overlayRect, setOverlayRect] = useState<{
+    top: number
+    left: number
+    width: number
+    height: number
+  } | null>(null)
+
+  useLayoutEffect(() => {
+    // `tick` drives re-measurement on scroll / resize / ytext edits.
+    void tick
+    const textarea = textareaRef.current
+    if (!textarea) return
+    const parent = textarea.offsetParent as HTMLElement | null
+    if (!parent) return
+    setOverlayRect({
+      top: textarea.offsetTop,
+      left: textarea.offsetLeft,
+      width: textarea.offsetWidth,
+      height: textarea.offsetHeight,
+    })
+  }, [textareaRef, tick])
+
   return (
     <div
       data-testid="cursor-overlay"
       aria-hidden
       style={{
         position: 'absolute',
-        inset: 0,
+        top: overlayRect?.top ?? 0,
+        left: overlayRect?.left ?? 0,
+        width: overlayRect?.width ?? 0,
+        height: overlayRect?.height ?? 0,
         pointerEvents: 'none',
         overflow: 'hidden',
       }}
