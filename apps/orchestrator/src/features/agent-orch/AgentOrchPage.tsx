@@ -18,7 +18,7 @@ import { userTabsCollection } from '~/db/user-tabs-collection'
 import { getActiveTabId, setActiveTabId } from '~/hooks/use-active-tab'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { useSwipeTabs } from '~/hooks/use-swipe-tabs'
-import { ensureTabForSession, newTabId, nextPosition } from '~/lib/tab-utils'
+import { ensureTabForSession } from '~/lib/tab-utils'
 import type { UserTabRow } from '~/lib/types'
 import { AgentDetailView } from './AgentDetailView'
 import type { SpawnFormConfig } from './SpawnAgentForm'
@@ -133,22 +133,8 @@ function AgentOrchContent() {
         setQuickPromptHint(null)
         setSelectedSessionId(sessionId)
 
-        // Add to tab. With project/title fields gone, "newTab vs replace"
-        // collapses: `newTab` always inserts; default uses the find-or-create
-        // path so a re-prompt for the same session reuses the existing tab.
-        if (config.newTab) {
-          const id = newTabId()
-          userTabsCollection.insert({
-            id,
-            userId: '',
-            sessionId,
-            position: nextPosition(),
-            createdAt: new Date().toISOString(),
-          } as UserTabRow & Record<string, unknown>)
-          setActiveTabId(id)
-        } else {
-          ensureTabForSession(sessionId)
-        }
+        // Ensure a tab exists for this session (find-or-create).
+        ensureTabForSession(sessionId)
 
         navigate({ to: '/', search: { session: sessionId } })
       } catch (err) {

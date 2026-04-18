@@ -312,7 +312,27 @@ export function createApiApp() {
       .from(userTabs)
       .where(eq(userTabs.userId, userId))
       .orderBy(asc(userTabs.position))
-    return c.json({ tabs: tabs as UserTabRow[] })
+
+    // Self-heal: remove duplicate tabs for the same sessionId (keep earliest)
+    const seen = new Map<string, string>() // sessionId → first tab id
+    const dupeIds: string[] = []
+    for (const tab of tabs) {
+      const sid = (tab as Record<string, unknown>).sessionId as string | null
+      if (!sid) continue
+      if (seen.has(sid)) {
+        dupeIds.push(tab.id)
+      } else {
+        seen.set(sid, tab.id)
+      }
+    }
+    if (dupeIds.length > 0) {
+      await db
+        .delete(userTabs)
+        .where(and(eq(userTabs.userId, userId), inArray(userTabs.id, dupeIds)))
+    }
+
+    const deduped = tabs.filter((t) => !dupeIds.includes(t.id))
+    return c.json({ tabs: deduped as UserTabRow[] })
   })
 
   app.post('/api/user-settings/tabs', async (c) => {
@@ -337,6 +357,19 @@ export function createApiApp() {
       position = typeof max === 'number' ? max + 1 : 0
     }
 
+    // Dedup: if a tab already exists for this (userId, sessionId), return it
+    const sessionId = body.sessionId ?? null
+    if (sessionId) {
+      const existing = await db
+        .select()
+        .from(userTabs)
+        .where(and(eq(userTabs.userId, userId), eq(userTabs.sessionId, sessionId)))
+        .limit(1)
+      if (existing.length > 0) {
+        return c.json({ tab: existing[0] as UserTabRow }, 200)
+      }
+    }
+
     const id = typeof body.id === 'string' && body.id.length > 0 ? body.id : crypto.randomUUID()
     const createdAt = new Date().toISOString()
     const inserted = await db
@@ -344,7 +377,7 @@ export function createApiApp() {
       .values({
         id,
         userId,
-        sessionId: body.sessionId ?? null,
+        sessionId,
         position,
         createdAt,
       })
