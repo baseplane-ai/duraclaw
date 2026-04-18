@@ -119,14 +119,22 @@ export function useSessionCollab(opts: { sessionId: string }): UseSessionCollabR
       name: userName ?? 'Anonymous',
       color: colorForUserId(userId),
     }
-    awareness.setLocalStateField('user', user)
-    awareness.setLocalStateField('typing', false)
+    // y-protocols' setLocalStateField is a no-op while getLocalState() is
+    // null (see node_modules/y-protocols/awareness.js setLocalStateField —
+    // the `if (state !== null)` guard). The local state starts null, so we
+    // MUST seed it with a full setLocalState({...}) before any subsequent
+    // setLocalStateField (typing toggle, cursor, etc.) can take effect.
+    //
     // `activeSessionId` is implicit — if we're writing awareness, we're
     // connected to this session. Peers read it to distinguish "viewing
     // here" vs "connected but backgrounded". Per B9, background tabs
     // actually disconnect (YProvider tears down on unmount), so the
     // natural unmount flow handles absence — we only set it here.
-    awareness.setLocalStateField('activeSessionId', sessionId)
+    awareness.setLocalState({
+      user,
+      typing: false,
+      activeSessionId: sessionId,
+    })
     return () => {
       // Clear our own fields; y-protocols will also drop the full state
       // when the WS closes, but doing this eagerly avoids a stale "typing"
@@ -190,13 +198,21 @@ export function useSessionCollab(opts: { sessionId: string }): UseSessionCollabR
     }
   }, [])
 
-  // Cleanup on unmount: close the WS and free the Y.Doc. useYProvider
-  // handles provider lifecycle across re-renders; we still drop the doc.
-  useEffect(() => {
-    return () => {
-      doc.destroy()
-    }
-  }, [doc])
+  // Do NOT destroy the Y.Doc in an unmount cleanup: under React
+  // StrictMode the component mounts → unmounts → remounts synchronously,
+  // and `doc.destroy()` cascades into `awareness.destroy()` →
+  // `Observable.destroy()` which WIPES every 'change' observer — including
+  // y-partyserver provider's internal `_awarenessUpdateHandler` that
+  // broadcasts our awareness updates to peers. The provider is memoized
+  // (constructor runs once per useState), so the broadcast handler is
+  // never re-attached on the second mount, and subsequent
+  // `setLocalStateField` calls (typing toggles, cursor updates) emit
+  // 'change' locally but never reach the WebSocket.
+  //
+  // The doc is scoped to the `sessionId`-keyed useMemo; when the session
+  // changes, React drops the old doc reference and it is garbage
+  // collected. useYProvider's unmount closes the WS. No explicit
+  // destroy is required.
 
   const awareness = provider?.awareness ?? null
   const selfClientId = provider?.awareness?.clientID ?? null
