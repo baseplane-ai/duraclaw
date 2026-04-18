@@ -116,3 +116,18 @@ export default {
 }
 
 export { SessionCollabDO, SessionDO, UserSettingsDO }
+
+// Stub: wrangler needs this class exported for the v5 deleted_classes
+// migration to apply. Once the migration has run on the infra pipeline's
+// first successful deploy, this stub can be removed in a follow-up commit.
+export class ProjectRegistry {
+  state: DurableObjectState
+  env: Env
+  constructor(state: DurableObjectState, env: Env) {
+    this.state = state
+    this.env = env
+  }
+  async fetch() {
+    return new Response('gone', { status: 410 })
+  }
+}
