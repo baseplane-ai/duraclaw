@@ -312,27 +312,7 @@ export function createApiApp() {
       .from(userTabs)
       .where(eq(userTabs.userId, userId))
       .orderBy(asc(userTabs.position))
-
-    // Self-heal: remove duplicate tabs for the same sessionId (keep earliest)
-    const seen = new Map<string, string>() // sessionId → first tab id
-    const dupeIds: string[] = []
-    for (const tab of tabs) {
-      const sid = (tab as Record<string, unknown>).sessionId as string | null
-      if (!sid) continue
-      if (seen.has(sid)) {
-        dupeIds.push(tab.id)
-      } else {
-        seen.set(sid, tab.id)
-      }
-    }
-    if (dupeIds.length > 0) {
-      await db
-        .delete(userTabs)
-        .where(and(eq(userTabs.userId, userId), inArray(userTabs.id, dupeIds)))
-    }
-
-    const deduped = tabs.filter((t) => !dupeIds.includes(t.id))
-    return c.json({ tabs: deduped as UserTabRow[] })
+    return c.json({ tabs: tabs as UserTabRow[] })
   })
 
   app.post('/api/user-settings/tabs', async (c) => {
