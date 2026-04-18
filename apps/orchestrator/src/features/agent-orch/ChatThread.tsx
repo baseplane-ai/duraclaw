@@ -582,9 +582,10 @@ export function ChatThread({
                 const isGroupableTool =
                   part.type?.startsWith('tool-') && !isPendingGate(part, readOnly)
                 if (isGroupableTool) {
-                  // Reasoning precedes its tools visually, so flush the thought
-                  // chip before starting/continuing a tool run.
-                  flushReasoning()
+                  // Buffer alongside any accumulated reasoning — both flush
+                  // together on the next text part so that even when the agent
+                  // interleaves thoughts with tool calls they still consolidate
+                  // into one thought chip + one tool chip per text span.
                   pending.push(part)
                   return
                 }
@@ -592,14 +593,16 @@ export function ChatThread({
                 // pills (which already group by file path in the detail sheet).
                 // Skip without flushing so they don't fragment the chip run.
                 if (part.type === 'data-file-changed') return
-                // Collapse consecutive reasoning parts into a single chip
-                // rather than emitting one "Thought for a few seconds" block
-                // per thought. Does not flush the pending tool buffer.
+                // Collapse reasoning parts into a single chip rather than
+                // emitting one "Thought for a few seconds" block per thought.
                 if (part.type === 'reasoning') {
                   reasoningBuf.push(part)
                   return
                 }
                 // text / gate / error / etc. — real message break.
+                // Reasoning chip is always rendered before the tool chip so the
+                // "thought then acted" reading is preserved visually even when
+                // the underlying parts were interleaved.
                 flushReasoning()
                 flushPending()
                 nodes.push(renderPart(part, i, gate, status, onResolveGate, readOnly, onQaResolved))
