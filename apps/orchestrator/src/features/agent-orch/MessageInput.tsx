@@ -20,7 +20,6 @@ import { ImageIcon, XIcon } from 'lucide-react'
 import { useCallback, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { CursorOverlay } from '~/components/cursor-overlay'
-import { PresenceBar } from '~/components/presence-bar'
 import { TypingIndicator } from '~/components/typing-indicator'
 import { useSessionCollab } from '~/hooks/use-session-collab'
 import type { ContentBlock } from '~/lib/types'
@@ -137,9 +136,6 @@ export function MessageInput({
 
   return (
     <PromptInputProvider key={draftKey ?? '__local'}>
-      {collabReady && awareness && selfClientId !== null && (
-        <PresenceBar awareness={awareness} selfClientId={selfClientId} />
-      )}
       {isAuthFailed && (
         <div
           className="px-4 py-2 text-xs text-destructive"
