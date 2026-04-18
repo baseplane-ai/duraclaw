@@ -30,27 +30,14 @@ export const Route = createFileRoute('/_authenticated/debug/session-collection')
 })
 
 function DebugSessionCollectionPage() {
-  // Hooks first (rules of hooks); gate on isDev AFTER the hook calls.
   const { session: sessionFromUrl } = useSearch({
     from: '/_authenticated/debug/session-collection',
   })
 
-  // Dev-gate: render a notice in production builds. import.meta.env.DEV is
-  // true for vite dev + miniflare local runs and false in wrangler deploy.
-  const isDev = ((import.meta as unknown as { env?: { DEV?: boolean } }).env?.DEV ?? false) === true
-
-  if (!isDev) {
-    return (
-      <>
-        <Header />
-        <Main>
-          <div className="p-6 text-sm text-neutral-400">
-            This debug route is only available in dev builds.
-          </div>
-        </Main>
-      </>
-    )
-  }
+  // Dev-gate removed: this is an internal build, admin-only via the
+  // sidebar nav group. Available in production deploys for operator
+  // access to the R1 prototype / lag probe. Re-gate if it ever ships
+  // to non-internal tenants.
 
   return (
     <>
