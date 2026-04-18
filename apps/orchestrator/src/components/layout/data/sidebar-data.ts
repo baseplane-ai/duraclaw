@@ -1,4 +1,4 @@
-import { MessagesSquare, Settings, Users } from 'lucide-react'
+import { Bug, MessagesSquare, Settings, Users } from 'lucide-react'
 import type { NavGroup, SidebarData } from '../types'
 
 export const sidebarData: SidebarData = {
@@ -28,6 +28,11 @@ export const adminNavGroup: NavGroup = {
       title: 'Users',
       url: '/admin/users',
       icon: Users,
+    },
+    {
+      title: 'Debug: session collection',
+      url: '/debug/session-collection',
+      icon: Bug,
     },
   ],
 }
