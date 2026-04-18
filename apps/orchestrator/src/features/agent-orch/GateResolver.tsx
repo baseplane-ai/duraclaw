@@ -150,10 +150,10 @@ export function GateResolver({ gate, onResolve, onResolved }: GateResolverProps)
     }
 
     const hasSelection = Array.from(selections.values()).some((s) => s.size > 0)
-    const canSubmit = otherText.trim() || hasSelection
+    const trimmedOther = otherText.trim()
+    const canSubmit = Boolean(trimmedOther) || hasSelection
 
     const buildAnswer = (): string => {
-      if (otherText.trim()) return otherText.trim()
       const parts: string[] = []
       for (let i = 0; i < questions.length; i++) {
         const selected = selections.get(i)
@@ -161,7 +161,11 @@ export function GateResolver({ gate, onResolve, onResolved }: GateResolverProps)
           parts.push(Array.from(selected).join(', '))
         }
       }
-      return parts.join('; ')
+      const selectionStr = parts.join('; ')
+      if (selectionStr && trimmedOther) {
+        return `${selectionStr}; Additional context: ${trimmedOther}`
+      }
+      return selectionStr || trimmedOther
     }
 
     const handleStructuredSubmit = async () => {
@@ -221,9 +225,6 @@ export function GateResolver({ gate, onResolve, onResolved }: GateResolverProps)
             disabled={resolving}
             onChange={(e) => {
               setOtherText(e.target.value)
-              if (e.target.value.trim()) {
-                setSelections(new Map())
-              }
             }}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && canSubmit) {

@@ -152,6 +152,44 @@ describe('GateResolver — structured AskUserQuestion', () => {
     expect(onResolve).toHaveBeenCalledWith('gate-1', { answer: 'underscore' })
   })
 
+  it('Other text is additive: appended as context alongside a selection', async () => {
+    const onResolve = vi.fn().mockResolvedValue(undefined)
+    render(<GateResolver gate={sampleGate} onResolve={onResolve} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /lodash/i }))
+
+    const otherInput = screen.getByPlaceholderText(/other/i)
+    fireEvent.change(otherInput, { target: { value: 'prefer tree-shakeable' } })
+
+    // Selection must survive typing into Other
+    expect(screen.getByRole('button', { name: /lodash/i }).getAttribute('aria-pressed')).toBe(
+      'true',
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /submit/i }))
+
+    expect(onResolve).toHaveBeenCalledWith('gate-1', {
+      answer: 'lodash; Additional context: prefer tree-shakeable',
+    })
+  })
+
+  it('Other text is additive in multi-select: appended after all selections', async () => {
+    const onResolve = vi.fn().mockResolvedValue(undefined)
+    render(<GateResolver gate={multiSelectGate} onResolve={onResolve} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /dark-mode/i }))
+    fireEvent.click(screen.getByRole('button', { name: /i18n/i }))
+
+    const otherInput = screen.getByPlaceholderText(/other/i)
+    fireEvent.change(otherInput, { target: { value: 'also want telemetry' } })
+
+    fireEvent.click(screen.getByRole('button', { name: /submit/i }))
+
+    expect(onResolve).toHaveBeenCalledWith('gate-2', {
+      answer: 'dark-mode, i18n; Additional context: also want telemetry',
+    })
+  })
+
   it('multi-select: can toggle multiple options', () => {
     const onResolve = vi.fn().mockResolvedValue(undefined)
     render(<GateResolver gate={multiSelectGate} onResolve={onResolve} />)
