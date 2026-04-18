@@ -209,7 +209,51 @@ First-ever load has no cache and no useful data regardless of approach. A skelet
 - Does TanStack DB expose an `acknowledgeInitial()` / `markReadyFromSeed()` primitive on `queryCollectionOptions` in later versions? Worth checking before retrying any `isLoading`-based approach in future. As of 0.6.4 the answer is no.
 - Is there appetite to upstream a "cache-first ready" option? Out of scope for this research, but the pattern (seed from cache → report ready → reconcile with server in background) is general and would benefit more than Duraclaw.
 
-## 7. Sources
+## 7. Addendum — confirmed against the public `useLiveQuery` docs
+
+Verified at https://tanstack.com/db/latest/docs/framework/react/reference/functions/useLiveQuery (2026-04-17):
+
+The hook returns a superset of flags beyond `isLoading`: `{ data, collection, state, status, isIdle, isLoading, isReady, isError, isCleanedUp, isEnabled }`. The existence of a distinct `isReady` flag raised a reasonable question — maybe `isReady` is the "data visible, still fetching" signal, separate from `isLoading`. It is not.
+
+`useLiveQuery.ts:541`:
+
+```ts
+isReady: snapshot.collection.status === 'ready'
+```
+
+`useLiveQuery.ts:540`:
+
+```ts
+isLoading: snapshot.collection.status === 'loading'
+```
+
+Both flags reduce to `collection.status`. With the three-state machine `idle → loading → ready`, `isReady` is simply the inverse of `isLoading` (with `isIdle` capturing the pre-start state). There is no separate "data hydrated but sync not complete" signal exposed by the hook.
+
+Where `markReady()` is actually called for `queryCollectionOptions`:
+
+`query-db-collection/src/query.ts:1328`:
+
+```ts
+// Mark collection as ready after first successful query result
+markReady()
+```
+
+`query-db-collection/src/query.ts:1390`:
+
+```ts
+// Mark collection as ready even on error to avoid blocking apps
+markReady()
+```
+
+Confirmed: `ready` is gated on `queryFn` settling (success or error). Not on `writeBatch`, not on persistence hydrate. `@tanstack/browser-db-sqlite-persistence` does not call `markReady` at all — it is a pure persistence adapter; readiness remains the sync's job.
+
+The `db-core/custom-adapter/SKILL.md` bundled with `@tanstack/db` reinforces this:
+
+> `markReady()` transitions the collection to "ready" status. Without it, live queries never resolve and `useLiveSuspenseQuery` hangs forever in Suspense.
+
+Reaffirms the decision in §5: issue #7's "skeleton, ~1ms" gate doesn't exist in the library as shipped. Reject the gate; proceed with #5.
+
+## 8. Sources
 
 - `apps/orchestrator/src/db/sessions-collection.ts` (full)
 - `apps/orchestrator/src/db/tabs-collection.ts` (full)
