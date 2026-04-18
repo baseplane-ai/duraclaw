@@ -1,278 +1,55 @@
-import { Agent, type Connection, callable } from 'agents'
-import { runMigrations } from '~/lib/do-migrations'
+// UserSettingsDO — PartyServer fanout for cache-invalidation broadcasts.
+//
+// Issue #7 p3: this DO no longer holds tabs / drafts / preferences. All
+// authoritative state moved to D1 in p2. The DO's only job now is to
+// receive `POST /notify` calls from the Worker (after a D1 commit) and
+// fan the JSON payload out to every browser socket open for this user.
+//
+// Auth: the room name (URL path userId) MUST equal the cookie's userId.
+// onConnect closes 4401 unauthenticated / 4403 forbidden otherwise.
+// No this.storage / this.state / this.ctx.storage.sql access — the class
+// is stateless and we ship a wrangler `delete_sqlite` migration in p3 to
+// free the per-DO SQLite from the prior Agent-based implementation.
+
+import { type Connection, type ConnectionContext, Server } from 'partyserver'
+import { getRequestSession } from '~/api/auth-session'
 import type { Env } from '~/lib/types'
-import { USER_SETTINGS_MIGRATIONS } from './user-settings-do-migrations'
 
-// ── Types ────────────────────────────────────────────────────────
-
-export interface TabRecord {
-  id: string
-  project: string
-  sessionId: string
-  title: string
-}
-
-export interface UserSettingsState {
-  tabs: TabRecord[]
-  activeTabId: string | null
-}
-
-const DEFAULT_STATE: UserSettingsState = {
-  tabs: [],
-  activeTabId: null,
-}
-
-// ── DO ───────────────────────────────────────────────────────────
-
-export class UserSettingsDO extends Agent<Env, UserSettingsState> {
-  initialState = DEFAULT_STATE
-  private initialized = false
-
-  private ensureInit() {
-    if (this.initialized) return
-    this.initialized = true
-    runMigrations(this.ctx.storage.sql, USER_SETTINGS_MIGRATIONS)
-    this.loadStateFromSql()
+export class UserSettingsDO extends Server<Env> {
+  async onConnect(conn: Connection, ctx: ConnectionContext) {
+    const session = await getRequestSession(this.env, ctx.request)
+    if (!session) {
+      conn.close(4401, 'unauthenticated')
+      return
+    }
+    // The room name is the URL path userId (set by partyserver from
+    // /parties/user-settings/:userId). Reject if it doesn't match the
+    // authenticated session's userId so a logged-in user can't snoop on
+    // someone else's invalidation stream by guessing a userId.
+    const roomUserId = this.name
+    if (roomUserId && roomUserId !== session.userId) {
+      conn.close(4403, 'forbidden')
+      return
+    }
   }
 
-  async onStart() {
-    this.ensureInit()
-  }
-
-  onConnect(connection: Connection) {
-    this.ensureInit()
-    connection.send(JSON.stringify({ type: 'state', state: this.state }))
-  }
-
-  /** HTTP API for TanStack DB queryCollection sync */
-  async onRequest(request: Request): Promise<Response> {
-    try {
-      this.ensureInit()
-      const url = new URL(request.url)
-
-      // GET /tabs — list all tabs
-      if (request.method === 'GET' && url.pathname === '/tabs') {
-        return Response.json({ tabs: this.state.tabs })
-      }
-
-      // POST /tabs — add, upsert, or reorder tabs
-      if (request.method === 'POST' && url.pathname === '/tabs') {
-        const body = (await request.json()) as {
-          action?: string
-          id?: string
-          project?: string
-          sessionId?: string
-          title?: string
-          tabId?: string
-          orderedIds?: string[]
+  async onRequest(req: Request): Promise<Response> {
+    const url = new URL(req.url)
+    if (url.pathname === '/notify' && req.method === 'POST') {
+      const body = await req.text()
+      for (const conn of this.getConnections()) {
+        try {
+          conn.send(body)
+        } catch {
+          // Dropped sockets — partyserver will reap on next webSocketClose.
         }
-        if (body.action === 'reorder' && body.orderedIds) {
-          this.reorderTabs(body.orderedIds)
-          return Response.json({ tabs: this.state.tabs })
-        }
-        if (body.action === 'addNew' && body.project && body.sessionId) {
-          this.addNewTab(body.project, body.sessionId, body.title, body.id)
-        } else if (body.action === 'switch' && body.tabId && body.sessionId) {
-          this.switchTabSession(body.tabId, body.sessionId, body.title)
-        } else if (body.project && body.sessionId) {
-          this.addTab(body.project, body.sessionId, body.title, body.id)
-        }
-        return Response.json({ tabs: this.state.tabs })
       }
-
-      // PATCH /tabs/:id — update sessionId and/or title
-      if (request.method === 'PATCH' && url.pathname.startsWith('/tabs/')) {
-        const tabId = url.pathname.slice('/tabs/'.length)
-        const body = (await request.json()) as {
-          sessionId?: string
-          title?: string
-        }
-        if (body.sessionId) {
-          this.switchTabSession(tabId, body.sessionId, body.title)
-        } else if (body.title) {
-          this.updateTabTitle(tabId, body.title)
-        }
-        return Response.json({ tabs: this.state.tabs })
-      }
-
-      // DELETE /tabs/:id — remove tab
-      if (request.method === 'DELETE' && url.pathname.startsWith('/tabs/')) {
-        const tabId = url.pathname.slice('/tabs/'.length)
-        const result = this.removeTab(tabId)
-        return Response.json(result)
-      }
-    } catch (err) {
-      return Response.json(
-        { error: err instanceof Error ? err.message : String(err) },
-        { status: 500 },
-      )
+      return new Response(null, { status: 204 })
     }
-
-    return super.onRequest(request)
+    return new Response('not found', { status: 404 })
   }
 
-  // ── State persistence ──────────────────────────────────────────
-
-  private loadStateFromSql() {
-    const tabRows = this.ctx.storage.sql
-      .exec(`SELECT id, project, session_id, title FROM tabs ORDER BY position ASC`)
-      .toArray() as Array<{ id: string; project: string; session_id: string; title: string }>
-
-    const tabs: TabRecord[] = tabRows.map((r) => ({
-      id: r.id,
-      project: r.project,
-      sessionId: r.session_id,
-      title: r.title,
-    }))
-
-    const activeRow = this.ctx.storage.sql
-      .exec(`SELECT value FROM tab_state WHERE key = 'activeTabId'`)
-      .toArray() as Array<{ value: string | null }>
-    const activeTabId = activeRow[0]?.value ?? null
-
-    this.setState({ tabs, activeTabId })
-  }
-
-  private persistTabs() {
-    const { tabs, activeTabId } = this.state
-    const now = new Date().toISOString()
-
-    this.ctx.storage.sql.exec(`DELETE FROM tabs`)
-    for (let i = 0; i < tabs.length; i++) {
-      const t = tabs[i]
-      this.ctx.storage.sql.exec(
-        `INSERT INTO tabs (id, project, session_id, title, position, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
-        t.id,
-        t.project,
-        t.sessionId,
-        t.title,
-        i,
-        now,
-      )
-    }
-
-    this.ctx.storage.sql.exec(
-      `INSERT OR REPLACE INTO tab_state (key, value) VALUES ('activeTabId', ?)`,
-      activeTabId,
-    )
-  }
-
-  // ── RPC methods ────────────────────────────────────────────────
-
-  @callable()
-  addTab(project: string, sessionId: string, title?: string, clientId?: string): TabRecord[] {
-    this.ensureInit()
-    const { tabs } = this.state
-
-    // If session already has a tab, activate it
-    const bySession = tabs.find((t) => t.sessionId === sessionId)
-    if (bySession) {
-      const newTabs =
-        title && title !== bySession.title
-          ? tabs.map((t) => (t.id === bySession.id ? { ...t, title } : t))
-          : tabs
-      this.setState({ ...this.state, tabs: newTabs, activeTabId: bySession.id })
-      this.persistTabs()
-      return this.state.tabs
-    }
-
-    // If project already has a tab, replace its session
-    const byProject = tabs.find((t) => t.project === project)
-    if (byProject) {
-      const newTabs = tabs.map((t) =>
-        t.id === byProject.id ? { ...t, sessionId, title: title || sessionId.slice(0, 12) } : t,
-      )
-      this.setState({ ...this.state, tabs: newTabs, activeTabId: byProject.id })
-      this.persistTabs()
-      return this.state.tabs
-    }
-
-    // New tab — use client-provided ID if available for consistency
-    const id = clientId || crypto.randomUUID().slice(0, 8)
-    const newTab: TabRecord = { id, project, sessionId, title: title || sessionId.slice(0, 12) }
-    const newTabs = [...tabs, newTab]
-    this.setState({ ...this.state, tabs: newTabs, activeTabId: id })
-    this.persistTabs()
-    return this.state.tabs
-  }
-
-  @callable()
-  addNewTab(project: string, sessionId: string, title?: string, clientId?: string): TabRecord[] {
-    this.ensureInit()
-    const id = clientId || crypto.randomUUID().slice(0, 8)
-    const newTab: TabRecord = { id, project, sessionId, title: title || sessionId.slice(0, 12) }
-    const newTabs = [...this.state.tabs, newTab]
-    this.setState({ ...this.state, tabs: newTabs, activeTabId: id })
-    this.persistTabs()
-    return this.state.tabs
-  }
-
-  @callable()
-  switchTabSession(tabId: string, sessionId: string, title?: string): TabRecord[] {
-    this.ensureInit()
-    const newTabs = this.state.tabs.map((t) =>
-      t.id === tabId ? { ...t, sessionId, title: title || sessionId.slice(0, 12) } : t,
-    )
-    this.setState({ ...this.state, tabs: newTabs })
-    this.persistTabs()
-    return this.state.tabs
-  }
-
-  @callable()
-  removeTab(tabId: string): { tabs: TabRecord[]; activeTabId: string | null } {
-    this.ensureInit()
-    const { tabs, activeTabId } = this.state
-    const newTabs = tabs.filter((t) => t.id !== tabId)
-    let newActive = activeTabId
-    if (activeTabId === tabId) {
-      const idx = tabs.findIndex((t) => t.id === tabId)
-      newActive = newTabs[Math.min(idx, newTabs.length - 1)]?.id ?? null
-    }
-    this.setState({ ...this.state, tabs: newTabs, activeTabId: newActive })
-    this.persistTabs()
-
-    return { tabs: this.state.tabs, activeTabId: this.state.activeTabId }
-  }
-
-  @callable()
-  setActiveTab(tabId: string): string | null {
-    this.ensureInit()
-    this.setState({ ...this.state, activeTabId: tabId })
-    this.ctx.storage.sql.exec(
-      `INSERT OR REPLACE INTO tab_state (key, value) VALUES ('activeTabId', ?)`,
-      tabId,
-    )
-    return tabId
-  }
-
-  @callable()
-  updateTabTitle(tabId: string, title: string): TabRecord[] {
-    this.ensureInit()
-    const newTabs = this.state.tabs.map((t) => (t.id === tabId ? { ...t, title } : t))
-    this.setState({ ...this.state, tabs: newTabs })
-    this.persistTabs()
-    return this.state.tabs
-  }
-
-  @callable()
-  reorderTabs(orderedIds: string[]): TabRecord[] {
-    this.ensureInit()
-    const byId = new Map(this.state.tabs.map((t) => [t.id, t]))
-    const reordered: TabRecord[] = []
-    const seen = new Set<string>()
-    for (const id of orderedIds) {
-      const t = byId.get(id)
-      if (t) {
-        reordered.push(t)
-        seen.add(id)
-      }
-    }
-    // Append any tabs not in the provided list (safety net)
-    for (const t of this.state.tabs) {
-      if (!seen.has(t.id)) reordered.push(t)
-    }
-    this.setState({ ...this.state, tabs: reordered })
-    this.persistTabs()
-    return this.state.tabs
+  async onClose(_conn: Connection) {
+    // partyserver removes from getConnections() automatically.
   }
 }

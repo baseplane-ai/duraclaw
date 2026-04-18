@@ -1,0 +1,20 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1776504128814,
+      "tag": "0008_replace_user_preferences",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1776510668061,
+      "tag": "0009_drop_user_preferences_legacy",
+      "breakpoints": true
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { getRequestSession } from './auth-session'
-import { createApiApp } from './index'
+import { installFakeDb, makeFakeDb } from './test-helpers'
 
 vi.mock('./auth-session', () => ({
   getRequestSession: vi.fn(),
@@ -11,32 +11,29 @@ vi.mock('./auth-routes', async () => {
   return { authRoutes: new Hono() }
 })
 
+vi.mock('./notify', () => ({
+  notifyInvalidation: vi.fn().mockResolvedValue(undefined),
+}))
+
+vi.mock('drizzle-orm/d1', () => ({
+  drizzle: vi.fn(() => (globalThis as any).__fakeDb),
+}))
+
+import { createApiApp } from './index'
+
 const mockedGetRequestSession = vi.mocked(getRequestSession)
 
-function createMockRegistry(overrides: Record<string, any> = {}) {
+function createMockEnv() {
   return {
-    searchSessions: vi.fn().mockResolvedValue([]),
-    listSessionsPaginated: vi.fn().mockResolvedValue({ sessions: [], total: 0 }),
-    listSessions: vi.fn().mockResolvedValue([]),
-    listActiveSessions: vi.fn().mockResolvedValue([]),
-    listSessionsByProject: vi.fn().mockResolvedValue([]),
-    getSession: vi.fn().mockResolvedValue(null),
-    getUserPreferences: vi.fn().mockResolvedValue(null),
-    setUserPreferences: vi.fn().mockResolvedValue(undefined),
-    ...overrides,
-  }
-}
-
-function createMockEnv(registry: ReturnType<typeof createMockRegistry>) {
-  return {
-    SESSION_REGISTRY: {
-      idFromName: vi.fn().mockReturnValue('registry-id'),
-      get: vi.fn().mockReturnValue(registry),
-    },
     SESSION_AGENT: {
       newUniqueId: vi.fn(),
       idFromString: vi.fn(),
+      idFromName: vi.fn().mockReturnValue('do-id'),
       get: vi.fn(),
+    },
+    USER_SETTINGS: {
+      idFromName: vi.fn().mockReturnValue('settings-id'),
+      get: vi.fn().mockReturnValue({ fetch: vi.fn().mockResolvedValue(new Response(null)) }),
     },
     AUTH_DB: {},
     BETTER_AUTH_SECRET: 'test-secret',
@@ -56,12 +53,13 @@ function makeApp(env: any) {
 }
 
 describe('GET /api/preferences', () => {
-  let registry: ReturnType<typeof createMockRegistry>
   let env: any
+  let fakeDb: ReturnType<typeof makeFakeDb>
 
   beforeEach(() => {
-    registry = createMockRegistry()
-    env = createMockEnv(registry)
+    env = createMockEnv()
+    fakeDb = makeFakeDb()
+    installFakeDb(fakeDb.db)
     mockedGetRequestSession.mockResolvedValue({
       userId: 'user-1',
       session: { id: 's' },
@@ -69,32 +67,40 @@ describe('GET /api/preferences', () => {
     })
   })
 
-  it('returns empty object when no preferences exist', async () => {
-    registry.getUserPreferences.mockResolvedValue(null)
+  it('returns synthesised defaults when no row exists for the user', async () => {
+    fakeDb.data.select = []
 
     const app = makeApp(env)
     const res = await app.request('/api/preferences')
 
     expect(res.status).toBe(200)
-    await expect(res.json()).resolves.toEqual({})
-    expect(registry.getUserPreferences).toHaveBeenCalledWith('user-1')
+    const body = (await res.json()) as Record<string, unknown>
+    expect(body.userId).toBe('user-1')
+    expect(body.permissionMode).toBe('default')
+    expect(body.thinkingMode).toBe('adaptive')
+    expect(body.effort).toBe('high')
+    // Defaults are NOT persisted on a GET — only on PUT.
+    expect(fakeDb.db.insert).not.toHaveBeenCalled()
   })
 
-  it('returns stored preferences', async () => {
-    const prefs = {
-      permission_mode: 'bypassPermissions',
+  it('returns the stored row when one exists', async () => {
+    const stored = {
+      userId: 'user-1',
+      permissionMode: 'acceptAll',
       model: 'claude-sonnet-4-20250514',
-      max_budget: 5.0,
-      thinking_mode: 'enabled',
+      maxBudget: 5.0,
+      thinkingMode: 'on',
       effort: 'medium',
+      hiddenProjects: null,
+      updatedAt: '2026-04-18T00:00:00.000Z',
     }
-    registry.getUserPreferences.mockResolvedValue(prefs)
+    fakeDb.data.select = [stored]
 
     const app = makeApp(env)
     const res = await app.request('/api/preferences')
 
     expect(res.status).toBe(200)
-    await expect(res.json()).resolves.toEqual(prefs)
+    await expect(res.json()).resolves.toEqual(stored)
   })
 
   it('returns 401 when not authenticated', async () => {
@@ -108,12 +114,13 @@ describe('GET /api/preferences', () => {
 })
 
 describe('PUT /api/preferences', () => {
-  let registry: ReturnType<typeof createMockRegistry>
   let env: any
+  let fakeDb: ReturnType<typeof makeFakeDb>
 
   beforeEach(() => {
-    registry = createMockRegistry()
-    env = createMockEnv(registry)
+    env = createMockEnv()
+    fakeDb = makeFakeDb()
+    installFakeDb(fakeDb.db)
     mockedGetRequestSession.mockResolvedValue({
       userId: 'user-1',
       session: { id: 's' },
@@ -121,7 +128,19 @@ describe('PUT /api/preferences', () => {
     })
   })
 
-  it('calls setUserPreferences with userId and patch', async () => {
+  it('upserts allowed fields and returns the new row', async () => {
+    const inserted = {
+      userId: 'user-1',
+      permissionMode: 'default',
+      model: 'claude-sonnet-4-20250514',
+      maxBudget: null,
+      thinkingMode: 'adaptive',
+      effort: 'low',
+      hiddenProjects: null,
+      updatedAt: '2026-04-18T00:00:00.000Z',
+    }
+    fakeDb.data.insert = [inserted]
+
     const app = makeApp(env)
     const res = await app.request('/api/preferences', {
       method: 'PUT',
@@ -130,11 +149,33 @@ describe('PUT /api/preferences', () => {
     })
 
     expect(res.status).toBe(200)
-    await expect(res.json()).resolves.toEqual({ ok: true })
-    expect(registry.setUserPreferences).toHaveBeenCalledWith('user-1', {
-      model: 'claude-sonnet-4-20250514',
-      effort: 'low',
+    const body = (await res.json()) as { preferences: Record<string, unknown> }
+    expect(body.preferences).toEqual(inserted)
+    expect(fakeDb.db.insert).toHaveBeenCalled()
+  })
+
+  it('rejects unknown fields with 400', async () => {
+    const app = makeApp(env)
+    const res = await app.request('/api/preferences', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bogus: 'x' }),
     })
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toMatch(/Unknown field/)
+  })
+
+  it('rejects an invalid effort enum with 400', async () => {
+    const app = makeApp(env)
+    const res = await app.request('/api/preferences', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ effort: 'extreme' }),
+    })
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toMatch(/Invalid effort/)
   })
 
   it('returns 401 when not authenticated', async () => {

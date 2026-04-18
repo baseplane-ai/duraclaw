@@ -4,8 +4,8 @@
 
 import { useCallback, useEffect, useRef } from 'react'
 import { StatusBar } from '~/components/status-bar'
-import { useUserSettings } from '~/hooks/use-user-settings'
-import type { ProjectInfo } from '~/lib/types'
+import { userTabsCollection } from '~/db/user-tabs-collection'
+import type { ProjectInfo, UserTabRow } from '~/lib/types'
 import { useStatusBarStore } from '~/stores/status-bar'
 import { ChatThread } from './ChatThread'
 import { ConversationDownload } from './ConversationDownload'
@@ -109,8 +109,10 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
   // Resolve the tab that owns this session so MessageInput can persist its draft.
   // Use the sessionId prop (always available) instead of state?.session_id
   // (requires WS) to avoid a key-change remount that would lose typed text.
-  const { findTabBySession } = useUserSettings()
-  const tabId = findTabBySession(sessionId)?.id
+  // Imperative read is safe — the tabId only scopes localStorage, not reactive UI.
+  const tabId = (userTabsCollection.toArray as unknown as UserTabRow[]).find(
+    (t) => t.sessionId === sessionId,
+  )?.id
 
   return (
     <div

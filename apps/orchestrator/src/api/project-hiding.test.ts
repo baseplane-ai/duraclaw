@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { getRequestSession } from './auth-session'
-import { createApiApp } from './index'
+import { installFakeDb, makeFakeDb } from './test-helpers'
 
 vi.mock('./auth-session', () => ({
   getRequestSession: vi.fn(),
@@ -11,6 +11,16 @@ vi.mock('./auth-routes', async () => {
   return { authRoutes: new Hono() }
 })
 
+vi.mock('./notify', () => ({
+  notifyInvalidation: vi.fn().mockResolvedValue(undefined),
+}))
+
+vi.mock('drizzle-orm/d1', () => ({
+  drizzle: vi.fn(() => (globalThis as any).__fakeDb),
+}))
+
+import { createApiApp } from './index'
+
 const mockedGetRequestSession = vi.mocked(getRequestSession)
 
 const mockProjects = [
@@ -19,49 +29,19 @@ const mockProjects = [
   { name: 'gamma', path: '/data/projects/gamma' },
 ]
 
-function createMockRegistry(overrides: Record<string, any> = {}) {
+function createMockEnv() {
   return {
-    searchSessions: vi.fn().mockResolvedValue([]),
-    listSessionsPaginated: vi.fn().mockResolvedValue({ sessions: [], total: 0 }),
-    listSessions: vi.fn().mockResolvedValue([]),
-    listActiveSessions: vi.fn().mockResolvedValue([]),
-    listSessionsByProject: vi.fn().mockResolvedValue([]),
-    getSession: vi.fn().mockResolvedValue(null),
-    getUserPreferences: vi.fn().mockResolvedValue(null),
-    setUserPreferences: vi.fn().mockResolvedValue(undefined),
-    ...overrides,
-  }
-}
-
-function createMockD1(hiddenProjects: string[] | null = null) {
-  return {
-    prepare: vi.fn().mockReturnValue({
-      bind: vi.fn().mockReturnValue({
-        first: vi
-          .fn()
-          .mockResolvedValue(hiddenProjects ? { value: JSON.stringify(hiddenProjects) } : null),
-        all: vi.fn().mockResolvedValue({ results: [] }),
-        run: vi.fn().mockResolvedValue(undefined),
-      }),
-    }),
-  }
-}
-
-function createMockEnv(
-  registry: ReturnType<typeof createMockRegistry>,
-  hiddenProjects: string[] | null = null,
-) {
-  return {
-    SESSION_REGISTRY: {
-      idFromName: vi.fn().mockReturnValue('registry-id'),
-      get: vi.fn().mockReturnValue(registry),
-    },
     SESSION_AGENT: {
       newUniqueId: vi.fn(),
       idFromString: vi.fn(),
+      idFromName: vi.fn().mockReturnValue('do-id'),
       get: vi.fn(),
     },
-    AUTH_DB: createMockD1(hiddenProjects),
+    USER_SETTINGS: {
+      idFromName: vi.fn().mockReturnValue('settings-id'),
+      get: vi.fn().mockReturnValue({ fetch: vi.fn().mockResolvedValue(new Response(null)) }),
+    },
+    AUTH_DB: {},
     BETTER_AUTH_SECRET: 'test-secret',
     ASSETS: {},
     CC_GATEWAY_URL: 'wss://gateway.test',
@@ -80,17 +60,35 @@ function makeApp(env: any) {
   }
 }
 
+/**
+ * Build the queue of selects the route will issue:
+ *   1. getHiddenProjects → 1 select on user_preferences (returns [{hiddenProjects}])
+ *   2. for each visible project → 1 select on agent_sessions (returns [])
+ */
+function setupQueueForProjects(fakeDb: ReturnType<typeof makeFakeDb>, hidden: string[] | null) {
+  const prefRow = hidden === null ? [] : [{ hiddenProjects: JSON.stringify(hidden) }]
+  fakeDb.data.queue.push(prefRow)
+  const visible = hidden ? mockProjects.filter((p) => !hidden.includes(p.name)) : mockProjects
+  for (let i = 0; i < visible.length; i++) {
+    fakeDb.data.queue.push([])
+  }
+}
+
 describe('project hiding', () => {
   const originalFetch = globalThis.fetch
+  let env: any
+  let fakeDb: ReturnType<typeof makeFakeDb>
 
   beforeEach(() => {
+    env = createMockEnv()
+    fakeDb = makeFakeDb()
+    installFakeDb(fakeDb.db)
     mockedGetRequestSession.mockResolvedValue({
       userId: 'user-1',
       session: { id: 's' },
       user: { id: 'user-1' },
     })
 
-    // Mock global fetch for gateway calls
     globalThis.fetch = vi.fn().mockResolvedValue(
       new Response(JSON.stringify(mockProjects), {
         status: 200,
@@ -105,8 +103,7 @@ describe('project hiding', () => {
 
   describe('GET /api/gateway/projects', () => {
     it('returns all projects when no hidden preferences exist', async () => {
-      const registry = createMockRegistry()
-      const env = createMockEnv(registry, null)
+      fakeDb.data.queue.push([]) // no user_preferences row
       const app = makeApp(env)
 
       const res = await app.request('/api/gateway/projects')
@@ -118,8 +115,7 @@ describe('project hiding', () => {
     })
 
     it('filters out hidden projects', async () => {
-      const registry = createMockRegistry()
-      const env = createMockEnv(registry, ['beta'])
+      fakeDb.data.queue.push([{ hiddenProjects: JSON.stringify(['beta']) }])
       const app = makeApp(env)
 
       const res = await app.request('/api/gateway/projects')
@@ -131,8 +127,7 @@ describe('project hiding', () => {
     })
 
     it('filters out multiple hidden projects', async () => {
-      const registry = createMockRegistry()
-      const env = createMockEnv(registry, ['alpha', 'gamma'])
+      fakeDb.data.queue.push([{ hiddenProjects: JSON.stringify(['alpha', 'gamma']) }])
       const app = makeApp(env)
 
       const res = await app.request('/api/gateway/projects')
@@ -144,8 +139,7 @@ describe('project hiding', () => {
     })
 
     it('returns all projects when hidden list is empty', async () => {
-      const registry = createMockRegistry()
-      const env = createMockEnv(registry, [])
+      fakeDb.data.queue.push([{ hiddenProjects: JSON.stringify([]) }])
       const app = makeApp(env)
 
       const res = await app.request('/api/gateway/projects')
@@ -155,25 +149,19 @@ describe('project hiding', () => {
       expect(body).toHaveLength(3)
     })
 
-    it('queries user_preferences with correct user_id and key', async () => {
-      const registry = createMockRegistry()
-      const env = createMockEnv(registry, null)
+    it('queries user_preferences via the drizzle select chain', async () => {
+      fakeDb.data.queue.push([])
       const app = makeApp(env)
 
       await app.request('/api/gateway/projects')
 
-      expect(env.AUTH_DB.prepare).toHaveBeenCalledWith(
-        "SELECT value FROM user_preferences WHERE user_id = ? AND key = 'hidden_projects'",
-      )
-      const bindMock = env.AUTH_DB.prepare.mock.results[0].value.bind
-      expect(bindMock).toHaveBeenCalledWith('user-1')
+      expect(fakeDb.db.select).toHaveBeenCalledTimes(1)
     })
   })
 
   describe('GET /api/gateway/projects/all', () => {
     it('returns all projects with hidden: false when no hidden prefs', async () => {
-      const registry = createMockRegistry()
-      const env = createMockEnv(registry, null)
+      fakeDb.data.queue.push([])
       const app = makeApp(env)
 
       const res = await app.request('/api/gateway/projects/all')
@@ -185,8 +173,7 @@ describe('project hiding', () => {
     })
 
     it('marks hidden projects with hidden: true', async () => {
-      const registry = createMockRegistry()
-      const env = createMockEnv(registry, ['beta', 'gamma'])
+      fakeDb.data.queue.push([{ hiddenProjects: JSON.stringify(['beta', 'gamma']) }])
       const app = makeApp(env)
 
       const res = await app.request('/api/gateway/projects/all')
@@ -204,8 +191,7 @@ describe('project hiding', () => {
     })
 
     it('includes all project fields plus hidden flag', async () => {
-      const registry = createMockRegistry()
-      const env = createMockEnv(registry, ['alpha'])
+      fakeDb.data.queue.push([{ hiddenProjects: JSON.stringify(['alpha']) }])
       const app = makeApp(env)
 
       const res = await app.request('/api/gateway/projects/all')
@@ -222,9 +208,6 @@ describe('project hiding', () => {
 
     it('returns 502 when gateway is unreachable', async () => {
       globalThis.fetch = vi.fn().mockRejectedValue(new Error('connection refused'))
-
-      const registry = createMockRegistry()
-      const env = createMockEnv(registry, null)
       const app = makeApp(env)
 
       const res = await app.request('/api/gateway/projects/all')
@@ -237,8 +220,7 @@ describe('project hiding', () => {
 
   describe('GET /api/projects', () => {
     it('returns all projects when no hidden preferences exist', async () => {
-      const registry = createMockRegistry()
-      const env = createMockEnv(registry, null)
+      setupQueueForProjects(fakeDb, null)
       const app = makeApp(env)
 
       const res = await app.request('/api/projects')
@@ -250,8 +232,7 @@ describe('project hiding', () => {
     })
 
     it('filters out hidden projects', async () => {
-      const registry = createMockRegistry()
-      const env = createMockEnv(registry, ['alpha', 'beta'])
+      setupQueueForProjects(fakeDb, ['alpha', 'beta'])
       const app = makeApp(env)
 
       const res = await app.request('/api/projects')
@@ -262,18 +243,14 @@ describe('project hiding', () => {
       expect(body.projects[0].name).toBe('gamma')
     })
 
-    it('does not fetch sessions for hidden projects', async () => {
-      const registry = createMockRegistry()
-      const env = createMockEnv(registry, ['beta'])
+    it('does not query agent_sessions for hidden projects', async () => {
+      setupQueueForProjects(fakeDb, ['beta'])
       const app = makeApp(env)
 
       await app.request('/api/projects')
 
-      // listSessionsByProject should only be called for visible projects
-      expect(registry.listSessionsByProject).toHaveBeenCalledTimes(2)
-      expect(registry.listSessionsByProject).toHaveBeenCalledWith('alpha', 'user-1')
-      expect(registry.listSessionsByProject).toHaveBeenCalledWith('gamma', 'user-1')
-      expect(registry.listSessionsByProject).not.toHaveBeenCalledWith('beta', 'user-1')
+      // 1 select for user_preferences + 2 for the visible projects (alpha, gamma)
+      expect(fakeDb.db.select).toHaveBeenCalledTimes(3)
     })
   })
 })

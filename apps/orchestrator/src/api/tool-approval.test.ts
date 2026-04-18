@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { generateActionToken } from '~/lib/action-token'
+import { installFakeDb, makeFakeDb } from './test-helpers'
 
 const { mockGetRequestSession } = vi.hoisted(() => ({
   mockGetRequestSession: vi.fn(),
@@ -18,21 +19,17 @@ vi.mock('~/lib/auth', () => ({
   createAuth: vi.fn(),
 }))
 
+vi.mock('./notify', () => ({
+  notifyInvalidation: vi.fn().mockResolvedValue(undefined),
+}))
+
+vi.mock('drizzle-orm/d1', () => ({
+  drizzle: vi.fn(() => (globalThis as any).__fakeDb),
+}))
+
 import { createApiApp } from './index'
 
 const TEST_SECRET = 'test-hmac-secret'
-
-function createMockRegistry(overrides: Record<string, any> = {}) {
-  return {
-    getSession: vi.fn().mockResolvedValue(null),
-    listSessions: vi.fn().mockResolvedValue([]),
-    listActiveSessions: vi.fn().mockResolvedValue([]),
-    listSessionsByProject: vi.fn().mockResolvedValue([]),
-    searchSessions: vi.fn().mockResolvedValue([]),
-    listSessionsPaginated: vi.fn().mockResolvedValue({ sessions: [], total: 0 }),
-    ...overrides,
-  }
-}
 
 function createMockSessionDO(fetchResponse?: Response) {
   return {
@@ -40,20 +37,17 @@ function createMockSessionDO(fetchResponse?: Response) {
   }
 }
 
-function createMockEnv(
-  registry: ReturnType<typeof createMockRegistry>,
-  sessionDO?: ReturnType<typeof createMockSessionDO>,
-) {
+function createMockEnv(sessionDO?: ReturnType<typeof createMockSessionDO>) {
   return {
-    SESSION_REGISTRY: {
-      idFromName: vi.fn().mockReturnValue('registry-id'),
-      get: vi.fn().mockReturnValue(registry),
-    },
     SESSION_AGENT: {
       newUniqueId: vi.fn(),
       idFromString: vi.fn().mockReturnValue('do-id'),
       idFromName: vi.fn().mockReturnValue('do-id'),
       get: vi.fn().mockReturnValue(sessionDO ?? createMockSessionDO()),
+    },
+    USER_SETTINGS: {
+      idFromName: vi.fn().mockReturnValue('settings-id'),
+      get: vi.fn().mockReturnValue({ fetch: vi.fn().mockResolvedValue(new Response(null)) }),
     },
     AUTH_DB: {} as any,
     BETTER_AUTH_SECRET: TEST_SECRET,
@@ -62,11 +56,17 @@ function createMockEnv(
 }
 
 describe('POST /api/sessions/:id/tool-approval', () => {
+  let fakeDb: ReturnType<typeof makeFakeDb>
+
+  beforeEach(() => {
+    fakeDb = makeFakeDb()
+    installFakeDb(fakeDb.db)
+  })
+
   describe('with Bearer action token', () => {
     it('accepts a valid action token and forwards to DO', async () => {
       const sessionDO = createMockSessionDO()
-      const registry = createMockRegistry()
-      const env = createMockEnv(registry, sessionDO)
+      const env = createMockEnv(sessionDO)
 
       const token = await generateActionToken('sess-1', 'gate-abc', TEST_SECRET)
 
@@ -87,7 +87,6 @@ describe('POST /api/sessions/:id/tool-approval', () => {
       expect(res.status).toBe(200)
       expect(await res.json()).toEqual({ ok: true })
 
-      // Verify the DO fetch was called with the gid from the token
       expect(sessionDO.fetch).toHaveBeenCalledOnce()
       const fetchCall = sessionDO.fetch.mock.calls[0][0] as Request
       const body = await fetchCall.json()
@@ -97,8 +96,7 @@ describe('POST /api/sessions/:id/tool-approval', () => {
 
     it('passes approved:false for deny action', async () => {
       const sessionDO = createMockSessionDO()
-      const registry = createMockRegistry()
-      const env = createMockEnv(registry, sessionDO)
+      const env = createMockEnv(sessionDO)
 
       const token = await generateActionToken('sess-1', 'gate-abc', TEST_SECRET)
 
@@ -123,8 +121,7 @@ describe('POST /api/sessions/:id/tool-approval', () => {
     })
 
     it('rejects an invalid action token with 401', async () => {
-      const registry = createMockRegistry()
-      const env = createMockEnv(registry)
+      const env = createMockEnv()
 
       const app = createApiApp()
       const res = await app.request(
@@ -145,8 +142,7 @@ describe('POST /api/sessions/:id/tool-approval', () => {
     })
 
     it('rejects a token signed with a different secret', async () => {
-      const registry = createMockRegistry()
-      const env = createMockEnv(registry)
+      const env = createMockEnv()
 
       const token = await generateActionToken('sess-1', 'gate-abc', 'wrong-secret')
 
@@ -169,8 +165,7 @@ describe('POST /api/sessions/:id/tool-approval', () => {
     })
 
     it('rejects a token for a different session ID', async () => {
-      const registry = createMockRegistry()
-      const env = createMockEnv(registry)
+      const env = createMockEnv()
 
       const token = await generateActionToken('sess-OTHER', 'gate-abc', TEST_SECRET)
 
@@ -193,10 +188,8 @@ describe('POST /api/sessions/:id/tool-approval', () => {
     })
 
     it('rejects an expired action token', async () => {
-      const registry = createMockRegistry()
-      const env = createMockEnv(registry)
+      const env = createMockEnv()
 
-      // Generate token with exp in the past
       const realDateNow = Date.now
       vi.spyOn(Date, 'now').mockReturnValue((Math.floor(realDateNow() / 1000) - 600) * 1000)
       const token = await generateActionToken('sess-1', 'gate-abc', TEST_SECRET)
@@ -221,12 +214,10 @@ describe('POST /api/sessions/:id/tool-approval', () => {
     })
 
     it('does not require session cookie auth when Bearer token is valid', async () => {
-      // Ensure getRequestSession is NOT called when Bearer token is used
-      mockGetRequestSession.mockResolvedValue(null) // would fail if checked
+      mockGetRequestSession.mockResolvedValue(null)
 
       const sessionDO = createMockSessionDO()
-      const registry = createMockRegistry()
-      const env = createMockEnv(registry, sessionDO)
+      const env = createMockEnv(sessionDO)
 
       const token = await generateActionToken('sess-1', 'gate-abc', TEST_SECRET)
 
@@ -257,16 +248,18 @@ describe('POST /api/sessions/:id/tool-approval', () => {
         user: {},
       })
 
-      const sessionDO = createMockSessionDO()
-      const registry = createMockRegistry({
-        getSession: vi.fn().mockResolvedValue({
+      // getOwnedSession does a select on agent_sessions; return the row.
+      fakeDb.data.select = [
+        {
           id: 'sess-1',
           userId: 'user-1',
           project: 'test',
           status: 'waiting_gate',
-        }),
-      })
-      const env = createMockEnv(registry, sessionDO)
+        },
+      ]
+
+      const sessionDO = createMockSessionDO()
+      const env = createMockEnv(sessionDO)
 
       const app = createApiApp()
       const res = await app.request(
@@ -287,8 +280,7 @@ describe('POST /api/sessions/:id/tool-approval', () => {
     it('returns 401 when not authenticated and no Bearer token', async () => {
       mockGetRequestSession.mockResolvedValue(null)
 
-      const registry = createMockRegistry()
-      const env = createMockEnv(registry)
+      const env = createMockEnv()
 
       const app = createApiApp()
       const res = await app.request(
@@ -305,17 +297,15 @@ describe('POST /api/sessions/:id/tool-approval', () => {
       expect(await res.json()).toEqual({ error: 'Unauthorized' })
     })
 
-    it('returns 404 when session not found in registry', async () => {
+    it('returns 404 when session not found in D1', async () => {
       mockGetRequestSession.mockResolvedValue({
         userId: 'user-1',
         session: {},
         user: {},
       })
 
-      const registry = createMockRegistry({
-        getSession: vi.fn().mockResolvedValue(null),
-      })
-      const env = createMockEnv(registry)
+      fakeDb.data.select = []
+      const env = createMockEnv()
 
       const app = createApiApp()
       const res = await app.request(
@@ -331,22 +321,23 @@ describe('POST /api/sessions/:id/tool-approval', () => {
       expect(res.status).toBe(404)
     })
 
-    it('returns 403 when session belongs to another user', async () => {
+    it('returns 404 when session belongs to another user (B-API-1)', async () => {
       mockGetRequestSession.mockResolvedValue({
         userId: 'user-1',
         session: {},
         user: {},
       })
 
-      const registry = createMockRegistry({
-        getSession: vi.fn().mockResolvedValue({
+      fakeDb.data.select = [
+        {
           id: 'sess-1',
           userId: 'user-OTHER',
           project: 'test',
           status: 'waiting_gate',
-        }),
-      })
-      const env = createMockEnv(registry)
+        },
+      ]
+
+      const env = createMockEnv()
 
       const app = createApiApp()
       const res = await app.request(
@@ -359,7 +350,9 @@ describe('POST /api/sessions/:id/tool-approval', () => {
         env,
       )
 
-      expect(res.status).toBe(403)
+      // Per B-API-1: real-user mismatch collapses to 404 (not 403) to
+      // avoid existence disclosure.
+      expect(res.status).toBe(404)
     })
 
     it('returns 400 when toolCallId is missing for cookie auth', async () => {
@@ -369,15 +362,16 @@ describe('POST /api/sessions/:id/tool-approval', () => {
         user: {},
       })
 
-      const registry = createMockRegistry({
-        getSession: vi.fn().mockResolvedValue({
+      fakeDb.data.select = [
+        {
           id: 'sess-1',
           userId: 'user-1',
           project: 'test',
           status: 'waiting_gate',
-        }),
-      })
-      const env = createMockEnv(registry)
+        },
+      ]
+
+      const env = createMockEnv()
 
       const app = createApiApp()
       const res = await app.request(
@@ -397,8 +391,7 @@ describe('POST /api/sessions/:id/tool-approval', () => {
 
   describe('common validation', () => {
     it('returns 400 when approved field is missing', async () => {
-      const registry = createMockRegistry()
-      const env = createMockEnv(registry)
+      const env = createMockEnv()
 
       const app = createApiApp()
       const res = await app.request(

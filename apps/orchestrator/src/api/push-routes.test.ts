@@ -53,7 +53,7 @@ function mockD1() {
 function createMockEnv(overrides: Partial<Env> = {}): Env {
   return {
     SESSION_AGENT: {} as any,
-    SESSION_REGISTRY: {} as any,
+    USER_SETTINGS: {} as any,
     ASSETS: {} as any,
     AUTH_DB: mockD1() as any,
     BETTER_AUTH_SECRET: 'test-secret',

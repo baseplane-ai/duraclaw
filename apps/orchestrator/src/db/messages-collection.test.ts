@@ -34,7 +34,7 @@ vi.mock('@tanstack/browser-db-sqlite-persistence', () => ({
 }))
 
 vi.mock('./db-instance', () => ({
-  persistence: null,
+  dbReady: Promise.resolve(null),
   queryClient: { fetchQuery: vi.fn() },
 }))
 
@@ -80,7 +80,7 @@ describe('messages-collection', () => {
     vi.resetModules()
 
     vi.doMock('./db-instance', () => ({
-      persistence: { adapter: {}, coordinator: {} },
+      dbReady: Promise.resolve({ adapter: {}, coordinator: {} }),
       queryClient: { fetchQuery: vi.fn() },
     }))
 

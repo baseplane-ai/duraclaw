@@ -12,6 +12,11 @@ custom_domain = true
 [observability]
 enabled = true
 
+# Cron triggers — replaces the in-DO discovery alarm (issue #7 p2).
+# Calls the `scheduled` handler in src/server.ts every 5 minutes.
+[triggers]
+crons = ['*/5 * * * *']
+
 [assets]
 binding = "ASSETS"
 directory = "./dist/client"
@@ -20,10 +25,6 @@ directory = "./dist/client"
 [[durable_objects.bindings]]
 name = "SESSION_AGENT"
 class_name = "SessionDO"
-
-[[durable_objects.bindings]]
-name = "SESSION_REGISTRY"
-class_name = "ProjectRegistry"
 
 [[durable_objects.bindings]]
 name = "USER_SETTINGS"
@@ -39,6 +40,8 @@ class_name = "SessionCollabDO"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["SessionDO", "ProjectRegistry"]
+# Note: ProjectRegistry was created here at v1 to keep the migration chain
+# compatible with the originally-deployed shape; it is dropped at v4 below.
 
 [[migrations]]
 tag = "v2"
@@ -47,6 +50,20 @@ new_sqlite_classes = ["UserSettingsDO"]
 [[migrations]]
 tag = "v3"
 new_sqlite_classes = ["SessionCollabDO"]
+
+# Issue #7 p3: UserSettingsDO is now a stateless PartyServer fanout.
+# The class no longer touches its SQLite — storage from the v2
+# Agent-based implementation is orphaned and harmlessly reaped.
+[[migrations]]
+tag = "v4"
+
+# Issue #7 p6 (B-INFRA-5): drop the ProjectRegistry DO class entirely.
+# All session metadata now lives in D1 (agent_sessions). The class binding
+# was removed from this file in the same change, so deleted_classes here
+# tells Cloudflare to release the namespace storage as well.
+[[migrations]]
+tag = "v5"
+deleted_classes = ["ProjectRegistry"]
 
 # D1 database for auth
 [[d1_databases]]

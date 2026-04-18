@@ -1,9 +1,10 @@
-import { ProjectRegistry } from './agents/project-registry'
+import { routePartykitRequest } from 'partyserver'
 import { SessionCollabDO } from './agents/session-collab-do'
 import { SessionDO } from './agents/session-do'
 import { UserSettingsDO } from './agents/user-settings-do'
 import { createApiApp } from './api'
 import { getRequestSession } from './api/auth-session'
+import { scheduled } from './api/scheduled'
 import type { Env } from './lib/types'
 
 // Gateway + session-runner decoupling live on prod as of 2026-04-17 (#1).
@@ -19,21 +20,28 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url)
 
-    // User settings DO — WS upgrade for live tab sync
-    if (
-      url.pathname === '/api/user-settings/ws' &&
-      request.headers.get('Upgrade') === 'websocket'
-    ) {
-      const authSession = await getRequestSession(env, request)
-      if (!authSession) {
-        return new Response('Unauthorized', { status: 401 })
+    // Maintenance-mode short-circuit (#7 cutover, B-INFRA-4). Operators flip
+    // MAINTENANCE_MODE=1 via wrangler secret to drain traffic during the
+    // big-bang DB switchover. /login and /api/health stay open so the
+    // operator can validate auth + worker health pre-flip.
+    if (env.MAINTENANCE_MODE === '1') {
+      if (!url.pathname.startsWith('/login') && url.pathname !== '/api/health') {
+        const html = `<!DOCTYPE html><html><body><div style="text-align:center;padding:48px;font-family:system-ui"><h1>Migration in progress</h1><p style="color:#666">We're upgrading our storage. Back in about 15 minutes.</p></div></body></html>`
+        return new Response(html, { status: 503, headers: { 'content-type': 'text/html' } })
       }
-      const doId = env.USER_SETTINGS.idFromName(authSession.userId)
-      const stub = env.USER_SETTINGS.get(doId)
-      const headers = new Headers(request.headers)
-      headers.set('x-partykit-room', authSession.userId)
-      headers.set('x-user-id', authSession.userId)
-      return stub.fetch(new Request(request, { headers }))
+    }
+
+    // PartyKit-style routing for /parties/user-settings/:userId — the
+    // browser WS for cache-invalidation fanout (issue #7 p3, B-API-4b).
+    // routePartykitRequest kebab-cases the binding name, so USER_SETTINGS
+    // is reachable as the `user-settings` party. Auth (cookie userId ==
+    // path userId) is enforced inside the DO's onConnect.
+    if (url.pathname.startsWith('/parties/')) {
+      const partyResp = await routePartykitRequest(
+        request,
+        env as unknown as Record<string, unknown>,
+      )
+      if (partyResp) return partyResp
     }
 
     // Session collab DO — WS upgrade for Yjs multiplayer draft sync
@@ -104,6 +112,7 @@ export default {
 
     return env.ASSETS.fetch(new Request(new URL('/', request.url), request))
   },
+  scheduled,
 }
 
-export { ProjectRegistry, SessionCollabDO, SessionDO, UserSettingsDO }
+export { SessionCollabDO, SessionDO, UserSettingsDO }

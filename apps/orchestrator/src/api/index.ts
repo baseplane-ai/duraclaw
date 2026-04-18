@@ -1,18 +1,24 @@
+import { and, asc, desc, eq, inArray, like, or, sql } from 'drizzle-orm'
+import { drizzle } from 'drizzle-orm/d1'
 import { Hono } from 'hono'
+import * as schema from '~/db/schema'
+import { agentSessions, userPreferences, userTabs } from '~/db/schema'
 import { validateActionToken } from '~/lib/action-token'
 import { createAuth } from '~/lib/auth'
 import { type PushPayload, sendPushNotification } from '~/lib/push'
 import type {
+  AgentSessionRow,
   ContentBlock,
   DiscoveredSession,
   ProjectInfo,
-  SessionSummary,
-  UserPreferences,
+  UserPreferencesRow,
+  UserTabRow,
 } from '~/lib/types'
 import { authMiddleware } from './auth-middleware'
 import { authRoutes } from './auth-routes'
 import { getRequestSession } from './auth-session'
 import type { ApiAppEnv } from './context'
+import { notifyInvalidation } from './notify'
 
 interface CreateSessionBody {
   project?: string
@@ -23,18 +29,35 @@ interface CreateSessionBody {
   agent?: string
 }
 
-type RegistrySession = SessionSummary & {
-  userId: string | null
-}
+const ACTIVE_STATUSES = ['running', 'waiting_input', 'waiting_permission'] as const
 
-function getRegistry(c: { env: ApiAppEnv['Bindings'] }) {
-  const registryId = c.env.SESSION_REGISTRY.idFromName('default')
-  return c.env.SESSION_REGISTRY.get(registryId) as any
-}
+const SESSION_PATCH_KEYS = new Set([
+  'title',
+  'summary',
+  'tag',
+  'status',
+  'archived',
+  'model',
+  'project',
+])
 
-function getUserSettingsDO(env: ApiAppEnv['Bindings'], userId: string) {
-  const doId = env.USER_SETTINGS.idFromName(userId)
-  return env.USER_SETTINGS.get(doId)
+const TAB_PATCH_KEYS = new Set(['sessionId', 'position'])
+
+const PREF_PATCH_KEYS = new Set([
+  'permissionMode',
+  'model',
+  'maxBudget',
+  'thinkingMode',
+  'effort',
+  'hiddenProjects',
+])
+
+const PERMISSION_MODES = new Set(['default', 'acceptAll', 'acceptEdits', 'plan'])
+const THINKING_MODES = new Set(['adaptive', 'off', 'on'])
+const EFFORTS = new Set(['low', 'medium', 'high'])
+
+function getDb(env: ApiAppEnv['Bindings']) {
+  return drizzle(env.AUTH_DB, { schema })
 }
 
 /** Resolve a session ID to a DO ID — hex IDs use idFromString, UUIDs use idFromName */
@@ -82,26 +105,54 @@ async function resolveProjectPath(
   return `/data/projects/${projectName}`
 }
 
+/**
+ * Read the user's hidden-project list. Stored on user_preferences as the
+ * `hidden_projects_json` column (JSON-stringified `string[]`). Returns an
+ * empty Set if no row exists or the JSON is malformed.
+ */
+async function getHiddenProjects(env: ApiAppEnv['Bindings'], userId: string): Promise<Set<string>> {
+  const db = getDb(env)
+  const rows = await db
+    .select({ hiddenProjects: userPreferences.hiddenProjects })
+    .from(userPreferences)
+    .where(eq(userPreferences.userId, userId))
+    .limit(1)
+  const raw = rows[0]?.hiddenProjects
+  if (!raw) return new Set()
+  try {
+    const parsed = JSON.parse(raw)
+    if (Array.isArray(parsed)) {
+      return new Set(parsed.filter((v): v is string => typeof v === 'string'))
+    }
+  } catch {
+    // fall through
+  }
+  return new Set()
+}
+
 async function getOwnedSession(
   env: ApiAppEnv['Bindings'],
   sessionId: string,
   userId: string,
-): Promise<{ ok: true; session: RegistrySession } | { ok: false; status: 403 | 404 }> {
-  const registry = getRegistry({ env })
-  const session = (await registry.getSession(sessionId)) as RegistrySession | null
+): Promise<{ ok: true; session: AgentSessionRow } | { ok: false; status: 403 | 404 }> {
+  const db = getDb(env)
+  const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1)
+  const row = rows[0]
 
-  if (!session) {
+  if (!row) {
     return { ok: false, status: 404 }
   }
 
   // Ownership check: reject sessions that belong to a different real user.
   // "system" is a placeholder used by the 5-min discovery alarm (which has no
   // user context) — treat those as shared since duraclaw is single-user per VPS.
-  if (session.userId && session.userId !== userId && session.userId !== 'system') {
-    return { ok: false, status: 403 }
+  // Per B-API-1, real-user mismatches return 404 (not 403) to avoid existence
+  // disclosure.
+  if (row.userId && row.userId !== userId && row.userId !== 'system') {
+    return { ok: false, status: 404 }
   }
 
-  return { ok: true, session }
+  return { ok: true, session: row as AgentSessionRow }
 }
 
 export function createApiApp() {
@@ -252,93 +303,221 @@ export function createApiApp() {
 
   app.use('/api/*', authMiddleware)
 
-  // ── User settings (tabs) — proxied to UserSettingsDO ──────────
+  // ── User settings (tabs) — direct D1 CRUD (B-API-2) ──────────────
 
   app.get('/api/user-settings/tabs', async (c) => {
-    const stub = getUserSettingsDO(c.env, c.get('userId'))
-    const resp = await stub.fetch(new Request('https://do/tabs'))
-    return c.json(await resp.json())
+    const userId = c.get('userId')
+    const db = getDb(c.env)
+    const tabs = await db
+      .select()
+      .from(userTabs)
+      .where(eq(userTabs.userId, userId))
+      .orderBy(asc(userTabs.position))
+    return c.json({ tabs: tabs as UserTabRow[] })
   })
 
   app.post('/api/user-settings/tabs', async (c) => {
-    const body = await c.req.json()
-    const stub = getUserSettingsDO(c.env, c.get('userId'))
-    const resp = await stub.fetch(
-      new Request('https://do/tabs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      }),
-    )
-    return c.json(await resp.json())
+    const userId = c.get('userId')
+    const body = (await c.req.json().catch(() => null)) as {
+      sessionId?: string | null
+      position?: number
+    } | null
+    if (!body || typeof body !== 'object') {
+      return c.json({ error: 'Invalid body' }, 400)
+    }
+
+    const db = getDb(c.env)
+    let position = body.position
+    if (typeof position !== 'number') {
+      const maxRow = await db
+        .select({ max: sql<number | null>`MAX(${userTabs.position})` })
+        .from(userTabs)
+        .where(eq(userTabs.userId, userId))
+      const max = maxRow[0]?.max
+      position = typeof max === 'number' ? max + 1 : 0
+    }
+
+    const id = crypto.randomUUID()
+    const createdAt = new Date().toISOString()
+    const inserted = await db
+      .insert(userTabs)
+      .values({
+        id,
+        userId,
+        sessionId: body.sessionId ?? null,
+        position,
+        createdAt,
+      })
+      .returning()
+
+    await notifyInvalidation(c.env, userId, 'user_tabs')
+    return c.json({ tab: inserted[0] as UserTabRow }, 201)
   })
 
   app.patch('/api/user-settings/tabs/:id', async (c) => {
+    const userId = c.get('userId')
     const tabId = c.req.param('id')
-    const body = await c.req.json()
-    const stub = getUserSettingsDO(c.env, c.get('userId'))
-    const resp = await stub.fetch(
-      new Request(`https://do/tabs/${tabId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      }),
-    )
-    return c.json(await resp.json())
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null
+    if (!body || typeof body !== 'object') {
+      return c.json({ error: 'Invalid body' }, 400)
+    }
+
+    for (const key of Object.keys(body)) {
+      if (!TAB_PATCH_KEYS.has(key)) {
+        return c.json({ error: `Unknown field: ${key}` }, 400)
+      }
+    }
+
+    const db = getDb(c.env)
+    const updated = await db
+      .update(userTabs)
+      .set(body as Partial<typeof userTabs.$inferInsert>)
+      .where(and(eq(userTabs.id, tabId), eq(userTabs.userId, userId)))
+      .returning()
+
+    if (updated.length === 0) {
+      return c.json({ error: 'Tab not found' }, 404)
+    }
+
+    await notifyInvalidation(c.env, userId, 'user_tabs')
+    return c.json({ tab: updated[0] as UserTabRow })
   })
 
   app.delete('/api/user-settings/tabs/:id', async (c) => {
+    const userId = c.get('userId')
     const tabId = c.req.param('id')
-    const stub = getUserSettingsDO(c.env, c.get('userId'))
-    const resp = await stub.fetch(new Request(`https://do/tabs/${tabId}`, { method: 'DELETE' }))
-    return c.json(await resp.json())
-  })
+    const db = getDb(c.env)
+    const deleted = await db
+      .delete(userTabs)
+      .where(and(eq(userTabs.id, tabId), eq(userTabs.userId, userId)))
+      .returning({ id: userTabs.id })
 
-  app.get('/api/user/preferences', async (c) => {
-    const userId = c.get('userId')
-    const result = await c.env.AUTH_DB.prepare(
-      'SELECT key, value FROM user_preferences WHERE user_id = ?',
-    )
-      .bind(userId)
-      .all<{ key: string; value: string }>()
-
-    const prefs: Record<string, string> = {}
-    for (const row of result.results) {
-      prefs[row.key] = row.value
-    }
-    return c.json(prefs)
-  })
-
-  app.put('/api/user/preferences', async (c) => {
-    const userId = c.get('userId')
-    const body = (await c.req.json()) as { key?: string; value?: string }
-
-    if (typeof body.key !== 'string' || typeof body.value !== 'string') {
-      return c.json({ error: 'Missing required fields: key, value' }, 400)
+    if (deleted.length === 0) {
+      return c.json({ error: 'Tab not found' }, 404)
     }
 
-    await c.env.AUTH_DB.prepare(
-      'INSERT OR REPLACE INTO user_preferences (user_id, key, value) VALUES (?, ?, ?)',
-    )
-      .bind(userId, body.key, body.value)
-      .run()
+    await notifyInvalidation(c.env, userId, 'user_tabs')
+    return c.body(null, 204)
+  })
 
+  app.post('/api/user-settings/tabs/reorder', async (c) => {
+    const userId = c.get('userId')
+    const body = (await c.req.json().catch(() => null)) as {
+      orderedIds?: unknown
+    } | null
+    if (!body || !Array.isArray(body.orderedIds)) {
+      return c.json({ error: 'Invalid body: orderedIds must be a string[]' }, 400)
+    }
+    const orderedIds = body.orderedIds
+    if (!orderedIds.every((id) => typeof id === 'string')) {
+      return c.json({ error: 'Invalid body: orderedIds must be a string[]' }, 400)
+    }
+    if (new Set(orderedIds).size !== orderedIds.length) {
+      return c.json({ error: 'Duplicate ids in orderedIds' }, 400)
+    }
+
+    const ids = orderedIds as string[]
+    const db = getDb(c.env)
+
+    const result = await db.transaction(async (tx) => {
+      const owned = await tx
+        .select({ id: userTabs.id })
+        .from(userTabs)
+        .where(and(eq(userTabs.userId, userId), inArray(userTabs.id, ids)))
+      if (owned.length !== ids.length) {
+        return { ok: false as const }
+      }
+      for (let idx = 0; idx < ids.length; idx++) {
+        await tx
+          .update(userTabs)
+          .set({ position: idx })
+          .where(and(eq(userTabs.id, ids[idx]), eq(userTabs.userId, userId)))
+      }
+      return { ok: true as const }
+    })
+
+    if (!result.ok) {
+      return c.json({ error: 'One or more ids not owned by caller' }, 400)
+    }
+
+    await notifyInvalidation(c.env, userId, 'user_tabs')
     return c.json({ ok: true })
   })
 
+  // ── User preferences (columnar) — B-API-3 ────────────────────────
+
   app.get('/api/preferences', async (c) => {
     const userId = c.get('userId')
-    const registry = getRegistry(c)
-    const prefs = (await registry.getUserPreferences(userId)) as UserPreferences | null
-    return c.json(prefs ?? {})
+    const db = getDb(c.env)
+    const rows = await db
+      .select()
+      .from(userPreferences)
+      .where(eq(userPreferences.userId, userId))
+      .limit(1)
+    if (rows[0]) {
+      return c.json(rows[0] as UserPreferencesRow)
+    }
+    // Synthesise defaults without inserting — first-run users get a stable
+    // envelope so the client UI doesn't have to handle a 404 case.
+    const defaults: UserPreferencesRow = {
+      userId,
+      permissionMode: 'default',
+      model: 'claude-opus-4-6',
+      maxBudget: null,
+      thinkingMode: 'adaptive',
+      effort: 'high',
+      hiddenProjects: null,
+      updatedAt: new Date().toISOString(),
+    }
+    return c.json(defaults)
   })
 
   app.put('/api/preferences', async (c) => {
     const userId = c.get('userId')
-    const body = (await c.req.json()) as Partial<UserPreferences>
-    const registry = getRegistry(c)
-    await registry.setUserPreferences(userId, body)
-    return c.json({ ok: true })
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null
+    if (!body || typeof body !== 'object') {
+      return c.json({ error: 'Invalid body' }, 400)
+    }
+
+    for (const key of Object.keys(body)) {
+      if (!PREF_PATCH_KEYS.has(key)) {
+        return c.json({ error: `Unknown field: ${key}` }, 400)
+      }
+    }
+
+    if (typeof body.permissionMode === 'string' && !PERMISSION_MODES.has(body.permissionMode)) {
+      return c.json({ error: `Invalid permissionMode: ${body.permissionMode}` }, 400)
+    }
+    if (typeof body.thinkingMode === 'string' && !THINKING_MODES.has(body.thinkingMode)) {
+      return c.json({ error: `Invalid thinkingMode: ${body.thinkingMode}` }, 400)
+    }
+    if (typeof body.effort === 'string' && !EFFORTS.has(body.effort)) {
+      return c.json({ error: `Invalid effort: ${body.effort}` }, 400)
+    }
+    if (
+      body.maxBudget !== undefined &&
+      body.maxBudget !== null &&
+      typeof body.maxBudget !== 'number'
+    ) {
+      return c.json({ error: 'maxBudget must be a number or null' }, 400)
+    }
+    if (body.hiddenProjects !== undefined && body.hiddenProjects !== null) {
+      if (typeof body.hiddenProjects !== 'string') {
+        return c.json({ error: 'hiddenProjects must be a JSON string or null' }, 400)
+      }
+    }
+
+    const updatedAt = new Date().toISOString()
+    const db = getDb(c.env)
+    const setValues = { ...(body as Partial<typeof userPreferences.$inferInsert>), updatedAt }
+    const inserted = await db
+      .insert(userPreferences)
+      .values({ userId, ...setValues })
+      .onConflictDoUpdate({ target: userPreferences.userId, set: setValues })
+      .returning()
+
+    await notifyInvalidation(c.env, userId, 'user_preferences')
+    return c.json({ preferences: inserted[0] as UserPreferencesRow })
   })
 
   app.post('/api/push/subscribe', async (c) => {
@@ -508,28 +687,20 @@ export function createApiApp() {
 
     try {
       const projects = await fetchGatewayProjects(c.env)
-
-      // Filter out user-hidden projects
-      const hiddenResult = await c.env.AUTH_DB.prepare(
-        "SELECT value FROM user_preferences WHERE user_id = ? AND key = 'hidden_projects'",
-      )
-        .bind(userId)
-        .first<{ value: string }>()
-      const hiddenSet = new Set(
-        hiddenResult?.value ? (JSON.parse(hiddenResult.value) as string[]) : [],
-      )
+      const hiddenSet = await getHiddenProjects(c.env, userId)
       const visibleProjects =
         hiddenSet.size > 0 ? projects.filter((p) => !hiddenSet.has(p.name)) : projects
 
-      const registry = getRegistry(c)
+      const db = getDb(c.env)
       const merged = await Promise.all(
-        visibleProjects.map(async (project) => ({
-          ...project,
-          sessions: (await registry.listSessionsByProject(
-            project.name,
-            userId,
-          )) as SessionSummary[],
-        })),
+        visibleProjects.map(async (project) => {
+          const sessions = await db
+            .select()
+            .from(agentSessions)
+            .where(and(eq(agentSessions.userId, userId), eq(agentSessions.project, project.name)))
+            .orderBy(desc(agentSessions.lastActivity))
+          return { ...project, sessions: sessions as AgentSessionRow[] }
+        }),
       )
 
       return c.json({ projects: merged })
@@ -540,40 +711,105 @@ export function createApiApp() {
   })
 
   app.get('/api/sessions', async (c) => {
-    const sessions = (await getRegistry(c).listSessions(c.get('userId'))) as SessionSummary[]
-    return c.json({ sessions })
+    const userId = c.get('userId')
+    const db = getDb(c.env)
+    const rows = await db
+      .select()
+      .from(agentSessions)
+      .where(eq(agentSessions.userId, userId))
+      .orderBy(desc(agentSessions.lastActivity))
+      .limit(200)
+    return c.json({ sessions: rows as AgentSessionRow[] })
   })
 
   app.get('/api/sessions/active', async (c) => {
-    const sessions = (await getRegistry(c).listActiveSessions(c.get('userId'))) as SessionSummary[]
-    return c.json({ sessions })
+    const userId = c.get('userId')
+    const db = getDb(c.env)
+    const rows = await db
+      .select()
+      .from(agentSessions)
+      .where(
+        and(eq(agentSessions.userId, userId), inArray(agentSessions.status, [...ACTIVE_STATUSES])),
+      )
+      .orderBy(desc(agentSessions.lastActivity))
+    return c.json({ sessions: rows as AgentSessionRow[] })
   })
 
   app.get('/api/sessions/search', async (c) => {
     const q = c.req.query('q')
     if (!q) return c.json({ sessions: [] })
-    const sessions = (await getRegistry(c).searchSessions(c.get('userId'), q)) as SessionSummary[]
-    return c.json({ sessions })
+    const userId = c.get('userId')
+    const needle = `%${q}%`
+    const db = getDb(c.env)
+    const rows = await db
+      .select()
+      .from(agentSessions)
+      .where(
+        and(
+          eq(agentSessions.userId, userId),
+          or(
+            like(agentSessions.prompt, needle),
+            like(agentSessions.project, needle),
+            like(agentSessions.id, needle),
+            like(agentSessions.title, needle),
+            like(agentSessions.summary, needle),
+            like(agentSessions.agent, needle),
+            like(agentSessions.sdkSessionId, needle),
+          ),
+        ),
+      )
+      .orderBy(desc(agentSessions.lastActivity))
+      .limit(200)
+    return c.json({ sessions: rows as AgentSessionRow[] })
   })
 
   app.get('/api/sessions/history', async (c) => {
-    const registry = getRegistry(c)
-    const result = await registry.listSessionsPaginated(c.get('userId'), {
-      sortBy: (c.req.query('sortBy') as any) || undefined,
-      sortDir: (c.req.query('sortDir') as any) || undefined,
-      status: c.req.query('status') || undefined,
-      project: c.req.query('project') || undefined,
-      model: c.req.query('model') || undefined,
-      limit: c.req.query('limit') ? Number(c.req.query('limit')) : undefined,
-      offset: c.req.query('offset') ? Number(c.req.query('offset')) : undefined,
-    })
-    return c.json(result)
-  })
+    const userId = c.get('userId')
+    const sortByParam = c.req.query('sortBy')
+    const sortDirParam = c.req.query('sortDir')
+    const status = c.req.query('status')
+    const project = c.req.query('project')
+    const model = c.req.query('model')
+    const limitParam = c.req.query('limit')
+    const offsetParam = c.req.query('offset')
 
-  app.post('/api/sessions/backfill', async (c) => {
-    const registry = getRegistry(c)
-    const remaining = await registry.backfillLastActivity()
-    return c.json({ ok: true, remaining_null: remaining })
+    const limit = Math.min(Math.max(Number(limitParam) || 50, 1), 200)
+    const offset = Math.max(Number(offsetParam) || 0, 0)
+
+    const sortColumn = (() => {
+      switch (sortByParam) {
+        case 'created_at':
+          return agentSessions.createdAt
+        case 'updated_at':
+          return agentSessions.updatedAt
+        case 'project':
+          return agentSessions.project
+        case 'status':
+          return agentSessions.status
+        default:
+          return agentSessions.lastActivity
+      }
+    })()
+    const orderExpr = sortDirParam === 'asc' ? asc(sortColumn) : desc(sortColumn)
+
+    const filters = [eq(agentSessions.userId, userId)]
+    if (status) filters.push(eq(agentSessions.status, status))
+    if (project) filters.push(eq(agentSessions.project, project))
+    if (model) filters.push(eq(agentSessions.model, model))
+
+    const db = getDb(c.env)
+    const rows = await db
+      .select()
+      .from(agentSessions)
+      .where(and(...filters))
+      .orderBy(orderExpr)
+      .limit(limit)
+      .offset(offset)
+
+    return c.json({
+      sessions: rows as AgentSessionRow[],
+      nextOffset: rows.length === limit ? offset + limit : null,
+    })
   })
 
   app.post('/api/sessions/sync', async (c) => {
@@ -597,14 +833,75 @@ export function createApiApp() {
         return c.json({ error: `Gateway returned ${resp.status}` }, 502)
       }
       const data = (await resp.json()) as { sessions: DiscoveredSession[] }
-      sessions = data.sessions
+      sessions = data.sessions ?? []
     } catch {
       return c.json({ error: 'Gateway unreachable' }, 502)
     }
 
-    const registry = getRegistry(c)
-    const result = await registry.syncDiscoveredSessions(userId, sessions)
-    return c.json(result)
+    const db = getDb(c.env)
+    const now = new Date().toISOString()
+    let inserted = 0
+    let updated = 0
+
+    await db.transaction(async (tx) => {
+      for (const s of sessions) {
+        const ownerId = (s as DiscoveredSession & { user?: string }).user || userId
+        const existing = await tx
+          .select({ id: agentSessions.id })
+          .from(agentSessions)
+          .where(eq(agentSessions.sdkSessionId, s.sdk_session_id))
+          .limit(1)
+
+        const row = {
+          id: s.sdk_session_id,
+          userId: ownerId,
+          project: s.project,
+          status: 'idle',
+          model: null as string | null,
+          sdkSessionId: s.sdk_session_id,
+          createdAt: s.started_at || now,
+          updatedAt: s.last_activity || now,
+          lastActivity: s.last_activity || now,
+          numTurns: null as number | null,
+          prompt: null as string | null,
+          summary: s.summary || null,
+          title: s.title ?? null,
+          tag: s.tag ?? null,
+          origin: 'discovered',
+          agent: s.agent ?? 'claude',
+          archived: false,
+          durationMs: null as number | null,
+          totalCostUsd: null as number | null,
+          messageCount: s.message_count ?? null,
+          kataMode: null as string | null,
+          kataIssue: null as number | null,
+          kataPhase: null as string | null,
+        }
+
+        await tx
+          .insert(agentSessions)
+          .values(row)
+          .onConflictDoUpdate({
+            target: agentSessions.sdkSessionId,
+            set: {
+              project: row.project,
+              lastActivity: row.lastActivity,
+              updatedAt: row.updatedAt,
+              summary: row.summary,
+              title: row.title,
+              tag: row.tag,
+              messageCount: row.messageCount,
+              agent: row.agent,
+            },
+          })
+
+        if (existing.length > 0) updated++
+        else inserted++
+      }
+    })
+
+    await notifyInvalidation(c.env, userId, 'agent_sessions')
+    return c.json({ inserted, updated })
   })
 
   app.post('/api/sessions', async (c) => {
@@ -616,7 +913,6 @@ export function createApiApp() {
     }
 
     const projectPath = await resolveProjectPath(c.env, body.project)
-    const registry = getRegistry(c)
 
     const doId = c.env.SESSION_AGENT.newUniqueId()
     const sessionId = doId.toString()
@@ -648,41 +944,59 @@ export function createApiApp() {
     }
 
     const now = new Date().toISOString()
+    const promptText = typeof body.prompt === 'string' ? body.prompt : JSON.stringify(body.prompt)
+    const db = getDb(c.env)
 
-    // When resuming a discovered session, replace the old entry instead of creating a duplicate
-    if (body.sdk_session_id) {
-      const existing = await registry.findSessionBySdkId(body.sdk_session_id)
-      if (existing) {
-        await registry.replaceSessionForResume(existing.id, {
-          id: sessionId,
-          userId,
-          project: body.project,
-          status: 'running',
-          model: body.model ?? existing.model ?? null,
-          created_at: existing.created_at ?? now,
-          updated_at: now,
-          prompt: existing.prompt ?? body.prompt,
-          sdk_session_id: body.sdk_session_id,
-          title: existing.title,
-          summary: existing.summary,
-          tag: existing.tag,
-          agent: body.agent ?? existing.agent,
-        } as any)
-        return c.json({ session_id: sessionId }, 201)
-      }
-    }
-
-    await registry.registerSession({
+    const baseRow = {
       id: sessionId,
       userId,
       project: body.project,
       status: 'running',
       model: body.model ?? null,
-      created_at: now,
-      updated_at: now,
-      prompt: body.prompt,
-    })
+      sdkSessionId: body.sdk_session_id ?? null,
+      createdAt: now,
+      updatedAt: now,
+      lastActivity: now,
+      numTurns: null as number | null,
+      prompt: promptText,
+      summary: null as string | null,
+      title: null as string | null,
+      tag: null as string | null,
+      origin: 'duraclaw',
+      agent: body.agent ?? 'claude',
+      archived: false,
+      durationMs: null as number | null,
+      totalCostUsd: null as number | null,
+      messageCount: null as number | null,
+      kataMode: null as string | null,
+      kataIssue: null as number | null,
+      kataPhase: null as string | null,
+    }
 
+    if (body.sdk_session_id) {
+      // Resume path — UPSERT on sdk_session_id swaps in the new DO id
+      // (matches the previous registry.replaceSessionForResume semantics).
+      await db
+        .insert(agentSessions)
+        .values(baseRow)
+        .onConflictDoUpdate({
+          target: agentSessions.sdkSessionId,
+          set: {
+            id: sessionId,
+            userId,
+            project: body.project,
+            status: 'running',
+            model: baseRow.model,
+            updatedAt: now,
+            lastActivity: now,
+            agent: baseRow.agent,
+          },
+        })
+    } else {
+      await db.insert(agentSessions).values(baseRow)
+    }
+
+    await notifyInvalidation(c.env, userId, 'agent_sessions')
     return c.json({ session_id: sessionId }, 201)
   })
 
@@ -696,6 +1010,8 @@ export function createApiApp() {
       )
     }
 
+    // Merge: D1 metadata + DO runtime state. The DO owns live fields like
+    // pending gates, current turn message id, etc. that are not in agent_sessions.
     const doId = getSessionDoId(c.env, ownership.session.id)
     const sessionDO = c.env.SESSION_AGENT.get(doId)
     const response = await sessionDO.fetch(
@@ -711,8 +1027,8 @@ export function createApiApp() {
       return c.json({ error: 'Session not found' }, response.status === 403 ? 403 : 404)
     }
 
-    const session = await response.json()
-    return c.json({ session })
+    const doState = (await response.json()) as Record<string, unknown>
+    return c.json({ session: { ...ownership.session, ...doState } })
   })
 
   app.get('/api/sessions/:id/messages', async (c) => {
@@ -746,37 +1062,43 @@ export function createApiApp() {
 
   app.patch('/api/sessions/:id', async (c) => {
     const userId = c.get('userId')
-    const ownership = await getOwnedSession(c.env, c.req.param('id'), userId)
-    if (!ownership.ok) {
-      return c.json(
-        { error: ownership.status === 404 ? 'Session not found' : 'Forbidden' },
-        ownership.status,
-      )
+    const sessionId = c.req.param('id')
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null
+    if (!body || typeof body !== 'object') {
+      return c.json({ error: 'Invalid body' }, 400)
     }
 
-    const body = (await c.req.json()) as Record<string, unknown>
-    const registry = getRegistry(c)
-    await registry.updateSession(ownership.session.id, body)
-    return c.json({ ok: true })
+    for (const key of Object.keys(body)) {
+      if (!SESSION_PATCH_KEYS.has(key)) {
+        return c.json({ error: `Unknown field: ${key}` }, 400)
+      }
+    }
+
+    const updatedAt = new Date().toISOString()
+    const db = getDb(c.env)
+    const updated = await db
+      .update(agentSessions)
+      .set({ ...(body as Partial<typeof agentSessions.$inferInsert>), updatedAt })
+      .where(and(eq(agentSessions.id, sessionId), eq(agentSessions.userId, userId)))
+      .returning()
+
+    if (updated.length === 0) {
+      // Either the session doesn't exist or it's owned by a different real
+      // user — collapsed to 404 to avoid existence disclosure (B-API-1).
+      return c.json({ error: 'Session not found' }, 404)
+    }
+
+    await notifyInvalidation(c.env, userId, 'agent_sessions')
+    return c.json({ session: updated[0] as AgentSessionRow })
   })
 
   app.get('/api/gateway/projects', async (c) => {
     try {
       const projects = await fetchGatewayProjects(c.env)
-
-      // Filter out user-hidden projects
       const userId = c.get('userId')
-      const hiddenResult = await c.env.AUTH_DB.prepare(
-        "SELECT value FROM user_preferences WHERE user_id = ? AND key = 'hidden_projects'",
-      )
-        .bind(userId)
-        .first<{ value: string }>()
-      const hiddenSet = new Set(
-        hiddenResult?.value ? (JSON.parse(hiddenResult.value) as string[]) : [],
-      )
+      const hiddenSet = await getHiddenProjects(c.env, userId)
       const filtered =
         hiddenSet.size > 0 ? projects.filter((p) => !hiddenSet.has(p.name)) : projects
-
       return c.json(filtered)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Gateway unreachable'
@@ -787,16 +1109,8 @@ export function createApiApp() {
   app.get('/api/gateway/projects/all', async (c) => {
     try {
       const projects = await fetchGatewayProjects(c.env)
-
       const userId = c.get('userId')
-      const hiddenResult = await c.env.AUTH_DB.prepare(
-        "SELECT value FROM user_preferences WHERE user_id = ? AND key = 'hidden_projects'",
-      )
-        .bind(userId)
-        .first<{ value: string }>()
-      const hiddenNames: string[] = hiddenResult?.value ? JSON.parse(hiddenResult.value) : []
-      const hiddenSet = new Set(hiddenNames)
-
+      const hiddenSet = await getHiddenProjects(c.env, userId)
       return c.json(projects.map((p) => ({ ...p, hidden: hiddenSet.has(p.name) })))
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Gateway unreachable'

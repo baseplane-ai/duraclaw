@@ -45,3 +45,8 @@ logs/
 .env.vapid
 .kata/sessions/
 .kata/.cleanup-ran
+
+# Cutover artefacts (generated locally during rehearsal or prod runs)
+apps/orchestrator/dump.json
+apps/orchestrator/export.sql
+apps/orchestrator/prod-snapshot.sql

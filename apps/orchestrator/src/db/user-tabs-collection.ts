@@ -1,37 +1,38 @@
 /**
- * Tabs QueryCollection -- synced to UserSettingsDO via WS + HTTP.
+ * User Tabs QueryCollection -- the new D1-backed tab list (B-CLIENT-2).
  *
- * - Collection key: 'tabs'
+ * - Collection id: 'user_tabs'
  * - Persisted to OPFS SQLite (schema version 1)
- * - queryFn fetches full state on cold start (no polling — WS pushes updates)
- * - onInsert/onUpdate/onDelete handlers sync mutations to the DO via HTTP
- * - Live sync: WS broadcasts from DO feed utils.writeBatch for server state
- * - Optimistic mutations with automatic rollback on handler error
+ * - queryFn fetches the full state from /api/user-settings/tabs
+ * - refetchInterval: false (PartyKit invalidation channel pushes freshness)
+ * - onInsert/onUpdate/onDelete handlers POST/PATCH/DELETE the DO HTTP routes
+ *
+ * Row shape matches the D1 `user_tabs` table after p1 / p2:
+ * `{id, userId, sessionId, position, createdAt}` — no `project`, `title`, or
+ * `draft`. Consumers join with `agentSessionsCollection` to derive display
+ * fields (project / title) reactively.
  */
 
 import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence'
 import { createCollection } from '@tanstack/db'
 import { queryCollectionOptions } from '@tanstack/query-db-collection'
-import { persistence, queryClient } from './db-instance'
+import type { UserTabRow } from '~/lib/types'
+import { dbReady, queryClient } from './db-instance'
 
-export interface TabItem {
-  id: string
-  project: string
-  sessionId: string
-  title: string
-}
+export type TabRow = UserTabRow
 
 const queryOpts = queryCollectionOptions({
-  queryKey: ['tabs'] as const,
+  id: 'user_tabs',
+  queryKey: ['user_tabs'] as const,
   queryFn: async () => {
     const resp = await fetch('/api/user-settings/tabs')
-    if (!resp.ok) return []
-    const json = (await resp.json()) as { tabs: TabItem[] }
+    if (!resp.ok) return [] as UserTabRow[]
+    const json = (await resp.json()) as { tabs: UserTabRow[] }
     return json.tabs
   },
   queryClient,
-  getKey: (item: TabItem) => item.id,
-  // No polling — WS pushes live updates via utils.writeBatch
+  getKey: (item: UserTabRow) => item.id,
+  // No polling — invalidation channel (B-CLIENT-5) pushes refresh signals
   refetchInterval: false,
   staleTime: Number.POSITIVE_INFINITY,
 
@@ -65,7 +66,9 @@ const queryOpts = queryCollectionOptions({
   },
 })
 
-function createTabsCollection() {
+const persistence = await dbReady
+
+function createUserTabsCollection() {
   if (persistence) {
     const opts = persistedCollectionOptions({
       ...queryOpts,
@@ -79,4 +82,4 @@ function createTabsCollection() {
   return createCollection(queryOpts)
 }
 
-export const tabsCollection = createTabsCollection()
+export const userTabsCollection = createUserTabsCollection()

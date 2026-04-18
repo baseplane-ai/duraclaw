@@ -14,9 +14,6 @@ vi.mock('./api', () => ({
 }))
 
 // Mock DO classes to avoid import side-effects
-vi.mock('./agents/project-registry', () => ({
-  ProjectRegistry: class {},
-}))
 vi.mock('./agents/session-do', () => ({
   SessionDO: class {},
 }))
@@ -25,6 +22,12 @@ vi.mock('./agents/user-settings-do', () => ({
 }))
 vi.mock('./agents/session-collab-do', () => ({
   SessionCollabDO: class {},
+}))
+
+// partyserver imports `cloudflare:workers` which the node ESM loader
+// can't resolve. Stub the only export server.ts uses.
+vi.mock('partyserver', () => ({
+  routePartykitRequest: vi.fn().mockResolvedValue(null),
 }))
 
 import { getRequestSession } from './api/auth-session'
@@ -43,7 +46,6 @@ function createMockEnv(overrides?: Partial<Env>) {
       idFromString: vi.fn(() => mockDoId),
       get: vi.fn(() => mockStub),
     },
-    SESSION_REGISTRY: {},
     ASSETS: {
       fetch: vi.fn(() => new Response('asset', { status: 200 })),
     },

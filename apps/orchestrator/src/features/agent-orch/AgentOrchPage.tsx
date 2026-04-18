@@ -2,8 +2,8 @@
  * AgentOrchPage — Main page for spawning and observing sessions.
  *
  * Layout: sidebar (session list + spawn form) + main area (selected agent detail view).
- * Adapted from baseplane: uses ProjectRegistry instead of DataForge,
- * duraclaw's TanStack Router, and SessionDO instead of CodingAgent.
+ * Adapted from baseplane: session metadata is read from D1 via the
+ * sessions collection, with duraclaw's TanStack Router and SessionDO.
  */
 
 import { useNavigate, useSearch } from '@tanstack/react-router'
@@ -14,21 +14,62 @@ import { PushOptInBanner } from '~/components/push-opt-in-banner'
 import { PwaInstallBanner } from '~/components/pwa-install-banner'
 import { QuickPromptInput } from '~/components/quick-prompt-input'
 import { TabBar } from '~/components/tab-bar'
-import { lookupSessionInCache } from '~/db/sessions-collection'
+import { userTabsCollection } from '~/db/user-tabs-collection'
+import { getActiveTabId, setActiveTabId } from '~/hooks/use-active-tab'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { useSwipeTabs } from '~/hooks/use-swipe-tabs'
-import { getUserSettings, useUserSettings } from '~/hooks/use-user-settings'
+import type { UserTabRow } from '~/lib/types'
 import { AgentDetailView } from './AgentDetailView'
 import type { SpawnFormConfig } from './SpawnAgentForm'
-import { getPreviewText } from './session-utils'
 import { type SpawnConfig, useCodingAgent } from './use-coding-agent'
 
 export function AgentOrchPage() {
   return <AgentOrchContent />
 }
 
+// ── Helpers ───────────────────────────────────────────────────────
+// Inline imperative tab utilities — kept out of a hook because the keyboard
+// handler and spawn flows need synchronous access without re-render churn.
+
+function newTabId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID().slice(0, 8)
+  }
+  return Math.random().toString(36).slice(2, 10)
+}
+
+function nextPosition(): number {
+  const tabs = userTabsCollection.toArray as unknown as UserTabRow[]
+  if (tabs.length === 0) return 0
+  return Math.max(0, ...tabs.map((t) => t.position)) + 1
+}
+
+/**
+ * Locate the existing tab for `sessionId`, or insert a fresh one. In both
+ * cases the resulting tab is set active. The optimistic insert uses an empty
+ * `userId` — the server populates the real value on POST.
+ */
+function ensureTabForSession(sessionId: string): string {
+  const tabs = userTabsCollection.toArray as unknown as UserTabRow[]
+  const existing = tabs.find((t) => t.sessionId === sessionId)
+  if (existing) {
+    setActiveTabId(existing.id)
+    return existing.id
+  }
+  const id = newTabId()
+  userTabsCollection.insert({
+    id,
+    userId: '',
+    sessionId,
+    position: nextPosition(),
+    createdAt: new Date().toISOString(),
+  } as UserTabRow & Record<string, unknown>)
+  setActiveTabId(id)
+  return id
+}
+
 function AgentOrchContent() {
-  const { sessions, updateSession } = useSessionsCollection()
+  const { updateSession } = useSessionsCollection()
   const search = useSearch({ from: '/_authenticated/' })
   const navigate = useNavigate()
   const searchSessionId = (search as { session?: string }).session ?? null
@@ -36,40 +77,35 @@ function AgentOrchContent() {
     (search as { newSessionProject?: string }).newSessionProject ?? null
   const searchNewTab = (search as { newTab?: boolean }).newTab ?? false
 
-  const { addTab, addNewTab } = useUserSettings()
-
   // Synchronous init: resolve selectedSessionId from URL or last active tab.
+  // Tabs live in `userTabsCollection` (D1-synced, OPFS-cached) — `.toArray()`
+  // returns the hydrated rows synchronously on cold start. The init effect
+  // also seeds an optimistic tab row for URL-delivered sessions so the tab
+  // bar renders on the first frame.
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(() => {
-    const settings = getUserSettings()
     if (searchSessionId) {
-      // Create/merge tab SYNCHRONOUSLY using localStorage-cached session
-      // metadata. This runs during the initial render — before any effects —
-      // so the tab bar renders correctly on the first frame even after a
-      // full page reload (push notification tap). Direct localStorage read
-      // avoids any TanStack DB collection/query-layer timing issues.
-      const cached = lookupSessionInCache(searchSessionId)
-      if (cached) {
-        settings.addTab(cached.project, searchSessionId, cached.title || cached.project)
-      }
+      // Notification deep-link / shared URL: ensure a tab exists for this
+      // session id so the tab bar shows it on the very first frame. The tab
+      // initially has no joined session row; the join skeleton renders until
+      // agentSessionsCollection hydrates.
+      ensureTabForSession(searchSessionId)
       return searchSessionId
     }
-    // No URL session — restore from the last active tab (cold launch / PWA)
-    const { tabs: currentTabs, activeTabId: currentActiveTabId } = settings
-    if (currentActiveTabId) {
-      const match = currentTabs.find((t) => t.id === currentActiveTabId)
-      if (match) return match.sessionId
+    // Cold launch fallback: prefer the persisted active tab; else the first tab.
+    const tabs = userTabsCollection.toArray as unknown as UserTabRow[]
+    const activeId = getActiveTabId()
+    if (activeId) {
+      const match = tabs.find((t) => t.id === activeId)
+      if (match?.sessionId) return match.sessionId
     }
-    // Fallback: if tabs exist but none is marked active (e.g., stale activeTabId,
-    // notification tap that failed to set ?session=X), select the first tab rather
-    // than showing the empty "Start a conversation" state.
-    if (currentTabs.length > 0) {
-      const fallback = currentTabs[0]
-      settings.setActiveTab(fallback.id)
-      return fallback.sessionId
+    if (tabs.length > 0) {
+      const fallback = tabs[0]
+      setActiveTabId(fallback.id)
+      return fallback.sessionId ?? null
     }
     return null
   })
-  const restoredSessionId = !searchSessionId ? selectedSessionId : null
+
   const [spawnConfig, setSpawnConfig] = useState<SpawnConfig | null>(null)
   // Pre-fill hints for the QuickPromptInput composer, set by tab context menu actions.
   // Seed from URL search params so the hint survives reloads / cold launches.
@@ -80,71 +116,6 @@ function AgentOrchContent() {
     searchNewSessionProject ? { project: searchNewSessionProject, newTab: searchNewTab } : null,
   )
 
-  // Strip the hint search params from the URL once consumed so reloads don't re-trigger them.
-  useEffect(() => {
-    if (searchNewSessionProject) {
-      navigate({
-        to: '/',
-        search: (prev) => ({ ...prev, newSessionProject: undefined, newTab: undefined }),
-        replace: true,
-      })
-    }
-  }, [searchNewSessionProject, navigate])
-  const prevSearchRef = useRef(searchSessionId)
-  const didRestoreRef = useRef(false)
-
-  // On restore, push the session into the URL so bookmarks/refresh work
-  useEffect(() => {
-    if (restoredSessionId && !didRestoreRef.current) {
-      didRestoreRef.current = true
-      navigate({ to: '/', search: { session: restoredSessionId }, replace: true })
-    }
-  }, [restoredSessionId, navigate])
-
-  // Sync URL → selectedSessionId on subsequent navigations
-  useEffect(() => {
-    const prev = prevSearchRef.current
-    prevSearchRef.current = searchSessionId
-
-    // Tab-highlight sync: ensure the active tab matches the URL session.
-    // Runs on mount too (not just on URL changes) so cold-load from a push
-    // notification (/?session=X) activates or creates the matching tab —
-    // otherwise activeTabId stays on a stale localStorage value and the
-    // session appears with no tab focus.
-    if (searchSessionId) {
-      const settings = getUserSettings()
-      const matchingTab = settings.findTabBySession(searchSessionId)
-      if (matchingTab) {
-        if (settings.activeTabId !== matchingTab.id) {
-          settings.setActiveTab(matchingTab.id)
-        }
-      } else {
-        // Session has no tab. Sessions collection is seeded from localStorage
-        // on module load, so data is available synchronously on first render.
-        const session = sessions.find((s) => s.id === searchSessionId)
-        const project = session?.project || 'unknown'
-        const title = session?.title || getPreviewText(session ?? { prompt: undefined }) || project
-        settings.addTab(project, searchSessionId, title)
-      }
-    }
-
-    if (searchSessionId && searchSessionId !== selectedSessionId) {
-      // URL has a session that doesn't match local state — sync from URL.
-      // Skip if a quickPromptHint was just set (tab context-menu action):
-      // navigate({ to: '/' }) may not update searchSessionId synchronously,
-      // so the stale URL param can race with the freshly-set hint and clear it.
-      if (!quickPromptHint) {
-        setSpawnConfig(null)
-        setQuickPromptHint(null)
-        setSelectedSessionId(searchSessionId)
-      }
-    } else if (!searchSessionId && selectedSessionId && prev !== null) {
-      // Navigated from a session URL to "/" (e.g. "New session" click) — clear selection.
-      // Skips cold launch where prev is also null (restore case).
-      setSpawnConfig(null)
-      setSelectedSessionId(null)
-    }
-  }, [searchSessionId, selectedSessionId, quickPromptHint, sessions])
   const [projects, setProjects] = useState<
     Array<{ name: string; path: string; repo_origin?: string | null }>
   >([])
@@ -186,11 +157,6 @@ function AgentOrchContent() {
 
         const data = (await resp.json()) as { session_id: string }
         const sessionId = data.session_id
-        const promptText =
-          typeof config.prompt === 'string'
-            ? config.prompt
-            : (config.prompt.find((b) => b.type === 'text')?.text ?? '')
-        const title = promptText.slice(0, 40) || config.project
 
         // Set spawn config for auto-spawn in AgentDetailWithSpawn
         setSpawnConfig({
@@ -202,11 +168,21 @@ function AgentOrchContent() {
         setQuickPromptHint(null)
         setSelectedSessionId(sessionId)
 
-        // Add to tab: replace existing project tab or force new tab
+        // Add to tab. With project/title fields gone, "newTab vs replace"
+        // collapses: `newTab` always inserts; default uses the find-or-create
+        // path so a re-prompt for the same session reuses the existing tab.
         if (config.newTab) {
-          addNewTab(config.project, sessionId, title)
+          const id = newTabId()
+          userTabsCollection.insert({
+            id,
+            userId: '',
+            sessionId,
+            position: nextPosition(),
+            createdAt: new Date().toISOString(),
+          } as UserTabRow & Record<string, unknown>)
+          setActiveTabId(id)
         } else {
-          addTab(config.project, sessionId, title)
+          ensureTabForSession(sessionId)
         }
 
         navigate({ to: '/', search: { session: sessionId } })
@@ -214,21 +190,17 @@ function AgentOrchContent() {
         console.error('[AgentOrch] Spawn failed:', err)
       }
     },
-    [navigate, addTab, addNewTab],
+    [navigate],
   )
 
   const handleSelectSession = useCallback(
     (sessionId: string) => {
-      const session = sessions.find((s) => s.id === sessionId)
-      const title =
-        session?.title || getPreviewText(session ?? { prompt: undefined }) || sessionId.slice(0, 12)
-      const project = session?.project || 'unknown'
-      addTab(project, sessionId, title)
+      ensureTabForSession(sessionId)
       setSpawnConfig(null)
       setSelectedSessionId(sessionId)
       navigate({ to: '/', search: { session: sessionId } })
     },
-    [navigate, addTab, sessions],
+    [navigate],
   )
 
   const handleLastTabClosed = useCallback(() => {
@@ -267,27 +239,29 @@ function AgentOrchContent() {
 
   const { swipeProps, swipeDir } = useSwipeTabs(handleSelectSession, selectedSessionId)
 
+  // ── Keyboard shortcuts ───────────────────────────────────────────
+  // Reads userTabsCollection / getActiveTabId synchronously inside the handler
+  // so the listener never needs to depend on tab state — a single listener
+  // registration for the lifetime of the component.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const isMod = e.metaKey || e.ctrlKey
 
-      // Cmd+T: add current session as tab (or no-op)
+      // Cmd+T: ensure a tab exists for the current session (no-op otherwise)
       if (isMod && e.key === 't') {
         e.preventDefault()
         if (selectedSessionId) {
-          const session = sessions.find((s) => s.id === selectedSessionId)
-          const project = session?.project || 'unknown'
-          getUserSettings().addTab(project, selectedSessionId)
+          ensureTabForSession(selectedSessionId)
         }
       }
 
-      // Cmd+W: close current tab
+      // Cmd+W: close active tab
       if (isMod && e.key === 'w') {
         e.preventDefault()
-        const settings = getUserSettings()
-        if (settings.activeTabId) {
-          settings.removeTab(settings.activeTabId)
-          if (settings.tabs.length <= 1) {
+        const activeId = getActiveTabId()
+        if (activeId && userTabsCollection.has(activeId)) {
+          userTabsCollection.delete([activeId])
+          if (userTabsCollection.size <= 1) {
             handleLastTabClosed()
           }
         }
@@ -296,19 +270,21 @@ function AgentOrchContent() {
       // Cmd+1-9: switch to Nth tab
       if (isMod && e.key >= '1' && e.key <= '9') {
         const idx = parseInt(e.key, 10) - 1
-        const settings = getUserSettings()
-        if (idx < settings.tabs.length) {
+        const tabs = userTabsCollection.toArray as unknown as UserTabRow[]
+        const tab = tabs[idx]
+        if (tab) {
           e.preventDefault()
-          const tab = settings.tabs[idx]
-          settings.setActiveTab(tab.id)
-          handleSelectSession(tab.sessionId)
+          setActiveTabId(tab.id)
+          if (tab.sessionId) {
+            handleSelectSession(tab.sessionId)
+          }
         }
       }
     }
 
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [selectedSessionId, sessions, handleSelectSession, handleLastTabClosed])
+  }, [selectedSessionId, handleSelectSession, handleLastTabClosed])
 
   return (
     <>
@@ -385,7 +361,9 @@ function AgentDetailWithSpawn({
     }
   }, [spawnConfig, agent.state, agent.spawn])
 
-  // Sync DO state changes to registry + update tab title from summary
+  // Sync DO state changes to the sessions collection. Tab title/project come
+  // from the join with agentSessionsCollection (B-UI-1) — no per-tab title or
+  // project fields any more, so this effect just forwards the patch.
   const prevStateRef = useRef(agent.state)
   useEffect(() => {
     if (agent.state && agent.state !== prevStateRef.current) {
@@ -395,20 +373,6 @@ function AgentDetailWithSpawn({
         num_turns: agent.state.num_turns,
         error: agent.state.error,
       })
-      // Update tab title when session gets a summary, and backfill the
-      // project field if it was a placeholder (e.g., "unknown" set when
-      // a URL-delivered session had no local metadata yet).
-      const title = agent.state.summary || agent.state.project
-      const settings = getUserSettings()
-      const tab = settings.findTabBySession(sessionId)
-      if (tab) {
-        if (title && tab.title !== title) {
-          settings.updateTabTitle(tab.id, title)
-        }
-        if (agent.state.project && tab.project !== agent.state.project) {
-          settings.updateTabProject(tab.id, agent.state.project)
-        }
-      }
     }
   }, [agent.state, sessionId, onStateChange])
 

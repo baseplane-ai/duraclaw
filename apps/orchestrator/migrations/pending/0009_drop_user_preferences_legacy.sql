@@ -1,0 +1,15 @@
+-- Drop the renamed legacy KV-shape `user_preferences_legacy` table that
+-- migration 0008 preserved via RENAME. This is intentionally a separate
+-- migration so it can be deferred (or skipped entirely) until operators
+-- have verified the new columnar `user_preferences` is populated
+-- correctly from DO state via `scripts/export-do-state.ts` (P1.6).
+--
+-- During cutover, 0008 runs as part of the normal migration step and
+-- 0009 is held back until verification:
+--   wrangler d1 execute duraclaw-auth --remote \
+--     --command "SELECT COUNT(*) FROM user_preferences"
+-- Once the columnar table has the expected row count, apply 0009 to
+-- finish reclaiming the legacy table. If verification fails, leave 0009
+-- unapplied so the legacy rows remain available for inspection or
+-- rollback.
+DROP TABLE IF EXISTS `user_preferences_legacy`;
