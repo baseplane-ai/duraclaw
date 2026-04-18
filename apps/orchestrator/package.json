@@ -11,8 +11,16 @@
     "ship": "set -a && . ../../.env && set +a && wrangler deploy",
     "cf-typegen": "wrangler types",
     "db:generate": "drizzle-kit generate",
+    "db:check": "drizzle-kit check",
     "db:migrate": "wrangler d1 migrations apply duraclaw-auth",
-    "db:studio": "drizzle-kit studio"
+    "db:migrate:local": "wrangler d1 migrations apply duraclaw-auth --local",
+    "db:migrate:remote": "wrangler d1 migrations apply duraclaw-auth --remote",
+    "db:reset:local": "wrangler d1 execute duraclaw-auth --local --command \"PRAGMA writable_schema=1; DELETE FROM sqlite_master; PRAGMA writable_schema=0; VACUUM;\" && pnpm db:migrate:local",
+    "db:export:remote": "wrangler d1 export duraclaw-auth --remote --output=prod-snapshot.sql",
+    "db:clone:remote": "pnpm db:export:remote && pnpm db:reset:local && wrangler d1 execute duraclaw-auth --local --file=prod-snapshot.sql",
+    "db:studio": "drizzle-kit studio",
+    "cutover:rehearse": "bash scripts/cutover-rehearsal.sh",
+    "cutover:dump-my-state": "bash scripts/dump-my-state.sh"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
