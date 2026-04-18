@@ -7,6 +7,18 @@
 -- sequentially, so a failure on CREATE leaves the DROP applied. The
 -- migration will, however, be marked failed and operators can recover by
 -- fixing the CREATE and re-running — `DROP TABLE IF EXISTS` is idempotent.
+--
+-- DATA-LOSS FOOTNOTE: The old KV-shape `user_preferences` rows from
+-- migration 0003 are intentionally discarded by this migration. The
+-- columnar replacement table is *not* backfilled from the old KV rows;
+-- instead it is repopulated from UserSettingsDO state during cutover via
+-- `scripts/export-do-state.ts` (P1.6), which is the authoritative source
+-- of preference data at migration time. Consequently a CREATE failure
+-- here does not lose user preference data — DO state remains intact and
+-- the export script is re-runnable. A failure only means the new
+-- columnar table does not yet exist; once the CREATE is fixed and the
+-- migration re-applied (DROP IF EXISTS makes re-run safe), the export
+-- script can hydrate it.
 DROP TABLE IF EXISTS `user_preferences`;
 CREATE TABLE `user_preferences` (
 	`user_id` text PRIMARY KEY NOT NULL,
