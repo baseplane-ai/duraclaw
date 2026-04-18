@@ -116,17 +116,3 @@ export default {
 }
 
 export { SessionCollabDO, SessionDO, UserSettingsDO }
-
-// Stub class needed for the v5 deleted_classes migration to proceed.
-// Cloudflare requires the class to exist in the script until the
-// delete-class migration is applied. Safe to remove after the first
-// successful deploy with v5 migration.
-export class ProjectRegistry {
-  constructor(
-    public state: DurableObjectState,
-    public env: Env,
-  ) {}
-  async fetch() {
-    return new Response('ProjectRegistry deleted — use D1 agent_sessions', { status: 410 })
-  }
-}

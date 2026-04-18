@@ -6,7 +6,7 @@ compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 
 [[routes]]
-pattern = "duraclaw.codevibesmatter.com"
+pattern = "dura.baseplane.ai"
 custom_domain = true
 
 [observability]
@@ -34,16 +34,35 @@ class_name = "UserSettingsDO"
 name = "SESSION_COLLAB"
 class_name = "SessionCollabDO"
 
-# DO migrations.
-# SessionDO + ProjectRegistry were registered without a migration tag
-# on the initial version_upload (2026-04-16). Subsequent migrations
-# start from that baseline — no v1 needed.
+# DO migrations — collapsed for fresh deploy on baseplane-ai account.
+# The old worker (on the codevibesmatter account) held the prior v1..v5 chain;
+# here we start at the final SQLite-backed shape.
 [[migrations]]
 tag = "v1"
-new_sqlite_classes = ["UserSettingsDO", "SessionCollabDO"]
+new_sqlite_classes = ["SessionDO", "ProjectRegistry"]
+# Note: ProjectRegistry was created here at v1 to keep the migration chain
+# compatible with the originally-deployed shape; it is dropped at v4 below.
 
 [[migrations]]
 tag = "v2"
+new_sqlite_classes = ["UserSettingsDO"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["SessionCollabDO"]
+
+# Issue #7 p3: UserSettingsDO is now a stateless PartyServer fanout.
+# The class no longer touches its SQLite — storage from the v2
+# Agent-based implementation is orphaned and harmlessly reaped.
+[[migrations]]
+tag = "v4"
+
+# Issue #7 p6 (B-INFRA-5): drop the ProjectRegistry DO class entirely.
+# All session metadata now lives in D1 (agent_sessions). The class binding
+# was removed from this file in the same change, so deleted_classes here
+# tells Cloudflare to release the namespace storage as well.
+[[migrations]]
+tag = "v5"
 deleted_classes = ["ProjectRegistry"]
 
 # D1 database for auth
