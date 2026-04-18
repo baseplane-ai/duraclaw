@@ -249,6 +249,7 @@ export function MessageInput({
               yText={collabActive ? ytext : undefined}
               onInput={collabActive ? notifyTyping : undefined}
               onCursorChange={collabActive ? setCursor : undefined}
+              className={collabActive ? '[field-sizing:fixed] h-20 overflow-y-auto' : undefined}
             />
             {collabActive && awareness && selfClientId !== null && (
               <CursorOverlay
