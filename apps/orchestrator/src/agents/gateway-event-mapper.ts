@@ -101,3 +101,37 @@ export function finalizeStreamingParts(parts: SessionMessagePart[]): SessionMess
     return p
   })
 }
+
+/**
+ * Merge the final `assistant` event content with any previously-accumulated
+ * streaming parts so delta-accumulated text/reasoning survives finalize.
+ *
+ * Behavior (regression-guarded):
+ * - Streaming parts transition in place (streaming → done) so the delta-accumulated
+ *   text/reasoning survives. Tool parts in 'input-available' are left untouched —
+ *   tool_result events finalize them next.
+ * - If the message had streaming text/reasoning, the matching kind from the final
+ *   `assistant` event is dropped (the streamed copy is authoritative — the SDK may
+ *   or may not re-emit thinking blocks in the final event).
+ * - If no existing parts are supplied, the final event's parts are used directly.
+ */
+export function mergeFinalAssistantParts(
+  existingParts: SessionMessagePart[] | undefined,
+  finalParts: SessionMessagePart[],
+): SessionMessagePart[] {
+  if (!existingParts) return finalParts
+  const finalized = existingParts.map((p) =>
+    p.state === 'streaming' ? { ...p, state: 'done' as const } : p,
+  )
+  const hadStreamingText = existingParts.some((p) => p.type === 'text' && p.state === 'streaming')
+  const hadStreamingReasoning = existingParts.some(
+    (p) => p.type === 'reasoning' && p.state === 'streaming',
+  )
+  const additions: SessionMessagePart[] = []
+  for (const np of finalParts) {
+    if (np.type === 'text' && hadStreamingText) continue
+    if (np.type === 'reasoning' && hadStreamingReasoning) continue
+    additions.push(np)
+  }
+  return [...finalized, ...additions]
+}

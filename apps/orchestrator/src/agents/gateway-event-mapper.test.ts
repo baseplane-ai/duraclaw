@@ -3,6 +3,7 @@ import {
   applyToolResult,
   assistantContentToParts,
   finalizeStreamingParts,
+  mergeFinalAssistantParts,
   partialAssistantToParts,
 } from './gateway-event-mapper'
 
@@ -221,5 +222,78 @@ describe('finalizeStreamingParts', () => {
     expect(result[0].state).toBe('done')
     expect(result[1].state).toBe('done')
     expect(result[2].state).toBe('done')
+  })
+})
+
+/**
+ * Regression-guard suite for "preserve streamed reasoning text on assistant
+ * finalize" (commit 02589e3). A silent regression here re-introduces empty
+ * reasoning chips because the SDK's final `assistant` event often omits
+ * thinking blocks (they only arrive via partial_assistant deltas).
+ */
+describe('mergeFinalAssistantParts', () => {
+  it('returns finalParts when there are no existing parts', () => {
+    const finalParts = [{ type: 'text', text: 'hello', state: 'done' as const }]
+    expect(mergeFinalAssistantParts(undefined, finalParts)).toEqual(finalParts)
+  })
+
+  it('transitions streaming parts to done in place', () => {
+    const existing = [
+      { type: 'text', text: 'streamed', state: 'streaming' as const },
+      { type: 'reasoning', text: 'thought', state: 'streaming' as const },
+    ]
+    const result = mergeFinalAssistantParts(existing, [])
+    expect(result[0].state).toBe('done')
+    expect(result[0].text).toBe('streamed')
+    expect(result[1].state).toBe('done')
+    expect(result[1].text).toBe('thought')
+  })
+
+  it('drops final-event reasoning when a streaming reasoning part already existed', () => {
+    // The silent-fail scenario: SDK emits thinking only via deltas; final event
+    // has no thinking block. Pre-fix code stripped streaming parts and only
+    // kept newParts — reasoning text was lost. Post-fix, existing survives.
+    const existing = [
+      { type: 'reasoning', text: 'accumulated via deltas', state: 'streaming' as const },
+      { type: 'text', text: 'partial answer', state: 'streaming' as const },
+    ]
+    const finalParts = [
+      { type: 'text', text: 'partial answer', state: 'done' as const },
+      // Note: no reasoning in finalParts — this is the exact regression case.
+    ]
+    const result = mergeFinalAssistantParts(existing, finalParts)
+    // Accumulated reasoning survives.
+    expect(result.some((p) => p.type === 'reasoning' && p.text === 'accumulated via deltas')).toBe(
+      true,
+    )
+    // Text appears exactly once (streamed copy kept, final duplicate dropped).
+    const textParts = result.filter((p) => p.type === 'text')
+    expect(textParts).toHaveLength(1)
+    expect(textParts[0].state).toBe('done')
+  })
+
+  it('appends final reasoning when no streaming reasoning existed', () => {
+    const existing = [{ type: 'text', text: 'answer', state: 'streaming' as const }]
+    const finalParts = [
+      { type: 'text', text: 'answer', state: 'done' as const },
+      { type: 'reasoning', text: 'final thought', state: 'done' as const },
+    ]
+    const result = mergeFinalAssistantParts(existing, finalParts)
+    // Reasoning from final appended because no streaming reasoning existed.
+    expect(result.some((p) => p.type === 'reasoning' && p.text === 'final thought')).toBe(true)
+  })
+
+  it('preserves input-available tool parts untouched for later tool_result merge', () => {
+    const existing = [
+      {
+        type: 'tool-Bash',
+        toolCallId: 't1',
+        toolName: 'Bash',
+        input: { command: 'ls' },
+        state: 'input-available' as const,
+      },
+    ]
+    const result = mergeFinalAssistantParts(existing, [])
+    expect(result[0].state).toBe('input-available')
   })
 })

@@ -368,3 +368,154 @@ describe('ChatThread Suggestions', () => {
     expect(screen.queryByTestId('suggestions')).toBeNull()
   })
 })
+
+/**
+ * Regression-guard suite for the "collapse consecutive thoughts into a reasoning
+ * chip" feature (commits 87778dd, 0059046, 6ae1f96, 02589e3). These scenarios
+ * are the exact shapes that competing worktree merges have broken in the past:
+ * a silent regression here ships as every thought rendering as its own block
+ * again, which we explicitly moved away from.
+ */
+describe('ChatThread reasoning consolidation', () => {
+  const defaultProps = {
+    gate: null,
+    status: 'idle' as const,
+    state: null,
+    isConnecting: false,
+    onResolveGate: vi.fn(),
+    readOnly: false,
+  }
+
+  it('renders one chip with no count for a single reasoning part', () => {
+    const messages: SessionMessage[] = [
+      {
+        id: 'msg-1',
+        role: 'assistant',
+        parts: [
+          { type: 'reasoning', text: 'one thought', state: 'done' },
+          { type: 'text', text: 'answer', state: 'done' },
+        ],
+        createdAt: new Date(),
+      },
+    ]
+
+    render(<ChatThread {...defaultProps} messages={messages} />)
+
+    const chipLabels = screen.getAllByText('Thought for a few seconds')
+    expect(chipLabels).toHaveLength(1)
+    expect(screen.queryByText(/^×/)).toBeNull()
+  })
+
+  it('collapses consecutive reasoning parts into a single ×N chip', () => {
+    const messages: SessionMessage[] = [
+      {
+        id: 'msg-1',
+        role: 'assistant',
+        parts: [
+          { type: 'reasoning', text: 'r1', state: 'done' },
+          { type: 'reasoning', text: 'r2', state: 'done' },
+          { type: 'reasoning', text: 'r3', state: 'done' },
+          { type: 'text', text: 'ok', state: 'done' },
+        ],
+        createdAt: new Date(),
+      },
+    ]
+
+    render(<ChatThread {...defaultProps} messages={messages} />)
+
+    expect(screen.getAllByText('Thought for a few seconds')).toHaveLength(1)
+    expect(screen.getByText('×3')).toBeTruthy()
+  })
+
+  it('keeps one reasoning chip even when tool calls interleave', () => {
+    // [r, t, r, t, r, text] previously fragmented into 3 "Thought" chips.
+    // With 0059046 the reasoning buffer survives tool arrivals and only
+    // flushes on the text break.
+    const messages: SessionMessage[] = [
+      {
+        id: 'msg-1',
+        role: 'assistant',
+        parts: [
+          { type: 'reasoning', text: 'think a', state: 'done' },
+          {
+            type: 'tool-Bash',
+            toolCallId: 't1',
+            toolName: 'Bash',
+            input: { command: 'ls' },
+            state: 'output-available',
+            output: 'README.md',
+          },
+          { type: 'reasoning', text: 'think b', state: 'done' },
+          {
+            type: 'tool-Bash',
+            toolCallId: 't2',
+            toolName: 'Bash',
+            input: { command: 'pwd' },
+            state: 'output-available',
+            output: '/',
+          },
+          { type: 'reasoning', text: 'think c', state: 'done' },
+          { type: 'text', text: 'done', state: 'done' },
+        ],
+        createdAt: new Date(),
+      },
+    ]
+
+    render(<ChatThread {...defaultProps} messages={messages} />)
+
+    // Exactly ONE reasoning chip spanning all three thoughts.
+    expect(screen.getAllByText('Thought for a few seconds')).toHaveLength(1)
+    expect(screen.getByText('×3')).toBeTruthy()
+  })
+
+  it('does not let data-file-changed parts fragment the reasoning chip', () => {
+    const messages: SessionMessage[] = [
+      {
+        id: 'msg-1',
+        role: 'assistant',
+        parts: [
+          { type: 'reasoning', text: 'r1', state: 'done' },
+          // data-file-changed is a loosely-typed narration row; the renderer
+          // skips it without flushing buffered reasoning.
+          {
+            type: 'data-file-changed',
+            data: { path: '/x' },
+          } as unknown as SessionMessage['parts'][number],
+          { type: 'reasoning', text: 'r2', state: 'done' },
+          { type: 'text', text: 'done', state: 'done' },
+        ],
+        createdAt: new Date(),
+      },
+    ]
+
+    render(<ChatThread {...defaultProps} messages={messages} />)
+
+    expect(screen.getAllByText('Thought for a few seconds')).toHaveLength(1)
+    expect(screen.getByText('×2')).toBeTruthy()
+  })
+
+  it('renders separate chips when reasoning is split by a text part (real boundary)', () => {
+    // Text is a real message break — the feature collapses WITHIN a contiguous
+    // group, not across the whole message.
+    const messages: SessionMessage[] = [
+      {
+        id: 'msg-1',
+        role: 'assistant',
+        parts: [
+          { type: 'reasoning', text: 'r1', state: 'done' },
+          { type: 'reasoning', text: 'r2', state: 'done' },
+          { type: 'text', text: 'intermediate answer', state: 'done' },
+          { type: 'reasoning', text: 'r3', state: 'done' },
+          { type: 'text', text: 'final', state: 'done' },
+        ],
+        createdAt: new Date(),
+      },
+    ]
+
+    render(<ChatThread {...defaultProps} messages={messages} />)
+
+    // Two separate reasoning chips — one for [r1,r2] (×2), one for [r3] (no count).
+    expect(screen.getAllByText('Thought for a few seconds')).toHaveLength(2)
+    expect(screen.getByText('×2')).toBeTruthy()
+  })
+})

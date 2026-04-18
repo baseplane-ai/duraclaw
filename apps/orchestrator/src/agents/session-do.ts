@@ -20,6 +20,7 @@ import {
   applyToolResult,
   assistantContentToParts,
   finalizeStreamingParts,
+  mergeFinalAssistantParts,
   partialAssistantToParts,
 } from './gateway-event-mapper'
 import {
@@ -1617,35 +1618,14 @@ export class SessionDO extends Agent<Env, SessionState> {
         const newParts = assistantContentToParts(event.content as unknown[])
         const msgId = this.currentTurnMessageId ?? `msg-${this.turnCounter}`
 
-        // Merge: finalize any streaming text/reasoning parts (preserving the
-        // text accumulated from partial_assistant deltas), then append newParts.
-        // We avoid duplicating text/reasoning that already streamed — the SDK's
-        // final assistant event may or may not re-emit thinking blocks, so the
-        // authoritative copy of extended-thinking traces is the streamed one.
+        // Merge finalizes any streaming text/reasoning parts (preserving the
+        // text accumulated from partial_assistant deltas) and appends newParts
+        // while avoiding duplicating text/reasoning that already streamed — the
+        // SDK's final assistant event may or may not re-emit thinking blocks,
+        // so the authoritative copy of extended-thinking traces is the streamed
+        // one. See mergeFinalAssistantParts + its regression-guard tests.
         const existing = this.session.getMessage(msgId)
-        let mergedParts: SessionMessagePart[]
-        if (existing) {
-          // Transition streaming → done in place so accumulated delta text survives.
-          // Leave input-available tool parts untouched — tool_result events come next.
-          const finalized = existing.parts.map((p) =>
-            p.state === 'streaming' ? { ...p, state: 'done' as const } : p,
-          )
-          const hadStreamingText = existing.parts.some(
-            (p) => p.type === 'text' && p.state === 'streaming',
-          )
-          const hadStreamingReasoning = existing.parts.some(
-            (p) => p.type === 'reasoning' && p.state === 'streaming',
-          )
-          const additions: SessionMessagePart[] = []
-          for (const np of newParts) {
-            if (np.type === 'text' && hadStreamingText) continue
-            if (np.type === 'reasoning' && hadStreamingReasoning) continue
-            additions.push(np)
-          }
-          mergedParts = [...finalized, ...additions]
-        } else {
-          mergedParts = newParts
-        }
+        const mergedParts = mergeFinalAssistantParts(existing?.parts, newParts)
 
         const msg: SessionMessage = {
           id: msgId,

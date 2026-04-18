@@ -12,9 +12,6 @@ import {
   Message,
   MessageContent,
   MessageResponse,
-  Reasoning,
-  ReasoningContent,
-  ReasoningTrigger,
   Suggestion,
   Suggestions,
   Tool,
@@ -348,14 +345,10 @@ function renderPart(
     )
   }
 
-  if (part.type === 'reasoning') {
-    return (
-      <Reasoning key={index} isStreaming={part.state === 'streaming'} defaultOpen={true}>
-        <ReasoningTrigger />
-        <ReasoningContent>{part.text || ''}</ReasoningContent>
-      </Reasoning>
-    )
-  }
+  // NOTE: `reasoning` parts are intercepted by the assistant-message rendering
+  // loop (see ReasoningPillRow usage in the forEach below) and never reach
+  // renderPart. The consolidation is what keeps "Thought for a few seconds ×N"
+  // from fragmenting into one Reasoning block per thought.
 
   if (part.type === 'data-file-changed') {
     return (
