@@ -245,12 +245,29 @@ export class ClaudeRunner {
     const resolvedPath = await resolveProject(cmd.project)
     console.log(`[session-runner] executeSession: projectPath=${resolvedPath}`)
     if (!resolvedPath) {
+      // GH#8: verbose miss log — project-resolver returns null for both
+      // "directory absent" and "prefix filter rejected", and the two are
+      // indistinguishable in the current error event. Dump the visible
+      // project list + active prefix filter so operators can tell which
+      // one fired without re-running with a debugger.
+      const projectsDir = '/data/projects'
+      const rawPatterns = process.env.PROJECT_PATTERNS ?? process.env.WORKTREE_PATTERNS ?? '(unset)'
+      let visible = '(unreadable)'
+      try {
+        const entries = await (await import('node:fs/promises')).readdir(projectsDir)
+        visible = entries.join(',')
+      } catch {
+        /* best-effort */
+      }
+      console.error(
+        `[session-runner] project miss: name="${cmd.project}" patterns="${rawPatterns}" projects_dir="${projectsDir}" visible=[${visible}] — either the directory is missing or PROJECT_PATTERNS / WORKTREE_PATTERNS is filtering it out`,
+      )
       send(
         ch,
         {
           type: 'error',
           session_id: sessionId,
-          error: `Project "${cmd.project}" not found`,
+          error: `Project "${cmd.project}" not found (patterns="${rawPatterns}")`,
         },
         ctx,
       )

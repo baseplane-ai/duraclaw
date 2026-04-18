@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+#
+# GH#8: Thin wrapper that invokes `chrome-devtools-axi` against Browser A
+# (the CDP endpoint launched by scripts/verify/browser-dual-up.sh).
+#
+# Usage: same as chrome-devtools-axi itself.
+#     scripts/verify/axi-a open http://localhost:43173/login
+#     scripts/verify/axi-a snapshot
+#
+# Paired with scripts/verify/axi-b for Browser B.
+
+set -euo pipefail
+
+BROWSER_A_PORT="${BROWSER_A_PORT:-9222}"
+export CHROME_DEVTOOLS_AXI_BROWSER_URL="http://127.0.0.1:${BROWSER_A_PORT}"
+
+exec chrome-devtools-axi "$@"

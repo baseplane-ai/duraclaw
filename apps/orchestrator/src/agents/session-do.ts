@@ -1176,6 +1176,25 @@ export class SessionDO extends Agent<Env, SessionState> {
       return { ok: false, error: `Cannot send message: status is '${status}'` }
     }
 
+    // GH#8 preflight: if we're about to trigger a gateway dial but the
+    // gateway-contract env vars are missing, fail loudly BEFORE persisting
+    // the user message. Otherwise the message lands in history, the
+    // triggerGatewayDial bail at line ~315 flips status to idle, and the
+    // user perceives a "silent no-op" with nothing in the transcript to
+    // explain it. See planning/research/2026-04-18-verify-infra-issue-8.md.
+    if (!hasLiveRunner && isResumable) {
+      if (!this.env.CC_GATEWAY_URL || !this.env.WORKER_PUBLIC_URL) {
+        console.error(
+          `[SessionDO:${this.ctx.id}] sendMessage preflight: CC_GATEWAY_URL=${Boolean(this.env.CC_GATEWAY_URL)} WORKER_PUBLIC_URL=${Boolean(this.env.WORKER_PUBLIC_URL)} — gateway not configured`,
+        )
+        return {
+          ok: false,
+          error:
+            'Gateway not configured for this worker (missing CC_GATEWAY_URL or WORKER_PUBLIC_URL)',
+        }
+      }
+    }
+
     // If we're about to take the resume path, preflight for an orphan
     // runner that would hijack the sdk_session_id. If found, auto-fork to a
     // fresh SDK session so the user doesn't see silent failure.

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+#
+# GH#8: Thin wrapper that invokes `chrome-devtools-axi` against Browser B.
+# See axi-a for the full pattern.
+
+set -euo pipefail
+
+BROWSER_B_PORT="${BROWSER_B_PORT:-9223}"
+export CHROME_DEVTOOLS_AXI_BROWSER_URL="http://127.0.0.1:${BROWSER_B_PORT}"
+
+exec chrome-devtools-axi "$@"

@@ -182,6 +182,53 @@ chrome-devtools-axi snapshot            # Verify redirect to dashboard
 
 **GitHub operations:** Use `gh-axi` instead of `gh` for issues, PRs, runs, releases.
 
+### Dual browser profiles (multi-user verification)
+
+`chrome-devtools-axi` wraps a single persistent Chrome — `CHROME_DEVTOOLS_AXI_USER_DATA_DIR`
+on a second call is ignored because the first Chrome holds the profile lock.
+For VPs that need two real signed-in users at once, pre-launch two Chromes
+and target each via `CHROME_DEVTOOLS_AXI_BROWSER_URL`:
+
+```bash
+scripts/verify/browser-dual-up.sh          # idempotent: launches A on :9222, B on :9223
+scripts/verify/axi-a open http://localhost:43173/login   # drive user A
+scripts/verify/axi-b open http://localhost:43173/login   # drive user B
+scripts/verify/browser-dual-down.sh        # teardown
+```
+
+Profiles live at `/tmp/duraclaw-chrome-a` and `/tmp/duraclaw-chrome-b` — each
+has its own cookie jar, so sign-in state doesn't cross-contaminate. Headed
+mode via `BROWSER_HEADED=1 scripts/verify/browser-dual-up.sh`.
+
+### Verify-mode local stack
+
+`scripts/verify/dev-up.sh` starts a local orchestrator (miniflare, port
+43173) and local agent-gateway (port 9877) for the current worktree. For
+the gateway→DO dispatch loop to close end-to-end, the orchestrator's
+`apps/orchestrator/.dev.vars` MUST define all four variables:
+
+```
+CC_GATEWAY_URL=ws://127.0.0.1:9877
+CC_GATEWAY_SECRET=<matches .env in the gateway's cwd>
+WORKER_PUBLIC_URL=http://127.0.0.1:43173
+BETTER_AUTH_URL=http://localhost:43173
+```
+
+Missing `WORKER_PUBLIC_URL` causes the classic "message lands in history,
+no assistant turn" silent-fail (GH#8). `sendMessage` now preflights this
+and returns an explicit error instead of persisting into limbo — if you see
+`Gateway not configured for this worker`, fill in `.dev.vars`.
+
+Gateway-side project resolution is governed by `PROJECT_PATTERNS` /
+`WORKTREE_PATTERNS` (comma-separated prefixes). Leaving them unset accepts
+every git repo under `/data/projects/`. If you set them, ensure the prefix
+covers the worktree you'll dispatch into — the runner logs a verbose miss
+line (`[session-runner] project miss: name=...`) when filtered out.
+
+Design rationale and Phase-2/3 follow-ups (portless-style multi-worktree
+URL routing, assistant-visible runner errors) are documented in
+`planning/research/2026-04-18-verify-infra-issue-8.md`.
+
 ## Conventions
 
 - Commit messages: `type(scope): description` (feat, fix, chore, refactor, docs, test)
