@@ -1,25 +1,31 @@
 -- Replace old KV-shape user_preferences (from 0003) with the columnar
--- shape. NOTE: D1 does not implicitly wrap multi-statement migrations in
--- a transaction, and the `--> statement-breakpoint` marker would split
+-- shape. The old table is RENAMED to `user_preferences_legacy` (not
+-- dropped) so its rows survive this migration in case cutover needs to
+-- be inspected or rolled back. The columnar replacement is then created
+-- fresh under the original name.
+--
+-- NOTE: D1 does not implicitly wrap multi-statement migrations in a
+-- transaction, and the `--> statement-breakpoint` marker would split
 -- this into independent statements. We therefore omit the breakpoint so
 -- drizzle/wrangler hand both statements to a single `db.execute()` call.
 -- This is NOT a true atomic transaction: D1 still executes statements
--- sequentially, so a failure on CREATE leaves the DROP applied. The
--- migration will, however, be marked failed and operators can recover by
--- fixing the CREATE and re-running — `DROP TABLE IF EXISTS` is idempotent.
+-- sequentially, so a failure on CREATE leaves the RENAME applied. In
+-- that case both tables can coexist briefly — the legacy rename is
+-- preserved, and there is no new `user_preferences` yet. Operators
+-- recover by fixing the CREATE, dropping any partial new
+-- `user_preferences` if one exists, and re-running the migration. The
+-- legacy table itself is removed by the follow-up migration 0009 only
+-- after operators have verified the columnar replacement is hydrated
+-- correctly.
 --
--- DATA-LOSS FOOTNOTE: The old KV-shape `user_preferences` rows from
--- migration 0003 are intentionally discarded by this migration. The
--- columnar replacement table is *not* backfilled from the old KV rows;
--- instead it is repopulated from UserSettingsDO state during cutover via
--- `scripts/export-do-state.ts` (P1.6), which is the authoritative source
--- of preference data at migration time. Consequently a CREATE failure
--- here does not lose user preference data — DO state remains intact and
--- the export script is re-runnable. A failure only means the new
--- columnar table does not yet exist; once the CREATE is fixed and the
--- migration re-applied (DROP IF EXISTS makes re-run safe), the export
--- script can hydrate it.
-DROP TABLE IF EXISTS `user_preferences`;
+-- DATA-LOSS FOOTNOTE: The columnar replacement table is *not* backfilled
+-- automatically from the legacy KV rows; instead it is repopulated from
+-- UserSettingsDO state during cutover via `scripts/export-do-state.ts`
+-- (P1.6), which is the authoritative source of preference data at
+-- migration time. The renamed `user_preferences_legacy` table is kept
+-- around as a safety net so the old KV rows remain inspectable until
+-- 0009 drops it post-verification.
+ALTER TABLE `user_preferences` RENAME TO `user_preferences_legacy`;
 CREATE TABLE `user_preferences` (
 	`user_id` text PRIMARY KEY NOT NULL,
 	`permission_mode` text DEFAULT 'default',
