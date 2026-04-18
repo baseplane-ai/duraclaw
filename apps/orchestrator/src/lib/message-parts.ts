@@ -66,3 +66,62 @@ export function contentToParts(content: string | ContentBlock[]): SessionMessage
   }
   return parts
 }
+
+/**
+ * Convert user content pulled from the VPS SDK transcript into
+ * SessionMessageParts. Handles the same shapes as `contentToParts` but is
+ * defensive against unknown block types so transcript hydration never
+ * silently drops data — unknown blocks fall back to a JSON-stringified
+ * text part (the pre-fix behavior) rather than being dropped.
+ *
+ * The transcript delivers image blocks in Anthropic's wire shape
+ * (`{type:'image', source:{type:'base64', media_type, data}}`), which this
+ * helper converts into `UserImagePart` so the browser renderer's
+ * `getImagePartDataUrl()` can build a displayable data URL on reload.
+ */
+export function transcriptUserContentToParts(content: unknown): SessionMessagePart[] {
+  if (typeof content === 'string') {
+    return [{ type: 'text', text: content }]
+  }
+
+  if (!Array.isArray(content)) {
+    return [{ type: 'text', text: JSON.stringify(content) }]
+  }
+
+  const parts: SessionMessagePart[] = []
+  for (const block of content) {
+    if (typeof block === 'string') {
+      parts.push({ type: 'text', text: block })
+      continue
+    }
+    const b = block as Record<string, unknown>
+    if (b?.type === 'text' && typeof b.text === 'string') {
+      parts.push({ type: 'text', text: b.text })
+      continue
+    }
+    if (b?.type === 'image' && b.source && typeof b.source === 'object') {
+      const src = b.source as Record<string, unknown>
+      if (
+        src.type === 'base64' &&
+        typeof src.media_type === 'string' &&
+        typeof src.data === 'string'
+      ) {
+        const imagePart: UserImagePart = {
+          type: 'image',
+          input: {
+            source: {
+              type: 'base64',
+              media_type: src.media_type as UserImagePart['input']['source']['media_type'],
+              data: src.data,
+            },
+          },
+        }
+        parts.push(imagePart)
+        continue
+      }
+    }
+    // Unknown block shape — preserve pre-fix fallback so nothing is lost.
+    parts.push({ type: 'text', text: JSON.stringify(block) })
+  }
+  return parts
+}

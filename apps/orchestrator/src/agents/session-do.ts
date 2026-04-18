@@ -7,7 +7,7 @@ import * as schema from '~/db/schema'
 import { agentSessions } from '~/db/schema'
 import { generateActionToken } from '~/lib/action-token'
 import { runMigrations } from '~/lib/do-migrations'
-import { contentToParts } from '~/lib/message-parts'
+import { contentToParts, transcriptUserContentToParts } from '~/lib/message-parts'
 import { type PushPayload, sendPushNotification } from '~/lib/push'
 import type {
   ContentBlock,
@@ -723,23 +723,7 @@ export class SessionDO extends Agent<Env, SessionState> {
           const sessionMsg: SessionMessage = {
             id: msgId,
             role: 'user',
-            parts: [
-              {
-                type: 'text',
-                text:
-                  typeof content === 'string'
-                    ? content
-                    : Array.isArray(content)
-                      ? content
-                          .map((c: unknown) =>
-                            typeof c === 'string'
-                              ? c
-                              : ((c as Record<string, unknown>)?.text ?? JSON.stringify(c)),
-                          )
-                          .join('')
-                      : JSON.stringify(content),
-              },
-            ],
+            parts: transcriptUserContentToParts(content),
             createdAt: new Date(),
           }
           await this.session.appendMessage(sessionMsg, lastMsgId)
