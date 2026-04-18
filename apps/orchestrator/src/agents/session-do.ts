@@ -1617,15 +1617,32 @@ export class SessionDO extends Agent<Env, SessionState> {
         const newParts = assistantContentToParts(event.content as unknown[])
         const msgId = this.currentTurnMessageId ?? `msg-${this.turnCounter}`
 
-        // Merge: keep existing non-streaming parts (tool results from prior cycles),
-        // replace streaming text with finalized content
+        // Merge: finalize any streaming text/reasoning parts (preserving the
+        // text accumulated from partial_assistant deltas), then append newParts.
+        // We avoid duplicating text/reasoning that already streamed — the SDK's
+        // final assistant event may or may not re-emit thinking blocks, so the
+        // authoritative copy of extended-thinking traces is the streamed one.
         const existing = this.session.getMessage(msgId)
         let mergedParts: SessionMessagePart[]
         if (existing) {
-          // Keep all non-streaming parts (tool results, file changes, etc.), drop streaming text
-          const retained = existing.parts.filter((p) => p.state !== 'streaming')
-          // Append the new finalized parts (text + tool_use from this response cycle)
-          mergedParts = [...retained, ...newParts]
+          // Transition streaming → done in place so accumulated delta text survives.
+          // Leave input-available tool parts untouched — tool_result events come next.
+          const finalized = existing.parts.map((p) =>
+            p.state === 'streaming' ? { ...p, state: 'done' as const } : p,
+          )
+          const hadStreamingText = existing.parts.some(
+            (p) => p.type === 'text' && p.state === 'streaming',
+          )
+          const hadStreamingReasoning = existing.parts.some(
+            (p) => p.type === 'reasoning' && p.state === 'streaming',
+          )
+          const additions: SessionMessagePart[] = []
+          for (const np of newParts) {
+            if (np.type === 'text' && hadStreamingText) continue
+            if (np.type === 'reasoning' && hadStreamingReasoning) continue
+            additions.push(np)
+          }
+          mergedParts = [...finalized, ...additions]
         } else {
           mergedParts = newParts
         }
