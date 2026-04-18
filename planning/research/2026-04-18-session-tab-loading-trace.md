@@ -160,3 +160,115 @@ So the user's instinct is correct on the ground-truth: the merge made the *sessi
 - `apps/orchestrator/src/db/db-instance.ts:27-54` — `dbReady` top-level-await contract.
 - `apps/orchestrator/src/agents/session-do.ts:637-801, 1411-1458` — `hydrateFromGateway`, `getMessages`, `appendMessage` then `broadcastMessage`.
 - `planning/specs/7-d1-partykit-migration.md` p3–p4 — the merge the user is comparing against.
+
+---
+
+## 8. Debug-route prototype plan (for R1)
+
+Stated intent (2026-04-18 follow-up): prove that `messagesCollection` can be the sole render source in an **isolated debug route** before touching `useCodingAgent` / `AgentOrchPage` / the production message renderer.
+
+Note on framing: `useAgent`'s built-in `state` sync (SessionState auto-broadcast from the Agents SDK) already gives us live-reactive session metadata without a collection. The thesis for R1 is to do the **same thing for messages** — but since the SDK doesn't push the message list as `state` (custom `onMessage` events instead), we bridge via `messagesCollection` and render reactively off `useLiveQuery`.
+
+### 8.1 Scope (what the debug route does / doesn't touch)
+
+| Status | File |
+|---|---|
+| **ADD** | `apps/orchestrator/src/routes/_authenticated/debug.session-collection.tsx` — TanStack Start route at `/debug/session-collection?session=<id>`, dev-gated (`import.meta.env.DEV` or `DEBUG_ROUTES` flag). |
+| **ADD** | `apps/orchestrator/src/features/agent-orch/use-coding-agent-collection.ts` — prototype hook: same `useAgent` connection, no `useState<SessionMessage[]>`, collection-only read path. |
+| **ADD** | `apps/orchestrator/src/features/agent-orch/debug/CollectionMessageView.tsx` — minimal message list component that reads `useMessagesCollection(sessionId)` directly. |
+| **ADD** | `apps/orchestrator/src/features/agent-orch/debug/lag-probe.ts` — `performance.mark` helpers (`ws.received`, `collection.inserted`, `dom.painted`) and a console-table dumper. |
+| **UNCHANGED** | `use-coding-agent.ts`, `AgentOrchPage.tsx`, `messages-collection.ts` (extend only if a primitive is missing — use the existing `.insert` / `.update` / `.delete` API first). |
+
+### 8.2 Hook shape (`use-coding-agent-collection.ts`)
+
+```
+function useCodingAgentCollection(agentName: string) {
+  // 1. Read path: live-query the collection as the sole message source.
+  const { messages } = useMessagesCollection(agentName)
+
+  // 2. WS: same useAgent subscription, but onMessage writes to the collection.
+  const connection = useAgent<SessionState>({
+    agent: 'session-agent',
+    name: agentName,
+    onStateUpdate: (s) => {
+      setState(s)                         // keep SDK state reactive as-is
+      if (!hydratedRef.current) {
+        hydrateMessagesToCollection(conn) // fills via getMessages RPC → collection
+      }
+    },
+    onMessage: (evt) => {
+      const parsed = JSON.parse(evt.data)
+      if (parsed.type === 'message')  upsertMessage(parsed.message)
+      if (parsed.type === 'messages') bulkUpsert(parsed.messages)
+      // gateway_event / kata / context_usage stay in local state for prototype
+    },
+  })
+
+  // 3. Write path: upsert-by-id into the collection.
+  const upsertMessage = (m: SessionMessage) => {
+    if (messagesCollection.has(m.id)) messagesCollection.update(m.id, (d) => Object.assign(d, toRow(m, agentName)))
+    else                              messagesCollection.insert(toRow(m, agentName))
+  }
+
+  // 4. Optimistic send: insert tagged row, reconcile on echo, delete on failure.
+  const sendMessage = async (content) => {
+    const optId = `usr-optimistic-${Date.now()}`
+    messagesCollection.insert({ id: optId, sessionId: agentName, role: 'user', parts, optimistic: true })
+    const res = await connection.call('sendMessage', [content])
+    if (!res.ok) messagesCollection.delete(optId)
+    // happy path: server echo arrives via onMessage; echo carries real id;
+    // reconciler deletes the optimistic row when a non-optimistic user row
+    // with matching content shows up (or within 2s timeout).
+  }
+
+  return { messages, state, sendMessage, ... }
+}
+```
+
+Key differences from production `useCodingAgent`:
+- **Zero `useState` for messages** — line 95 (`const [messages, setMessages]`) and the cache-first seed effect (lines 147-163) disappear.
+- **No `cacheSeededRef` / `knownEventUuidsRef` / `optimisticIdsRef`** — the collection *is* the set; dedup is inherent via `getKey`.
+- **Upsert semantics** replace the `setMessages(prev → upserted)` reducer dance on every `onMessage`.
+- **Optimistic rollback** via `.delete(optId)` rather than filtering React state.
+
+### 8.3 Renderer (`CollectionMessageView.tsx`)
+
+- Takes `messages: SessionMessage[]` from the hook.
+- Each row is a memoized `<MessageItem>` keyed on `message.id` so `partial_assistant` updates only re-render the streaming row.
+- No virtualisation for the prototype — we want full-list reactivity to be the benchmark baseline.
+- A small footer strip renders the lag-probe numbers live (p50/p95 ws→paint delta for the current session).
+
+### 8.4 Verification checklist (drives the prototype's go/no-go)
+
+| # | Scenario | Expected |
+|---|---|---|
+| V1 | Cold OPFS (incognito) | First paint empty → WS `{type:'messages'}` populates collection → list appears in one frame. |
+| V2 | Warm OPFS | First paint shows cached rows before WS connects. |
+| V3 | 30-turn streaming `partial_assistant` burst | Only the streaming row re-renders; list-wide render count matches turn count, not delta count. |
+| V4 | Optimistic send happy path | Optimistic row appears in the same tick as the user hit enter; server echo replaces it without visual flash. |
+| V5 | Optimistic send failure (mock `__mockSendFailure`) | Optimistic row removed within 200 ms. |
+| V6 | Tab switch to another session | Query re-filters instantly; zero message bleed from previous session. |
+| V7 | Two browser tabs to the same session | Both render identical list; WS events upsert idempotently; no dupes. |
+| V8 | Cold-DO RPC race | `getMessages` returns empty → 500 ms retry still works → collection fills on retry → UI reacts without rerunning `useEffect` boilerplate. |
+| V9 | Streaming burst under throttled CPU (4×) | Collection-backed render stays within 16 ms frame budget; measure p95 `ws.received → dom.painted` delta. |
+| V10 | 30-day eviction | `evictOldMessages()` on mount deletes stale rows; UI reacts (rows disappear). |
+
+### 8.5 Risks to surface early (before going prod-wide)
+
+| Risk | Mitigation in the prototype |
+|---|---|
+| `useLiveQuery` re-runs filter+sort in JS on every insert — O(n) on 1000+ rows. | Measure V9 at realistic history depth (replay a long session). If p95 > 16 ms, add a paginated/windowed query (last 200 + lazy older) before R1 lands in prod. |
+| LocalOnlyCollection may not support atomic transactions for insert+delete (optimistic reconcile). | Confirm against `@tanstack/db` docs; fall back to sequenced `.delete` + `.insert` with a short reconcile window. |
+| Optimistic-vs-echo ID reconciliation — server picks a different id than the optimistic `usr-optimistic-*`. | Keep an in-memory `optimistic → echoed` map in the hook for ~2 s; delete the optimistic row when the echo arrives. Collection dedup handles the rest. |
+| OPFS write throughput under streaming bursts (L5 in §4). | Add a microtask batcher in the prototype (`queueMicrotask(flush)`) as an opt-in flag; verify V9 with/without. |
+| `useAgent` reconnect path may re-fire `{type:'messages'}` bulk → duplicate inserts. | Already handled by upsert-by-id; verify explicitly in V7. |
+
+### 8.6 Parked for future prototypes (not in this route)
+
+- **DO-side broadcast-on-hydrate (R2)** — can be prototyped in a parallel feature branch against the DO; completely orthogonal to the client debug route.
+- **`agentSessionsCollection` status mirror via `useAgent.state` subscriber** — fold once R1 lands; small diff, not worth a separate route.
+- **D1-backed messages (R5)** — wait for R1 signal before proposing as spec #8. If R1's perf numbers are good enough, R5 becomes strictly an "offline + cross-device" win, not a latency fix.
+
+### 8.7 Go/no-go criteria for promoting R1 to the main route
+
+Promote if **all** of V1–V10 pass AND the debug-route p95 `ws.received → dom.painted` is **within 20% of the current `setMessages` baseline** at equivalent history depth. Otherwise, iterate on the paginated-query fallback before merging.
