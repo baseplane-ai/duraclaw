@@ -147,6 +147,23 @@ export class SessionDO extends Agent<Env, SessionState> {
       }
     }
 
+    // Raw message history from the DO's SQLite — for auditing persisted parts
+    // (e.g. verifying whether a `tool-ask_user` gate part was ever appended).
+    // No gateway hydration: we want exactly what's in local history, nothing
+    // merged in from the runner transcript.
+    if (request.method === 'GET' && url.pathname === '/messages') {
+      try {
+        return new Response(JSON.stringify({ messages: this.session.getHistory() }), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      } catch (err) {
+        return new Response(
+          JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+    }
+
     // Delegate to Agent base class for WS upgrades and other routes
     return super.onRequest(request)
   }
