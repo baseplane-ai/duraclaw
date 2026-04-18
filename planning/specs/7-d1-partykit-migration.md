@@ -2,12 +2,12 @@
 initiative: d1-partykit-migration
 type: project
 issue_type: feature
-status: draft
+status: approved
 priority: high
 github_issue: 7
 supersedes: [5, 6]
 created: 2026-04-18
-updated: 2026-04-18
+updated: 2026-04-17
 phases:
   - id: p1
     name: "D1 schema + drizzle-kit adoption"
