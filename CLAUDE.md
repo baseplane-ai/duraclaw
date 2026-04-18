@@ -306,4 +306,11 @@ in `planning/research/2026-04-18-verify-infra-issue-8.md`.
 - Commit messages: `type(scope): description` (feat, fix, chore, refactor, docs, test)
 - Biome formatting: 2-space indent, 100 char line width, LF endings
 - Path alias: `~/` maps to `./src/` in orchestrator
-- Git workflow: commit and push directly to `main` on `origin` (github.com/baseplane-ai/duraclaw). No PR workflow — CI runs remotely after push.
+- Git workflow: commit and push to **the currently checked-out branch**
+  on `origin` (github.com/baseplane-ai/duraclaw). Never switch branches to
+  push elsewhere — respect whatever branch the human/session left you on.
+  On `main` this means direct-to-main (no PR workflow, CI runs remotely
+  after push); on any feature branch (e.g. `feature/3-yjs-...`,
+  `feat/...`, `fix/...`) push to that branch so the open PR updates in
+  place. If a rebase has rewritten branch history, push with
+  `--force-with-lease` (never plain `--force`).
