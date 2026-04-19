@@ -36,6 +36,17 @@ export async function scheduled(
   env: Env,
   _ctx: ExecutionContext,
 ): Promise<void> {
+  // Piggyback the worktree-reservation stale GC onto every cron tick.
+  // Cheap SQL + idempotent, so running every 5min (rather than hourly
+  // as specced) is fine. Isolated in its own try/catch so a GC failure
+  // never blocks the gateway-session sync below.
+  try {
+    await runWorktreeStaleGc(env)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    console.error(`[cron] worktree-stale-gc failed: ${message}`)
+  }
+
   if (!env.CC_GATEWAY_URL) {
     console.warn('[cron] CC_GATEWAY_URL not configured — skipping sync')
     return
@@ -121,4 +132,32 @@ export async function scheduled(
   })
 
   console.log(`[cron] synced ${updated}/${snapshots.length} gateway sessions`)
+}
+
+/**
+ * Worktree-reservation stale-flag GC.
+ *
+ * Marks reservations whose `last_activity_at` is older than 7 days as
+ * stale, and defensively clears the stale flag on rows that have since
+ * seen activity (clock skew, webhook-driven recovery, etc.).
+ *
+ * Runs every cron tick (currently every 5min) — SQL is cheap and
+ * idempotent, so it's fine to run more often than the hourly cadence
+ * described in the spec. See planning/specs/16-chain-ux.md → 3E/B14.
+ */
+async function runWorktreeStaleGc(env: Env): Promise<void> {
+  // Mark newly-stale rows.
+  await env.AUTH_DB.prepare(
+    `UPDATE worktree_reservations
+       SET stale = 1
+     WHERE last_activity_at < datetime('now', '-7 days')
+       AND stale = 0`,
+  ).run()
+  // Clear stale on recently-active rows.
+  await env.AUTH_DB.prepare(
+    `UPDATE worktree_reservations
+       SET stale = 0
+     WHERE last_activity_at >= datetime('now', '-7 days')
+       AND stale = 1`,
+  ).run()
 }

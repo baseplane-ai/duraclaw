@@ -2,7 +2,7 @@ import { and, asc, desc, eq, inArray, like, or, sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import { Hono } from 'hono'
 import * as schema from '~/db/schema'
-import { agentSessions, userPreferences, userTabs } from '~/db/schema'
+import { agentSessions, auditLog, userPreferences, userTabs, worktreeReservations } from '~/db/schema'
 import { validateActionToken } from '~/lib/action-token'
 import { createAuth } from '~/lib/auth'
 import { type PushPayload, sendPushNotification } from '~/lib/push'
@@ -12,6 +12,7 @@ import type {
   ProjectInfo,
   UserPreferencesRow,
   UserTabRow,
+  WorktreeReservation,
 } from '~/lib/types'
 import { authMiddleware } from './auth-middleware'
 import { authRoutes } from './auth-routes'
@@ -57,6 +58,47 @@ const EFFORTS = new Set(['low', 'medium', 'high'])
 
 function getDb(env: ApiAppEnv['Bindings']) {
   return drizzle(env.AUTH_DB, { schema })
+}
+
+/**
+ * Verify a GitHub webhook `X-Hub-Signature-256` header against the raw body
+ * using HMAC-SHA-256. Workers runtime — uses Web Crypto, not node:crypto.
+ *
+ * Constant-time comparison is performed manually over the decoded byte arrays
+ * (length-mismatched inputs still walk the full loop to avoid leaking length
+ * via timing, though they're rejected up front).
+ */
+async function verifyGithubSignature(
+  secret: string,
+  header: string | undefined,
+  rawBody: string,
+): Promise<boolean> {
+  if (!header) return false
+  const [scheme, hex] = header.split('=')
+  if (scheme !== 'sha256' || !hex) return false
+
+  const enc = new TextEncoder()
+  const key = await crypto.subtle.importKey(
+    'raw',
+    enc.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  )
+  const mac = await crypto.subtle.sign('HMAC', key, enc.encode(rawBody))
+  const want = new Uint8Array(mac)
+
+  if (hex.length !== want.length * 2) return false
+  const got = new Uint8Array(want.length)
+  for (let i = 0; i < want.length; i++) {
+    const byte = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16)
+    if (!Number.isFinite(byte)) return false
+    got[i] = byte
+  }
+
+  let diff = 0
+  for (let i = 0; i < want.length; i++) diff |= got[i] ^ want[i]
+  return diff === 0
 }
 
 /** Resolve a session ID to a DO ID — hex IDs use idFromString, UUIDs use idFromName */
@@ -298,6 +340,91 @@ export function createApiApp() {
       .run()
 
     return c.json({ ok: true, userId: result.user.id, role: 'admin' })
+  })
+
+  // GitHub webhook — MUST bypass authMiddleware (signature is the auth).
+  // Registered before `app.use('/api/*', authMiddleware)` so the middleware
+  // doesn't see unauthenticated webhook traffic. Signature verification uses
+  // Web Crypto (Workers runtime — no node:crypto `timingSafeEqual`).
+  app.post('/api/webhooks/github', async (c) => {
+    if (!c.env.GITHUB_WEBHOOK_SECRET) {
+      return c.json({ error: 'Webhook not configured' }, 503)
+    }
+
+    const rawBody = await c.req.text()
+    const sig = c.req.header('x-hub-signature-256')
+    const valid = await verifyGithubSignature(c.env.GITHUB_WEBHOOK_SECRET, sig, rawBody)
+    if (!valid) {
+      return c.json({ error: 'Invalid signature' }, 401)
+    }
+
+    let payload: {
+      repository?: { full_name?: string }
+      action?: string
+      issue?: { number?: number }
+      pull_request?: {
+        number?: number
+        merged?: boolean
+        head?: { ref?: string }
+        body?: string | null
+      }
+    }
+    try {
+      payload = JSON.parse(rawBody)
+    } catch {
+      // Malformed JSON post-signature is still an ack — we verified the body
+      // belongs to GitHub. Return 200 with an ignored marker.
+      return c.json({ ignored: 'invalid json' })
+    }
+
+    if (payload.repository?.full_name !== c.env.GITHUB_REPO) {
+      return c.json({ ignored: 'wrong repo' })
+    }
+
+    const event = c.req.header('x-github-event')
+    let issueNumber: number | undefined
+
+    if (event === 'issues' && payload.action === 'closed') {
+      issueNumber = payload.issue?.number
+    } else if (
+      event === 'pull_request' &&
+      payload.action === 'closed' &&
+      payload.pull_request?.merged === true
+    ) {
+      const branchRef = payload.pull_request.head?.ref ?? ''
+      const branchMatch = branchRef.match(/^(?:feature|fix|feat)\/(\d+)[-_]/)
+      if (branchMatch) {
+        issueNumber = Number.parseInt(branchMatch[1], 10)
+      } else {
+        const body = payload.pull_request.body ?? ''
+        const bodyMatch = body.match(/(?:closes|fixes)\s+#(\d+)/i)
+        if (bodyMatch) {
+          issueNumber = Number.parseInt(bodyMatch[1], 10)
+        }
+      }
+
+      if (issueNumber === undefined || !Number.isFinite(issueNumber)) {
+        console.log(
+          '[gh-webhook] PR merged without linkable issue:',
+          payload.pull_request.number,
+        )
+        return c.json({ ignored: 'no linkable issue' })
+      }
+    } else {
+      return c.json({ ignored: true })
+    }
+
+    if (issueNumber === undefined || !Number.isFinite(issueNumber)) {
+      return c.json({ ignored: true })
+    }
+
+    const db = getDb(c.env)
+    const deleted = await db
+      .delete(worktreeReservations)
+      .where(eq(worktreeReservations.issueNumber, issueNumber))
+      .returning({ worktree: worktreeReservations.worktree })
+
+    return c.json({ released: true, issueNumber, deleted: deleted.length })
   })
 
   app.use('/api/*', authMiddleware)
@@ -1211,6 +1338,217 @@ export function createApiApp() {
     }
 
     return c.json({ status: 'idle' })
+  })
+
+  // ── Chain worktree reservations (GH#16 Feature 3E / U2) ──────────
+  //
+  // Concurrency: D1's single-writer SQLite semantics + the `worktree`
+  // PRIMARY KEY on worktree_reservations make checkout safe without an
+  // explicit mutex. If a race slips through SELECT, INSERT throws a
+  // UNIQUE constraint error which we catch and translate into a 409
+  // with the winning reservation.
+
+  const FORCE_RELEASE_STALE_DAYS = 7
+  const FORCE_RELEASE_STALE_MS = FORCE_RELEASE_STALE_DAYS * 86_400_000
+
+  function reservationToDto(
+    r: typeof worktreeReservations.$inferSelect,
+  ): WorktreeReservation {
+    return {
+      issueNumber: r.issueNumber,
+      worktree: r.worktree,
+      ownerId: r.ownerId,
+      heldSince: r.heldSince,
+      lastActivityAt: r.lastActivityAt,
+      modeAtCheckout: r.modeAtCheckout,
+      stale: !!r.stale,
+    }
+  }
+
+  app.post('/api/chains/:issue/checkout', async (c) => {
+    const userId = c.get('userId')
+    const issueNumber = Number.parseInt(c.req.param('issue'), 10)
+    if (!Number.isFinite(issueNumber)) {
+      return c.json({ error: 'Invalid issue number' }, 400)
+    }
+
+    const body = (await c.req.json().catch(() => null)) as {
+      worktree?: unknown
+      modeAtCheckout?: unknown
+    } | null
+    if (!body || typeof body.worktree !== 'string' || body.worktree.length === 0) {
+      return c.json({ error: 'Missing required field: worktree' }, 400)
+    }
+    const worktree = body.worktree
+    const modeAtCheckout =
+      typeof body.modeAtCheckout === 'string' && body.modeAtCheckout.length > 0
+        ? body.modeAtCheckout
+        : 'implementation'
+
+    const db = getDb(c.env)
+    const now = new Date().toISOString()
+
+    const existingRows = await db
+      .select()
+      .from(worktreeReservations)
+      .where(eq(worktreeReservations.worktree, worktree))
+      .limit(1)
+    const existing = existingRows[0]
+
+    if (existing) {
+      if (existing.issueNumber === issueNumber) {
+        // Same-chain re-entry — idempotent refresh.
+        const refreshed = await db
+          .update(worktreeReservations)
+          .set({ lastActivityAt: now, stale: false })
+          .where(eq(worktreeReservations.worktree, worktree))
+          .returning()
+        const row = refreshed[0] ?? { ...existing, lastActivityAt: now, stale: false }
+        return c.json({ reservation: reservationToDto(row) })
+      }
+      return c.json(
+        {
+          conflict: reservationToDto(existing),
+          message: `Worktree held by chain #${existing.issueNumber}`,
+        },
+        409,
+      )
+    }
+
+    try {
+      const inserted = await db
+        .insert(worktreeReservations)
+        .values({
+          worktree,
+          issueNumber,
+          ownerId: userId,
+          heldSince: now,
+          lastActivityAt: now,
+          modeAtCheckout,
+          stale: false,
+        })
+        .returning()
+      return c.json({ reservation: reservationToDto(inserted[0]) })
+    } catch (err) {
+      // UNIQUE constraint race — re-read and return 409 with winner.
+      const raceRows = await db
+        .select()
+        .from(worktreeReservations)
+        .where(eq(worktreeReservations.worktree, worktree))
+        .limit(1)
+      const winner = raceRows[0]
+      if (winner && winner.issueNumber === issueNumber) {
+        // Unlikely but possible: peer request was for the same chain.
+        return c.json({ reservation: reservationToDto(winner) })
+      }
+      if (winner) {
+        return c.json(
+          {
+            conflict: reservationToDto(winner),
+            message: `Worktree held by chain #${winner.issueNumber}`,
+          },
+          409,
+        )
+      }
+      // Row disappeared between INSERT failure and re-read — surface the
+      // original error rather than invent a state.
+      const message = err instanceof Error ? err.message : 'Checkout failed'
+      return c.json({ error: message }, 500)
+    }
+  })
+
+  app.post('/api/chains/:issue/release', async (c) => {
+    const issueNumber = Number.parseInt(c.req.param('issue'), 10)
+    if (!Number.isFinite(issueNumber)) {
+      return c.json({ error: 'Invalid issue number' }, 400)
+    }
+
+    const db = getDb(c.env)
+    const targets = await db
+      .select()
+      .from(worktreeReservations)
+      .where(eq(worktreeReservations.issueNumber, issueNumber))
+    if (targets.length === 0) {
+      return c.json({ message: 'No reservation for this chain' }, 404)
+    }
+
+    await db
+      .delete(worktreeReservations)
+      .where(eq(worktreeReservations.issueNumber, issueNumber))
+
+    return c.json({ released: true, count: targets.length })
+  })
+
+  app.post('/api/chains/:issue/force-release', async (c) => {
+    const userId = c.get('userId')
+    const issueNumber = Number.parseInt(c.req.param('issue'), 10)
+    if (!Number.isFinite(issueNumber)) {
+      return c.json({ error: 'Invalid issue number' }, 400)
+    }
+
+    const body = (await c.req.json().catch(() => null)) as {
+      confirmation?: unknown
+      worktree?: unknown
+    } | null
+    if (!body || body.confirmation !== true) {
+      return c.json({ message: 'Missing confirmation' }, 400)
+    }
+    const worktreeFilter = typeof body.worktree === 'string' ? body.worktree : undefined
+
+    const db = getDb(c.env)
+    const targets = worktreeFilter
+      ? await db
+          .select()
+          .from(worktreeReservations)
+          .where(
+            and(
+              eq(worktreeReservations.issueNumber, issueNumber),
+              eq(worktreeReservations.worktree, worktreeFilter),
+            ),
+          )
+      : await db
+          .select()
+          .from(worktreeReservations)
+          .where(eq(worktreeReservations.issueNumber, issueNumber))
+
+    if (targets.length === 0) {
+      return c.json({ message: 'No reservation for this chain' }, 404)
+    }
+
+    const staleCutoff = Date.now() - FORCE_RELEASE_STALE_MS
+    for (const r of targets) {
+      const lastActivityMs = new Date(r.lastActivityAt).getTime()
+      const isStale = !!r.stale || (Number.isFinite(lastActivityMs) && lastActivityMs < staleCutoff)
+      if (!isStale) {
+        return c.json(
+          {
+            message: 'Reservation not stale enough',
+            staleAfterDays: FORCE_RELEASE_STALE_DAYS,
+            lastActivity: r.lastActivityAt,
+          },
+          403,
+        )
+      }
+    }
+
+    // All targets pass the gate — delete + audit.
+    for (const r of targets) {
+      await db
+        .delete(worktreeReservations)
+        .where(eq(worktreeReservations.worktree, r.worktree))
+      await db.insert(auditLog).values({
+        action: 'force_release_worktree',
+        userId,
+        details: JSON.stringify({
+          issueNumber,
+          worktree: r.worktree,
+          previousOwner: r.ownerId,
+          heldSince: r.heldSince,
+        }),
+      })
+    }
+
+    return c.json({ released: true, forced: true, count: targets.length })
   })
 
   app.post('/api/sessions/:id/answers', async (c) => {

@@ -168,6 +168,40 @@ export const userTabs = sqliteTable(
   }),
 )
 
+export const worktreeReservations = sqliteTable(
+  'worktree_reservations',
+  {
+    worktree: text('worktree').primaryKey(),
+    issueNumber: integer('issue_number').notNull(),
+    ownerId: text('owner_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    heldSince: text('held_since').notNull(),
+    lastActivityAt: text('last_activity_at').notNull(),
+    modeAtCheckout: text('mode_at_checkout').notNull(),
+    stale: integer('stale', { mode: 'boolean' }).notNull().default(false),
+  },
+  (t) => ({
+    byIssue: index('idx_wt_res_issue').on(t.issueNumber),
+  }),
+)
+
+export const auditLog = sqliteTable(
+  'audit_log',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    action: text('action').notNull(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    details: text('details').notNull(),
+    createdAt: text('created_at').notNull().default(sql`(datetime('now'))`),
+  },
+  (t) => ({
+    byActionTime: index('idx_audit_action').on(t.action, t.createdAt),
+  }),
+)
+
 export const userPreferences = sqliteTable('user_preferences', {
   userId: text('user_id')
     .primaryKey()

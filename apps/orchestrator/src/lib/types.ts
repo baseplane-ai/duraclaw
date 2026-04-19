@@ -53,6 +53,15 @@ export interface Env {
   BOOTSTRAP_TOKEN?: string
   /** Watchdog stale threshold in ms. Default 90_000 when unset. */
   STALE_THRESHOLD_MS?: string
+  /** GitHub webhook HMAC secret (set via `wrangler secret`). Required for the
+   *  `/api/webhooks/github` handler (GH#16 Feature 3E / U3); missing secret
+   *  causes the handler to 503 rather than accidentally ack unauthenticated
+   *  traffic. */
+  GITHUB_WEBHOOK_SECRET?: string
+  /** Fully-qualified GitHub repository (e.g. "baseplane-ai/duraclaw") used to
+   *  filter incoming webhook payloads — events for other repos are ack'd-but-
+   *  ignored. */
+  GITHUB_REPO?: string
 }
 
 // ── D1 row response shapes (issue #7 p2) ───────────────────────────
@@ -95,6 +104,22 @@ export interface UserTabRow {
   sessionId: string | null
   position: number
   createdAt: string
+}
+
+/**
+ * Chain-level worktree checkout reservation (GH#16 Feature 3E). One row per
+ * currently-checked-out worktree — owner holds the worktree for the lifetime
+ * of the chain driving `issueNumber`. Serves as the TypeScript API contract
+ * for `/api/worktrees/*` endpoints (U2) and the force-release webhook (U3).
+ */
+export interface WorktreeReservation {
+  issueNumber: number
+  worktree: string
+  ownerId: string
+  heldSince: string // ISO
+  lastActivityAt: string // ISO
+  modeAtCheckout: string
+  stale: boolean
 }
 
 export interface UserPreferencesRow {
