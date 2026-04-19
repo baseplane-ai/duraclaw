@@ -1475,34 +1475,43 @@ export class SessionDO extends Agent<Env, SessionState> {
       return { ok: false, error: `Cannot interrupt: status is '${this.state.status}'` }
     }
 
-    // If a gate is pending, release it locally so the UI isn't stuck on a
-    // GateResolver while the runner unwinds. Flip the corresponding tool
-    // part to `output-denied` with an "Interrupted" marker and clear the
-    // scalar state.gate — the subsequent `interrupt` command to the runner
-    // will cause the SDK to abort its in-flight canUseTool promise (no
-    // explicit per-gate cancel command exists, so we rely on the SDK
-    // interrupt to release the pending answer/permission wait).
-    const pendingGate = this.state.gate
-    if (pendingGate) {
-      const history = this.session.getHistory()
-      for (let i = history.length - 1; i >= 0; i--) {
-        const msg = history[i]
-        const idx = msg.parts.findIndex((p) => p.toolCallId === pendingGate.id)
-        if (idx === -1) continue
-        const updatedParts = msg.parts.map((p) =>
-          p.toolCallId === pendingGate.id
-            ? { ...p, state: 'output-denied' as const, output: 'Interrupted' }
-            : p,
-        )
-        const updatedMsg: SessionMessage = { ...msg, parts: updatedParts }
-        try {
-          this.session.updateMessage(updatedMsg)
-          this.broadcastMessage(updatedMsg)
-        } catch (err) {
-          console.error(`[SessionDO:${this.ctx.id}] Failed to mark gate interrupted:`, err)
-        }
-        break
+    // Release ALL pending gate parts, not just the one tracked in
+    // state.gate. The scalar and history can drift (dropped broadcast,
+    // multiple gates in flight), so the UI may be rendering a
+    // GateResolver for a tool_call_id that state.gate never tracked.
+    // Flipping every approval-requested gate part to 'output-denied'
+    // guarantees the UI clears its GateResolver(s) when the user hits
+    // interrupt. The subsequent `interrupt` command to the runner aborts
+    // the SDK's in-flight canUseTool promise — no per-gate cancel
+    // command exists, so we rely on the SDK interrupt to release the
+    // pending answer/permission wait.
+    const history = this.session.getHistory()
+    for (let i = history.length - 1; i >= 0; i--) {
+      const msg = history[i]
+      const hasPendingGate = msg.parts.some(
+        (p) =>
+          p.state === 'approval-requested' &&
+          (p.type === 'tool-ask_user' || p.type === 'tool-permission'),
+      )
+      if (!hasPendingGate) continue
+      const updatedParts = msg.parts.map((p) =>
+        p.state === 'approval-requested' &&
+        (p.type === 'tool-ask_user' || p.type === 'tool-permission')
+          ? { ...p, state: 'output-denied' as const, output: 'Interrupted' }
+          : p,
+      )
+      const updatedMsg: SessionMessage = { ...msg, parts: updatedParts }
+      try {
+        this.session.updateMessage(updatedMsg)
+        this.broadcastMessage(updatedMsg)
+      } catch (err) {
+        console.error(`[SessionDO:${this.ctx.id}] Failed to mark gate interrupted:`, err)
       }
+    }
+
+    // Always clear the scalar gate + flip status back to running so the
+    // watchdog and UI agree the session has left waiting_gate.
+    if (this.state.gate || this.state.status === 'waiting_gate') {
       this.updateState({ status: 'running', gate: null })
     }
 
