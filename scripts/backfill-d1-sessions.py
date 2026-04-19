@@ -3,17 +3,32 @@
 Backfill agent_sessions in D1 from ~/.claude/projects JSONL files + gateway .meta.json.
 
 Usage:
-  python3 scripts/backfill-d1-sessions.py --dry-run   # print SQL only
-  python3 scripts/backfill-d1-sessions.py              # apply to remote D1
+  python3 scripts/backfill-d1-sessions.py --user-id <id> --dry-run
+  python3 scripts/backfill-d1-sessions.py --user-id <id>
 
 Reads:
   - ~/.claude/projects/-data-projects-*/*.jsonl  (session transcripts)
-  - /run/duraclaw/sessions/*.meta.json + *.cmd   (live gateway cost data)
+  - $GATEWAY_DIR (default /run/duraclaw/sessions) *.meta.json + *.cmd
 
 Writes:
   - INSERT OR REPLACE into agent_sessions via wrangler d1 execute --remote
+
+Options:
+  --user-id ID              Owning user_id to stamp on every row (required unless
+                            --dry-run; can also be supplied via
+                            DURACLAW_BACKFILL_USER_ID).
+  --dry-run                 Print SQL preview, do not invoke wrangler.
+  --gateway-dir PATH        Override gateway sessions dir (also via
+                            $GATEWAY_DIR). Default: /run/duraclaw/sessions.
+  --orchestrator-dir PATH   Directory to cd into before calling wrangler.
+                            Default: <repo>/apps/orchestrator resolved relative
+                            to this script's location.
+  --use-wrangler-auth       Strip CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID
+                            from the subprocess env so wrangler falls back to
+                            its own stored credentials. Default: inherit env.
 """
 
+import argparse
 import json
 import os
 import glob
@@ -22,10 +37,8 @@ import subprocess
 from datetime import datetime
 from collections import defaultdict
 
-DRY_RUN = "--dry-run" in sys.argv
-USER_ID = "uba9UJNmBPfLSqjb0b4HBYz8soFgRIag"  # ben@baseplane.ai
 CLAUDE_PROJECTS = os.path.expanduser("~/.claude/projects")
-GATEWAY_DIR = "/run/duraclaw/sessions"
+DEFAULT_GATEWAY_DIR = "/run/duraclaw/sessions"
 
 # Skip eval/research/test projects — these are noise
 SKIP_PATTERNS = [
@@ -35,6 +48,49 @@ SKIP_PATTERNS = [
     "kata-test",
     "kata-fresh",
 ]
+
+
+def default_orchestrator_dir():
+    """Resolve <repo>/apps/orchestrator relative to this script.
+
+    Script lives at <repo>/scripts/backfill-d1-sessions.py, so go up one and
+    into apps/orchestrator. Works across worktrees without env vars.
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    return os.path.join(repo_root, "apps", "orchestrator")
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(
+        description="Backfill agent_sessions in D1 from ~/.claude/projects."
+    )
+    ap.add_argument(
+        "--user-id",
+        default=os.environ.get("DURACLAW_BACKFILL_USER_ID"),
+        help="Owning user_id stamped on every row (or $DURACLAW_BACKFILL_USER_ID).",
+    )
+    ap.add_argument("--dry-run", action="store_true", help="Print SQL only.")
+    ap.add_argument(
+        "--gateway-dir",
+        default=os.environ.get("GATEWAY_DIR", DEFAULT_GATEWAY_DIR),
+        help="Gateway sessions dir (default %(default)s).",
+    )
+    ap.add_argument(
+        "--orchestrator-dir",
+        default=default_orchestrator_dir(),
+        help="Directory with wrangler.jsonc (default: <repo>/apps/orchestrator).",
+    )
+    ap.add_argument(
+        "--use-wrangler-auth",
+        action="store_true",
+        help="Strip CLOUDFLARE_* env vars so wrangler uses its stored creds.",
+    )
+    args = ap.parse_args()
+    # User id is required unless dry-run.
+    if not args.dry_run and not args.user_id:
+        ap.error("--user-id is required (or set $DURACLAW_BACKFILL_USER_ID) unless --dry-run")
+    return args
 
 
 def dir_to_project(dirname):
@@ -105,12 +161,12 @@ def extract_jsonl_metadata(path):
     return meta
 
 
-def load_gateway_data():
+def load_gateway_data(gateway_dir):
     """Load gateway .cmd + .meta.json files, keyed by sdk_session_id."""
     gateway = {}
 
-    cmd_files = glob.glob(os.path.join(GATEWAY_DIR, "*.cmd"))
-    meta_files = glob.glob(os.path.join(GATEWAY_DIR, "*.meta.json"))
+    cmd_files = glob.glob(os.path.join(gateway_dir, "*.cmd"))
+    meta_files = glob.glob(os.path.join(gateway_dir, "*.meta.json"))
 
     cmds = {}
     for f in cmd_files:
@@ -150,11 +206,12 @@ def escape_sql(s):
 
 
 def main():
+    args = parse_args()
     print("=== Duraclaw D1 Session Backfill ===\n")
 
     # 1. Load gateway data (keyed by sdk_session_id)
-    gateway = load_gateway_data()
-    print(f"Gateway sessions loaded: {len(gateway)}")
+    gateway = load_gateway_data(args.gateway_dir)
+    print(f"Gateway sessions loaded: {len(gateway)} (from {args.gateway_dir})")
 
     # 2. Scan all JSONL files
     project_dirs = glob.glob(os.path.join(CLAUDE_PROJECTS, "-data-projects-*"))
@@ -205,7 +262,7 @@ def main():
             # Build row
             row = {
                 "id": sdk_session_id,
-                "user_id": USER_ID,
+                "user_id": args.user_id or "DRY_RUN_USER",
                 "project": final_project,
                 "status": status,
                 "model": gw.get("model") or meta["model"],
@@ -270,22 +327,29 @@ def main():
 
     print(f"Generated {len(batches)} SQL batches")
 
-    if DRY_RUN:
+    if args.dry_run:
         print("\n--- DRY RUN: SQL preview (first batch) ---")
         print(batches[0][:2000])
         if len(batches) > 1:
             print(f"\n... and {len(batches) - 1} more batches")
         return
 
-    # 4. Execute via wrangler
-    os.chdir("/data/projects/duraclaw-dev1/apps/orchestrator")
+    # 4. Execute via wrangler from the orchestrator worktree.
+    os.chdir(args.orchestrator_dir)
+    if args.use_wrangler_auth:
+        # Drop CF creds from env so wrangler falls back to its stored login
+        # (useful when the current shell is authed to a different account).
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID")}
+    else:
+        env = os.environ.copy()
     total_inserted = 0
     for i, sql in enumerate(batches):
         print(f"\n  Executing batch {i+1}/{len(batches)}...", end=" ", flush=True)
         result = subprocess.run(
             ["npx", "wrangler", "d1", "execute", "duraclaw-auth", "--remote",
              "--command", sql],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=30, env=env,
         )
         if result.returncode != 0:
             print(f"FAILED")
