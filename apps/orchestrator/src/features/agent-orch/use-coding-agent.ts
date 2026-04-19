@@ -4,9 +4,11 @@
  * Render source for the message list is `messagesCollection` (OPFS-persisted)
  * via `useMessagesCollection`; server-authoritative live state (status,
  * context usage, kata, session result) is read from `sessionLiveStateCollection`
- * via `useSessionLiveState`. WS handlers below write into those collections
- * on state / gateway-event delivery. Only `events` (debug log) and
- * `branchInfo` remain as local React state.
+ * via `useSessionLiveState`. Per-turn branch info is a reactive read from
+ * `branchInfoCollection` via `useBranchInfo` — DO-pushed on snapshot
+ * payloads (B7). WS handlers below write into those collections on state /
+ * gateway-event / messages-frame delivery. Only `events` (debug log)
+ * remains as local React state.
  */
 
 import { createTransaction } from '@tanstack/db'
@@ -14,6 +16,7 @@ import { useAgent } from 'agents/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type * as Y from 'yjs'
 import { agentSessionsCollection as sessionsCollection } from '~/db/agent-sessions-collection'
+import { type BranchInfoRow, createBranchInfoCollection } from '~/db/branch-info-collection'
 import { type CachedMessage, createMessagesCollection } from '~/db/messages-collection'
 import { upsertSessionLiveState } from '~/db/session-live-state-collection'
 import { useMessagesCollection } from '~/hooks/use-messages-collection'
@@ -66,8 +69,6 @@ export interface UseCodingAgentResult {
   forkWithHistory: (content: string | ContentBlock[]) => Promise<unknown>
   rewind: (turnIndex: number) => Promise<{ ok: boolean; error?: string }>
   injectQaPair: (question: string, answer: string) => void
-  branchInfo: Map<string, { current: number; total: number; siblings: string[] }>
-  getBranches: (messageId: string) => Promise<SessionMessage[]>
   resubmitMessage: (
     messageId: string,
     content: string,
@@ -111,9 +112,6 @@ function toRow(msg: SessionMessage, sessionId: string): CachedMessage & Record<s
 /** Connect to a SessionDO instance by name; returns live state, messages, and RPC helpers. */
 export function useCodingAgent(agentName: string): UseCodingAgentResult {
   const [events, setEvents] = useState<Array<{ ts: string; type: string; data?: unknown }>>([])
-  const [branchInfo, setBranchInfo] = useState<
-    Map<string, { current: number; total: number; siblings: string[] }>
-  >(new Map())
   const prevAgentNameRef = useRef(agentName)
   // Per-session watermark for MessagesFrame `seq` (B1/B3). Keyed by agentName
   // so concurrent session tabs each keep their own highest-applied seq.
@@ -132,7 +130,8 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     lastSeqRef.current.delete(prevAgentNameRef.current)
     prevAgentNameRef.current = agentName
     setEvents([])
-    setBranchInfo(new Map())
+    // branch-info collection is per-agentName (factory memoises); switching
+    // sessions auto-swaps the backing collection via `createBranchInfoCollection`.
   }
 
   // Render source for messages: reactive live query on the persisted collection.
@@ -225,6 +224,32 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       if (frame.payload.kind === 'snapshot') {
         replaceAllMessages(frame.payload.messages)
         map.set(agentName, Math.max(lastSeq, frame.payload.version))
+        // B7: DO pushes branchInfo alongside snapshot payloads on reconnect,
+        // rewind, resubmit, and branch-navigate. Upsert each row into the
+        // per-session branchInfoCollection; the `useBranchInfo` hook reads
+        // reactively.
+        const branchInfo = (frame.payload as { branchInfo?: BranchInfoRow[] }).branchInfo
+        if (branchInfo && branchInfo.length > 0) {
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const biColl = createBranchInfoCollection(agentName) as any
+            for (const row of branchInfo) {
+              try {
+                if (biColl.has?.(row.parentMsgId)) {
+                  biColl.update(row.parentMsgId, (draft: BranchInfoRow) => {
+                    Object.assign(draft, row)
+                  })
+                } else {
+                  biColl.insert(row)
+                }
+              } catch {
+                // ignore — next snapshot retries
+              }
+            }
+          } catch {
+            // collection may not be ready; next snapshot retries
+          }
+        }
         return
       }
 
@@ -425,93 +450,55 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     [connection, cachedMessages, replaceAllMessages],
   )
 
-  const refreshBranchInfo = useCallback(
-    async (msgs: SessionMessage[]) => {
-      const newBranchInfo = new Map<
-        string,
-        { current: number; total: number; siblings: string[] }
-      >()
-
-      for (const msg of msgs) {
-        if (msg.role === 'user') {
-          try {
-            const msgIdx = msgs.findIndex((m) => m.id === msg.id)
-            const parentId = msgIdx > 0 ? msgs[msgIdx - 1].id : null
-
-            if (parentId) {
-              const siblings = (await connection.call('getBranches', [
-                parentId,
-              ])) as SessionMessage[]
-              const userSiblings = siblings.filter((s) => s.role === 'user')
-              if (userSiblings.length > 1) {
-                const currentIdx = userSiblings.findIndex((s) => s.id === msg.id)
-                newBranchInfo.set(msg.id, {
-                  current: currentIdx + 1,
-                  total: userSiblings.length,
-                  siblings: userSiblings.map((s) => s.id),
-                })
-              }
-            }
-          } catch {
-            // Skip — non-critical
-          }
-        }
-      }
-
-      setBranchInfo(newBranchInfo)
-    },
-    [connection],
-  )
-
-  const getBranches = useCallback(
-    async (messageId: string) => {
-      return connection.call('getBranches', [messageId]) as Promise<SessionMessage[]>
-    },
-    [connection],
-  )
-
   const resubmitMessage = useCallback(
     async (messageId: string, content: string) => {
-      const result = (await connection.call('resubmitMessage', [messageId, content])) as {
+      // The DO's `resubmitMessage` path emits a reason='resubmit' snapshot
+      // (B2) carrying both the new leaf's history AND the parent's fresh
+      // branchInfo row (B7). The snapshot handler in `handleMessagesFrame`
+      // reconciles both — no manual `getMessages` / `refreshBranchInfo`
+      // round-trip needed.
+      return (await connection.call('resubmitMessage', [messageId, content])) as {
         ok: boolean
         leafId?: string
         error?: string
       }
-      if (result.ok && result.leafId) {
-        const newMessages = (await connection.call('getMessages', [
-          { session_hint: agentName, leafId: result.leafId },
-        ])) as SessionMessage[]
-        if (newMessages.length > 0) {
-          replaceAllMessages(newMessages)
-          await refreshBranchInfo(newMessages)
-        }
-      }
-      return result
     },
-    [connection, agentName, refreshBranchInfo, replaceAllMessages],
+    [connection],
   )
 
   const navigateBranch = useCallback(
     async (messageId: string, direction: 'prev' | 'next') => {
-      const info = branchInfo.get(messageId)
-      if (!info) return
-
-      const currentIdx = info.current - 1
-      const targetIdx = direction === 'prev' ? currentIdx - 1 : currentIdx + 1
-      if (targetIdx < 0 || targetIdx >= info.siblings.length) return
-
-      const targetSiblingId = info.siblings[targetIdx]
-
-      const branchMessages = (await connection.call('getMessages', [
-        { session_hint: agentName, leafId: targetSiblingId },
-      ])) as SessionMessage[]
-
-      if (branchMessages.length > 0) {
-        replaceAllMessages(branchMessages)
-        await refreshBranchInfo(branchMessages)
+      // `messageId` is the currently-rendered user-turn id (ChatThread
+      // passes `msg.id`). Find its row by matching `activeId` so we can
+      // compute the next/prev sibling id to request.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const biColl = createBranchInfoCollection(agentName) as any
+      let row: BranchInfoRow | undefined
+      try {
+        for (const [, r] of biColl as Iterable<[string, BranchInfoRow]>) {
+          if (r.activeId === messageId) {
+            row = r
+            break
+          }
+        }
+      } catch {
+        // collection not ready
+      }
+      if (!row) return
+      const idx = row.siblings.indexOf(row.activeId)
+      if (idx < 0) return
+      const targetId = direction === 'next' ? row.siblings[idx + 1] : row.siblings[idx - 1]
+      if (!targetId) return
+      // DO responds with a reason='branch-navigate' snapshot carrying both
+      // the target branch's history AND updated branchInfo rows. The
+      // collection subscriptions converge the view — no replaceAllMessages.
+      try {
+        await connection.call('getBranchHistory', [targetId])
+      } catch {
+        // Non-fatal: the client stays on the current branch.
       }
     },
-    [connection, agentName, branchInfo, refreshBranchInfo, replaceAllMessages],
+    [connection, agentName],
   )
 
   /**
@@ -694,8 +681,6 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     forkWithHistory,
     rewind,
     injectQaPair,
-    branchInfo,
-    getBranches,
     resubmitMessage,
     navigateBranch,
   }

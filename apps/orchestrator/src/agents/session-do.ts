@@ -1,4 +1,5 @@
 import type {
+  BranchInfoRow,
   MessagesFrame,
   MessagesPayload,
   SessionMessage as WireSessionMessage,
@@ -241,12 +242,15 @@ export class SessionDO extends Agent<Env, SessionState> {
       // Targeted reconnect snapshot (B1 + B2 single-client scope). The
       // legacy `{type:'messages', messages}` emit was retired in P1
       // sub-phase 1b; the unified frame carries the reconnect payload.
+      // B7: include branchInfo for every user turn with siblings so the
+      // client's branch-info collection hydrates on first paint.
       this.broadcastMessages(
         {
           kind: 'snapshot',
           version: this.messageSeq,
           messages: messages as unknown as WireSessionMessage[],
           reason: 'reconnect',
+          branchInfo: this.computeBranchInfo(messages),
         },
         { targetClientId: connection.id },
       )
@@ -601,6 +605,49 @@ export class SessionDO extends Agent<Env, SessionState> {
     // `{type:'message'}` emit was retired in P1 sub-phase 1b now that the
     // client dispatches exclusively on the unified shape.
     this.broadcastMessages({ kind: 'delta', upsert: [message as unknown as WireSessionMessage] })
+  }
+
+  /**
+   * Compute `BranchInfoRow[]` for every user turn in the given linear history
+   * that has siblings (> 1 user-message branch under the same parent).
+   *
+   * Parent resolution: the Session API (`agents/experimental/memory/session`)
+   * exposes `getBranches(messageId)` but no `getParent()`. We derive the
+   * parent from the ordering of the linear history — the message immediately
+   * preceding a user turn on the active branch is its parent. Turns with no
+   * preceding message (the first turn) are skipped.
+   *
+   * Rows with `siblings.length <= 1` are omitted — the client's
+   * `useBranchInfo` only shows arrows when `total > 1` anyway, and this
+   * keeps the payload small.
+   *
+   * See GH#14 B7.
+   */
+  private computeBranchInfo(history: SessionMessage[]): BranchInfoRow[] {
+    const rows: BranchInfoRow[] = []
+    const nowIso = new Date().toISOString()
+    for (let i = 0; i < history.length; i++) {
+      const msg = history[i]
+      if (msg.role !== 'user') continue
+      const parentId = i > 0 ? history[i - 1].id : null
+      if (!parentId) continue
+      try {
+        const branches = this.session.getBranches(parentId)
+        const siblings = branches.filter((m) => m.role === 'user').map((m) => m.id)
+        if (siblings.length <= 1) continue
+        rows.push({
+          parentMsgId: parentId,
+          sessionId: this.name,
+          siblings,
+          activeId: msg.id,
+          updatedAt: nowIso,
+        })
+      } catch {
+        // Skip on error — branches may be unresolvable if the Session is
+        // mid-mutation; the next snapshot will recompute.
+      }
+    }
+    return rows
   }
 
   /**
@@ -1845,6 +1892,11 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         version: this.messageSeq,
         messages: trimmed as unknown as WireSessionMessage[],
         reason: 'rewind',
+        // B7: rewind may change sibling lists if it removes branches.
+        // Compute fresh rows for the trimmed view; client upserts override
+        // stale rows (the remove-on-empty case isn't supported, but rewind
+        // typically trims rather than deletes branches).
+        branchInfo: this.computeBranchInfo(trimmed),
       })
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to broadcast rewind snapshot:`, err)
@@ -1902,16 +1954,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
   }
 
   @callable()
-  async getBranches(messageId: string): Promise<SessionMessage[]> {
-    try {
-      return this.session.getBranches(messageId)
-    } catch (err) {
-      console.error(`[SessionDO:${this.ctx.id}] Failed to get branches:`, err)
-      return []
-    }
-  }
-
-  @callable()
   async resubmitMessage(
     originalMessageId: string,
     newContent: string,
@@ -1957,11 +1999,15 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       // DO-authored snapshot (B2): broadcast the branch view so all clients
       // realign onto the new leaf. getHistory(leafId) returns the path ending
       // at newUserMsg.id.
+      const resubmitHistory = this.session.getHistory(newUserMsg.id)
       this.broadcastMessages({
         kind: 'snapshot',
         version: this.messageSeq,
-        messages: this.session.getHistory(newUserMsg.id) as unknown as WireSessionMessage[],
+        messages: resubmitHistory as unknown as WireSessionMessage[],
         reason: 'resubmit',
+        // B7: the affected parent now has a new sibling — compute fresh
+        // branchInfo for the resubmitted branch's history.
+        branchInfo: this.computeBranchInfo(resubmitHistory),
       })
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to create branch:`, err)
@@ -1988,16 +2034,21 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     const found = history.find((m) => m.id === leafId)
     if (!found) return { ok: false, error: 'unknown_leaf' }
     if (found.role !== 'user') return { ok: false, error: 'not_on_branch' }
-    // TODO(P4): scope branch-navigate snapshot to the requesting client once
-    // @callable surfaces caller connection id. For now broadcast to all
-    // browser connections — this matches B1 correctness and only over-delivers
-    // when multiple clients are attached to the same session.
+    // Known limitation: scope branch-navigate snapshot to the requesting
+    // client once `@callable` surfaces the caller connection id. The agents
+    // SDK (v0.11) dispatches RPCs via `super.onMessage` with no public
+    // callback for caller identity, so we broadcast to all browser
+    // connections. Harmless over-delivery — matches B1 correctness and the
+    // client's per-session `lastSeq` watermark still drops stale frames.
     const messages = this.session.getHistory(leafId) ?? history
     this.broadcastMessages({
       kind: 'snapshot',
       version: this.messageSeq,
       messages: messages as unknown as WireSessionMessage[],
       reason: 'branch-navigate',
+      // B7: target branch's sibling map so the recipient's UI updates in
+      // lockstep with the history swap.
+      branchInfo: this.computeBranchInfo(messages),
     })
     return { ok: true }
   }
@@ -2006,14 +2057,17 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
   async requestSnapshot(): Promise<{ ok: true } | { ok: false; error: 'session_empty' }> {
     const messages = this.session.getHistory()
     if (messages.length === 0) return { ok: false, error: 'session_empty' }
-    // TODO(P4): scope reconnect snapshot to the requesting client once
-    // @callable surfaces caller connection id. Broadcast to all clients for
-    // now — harmless over-delivery in multi-client sessions.
+    // Known limitation: scope reconnect snapshot to the requesting client
+    // once `@callable` surfaces the caller connection id. Broadcast to all
+    // clients for now — harmless over-delivery in multi-client sessions
+    // (the client's per-session `lastSeq` watermark drops stale frames).
     this.broadcastMessages({
       kind: 'snapshot',
       version: this.messageSeq,
       messages: messages as unknown as WireSessionMessage[],
       reason: 'reconnect',
+      // B7: hydrate branch-info collection alongside the history.
+      branchInfo: this.computeBranchInfo(messages),
     })
     return { ok: true }
   }

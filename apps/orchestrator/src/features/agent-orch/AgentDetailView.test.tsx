@@ -87,8 +87,6 @@ function makeAgent(overrides: Partial<UseCodingAgentResult> = {}): UseCodingAgen
     forkWithHistory: vi.fn(),
     rewind: vi.fn(),
     injectQaPair: vi.fn(),
-    branchInfo: new Map(),
-    getBranches: vi.fn(),
     resubmitMessage: vi.fn(),
     navigateBranch: vi.fn(),
     ...overrides,
@@ -149,10 +147,12 @@ describe('AgentDetailView', () => {
     expect(store.onInterrupt).toBe(interruptFn)
   })
 
-  it('passes branchInfo and onBranchNavigate to ChatThread', () => {
-    const branchInfo = new Map([['usr-1', { current: 1, total: 2, siblings: ['usr-1', 'usr-3'] }]])
+  it('passes onBranchNavigate to ChatThread', () => {
+    // GH#14 P4: branchInfo is no longer a hook-return field — it's derived
+    // inside AgentDetailView from the per-session `branchInfoCollection`.
+    // This test just asserts the ChatThread renders with navigateBranch wired.
     const navigateBranch = vi.fn()
-    const agent = makeAgent({ branchInfo, navigateBranch })
+    const agent = makeAgent({ navigateBranch })
     render(<AgentDetailView name="test" agent={agent} />)
 
     const chatThread = screen.getByTestId('chat-thread')

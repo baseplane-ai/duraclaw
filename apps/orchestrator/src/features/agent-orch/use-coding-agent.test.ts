@@ -122,6 +122,44 @@ vi.mock('~/db/messages-collection', () => {
   }
 })
 
+// P4: branch-info collection mock — backed by a simple Map so tests can
+// seed rows directly and assert on inserts via the snapshot dispatch path.
+const branchInfoStore = new Map<
+  string,
+  {
+    parentMsgId: string
+    sessionId: string
+    siblings: string[]
+    activeId: string
+    updatedAt: string
+  }
+>()
+
+vi.mock('~/db/branch-info-collection', () => {
+  const coll = {
+    has: (key: string) => branchInfoStore.has(key),
+    insert: vi.fn((row: { parentMsgId: string }) => {
+      branchInfoStore.set(row.parentMsgId, row as never)
+    }),
+    update: vi.fn((key: string, patcher: (draft: Record<string, unknown>) => void) => {
+      const existing = branchInfoStore.get(key)
+      if (!existing) return
+      const draft = { ...existing }
+      patcher(draft as unknown as Record<string, unknown>)
+      branchInfoStore.set(key, draft as never)
+    }),
+    [Symbol.iterator]: () => {
+      const entries: Array<[string, unknown]> = []
+      for (const [k, v] of branchInfoStore) entries.push([k, v])
+      return entries[Symbol.iterator]()
+    },
+    utils: {},
+  }
+  return {
+    createBranchInfoCollection: () => coll,
+  }
+})
+
 vi.mock('~/db/agent-sessions-collection', () => ({
   agentSessionsCollection: {
     update: vi.fn(),
@@ -1117,7 +1155,7 @@ describe('legacy gateway_event handling', () => {
   })
 })
 
-describe('branch tracking', () => {
+describe('branch tracking (P4)', () => {
   beforeEach(() => {
     cachedMessagesStore.clear()
     liveStateStore.clear()
@@ -1125,46 +1163,17 @@ describe('branch tracking', () => {
     liveStateSubs.clear()
     capturedUseAgentConfig = null
     vi.clearAllMocks()
+    branchInfoStore.clear()
   })
 
   afterEach(() => {
     vi.restoreAllMocks()
   })
 
-  test('branchInfo is initially an empty Map', () => {
-    const { result } = renderHook(() => useCodingAgent('test-session'))
-    expect(result.current.branchInfo).toBeInstanceOf(Map)
-    expect(result.current.branchInfo.size).toBe(0)
-  })
-
-  test('getBranches calls connection.call with correct args', async () => {
+  test('resubmitMessage forwards RPC call — DO-authored snapshot converges the view', async () => {
     const { result } = renderHook(() => useCodingAgent('test-session'))
 
-    mockCall.mockResolvedValueOnce([
-      { id: 'usr-1', role: 'user', parts: [{ type: 'text', text: 'v1' }] },
-      { id: 'usr-3', role: 'user', parts: [{ type: 'text', text: 'v2' }] },
-    ])
-
-    await act(async () => {
-      const branches = await result.current.getBranches('msg-1')
-      expect(branches).toHaveLength(2)
-    })
-
-    expect(mockCall).toHaveBeenCalledWith('getBranches', ['msg-1'])
-  })
-
-  test('resubmitMessage calls RPC and refreshes messages on success', async () => {
-    const { result } = renderHook(() => useCodingAgent('test-session'))
-
-    // First call: resubmitMessage RPC
     mockCall.mockResolvedValueOnce({ ok: true, leafId: 'usr-5' })
-    // Second call: getMessages to fetch new branch
-    mockCall.mockResolvedValueOnce([
-      { id: 'msg-0', role: 'assistant', parts: [{ type: 'text', text: 'initial' }] },
-      { id: 'usr-5', role: 'user', parts: [{ type: 'text', text: 'edited' }] },
-    ])
-    // Third+ calls: getBranches for refreshBranchInfo (one per user message)
-    mockCall.mockResolvedValue([])
 
     await act(async () => {
       const res = await result.current.resubmitMessage('usr-1', 'edited')
@@ -1173,134 +1182,101 @@ describe('branch tracking', () => {
     })
 
     expect(mockCall).toHaveBeenCalledWith('resubmitMessage', ['usr-1', 'edited'])
-    expect(mockCall).toHaveBeenCalledWith('getMessages', [
-      { session_hint: 'test-session', leafId: 'usr-5' },
-    ])
-    // Messages should be updated
-    expect(result.current.messages).toHaveLength(2)
-    expect(result.current.messages[1].id).toBe('usr-5')
+    // P4: no side-channel getMessages / getBranches RPC — the DO pushes
+    // the new view via its own snapshot frame.
+    expect(mockCall).not.toHaveBeenCalledWith('getMessages', expect.anything())
+    expect(mockCall).not.toHaveBeenCalledWith('getBranches', expect.anything())
   })
 
-  test('resubmitMessage does not update messages on failure', async () => {
+  test('resubmitMessage surfaces DO failure result', async () => {
     const { result } = renderHook(() => useCodingAgent('test-session'))
-
-    // Seed some initial messages via WS replay
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'messages',
-          messages: [{ id: 'usr-1', role: 'user', parts: [{ type: 'text', text: 'original' }] }],
-        }),
-      )
-    })
-
-    expect(result.current.messages).toHaveLength(1)
 
     mockCall.mockResolvedValueOnce({ ok: false, error: 'Original message not found' })
 
     await act(async () => {
       const res = await result.current.resubmitMessage('usr-99', 'nope')
       expect(res.ok).toBe(false)
+      expect(res.error).toBe('Original message not found')
     })
-
-    // Messages unchanged
-    expect(result.current.messages).toHaveLength(1)
-    expect(result.current.messages[0].id).toBe('usr-1')
   })
 
-  test('navigateBranch does nothing when branchInfo is empty', async () => {
+  test('navigateBranch no-ops when branch-info collection has no matching row', async () => {
     const { result } = renderHook(() => useCodingAgent('test-session'))
 
     await act(async () => {
       await result.current.navigateBranch('usr-1', 'next')
     })
 
-    // No RPC calls should be made for getMessages
-    expect(mockCall).not.toHaveBeenCalledWith('getMessages', expect.anything())
+    // No RPC call — row missing.
+    expect(mockCall).not.toHaveBeenCalledWith('getBranchHistory', expect.anything())
   })
 
-  test('navigateBranch fetches messages for target sibling', async () => {
+  test('navigateBranch calls getBranchHistory with the target sibling id', async () => {
+    // Seed the branch-info collection via a snapshot frame carrying
+    // branchInfo (this is the DO → client B7 path).
     const { result } = renderHook(() => useCodingAgent('test-session'))
 
-    // Seed messages with branch info via hydration
-    // First, simulate having branchInfo by setting it via resubmitMessage flow
-    // Or more directly, we can test via the internal state.
+    mockCall.mockResolvedValue({ ok: true })
 
-    // Seed messages
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage(
+          snapshotFrame([{ id: 'usr-1', role: 'user', parts: [{ type: 'text', text: 'v1' }] }], {
+            version: 1,
+            reason: 'reconnect',
+          }),
+        ),
+      )
+    })
+
+    // Manually inject the branchInfo row into the mock collection — the
+    // snapshot path upserts via createBranchInfoCollection().insert.
+    branchInfoStore.set('msg-0', {
+      parentMsgId: 'msg-0',
+      sessionId: 'test-session',
+      siblings: ['usr-1', 'usr-3'],
+      activeId: 'usr-1',
+      updatedAt: '2026-04-19T00:00:00Z',
+    })
+
+    await act(async () => {
+      await result.current.navigateBranch('usr-1', 'next')
+    })
+
+    expect(mockCall).toHaveBeenCalledWith('getBranchHistory', ['usr-3'])
+  })
+
+  test('snapshot payload branchInfo rows land in the branch-info collection', () => {
+    renderHook(() => useCodingAgent('test-session'))
+
     act(() => {
       capturedUseAgentConfig?.onMessage?.(
         makeWsMessage({
           type: 'messages',
-          messages: [
-            { id: 'msg-0', role: 'assistant', parts: [{ type: 'text', text: 'hi' }] },
-            { id: 'usr-1', role: 'user', parts: [{ type: 'text', text: 'v1' }] },
-          ],
+          sessionId: 'test-session',
+          seq: 1,
+          payload: {
+            kind: 'snapshot',
+            version: 1,
+            reason: 'reconnect',
+            messages: [{ id: 'usr-1', role: 'user', parts: [{ type: 'text', text: 'v1' }] }],
+            branchInfo: [
+              {
+                parentMsgId: 'msg-0',
+                sessionId: 'test-session',
+                siblings: ['usr-1', 'usr-3'],
+                activeId: 'usr-1',
+                updatedAt: '2026-04-19T00:00:00Z',
+              },
+            ],
+          },
         }),
       )
     })
 
-    // Mock getBranches to return siblings (called during hydration refreshBranchInfo)
-    // The hydration triggers refreshBranchInfo which calls getBranches for parent of usr-1 (msg-0)
-    mockCall.mockResolvedValueOnce([
-      { id: 'usr-1', role: 'user', parts: [{ type: 'text', text: 'v1' }] },
-      { id: 'usr-3', role: 'user', parts: [{ type: 'text', text: 'v2' }] },
-    ])
-
-    // Trigger hydration which calls refreshBranchInfo
-    await act(async () => {
-      // getMessages RPC returns messages
-      mockCall.mockResolvedValueOnce([
-        { id: 'msg-0', role: 'assistant', parts: [{ type: 'text', text: 'hi' }] },
-        { id: 'usr-1', role: 'user', parts: [{ type: 'text', text: 'v1' }] },
-      ])
-      // getBranches for msg-0 (parent of usr-1)
-      mockCall.mockResolvedValueOnce([
-        { id: 'usr-1', role: 'user', parts: [{ type: 'text', text: 'v1' }] },
-        { id: 'usr-3', role: 'user', parts: [{ type: 'text', text: 'v2' }] },
-      ])
-      capturedUseAgentConfig?.onStateUpdate?.({ status: 'idle' })
-    })
-
-    // Wait for async hydration to complete
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 50))
-    })
-
-    // Now branchInfo should be populated
-    expect(result.current.branchInfo.size).toBeGreaterThanOrEqual(0)
-  })
-
-  test('refreshBranchInfo populates branch data after hydration', async () => {
-    const { result } = renderHook(() => useCodingAgent('branch-test'))
-
-    // Mock getMessages for hydration
-    mockCall.mockResolvedValueOnce([
-      { id: 'msg-0', role: 'assistant', parts: [{ type: 'text', text: 'system' }] },
-      { id: 'usr-1', role: 'user', parts: [{ type: 'text', text: 'hello v1' }] },
-      { id: 'msg-1', role: 'assistant', parts: [{ type: 'text', text: 'reply' }] },
-    ])
-    // Mock getBranches(msg-0) -> returns children including usr-1 and usr-3
-    mockCall.mockResolvedValueOnce([
-      { id: 'usr-1', role: 'user', parts: [{ type: 'text', text: 'hello v1' }] },
-      { id: 'usr-3', role: 'user', parts: [{ type: 'text', text: 'hello v2' }] },
-    ])
-
-    // Trigger hydration
-    await act(async () => {
-      capturedUseAgentConfig?.onStateUpdate?.({ status: 'idle' })
-    })
-
-    // Wait for async operations
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 50))
-    })
-
-    // branchInfo should now contain entry for usr-1
-    const info = result.current.branchInfo.get('usr-1')
-    if (info) {
-      expect(info.current).toBe(1)
-      expect(info.total).toBe(2)
-      expect(info.siblings).toEqual(['usr-1', 'usr-3'])
-    }
+    expect(branchInfoStore.has('msg-0')).toBe(true)
+    const row = branchInfoStore.get('msg-0')!
+    expect(row.siblings).toEqual(['usr-1', 'usr-3'])
+    expect(row.activeId).toBe('usr-1')
   })
 })

@@ -5,6 +5,7 @@
 import { useLiveQuery } from '@tanstack/react-db'
 import { useCallback, useEffect, useMemo } from 'react'
 import { StatusBar } from '~/components/status-bar'
+import { type BranchInfoRow, createBranchInfoCollection } from '~/db/branch-info-collection'
 import { projectsCollection } from '~/db/projects-collection'
 import { upsertSessionLiveState } from '~/db/session-live-state-collection'
 import type { ProjectInfo } from '~/lib/types'
@@ -33,9 +34,34 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
     submitDraft,
     rewind,
     injectQaPair,
-    branchInfo,
     navigateBranch,
   } = agent
+
+  // GH#14 B7: derive a Map<parentMsgId, {current,total,siblings}> from the
+  // per-session `branchInfoCollection` (DO-authored). ChatThread accepts the
+  // Map shape so upstream tests stay unchanged; the Map is rebuilt from the
+  // collection on every reactive update.
+  const branchInfoCollection = useMemo(() => createBranchInfoCollection(sessionId), [sessionId])
+  const { data: branchInfoRows } = useLiveQuery(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (q) => q.from({ rows: branchInfoCollection as any }),
+    [branchInfoCollection],
+  )
+  const branchInfo = useMemo(() => {
+    const map = new Map<string, { current: number; total: number; siblings: string[] }>()
+    if (!branchInfoRows) return map
+    for (const row of branchInfoRows as unknown as BranchInfoRow[]) {
+      const idx = row.siblings.indexOf(row.activeId)
+      // Key the map on `activeId` (the user-message id the UI is currently
+      // rendering under `msg.id`), matching the pre-B7 client contract.
+      map.set(row.activeId, {
+        current: idx >= 0 ? idx + 1 : 1,
+        total: row.siblings.length,
+        siblings: row.siblings,
+      })
+    }
+    return map
+  }, [branchInfoRows])
 
   // Only onStop / onInterrupt remain in the Zustand store — they're
   // consumed by the composer footer action buttons, not by StatusBar.
