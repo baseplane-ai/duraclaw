@@ -2,8 +2,9 @@
  * AgentDetailView — Live status display for a single SessionDO instance.
  */
 
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
 import { StatusBar } from '~/components/status-bar'
+import { readSessionStatusCache, writeSessionStatusCache } from '~/db/session-status-collection'
 import type { ProjectInfo } from '~/lib/types'
 import { useStatusBarStore } from '~/stores/status-bar'
 import { ChatThread } from './ChatThread'
@@ -41,17 +42,52 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
   const statusBarSet = useStatusBarStore((s) => s.set)
   const statusBarClear = useStatusBarStore((s) => s.clear)
 
+  // Cache-first hydration — runs before first paint on tab switch so the
+  // status bar renders immediately with persisted values instead of flashing
+  // blank while waiting on WS state sync + getContextUsage RPC + projects
+  // fetch. Live values from the hook overwrite cached values below once they
+  // arrive. Safe to call synchronously: readSessionStatusCache is a sync
+  // collection read and no-ops when OPFS is unavailable.
+  useLayoutEffect(() => {
+    const cached = readSessionStatusCache(sessionId)
+    if (!cached) return
+    statusBarSet({
+      state: cached.state,
+      contextUsage: cached.contextUsage,
+      kataState: cached.kataState,
+      worktreeInfo: cached.worktreeInfo,
+      sessionResult: cached.sessionResult,
+    })
+  }, [sessionId, statusBarSet])
+
+  // Write live values to the store. Guarded so a null live value (WS hasn't
+  // delivered state yet, getContextUsage hasn't fired, etc.) doesn't clobber
+  // the cache-first hydration above. wsReadyState / onStop / onInterrupt are
+  // always non-cached and always written through.
   useEffect(() => {
     statusBarSet({
-      state,
+      ...(state ? { state } : {}),
       wsReadyState,
-      contextUsage: contextUsage ?? null,
-      sessionResult: sessionResult ?? null,
+      ...(contextUsage ? { contextUsage } : {}),
+      ...(sessionResult ? { sessionResult } : {}),
       onStop: stop,
       onInterrupt: interrupt,
-      kataState: kataState ?? null,
+      ...(kataState ? { kataState } : {}),
     })
   }, [state, wsReadyState, contextUsage, sessionResult, stop, interrupt, kataState, statusBarSet])
+
+  // Write-through to the persistent cache on every meaningful live change so
+  // the next tab switch can hydrate instantly. Skips writes when everything
+  // is still null (nothing to cache yet).
+  useEffect(() => {
+    if (!state && !contextUsage && !kataState && !sessionResult) return
+    writeSessionStatusCache(sessionId, {
+      state: state ?? null,
+      contextUsage: contextUsage ?? null,
+      kataState: kataState ?? null,
+      sessionResult: sessionResult ?? null,
+    })
+  }, [sessionId, state, contextUsage, kataState, sessionResult])
 
   useEffect(() => {
     return () => statusBarClear()
@@ -73,16 +109,18 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
         .then((data) => {
           const match = (data as ProjectInfo[]).find((p) => p.name === projectName)
           if (match) {
-            statusBarSet({
-              worktreeInfo: {
-                name: match.name,
-                branch: match.branch,
-                dirty: match.dirty,
-                ahead: match.ahead ?? 0,
-                behind: match.behind ?? 0,
-                pr: match.pr ?? null,
-              },
-            })
+            const worktreeInfo = {
+              name: match.name,
+              branch: match.branch,
+              dirty: match.dirty,
+              ahead: match.ahead ?? 0,
+              behind: match.behind ?? 0,
+              pr: match.pr ?? null,
+            }
+            statusBarSet({ worktreeInfo })
+            // Write-through so the next tab switch renders the branch + PR
+            // info without waiting on /api/gateway/projects/all again.
+            writeSessionStatusCache(sessionId, { worktreeInfo })
           }
         })
         .catch(() => {})
@@ -94,7 +132,7 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
     return () => {
       if (worktreeInterval.current) clearInterval(worktreeInterval.current)
     }
-  }, [projectName, statusBarSet])
+  }, [projectName, sessionId, statusBarSet])
 
   const handleSendSuggestion = useCallback(
     (text: string) => {
