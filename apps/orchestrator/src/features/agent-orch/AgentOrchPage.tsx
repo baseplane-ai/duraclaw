@@ -63,6 +63,12 @@ function AgentOrchContent() {
     const session = sessions.find((s) => s.id === searchSessionId)
     if (session?.project) {
       deepLinkedRef.current = searchSessionId
+      if (session?.kataIssue != null) {
+        openTab(`chain:${session.kataIssue}`, {
+          kind: 'chain',
+          issueNumber: session.kataIssue,
+        })
+      }
       openTab(searchSessionId, { project: session.project })
     }
     // If sessions haven't loaded yet, this is a no-op. The effect
@@ -114,6 +120,10 @@ function AgentOrchContent() {
   const handleSpawn = useCallback(
     async (config: SpawnFormConfig & { newTab?: boolean }) => {
       try {
+        // TODO: wire worktree checkout here when AgentOrchPage learns
+        // kataIssue from the spawn form. Chain-scoped code-touching spawns
+        // from the kanban go through advance-chain.ts which handles this;
+        // freeform spawns from this form currently bypass the gate.
         const resp = await fetch('/api/sessions', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -143,6 +153,13 @@ function AgentOrchContent() {
         if (activeDraft) {
           replaceTab(activeDraft, sessionId)
         } else {
+          const session = sessions.find((s) => s.id === sessionId)
+          if (session?.kataIssue != null) {
+            openTab(`chain:${session.kataIssue}`, {
+              kind: 'chain',
+              issueNumber: session.kataIssue,
+            })
+          }
           openTab(sessionId, { project: config.project, forceNewTab: config.newTab })
         }
         navigate({ to: '/', search: { session: sessionId } })
@@ -150,12 +167,18 @@ function AgentOrchContent() {
         console.error('[AgentOrch] Spawn failed:', err)
       }
     },
-    [navigate, openTab, replaceTab, activeSessionId],
+    [navigate, openTab, replaceTab, activeSessionId, sessions],
   )
 
   const handleSelectSession = useCallback(
     (sessionId: string) => {
       const session = sessions.find((s) => s.id === sessionId)
+      if (session?.kataIssue != null) {
+        openTab(`chain:${session.kataIssue}`, {
+          kind: 'chain',
+          issueNumber: session.kataIssue,
+        })
+      }
       openTab(sessionId, { project: session?.project })
       setSpawnConfig(null)
       navigate({ to: '/', search: { session: sessionId } })

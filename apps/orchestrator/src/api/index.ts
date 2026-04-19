@@ -2,16 +2,20 @@ import { and, asc, desc, eq, inArray, like, or, sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import { Hono } from 'hono'
 import * as schema from '~/db/schema'
-import { agentSessions, userPreferences, userTabs } from '~/db/schema'
+import { agentSessions, auditLog, userPreferences, userTabs, worktreeReservations } from '~/db/schema'
 import { validateActionToken } from '~/lib/action-token'
 import { createAuth } from '~/lib/auth'
 import { type PushPayload, sendPushNotification } from '~/lib/push'
 import type {
   AgentSessionRow,
+  ChainSummary,
   ContentBlock,
   ProjectInfo,
+  SpecStatusResponse,
   UserPreferencesRow,
   UserTabRow,
+  VpStatusResponse,
+  WorktreeReservation,
 } from '~/lib/types'
 import { authMiddleware } from './auth-middleware'
 import { authRoutes } from './auth-routes'
@@ -26,6 +30,11 @@ interface CreateSessionBody {
   system_prompt?: string
   sdk_session_id?: string
   agent?: string
+  /** Optional GH issue number stamp — used by the kanban Start-next /
+   *  drag-to-advance flow (GH#16 P3 U3) so the newly spawned session
+   *  shows up in its chain immediately, before kata's own sync writes
+   *  the value back. */
+  kataIssue?: number
 }
 
 const ACTIVE_STATUSES = ['running', 'waiting_input', 'waiting_permission'] as const
@@ -57,6 +66,47 @@ const EFFORTS = new Set(['low', 'medium', 'high'])
 
 function getDb(env: ApiAppEnv['Bindings']) {
   return drizzle(env.AUTH_DB, { schema })
+}
+
+/**
+ * Verify a GitHub webhook `X-Hub-Signature-256` header against the raw body
+ * using HMAC-SHA-256. Workers runtime — uses Web Crypto, not node:crypto.
+ *
+ * Constant-time comparison is performed manually over the decoded byte arrays
+ * (length-mismatched inputs still walk the full loop to avoid leaking length
+ * via timing, though they're rejected up front).
+ */
+async function verifyGithubSignature(
+  secret: string,
+  header: string | undefined,
+  rawBody: string,
+): Promise<boolean> {
+  if (!header) return false
+  const [scheme, hex] = header.split('=')
+  if (scheme !== 'sha256' || !hex) return false
+
+  const enc = new TextEncoder()
+  const key = await crypto.subtle.importKey(
+    'raw',
+    enc.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  )
+  const mac = await crypto.subtle.sign('HMAC', key, enc.encode(rawBody))
+  const want = new Uint8Array(mac)
+
+  if (hex.length !== want.length * 2) return false
+  const got = new Uint8Array(want.length)
+  for (let i = 0; i < want.length; i++) {
+    const byte = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16)
+    if (!Number.isFinite(byte)) return false
+    got[i] = byte
+  }
+
+  let diff = 0
+  for (let i = 0; i < want.length; i++) diff |= got[i] ^ want[i]
+  return diff === 0
 }
 
 /** Resolve a session ID to a DO ID — hex IDs use idFromString, UUIDs use idFromName */
@@ -152,6 +202,298 @@ async function getOwnedSession(
   }
 
   return { ok: true, session: row as AgentSessionRow }
+}
+
+// ── GH#16 P3 Unit 1 — chain list + precondition helpers ────────────
+//
+// Module-level caches for GitHub issue/PR lists. Keyed by repo (we only
+// ever target `env.GITHUB_REPO`, but keying by repo keeps the cache correct
+// if the env changes between requests — e.g. a test worker). TTL 5 minutes
+// per spec "Resolved Questions". Cache is process-local; every Worker isolate
+// keeps its own copy, which is fine for a 5min TTL and low QPS.
+
+interface GhIssue {
+  number: number
+  title: string
+  state: 'open' | 'closed'
+  updated_at?: string
+  labels?: Array<{ name: string }>
+  pull_request?: unknown // when present, the issue is actually a PR
+}
+
+interface GhPull {
+  number: number
+  head?: { ref?: string }
+  body?: string | null
+}
+
+interface GhIssueCacheEntry {
+  issues: GhIssue[]
+  moreAvailable: boolean
+  expiresAt: number
+}
+
+interface GhPullCacheEntry {
+  pulls: GhPull[]
+  expiresAt: number
+}
+
+const GH_CACHE_TTL_MS = 5 * 60 * 1000
+const ghIssueCache = new Map<string, GhIssueCacheEntry>()
+const ghPullCache = new Map<string, GhPullCacheEntry>()
+
+function ghHeaders(env: ApiAppEnv['Bindings']): Record<string, string> {
+  const headers: Record<string, string> = {
+    Accept: 'application/vnd.github+json',
+    'User-Agent': 'duraclaw',
+  }
+  if (env.GITHUB_API_TOKEN) {
+    headers.Authorization = `Bearer ${env.GITHUB_API_TOKEN}`
+  }
+  return headers
+}
+
+/**
+ * Fetch up to 300 issues (3 pages × 100) from the configured GH repo.
+ * Response includes a `moreAvailable` flag set when page 3 came back full
+ * (indicating the caller truncated the feed). PR entries are filtered out
+ * at merge time — the issues endpoint returns both but GH tags PRs with a
+ * `pull_request` sub-object.
+ */
+async function fetchGithubIssues(
+  env: ApiAppEnv['Bindings'],
+): Promise<{ issues: GhIssue[]; moreAvailable: boolean }> {
+  const repo = env.GITHUB_REPO
+  if (!repo) return { issues: [], moreAvailable: false }
+
+  const cached = ghIssueCache.get(repo)
+  if (cached && cached.expiresAt > Date.now()) {
+    return { issues: cached.issues, moreAvailable: cached.moreAvailable }
+  }
+
+  const all: GhIssue[] = []
+  let moreAvailable = false
+  for (let page = 1; page <= 3; page++) {
+    const url = `https://api.github.com/repos/${repo}/issues?state=all&per_page=100&page=${page}`
+    const resp = await fetch(url, { headers: ghHeaders(env) })
+    if (!resp.ok) {
+      // Degrade gracefully — return whatever we have; do not populate cache
+      // on error so the next call retries.
+      return { issues: all, moreAvailable: false }
+    }
+    const batch = (await resp.json()) as GhIssue[]
+    all.push(...batch)
+    if (batch.length < 100) {
+      break
+    }
+    if (page === 3 && batch.length === 100) {
+      moreAvailable = true
+    }
+  }
+
+  ghIssueCache.set(repo, {
+    issues: all,
+    moreAvailable,
+    expiresAt: Date.now() + GH_CACHE_TTL_MS,
+  })
+  return { issues: all, moreAvailable }
+}
+
+/** Fetch up to 300 PRs from the configured GH repo, same cache strategy as issues. */
+async function fetchGithubPulls(env: ApiAppEnv['Bindings']): Promise<GhPull[]> {
+  const repo = env.GITHUB_REPO
+  if (!repo) return []
+
+  const cached = ghPullCache.get(repo)
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.pulls
+  }
+
+  const all: GhPull[] = []
+  for (let page = 1; page <= 3; page++) {
+    const url = `https://api.github.com/repos/${repo}/pulls?state=all&per_page=100&page=${page}`
+    const resp = await fetch(url, { headers: ghHeaders(env) })
+    if (!resp.ok) {
+      return all
+    }
+    const batch = (await resp.json()) as GhPull[]
+    all.push(...batch)
+    if (batch.length < 100) break
+  }
+
+  ghPullCache.set(repo, { pulls: all, expiresAt: Date.now() + GH_CACHE_TTL_MS })
+  return all
+}
+
+function deriveIssueType(
+  labels: Array<{ name: string }> | undefined,
+): 'bug' | 'enhancement' | 'other' {
+  const names = new Set((labels ?? []).map((l) => l.name))
+  // Precedence per spec B7: bug > enhancement > other
+  if (names.has('bug')) return 'bug'
+  if (names.has('enhancement')) return 'enhancement'
+  return 'other'
+}
+
+const COLUMN_QUALIFYING_MODES = new Set([
+  'research',
+  'planning',
+  'implementation',
+  'task',
+  'verify',
+])
+
+function modeToColumn(mode: string): ChainSummary['column'] | null {
+  switch (mode) {
+    case 'research':
+      return 'research'
+    case 'planning':
+      return 'planning'
+    case 'implementation':
+    case 'task':
+      return 'implementation'
+    case 'verify':
+      return 'verify'
+    default:
+      return null
+  }
+}
+
+/**
+ * Pick the current kanban column for a chain. Rules (spec B7):
+ *   1. Issue closed → `done`
+ *   2. No sessions → `backlog`
+ *   3. Latest session whose kataMode is in the qualifying set (research,
+ *      planning, implementation, task, verify) — skip debug/freeform side
+ *      quests. Use the session's lastActivity (fall back to createdAt) for
+ *      "latest".
+ *   4. Fallback `backlog`.
+ */
+function deriveColumn(
+  sessions: Array<{ kataMode: string | null; lastActivity: string | null; createdAt: string }>,
+  issueState: 'open' | 'closed',
+): ChainSummary['column'] {
+  if (issueState === 'closed') return 'done'
+  if (!sessions.length) return 'backlog'
+
+  let bestMode: string | null = null
+  let bestTs = -Infinity
+  for (const s of sessions) {
+    if (!s.kataMode || !COLUMN_QUALIFYING_MODES.has(s.kataMode)) continue
+    const ts = new Date(s.lastActivity ?? s.createdAt).getTime()
+    if (Number.isFinite(ts) && ts > bestTs) {
+      bestTs = ts
+      bestMode = s.kataMode
+    }
+  }
+
+  if (bestMode) {
+    const col = modeToColumn(bestMode)
+    if (col) return col
+  }
+  return 'backlog'
+}
+
+/**
+ * Find a matching PR for an issue. Two detection strategies (first match
+ * wins per PR; we scan all PRs and return the first that binds):
+ *   1. Branch pattern `^(feature|fix|feat)/(\d+)[-_]` on `pull_request.head.ref`
+ *   2. Body contains `Closes #N` or `Fixes #N` (case-insensitive)
+ */
+function findPrForIssue(pulls: GhPull[], issueNumber: number): number | undefined {
+  for (const pr of pulls) {
+    const branch = pr.head?.ref ?? ''
+    const branchMatch = branch.match(/^(?:feature|fix|feat)\/(\d+)[-_]/)
+    if (branchMatch && Number.parseInt(branchMatch[1], 10) === issueNumber) {
+      return pr.number
+    }
+    const body = pr.body ?? ''
+    // `m` flag so multi-line bodies are scanned per line; `i` for case insensitivity.
+    const bodyRe = new RegExp(`(?:closes|fixes)\\s+#${issueNumber}(?![0-9])`, 'i')
+    if (bodyRe.test(body)) {
+      return pr.number
+    }
+  }
+  return undefined
+}
+
+/**
+ * Tiny YAML frontmatter parser — handles `---\n<lines>\n---\n` blocks with
+ * `key: value` lines. Values are trimmed and stripped of matching outer
+ * quotes. Good enough for spec/VP metadata where we only read `status`-style
+ * scalars; does not support nested maps or arrays.
+ */
+function parseFrontmatter(markdown: string): Record<string, string> {
+  if (!markdown.startsWith('---\n')) return {}
+  const end = markdown.indexOf('\n---\n', 4)
+  if (end < 0) return {}
+  const block = markdown.slice(4, end)
+  const out: Record<string, string> = {}
+  for (const line of block.split('\n')) {
+    const m = line.match(/^([a-zA-Z_][\w-]*):\s*(.*)$/)
+    if (m) out[m[1]] = m[2].replace(/^["']|["']$/g, '').trim()
+  }
+  return out
+}
+
+/**
+ * Read a file from the gateway's project-browse endpoint. Returns null on
+ * any gateway error (matches spec "graceful degrade" for spec/VP status).
+ */
+async function fetchGatewayFile(
+  env: ApiAppEnv['Bindings'],
+  projectName: string,
+  relPath: string,
+): Promise<string | null> {
+  if (!env.CC_GATEWAY_URL) return null
+  const httpBase = env.CC_GATEWAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+  const url = new URL(
+    `/projects/${encodeURIComponent(projectName)}/files/${relPath
+      .split('/')
+      .map(encodeURIComponent)
+      .join('/')}`,
+    httpBase,
+  )
+  const headers: Record<string, string> = {}
+  if (env.CC_GATEWAY_SECRET) headers.Authorization = `Bearer ${env.CC_GATEWAY_SECRET}`
+  try {
+    const resp = await fetch(url.toString(), { headers })
+    if (!resp.ok) return null
+    return await resp.text()
+  } catch {
+    return null
+  }
+}
+
+interface GatewayFileEntry {
+  name: string
+  path?: string
+  type?: string
+  modified?: string | number
+}
+
+/** List files under a project-relative directory via the gateway. */
+async function listGatewayFiles(
+  env: ApiAppEnv['Bindings'],
+  projectName: string,
+  dirPath: string,
+): Promise<GatewayFileEntry[] | null> {
+  if (!env.CC_GATEWAY_URL) return null
+  const httpBase = env.CC_GATEWAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+  const url = new URL(`/projects/${encodeURIComponent(projectName)}/files`, httpBase)
+  url.searchParams.set('path', dirPath)
+  url.searchParams.set('depth', '1')
+  const headers: Record<string, string> = {}
+  if (env.CC_GATEWAY_SECRET) headers.Authorization = `Bearer ${env.CC_GATEWAY_SECRET}`
+  try {
+    const resp = await fetch(url.toString(), { headers })
+    if (!resp.ok) return null
+    const data = (await resp.json()) as { entries?: GatewayFileEntry[] } | GatewayFileEntry[]
+    if (Array.isArray(data)) return data
+    return data.entries ?? []
+  } catch {
+    return null
+  }
 }
 
 export function createApiApp() {
@@ -298,6 +640,91 @@ export function createApiApp() {
       .run()
 
     return c.json({ ok: true, userId: result.user.id, role: 'admin' })
+  })
+
+  // GitHub webhook — MUST bypass authMiddleware (signature is the auth).
+  // Registered before `app.use('/api/*', authMiddleware)` so the middleware
+  // doesn't see unauthenticated webhook traffic. Signature verification uses
+  // Web Crypto (Workers runtime — no node:crypto `timingSafeEqual`).
+  app.post('/api/webhooks/github', async (c) => {
+    if (!c.env.GITHUB_WEBHOOK_SECRET) {
+      return c.json({ error: 'Webhook not configured' }, 503)
+    }
+
+    const rawBody = await c.req.text()
+    const sig = c.req.header('x-hub-signature-256')
+    const valid = await verifyGithubSignature(c.env.GITHUB_WEBHOOK_SECRET, sig, rawBody)
+    if (!valid) {
+      return c.json({ error: 'Invalid signature' }, 401)
+    }
+
+    let payload: {
+      repository?: { full_name?: string }
+      action?: string
+      issue?: { number?: number }
+      pull_request?: {
+        number?: number
+        merged?: boolean
+        head?: { ref?: string }
+        body?: string | null
+      }
+    }
+    try {
+      payload = JSON.parse(rawBody)
+    } catch {
+      // Malformed JSON post-signature is still an ack — we verified the body
+      // belongs to GitHub. Return 200 with an ignored marker.
+      return c.json({ ignored: 'invalid json' })
+    }
+
+    if (payload.repository?.full_name !== c.env.GITHUB_REPO) {
+      return c.json({ ignored: 'wrong repo' })
+    }
+
+    const event = c.req.header('x-github-event')
+    let issueNumber: number | undefined
+
+    if (event === 'issues' && payload.action === 'closed') {
+      issueNumber = payload.issue?.number
+    } else if (
+      event === 'pull_request' &&
+      payload.action === 'closed' &&
+      payload.pull_request?.merged === true
+    ) {
+      const branchRef = payload.pull_request.head?.ref ?? ''
+      const branchMatch = branchRef.match(/^(?:feature|fix|feat)\/(\d+)[-_]/)
+      if (branchMatch) {
+        issueNumber = Number.parseInt(branchMatch[1], 10)
+      } else {
+        const body = payload.pull_request.body ?? ''
+        const bodyMatch = body.match(/(?:closes|fixes)\s+#(\d+)/i)
+        if (bodyMatch) {
+          issueNumber = Number.parseInt(bodyMatch[1], 10)
+        }
+      }
+
+      if (issueNumber === undefined || !Number.isFinite(issueNumber)) {
+        console.log(
+          '[gh-webhook] PR merged without linkable issue:',
+          payload.pull_request.number,
+        )
+        return c.json({ ignored: 'no linkable issue' })
+      }
+    } else {
+      return c.json({ ignored: true })
+    }
+
+    if (issueNumber === undefined || !Number.isFinite(issueNumber)) {
+      return c.json({ ignored: true })
+    }
+
+    const db = getDb(c.env)
+    const deleted = await db
+      .delete(worktreeReservations)
+      .where(eq(worktreeReservations.issueNumber, issueNumber))
+      .returning({ worktree: worktreeReservations.worktree })
+
+    return c.json({ released: true, issueNumber, deleted: deleted.length })
   })
 
   app.use('/api/*', authMiddleware)
@@ -911,6 +1338,15 @@ export function createApiApp() {
       return c.json({ error: 'Missing required fields: project, prompt' }, 400)
     }
 
+    // Validate kataIssue — must be a positive integer if supplied. This
+    // protects downstream consumers (chain joins, worktree reservations)
+    // from negative / fractional / NaN issue numbers.
+    if (body.kataIssue !== undefined && body.kataIssue !== null) {
+      if (!Number.isInteger(body.kataIssue) || body.kataIssue <= 0) {
+        return c.json({ error: 'invalid_kata_issue' }, 400)
+      }
+    }
+
     const projectPath = await resolveProjectPath(c.env, body.project)
 
     const doId = c.env.SESSION_AGENT.newUniqueId()
@@ -968,7 +1404,7 @@ export function createApiApp() {
       totalCostUsd: null as number | null,
       messageCount: null as number | null,
       kataMode: null as string | null,
-      kataIssue: null as number | null,
+      kataIssue: typeof body.kataIssue === 'number' ? body.kataIssue : (null as number | null),
       kataPhase: null as string | null,
     }
 
@@ -1211,6 +1647,490 @@ export function createApiApp() {
     }
 
     return c.json({ status: 'idle' })
+  })
+
+  // ── Chain worktree reservations (GH#16 Feature 3E / U2) ──────────
+  //
+  // Concurrency: D1's single-writer SQLite semantics + the `worktree`
+  // PRIMARY KEY on worktree_reservations make checkout safe without an
+  // explicit mutex. If a race slips through SELECT, INSERT throws a
+  // UNIQUE constraint error which we catch and translate into a 409
+  // with the winning reservation.
+
+  const FORCE_RELEASE_STALE_DAYS = 7
+  const FORCE_RELEASE_STALE_MS = FORCE_RELEASE_STALE_DAYS * 86_400_000
+
+  function reservationToDto(
+    r: typeof worktreeReservations.$inferSelect,
+  ): WorktreeReservation {
+    return {
+      issueNumber: r.issueNumber,
+      worktree: r.worktree,
+      ownerId: r.ownerId,
+      heldSince: r.heldSince,
+      lastActivityAt: r.lastActivityAt,
+      modeAtCheckout: r.modeAtCheckout,
+      stale: !!r.stale,
+    }
+  }
+
+  app.post('/api/chains/:issue/checkout', async (c) => {
+    const userId = c.get('userId')
+    const issueNumber = Number.parseInt(c.req.param('issue'), 10)
+    if (!Number.isFinite(issueNumber)) {
+      return c.json({ error: 'Invalid issue number' }, 400)
+    }
+
+    const body = (await c.req.json().catch(() => null)) as {
+      worktree?: unknown
+      modeAtCheckout?: unknown
+    } | null
+    if (!body || typeof body.worktree !== 'string' || body.worktree.length === 0) {
+      return c.json({ error: 'Missing required field: worktree' }, 400)
+    }
+    const worktree = body.worktree
+    const modeAtCheckout =
+      typeof body.modeAtCheckout === 'string' && body.modeAtCheckout.length > 0
+        ? body.modeAtCheckout
+        : 'implementation'
+
+    const db = getDb(c.env)
+    const now = new Date().toISOString()
+
+    const existingRows = await db
+      .select()
+      .from(worktreeReservations)
+      .where(eq(worktreeReservations.worktree, worktree))
+      .limit(1)
+    const existing = existingRows[0]
+
+    if (existing) {
+      if (existing.issueNumber === issueNumber) {
+        // Same-chain re-entry — idempotent refresh.
+        const refreshed = await db
+          .update(worktreeReservations)
+          .set({ lastActivityAt: now, stale: false })
+          .where(eq(worktreeReservations.worktree, worktree))
+          .returning()
+        const row = refreshed[0] ?? { ...existing, lastActivityAt: now, stale: false }
+        return c.json({ reservation: reservationToDto(row) })
+      }
+      return c.json(
+        {
+          conflict: reservationToDto(existing),
+          message: `Worktree held by chain #${existing.issueNumber}`,
+        },
+        409,
+      )
+    }
+
+    try {
+      const inserted = await db
+        .insert(worktreeReservations)
+        .values({
+          worktree,
+          issueNumber,
+          ownerId: userId,
+          heldSince: now,
+          lastActivityAt: now,
+          modeAtCheckout,
+          stale: false,
+        })
+        .returning()
+      return c.json({ reservation: reservationToDto(inserted[0]) })
+    } catch (err) {
+      // UNIQUE constraint race — re-read and return 409 with winner.
+      const raceRows = await db
+        .select()
+        .from(worktreeReservations)
+        .where(eq(worktreeReservations.worktree, worktree))
+        .limit(1)
+      const winner = raceRows[0]
+      if (winner && winner.issueNumber === issueNumber) {
+        // Unlikely but possible: peer request was for the same chain.
+        return c.json({ reservation: reservationToDto(winner) })
+      }
+      if (winner) {
+        return c.json(
+          {
+            conflict: reservationToDto(winner),
+            message: `Worktree held by chain #${winner.issueNumber}`,
+          },
+          409,
+        )
+      }
+      // Row disappeared between INSERT failure and re-read — surface the
+      // original error rather than invent a state.
+      const message = err instanceof Error ? err.message : 'Checkout failed'
+      return c.json({ error: message }, 500)
+    }
+  })
+
+  app.post('/api/chains/:issue/release', async (c) => {
+    const userId = c.get('userId')
+    const issueNumber = Number.parseInt(c.req.param('issue'), 10)
+    if (!Number.isFinite(issueNumber)) {
+      return c.json({ error: 'Invalid issue number' }, 400)
+    }
+
+    const db = getDb(c.env)
+    const targets = await db
+      .select()
+      .from(worktreeReservations)
+      .where(eq(worktreeReservations.issueNumber, issueNumber))
+    if (targets.length === 0) {
+      // Idempotent — no reservation means nothing to release.
+      return c.json({ released: true, count: 0 })
+    }
+
+    // Ownership check — only the reservation owner may call /release.
+    // Non-owners must use /force-release (which enforces the stale gate).
+    const nonOwned = targets.filter((r) => r.ownerId !== userId)
+    if (nonOwned.length > 0) {
+      return c.json({ error: 'not_owner', reservation: nonOwned[0] }, 403)
+    }
+
+    await db
+      .delete(worktreeReservations)
+      .where(eq(worktreeReservations.issueNumber, issueNumber))
+
+    for (const r of targets) {
+      await db.insert(auditLog).values({
+        action: 'reservation_released',
+        userId,
+        details: JSON.stringify({ issueNumber, worktree: r.worktree }),
+      })
+    }
+
+    return c.json({ released: true, count: targets.length })
+  })
+
+  app.post('/api/chains/:issue/force-release', async (c) => {
+    const userId = c.get('userId')
+    const issueNumber = Number.parseInt(c.req.param('issue'), 10)
+    if (!Number.isFinite(issueNumber)) {
+      return c.json({ error: 'Invalid issue number' }, 400)
+    }
+
+    const body = (await c.req.json().catch(() => null)) as {
+      confirmation?: unknown
+      worktree?: unknown
+    } | null
+    if (!body || body.confirmation !== true) {
+      return c.json({ message: 'Missing confirmation' }, 400)
+    }
+    const worktreeFilter = typeof body.worktree === 'string' ? body.worktree : undefined
+
+    const db = getDb(c.env)
+    const targets = worktreeFilter
+      ? await db
+          .select()
+          .from(worktreeReservations)
+          .where(
+            and(
+              eq(worktreeReservations.issueNumber, issueNumber),
+              eq(worktreeReservations.worktree, worktreeFilter),
+            ),
+          )
+      : await db
+          .select()
+          .from(worktreeReservations)
+          .where(eq(worktreeReservations.issueNumber, issueNumber))
+
+    if (targets.length === 0) {
+      return c.json({ message: 'No reservation for this chain' }, 404)
+    }
+
+    const staleCutoff = Date.now() - FORCE_RELEASE_STALE_MS
+    for (const r of targets) {
+      const lastActivityMs = new Date(r.lastActivityAt).getTime()
+      const isStale = !!r.stale || (Number.isFinite(lastActivityMs) && lastActivityMs < staleCutoff)
+      if (!isStale) {
+        return c.json(
+          {
+            message: 'Reservation not stale enough',
+            staleAfterDays: FORCE_RELEASE_STALE_DAYS,
+            lastActivity: r.lastActivityAt,
+          },
+          403,
+        )
+      }
+    }
+
+    // All targets pass the gate — delete + audit.
+    for (const r of targets) {
+      await db
+        .delete(worktreeReservations)
+        .where(eq(worktreeReservations.worktree, r.worktree))
+      await db.insert(auditLog).values({
+        action: 'force_release_worktree',
+        userId,
+        details: JSON.stringify({
+          issueNumber,
+          worktree: r.worktree,
+          previousOwner: r.ownerId,
+          heldSince: r.heldSince,
+        }),
+      })
+    }
+
+    return c.json({ released: true, forced: true, count: targets.length })
+  })
+
+  // ── Chain list + precondition endpoints (GH#16 P3 U1) ────────────
+
+  app.get('/api/chains', async (c) => {
+    const userId = c.get('userId')
+    const db = getDb(c.env)
+
+    // Parse + validate stale filter early so we can 400 before doing work.
+    const staleParam = c.req.query('stale')
+    let staleCutoff: number | null = null
+    if (typeof staleParam === 'string' && staleParam.length > 0) {
+      const m = staleParam.match(/^(\d+)d$/)
+      if (!m) return c.json({ error: 'Invalid stale format — expected `{N}d`' }, 400)
+      const days = Number.parseInt(m[1], 10)
+      if (!Number.isFinite(days) || days <= 0) {
+        return c.json({ error: 'Invalid stale format — expected `{N}d` with N > 0' }, 400)
+      }
+      staleCutoff = Date.now() - days * 86_400_000
+    }
+
+    const mineFilter = c.req.query('mine') !== undefined
+    const laneFilter = c.req.query('lane')
+    const columnFilter = c.req.query('column')
+    const projectFilter = c.req.query('project')
+
+    // 1. Collect issue numbers from D1.
+    const d1IssueRows = await db
+      .selectDistinct({ kataIssue: agentSessions.kataIssue })
+      .from(agentSessions)
+      .where(sql`${agentSessions.kataIssue} IS NOT NULL`)
+    const d1IssueNumbers = new Set<number>()
+    for (const row of d1IssueRows) {
+      if (typeof row.kataIssue === 'number' && Number.isFinite(row.kataIssue)) {
+        d1IssueNumbers.add(row.kataIssue)
+      }
+    }
+
+    // 2. Fetch GH issues (cached).
+    const { issues: ghIssues, moreAvailable } = await fetchGithubIssues(c.env)
+    const ghIssueByNumber = new Map<number, GhIssue>()
+    for (const issue of ghIssues) {
+      // Filter out PRs — GH's /issues endpoint interleaves them.
+      if (issue.pull_request) continue
+      ghIssueByNumber.set(issue.number, issue)
+    }
+
+    // 3. Union of issue numbers.
+    const allIssueNumbers = new Set<number>([...d1IssueNumbers, ...ghIssueByNumber.keys()])
+
+    // Fetch PRs once for matching (also cached).
+    const pulls = await fetchGithubPulls(c.env)
+
+    // Pre-fetch all relevant sessions + reservations in two bulk queries to
+    // avoid N×M SELECTs.
+    const issueNumArray = Array.from(allIssueNumbers)
+    const allSessions = issueNumArray.length
+      ? ((await db
+          .select()
+          .from(agentSessions)
+          .where(inArray(agentSessions.kataIssue, issueNumArray))
+          .orderBy(asc(agentSessions.createdAt))) as AgentSessionRow[])
+      : []
+    const sessionsByIssue = new Map<number, AgentSessionRow[]>()
+    for (const s of allSessions) {
+      if (typeof s.kataIssue !== 'number') continue
+      const list = sessionsByIssue.get(s.kataIssue) ?? []
+      list.push(s)
+      sessionsByIssue.set(s.kataIssue, list)
+    }
+
+    const allReservations = issueNumArray.length
+      ? await db
+          .select()
+          .from(worktreeReservations)
+          .where(inArray(worktreeReservations.issueNumber, issueNumArray))
+      : []
+    const reservationByIssue = new Map<number, (typeof allReservations)[number]>()
+    for (const r of allReservations) {
+      if (!reservationByIssue.has(r.issueNumber)) {
+        reservationByIssue.set(r.issueNumber, r)
+      }
+    }
+
+    // 4. Build ChainSummary[].
+    const chains: ChainSummary[] = []
+    for (const issueNumber of allIssueNumbers) {
+      const ghIssue = ghIssueByNumber.get(issueNumber)
+      const sessions = sessionsByIssue.get(issueNumber) ?? []
+
+      let issueTitle: string
+      let issueState: 'open' | 'closed'
+      let issueType: string
+      if (ghIssue) {
+        issueTitle = ghIssue.title
+        issueState = ghIssue.state
+        issueType = deriveIssueType(ghIssue.labels)
+      } else {
+        // D1-only — issue off-page or deleted.
+        issueTitle = `Issue #${issueNumber}`
+        issueState = 'open'
+        issueType = 'other'
+      }
+
+      const column = deriveColumn(
+        sessions.map((s) => ({
+          kataMode: s.kataMode,
+          lastActivity: s.lastActivity,
+          createdAt: s.createdAt,
+        })),
+        issueState,
+      )
+
+      const reservation = reservationByIssue.get(issueNumber)
+      const worktreeReservation = reservation
+        ? {
+            worktree: reservation.worktree,
+            heldSince: reservation.heldSince,
+            lastActivityAt: reservation.lastActivityAt,
+            ownerId: reservation.ownerId,
+            stale: !!reservation.stale,
+          }
+        : null
+
+      const prNumber = findPrForIssue(pulls, issueNumber)
+
+      // lastActivity: max of (sessions' lastActivity || createdAt); fall back
+      // to GH issue updated_at; empty string as a last resort.
+      let lastActivity = ''
+      let lastActivityTs = -Infinity
+      for (const s of sessions) {
+        const tsStr = s.lastActivity ?? s.createdAt
+        const ts = new Date(tsStr).getTime()
+        if (Number.isFinite(ts) && ts > lastActivityTs) {
+          lastActivityTs = ts
+          lastActivity = tsStr
+        }
+      }
+      if (!lastActivity) {
+        lastActivity = ghIssue?.updated_at ?? ''
+      }
+
+      const chain: ChainSummary = {
+        issueNumber,
+        issueTitle,
+        issueType,
+        issueState,
+        column,
+        sessions: sessions.map((s) => ({
+          id: s.id,
+          kataMode: s.kataMode,
+          status: s.status,
+          lastActivity: s.lastActivity,
+          createdAt: s.createdAt,
+          project: s.project,
+        })),
+        worktreeReservation,
+        lastActivity,
+        ...(prNumber !== undefined ? { prNumber } : {}),
+      }
+
+      // Preserve a reference to the underlying sessions for filter logic
+      // below without exposing it in the response. We re-use the mapped
+      // `sessions` array which already has `userId` stripped, so apply
+      // owner-filter against the original rows.
+      if (mineFilter) {
+        const anyOwned = sessions.some((s) => s.userId === userId)
+        if (!anyOwned) continue
+      }
+      if (laneFilter && chain.issueType !== laneFilter) continue
+      if (columnFilter && chain.column !== columnFilter) continue
+      if (projectFilter) {
+        const hasProject = sessions.some((s) => s.project === projectFilter)
+        if (!hasProject) continue
+      }
+      if (staleCutoff !== null) {
+        const ts = new Date(chain.lastActivity).getTime()
+        if (!Number.isFinite(ts) || ts >= staleCutoff) continue
+      }
+
+      chains.push(chain)
+    }
+
+    // Sort by lastActivity DESC (empty strings sink to the bottom).
+    chains.sort((a, b) => {
+      const ta = a.lastActivity ? new Date(a.lastActivity).getTime() : -Infinity
+      const tb = b.lastActivity ? new Date(b.lastActivity).getTime() : -Infinity
+      return tb - ta
+    })
+
+    return c.json({ chains, more_issues_available: moreAvailable })
+  })
+
+  app.get('/api/chains/:issue/spec-status', async (c) => {
+    const issueNumber = Number.parseInt(c.req.param('issue'), 10)
+    if (!Number.isFinite(issueNumber)) {
+      return c.json({ error: 'Invalid issue number' }, 400)
+    }
+    const project = c.req.query('project')
+    if (!project) {
+      return c.json({ error: 'Missing required query param: project' }, 400)
+    }
+
+    const entries = await listGatewayFiles(c.env, project, 'planning/specs')
+    if (!entries) {
+      return c.json<SpecStatusResponse>({ exists: false, status: null, path: null })
+    }
+
+    const pattern = new RegExp(`^${issueNumber}-.*\\.md$`)
+    const matches = entries.filter((e) => pattern.test(e.name))
+    if (matches.length === 0) {
+      return c.json<SpecStatusResponse>({ exists: false, status: null, path: null })
+    }
+
+    // Pick latest by `modified` timestamp (numeric or ISO string both work).
+    matches.sort((a, b) => {
+      const ta = a.modified ? new Date(a.modified as string | number).getTime() : 0
+      const tb = b.modified ? new Date(b.modified as string | number).getTime() : 0
+      return tb - ta
+    })
+    const winner = matches[0]
+    const relPath = winner.path ?? `planning/specs/${winner.name}`
+
+    const content = await fetchGatewayFile(c.env, project, relPath)
+    if (content === null) {
+      return c.json<SpecStatusResponse>({ exists: false })
+    }
+
+    const fm = parseFrontmatter(content)
+    const status = fm.status ?? null
+    return c.json<SpecStatusResponse>({ exists: true, status, path: relPath })
+  })
+
+  app.get('/api/chains/:issue/vp-status', async (c) => {
+    const issueNumber = Number.parseInt(c.req.param('issue'), 10)
+    if (!Number.isFinite(issueNumber)) {
+      return c.json({ error: 'Invalid issue number' }, 400)
+    }
+    const project = c.req.query('project')
+    if (!project) {
+      return c.json({ error: 'Missing required query param: project' }, 400)
+    }
+
+    const relPath = `.kata/verification-evidence/vp-${issueNumber}.json`
+    const content = await fetchGatewayFile(c.env, project, relPath)
+    if (content === null) {
+      return c.json<VpStatusResponse>({ exists: false, passed: null, path: null })
+    }
+
+    try {
+      const parsed = JSON.parse(content) as { overallPassed?: unknown }
+      const passed = typeof parsed.overallPassed === 'boolean' ? parsed.overallPassed : null
+      return c.json<VpStatusResponse>({ exists: true, passed, path: relPath })
+    } catch {
+      return c.json<VpStatusResponse>({ exists: false, passed: null, path: null })
+    }
   })
 
   app.post('/api/sessions/:id/answers', async (c) => {

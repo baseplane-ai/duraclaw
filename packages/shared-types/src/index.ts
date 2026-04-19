@@ -157,10 +157,53 @@ export type GatewayEvent =
   | TaskProgressEvent
   | TaskNotificationEvent
   | HeartbeatEvent
+  | ModeTransitionEvent
+  | ModeTransitionTimeoutEvent
+  | ModeTransitionPreambleDegradedEvent
+  | ModeTransitionFlushTimeoutEvent
 
 export interface HeartbeatEvent {
   type: 'heartbeat'
   session_id: string
+}
+
+// ── Mode transition events (DO-synthesised for chain UX) ────────────
+//
+// Emitted by SessionDO when a chain-linked session receives a `kata_state`
+// event whose `currentMode` differs from the previous mode and
+// `continueSdk` is not set. These travel over the browser WS channel
+// alongside real runner events so the chain timeline UI can render them.
+
+export interface ModeTransitionEvent {
+  type: 'mode_transition'
+  session_id: string
+  from: string | null
+  to: string
+  issueNumber: number
+  at: string
+}
+
+export interface ModeTransitionTimeoutEvent {
+  type: 'mode_transition_timeout'
+  session_id: string
+  issueNumber: number
+  at: string
+  note: string
+}
+
+export interface ModeTransitionPreambleDegradedEvent {
+  type: 'mode_transition_preamble_degraded'
+  session_id: string
+  issueNumber: number
+  at: string
+  reason: string
+}
+
+export interface ModeTransitionFlushTimeoutEvent {
+  type: 'mode_transition_flush_timeout'
+  session_id: string
+  issueNumber: number
+  at: string
 }
 
 export interface StoppedEvent {
@@ -460,6 +503,13 @@ export interface KataSessionState {
   updatedAt: string
   beadsCreated: string[]
   editedFiles: string[]
+  /**
+   * If true, a kata_state event signalling a mode change instructs the DO to
+   * KEEP the current SDK runner instead of performing a reset. Used by modes
+   * that legitimately want to reuse the live context (rare — default is
+   * reset-on-enter).
+   */
+  continueSdk?: boolean
 }
 
 export interface KataStateEvent {
@@ -509,6 +559,13 @@ export interface SessionState {
    * state. Lives in the DO's setState JSON blob — no SQLite migration.
    */
   active_callback_token?: string
+  /**
+   * Last `currentMode` observed on a `kata_state` event. Used by the chain
+   * UX mode-transition detector: when a new kata_state arrives with a
+   * different `currentMode` the DO kicks the runner and respawns in the new
+   * mode. Stored in the DO's setState JSON blob — no SQLite migration.
+   */
+  lastKataMode?: string
   /** @deprecated Use gate instead */
   pending_question?: {
     tool_call_id: string
