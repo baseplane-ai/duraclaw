@@ -24,8 +24,8 @@
  */
 
 import { useAgent } from 'agents/react'
-import { useCallback, useRef, useState } from 'react'
-import { type CachedMessage, messagesCollection } from '~/db/messages-collection'
+import { useCallback, useMemo, useRef, useState } from 'react'
+import { type CachedMessage, createMessagesCollection } from '~/db/messages-collection'
 import { useMessagesCollection } from '~/hooks/use-messages-collection'
 import { contentToParts } from '~/lib/message-parts'
 import type { ContentBlock, SessionMessage, SessionState } from '~/lib/types'
@@ -64,6 +64,9 @@ export function useCodingAgentCollection(agentName: string): UseCodingAgentColle
   const hydratedRef = useRef(false)
   const prevAgentNameRef = useRef(agentName)
 
+  // Per-agentName collection (memoised inside the factory).
+  const messagesCollection = useMemo(() => createMessagesCollection(agentName), [agentName])
+
   // Reset per-session refs on tab switch without remount.
   if (prevAgentNameRef.current !== agentName) {
     prevAgentNameRef.current = agentName
@@ -81,7 +84,7 @@ export function useCodingAgentCollection(agentName: string): UseCodingAgentColle
       const row = toRow(msg, agentName)
       try {
         if (messagesCollection.has(msg.id)) {
-          messagesCollection.update(msg.id, (draft) => {
+          messagesCollection.update(msg.id, (draft: CachedMessage) => {
             Object.assign(draft, row)
           })
         } else {
@@ -91,7 +94,7 @@ export function useCodingAgentCollection(agentName: string): UseCodingAgentColle
         // Swallow — mutation API throws on rare contention; next frame will retry.
       }
     },
-    [agentName],
+    [agentName, messagesCollection],
   )
 
   const bulkUpsert = useCallback(
@@ -192,7 +195,7 @@ export function useCodingAgentCollection(agentName: string): UseCodingAgentColle
       // V4 / V5 behavior is easy to eyeball.
       return result
     },
-    [connection, agentName],
+    [connection, agentName, messagesCollection],
   )
 
   return {

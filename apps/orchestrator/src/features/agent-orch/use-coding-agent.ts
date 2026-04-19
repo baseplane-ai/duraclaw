@@ -10,10 +10,10 @@
  */
 
 import { useAgent } from 'agents/react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type * as Y from 'yjs'
 import { agentSessionsCollection as sessionsCollection } from '~/db/agent-sessions-collection'
-import { type CachedMessage, messagesCollection } from '~/db/messages-collection'
+import { type CachedMessage, createMessagesCollection } from '~/db/messages-collection'
 import { upsertSessionLiveState } from '~/db/session-live-state-collection'
 import { useMessagesCollection } from '~/hooks/use-messages-collection'
 import { useSessionLiveState } from '~/hooks/use-session-live-state'
@@ -120,12 +120,14 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   const [branchInfo, setBranchInfo] = useState<
     Map<string, { current: number; total: number; siblings: string[] }>
   >(new Map())
-  const hydratedRef = useRef(false)
-  const prevStatusRef = useRef<string | null>(null)
   const prevAgentNameRef = useRef(agentName)
   // Per-session watermark for MessagesFrame `seq` (B1/B3). Keyed by agentName
   // so concurrent session tabs each keep their own highest-applied seq.
   const lastSeqRef = useRef<Map<string, number>>(new Map())
+
+  // Per-agentName collection (memoised inside createMessagesCollection, so the
+  // same factory call returns the same instance on re-render).
+  const messagesCollection = useMemo(() => createMessagesCollection(agentName), [agentName])
 
   // Server-authoritative live state from the TanStack DB collection.
   const { state, contextUsage, kataState, sessionResult } = useSessionLiveState(agentName)
@@ -135,14 +137,14 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   if (prevAgentNameRef.current !== agentName) {
     lastSeqRef.current.delete(prevAgentNameRef.current)
     prevAgentNameRef.current = agentName
-    hydratedRef.current = false
-    prevStatusRef.current = null
     setEvents([])
     setBranchInfo(new Map())
   }
 
   // Render source for messages: reactive live query on the persisted collection.
-  const { messages: cachedMessages } = useMessagesCollection(agentName)
+  // `isFetching` proxies the query-collection fetch state and feeds the
+  // `isConnecting` derivation below, retiring the old `hydratedRef` gate.
+  const { messages: cachedMessages, isFetching } = useMessagesCollection(agentName)
   const messages: SessionMessage[] = cachedMessages.map(toSessionMessage)
 
   /** Upsert a SessionMessage into the collection (dedup via .has()). */
@@ -151,7 +153,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       const row = toRow(msg, agentName)
       try {
         if (messagesCollection.has(msg.id)) {
-          messagesCollection.update(msg.id, (draft) => {
+          messagesCollection.update(msg.id, (draft: CachedMessage) => {
             Object.assign(draft, row)
           })
         } else {
@@ -161,7 +163,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         // Rare mutation-API contention; next event will retry.
       }
     },
-    [agentName],
+    [agentName, messagesCollection],
   )
 
   const bulkUpsert = useCallback((msgs: SessionMessage[]) => msgs.forEach(upsert), [upsert])
@@ -187,7 +189,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       }
       bulkUpsert(newMsgs)
     },
-    [agentName, bulkUpsert],
+    [agentName, bulkUpsert, messagesCollection],
   )
 
   /** Drop the oldest `usr-optimistic-*` row for this session (FIFO; one echo → one clear). */
@@ -215,7 +217,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         // Already gone (raced with another echo or rollback).
       }
     }
-  }, [agentName])
+  }, [agentName, messagesCollection])
 
   /**
    * Apply a `{type:'messages', seq, payload}` frame from the DO (B1/B3).
@@ -255,7 +257,6 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
 
       if (frame.payload.kind === 'snapshot') {
         replaceAllMessages(frame.payload.messages)
-        hydratedRef.current = true
         map.set(agentName, Math.max(lastSeq, frame.payload.version))
         return
       }
@@ -290,15 +291,13 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       // frame.seq <= lastSeq — stale/duplicate; drop silently.
       return
     },
-    [agentName, upsert, clearOldestOptimisticRow, replaceAllMessages],
+    [agentName, upsert, clearOldestOptimisticRow, replaceAllMessages, messagesCollection],
   )
 
   const connection = useAgent<SessionState>({
     agent: 'session-agent',
     name: agentName,
     onStateUpdate: (newState) => {
-      const prevStatus = prevStatusRef.current
-      prevStatusRef.current = newState.status
       upsertSessionLiveState(agentName, { state: newState, wsReadyState: 1 })
       // Mirror WS state into the sessions query collection (local-only, no
       // round-trip). `utils.writeUpdate` because `.update()` needs an onUpdate
@@ -314,31 +313,10 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         if (newState.duration_ms != null) patch.durationMs = newState.duration_ms
         sessionsCollection.utils.writeUpdate(patch)
       }
-      // Hydrate messages on first state sync. Only flip the ref on non-empty
-      // so a transient empty doesn't permanently gate future attempts.
-      if (!hydratedRef.current) {
-        hydrateMessages(connection)
-          .then((msgCount) => {
-            if (msgCount > 0) hydratedRef.current = true
-            else if (newState.sdk_session_id) {
-              // History expected but gateway may not be hydrated yet; retry once.
-              setTimeout(() => {
-                hydrateMessages(connection)
-                  .then((n) => {
-                    if (n > 0) hydratedRef.current = true
-                  })
-                  .catch(() => {})
-              }, 500)
-            } else {
-              hydratedRef.current = true
-            }
-          })
-          .catch(() => {})
-      }
-      // Re-hydrate when a resumed session completes.
-      if (prevStatus === 'running' && newState.status === 'idle') {
-        hydrateMessages(connection).catch(() => {})
-      }
+      // Hydration is owned by the queryCollection (`messagesCollection` factory
+      // + `useMessagesCollection`). The WS snapshot still writes directly to
+      // the collection as a latency optimisation; the queryFn is the
+      // cold-start / stale-cache fallback with retry: 1, retryDelay: 500.
     },
     onMessage: (message: MessageEvent) => {
       try {
@@ -377,7 +355,6 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           // Legacy shape: {type:'messages', messages: SessionMessage[]}
           if (Array.isArray((parsed as { messages?: unknown }).messages)) {
             replaceAllMessages((parsed as { messages: SessionMessage[] }).messages)
-            hydratedRef.current = true
             return
           }
           return
@@ -435,19 +412,6 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     upsertSessionLiveState(agentName, { wsReadyState: connection.readyState })
   }, [agentName, connection.readyState])
 
-  /** Fetch persisted messages and write them into the collection. */
-  async function hydrateMessages(conn: typeof connection): Promise<number> {
-    const hints = { session_hint: agentName }
-    const serverMessages = (await conn.call('getMessages', [{ ...hints }])) as SessionMessage[]
-
-    if (serverMessages.length > 0) {
-      bulkUpsert(serverMessages)
-      // Refresh branch info after hydration
-      refreshBranchInfo(serverMessages).catch(() => {})
-    }
-    return serverMessages.length
-  }
-
   const spawn = useCallback(
     (config: SpawnConfig) => connection.call('spawn', [config]),
     [connection],
@@ -474,11 +438,11 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         // duplicate id or collection not ready — drop
       }
     },
-    [agentName],
+    [agentName, messagesCollection],
   )
 
   const wsReadyState = state ? 1 : 0
-  const isConnecting = !hydratedRef.current
+  const isConnecting = isFetching || wsReadyState !== 1
 
   const rewind = useCallback(
     async (turnIndex: number) => {
@@ -604,16 +568,19 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       }
       return optimisticId
     },
-    [agentName, cachedMessages],
+    [agentName, cachedMessages, messagesCollection],
   )
 
-  const deleteOptimistic = useCallback((id: string) => {
-    try {
-      messagesCollection.delete(id)
-    } catch {
-      // Already gone.
-    }
-  }, [])
+  const deleteOptimistic = useCallback(
+    (id: string) => {
+      try {
+        messagesCollection.delete(id)
+      } catch {
+        // Already gone.
+      }
+    },
+    [messagesCollection],
+  )
 
   const sendMessage = useCallback(
     async (content: string | ContentBlock[], opts?: { submitId?: string }) => {

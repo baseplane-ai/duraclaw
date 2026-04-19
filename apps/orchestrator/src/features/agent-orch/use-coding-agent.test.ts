@@ -56,15 +56,20 @@ const mockDelete = vi.fn((keys: string | string[]) => {
   bumpCollection()
 })
 
-vi.mock('~/db/messages-collection', () => ({
-  messagesCollection: {
+vi.mock('~/db/messages-collection', () => {
+  const coll = {
     [Symbol.iterator]: () => cachedMessagesStore.entries(),
     has: (id: string) => cachedMessagesStore.has(id),
     insert: (...args: unknown[]) => mockInsert(...(args as [CachedMessage])),
     update: (...args: unknown[]) => mockUpdate(...(args as [string, (d: CachedMessage) => void])),
     delete: (...args: unknown[]) => mockDelete(...(args as [string | string[]])),
-  },
-}))
+    utils: { isFetching: false },
+  }
+  return {
+    messagesCollection: coll,
+    createMessagesCollection: () => coll,
+  }
+})
 
 vi.mock('~/db/agent-sessions-collection', () => ({
   agentSessionsCollection: {
@@ -97,7 +102,7 @@ vi.mock('~/hooks/use-messages-collection', async () => {
           const bTime = b.createdAt ? new Date(b.createdAt as string).getTime() : 0
           return aTime - bTime
         })
-      return { messages: filtered, isLoading: false }
+      return { messages: filtered, isLoading: false, isFetching: false }
     },
   }
 })

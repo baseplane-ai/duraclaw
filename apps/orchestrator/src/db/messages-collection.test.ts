@@ -15,9 +15,9 @@ const mockCollection = {
 }
 
 const mockCreateCollection = vi.fn().mockReturnValue(mockCollection)
-const mockLocalOnlyCollectionOptions = vi.fn().mockImplementation((config) => ({
+const mockQueryCollectionOptions = vi.fn().mockImplementation((config) => ({
   ...config,
-  _type: 'localOnlyCollectionOptions',
+  _type: 'queryCollectionOptions',
 }))
 const mockPersistedCollectionOptions = vi.fn().mockImplementation((config) => ({
   ...config,
@@ -26,7 +26,10 @@ const mockPersistedCollectionOptions = vi.fn().mockImplementation((config) => ({
 
 vi.mock('@tanstack/db', () => ({
   createCollection: mockCreateCollection,
-  localOnlyCollectionOptions: mockLocalOnlyCollectionOptions,
+}))
+
+vi.mock('@tanstack/query-db-collection', () => ({
+  queryCollectionOptions: mockQueryCollectionOptions,
 }))
 
 vi.mock('@tanstack/browser-db-sqlite-persistence', () => ({
@@ -47,36 +50,51 @@ describe('messages-collection', () => {
     vi.restoreAllMocks()
   })
 
-  it('exports messagesCollection', async () => {
+  it('exports createMessagesCollection factory', async () => {
+    vi.resetModules()
+    const mod = await import('./messages-collection')
+    expect(mod.createMessagesCollection).toBeDefined()
+    expect(typeof mod.createMessagesCollection).toBe('function')
+  })
+
+  it('exports legacy messagesCollection singleton stub', async () => {
     vi.resetModules()
     const mod = await import('./messages-collection')
     expect(mod.messagesCollection).toBeDefined()
   })
 
-  it('configures localOnlyCollectionOptions with id and getKey', async () => {
+  it('configures queryCollectionOptions with per-agentName id and getKey', async () => {
     vi.resetModules()
-    await import('./messages-collection')
+    const mod = await import('./messages-collection')
 
-    expect(mockLocalOnlyCollectionOptions).toHaveBeenCalledWith(
+    mod.createMessagesCollection('test-agent')
+
+    expect(mockQueryCollectionOptions).toHaveBeenCalledWith(
       expect.objectContaining({
-        id: 'messages',
+        id: 'messages:test-agent',
+        queryKey: ['messages', 'test-agent'],
       }),
     )
 
-    // getKey should extract .id
-    const config = mockLocalOnlyCollectionOptions.mock.calls[0][0]
-    expect(config.getKey({ id: 'msg-123', sessionId: 's1' })).toBe('msg-123')
+    // getKey extracts .id — find the call for 'test-agent'
+    const call = mockQueryCollectionOptions.mock.calls.find(
+      (c) => (c[0] as { id: string }).id === 'messages:test-agent',
+    )
+    expect(call).toBeDefined()
+    const config = call![0] as { getKey: (item: { id: string }) => string }
+    expect(config.getKey({ id: 'msg-123' })).toBe('msg-123')
   })
 
   it('creates collection without persistence when persistence is null', async () => {
     vi.resetModules()
-    await import('./messages-collection')
+    const mod = await import('./messages-collection')
+    mod.createMessagesCollection('agent-1')
 
     expect(mockCreateCollection).toHaveBeenCalled()
     expect(mockPersistedCollectionOptions).not.toHaveBeenCalled()
   })
 
-  it('wraps with persistedCollectionOptions when persistence is available', async () => {
+  it('wraps with persistedCollectionOptions (schemaVersion 3) when persistence is available', async () => {
     vi.resetModules()
 
     vi.doMock('./db-instance', () => ({
@@ -84,14 +102,34 @@ describe('messages-collection', () => {
       queryClient: { fetchQuery: vi.fn() },
     }))
 
-    await import('./messages-collection')
+    const mod = await import('./messages-collection')
+    mod.createMessagesCollection('agent-persisted')
 
     expect(mockPersistedCollectionOptions).toHaveBeenCalledWith(
       expect.objectContaining({
-        schemaVersion: 2,
+        schemaVersion: 3,
         persistence: expect.objectContaining({ adapter: {} }),
       }),
     )
+  })
+
+  it('memoises collections by agentName', async () => {
+    vi.resetModules()
+    const mod = await import('./messages-collection')
+
+    const a1 = mod.createMessagesCollection('agentA')
+    const a2 = mod.createMessagesCollection('agentA')
+    const b = mod.createMessagesCollection('agentB')
+
+    expect(a1).toBe(a2)
+    // a1 and b come from the same mock but different createCollection calls
+    // — assert that createCollection was invoked once per distinct agentName
+    // (1 for __legacy__ from module load, 1 for agentA, 1 for agentB).
+    const distinctIds = new Set(
+      mockQueryCollectionOptions.mock.calls.map((c) => (c[0] as { id: string }).id),
+    )
+    expect(distinctIds.has('messages:agentA')).toBe(true)
+    expect(distinctIds.has('messages:agentB')).toBe(true)
   })
 
   it('exports CachedMessage type that narrows id to string and adds sessionId', async () => {
@@ -103,13 +141,79 @@ describe('messages-collection', () => {
       id: 'msg-1',
       sessionId: 'session-abc',
       role: 'assistant',
-      type: 'text',
-      content: '{"text":"hello"}',
-      event_uuid: 'uuid-1',
-      created_at: '2026-01-01T00:00:00Z',
+      parts: [{ type: 'text', text: 'hello' }],
+      createdAt: '2026-01-01T00:00:00Z',
     }
     expect(msg.id).toBe('msg-1')
     expect(msg.sessionId).toBe('session-abc')
+  })
+})
+
+describe('createMessagesCollection retry behavior', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('configures retry: 1, retryDelay: 500, staleTime: Infinity, refetchInterval: undefined, syncMode: on-demand', async () => {
+    vi.resetModules()
+    const mod = await import('./messages-collection')
+
+    mod.createMessagesCollection('retry-agent')
+
+    const call = mockQueryCollectionOptions.mock.calls.find(
+      (c) => (c[0] as { id: string }).id === 'messages:retry-agent',
+    )
+    expect(call).toBeDefined()
+    const config = call![0] as {
+      retry: number
+      retryDelay: number
+      staleTime: number
+      refetchInterval: unknown
+      syncMode: string
+    }
+    expect(config.retry).toBe(1)
+    expect(config.retryDelay).toBe(500)
+    expect(config.staleTime).toBe(Number.POSITIVE_INFINITY)
+    expect(config.refetchInterval).toBeUndefined()
+    expect(config.syncMode).toBe('on-demand')
+  })
+
+  it('queryFn fetches from the REST /api/sessions/:id/messages endpoint', async () => {
+    vi.resetModules()
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        messages: [{ id: 'm1', role: 'user', parts: [{ type: 'text', text: 'hi' }] }],
+      }),
+    })
+    // @ts-expect-error — jsdom doesn't ship fetch; assign a minimal stub.
+    globalThis.fetch = mockFetch
+
+    const mod = await import('./messages-collection')
+    mod.createMessagesCollection('fetch-agent')
+
+    const call = mockQueryCollectionOptions.mock.calls.find(
+      (c) => (c[0] as { id: string }).id === 'messages:fetch-agent',
+    )
+    expect(call).toBeDefined()
+    const config = call![0] as {
+      queryFn: (ctx: { signal: AbortSignal }) => Promise<unknown[]>
+    }
+    const ctrl = new AbortController()
+    const rows = (await config.queryFn({ signal: ctrl.signal })) as Array<{
+      id: string
+      sessionId: string
+    }>
+    expect(mockFetch).toHaveBeenCalledWith(
+      '/api/sessions/fetch-agent/messages',
+      expect.objectContaining({ signal: ctrl.signal }),
+    )
+    expect(rows[0].id).toBe('m1')
+    expect(rows[0].sessionId).toBe('fetch-agent')
   })
 })
 
@@ -122,7 +226,7 @@ describe('evictOldMessages', () => {
     vi.restoreAllMocks()
   })
 
-  it('deletes messages older than 30 days', async () => {
+  it('deletes messages older than 30 days across every cached collection', async () => {
     vi.resetModules()
 
     const thirtyOneDaysAgo = new Date()
@@ -153,6 +257,8 @@ describe('evictOldMessages', () => {
     mockIterator.mockReturnValue(entries[Symbol.iterator]())
 
     const mod = await import('./messages-collection')
+    // Ensure at least one cached collection exists.
+    mod.createMessagesCollection('evict-agent')
     mod.evictOldMessages()
 
     expect(mockDelete).toHaveBeenCalledWith(['old-1'])
@@ -178,6 +284,7 @@ describe('evictOldMessages', () => {
     mockIterator.mockReturnValue(entries[Symbol.iterator]())
 
     const mod = await import('./messages-collection')
+    mod.createMessagesCollection('evict-agent')
     mod.evictOldMessages()
 
     expect(mockDelete).not.toHaveBeenCalled()
@@ -189,6 +296,7 @@ describe('evictOldMessages', () => {
     mockIterator.mockReturnValue([][Symbol.iterator]())
 
     const mod = await import('./messages-collection')
+    mod.createMessagesCollection('evict-agent')
     mod.evictOldMessages()
 
     expect(mockDelete).not.toHaveBeenCalled()
@@ -202,6 +310,7 @@ describe('evictOldMessages', () => {
     })
 
     const mod = await import('./messages-collection')
+    mod.createMessagesCollection('evict-agent')
 
     // Should not throw
     expect(() => mod.evictOldMessages()).not.toThrow()
@@ -217,6 +326,7 @@ describe('evictOldMessages', () => {
     mockIterator.mockReturnValue(entries[Symbol.iterator]())
 
     const mod = await import('./messages-collection')
+    mod.createMessagesCollection('evict-agent')
     mod.evictOldMessages()
 
     expect(mockDelete).not.toHaveBeenCalled()

@@ -20,14 +20,21 @@ vi.mock('@tanstack/react-db', () => ({
   }),
 }))
 
-vi.mock('~/db/messages-collection', () => ({
-  messagesCollection: {
+const mockCreateMessagesCollection = vi.hoisted(() => vi.fn())
+
+vi.mock('~/db/messages-collection', () => {
+  const coll = {
     insert: vi.fn(),
     delete: vi.fn(),
     [Symbol.iterator]: vi.fn().mockReturnValue([][Symbol.iterator]()),
-    utils: {},
-  },
-}))
+    utils: { isFetching: false },
+  }
+  mockCreateMessagesCollection.mockImplementation(() => coll)
+  return {
+    messagesCollection: coll,
+    createMessagesCollection: mockCreateMessagesCollection,
+  }
+})
 
 import { useMessagesCollection } from './use-messages-collection'
 
@@ -70,10 +77,11 @@ describe('useMessagesCollection', () => {
     expect(result.current.isLoading).toBe(true)
   })
 
-  it('filters messages by sessionId', () => {
+  it('returns all rows from the per-session collection (factory scopes by sessionId)', () => {
+    // After P2: the collection itself is per-agentName, so the hook no longer
+    // filters — every row in the collection belongs to this session.
     mockLiveQueryData = [
       makeMessage({ id: 'm1', sessionId: 'session-abc' }),
-      makeMessage({ id: 'm2', sessionId: 'session-xyz' }),
       makeMessage({ id: 'm3', sessionId: 'session-abc' }),
     ]
 
@@ -126,23 +134,17 @@ describe('useMessagesCollection', () => {
     expect(result.current.messages).toHaveLength(2)
   })
 
-  it('updates when sessionId changes', () => {
-    mockLiveQueryData = [
-      makeMessage({ id: 'm1', sessionId: 'session-abc' }),
-      makeMessage({ id: 'm2', sessionId: 'session-xyz' }),
-    ]
+  it('re-memoises the collection when sessionId changes', () => {
+    mockLiveQueryData = [makeMessage({ id: 'm1', sessionId: 'session-abc' })]
 
-    const { result, rerender } = renderHook(({ sessionId }) => useMessagesCollection(sessionId), {
+    const { rerender } = renderHook(({ sessionId }) => useMessagesCollection(sessionId), {
       initialProps: { sessionId: 'session-abc' },
     })
 
-    expect(result.current.messages).toHaveLength(1)
-    expect(result.current.messages[0].id).toBe('m1')
+    expect(mockCreateMessagesCollection).toHaveBeenCalledWith('session-abc')
 
     rerender({ sessionId: 'session-xyz' })
-
-    expect(result.current.messages).toHaveLength(1)
-    expect(result.current.messages[0].id).toBe('m2')
+    expect(mockCreateMessagesCollection).toHaveBeenCalledWith('session-xyz')
   })
 
   it('sorts server-assigned rows by turn number regardless of createdAt', () => {

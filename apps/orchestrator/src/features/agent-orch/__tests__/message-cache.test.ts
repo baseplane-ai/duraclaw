@@ -55,8 +55,8 @@ const bumpCollection = () => {
   for (const cb of collectionSubs) cb()
 }
 
-vi.mock('~/db/messages-collection', () => ({
-  messagesCollection: {
+vi.mock('~/db/messages-collection', () => {
+  const coll = {
     insert: (...args: unknown[]) => {
       mockInsert(...args)
       const row = args[0] as { id: string } & Record<string, unknown>
@@ -85,8 +85,13 @@ vi.mock('~/db/messages-collection', () => ({
       bumpCollection()
     },
     [Symbol.iterator]: () => mockCollectionEntries[Symbol.iterator](),
-  },
-}))
+    utils: { isFetching: false },
+  }
+  return {
+    messagesCollection: coll,
+    createMessagesCollection: () => coll,
+  }
+})
 
 // Reactive live-query mock — subscribes to mutation bumps and re-renders
 // the consuming hook. Wraps iteration in try/catch so the
@@ -117,7 +122,7 @@ vi.mock('~/hooks/use-messages-collection', async () => {
           const bTime = b.createdAt ? new Date(b.createdAt as string).getTime() : 0
           return aTime - bTime
         })
-      return { messages: filtered, isLoading: false }
+      return { messages: filtered, isLoading: false, isFetching: false }
     },
   }
 })
@@ -446,62 +451,6 @@ describe('message cache-first hydration', () => {
   })
 })
 
-describe('hydration writes to collection', () => {
-  beforeEach(() => {
-    capturedOnStateUpdate = null
-    capturedOnMessage = null
-    vi.clearAllMocks()
-    mockCollectionEntries.length = 0
-  })
-
-  afterEach(() => {
-    vi.restoreAllMocks()
-  })
-
-  test('hydrateMessages writes hydrated messages to collection', async () => {
-    const hydratedMessages = [
-      {
-        id: 'usr-1',
-        role: 'user',
-        parts: [{ type: 'text', text: 'hello' }],
-        createdAt: '2026-01-01T00:00:00Z',
-      },
-      {
-        id: 'asst-1',
-        role: 'assistant',
-        parts: [{ type: 'text', text: 'hi back' }],
-        createdAt: '2026-01-01T01:00:00Z',
-      },
-    ]
-
-    mockCall.mockResolvedValueOnce(hydratedMessages).mockResolvedValue([])
-
-    renderHook(() => useCodingAgent('test-session'))
-
-    // Trigger first state sync which calls hydrateMessages
-    await act(async () => {
-      capturedOnStateUpdate!({ status: 'idle' })
-      // Allow hydrateMessages promise to resolve
-      await new Promise((r) => setTimeout(r, 0))
-    })
-
-    // Should have written both messages to collection
-    expect(mockInsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'usr-1',
-        sessionId: 'test-session',
-        role: 'user',
-        parts: [{ type: 'text', text: 'hello' }],
-      }),
-    )
-
-    expect(mockInsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'asst-1',
-        sessionId: 'test-session',
-        role: 'assistant',
-        parts: [{ type: 'text', text: 'hi back' }],
-      }),
-    )
-  })
-})
+// P2: `hydrateMessages` has been retired — hydration is now owned by the
+// per-agentName queryCollection's queryFn (REST GET /api/sessions/:id/messages).
+// Tests for the old RPC-based hydration path have been removed.

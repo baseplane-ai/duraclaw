@@ -35,18 +35,23 @@ vi.mock('~/db/agent-sessions-collection', () => ({
 // messagesCollection + useMessagesCollection are now used by useCodingAgent
 // on every render (live-query render source). Minimal no-op mocks so the
 // hook renders in the test environment without needing OPFS / react-db.
-vi.mock('~/db/messages-collection', () => ({
-  messagesCollection: {
+vi.mock('~/db/messages-collection', () => {
+  const coll = {
     [Symbol.iterator]: () => [][Symbol.iterator](),
     has: () => false,
     insert: vi.fn(),
     update: vi.fn(),
     delete: vi.fn(),
-  },
-}))
+    utils: { isFetching: false },
+  }
+  return {
+    messagesCollection: coll,
+    createMessagesCollection: () => coll,
+  }
+})
 
 vi.mock('~/hooks/use-messages-collection', () => ({
-  useMessagesCollection: () => ({ messages: [], isLoading: false }),
+  useMessagesCollection: () => ({ messages: [], isLoading: false, isFetching: false }),
 }))
 
 // useSessionLiveState now owns state/contextUsage/kataState/sessionResult.

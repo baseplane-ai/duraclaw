@@ -1,7 +1,10 @@
 /**
- * Hook for reading cached messages from the local messages collection.
+ * Hook for reading cached messages from the per-session messages collection.
  *
- * Returns messages filtered by sessionId, sorted into stable turn order.
+ * Returns messages for the given `sessionId`, sorted into stable turn order.
+ * The collection is produced by `createMessagesCollection(sessionId)` and
+ * memoised per agentName — no sessionId filter needed because the collection
+ * is already scoped.
  *
  * Sort contract (primary → tiebreaker):
  *   1. Server-assigned rows (`usr-N` / `msg-N` / `err-N`) sort by N, which is
@@ -16,11 +19,15 @@
  *      falls into its proper turn-N slot.
  *   3. Unknown id formats fall back to `createdAt` as a last-resort
  *      tiebreaker so forward-compat rows still render in something sensible.
+ *
+ * The P2 migration keeps the sort logic UNCHANGED (still keyed on
+ * `usr-optimistic-*` / `turnHint`). Simplification happens in P3 alongside
+ * the `createTransaction` rewrite.
  */
 
 import { useLiveQuery } from '@tanstack/react-db'
 import { useMemo } from 'react'
-import { type CachedMessage, messagesCollection } from '~/db/messages-collection'
+import { type CachedMessage, createMessagesCollection } from '~/db/messages-collection'
 
 const TURN_ID_RE = /^(?:usr|msg|err)-(\d+)$/
 const OPTIMISTIC_ID_RE = /^usr-optimistic-(\d+)$/
@@ -59,20 +66,29 @@ function sortKey(row: CachedMessage): [number, number] {
 }
 
 export function useMessagesCollection(sessionId: string) {
+  const collection = useMemo(() => createMessagesCollection(sessionId), [sessionId])
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, isLoading } = useLiveQuery((q) => q.from({ messages: messagesCollection as any }))
+  const { data, isLoading } = useLiveQuery(
+    (q) => q.from({ messages: collection as any }),
+    [collection],
+  )
 
   const messages = useMemo(() => {
     if (!data) return []
-    return (data as unknown as CachedMessage[])
-      .filter((m) => m.sessionId === sessionId)
-      .sort((a, b) => {
-        const [aP, aS] = sortKey(a)
-        const [bP, bS] = sortKey(b)
-        if (aP !== bP) return aP - bP
-        return aS - bS
-      })
-  }, [data, sessionId])
+    return (data as unknown as CachedMessage[]).slice().sort((a, b) => {
+      const [aP, aS] = sortKey(a)
+      const [bP, bS] = sortKey(b)
+      if (aP !== bP) return aP - bP
+      return aS - bS
+    })
+  }, [data])
 
-  return { messages, isLoading }
+  // `isFetching` mirrors queryCollection's fetch state (true while the queryFn
+  // is running, including during the retry window). Components derive
+  // `isConnecting = isFetching || wsReadyState !== 1`.
+  const utils = (collection as unknown as { utils?: { isFetching?: boolean } }).utils
+  const isFetching = utils?.isFetching ?? false
+
+  return { messages, isLoading, isFetching }
 }
