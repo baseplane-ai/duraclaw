@@ -346,7 +346,14 @@ function renderPart(
   onResolveGate: (gateId: string, response: GateResponse) => Promise<unknown>,
   readOnly?: boolean,
   onQaResolved?: (question: string, answer: string) => void,
+  skipPendingGateId?: string | null,
 ) {
+  // When the gate is hoisted to the bottom of the thread (see ChatThread),
+  // skip its inline render so it only appears in the pinned slot. Resolved
+  // ask_user / permission parts still render inline as history.
+  if (skipPendingGateId && part.toolCallId === skipPendingGateId) {
+    return null
+  }
   if (part.type === 'text') {
     return (
       <Message key={index} from="assistant">
@@ -485,6 +492,47 @@ export function ChatThread({
   onBranchNavigate,
   onSendSuggestion,
 }: ChatThreadProps) {
+  // Find the single pending gate (if any) so we can hoist it to the bottom of
+  // the thread. The session-level invariant is that at most one gate is
+  // pending at a time, so a linear scan that takes the first match is safe.
+  let pendingGatePart: SessionMessagePart | null = null
+  if (!readOnly) {
+    outer: for (const msg of messages) {
+      if (msg.role !== 'assistant') continue
+      for (const part of msg.parts) {
+        if (isPendingGate(part, readOnly, gate, status)) {
+          pendingGatePart = part
+          break outer
+        }
+      }
+    }
+  }
+  const pendingGateId = pendingGatePart?.toolCallId ?? null
+
+  const pinnedGateNode = pendingGatePart?.toolCallId
+    ? (() => {
+        const partGate =
+          pendingGatePart.type === 'tool-ask_user'
+            ? {
+                id: pendingGatePart.toolCallId,
+                type: 'ask_user' as const,
+                detail: pendingGatePart.input,
+              }
+            : {
+                id: pendingGatePart.toolCallId,
+                type: 'permission_request' as const,
+                detail: pendingGatePart.input,
+              }
+        const resolvedGate =
+          gate && status === 'waiting_gate' && gate.id === pendingGatePart.toolCallId
+            ? gate
+            : partGate
+        return (
+          <GateResolver gate={resolvedGate} onResolve={onResolveGate} onResolved={onQaResolved} />
+        )
+      })()
+    : null
+
   return (
     <Conversation className="min-h-0 min-w-0 flex-1 overflow-x-clip">
       <ConversationContent className="min-w-0 overflow-x-hidden [&_pre]:overflow-x-auto [&_pre]:max-w-full">
@@ -653,7 +701,18 @@ export function ChatThread({
                 // the underlying parts were interleaved.
                 flushReasoning()
                 flushPending()
-                nodes.push(renderPart(part, i, gate, status, onResolveGate, readOnly, onQaResolved))
+                nodes.push(
+                  renderPart(
+                    part,
+                    i,
+                    gate,
+                    status,
+                    onResolveGate,
+                    readOnly,
+                    onQaResolved,
+                    pendingGateId,
+                  ),
+                )
               })
               flushReasoning()
               flushPending()
@@ -668,6 +727,15 @@ export function ChatThread({
             return null
           })
         )}
+        {/*
+          Pending gate (ask_user / permission_request) always renders pinned
+          to the bottom of the thread, regardless of where the underlying
+          tool part sits inside its assistant turn. Once the user answers,
+          the gate resolves, `injectQaPair` appends a normal qa_pair user
+          message, and this slot disappears — the answer then scrolls away
+          naturally as new assistant turns arrive.
+        */}
+        {pinnedGateNode}
       </ConversationContent>
       <ConversationScrollButton />
     </Conversation>
