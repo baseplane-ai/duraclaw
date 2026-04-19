@@ -90,6 +90,38 @@ bun run src/server.ts   # Starts on 127.0.0.1:$CC_GATEWAY_PORT (default 9877)
 pnpm --filter @duraclaw/session-runner build   # Emits dist/main.js with #!/usr/bin/env bun shebang
 ```
 
+## New Worktree Setup
+
+Clone and bootstrap a new dev worktree in one shot:
+
+```bash
+cd /data/projects
+git clone git@github.com:baseplane-ai/duraclaw.git duraclaw-dev4
+cd duraclaw-dev4
+scripts/setup-clone.sh --from /data/projects/duraclaw/.env
+```
+
+Or manually:
+
+```bash
+cp .env.example .env        # fill in CC_GATEWAY_API_TOKEN + BOOTSTRAP_TOKEN
+scripts/verify/dev-up.sh    # generates .dev.vars, starts gateway + orchestrator
+```
+
+**Port derivation** — each worktree auto-derives a unique port pair from its path (no manual allocation):
+
+| Worktree | Orch port | Gateway port |
+|----------|-----------|-------------|
+| duraclaw | 43307 | 10107 |
+| duraclaw-dev1 | 43054 | 9854 |
+| duraclaw-dev2 | 43613 | 10413 |
+| duraclaw-dev3 | 43537 | 10337 |
+
+**Rules:**
+- Never set `CC_GATEWAY_PORT` in `.env` — it collides across worktrees. Use `VERIFY_GATEWAY_PORT` to override.
+- `.dev.vars` is generated — never hand-edit. Override via `.env` + `dev-up.sh`.
+- `.env` is gitignored. `.env.example` is the canonical template.
+
 ## Packages
 
 ### apps/orchestrator (CF Workers)
