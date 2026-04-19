@@ -39,7 +39,7 @@ import {
   SidebarMenuSubItem,
   useSidebar,
 } from '~/components/ui/sidebar'
-import type { SessionRecord } from '~/db/agent-sessions-collection'
+import type { SessionRecord } from '~/db/session-record'
 import { getPreviewText, StatusDot } from '~/features/agent-orch/session-utils'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { useTabSync } from '~/hooks/use-tab-sync'

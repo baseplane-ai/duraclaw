@@ -38,10 +38,7 @@ export interface UseChainCheckoutResult {
     modeAtCheckout?: string,
   ) => Promise<ChainCheckoutResult>
   release: (issueNumber: number) => Promise<ChainReleaseResult>
-  forceRelease: (
-    issueNumber: number,
-    worktree?: string,
-  ) => Promise<ChainForceReleaseResult>
+  forceRelease: (issueNumber: number, worktree?: string) => Promise<ChainForceReleaseResult>
 }
 
 async function postJson(
@@ -68,10 +65,10 @@ export function useChainCheckout(): UseChainCheckoutResult {
     () => ({
       async checkout(issueNumber, worktree, modeAtCheckout) {
         try {
-          const { status, data } = await postJson(
-            `/api/chains/${issueNumber}/checkout`,
-            { worktree, modeAtCheckout },
-          )
+          const { status, data } = await postJson(`/api/chains/${issueNumber}/checkout`, {
+            worktree,
+            modeAtCheckout,
+          })
           if (status === 200 && data && 'reservation' in data) {
             return { ok: true, reservation: data.reservation as WorktreeReservation }
           }
@@ -96,10 +93,7 @@ export function useChainCheckout(): UseChainCheckoutResult {
 
       async release(issueNumber) {
         try {
-          const { status, data } = await postJson(
-            `/api/chains/${issueNumber}/release`,
-            {},
-          )
+          const { status, data } = await postJson(`/api/chains/${issueNumber}/release`, {})
           if (status === 200) {
             const count =
               data && typeof data.count === 'number' ? (data.count as number) : undefined
@@ -121,10 +115,7 @@ export function useChainCheckout(): UseChainCheckoutResult {
         try {
           const body: Record<string, unknown> = { confirmation: true }
           if (worktree) body.worktree = worktree
-          const { status, data } = await postJson(
-            `/api/chains/${issueNumber}/force-release`,
-            body,
-          )
+          const { status, data } = await postJson(`/api/chains/${issueNumber}/force-release`, body)
           if (status === 200) return { ok: true }
           return {
             ok: false,

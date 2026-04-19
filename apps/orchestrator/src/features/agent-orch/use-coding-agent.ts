@@ -7,15 +7,13 @@
  * via `useSessionLiveState`. Per-turn branch info is a reactive read from
  * `branchInfoCollection` via `useBranchInfo` — DO-pushed on snapshot
  * payloads (B7). WS handlers below write into those collections on state /
- * gateway-event / messages-frame delivery. Only `events` (debug log)
- * remains as local React state.
+ * gateway-event / messages-frame delivery.
  */
 
 import { createTransaction } from '@tanstack/db'
 import { useAgent } from 'agents/react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import type * as Y from 'yjs'
-import { agentSessionsCollection as sessionsCollection } from '~/db/agent-sessions-collection'
 import { type BranchInfoRow, createBranchInfoCollection } from '~/db/branch-info-collection'
 import { type CachedMessage, createMessagesCollection } from '~/db/messages-collection'
 import { upsertSessionLiveState } from '~/db/session-live-state-collection'
@@ -49,7 +47,6 @@ export interface ContextUsage {
 
 export interface UseCodingAgentResult {
   state: SessionState | null
-  events: Array<{ ts: string; type: string; data?: unknown }>
   messages: SessionMessage[]
   sessionResult: { total_cost_usd: number; duration_ms: number } | null
   kataState: KataSessionState | null
@@ -111,7 +108,6 @@ function toRow(msg: SessionMessage, sessionId: string): CachedMessage & Record<s
 
 /** Connect to a SessionDO instance by name; returns live state, messages, and RPC helpers. */
 export function useCodingAgent(agentName: string): UseCodingAgentResult {
-  const [events, setEvents] = useState<Array<{ ts: string; type: string; data?: unknown }>>([])
   const prevAgentNameRef = useRef(agentName)
   // Per-session watermark for MessagesFrame `seq` (B1/B3). Keyed by agentName
   // so concurrent session tabs each keep their own highest-applied seq.
@@ -129,14 +125,13 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   if (prevAgentNameRef.current !== agentName) {
     lastSeqRef.current.delete(prevAgentNameRef.current)
     prevAgentNameRef.current = agentName
-    setEvents([])
     // branch-info collection is per-agentName (factory memoises); switching
     // sessions auto-swaps the backing collection via `createBranchInfoCollection`.
   }
 
   // Render source for messages: reactive live query on the persisted collection.
   // `isFetching` proxies the query-collection fetch state and feeds the
-  // `isConnecting` derivation below, retiring the old `hydratedRef` gate.
+  // `isConnecting` derivation below.
   const { messages: cachedMessages, isFetching } = useMessagesCollection(agentName)
   const messages: SessionMessage[] = cachedMessages.map(toSessionMessage)
 
@@ -161,26 +156,22 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
 
   const bulkUpsert = useCallback((msgs: SessionMessage[]) => msgs.forEach(upsert), [upsert])
 
-  /** Replace this session's message set; deletes rows not in `newMsgs`, then upserts them. */
-  const replaceAllMessages = useCallback(
-    (newMsgs: SessionMessage[]) => {
-      const newIds = new Set(newMsgs.map((m) => m.id))
+  /** Snapshot reconcile: delete rows for this session not in `messages`, then upsert. */
+  const applySnapshot = useCallback(
+    (messages: SessionMessage[]) => {
+      const newIds = new Set(messages.map((m) => m.id))
       const staleIds: string[] = []
       try {
         for (const [id, row] of messagesCollection as Iterable<[string, CachedMessage]>) {
           if (row.sessionId === agentName && !newIds.has(id)) staleIds.push(id)
         }
-      } catch {
-        // Iteration rarely throws; skip stale cleanup.
-      }
+      } catch {}
       if (staleIds.length > 0) {
         try {
           messagesCollection.delete(staleIds)
-        } catch {
-          // swallow
-        }
+        } catch {}
       }
-      bulkUpsert(newMsgs)
+      bulkUpsert(messages)
     },
     [agentName, bulkUpsert, messagesCollection],
   )
@@ -222,7 +213,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       const lastSeq = map.get(agentName) ?? 0
 
       if (frame.payload.kind === 'snapshot') {
-        replaceAllMessages(frame.payload.messages)
+        applySnapshot(frame.payload.messages)
         map.set(agentName, Math.max(lastSeq, frame.payload.version))
         // B7: DO pushes branchInfo alongside snapshot payloads on reconnect,
         // rewind, resubmit, and branch-navigate. Upsert each row into the
@@ -281,28 +272,27 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       // frame.seq <= lastSeq — stale/duplicate; drop silently.
       return
     },
-    [agentName, upsert, replaceAllMessages, messagesCollection],
+    [agentName, upsert, applySnapshot, messagesCollection],
   )
 
   const connection = useAgent<SessionState>({
     agent: 'session-agent',
     name: agentName,
     onStateUpdate: (newState) => {
-      upsertSessionLiveState(agentName, { state: newState, wsReadyState: 1 })
-      // Mirror WS state into the sessions query collection (local-only, no
-      // round-trip). `utils.writeUpdate` because `.update()` needs an onUpdate
-      // handler that queryCollectionOptions doesn't configure.
-      if (sessionsCollection.has(agentName)) {
-        const patch: Partial<import('~/db/agent-sessions-collection').SessionRecord> = {
-          id: agentName,
-          status: newState.status,
-          updatedAt: new Date().toISOString(),
-        }
-        if (newState.num_turns != null) patch.numTurns = newState.num_turns
-        if (newState.total_cost_usd != null) patch.totalCostUsd = newState.total_cost_usd
-        if (newState.duration_ms != null) patch.durationMs = newState.duration_ms
-        sessionsCollection.utils.writeUpdate(patch)
-      }
+      // Mirror summary-ish fields onto the top level of the live-state row
+      // so session-list readers (tab-bar, SessionListItem, SessionHistory)
+      // can see them without a parallel session-summary dual-write.
+      upsertSessionLiveState(agentName, {
+        state: newState,
+        wsReadyState: 1,
+        status: newState.status,
+        numTurns: newState.num_turns,
+        totalCostUsd: newState.total_cost_usd,
+        durationMs: newState.duration_ms,
+        model: newState.model,
+        project: newState.project,
+        prompt: newState.prompt,
+      })
       // Hydration is owned by the queryCollection (`messagesCollection` factory
       // + `useMessagesCollection`). The WS snapshot still writes directly to
       // the collection as a latency optimisation; the queryFn is the
@@ -344,7 +334,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           }
           // Legacy shape: {type:'messages', messages: SessionMessage[]}
           if (Array.isArray((parsed as { messages?: unknown }).messages)) {
-            replaceAllMessages((parsed as { messages: SessionMessage[] }).messages)
+            applySnapshot((parsed as { messages: SessionMessage[] }).messages)
             return
           }
           return
@@ -353,10 +343,6 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         // Legacy gateway_event format (non-message events only)
         if (parsed.type === 'gateway_event' && parsed.event) {
           const event = parsed.event as GatewayEvent & { uuid?: string; content?: unknown[] }
-          setEvents((prev) => [
-            ...prev,
-            { ts: new Date().toISOString(), type: event.type, data: event },
-          ])
 
           // Capture kata session state
           if (event.type === 'kata_state') {
@@ -436,18 +422,14 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
 
   const rewind = useCallback(
     async (turnIndex: number) => {
-      const result = (await connection.call('rewind', [turnIndex])) as {
+      // DO broadcasts a reason='rewind' snapshot (B2) that reconciles via
+      // the normal handleMessagesFrame path — no client-side replace.
+      return (await connection.call('rewind', [turnIndex])) as {
         ok: boolean
         error?: string
       }
-      if (result.ok) {
-        // Trim displayed thread; deleted rows propagate via the live query.
-        const kept = cachedMessages.slice(0, turnIndex + 1).map(toSessionMessage)
-        replaceAllMessages(kept)
-      }
-      return result
     },
-    [connection, cachedMessages, replaceAllMessages],
+    [connection],
   )
 
   const resubmitMessage = useCallback(
@@ -455,8 +437,8 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       // The DO's `resubmitMessage` path emits a reason='resubmit' snapshot
       // (B2) carrying both the new leaf's history AND the parent's fresh
       // branchInfo row (B7). The snapshot handler in `handleMessagesFrame`
-      // reconciles both — no manual `getMessages` / `refreshBranchInfo`
-      // round-trip needed.
+      // reconciles both collections server-side — the client only fires the
+      // RPC and awaits the pushed snapshot frame.
       return (await connection.call('resubmitMessage', [messageId, content])) as {
         ok: boolean
         leafId?: string
@@ -491,7 +473,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       if (!targetId) return
       // DO responds with a reason='branch-navigate' snapshot carrying both
       // the target branch's history AND updated branchInfo rows. The
-      // collection subscriptions converge the view — no replaceAllMessages.
+      // collection subscriptions converge the view from the pushed frame.
       try {
         await connection.call('getBranchHistory', [targetId])
       } catch {
@@ -505,8 +487,8 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
    * GH#14 P3: optimistic user-row inserts use `createTransaction` with
    * server-accepts-client-ID reconciliation. The DO accepts the
    * `client_message_id` as the primary id, so echoes reconcile via
-   * TanStack DB deep-equality — no manual delete+insert churn, no
-   * turnHint sort hints, no maxServerTurn bookkeeping.
+   * TanStack DB deep-equality — a single insert followed by the server
+   * echo updating the same row in place, no delete+reinsert churn.
    */
   const sendMessage = useCallback(
     async (content: string | ContentBlock[], opts?: { submitId?: string }) => {
@@ -634,9 +616,9 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           // client_message_id (the DO-authored user row carries its own
           // `usr-N` id). The optimistic row stays keyed on
           // `usr-client-<uuid>`; the server echo arrives with a different id
-          // but the snapshot emitted by forkWithHistory + replaceAllMessages
-          // still converges the collection. Documented as a deviation in
-          // GH#14 P3.
+          // but the snapshot emitted by forkWithHistory reconciles via
+          // handleMessagesFrame and still converges the collection.
+          // Documented as a deviation in GH#14 P3.
           const result = (await connection.call('forkWithHistory', [content])) as {
             ok: boolean
             error?: string
@@ -663,7 +645,6 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
 
   return {
     state,
-    events,
     messages,
     sessionResult,
     kataState,

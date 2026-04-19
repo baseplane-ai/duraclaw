@@ -19,12 +19,8 @@
  * drag-to-advance) and the hook share this cache.
  */
 
-import { useLiveQuery } from '@tanstack/react-db'
 import { useEffect, useMemo, useState } from 'react'
-import {
-  type SessionRecord,
-  agentSessionsCollection,
-} from '~/db/agent-sessions-collection'
+import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import type { ChainSummary, SpecStatusResponse, VpStatusResponse } from '~/lib/types'
 
 export type NextMode = 'research' | 'planning' | 'implementation' | 'verify' | 'close' | null
@@ -117,9 +113,7 @@ export async function checkPrecondition(
   }
 
   if (mode === 'planning') {
-    const ok = sessionsForChain.some(
-      (s) => s.kataMode === 'research' && s.status === 'completed',
-    )
+    const ok = sessionsForChain.some((s) => s.kataMode === 'research' && s.status === 'completed')
     return {
       canAdvance: ok,
       reason: ok ? '' : 'No completed research session',
@@ -167,9 +161,7 @@ export async function checkPrecondition(
 }
 
 export function useNextModePrecondition(chain: ChainSummary): ChainPrecondition {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data } = useLiveQuery(agentSessionsCollection as any)
-  const sessions = useMemo(() => (data ? ([...data] as SessionRecord[]) : []), [data])
+  const { sessions } = useSessionsCollection({ includeArchived: true })
 
   const sessionsForChain = useMemo(
     () => sessions.filter((s) => s.kataIssue === chain.issueNumber),

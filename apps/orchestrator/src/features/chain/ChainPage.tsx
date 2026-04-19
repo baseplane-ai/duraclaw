@@ -67,18 +67,14 @@ export function ChainPage({ issueNumber }: ChainPageProps) {
       valid
         ? sessions
             .filter((s) => s.kataIssue === issueNumber)
-            .sort(
-              (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
-            )
+            .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
         : [],
     [sessions, issueNumber, valid],
   )
 
   // Prefer the most recent running / waiting session as the expanded row.
   const activeSession = useMemo(() => {
-    const candidates = chainSessions.filter(
-      (s) => !TERMINAL.has(String(s.status || 'idle')),
-    )
+    const candidates = chainSessions.filter((s) => !TERMINAL.has(String(s.status || 'idle')))
     if (candidates.length === 0) return null
     return candidates[candidates.length - 1]
   }, [chainSessions])
@@ -158,17 +154,11 @@ export function ChainPage({ issueNumber }: ChainPageProps) {
       </Header>
       <Main>
         <div className="mx-auto max-w-3xl">
-          <ChainHeader
-            issueNumber={issueNumber}
-            title={title}
-            workspace={workspace}
-          />
+          <ChainHeader issueNumber={issueNumber} title={title} workspace={workspace} />
 
           {chainSessions.length === 0 ? (
             <div className="rounded-md border border-dashed p-6 text-center">
-              <p className="text-sm text-muted-foreground mb-3">
-                No sessions for this issue yet.
-              </p>
+              <p className="text-sm text-muted-foreground mb-3">No sessions for this issue yet.</p>
               {!knownProject ? (
                 <div className="mb-3 flex justify-center">
                   <select

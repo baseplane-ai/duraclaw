@@ -3,9 +3,9 @@
  * `GET /api/sessions/:id/messages` and persisted to OPFS SQLite.
  *
  * - Collection id: `messages:<agentName>` (one collection per SessionDO tab)
- * - Persisted to OPFS SQLite (schemaVersion 4 — bump from v3; v3 rows re-
- *   hydrate via queryFn on first read, turnHint is silently dropped on first
- *   write. Retired in P3 in favor of `canonical_turn_id` on user rows.)
+ * - Persisted to OPFS SQLite (schemaVersion 4). Rows sort by
+ *   `canonical_turn_id` on user turns, `createdAt` otherwise — see
+ *   `use-messages-collection.ts` for the sort contract.
  * - syncMode: 'on-demand' — queryFn only fires on explicit fetch / first
  *   subscriber. WS snapshots are the push channel; the query is the pull
  *   channel for cold-start and reconnect-with-stale-cache.

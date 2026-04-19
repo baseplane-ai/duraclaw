@@ -2,7 +2,7 @@
  * Chains QueryCollection — wraps GET /api/chains with TanStackDB.
  *
  * One entry per kata-linked GitHub issue (see ChainSummary in lib/types).
- * Mirrors agentSessionsCollection: OPFS-persisted, 30s refetch, 15s stale.
+ * Mirrors sessionLiveStateCollection siblings: OPFS-persisted, 30s refetch, 15s stale.
  */
 
 import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence'

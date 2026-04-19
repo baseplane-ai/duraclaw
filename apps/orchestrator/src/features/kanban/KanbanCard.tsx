@@ -12,9 +12,9 @@ import { useCallback, useState } from 'react'
 import { toast } from 'sonner'
 import { PipelineDots } from '~/components/layout/nav-sessions'
 import { Button } from '~/components/ui/button'
-import type { SessionRecord } from '~/db/agent-sessions-collection'
-import { WorktreeConflictModal } from '~/features/chain/WorktreeConflictModal'
+import type { SessionRecord } from '~/db/session-record'
 import { formatTimeAgo } from '~/features/agent-orch/session-utils'
+import { WorktreeConflictModal } from '~/features/chain/WorktreeConflictModal'
 import { useChainCheckout } from '~/hooks/use-chain-checkout'
 import { useNextModePrecondition } from '~/hooks/use-chain-preconditions'
 import { useTabSync } from '~/hooks/use-tab-sync'
@@ -165,8 +165,7 @@ export function KanbanCard({ chain }: KanbanCardProps) {
         {...listeners}
       >
         <div className="line-clamp-2 text-xs font-medium leading-snug">
-          <span className="text-muted-foreground">#{chain.issueNumber}</span>{' '}
-          {chain.issueTitle}
+          <span className="text-muted-foreground">#{chain.issueNumber}</span> {chain.issueTitle}
         </div>
         <div className="flex items-center gap-2 text-[11px]">
           <PipelineDots sessions={sessionsForDots} />

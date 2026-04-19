@@ -69,7 +69,6 @@ function makeAgent(overrides: Partial<UseCodingAgentResult> = {}): UseCodingAgen
       summary: null,
       sdk_session_id: null,
     },
-    events: [],
     messages: [],
     sessionResult: null,
     kataState: null,

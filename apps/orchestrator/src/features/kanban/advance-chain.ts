@@ -8,8 +8,8 @@
  * for the B5 preamble flow; call sites don't change.
  *
  * No collection mutations here — the new session will appear in
- * agentSessionsCollection via its normal 30s refetch / invalidation
- * channel. The caller is expected to toast success and navigate.
+ * sessionLiveStateCollection via its normal seeding / refresh flow.
+ * The caller is expected to toast success and navigate.
  */
 
 import type { ChainSummary, WorktreeReservation } from '~/lib/types'
@@ -27,9 +27,7 @@ export type AdvanceChainResult =
   | { ok: true; sessionId: string }
   | { ok: false; error?: string; conflict?: WorktreeReservation }
 
-function latestActiveSession(
-  chain: ChainSummary,
-): ChainSummary['sessions'][number] | null {
+function latestActiveSession(chain: ChainSummary): ChainSummary['sessions'][number] | null {
   const active = chain.sessions.filter((s) => ACTIVE_STATUSES.has(String(s.status)))
   if (active.length === 0) return null
   const sorted = [...active].sort((a, b) => {
@@ -102,19 +100,17 @@ export async function advanceChain(
     // B11: code-touching modes must reserve the worktree before spawn.
     // Read-only modes (research, planning) skip the gate.
     if (CODE_TOUCHING_MODES.has(nextMode)) {
-      const checkoutResp = await fetch(
-        `/api/chains/${chain.issueNumber}/checkout`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({ worktree: project, modeAtCheckout: nextMode }),
-        },
-      )
+      const checkoutResp = await fetch(`/api/chains/${chain.issueNumber}/checkout`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ worktree: project, modeAtCheckout: nextMode }),
+      })
       if (checkoutResp.status === 409) {
-        const body = (await checkoutResp.json().catch(() => null)) as
-          | { conflict?: WorktreeReservation; message?: string }
-          | null
+        const body = (await checkoutResp.json().catch(() => null)) as {
+          conflict?: WorktreeReservation
+          message?: string
+        } | null
         return {
           ok: false,
           error: body?.message ?? 'Worktree already held',

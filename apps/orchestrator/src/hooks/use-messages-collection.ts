@@ -15,8 +15,8 @@
  *      the tail. Assistant rows anchored to turn N interleave between
  *      turn N and turn N+1 because their `createdAt` falls in that window.
  *
- * P3 replaces the old `usr-optimistic-*` / `turnHint` machinery with a
- * single canonical-id-driven sort. See GH#14 spec B5/B6.
+ * The canonical-id-driven sort (B5/B6) gives every reconciled user turn a
+ * stable monotonic slot without client-side ordering hints. See GH#14.
  */
 
 import { useLiveQuery } from '@tanstack/react-db'

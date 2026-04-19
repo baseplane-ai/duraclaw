@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import type { SessionRecord } from '~/db/agent-sessions-collection'
+import type { SessionRecord } from '~/db/session-record'
 import { isQualifyingSession } from '../ActiveStrip'
 import { getRecentAndOlder, isInDateRange } from '../FilterChipBar'
 import { getDateGroup } from '../SessionSidebar'

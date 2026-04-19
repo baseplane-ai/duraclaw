@@ -82,9 +82,7 @@ describe('useChainCheckout', () => {
   })
 
   it('release resolves with count on 200', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      jsonResponse(200, { released: true, count: 1 }),
-    )
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(200, { released: true, count: 1 }))
 
     const { result } = renderHook(() => useChainCheckout())
 

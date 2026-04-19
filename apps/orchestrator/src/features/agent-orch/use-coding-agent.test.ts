@@ -160,15 +160,6 @@ vi.mock('~/db/branch-info-collection', () => {
   }
 })
 
-vi.mock('~/db/agent-sessions-collection', () => ({
-  agentSessionsCollection: {
-    update: vi.fn(),
-    insert: vi.fn(),
-    has: vi.fn().mockReturnValue(true),
-    utils: { writeUpdate: vi.fn() },
-  },
-}))
-
 // Reactive useMessagesCollection mock — subscribes to mutation bumps so
 // `result.current.messages` reflects collection writes between act() calls.
 vi.mock('~/hooks/use-messages-collection', async () => {
@@ -1057,22 +1048,6 @@ describe('legacy gateway_event handling', () => {
     })
   })
 
-  test('accumulates events in events array', () => {
-    const { result } = renderHook(() => useCodingAgent('test-session'))
-
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'gateway_event',
-          event: { type: 'context_usage', usage: { totalTokens: 1, maxTokens: 2, percentage: 0 } },
-        }),
-      )
-    })
-
-    expect(result.current.events).toHaveLength(1)
-    expect(result.current.events[0].type).toBe('context_usage')
-  })
-
   test('does NOT create messages from assistant gateway_events (stripped)', () => {
     const { result } = renderHook(() => useCodingAgent('test-session'))
 
@@ -1182,10 +1157,9 @@ describe('branch tracking (P4)', () => {
     })
 
     expect(mockCall).toHaveBeenCalledWith('resubmitMessage', ['usr-1', 'edited'])
-    // P4: no side-channel getMessages / getBranches RPC — the DO pushes
-    // the new view via its own snapshot frame.
+    // P4: no side-channel getMessages RPC — the DO pushes the new view
+    // via its own snapshot frame.
     expect(mockCall).not.toHaveBeenCalledWith('getMessages', expect.anything())
-    expect(mockCall).not.toHaveBeenCalledWith('getBranches', expect.anything())
   })
 
   test('resubmitMessage surfaces DO failure result', async () => {

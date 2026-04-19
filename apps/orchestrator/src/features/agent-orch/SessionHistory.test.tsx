@@ -7,30 +7,33 @@
 
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { SessionRecord } from '~/db/agent-sessions-collection'
+import type { SessionRecord } from '~/db/session-record'
 
 const mockNavigate = vi.fn()
 vi.mock('@tanstack/react-router', () => ({
   useNavigate: () => mockNavigate,
 }))
 
-// Mock useLiveQuery to return controlled data
+// Mock useSessionsCollection to return controlled data — SessionHistory
+// now reads through the shared hook after GH#14 P5.
 let mockLiveQueryData: SessionRecord[] | null = null
 let mockLiveQueryIsLoading = false
 
-vi.mock('@tanstack/react-db', () => ({
-  useLiveQuery: () => ({
-    get data() {
-      return mockLiveQueryData
-    },
-    get isLoading() {
-      return mockLiveQueryIsLoading
-    },
+vi.mock('~/hooks/use-sessions-collection', () => ({
+  useSessionsCollection: () => ({
+    sessions: mockLiveQueryData ?? [],
+    isLoading: mockLiveQueryIsLoading,
+    createSession: vi.fn(),
+    updateSession: vi.fn(),
+    archiveSession: vi.fn(),
+    refresh: vi.fn(),
   }),
 }))
 
-vi.mock('~/db/agent-sessions-collection', () => ({
-  agentSessionsCollection: {},
+// Stub the live-state collection module so the REST hydrate doesn't touch
+// OPFS or run the real seed helper in tests.
+vi.mock('~/db/session-live-state-collection', () => ({
+  seedSessionLiveStateFromSummary: vi.fn(),
 }))
 
 // Must import after mocks

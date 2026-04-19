@@ -19,9 +19,7 @@ export function ChainHeader({ issueNumber, title, workspace }: ChainHeaderProps)
         #{issueNumber}
         {title ? ` ${title}` : ''}
       </h2>
-      <p className="text-xs text-muted-foreground mt-1">
-        workspace: {workspace ?? '(unknown)'}
-      </p>
+      <p className="text-xs text-muted-foreground mt-1">workspace: {workspace ?? '(unknown)'}</p>
     </div>
   )
 }

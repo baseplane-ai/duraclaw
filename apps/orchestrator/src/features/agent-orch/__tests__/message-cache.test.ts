@@ -34,12 +34,30 @@ vi.mock('agents/react', () => ({
   },
 }))
 
-vi.mock('~/db/agent-sessions-collection', () => ({
-  agentSessionsCollection: {
+// Stub the live-state collection so upsertSessionLiveState from the onStateUpdate
+// path doesn't reach OPFS in tests. message-cache.test does not assert on
+// live-state writes — this mock is a no-op to satisfy the import.
+vi.mock('~/db/session-live-state-collection', () => ({
+  sessionLiveStateCollection: {
+    [Symbol.iterator]: () => [][Symbol.iterator](),
+    has: () => false,
+    insert: vi.fn(),
     update: vi.fn(),
-    has: vi.fn().mockReturnValue(true),
-    utils: { writeUpdate: vi.fn() },
+    delete: vi.fn(),
   },
+  upsertSessionLiveState: vi.fn(),
+}))
+
+vi.mock('~/hooks/use-session-live-state', () => ({
+  useSessionLiveState: () => ({
+    state: null,
+    contextUsage: null,
+    kataState: null,
+    worktreeInfo: null,
+    sessionResult: null,
+    wsReadyState: null,
+    isLive: false,
+  }),
 }))
 
 // ── Messages collection mock ──────────────────────────────────────
