@@ -42,7 +42,7 @@ Port baseplane's agent-orch UI + extract shared ai-elements package. Replaces bu
 | A.2 | SessionDO gateway relay | done | P3 in #17. Raw GatewayEvent relay, unified gate handling, @callable RPC. Fixed: onMessage delegates to super for RPC dispatch; WS route handles /agents/ path. |
 | A.3 | Copy agent-orch UI components | done | P4 in #17. 11 components in features/agent-orch/. |
 | A.4 | Rewrite data hooks | done | P5 in #17. useCodingAgent + useAgentOrchSessions backed by ProjectRegistry DO. Fixed: getMessages derives from events table (messages table was never populated). |
-| A.5 | Voice input (withVoiceInput) | not-started | STT mixin on SessionAgent for mobile gate approval + prompts. |
+| A.5 | Voice input (withVoiceInput) | spec | Spec [20-voice-input.md](specs/20-voice-input.md) · issue [#20](https://github.com/baseplane-ai/duraclaw/issues/20). Hybrid STT: Web Speech primary, server Whisper fallback. |
 | A.6 | Durable fibers for gateway relay | not-started | Replace custom reconnectVps with runFiber() crash recovery. |
 
 ### How Specs Map to Roadmap Phases
