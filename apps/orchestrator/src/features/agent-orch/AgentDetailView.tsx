@@ -4,8 +4,9 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
 import { StatusBar } from '~/components/status-bar'
+import { agentSessionsCollection, type SessionRecord } from '~/db/agent-sessions-collection'
 import { readSessionStatusCache, writeSessionStatusCache } from '~/db/session-status-collection'
-import type { ProjectInfo } from '~/lib/types'
+import type { ProjectInfo, SessionState, SessionStatus } from '~/lib/types'
 import { useStatusBarStore } from '~/stores/status-bar'
 import { ChatThread } from './ChatThread'
 import { ConversationDownload } from './ConversationDownload'
@@ -16,6 +17,37 @@ import type { UseCodingAgentResult } from './use-coding-agent'
 interface AgentDetailViewProps {
   name: string
   agent: UseCodingAgentResult
+}
+
+/**
+ * Synthesize a partial SessionState from the server-backed SessionRecord
+ * so tabs the user has never opened still render an informative status bar
+ * instead of flashing blank. Only basic fields (project, status, model,
+ * num_turns, timestamps) — richer fields (gate, summary, error) come in
+ * via the live WS as soon as it connects.
+ */
+function synthesizeStateFromSessionRecord(record: SessionRecord): SessionState {
+  return {
+    status: record.status as SessionStatus,
+    session_id: record.id,
+    project: record.project,
+    project_path: '',
+    model: record.model ?? null,
+    prompt: record.prompt ?? '',
+    userId: record.userId,
+    started_at: record.lastActivity ?? record.createdAt,
+    completed_at: null,
+    num_turns: record.numTurns ?? 0,
+    total_cost_usd: record.totalCostUsd ?? null,
+    duration_ms: record.durationMs ?? null,
+    gate: null,
+    created_at: record.createdAt,
+    updated_at: record.updatedAt,
+    result: null,
+    error: null,
+    summary: record.summary ?? null,
+    sdk_session_id: record.sdkSessionId ?? null,
+  }
 }
 
 export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps) {
@@ -50,14 +82,29 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
   // collection read and no-ops when OPFS is unavailable.
   useLayoutEffect(() => {
     const cached = readSessionStatusCache(sessionId)
-    if (!cached) return
-    statusBarSet({
-      state: cached.state,
-      contextUsage: cached.contextUsage,
-      kataState: cached.kataState,
-      worktreeInfo: cached.worktreeInfo,
-      sessionResult: cached.sessionResult,
-    })
+    if (cached) {
+      statusBarSet({
+        state: cached.state,
+        contextUsage: cached.contextUsage,
+        kataState: cached.kataState,
+        worktreeInfo: cached.worktreeInfo,
+        sessionResult: cached.sessionResult,
+      })
+      return
+    }
+    // Fallback: synthesize from the server-backed agent_sessions list so
+    // tabs the user has never opened (no session_status entry yet) still
+    // render the project / status / model / turns immediately from the
+    // already-loaded session record.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const record = (agentSessionsCollection as any).get?.(sessionId) as SessionRecord | undefined
+      if (record) {
+        statusBarSet({ state: synthesizeStateFromSessionRecord(record) })
+      }
+    } catch {
+      // collection may not be ready
+    }
   }, [sessionId, statusBarSet])
 
   // Write live values to the store. Guarded so a null live value (WS hasn't
