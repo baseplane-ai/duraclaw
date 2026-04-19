@@ -1,7 +1,7 @@
 /**
  * @vitest-environment jsdom
  */
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionState } from '~/lib/types'
 import { useStatusBarStore } from '~/stores/status-bar'
@@ -156,41 +156,10 @@ describe('StatusBar', () => {
     expect(screen.queryByText('0%')).toBeNull()
   })
 
-  it('shows stop and interrupt buttons when running', () => {
-    const stopFn = vi.fn()
-    const interruptFn = vi.fn()
-
+  it('does not render stop or interrupt buttons (moved to composer footer)', () => {
     act(() => {
       useStatusBarStore.getState().set({
         state: makeState({ status: 'running' }),
-        onStop: stopFn,
-        onInterrupt: interruptFn,
-      })
-    })
-
-    render(<StatusBar />)
-    expect(screen.getByLabelText('Stop session')).toBeDefined()
-    expect(screen.getByLabelText('Interrupt session')).toBeDefined()
-  })
-
-  it('shows stop and interrupt buttons when waiting_gate', () => {
-    act(() => {
-      useStatusBarStore.getState().set({
-        state: makeState({ status: 'waiting_gate' }),
-        onStop: vi.fn(),
-        onInterrupt: vi.fn(),
-      })
-    })
-
-    render(<StatusBar />)
-    expect(screen.getByLabelText('Stop session')).toBeDefined()
-    expect(screen.getByLabelText('Interrupt session')).toBeDefined()
-  })
-
-  it('does not show stop/interrupt buttons when idle', () => {
-    act(() => {
-      useStatusBarStore.getState().set({
-        state: makeState({ status: 'idle' }),
         onStop: vi.fn(),
         onInterrupt: vi.fn(),
       })
@@ -198,66 +167,6 @@ describe('StatusBar', () => {
 
     render(<StatusBar />)
     expect(screen.queryByLabelText('Stop session')).toBeNull()
-    expect(screen.queryByLabelText('Interrupt session')).toBeNull()
-  })
-
-  it('does not show stop/interrupt buttons when failed', () => {
-    act(() => {
-      useStatusBarStore.getState().set({
-        state: makeState({ status: 'failed' }),
-        onStop: vi.fn(),
-        onInterrupt: vi.fn(),
-      })
-    })
-
-    render(<StatusBar />)
-    expect(screen.queryByLabelText('Stop session')).toBeNull()
-    expect(screen.queryByLabelText('Interrupt session')).toBeNull()
-  })
-
-  it('calls onStop with reason when stop button clicked', () => {
-    const stopFn = vi.fn()
-
-    act(() => {
-      useStatusBarStore.getState().set({
-        state: makeState({ status: 'running' }),
-        onStop: stopFn,
-      })
-    })
-
-    render(<StatusBar />)
-    fireEvent.click(screen.getByLabelText('Stop session'))
-
-    expect(stopFn).toHaveBeenCalledWith('Stopped by user')
-  })
-
-  it('calls onInterrupt when interrupt button clicked', () => {
-    const interruptFn = vi.fn()
-
-    act(() => {
-      useStatusBarStore.getState().set({
-        state: makeState({ status: 'running' }),
-        onInterrupt: interruptFn,
-      })
-    })
-
-    render(<StatusBar />)
-    fireEvent.click(screen.getByLabelText('Interrupt session'))
-
-    expect(interruptFn).toHaveBeenCalledOnce()
-  })
-
-  it('does not show interrupt button when onInterrupt is null', () => {
-    act(() => {
-      useStatusBarStore.getState().set({
-        state: makeState({ status: 'running' }),
-        onStop: vi.fn(),
-        onInterrupt: null,
-      })
-    })
-
-    render(<StatusBar />)
-    expect(screen.getByLabelText('Stop session')).toBeDefined()
     expect(screen.queryByLabelText('Interrupt session')).toBeNull()
   })
 

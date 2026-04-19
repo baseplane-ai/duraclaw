@@ -3,12 +3,11 @@
  * Reads from the Zustand status-bar store (populated by AgentDetailView).
  */
 
-import { GitBranchIcon, Square, Zap } from 'lucide-react'
+import { GitBranchIcon } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import type { KataSessionState, PrInfo, SessionState } from '~/lib/types'
 import { cn } from '~/lib/utils'
 import { type ContextUsage, useStatusBarStore, type WorktreeInfo } from '~/stores/status-bar'
-import { Button } from './ui/button'
 
 function formatDuration(ms: number): string {
   const seconds = Math.floor(ms / 1000)
@@ -213,19 +212,10 @@ function KataStatusItem({ kataState }: { kataState: KataSessionState }) {
 }
 
 export function StatusBar() {
-  const {
-    state,
-    wsReadyState,
-    contextUsage,
-    sessionResult,
-    onStop,
-    onInterrupt,
-    kataState,
-    worktreeInfo,
-  } = useStatusBarStore()
+  const { state, wsReadyState, contextUsage, sessionResult, kataState, worktreeInfo } =
+    useStatusBarStore()
 
   const status = state?.status
-  const canStop = status === 'running' || status === 'waiting_gate'
 
   if (!state) return null
 
@@ -254,33 +244,11 @@ export function StatusBar() {
       {contextUsage && <ContextBar contextUsage={contextUsage} />}
       {kataState && <KataStatusItem kataState={kataState} />}
 
-      {/* Right-aligned actions — push to end */}
+      {/* Right-aligned timer — action buttons moved to the composer footer */}
       <div className="ml-auto flex shrink-0 items-center gap-2">
         <ElapsedTimer state={state} />
         {sessionResult?.duration_ms != null && (
           <span className="text-muted-foreground">{formatDuration(sessionResult.duration_ms)}</span>
-        )}
-        {canStop && onInterrupt && (
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-5 w-5"
-            aria-label="Interrupt session"
-            onClick={onInterrupt}
-          >
-            <Zap className="h-3 w-3" />
-          </Button>
-        )}
-        {canStop && onStop && (
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-5 w-5 text-red-400 hover:text-red-300"
-            aria-label="Stop session"
-            onClick={() => onStop('Stopped by user')}
-          >
-            <Square className="h-3 w-3" />
-          </Button>
         )}
       </div>
     </div>

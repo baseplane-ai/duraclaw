@@ -15,14 +15,17 @@ import {
   PromptInputProvider,
   PromptInputSubmit,
   PromptInputTextarea,
+  usePromptInputController,
 } from '@duraclaw/ai-elements'
-import { ImageIcon, XIcon } from 'lucide-react'
-import { useCallback, useRef, useState } from 'react'
+import { ImageIcon, SquareIcon, XIcon, Zap } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
+import type * as Y from 'yjs'
 import { CursorOverlay } from '~/components/cursor-overlay'
 import { TypingIndicator } from '~/components/typing-indicator'
 import { useSessionCollab } from '~/hooks/use-session-collab'
-import type { ContentBlock } from '~/lib/types'
+import type { ContentBlock, SessionStatus } from '~/lib/types'
+import { cn } from '~/lib/utils'
 
 interface ImagePreview {
   data: string
@@ -55,6 +58,17 @@ interface MessageInputProps {
   sessionId?: string
   disabled?: boolean
   /**
+   * Live session status. Drives the combined send/stop button: when the
+   * agent is running and the draft is empty we swap the send icon for an
+   * animated stop button; any time the user has typed text we show the
+   * send button (so steering works mid-run).
+   */
+  status?: SessionStatus
+  /** Stop the session. Wired through from useCodingAgent.stop. */
+  onStop?: (reason: string) => void
+  /** Interrupt the current turn. Wired through from useCodingAgent.interrupt. */
+  onInterrupt?: () => void
+  /**
    * Optional tab id — kept for parity with the previous per-tab draft
    * API. Drafts now live in the shared Y.Text on SessionCollabDO, so this
    * key only scopes the local `PromptInputProvider` (no DO round-trip).
@@ -69,6 +83,9 @@ export function MessageInput({
   submitDraft,
   sessionId,
   disabled,
+  status,
+  onStop,
+  onInterrupt,
   draftKey,
 }: MessageInputProps) {
   const [images, setImages] = useState<ImagePreview[]>([])
@@ -268,12 +285,91 @@ export function MessageInput({
             />
             <ImageIcon className="size-4" />
           </label>
-          <PromptInputSubmit disabled={textareaDisabled} />
+          <ComposerActions
+            ytext={collabReady ? ytext : null}
+            disabled={textareaDisabled}
+            status={status}
+            onStop={onStop}
+            onInterrupt={onInterrupt}
+          />
         </PromptInputFooter>
       </PromptInput>
       {collabReady && awareness && selfClientId !== null && (
         <TypingIndicator awareness={awareness} selfClientId={selfClientId} />
       )}
     </PromptInputProvider>
+  )
+}
+
+interface ComposerActionsProps {
+  ytext: Y.Text | null
+  disabled: boolean
+  status?: SessionStatus
+  onStop?: (reason: string) => void
+  onInterrupt?: () => void
+}
+
+/**
+ * Renders the interrupt + combined send/stop buttons inside the prompt
+ * input footer. Must live inside <PromptInputProvider> so it can read the
+ * current draft text from the controller.
+ *
+ * Button swap rules:
+ *  - text in draft              → send button (works even while running,
+ *                                 so steering messages still submit)
+ *  - no text + session running  → animated stop button
+ *  - no text + session idle     → disabled send button
+ *
+ * While the session is running and the draft is empty, the interrupt
+ * button also appears to the left of the stop button.
+ */
+function ComposerActions({ ytext, disabled, status, onStop, onInterrupt }: ComposerActionsProps) {
+  const controller = usePromptInputController()
+  const [yLen, setYLen] = useState<number>(ytext ? ytext.length : 0)
+
+  useEffect(() => {
+    if (!ytext) return
+    setYLen(ytext.length)
+    const update = () => setYLen(ytext.length)
+    ytext.observe(update)
+    return () => ytext.unobserve(update)
+  }, [ytext])
+
+  const controllerText = controller.textInput.value
+  const hasText = ytext ? yLen > 0 : controllerText.trim().length > 0
+
+  const isRunning = status === 'running' || status === 'waiting_gate'
+  const showStop = isRunning && !hasText && Boolean(onStop)
+  const showInterrupt = isRunning && !hasText && Boolean(onInterrupt)
+
+  // The submit button stays interactive when it's acting as the stop
+  // button even if the composer is "disabled" (waiting_gate) — users
+  // should always be able to stop a runaway turn.
+  const submitDisabled = disabled && !showStop && !hasText
+
+  return (
+    <>
+      {showInterrupt && onInterrupt && (
+        <button
+          type="button"
+          aria-label="Interrupt turn"
+          onClick={onInterrupt}
+          className="inline-flex size-7 cursor-pointer items-center justify-center rounded-lg text-yellow-500 transition-colors hover:bg-muted hover:text-yellow-400"
+        >
+          <Zap className="size-4" />
+        </button>
+      )}
+      <PromptInputSubmit
+        disabled={submitDisabled}
+        status={showStop ? 'streaming' : undefined}
+        onStop={showStop && onStop ? () => onStop('Stopped by user') : undefined}
+        className={cn(
+          showStop &&
+            'bg-red-500/90 text-white hover:bg-red-500 animate-pulse shadow-[0_0_0_0_rgba(239,68,68,0.6)]',
+        )}
+      >
+        {showStop ? <SquareIcon className="size-4 fill-current" /> : undefined}
+      </PromptInputSubmit>
+    </>
   )
 }

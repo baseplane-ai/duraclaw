@@ -7,6 +7,10 @@
 import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+// Shared mock text state the controller hook reads from. Tests can
+// mutate this before render to simulate a non-empty draft.
+const mockControllerState = { value: '' }
+
 // Mock ai-elements to verify compound structure
 vi.mock('@duraclaw/ai-elements', () => ({
   PromptInput: ({ children, className, onPaste, ...props }: Record<string, unknown>) => (
@@ -28,8 +32,23 @@ vi.mock('@duraclaw/ai-elements', () => ({
   PromptInputProvider: ({ children }: Record<string, unknown>) => (
     <div data-testid="prompt-input-provider">{children as React.ReactNode}</div>
   ),
-  PromptInputSubmit: ({ disabled }: Record<string, unknown>) => (
-    <button type="submit" data-testid="prompt-input-submit" disabled={disabled as boolean} />
+  PromptInputSubmit: ({ disabled, status, onStop, children }: Record<string, unknown>) => (
+    <button
+      type="submit"
+      data-testid="prompt-input-submit"
+      data-status={(status as string) ?? ''}
+      data-has-onstop={onStop ? 'true' : 'false'}
+      aria-label={status === 'streaming' ? 'Stop' : 'Submit'}
+      disabled={disabled as boolean}
+      onClick={(e) => {
+        if (onStop) {
+          e.preventDefault()
+          ;(onStop as () => void)()
+        }
+      }}
+    >
+      {children as React.ReactNode}
+    </button>
   ),
   PromptInputTextarea: ({ placeholder, disabled }: Record<string, unknown>) => (
     <textarea
@@ -38,6 +57,17 @@ vi.mock('@duraclaw/ai-elements', () => ({
       disabled={disabled as boolean}
     />
   ),
+  usePromptInputController: () => ({
+    textInput: {
+      value: mockControllerState.value,
+      setInput: (v: string) => {
+        mockControllerState.value = v
+      },
+      clear: () => {
+        mockControllerState.value = ''
+      },
+    },
+  }),
 }))
 
 // Stub the collab hook — MessageInput's behavior is orthogonal to the
@@ -68,6 +98,7 @@ import { MessageInput } from './MessageInput'
 
 afterEach(() => {
   cleanup()
+  mockControllerState.value = ''
 })
 
 describe('MessageInput compound structure', () => {
@@ -115,5 +146,54 @@ describe('MessageInput compound structure', () => {
     render(<MessageInput onSend={vi.fn()} disabled />)
     const submit = screen.getByTestId('prompt-input-submit')
     expect(submit.hasAttribute('disabled')).toBe(true)
+  })
+})
+
+describe('MessageInput combined send/stop button', () => {
+  it('shows stop mode + fires onStop when running with an empty draft', () => {
+    const onStop = vi.fn()
+    render(<MessageInput onSend={vi.fn()} status="running" onStop={onStop} />)
+    const submit = screen.getByTestId('prompt-input-submit')
+    expect(submit.getAttribute('data-status')).toBe('streaming')
+    expect(submit.getAttribute('data-has-onstop')).toBe('true')
+    expect(submit.getAttribute('aria-label')).toBe('Stop')
+    submit.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    expect(onStop).toHaveBeenCalledWith('Stopped by user')
+  })
+
+  it('switches back to send mode when the draft has text (steering path)', () => {
+    mockControllerState.value = 'please also add tests'
+    const onStop = vi.fn()
+    render(<MessageInput onSend={vi.fn()} status="running" onStop={onStop} />)
+    const submit = screen.getByTestId('prompt-input-submit')
+    expect(submit.getAttribute('data-status')).toBe('')
+    expect(submit.getAttribute('data-has-onstop')).toBe('false')
+    expect(submit.getAttribute('aria-label')).toBe('Submit')
+  })
+
+  it('renders the interrupt button when running with an empty draft', () => {
+    const onInterrupt = vi.fn()
+    render(
+      <MessageInput onSend={vi.fn()} status="running" onStop={vi.fn()} onInterrupt={onInterrupt} />,
+    )
+    const interruptBtn = screen.getByLabelText('Interrupt turn')
+    expect(interruptBtn).toBeTruthy()
+    interruptBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    expect(onInterrupt).toHaveBeenCalled()
+  })
+
+  it('hides the interrupt button when the session is idle', () => {
+    render(<MessageInput onSend={vi.fn()} status="idle" onInterrupt={vi.fn()} />)
+    expect(screen.queryByLabelText('Interrupt turn')).toBeNull()
+  })
+
+  it('treats waiting_gate like running for the stop button', () => {
+    const onStop = vi.fn()
+    render(<MessageInput onSend={vi.fn()} disabled status="waiting_gate" onStop={onStop} />)
+    const submit = screen.getByTestId('prompt-input-submit')
+    expect(submit.getAttribute('data-status')).toBe('streaming')
+    // Stop must remain clickable even though `disabled` is true for the
+    // composer — users should always be able to halt a runaway turn.
+    expect(submit.hasAttribute('disabled')).toBe(false)
   })
 })
