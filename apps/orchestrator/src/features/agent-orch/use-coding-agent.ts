@@ -123,6 +123,9 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   const hydratedRef = useRef(false)
   const prevStatusRef = useRef<string | null>(null)
   const prevAgentNameRef = useRef(agentName)
+  // Per-session watermark for MessagesFrame `seq` (B1/B3). Keyed by agentName
+  // so concurrent session tabs each keep their own highest-applied seq.
+  const lastSeqRef = useRef<Map<string, number>>(new Map())
 
   // Server-authoritative live state from the TanStack DB collection.
   const { state, contextUsage, kataState, sessionResult } = useSessionLiveState(agentName)
@@ -130,6 +133,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   // Reset per-session transient state on agentName change (tab switch without
   // remount). Collection rows for other sessions are untouched.
   if (prevAgentNameRef.current !== agentName) {
+    lastSeqRef.current.delete(prevAgentNameRef.current)
     prevAgentNameRef.current = agentName
     hydratedRef.current = false
     prevStatusRef.current = null
@@ -213,6 +217,82 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     }
   }, [agentName])
 
+  /**
+   * Apply a `{type:'messages', seq, payload}` frame from the DO (B1/B3).
+   *
+   * Rules:
+   *   - `snapshot`: always apply regardless of seq, and bump the watermark to
+   *     `max(lastSeq, payload.version)` so subsequent in-flight deltas that
+   *     predated the snapshot (seq <= version) are dropped as stale.
+   *   - `delta` with seq === lastSeq + 1: contiguous, apply upserts + removes
+   *     and advance watermark.
+   *   - `delta` with seq > lastSeq + 1: gap — invoke `onGap` (caller requests
+   *     a snapshot). Do NOT apply and do NOT advance seq.
+   *   - `delta` with seq <= lastSeq: stale/duplicate — drop.
+   *
+   * The `onGap` callback is supplied by `onMessage` because `connection` is
+   * created below this hook; passing it in keeps this callback's deps stable.
+   */
+  const handleMessagesFrame = useCallback(
+    (
+      frame: {
+        type: 'messages'
+        sessionId: string
+        seq: number
+        payload:
+          | { kind: 'delta'; upsert?: SessionMessage[]; remove?: string[] }
+          | {
+              kind: 'snapshot'
+              version: number
+              messages: SessionMessage[]
+              reason: string
+            }
+      },
+      onGap: () => void,
+    ) => {
+      const map = lastSeqRef.current
+      const lastSeq = map.get(agentName) ?? 0
+
+      if (frame.payload.kind === 'snapshot') {
+        replaceAllMessages(frame.payload.messages)
+        hydratedRef.current = true
+        map.set(agentName, Math.max(lastSeq, frame.payload.version))
+        return
+      }
+
+      // kind === 'delta'
+      if (frame.seq === lastSeq + 1) {
+        const upsertList = frame.payload.upsert ?? []
+        for (const m of upsertList) {
+          if (m.role === 'user' && !m.id.startsWith('usr-optimistic-')) {
+            clearOldestOptimisticRow()
+          }
+          upsert(m)
+        }
+        const removeList = frame.payload.remove ?? []
+        if (removeList.length > 0) {
+          try {
+            messagesCollection.delete(removeList)
+          } catch {
+            // swallow
+          }
+        }
+        map.set(agentName, frame.seq)
+        return
+      }
+
+      if (frame.seq > lastSeq + 1) {
+        // True gap — request snapshot; do NOT apply delta or advance seq.
+        onGap()
+        return
+      }
+
+      // frame.seq <= lastSeq — stale/duplicate; drop silently.
+      return
+    },
+    [agentName, upsert, clearOldestOptimisticRow, replaceAllMessages],
+  )
+
   const connection = useAgent<SessionState>({
     agent: 'session-agent',
     name: agentName,
@@ -264,21 +344,42 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       try {
         const parsed = JSON.parse(typeof message.data === 'string' ? message.data : '')
 
-        // Single SessionMessage upsert. Echoes of canonical user turns retire
-        // exactly one pending optimistic row (FIFO; one echo → one clear).
-        if (parsed.type === 'message' && parsed.message) {
-          const msg = parsed.message as SessionMessage
-          if (msg.role === 'user' && !msg.id.startsWith('usr-optimistic-')) {
-            clearOldestOptimisticRow()
+        // Unified {type:'messages'} frame (B1/B3). Supports the new
+        // `{seq, payload}` shape with gap detection, and (for deploy
+        // rollover safety) still tolerates the legacy `{messages}` shape
+        // in case an old DO build emits it during the window.
+        if (parsed.type === 'messages') {
+          if (
+            typeof parsed.seq === 'number' &&
+            parsed.payload &&
+            typeof parsed.payload.kind === 'string'
+          ) {
+            const frame = parsed as {
+              type: 'messages'
+              sessionId: string
+              seq: number
+              payload:
+                | { kind: 'delta'; upsert?: SessionMessage[]; remove?: string[] }
+                | {
+                    kind: 'snapshot'
+                    version: number
+                    messages: SessionMessage[]
+                    reason: string
+                  }
+            }
+            handleMessagesFrame(frame, () => {
+              connection.call('requestSnapshot', []).catch(() => {
+                // Non-critical; reconnect path will eventually resync.
+              })
+            })
+            return
           }
-          upsert(msg)
-          return
-        }
-
-        // Bulk message replay on connect.
-        if (parsed.type === 'messages' && Array.isArray(parsed.messages)) {
-          replaceAllMessages(parsed.messages as SessionMessage[])
-          hydratedRef.current = true
+          // Legacy shape: {type:'messages', messages: SessionMessage[]}
+          if (Array.isArray((parsed as { messages?: unknown }).messages)) {
+            replaceAllMessages((parsed as { messages: SessionMessage[] }).messages)
+            hydratedRef.current = true
+            return
+          }
           return
         }
 

@@ -2,8 +2,10 @@
  * Tests for message cache-behind writes and cache-first hydration in useCodingAgent.
  *
  * Validates that:
- * - SessionMessage events are written to messagesCollection (cache-behind)
- * - Bulk message replay is written to messagesCollection
+ * - Unified {type:'messages', seq, payload:{kind:'delta'}} frames are written
+ *   to messagesCollection (cache-behind)
+ * - Bulk message replay (legacy {messages} shape — deploy rollover tolerance)
+ *   is written to messagesCollection
  * - Hydrated messages are written to messagesCollection
  * - On first state sync, cached messages are loaded before WS hydration (cache-first)
  * - Duplicate insert errors are silently ignored
@@ -127,12 +129,24 @@ function makeWsMessage(data: unknown): MessageEvent {
   return { data: JSON.stringify(data) } as MessageEvent
 }
 
+let msgSeq = 0
+function deltaFrame(upsert: Array<Record<string, unknown>>, sessionId = 'test-session') {
+  msgSeq += 1
+  return {
+    type: 'messages',
+    sessionId,
+    seq: msgSeq,
+    payload: { kind: 'delta', upsert },
+  }
+}
+
 describe('message cache-behind writes (SessionMessage format)', () => {
   beforeEach(() => {
     capturedOnStateUpdate = null
     capturedOnMessage = null
     vi.clearAllMocks()
     mockCollectionEntries.length = 0
+    msgSeq = 0
     vi.useFakeTimers()
   })
 
@@ -141,20 +155,21 @@ describe('message cache-behind writes (SessionMessage format)', () => {
     vi.restoreAllMocks()
   })
 
-  test('single message event triggers cache-behind write', () => {
+  test('single delta frame triggers cache-behind write', () => {
     renderHook(() => useCodingAgent('test-session'))
 
     act(() => {
       capturedOnMessage!(
-        makeWsMessage({
-          type: 'message',
-          message: {
-            id: 'msg-1',
-            role: 'assistant',
-            parts: [{ type: 'text', text: 'Hello world' }],
-            createdAt: '2026-04-13T12:00:00Z',
-          },
-        }),
+        makeWsMessage(
+          deltaFrame([
+            {
+              id: 'msg-1',
+              role: 'assistant',
+              parts: [{ type: 'text', text: 'Hello world' }],
+              createdAt: '2026-04-13T12:00:00Z',
+            },
+          ]),
+        ),
       )
     })
 
@@ -227,14 +242,15 @@ describe('message cache-behind writes (SessionMessage format)', () => {
     expect(() => {
       act(() => {
         capturedOnMessage!(
-          makeWsMessage({
-            type: 'message',
-            message: {
-              id: 'dup-msg',
-              role: 'assistant',
-              parts: [{ type: 'text', text: 'duplicate' }],
-            },
-          }),
+          makeWsMessage(
+            deltaFrame([
+              {
+                id: 'dup-msg',
+                role: 'assistant',
+                parts: [{ type: 'text', text: 'duplicate' }],
+              },
+            ]),
+          ),
         )
       })
     }).not.toThrow()
@@ -247,6 +263,7 @@ describe('message cache-first hydration', () => {
     capturedOnMessage = null
     vi.clearAllMocks()
     mockCollectionEntries.length = 0
+    msgSeq = 0
     mockCall.mockResolvedValue([])
   })
 
@@ -378,17 +395,18 @@ describe('message cache-first hydration', () => {
       capturedOnStateUpdate!({ status: 'idle' })
     })
 
-    // Now send a message event with the same id -- should upsert in place
+    // Now send a delta frame with the same id -- should upsert in place
     act(() => {
       capturedOnMessage!(
-        makeWsMessage({
-          type: 'message',
-          message: {
-            id: 'cached-evt',
-            role: 'assistant',
-            parts: [{ type: 'text', text: 'updated' }],
-          },
-        }),
+        makeWsMessage(
+          deltaFrame([
+            {
+              id: 'cached-evt',
+              role: 'assistant',
+              parts: [{ type: 'text', text: 'updated' }],
+            },
+          ]),
+        ),
       )
     })
 

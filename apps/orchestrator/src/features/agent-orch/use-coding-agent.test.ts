@@ -5,8 +5,12 @@
  *
  * Validates:
  * - Cache-first hydration from local collection (parts-based CachedMessage)
- * - { type: 'message' } wire format: upsert, optimistic replacement, cache writes
- * - { type: 'messages' } wire format: bulk replay, cache writes
+ * - Unified { type:'messages', seq, payload:{kind:'delta'} } wire format:
+ *   upsert, optimistic replacement, cache writes
+ * - Unified { type:'messages', seq, payload:{kind:'snapshot'} } wire format:
+ *   bulk replay, watermark bump
+ * - Gap detection: out-of-order delta → requestSnapshot RPC, stale deltas dropped
+ * - Legacy { type:'messages', messages } shape still tolerated for deploy rollover
  * - sendMessage: optimistic insert in SessionMessage format, rollback on failure
  * - injectQaPair: parts-based qa_pair message
  * - Legacy gateway_event: only non-message events processed (kata_state, context_usage, result)
@@ -188,6 +192,46 @@ function makeWsMessage(data: unknown): MessageEvent {
   return new MessageEvent('message', { data: JSON.stringify(data) })
 }
 
+// ── MessagesFrame helpers (P1/1b — unified shape) ────────────────────
+
+/**
+ * Per-test seq counter for building unified `{type:'messages'}` delta
+ * frames. Tests that expect a contiguous delta stream should reset this
+ * in `beforeEach` via `msgSeq = 0`.
+ */
+let msgSeq = 0
+
+function deltaFrame(
+  upsert: Array<Record<string, unknown>>,
+  opts: { remove?: string[]; sessionId?: string } = {},
+) {
+  msgSeq += 1
+  return {
+    type: 'messages',
+    sessionId: opts.sessionId ?? 'test-session',
+    seq: msgSeq,
+    payload: { kind: 'delta', upsert, ...(opts.remove ? { remove: opts.remove } : {}) },
+  }
+}
+
+function snapshotFrame(
+  messages: Array<Record<string, unknown>>,
+  opts: { version?: number; sessionId?: string; reason?: string } = {},
+) {
+  const version = opts.version ?? msgSeq
+  return {
+    type: 'messages',
+    sessionId: opts.sessionId ?? 'test-session',
+    seq: version,
+    payload: {
+      kind: 'snapshot',
+      version,
+      messages,
+      reason: opts.reason ?? 'reconnect',
+    },
+  }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────
 
 describe('useCodingAgent cache-first hydration', () => {
@@ -305,13 +349,14 @@ describe('useCodingAgent cache-first hydration', () => {
   })
 })
 
-describe('type: "message" wire format', () => {
+describe('type: "messages" delta wire format (unified)', () => {
   beforeEach(() => {
     cachedMessagesStore.clear()
     liveStateStore.clear()
     collectionSubs.clear()
     liveStateSubs.clear()
     capturedUseAgentConfig = null
+    msgSeq = 0
     vi.clearAllMocks()
   })
 
@@ -324,14 +369,15 @@ describe('type: "message" wire format', () => {
 
     act(() => {
       capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'message',
-          message: {
-            id: 'asst-1',
-            role: 'assistant',
-            parts: [{ type: 'text', text: 'Hello!' }],
-          },
-        }),
+        makeWsMessage(
+          deltaFrame([
+            {
+              id: 'asst-1',
+              role: 'assistant',
+              parts: [{ type: 'text', text: 'Hello!' }],
+            },
+          ]),
+        ),
       )
     })
 
@@ -347,14 +393,15 @@ describe('type: "message" wire format', () => {
     // First message
     act(() => {
       capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'message',
-          message: {
-            id: 'asst-1',
-            role: 'assistant',
-            parts: [{ type: 'text', text: 'Hel', state: 'streaming' }],
-          },
-        }),
+        makeWsMessage(
+          deltaFrame([
+            {
+              id: 'asst-1',
+              role: 'assistant',
+              parts: [{ type: 'text', text: 'Hel', state: 'streaming' }],
+            },
+          ]),
+        ),
       )
     })
 
@@ -365,14 +412,15 @@ describe('type: "message" wire format', () => {
     // Update same message
     act(() => {
       capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'message',
-          message: {
-            id: 'asst-1',
-            role: 'assistant',
-            parts: [{ type: 'text', text: 'Hello world!', state: 'done' }],
-          },
-        }),
+        makeWsMessage(
+          deltaFrame([
+            {
+              id: 'asst-1',
+              role: 'assistant',
+              parts: [{ type: 'text', text: 'Hello world!', state: 'done' }],
+            },
+          ]),
+        ),
       )
     })
 
@@ -399,14 +447,15 @@ describe('type: "message" wire format', () => {
     // Server echo arrives
     act(() => {
       capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'message',
-          message: {
-            id: 'server-usr-1',
-            role: 'user',
-            parts: [{ type: 'text', text: 'Hello agent' }],
-          },
-        }),
+        makeWsMessage(
+          deltaFrame([
+            {
+              id: 'server-usr-1',
+              role: 'user',
+              parts: [{ type: 'text', text: 'Hello agent' }],
+            },
+          ]),
+        ),
       )
     })
 
@@ -445,14 +494,15 @@ describe('type: "message" wire format', () => {
     // UI until its own echo arrived — the "repetitive display" bug.
     act(() => {
       capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'message',
-          message: {
-            id: 'usr-1',
-            role: 'user',
-            parts: [{ type: 'text', text: 'A' }],
-          },
-        }),
+        makeWsMessage(
+          deltaFrame([
+            {
+              id: 'usr-1',
+              role: 'user',
+              parts: [{ type: 'text', text: 'A' }],
+            },
+          ]),
+        ),
       )
     })
 
@@ -469,23 +519,23 @@ describe('type: "message" wire format', () => {
 
     act(() => {
       capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'message',
-          message: { id: 'usr-1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
-        }),
+        makeWsMessage(
+          deltaFrame([{ id: 'usr-1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] }]),
+        ),
       )
     })
 
     act(() => {
       capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'message',
-          message: {
-            id: 'asst-1',
-            role: 'assistant',
-            parts: [{ type: 'text', text: 'Hello!' }],
-          },
-        }),
+        makeWsMessage(
+          deltaFrame([
+            {
+              id: 'asst-1',
+              role: 'assistant',
+              parts: [{ type: 'text', text: 'Hello!' }],
+            },
+          ]),
+        ),
       )
     })
 
@@ -494,20 +544,21 @@ describe('type: "message" wire format', () => {
     expect(result.current.messages[1].role).toBe('assistant')
   })
 
-  test('writes to cache on each message event', () => {
+  test('writes to cache on each delta frame', () => {
     renderHook(() => useCodingAgent('test-session'))
 
     act(() => {
       capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'message',
-          message: {
-            id: 'msg-cache-1',
-            role: 'assistant',
-            parts: [{ type: 'text', text: 'cached' }],
-            createdAt: '2026-04-14T00:00:00Z',
-          },
-        }),
+        makeWsMessage(
+          deltaFrame([
+            {
+              id: 'msg-cache-1',
+              role: 'assistant',
+              parts: [{ type: 'text', text: 'cached' }],
+              createdAt: '2026-04-14T00:00:00Z',
+            },
+          ]),
+        ),
       )
     })
 
@@ -520,13 +571,14 @@ describe('type: "message" wire format', () => {
   })
 })
 
-describe('type: "messages" wire format (bulk replay)', () => {
+describe('type: "messages" snapshot wire format (bulk replay)', () => {
   beforeEach(() => {
     cachedMessagesStore.clear()
     liveStateStore.clear()
     collectionSubs.clear()
     liveStateSubs.clear()
     capturedUseAgentConfig = null
+    msgSeq = 0
     vi.clearAllMocks()
   })
 
@@ -534,34 +586,35 @@ describe('type: "messages" wire format (bulk replay)', () => {
     vi.restoreAllMocks()
   })
 
-  test('replaces all messages with bulk replay', () => {
+  test('replaces all messages with snapshot frame', () => {
     const { result } = renderHook(() => useCodingAgent('test-session'))
 
-    // Add a message first
+    // Add a message first via delta
     act(() => {
       capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'message',
-          message: { id: 'old-1', role: 'user', parts: [{ type: 'text', text: 'old' }] },
-        }),
+        makeWsMessage(
+          deltaFrame([{ id: 'old-1', role: 'user', parts: [{ type: 'text', text: 'old' }] }]),
+        ),
       )
     })
     expect(result.current.messages).toHaveLength(1)
 
-    // Bulk replay replaces everything
+    // Snapshot replaces everything
     act(() => {
       capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'messages',
-          messages: [
-            { id: 'replay-1', role: 'user', parts: [{ type: 'text', text: 'replayed user' }] },
-            {
-              id: 'replay-2',
-              role: 'assistant',
-              parts: [{ type: 'text', text: 'replayed assistant' }],
-            },
-          ],
-        }),
+        makeWsMessage(
+          snapshotFrame(
+            [
+              { id: 'replay-1', role: 'user', parts: [{ type: 'text', text: 'replayed user' }] },
+              {
+                id: 'replay-2',
+                role: 'assistant',
+                parts: [{ type: 'text', text: 'replayed assistant' }],
+              },
+            ],
+            { version: 10 },
+          ),
+        ),
       )
     })
 
@@ -570,18 +623,20 @@ describe('type: "messages" wire format (bulk replay)', () => {
     expect(result.current.messages[1].id).toBe('replay-2')
   })
 
-  test('caches all replayed messages', () => {
+  test('caches all snapshotted messages', () => {
     renderHook(() => useCodingAgent('test-session'))
 
     act(() => {
       capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'messages',
-          messages: [
-            { id: 'r-1', role: 'user', parts: [{ type: 'text', text: 'u' }] },
-            { id: 'r-2', role: 'assistant', parts: [{ type: 'text', text: 'a' }] },
-          ],
-        }),
+        makeWsMessage(
+          snapshotFrame(
+            [
+              { id: 'r-1', role: 'user', parts: [{ type: 'text', text: 'u' }] },
+              { id: 'r-2', role: 'assistant', parts: [{ type: 'text', text: 'a' }] },
+            ],
+            { version: 5 },
+          ),
+        ),
       )
     })
 
@@ -589,34 +644,163 @@ describe('type: "messages" wire format (bulk replay)', () => {
     expect(cachedMessagesStore.has('r-2')).toBe(true)
   })
 
-  test('subsequent single message upserts work after bulk replay', () => {
+  test('delta after snapshot bumps watermark correctly (seq max)', () => {
+    const { result } = renderHook(() => useCodingAgent('test-session'))
+
+    // Snapshot advances watermark to version=3
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage(
+          snapshotFrame([{ id: 'r-1', role: 'user', parts: [{ type: 'text', text: 'hi' }] }], {
+            version: 3,
+          }),
+        ),
+      )
+    })
+    msgSeq = 3
+
+    // A delta with seq=4 is contiguous and should apply.
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage(
+          deltaFrame([
+            {
+              id: 'asst-new',
+              role: 'assistant',
+              parts: [{ type: 'text', text: 'hello' }],
+            },
+          ]),
+        ),
+      )
+    })
+
+    expect(result.current.messages).toHaveLength(2)
+    expect(result.current.messages[1].id).toBe('asst-new')
+  })
+
+  test('legacy {type:"messages", messages} shape still hydrates (deploy rollover)', () => {
     const { result } = renderHook(() => useCodingAgent('test-session'))
 
     act(() => {
       capturedUseAgentConfig?.onMessage?.(
         makeWsMessage({
           type: 'messages',
-          messages: [{ id: 'r-1', role: 'user', parts: [{ type: 'text', text: 'hi' }] }],
-        }),
-      )
-    })
-
-    // Now a new message arrives
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'message',
-          message: {
-            id: 'asst-new',
-            role: 'assistant',
-            parts: [{ type: 'text', text: 'hello' }],
-          },
+          messages: [
+            { id: 'legacy-1', role: 'user', parts: [{ type: 'text', text: 'u' }] },
+            { id: 'legacy-2', role: 'assistant', parts: [{ type: 'text', text: 'a' }] },
+          ],
         }),
       )
     })
 
     expect(result.current.messages).toHaveLength(2)
-    expect(result.current.messages[1].id).toBe('asst-new')
+    expect(cachedMessagesStore.has('legacy-1')).toBe(true)
+    expect(cachedMessagesStore.has('legacy-2')).toBe(true)
+  })
+})
+
+describe('MessagesFrame gap detection (P1 B3)', () => {
+  beforeEach(() => {
+    cachedMessagesStore.clear()
+    liveStateStore.clear()
+    collectionSubs.clear()
+    liveStateSubs.clear()
+    capturedUseAgentConfig = null
+    msgSeq = 0
+    vi.clearAllMocks()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  test('out-of-order delta triggers requestSnapshot RPC and does NOT apply', () => {
+    mockCall.mockResolvedValue(undefined)
+    const { result } = renderHook(() => useCodingAgent('test-session'))
+
+    // Apply seq=1 normally
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage(
+          deltaFrame([{ id: 'm-1', role: 'user', parts: [{ type: 'text', text: 'a' }] }]),
+        ),
+      )
+    })
+    expect(result.current.messages).toHaveLength(1)
+
+    // Skip seq=2, deliver seq=3 (gap) — should be dropped and requestSnapshot called.
+    msgSeq = 2 // account for the "missing" delta
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage(
+          deltaFrame([{ id: 'm-3', role: 'assistant', parts: [{ type: 'text', text: 'c' }] }]),
+        ),
+      )
+    })
+
+    expect(result.current.messages).toHaveLength(1) // m-3 not applied
+    expect(mockCall).toHaveBeenCalledWith('requestSnapshot', [])
+  })
+
+  test('stale delta (seq <= lastSeq) is dropped silently', () => {
+    const { result } = renderHook(() => useCodingAgent('test-session'))
+
+    // Snapshot bumps watermark to 10
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage(
+          snapshotFrame([{ id: 's-1', role: 'user', parts: [{ type: 'text', text: 'snap' }] }], {
+            version: 10,
+          }),
+        ),
+      )
+    })
+
+    // A stale in-flight delta with seq=5 arrives after the snapshot. Must be dropped.
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage({
+          type: 'messages',
+          sessionId: 'test-session',
+          seq: 5,
+          payload: {
+            kind: 'delta',
+            upsert: [{ id: 'stale-1', role: 'assistant', parts: [{ type: 'text', text: 'x' }] }],
+          },
+        }),
+      )
+    })
+
+    expect(result.current.messages).toHaveLength(1)
+    expect(result.current.messages[0].id).toBe('s-1')
+  })
+
+  test('delta remove list deletes rows', () => {
+    const { result } = renderHook(() => useCodingAgent('test-session'))
+
+    // Seed two messages via a snapshot
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage(
+          snapshotFrame(
+            [
+              { id: 'keep-1', role: 'user', parts: [{ type: 'text', text: 'keep' }] },
+              { id: 'drop-1', role: 'assistant', parts: [{ type: 'text', text: 'drop' }] },
+            ],
+            { version: 2 },
+          ),
+        ),
+      )
+    })
+    msgSeq = 2
+
+    // Delta with remove only
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(makeWsMessage(deltaFrame([], { remove: ['drop-1'] })))
+    })
+
+    expect(result.current.messages).toHaveLength(1)
+    expect(result.current.messages[0].id).toBe('keep-1')
   })
 })
 

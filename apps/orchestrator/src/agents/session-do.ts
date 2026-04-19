@@ -202,15 +202,15 @@ export class SessionDO extends Agent<Env, SessionState> {
 
     // Browser connection: replay full message history. Always send the frame
     // (even empty) so the client has an explicit "history fetched" signal and
-    // doesn't sit gated on a `{type:'messages'}` frame that would never arrive
-    // for a session with no local history. If the DO is cold and has nothing
-    // in SQLite yet, the client's getMessages RPC will trigger gateway-side
+    // doesn't sit gated waiting for a snapshot that would never arrive for a
+    // session with no local history. If the DO is cold and has nothing in
+    // SQLite yet, the client's getMessages RPC will trigger gateway-side
     // hydration as the source of truth.
     try {
       const messages = this.session.getHistory()
-      // Legacy on-connect shape — removed in P1 sub-phase 1b
-      connection.send(JSON.stringify({ type: 'messages', messages }))
-      // New targeted reconnect snapshot (B1 + B2 single-client scope)
+      // Targeted reconnect snapshot (B1 + B2 single-client scope). The
+      // legacy `{type:'messages', messages}` emit was retired in P1
+      // sub-phase 1b; the unified frame carries the reconnect payload.
       this.broadcastMessages(
         {
           kind: 'snapshot',
@@ -222,7 +222,17 @@ export class SessionDO extends Agent<Env, SessionState> {
       )
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to replay history:`, err)
-      connection.send(JSON.stringify({ type: 'messages', messages: [] }))
+      // Explicit empty-history snapshot so the client isn't left without a
+      // "history fetched" signal on the error path.
+      this.broadcastMessages(
+        {
+          kind: 'snapshot',
+          version: this.messageSeq,
+          messages: [],
+          reason: 'reconnect',
+        },
+        { targetClientId: connection.id },
+      )
     }
 
     // Re-emit gate if session is waiting
@@ -557,9 +567,9 @@ export class SessionDO extends Agent<Env, SessionState> {
   }
 
   private broadcastMessage(message: SessionMessage) {
-    // Legacy per-message frame — removed in P1 sub-phase 1b (client rewrite)
-    this.broadcastToClients(JSON.stringify({ type: 'message', message }))
-    // New unified {type:'messages'} frame (B1)
+    // Unified {type:'messages'} delta frame (B1). The legacy per-message
+    // `{type:'message'}` emit was retired in P1 sub-phase 1b now that the
+    // client dispatches exclusively on the unified shape.
     this.broadcastMessages({ kind: 'delta', upsert: [message as unknown as WireSessionMessage] })
   }
 
