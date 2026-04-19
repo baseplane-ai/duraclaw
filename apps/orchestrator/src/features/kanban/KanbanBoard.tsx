@@ -1,10 +1,13 @@
 /**
  * KanbanBoard — top-level surface for `/board`.
  *
- * P3 U3 adds drag-to-advance: cards become draggables, columns become
- * droppables (`drop:<lane>:<column>`), and onDragEnd runs the B9
- * precondition check + B10 confirmation modal before delegating to
- * advanceChain.
+ * Swim lanes group by issue type (enhancement / bug / other). A project
+ * filter dropdown in the header lets users scope the board to chains that
+ * have sessions in a specific project (worktree).
+ *
+ * Drag-to-advance: cards are draggable, columns are droppable
+ * (`drop:<lane>:<column>`), and onDragEnd runs the B9 precondition check
+ * + B10 confirmation modal before delegating to advanceChain.
  *
  * Adjacency rule: only strict single-step left-to-right drops are
  * accepted. Any other target is a no-op with a toast.
@@ -24,6 +27,13 @@ import { useCallback, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 import { Header } from '~/components/layout/header'
 import { Main } from '~/components/layout/main'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '~/components/ui/select'
 import { chainsCollection } from '~/db/chains-collection'
 import { checkPrecondition } from '~/hooks/use-chain-preconditions'
 import { useKanbanLanes } from '~/hooks/use-kanban-lanes'
@@ -59,13 +69,37 @@ function parseDropId(id: string): { lane: string; column: ChainSummary['column']
   return { lane: parts[1], column: col }
 }
 
+/** Sentinel value for "all projects" (no filter). */
+const ALL_PROJECTS = '__all__'
+
 export function KanbanBoard() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data, isLoading } = useLiveQuery(chainsCollection as any)
   const { isCollapsed, toggle } = useKanbanLanes()
   const navigate = useNavigate()
+  const [projectFilter, setProjectFilter] = useState(ALL_PROJECTS)
 
   const chains = useMemo(() => (data ? ([...data] as ChainSummary[]) : []), [data])
+
+  // Derive unique project names across all chains for the filter dropdown.
+  const projects = useMemo(() => {
+    const set = new Set<string>()
+    for (const chain of chains) {
+      for (const s of chain.sessions) {
+        if (s.project) set.add(s.project)
+      }
+    }
+    return [...set].sort()
+  }, [chains])
+
+  // Apply project filter: keep chains that have at least one session in the
+  // selected project. Chains with no sessions (backlog-only) always show.
+  const filtered = useMemo(() => {
+    if (projectFilter === ALL_PROJECTS) return chains
+    return chains.filter(
+      (c) => c.sessions.length === 0 || c.sessions.some((s) => s.project === projectFilter),
+    )
+  }, [chains, projectFilter])
 
   const byLane = useMemo(() => {
     const out: Record<'enhancement' | 'bug' | 'other', ChainSummary[]> = {
@@ -73,11 +107,11 @@ export function KanbanBoard() {
       bug: [],
       other: [],
     }
-    for (const chain of chains) {
+    for (const chain of filtered) {
       out[laneFor(chain)].push(chain)
     }
     return out
-  }, [chains])
+  }, [filtered])
 
   const sensors = useSensors(useSensor(PointerSensor), useSensor(KeyboardSensor))
 
@@ -109,11 +143,6 @@ export function KanbanBoard() {
         return
       }
 
-      // Share the session fetch with use-chain-preconditions by reading
-      // chain.sessions directly (the collection's filter-by-kataIssue is
-      // a superset of chain.sessions). ChainSummary.sessions already
-      // carries kataMode + status, which is all checkPrecondition needs
-      // for the mode-based gates.
       const sessionsForChain = chain.sessions
       const res = await checkPrecondition(chain, sessionsForChain)
       if (!res.canAdvance || !res.nextMode) {
@@ -147,7 +176,24 @@ export function KanbanBoard() {
   return (
     <>
       <Header>
-        <h1 className="text-lg font-semibold">Board</h1>
+        <div className="flex items-center gap-3">
+          <h1 className="text-lg font-semibold">Board</h1>
+          {projects.length > 0 ? (
+            <Select value={projectFilter} onValueChange={setProjectFilter}>
+              <SelectTrigger className="h-8 w-auto min-w-[140px] text-xs">
+                <SelectValue placeholder="All projects" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={ALL_PROJECTS}>All projects</SelectItem>
+                {projects.map((p) => (
+                  <SelectItem key={p} value={p}>
+                    {p}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : null}
+        </div>
       </Header>
       <Main fluid fixed>
         <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
