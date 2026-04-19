@@ -1,16 +1,21 @@
 /**
  * @vitest-environment jsdom
  */
-import { act, cleanup, render, screen } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, render, screen } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import {
+  sessionLiveStateCollection,
+  upsertSessionLiveState,
+} from '~/db/session-live-state-collection'
 import type { SessionState } from '~/lib/types'
-import { useStatusBarStore } from '~/stores/status-bar'
 import { StatusBar } from './status-bar'
+
+const TEST_ID = 'test-session'
 
 function makeState(overrides: Partial<SessionState> = {}): SessionState {
   return {
     status: 'idle',
-    session_id: 'test-session',
+    session_id: TEST_ID,
     project: 'my-project',
     project_path: '/tmp/project',
     model: 'claude-4',
@@ -32,36 +37,49 @@ function makeState(overrides: Partial<SessionState> = {}): SessionState {
   }
 }
 
+function clearRow() {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const coll = sessionLiveStateCollection as any
+    if (coll.has?.(TEST_ID)) coll.delete(TEST_ID)
+  } catch {
+    // ignore
+  }
+}
+
 describe('StatusBar', () => {
   beforeEach(() => {
-    act(() => {
-      useStatusBarStore.getState().clear()
-    })
+    clearRow()
   })
 
   afterEach(() => {
     cleanup()
+    clearRow()
   })
 
-  it('renders nothing when store has no state', () => {
-    const { container } = render(<StatusBar />)
+  it('renders nothing when sessionId is null', () => {
+    const { container } = render(<StatusBar sessionId={null} />)
     expect(container.firstChild).toBeNull()
   })
 
-  it('shows session data when store has state', () => {
-    act(() => {
-      useStatusBarStore.getState().set({
-        state: makeState({
-          status: 'running',
-          project: 'duraclaw',
-          model: 'opus-4',
-          num_turns: 12,
-        }),
-        wsReadyState: 1,
-      })
+  it('renders nothing when collection has no row for sessionId', () => {
+    const { container } = render(<StatusBar sessionId={TEST_ID} />)
+    expect(container.firstChild).toBeNull()
+  })
+
+  it('renders nothing when row exists but state is null', () => {
+    upsertSessionLiveState(TEST_ID, { wsReadyState: 1 })
+    const { container } = render(<StatusBar sessionId={TEST_ID} />)
+    expect(container.firstChild).toBeNull()
+  })
+
+  it('shows session data when collection has row', () => {
+    upsertSessionLiveState(TEST_ID, {
+      state: makeState({ status: 'running', project: 'duraclaw', model: 'opus-4', num_turns: 12 }),
+      wsReadyState: 1,
     })
 
-    render(<StatusBar />)
+    render(<StatusBar sessionId={TEST_ID} />)
 
     expect(screen.getByText('running')).toBeDefined()
     expect(screen.getByText('duraclaw')).toBeDefined()
@@ -70,176 +88,110 @@ describe('StatusBar', () => {
   })
 
   it('shows "--" for missing project and model', () => {
-    act(() => {
-      useStatusBarStore.getState().set({
-        state: makeState({ project: '', model: null }),
-      })
+    upsertSessionLiveState(TEST_ID, {
+      state: makeState({ project: '', model: null }),
     })
 
-    render(<StatusBar />)
+    render(<StatusBar sessionId={TEST_ID} />)
 
     const dashes = screen.getAllByText('--')
     expect(dashes.length).toBe(2)
   })
 
   it('shows WS dot with "Connected" title when wsReadyState is 1', () => {
-    act(() => {
-      useStatusBarStore.getState().set({
-        state: makeState(),
-        wsReadyState: 1,
-      })
-    })
-
-    render(<StatusBar />)
+    upsertSessionLiveState(TEST_ID, { state: makeState(), wsReadyState: 1 })
+    render(<StatusBar sessionId={TEST_ID} />)
     expect(screen.getByTitle('Connected')).toBeDefined()
   })
 
   it('shows WS dot with "Connecting..." title when wsReadyState is 0', () => {
-    act(() => {
-      useStatusBarStore.getState().set({
-        state: makeState(),
-        wsReadyState: 0,
-      })
-    })
-
-    render(<StatusBar />)
+    upsertSessionLiveState(TEST_ID, { state: makeState(), wsReadyState: 0 })
+    render(<StatusBar sessionId={TEST_ID} />)
     expect(screen.getByTitle('Connecting...')).toBeDefined()
   })
 
   it('shows WS dot with "Disconnected" title when wsReadyState is 3', () => {
-    act(() => {
-      useStatusBarStore.getState().set({
-        state: makeState(),
-        wsReadyState: 3,
-      })
-    })
-
-    render(<StatusBar />)
+    upsertSessionLiveState(TEST_ID, { state: makeState(), wsReadyState: 3 })
+    render(<StatusBar sessionId={TEST_ID} />)
     expect(screen.getByTitle('Disconnected')).toBeDefined()
   })
 
   it('shows cost when sessionResult has total_cost_usd', () => {
-    act(() => {
-      useStatusBarStore.getState().set({
-        state: makeState(),
-        sessionResult: { total_cost_usd: 0.1234, duration_ms: 5000 },
-      })
+    upsertSessionLiveState(TEST_ID, {
+      state: makeState(),
+      sessionResult: { total_cost_usd: 0.1234, duration_ms: 5000 },
     })
-
-    render(<StatusBar />)
+    render(<StatusBar sessionId={TEST_ID} />)
     expect(screen.getByText('$0.1234')).toBeDefined()
     expect(screen.getByText('5s')).toBeDefined()
   })
 
   it('shows context usage bar when contextUsage is provided', () => {
-    act(() => {
-      useStatusBarStore.getState().set({
-        state: makeState(),
-        contextUsage: { totalTokens: 50000, maxTokens: 200000, percentage: 25 },
-      })
+    upsertSessionLiveState(TEST_ID, {
+      state: makeState(),
+      contextUsage: { totalTokens: 50000, maxTokens: 200000, percentage: 25 },
     })
-
-    render(<StatusBar />)
+    render(<StatusBar sessionId={TEST_ID} />)
     expect(screen.getByText('25%')).toBeDefined()
     expect(screen.getByTitle('50,000 / 200,000 tokens (25%)')).toBeDefined()
   })
 
   it('does not show context bar when maxTokens is 0', () => {
-    act(() => {
-      useStatusBarStore.getState().set({
-        state: makeState(),
-        contextUsage: { totalTokens: 0, maxTokens: 0, percentage: 0 },
-      })
+    upsertSessionLiveState(TEST_ID, {
+      state: makeState(),
+      contextUsage: { totalTokens: 0, maxTokens: 0, percentage: 0 },
     })
-
-    render(<StatusBar />)
+    render(<StatusBar sessionId={TEST_ID} />)
     expect(screen.queryByText('0%')).toBeNull()
   })
 
   it('does not render stop or interrupt buttons (moved to composer footer)', () => {
-    act(() => {
-      useStatusBarStore.getState().set({
-        state: makeState({ status: 'running' }),
-        onStop: vi.fn(),
-        onInterrupt: vi.fn(),
-      })
-    })
-
-    render(<StatusBar />)
+    upsertSessionLiveState(TEST_ID, { state: makeState({ status: 'running' }) })
+    render(<StatusBar sessionId={TEST_ID} />)
     expect(screen.queryByLabelText('Stop session')).toBeNull()
     expect(screen.queryByLabelText('Interrupt session')).toBeNull()
   })
 
   it('applies blue background classes when running', () => {
-    act(() => {
-      useStatusBarStore.getState().set({
-        state: makeState({ status: 'running' }),
-      })
-    })
-
-    render(<StatusBar />)
+    upsertSessionLiveState(TEST_ID, { state: makeState({ status: 'running' }) })
+    render(<StatusBar sessionId={TEST_ID} />)
     const bar = screen.getByTestId('status-bar')
     expect(bar.className).toContain('bg-info/20')
     expect(bar.className).toContain('border-info/50')
   })
 
   it('applies warning background classes when waiting_gate', () => {
-    act(() => {
-      useStatusBarStore.getState().set({
-        state: makeState({ status: 'waiting_gate' }),
-      })
-    })
-
-    render(<StatusBar />)
+    upsertSessionLiveState(TEST_ID, { state: makeState({ status: 'waiting_gate' }) })
+    render(<StatusBar sessionId={TEST_ID} />)
     const bar = screen.getByTestId('status-bar')
     expect(bar.className).toContain('bg-warning/20')
     expect(bar.className).toContain('border-warning/50')
   })
 
   it('applies default background when failed (only aborted is styled red)', () => {
-    act(() => {
-      useStatusBarStore.getState().set({
-        state: makeState({ status: 'failed' }),
-      })
-    })
-
-    render(<StatusBar />)
+    upsertSessionLiveState(TEST_ID, { state: makeState({ status: 'failed' }) })
+    render(<StatusBar sessionId={TEST_ID} />)
     const bar = screen.getByTestId('status-bar')
     expect(bar.className).toContain('bg-background')
   })
 
   it('applies default background when idle', () => {
-    act(() => {
-      useStatusBarStore.getState().set({
-        state: makeState({ status: 'idle' }),
-      })
-    })
-
-    render(<StatusBar />)
+    upsertSessionLiveState(TEST_ID, { state: makeState({ status: 'idle' }) })
+    render(<StatusBar sessionId={TEST_ID} />)
     const bar = screen.getByTestId('status-bar')
     expect(bar.className).toContain('bg-background')
   })
 
   it('applies warning background for waiting_input', () => {
-    act(() => {
-      useStatusBarStore.getState().set({
-        state: makeState({ status: 'waiting_input' }),
-      })
-    })
-
-    render(<StatusBar />)
+    upsertSessionLiveState(TEST_ID, { state: makeState({ status: 'waiting_input' }) })
+    render(<StatusBar sessionId={TEST_ID} />)
     const bar = screen.getByTestId('status-bar')
     expect(bar.className).toContain('bg-warning/20')
   })
 
   it('has correct height', () => {
-    act(() => {
-      useStatusBarStore.getState().set({
-        state: makeState(),
-      })
-    })
-
-    render(<StatusBar />)
+    upsertSessionLiveState(TEST_ID, { state: makeState() })
+    render(<StatusBar sessionId={TEST_ID} />)
     const bar = screen.getByTestId('status-bar')
     expect(bar.className).toContain('py-1')
   })

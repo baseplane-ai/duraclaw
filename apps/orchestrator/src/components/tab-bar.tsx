@@ -36,7 +36,9 @@ import {
 import { agentSessionsCollection, type SessionRecord } from '~/db/agent-sessions-collection'
 import { StatusDot } from '~/features/agent-orch/session-utils'
 import { useIsMobile } from '~/hooks/use-mobile'
+import { useSessionLiveState } from '~/hooks/use-session-live-state'
 import { isDraftTabId } from '~/hooks/use-tab-sync'
+import { deriveDisplayState } from '~/lib/display-state'
 import { cn } from '~/lib/utils'
 
 interface TabBarProps {
@@ -302,6 +304,15 @@ function ProjectTab({
   const isMobile = useIsMobile()
   const [menuOpen, setMenuOpen] = useState(false)
 
+  // Route tab status through `deriveDisplayState` so it agrees with the
+  // status bar + sidebar. Falls back to the (30s-stale) sessions row when
+  // no live state exists yet in this browser.
+  const live = useSessionLiveState(sessionId)
+  const tabDisplay = live.state ? deriveDisplayState(live.state, live.wsReadyState ?? 3) : null
+  const tabStatus =
+    tabDisplay && tabDisplay.status !== 'unknown' ? tabDisplay.status : (session?.status ?? 'idle')
+  const tabNumTurns = live.state?.num_turns ?? session?.numTurns ?? 0
+
   useEffect(() => {
     if (isDragging) setMenuOpen(false)
   }, [isDragging])
@@ -384,7 +395,7 @@ function ProjectTab({
     >
       {session ? (
         <>
-          <StatusDot status={session.status || 'idle'} numTurns={session.numTurns ?? 0} />
+          <StatusDot status={tabStatus} numTurns={tabNumTurns} />
           <div className="flex flex-col items-start min-w-0">
             <span className="text-[11px] text-muted-foreground leading-tight font-normal">
               {session.project}

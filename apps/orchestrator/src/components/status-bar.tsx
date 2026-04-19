@@ -1,13 +1,17 @@
 /**
  * StatusBar — VS Code-style fixed-bottom status bar showing session state.
- * Reads from the Zustand status-bar store (populated by AgentDetailView).
+ * Reads the active session's live state via `useSessionLiveState` (thin
+ * wrapper over `sessionLiveStateCollection`'s useLiveQuery). `sessionId` is
+ * a prop from the parent route; when null, the bar renders nothing.
  */
 
 import { GitBranchIcon } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { useSessionLiveState } from '~/hooks/use-session-live-state'
+import { deriveDisplayState } from '~/lib/display-state'
 import type { KataSessionState, PrInfo, SessionState } from '~/lib/types'
 import { cn } from '~/lib/utils'
-import { type ContextUsage, useStatusBarStore, type WorktreeInfo } from '~/stores/status-bar'
+import type { ContextUsage, WorktreeInfo } from '~/stores/status-bar'
 
 function formatDuration(ms: number): string {
   const seconds = Math.floor(ms / 1000)
@@ -211,13 +215,17 @@ function KataStatusItem({ kataState }: { kataState: KataSessionState }) {
   )
 }
 
-export function StatusBar() {
+export function StatusBar({ sessionId }: { sessionId: string | null }) {
   const { state, wsReadyState, contextUsage, sessionResult, kataState, worktreeInfo } =
-    useStatusBarStore()
+    useSessionLiveState(sessionId)
 
-  const status = state?.status
-
-  if (!state) return null
+  if (!sessionId || !state) return null
+  const readyState = wsReadyState ?? 3
+  const display = deriveDisplayState(state, readyState)
+  // Bar chrome is keyed on the raw SessionState.status so the "running" tint
+  // and "waiting_gate" warning chrome survive a transient WS drop. The
+  // semantic display (dot, label) still goes through `deriveDisplayState`.
+  const status = state.status
 
   return (
     <div
@@ -226,10 +234,11 @@ export function StatusBar() {
         getBarClasses(status),
       )}
       data-testid="status-bar"
+      data-display-status={display.status}
     >
       {/* Row 1: status + project + branch + model */}
       <div className="flex min-w-0 items-center gap-2">
-        <WsDot readyState={wsReadyState} />
+        <WsDot readyState={readyState} />
         <span className="text-foreground">{status}</span>
         <span className="truncate text-muted-foreground">{state.project || '--'}</span>
       </div>

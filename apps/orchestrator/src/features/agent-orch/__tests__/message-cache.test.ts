@@ -32,8 +32,8 @@ vi.mock('agents/react', () => ({
   },
 }))
 
-vi.mock('~/db/sessions-collection', () => ({
-  sessionsCollection: {
+vi.mock('~/db/agent-sessions-collection', () => ({
+  agentSessionsCollection: {
     update: vi.fn(),
     has: vi.fn().mockReturnValue(true),
     utils: { writeUpdate: vi.fn() },

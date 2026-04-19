@@ -2,11 +2,12 @@
 initiative: feat-cass-session-api
 type: project
 issue_type: feature
-status: approved
+status: parked
 priority: medium
-github_issue: 12
+github_issue: null
 created: 2026-04-08
-updated: 2026-04-08
+updated: 2026-04-19
+parked_note: "Filename used the `12-` prefix but GH #12 is unrelated (TanStack DB client unification, see 12-client-data-layer-unification.md). Renamed to `parked-` prefix and unset github_issue to avoid kata picking this up by filename collision. Spec content preserved as-is — re-file under a fresh issue number if/when the cass API work is actually scheduled."
 phases:
   - id: p1
     name: "Cass subprocess wrapper and search endpoint"

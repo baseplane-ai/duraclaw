@@ -7,7 +7,7 @@
 
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { SessionRecord } from '~/db/sessions-collection'
+import type { SessionRecord } from '~/db/agent-sessions-collection'
 
 const mockNavigate = vi.fn()
 vi.mock('@tanstack/react-router', () => ({
@@ -29,8 +29,8 @@ vi.mock('@tanstack/react-db', () => ({
   }),
 }))
 
-vi.mock('~/db/sessions-collection', () => ({
-  sessionsCollection: {},
+vi.mock('~/db/agent-sessions-collection', () => ({
+  agentSessionsCollection: {},
 }))
 
 // Must import after mocks

@@ -32,6 +32,17 @@ Key invariants:
 - `session-runner` never embeds the DO. It dials `CC_GATEWAY_URL`'s partner `WORKER_PUBLIC_URL` (`wss://dura…/agents/session-agent/<do-id>?role=gateway&token=…`).
 - Gateway restart / CF Worker redeploy are non-events for an in-flight runner; the BufferedChannel buffers while the WS is down, replays on reconnect, emits a single gap sentinel only on overflow.
 
+### Client data flow (session live state)
+
+The browser has exactly one render source for per-session live state:
+`sessionLiveStateCollection` (TanStack DB, OPFS-persisted). WS handlers in
+`use-coding-agent.ts` write `SessionState` / `gateway_event` payloads into
+the collection via `upsertSessionLiveState`; components read via
+`useSessionLiveState(sessionId)` (thin wrapper around `useLiveQuery`).
+Display derivation goes through `deriveDisplayState(state, wsReadyState)`
+in `apps/orchestrator/src/lib/display-state.ts` so StatusBar, sidebar
+cards, and the tab bar all agree on label / color / icon.
+
 ## Monorepo Structure
 
 ```

@@ -8,7 +8,10 @@
 import { createTransaction } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
 import { useCallback, useMemo } from 'react'
-import { type SessionRecord, sessionsCollection } from '~/db/sessions-collection'
+import {
+  type SessionRecord,
+  agentSessionsCollection as sessionsCollection,
+} from '~/db/agent-sessions-collection'
 import { useNotificationWatcher } from '~/hooks/use-notification-watcher'
 
 export interface UseSessionsCollectionResult {
