@@ -228,6 +228,117 @@ won't blow their context budget.
   boundary cleanly renderable — messages from the new runner carry a
   different `sdk_session_id` and collect under the new row.
 
+### 3D. Kanban home — where you kick off sessions — **Duraclaw-layer feature**
+
+3B gives you a detail view ("everything about issue #42"). The natural
+counterpart is a global view ("everything I'm working on, grouped"). A
+kanban board with swim lanes is a perfect fit because the kata mode
+pipeline *is* the kanban workflow, one-to-one:
+
+```
+          FEATURES ─────────────────────────────────────────────────────
+ Backlog  │ Research  │ Planning  │ Impl       │ Verify    │ Done
+ ┌──────┐ │ ┌──────┐  │ ┌──────┐  │ ┌────────┐ │           │ ┌──────┐
+ │ #51  │ │ │ #48  │  │ │ #42  │  │ │ #39 ●  │ │           │ │ #31 ✓│
+ │ mob. │ │ │ cache│  │ │ gw.  │ │ │ chain  │ │           │ │ pwa  │
+ │      │ │ │ ● res│  │ │ ● pln│ │ │ ● imp  │ │           │ │      │
+ └──────┘ │ └──────┘  │ └──────┘  │ └────────┘ │           │ └──────┘
+          │           │           │             │           │
+          BUGS ───────────────────────────────────────────────────────────
+ ┌──────┐ │           │           │ ┌────────┐ │ ┌──────┐  │
+ │ #55  │ │           │           │ │ #44 ●  │ │ │ #40  │  │
+ │ oom  │ │           │           │ │ gate   │ │ │ stat │  │
+ │      │ │           │           │ │ ● deb  │ │ │ ● vrf│  │
+ └──────┘ │           │           │ └────────┘ │ └──────┘  │
+          │           │           │             │           │
+          REFACTORS ─────────────────────────────────────────────────────
+ ┌──────┐ │ ┌──────┐  │           │             │           │
+ │ #58  │ │ │ #12  │  │           │             │           │
+ │ types│ │ │ tsdb │  │           │             │           │
+ │      │ │ │ ● res│  │           │             │           │
+ └──────┘ │ └──────┘  │           │             │           │
+```
+
+**Columns = kata mode phase.** Issue position is derived, not stored:
+
+| Column | Rule |
+|---|---|
+| Backlog | GH issue open, no kata sessions yet |
+| Research | latest session `kataMode=research`, or research doc committed but no spec |
+| Planning | latest session `kataMode=planning`, or spec exists with `status!=approved` |
+| Implementation | latest session `kataMode=implementation`, or open PR |
+| Verify | latest session `kataMode=verify` |
+| Done | issue closed or PR merged |
+
+**Swim lanes = issue type.** `commands/link.ts` already stores
+`issueType` on kata state from the GH label (`type:feature`, `type:bug`,
+`type:refactor`). Three default lanes — Features, Bugs, Refactors —
+with a catch-all "Other" for anything else. Lanes collapse; the user's
+sort order persists in Yjs alongside the tab map.
+
+**Cards = chain summary**:
+
+```
+┌──────────────────────────────┐
+│ #42 · Pluggable gateway      │   ← issue title
+│ feature · P1 · @alice        │   ← type · priority · assignee
+│ ● res  ● pln  ◐ imp  ○ ver   │   ← mode pipeline dots
+│ sess_xyz · live · 3m         │   ← active session, if any
+│ ┌──────────┐ ┌─────────────┐ │
+│ │ Open     │ │ Start impl →│ │   ← suggested next action
+│ └──────────┘ └─────────────┘ │
+└──────────────────────────────┘
+```
+
+**Kicking off a session — three paths**:
+
+1. **Card button** — "Start impl →" runs the same `kata exit && kata
+   enter impl --issue=42` under the hood; reuses 3D auto-advance logic.
+2. **Drag between columns** — drag #42 from Planning → Implementation:
+   confirmation modal "Close planning session and enter implementation?"
+   → executes the mode transition (3C runner reset) on confirm.
+3. **New card** — click "+" on the Backlog column: opens a mini issue
+   creation form (title, type label, optional body) → `gh issue
+   create` → inserts new card → optional "Start research now?" link.
+
+**Data source**: a new `GET /api/chains` endpoint that joins:
+- GH issues (via GitHub REST API or cached in D1 nightly)
+- `agentSessions` grouped by `kataIssue`
+- `pullRequests` (for Done detection)
+
+Live updates ride the same TanStack DB pipeline as chain tabs — once a
+session updates in D1, its card animates to the new column. Matches the
+"everything flows through sessionLiveStateCollection" direction in #12.
+
+**Navigation model**:
+
+```
+Kanban home  ───── click card ─────▶  Chain tab (3B detail view)
+     │                                        │
+     │                                        │ click row
+     ▼                                        ▼
+ New session button ─────────▶  Session tab (single-mode transcript, existing)
+```
+
+Keyboard: `/` focuses search, `n` creates a new card in focused column,
+`j`/`k` move between cards, `enter` opens chain tab, `shift+→` advances
+mode. Same muscle memory as Linear.
+
+**Filters** (URL-encoded for shareable views):
+- `?mine=true` — only cards with sessions owned by current user
+- `?lane=bugs` — collapse other lanes
+- `?column=impl` — zoom into one column
+- `?stale=7d` — cards where no session has been active in N days
+
+**What this buys you**:
+- Single pane of glass for "what's going on across the repo"
+- Starting new work goes from "find issue number, find project, find
+  worktree, open session, type mode" to "click card, pick mode"
+- Natural home for team dashboards once multi-user lands (#11 sets up
+  the rehearsal path)
+- Gives unlinked research/debug/freeform sessions a visible parking
+  lot ("Unassigned" lane at the bottom)
+
 ## 4. Auto-advance — the payoff once 3A+3B+3C ship
 
 With the chain as a first-class surface and mode-entry as a known-safe
@@ -291,7 +402,8 @@ the loop is how you merge bad specs. But the plumbing is the same.
 | A | Research promote-to-issue | **kata** (CC-layer) | `research.md` P5, `commands/link.ts`, small `gh issue create` wrapper | ~1 day |
 | B | Chain tab surface | **Duraclaw orchestrator** (UI) | `use-tab-sync.ts` (kind field, new cluster key), new `/chain/:issueNumber` route, `SessionCardList` grouping variant, `GET /api/sessions?issue=<n>` already works | ~3 days |
 | C | Mode-enter session reset | **Duraclaw runtime** (DO + runner) | New `SessionDO` watcher on `kata_state.currentMode` transitions, clean-close via new `4411 mode_transition` close code, preamble template, advisory `--continue-sdk` hint in kata payload | ~4 days |
-| D | Auto-advance affordances | **Duraclaw UI** | Inline "Continue to <next> →" actions on chain rows, preconditions table, keyboard bindings | ~1 day |
+| D | Kanban home + swim lanes | **Duraclaw UI + API** | New `/` (or `/board`) route with column/lane layout, `GET /api/chains` endpoint (joins GH issues + sessions + PRs), drag-to-advance with confirmation, card component reusing chain-tab internals, Yjs-backed lane collapse state, new-card mini form calling `gh issue create` | ~4 days |
+| E | Auto-advance affordances | **Duraclaw UI** | Inline "Continue to <next> →" actions on chain rows + cards, preconditions table, keyboard bindings | ~1 day |
 
 **The kata / Duraclaw split is load-bearing:**
 - A is the only kata-side change. It's a CLI prompt + a `gh` shell-out.
@@ -302,23 +414,51 @@ the loop is how you merge bad specs. But the plumbing is the same.
   `{mode, issueNumber, phase}` to state, the runner pipes it to the DO,
   the DO does everything else.
 
-Total ~9 days to get from "four unrelated sessions" to "one chain tab
-that walks itself through the kata pipeline with a human confirm at each
-mode gate."
+Total ~13 days to get from "four unrelated sessions" to "kanban home
+where every card walks itself through the kata pipeline with a human
+confirm at each mode gate."
+
+**Dependency graph:**
+
+```
+A (promote) ──┐
+              ├──▶ B (chain tab) ──▶ D (kanban) ──▶ E (auto-advance)
+              │          │
+              │          ▼
+              └──▶ C (reset) ────────┘
+                        ▲
+                GH#12 (TanStack DB unification)
+                GH#14 (message transport on DB)
+```
+
+A is standalone and ships first. B depends on A (needs issue as chain
+key) but nothing else. C depends on GH#12 landing. D depends on B
+(reuses the chain card). E is icing, depends on everything.
 
 ## 7. Recommendation
 
 Ship **3A alone first** — it's the cheapest change and the only one
 that touches kata. It unblocks the chain key and immediately makes
-`kata link` rarely needed. Then 3B for the visible payoff (Duraclaw UI
-only). 3C last because it's the Duraclaw-runtime change — touches DO
-lifecycle and runner close codes, and wants GH#12's single-channel
-state to land first. Auto-advance (3D) falls out naturally on top.
+`kata link` rarely needed. Then 3B for the chain detail view. Then 3D
+for the kanban home — this is the feature that changes how it *feels*
+to use Duraclaw, because starting new work becomes "click card, pick
+mode" instead of "navigate to worktree, remember issue number, open
+session form." 3C can slot in at any point (waiting on GH#12);
+auto-advance (3E) is the last mile.
 
 The mental model worth keeping straight: **kata signals, Duraclaw
 acts.** Anything that involves killing processes, rotating
 `sdk_session_id`, or rendering UI is a Duraclaw feature. Kata just
 writes `{mode, issueNumber, phase}` and asks nicely.
+
+And the right shape of the UI is fractal:
+- **Kanban home** = all chains, grouped by type, columned by mode.
+- **Chain tab** = one chain, rowed by mode.
+- **Session tab** = one mode, transcript.
+
+You can drop down a level at any click. You can always kick off a new
+session from the level above, because each level knows which `--issue`
+and which `--mode` it's starting with.
 
 The user's instinct in the prompt is right: **promote at research close,
 chain is the tab, reset at mode enter**. Nothing in the current code
