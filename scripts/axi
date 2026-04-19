@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# ============================================================================
+# axi — Per-worktree chrome-devtools-axi wrapper
+# ============================================================================
+#
+# Ergonomic drop-in replacement for `chrome-devtools-axi` that auto-isolates
+# the Chrome profile and bridge port per worktree. Two agents in different
+# worktrees can call `scripts/axi open <url>` simultaneously without
+# clobbering each other's browser state or fighting for sockets.
+#
+# Usage (same as chrome-devtools-axi):
+#   scripts/axi open http://localhost:43613/login
+#   scripts/axi snapshot
+#   scripts/axi click @ref
+#   scripts/axi screenshot /tmp/shot.png
+#
+# For dual-browser (two users at once), use:
+#   scripts/verify/axi-a ...   # Browser A
+#   scripts/verify/axi-b ...   # Browser B
+#
+# ============================================================================
+
+set -euo pipefail
+
+# Derive worktree root (one level up from scripts/)
+_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Deterministic port offset from worktree path (same formula as common.sh)
+_OFFSET=$(printf '%s' "$_ROOT" | cksum | awk '{ print $1 % 800 }')
+_WORKTREE_SLUG="$(basename "$_ROOT")"
+
+# Bridge port: 15000 + offset (distinct range from dual-browser ports 13000/14000)
+export CHROME_DEVTOOLS_AXI_PORT="${CHROME_DEVTOOLS_AXI_PORT:-$((15000 + _OFFSET))}"
+
+# Per-worktree Chrome profile — isolated cookies, localStorage, sessions
+export CHROME_DEVTOOLS_AXI_USER_DATA_DIR="${CHROME_DEVTOOLS_AXI_USER_DATA_DIR:-/tmp/duraclaw-chrome-${_WORKTREE_SLUG}}"
+
+# Per-worktree HOME so the bridge PID file doesn't collide with other worktrees
+_AXI_STATE="/tmp/duraclaw-axi-${_WORKTREE_SLUG}"
+mkdir -p "$_AXI_STATE"
+export HOME="$_AXI_STATE"
+
+# Resolve chrome-devtools-axi binary
+_NPM_GLOBAL_BIN="$HOME/.npm-global/bin"
+_REAL_HOME_BIN="/home/$(whoami)/.npm-global/bin"
+
+if command -v chrome-devtools-axi >/dev/null 2>&1; then
+  exec chrome-devtools-axi "$@"
+elif [[ -x "$_REAL_HOME_BIN/chrome-devtools-axi" ]]; then
+  exec "$_REAL_HOME_BIN/chrome-devtools-axi" "$@"
+elif [[ -x "$_NPM_GLOBAL_BIN/chrome-devtools-axi" ]]; then
+  exec "$_NPM_GLOBAL_BIN/chrome-devtools-axi" "$@"
+else
+  echo "axi: chrome-devtools-axi not found on PATH or ~/.npm-global/bin" >&2
+  exit 127
+fi
