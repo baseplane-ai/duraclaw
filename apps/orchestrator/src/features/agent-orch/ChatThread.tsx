@@ -77,13 +77,32 @@ function groupByFilePath(parts: SessionMessagePart[]): {
   }
 }
 
-function isPendingGate(part: SessionMessagePart, readOnly: boolean | undefined): boolean {
-  return (
-    (part.type === 'tool-ask_user' || part.type === 'tool-permission') &&
-    part.state === 'approval-requested' &&
-    !readOnly &&
-    !!part.toolCallId
-  )
+// Any ask_user / permission part with an id. Used to keep these parts OUT of
+// the ToolPillRow chip bucket — gate prompts must never have a collapsed-chip
+// alternative display path, otherwise a part whose state lags behind the
+// session gate (e.g. a state-update event that arrived while the tab was
+// blurred and got batched on refocus) silently renders as a badge instead of
+// the inline GateResolver UI.
+function isGateCandidate(part: SessionMessagePart): boolean {
+  return (part.type === 'tool-ask_user' || part.type === 'tool-permission') && !!part.toolCallId
+}
+
+function isPendingGate(
+  part: SessionMessagePart,
+  readOnly: boolean | undefined,
+  gate: SessionState['gate'],
+  status: SessionState['status'],
+): boolean {
+  if (!isGateCandidate(part) || readOnly) return false
+  // Dual signal — treat the gate as pending if EITHER the part's persisted
+  // state says 'approval-requested' OR the live session gate points at this
+  // part. Either alone is enough: when the tab is backgrounded and
+  // broadcastMessage state-update events are throttled/batched, the two can
+  // arrive out of order. Accepting both prevents "gate active but UI absent"
+  // after refocus.
+  if (part.state === 'approval-requested') return true
+  if (gate && status === 'waiting_gate' && gate.id === part.toolCallId) return true
+  return false
 }
 
 function ToolCallDetail({ part }: { part: SessionMessagePart }) {
@@ -368,12 +387,7 @@ function renderPart(
   // The server validates the gateId on resolveGate (returns stale-gate error
   // if the gate moved on), and once resolved the part state transitions away
   // from 'approval-requested' via broadcastMessage so this stops rendering.
-  if (
-    (part.type === 'tool-ask_user' || part.type === 'tool-permission') &&
-    part.state === 'approval-requested' &&
-    !readOnly &&
-    part.toolCallId
-  ) {
+  if (isPendingGate(part, readOnly, gate, status) && part.toolCallId) {
     const partGate =
       part.type === 'tool-ask_user'
         ? {
@@ -400,7 +414,35 @@ function renderPart(
     )
   }
 
-  // Tool parts (including resolved gates)
+  // Resolved gate parts — still render expanded (defaultOpen) so there is no
+  // collapsed-chip display variant for ask_user / permission history. This is
+  // a deliberate UX contract: gates always show as expanded blocks, never as
+  // badge pills, regardless of lifecycle state.
+  if (isGateCandidate(part)) {
+    const state = (part.state as ToolHeaderProps['state']) ?? 'output-available'
+    return (
+      <Tool key={index} defaultOpen>
+        <ToolHeader
+          {...({
+            type: 'dynamic-tool',
+            toolName: part.toolName || (part.type || '').replace('tool-', ''),
+            state,
+          } as ToolHeaderProps)}
+        />
+        <ToolContent>
+          <ToolInput input={part.input} />
+          {(state === 'output-available' || state === 'output-error') && (
+            <ToolOutput
+              output={part.output}
+              errorText={state === 'output-error' ? String(part.output ?? 'Error') : undefined}
+            />
+          )}
+        </ToolContent>
+      </Tool>
+    )
+  }
+
+  // Tool parts (other, non-gate)
   if (part.type?.startsWith('tool-')) {
     const state = (part.state as ToolHeaderProps['state']) ?? 'input-available'
     return (
@@ -577,8 +619,16 @@ export function ChatThread({
                 pending = []
               }
               msg.parts.forEach((part, i) => {
+                // ask_user / permission parts NEVER collapse into the chip
+                // row — they must always render as standalone expanded blocks
+                // (GateResolver when pending, defaultOpen Tool when resolved).
+                // This removes the failure mode where a lagging state update
+                // on a blurred tab landed the gate in the pill bucket and the
+                // UI stayed invisible after refocus.
                 const isGroupableTool =
-                  part.type?.startsWith('tool-') && !isPendingGate(part, readOnly)
+                  part.type?.startsWith('tool-') &&
+                  !isGateCandidate(part) &&
+                  !isPendingGate(part, readOnly, gate, status)
                 if (isGroupableTool) {
                   // Buffer alongside any accumulated reasoning — both flush
                   // together on the next text part so that even when the agent
