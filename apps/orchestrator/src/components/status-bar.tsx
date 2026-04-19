@@ -1,20 +1,13 @@
 /**
  * StatusBar — VS Code-style fixed-bottom status bar showing session state.
- * Reads the active session's live state directly from
- * `sessionLiveStateCollection` via `useLiveQuery` — no Zustand store / React
- * context. The `sessionId` prop is passed in from AgentDetailView (which
- * already receives it as a prop from its parent route); deriving it from a
- * URL param would require `useParams()` plumbing that the current route
- * shape (`/?session=X`, a query param on `/`) doesn't provide cleanly.
+ * Reads the active session's live state via `useSessionLiveState` (thin
+ * wrapper over `sessionLiveStateCollection`'s useLiveQuery). `sessionId` is
+ * a prop from the parent route; when null, the bar renders nothing.
  */
 
-import { useLiveQuery } from '@tanstack/react-db'
 import { GitBranchIcon } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
-import {
-  type SessionLiveState,
-  sessionLiveStateCollection,
-} from '~/db/session-live-state-collection'
+import { useEffect, useState } from 'react'
+import { useSessionLiveState } from '~/hooks/use-session-live-state'
 import type { KataSessionState, PrInfo, SessionState } from '~/lib/types'
 import { cn } from '~/lib/utils'
 import type { ContextUsage, WorktreeInfo } from '~/stores/status-bar'
@@ -222,18 +215,12 @@ function KataStatusItem({ kataState }: { kataState: KataSessionState }) {
 }
 
 export function StatusBar({ sessionId }: { sessionId: string | null }) {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data } = useLiveQuery((q) => q.from({ live_state: sessionLiveStateCollection as any }))
+  const { state, wsReadyState, contextUsage, sessionResult, kataState, worktreeInfo } =
+    useSessionLiveState(sessionId)
 
-  const row = useMemo(() => {
-    if (!sessionId || !data) return null
-    return (data as unknown as SessionLiveState[]).find((r) => r.id === sessionId) ?? null
-  }, [data, sessionId])
-
-  if (!sessionId || !row?.state) return null
-
-  const { state, wsReadyState, contextUsage, sessionResult, kataState, worktreeInfo } = row
+  if (!sessionId || !state) return null
   const status = state.status
+  const readyState = wsReadyState ?? 3
 
   return (
     <div
@@ -245,7 +232,7 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
     >
       {/* Row 1: status + project + branch + model */}
       <div className="flex min-w-0 items-center gap-2">
-        <WsDot readyState={wsReadyState} />
+        <WsDot readyState={readyState} />
         <span className="text-foreground">{status}</span>
         <span className="truncate text-muted-foreground">{state.project || '--'}</span>
       </div>

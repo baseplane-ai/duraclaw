@@ -10,6 +10,7 @@ import { ArchiveIcon, ChevronDownIcon, ChevronRightIcon } from 'lucide-react'
 import { useState } from 'react'
 import { Badge } from '~/components/ui/badge'
 import type { SessionRecord } from '~/db/sessions-collection'
+import { useSessionLiveState } from '~/hooks/use-session-live-state'
 import { cn } from '~/lib/utils'
 import { useWorkspaceStore } from '~/stores/workspace'
 import { ActiveStrip } from './ActiveStrip'
@@ -85,8 +86,10 @@ function SwipeableCard({
     setRevealed(false)
   }
 
-  const status = session.status || 'idle'
-  const numTurns = session.numTurns ?? 0
+  const live = useSessionLiveState(session.id)
+  const status = live.state?.status ?? session.status ?? 'idle'
+  const numTurns = live.state?.num_turns ?? session.numTurns ?? 0
+  const isLive = live.isLive
   const displayName = session.title || getPreviewText(session) || session.id.slice(0, 8)
 
   return (
@@ -121,7 +124,9 @@ function SwipeableCard({
       >
         {/* Row 1: status dot + title + time-ago */}
         <div className="flex items-center gap-2">
-          <StatusDot status={status} numTurns={numTurns} />
+          <span className={cn(!isLive && 'opacity-60')}>
+            <StatusDot status={status} numTurns={numTurns} />
+          </span>
           <span className="min-w-0 flex-1 truncate font-medium text-sm">{displayName}</span>
           {session.updatedAt && (
             <span className="shrink-0 text-xs text-muted-foreground">
@@ -135,6 +140,32 @@ function SwipeableCard({
         </div>
       </animated.div>
     </div>
+  )
+}
+
+function OlderSessionRow({ session, onClick }: { session: SessionRecord; onClick: () => void }) {
+  const live = useSessionLiveState(session.id)
+  const status = live.state?.status ?? session.status ?? 'idle'
+  const numTurns = live.state?.num_turns ?? session.numTurns ?? 0
+  const isLive = live.isLive
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent"
+    >
+      <span className={cn(!isLive && 'opacity-60')}>
+        <StatusDot status={status} numTurns={numTurns} />
+      </span>
+      <span className="min-w-0 flex-1 truncate">
+        {session.title || getPreviewText(session) || session.id.slice(0, 8)}
+      </span>
+      {session.updatedAt && (
+        <span className="shrink-0 text-xs text-muted-foreground">
+          {formatTimeAgo(session.updatedAt)}
+        </span>
+      )}
+    </button>
   )
 }
 
@@ -241,22 +272,11 @@ export function SessionCardList({
             {showOlder && (
               <div className="mt-2 space-y-1">
                 {olderSessions.map((session) => (
-                  <button
+                  <OlderSessionRow
                     key={session.id}
-                    type="button"
+                    session={session}
                     onClick={() => handleCardClick(session.id)}
-                    className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent"
-                  >
-                    <StatusDot status={session.status || 'idle'} numTurns={session.numTurns ?? 0} />
-                    <span className="min-w-0 flex-1 truncate">
-                      {session.title || getPreviewText(session) || session.id.slice(0, 8)}
-                    </span>
-                    {session.updatedAt && (
-                      <span className="shrink-0 text-xs text-muted-foreground">
-                        {formatTimeAgo(session.updatedAt)}
-                      </span>
-                    )}
-                  </button>
+                  />
                 ))}
               </div>
             )}

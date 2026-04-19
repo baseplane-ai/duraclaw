@@ -7,7 +7,7 @@
  * @vitest-environment jsdom
  */
 
-import { beforeEach, afterEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 // Capture the onStateUpdate callback so tests can invoke it directly
 let capturedOnStateUpdate: ((state: unknown) => void) | null = null
@@ -47,6 +47,35 @@ vi.mock('~/db/messages-collection', () => ({
 
 vi.mock('~/hooks/use-messages-collection', () => ({
   useMessagesCollection: () => ({ messages: [], isLoading: false }),
+}))
+
+// useSessionLiveState now owns state/contextUsage/kataState/sessionResult.
+// Stub it out so the hook doesn't subscribe to the real live-state collection
+// across tests (prior tests' row inserts would otherwise re-render stale
+// mounts and re-capture `capturedOnStateUpdate` with the wrong agentName).
+vi.mock('~/hooks/use-session-live-state', () => ({
+  useSessionLiveState: () => ({
+    state: null,
+    contextUsage: null,
+    kataState: null,
+    worktreeInfo: null,
+    sessionResult: null,
+    wsReadyState: null,
+    isLive: false,
+  }),
+}))
+
+// The real collection module lazily initialises OPFS at import time; keep it
+// out of the ws-bridge tests to avoid unrelated re-render churn.
+vi.mock('~/db/session-live-state-collection', () => ({
+  sessionLiveStateCollection: {
+    [Symbol.iterator]: () => [][Symbol.iterator](),
+    has: () => false,
+    insert: vi.fn(),
+    update: vi.fn(),
+    delete: vi.fn(),
+  },
+  upsertSessionLiveState: vi.fn(),
 }))
 
 // Import after mocks

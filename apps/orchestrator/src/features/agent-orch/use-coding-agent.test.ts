@@ -98,6 +98,57 @@ vi.mock('~/hooks/use-messages-collection', async () => {
   }
 })
 
+// useSessionLiveState + upsertSessionLiveState are the new ingress/egress for
+// server-authoritative state. Mock them together with a shared in-memory map
+// so onStateUpdate / onMessage writes round-trip back through the hook and
+// tests can assert on result.current.state / kataState / etc.
+const liveStateStore = new Map<string, Record<string, unknown>>()
+const liveStateSubs = new Set<() => void>()
+const bumpLiveState = () => {
+  for (const cb of liveStateSubs) cb()
+}
+
+vi.mock('~/hooks/use-session-live-state', async () => {
+  const React = await import('react')
+  return {
+    useSessionLiveState: (sessionId: string | null | undefined) => {
+      const [, setV] = React.useState(0)
+      React.useEffect(() => {
+        const cb = () => setV((v: number) => v + 1)
+        liveStateSubs.add(cb)
+        return () => {
+          liveStateSubs.delete(cb)
+        }
+      }, [])
+      const row = sessionId ? liveStateStore.get(sessionId) : undefined
+      return {
+        state: (row?.state as unknown) ?? null,
+        contextUsage: (row?.contextUsage as unknown) ?? null,
+        kataState: (row?.kataState as unknown) ?? null,
+        worktreeInfo: (row?.worktreeInfo as unknown) ?? null,
+        sessionResult: (row?.sessionResult as unknown) ?? null,
+        wsReadyState: (row?.wsReadyState as number | undefined) ?? null,
+        isLive: row?.wsReadyState === 1,
+      }
+    },
+  }
+})
+
+vi.mock('~/db/session-live-state-collection', () => ({
+  sessionLiveStateCollection: {
+    [Symbol.iterator]: () => [][Symbol.iterator](),
+    has: () => false,
+    insert: vi.fn(),
+    update: vi.fn(),
+    delete: vi.fn(),
+  },
+  upsertSessionLiveState: (sessionId: string, patch: Record<string, unknown>) => {
+    const existing = liveStateStore.get(sessionId) ?? {}
+    liveStateStore.set(sessionId, { ...existing, ...patch })
+    bumpLiveState()
+  },
+}))
+
 // Capture the useAgent config so we can inspect/invoke callbacks
 let capturedUseAgentConfig: {
   agent: string
@@ -142,6 +193,9 @@ function makeWsMessage(data: unknown): MessageEvent {
 describe('useCodingAgent cache-first hydration', () => {
   beforeEach(() => {
     cachedMessagesStore.clear()
+    liveStateStore.clear()
+    collectionSubs.clear()
+    liveStateSubs.clear()
     capturedUseAgentConfig = null
     vi.clearAllMocks()
   })
@@ -254,6 +308,9 @@ describe('useCodingAgent cache-first hydration', () => {
 describe('type: "message" wire format', () => {
   beforeEach(() => {
     cachedMessagesStore.clear()
+    liveStateStore.clear()
+    collectionSubs.clear()
+    liveStateSubs.clear()
     capturedUseAgentConfig = null
     vi.clearAllMocks()
   })
@@ -466,6 +523,9 @@ describe('type: "message" wire format', () => {
 describe('type: "messages" wire format (bulk replay)', () => {
   beforeEach(() => {
     cachedMessagesStore.clear()
+    liveStateStore.clear()
+    collectionSubs.clear()
+    liveStateSubs.clear()
     capturedUseAgentConfig = null
     vi.clearAllMocks()
   })
@@ -563,6 +623,9 @@ describe('type: "messages" wire format (bulk replay)', () => {
 describe('sendMessage (SessionMessage format)', () => {
   beforeEach(() => {
     cachedMessagesStore.clear()
+    liveStateStore.clear()
+    collectionSubs.clear()
+    liveStateSubs.clear()
     capturedUseAgentConfig = null
     vi.clearAllMocks()
   })
@@ -617,6 +680,9 @@ describe('sendMessage (SessionMessage format)', () => {
 describe('injectQaPair (SessionMessage format)', () => {
   beforeEach(() => {
     cachedMessagesStore.clear()
+    liveStateStore.clear()
+    collectionSubs.clear()
+    liveStateSubs.clear()
     capturedUseAgentConfig = null
     vi.clearAllMocks()
   })
@@ -643,6 +709,9 @@ describe('injectQaPair (SessionMessage format)', () => {
 describe('legacy gateway_event handling', () => {
   beforeEach(() => {
     cachedMessagesStore.clear()
+    liveStateStore.clear()
+    collectionSubs.clear()
+    liveStateSubs.clear()
     capturedUseAgentConfig = null
     vi.clearAllMocks()
   })
@@ -817,6 +886,9 @@ describe('legacy gateway_event handling', () => {
 describe('branch tracking', () => {
   beforeEach(() => {
     cachedMessagesStore.clear()
+    liveStateStore.clear()
+    collectionSubs.clear()
+    liveStateSubs.clear()
     capturedUseAgentConfig = null
     vi.clearAllMocks()
   })
