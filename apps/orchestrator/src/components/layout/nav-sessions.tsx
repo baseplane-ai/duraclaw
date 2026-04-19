@@ -16,6 +16,7 @@ import {
   EyeOff,
   FolderGit2,
   GitBranchIcon,
+  Layers,
   PlusIcon,
 } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -41,6 +42,7 @@ import {
 import type { SessionRecord } from '~/db/agent-sessions-collection'
 import { getPreviewText, StatusDot } from '~/features/agent-orch/session-utils'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
+import { useTabSync } from '~/hooks/use-tab-sync'
 import type { PrInfo, ProjectInfo } from '~/lib/types'
 import { cn } from '~/lib/utils'
 
@@ -214,6 +216,7 @@ export function NavSessions() {
   const { setOpenMobile } = useSidebar()
   const location = useLocation()
   const navigate = useNavigate()
+  const { openTab } = useTabSync()
 
   // Fetch projects from gateway
   const [projects, setProjects] = useState<ProjectInfoWithHidden[]>([])
@@ -299,6 +302,21 @@ export function NavSessions() {
     [archiveSession],
   )
 
+  const handleOpenChain = useCallback(
+    (issueNumber: number) => {
+      openTab(`chain:${issueNumber}`, { kind: 'chain', issueNumber })
+      setOpenMobile(false)
+      // Route params typing requires the generated route tree to include
+      // the chain route; cast to the router's expected shape.
+      navigate({
+        to: '/chain/$issueNumber',
+        params: { issueNumber: String(issueNumber) },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any)
+    },
+    [openTab, navigate, setOpenMobile],
+  )
+
   // Determine active session from URL. The dashboard (`/`) owns session
   // selection via `?session=X`; legacy `/session/:id` redirects to the same.
   const searchParams = new URLSearchParams(location.searchStr)
@@ -371,6 +389,7 @@ export function NavSessions() {
               onRename={handleRename}
               onArchive={handleArchive}
               onToggleHidden={handleToggleHidden}
+              onOpenChain={handleOpenChain}
             />
           ))}
 
@@ -411,6 +430,7 @@ function RepoGroup({
   onRename,
   onArchive,
   onToggleHidden,
+  onOpenChain,
 }: {
   repoOrigin: string
   projects: ProjectInfoWithHidden[]
@@ -420,6 +440,7 @@ function RepoGroup({
   onRename: (sessionId: string, title: string) => void
   onArchive: (sessionId: string, archived: boolean) => void
   onToggleHidden: (projectName: string) => void
+  onOpenChain: (issueNumber: number) => void
 }) {
   const orgRepo = extractOrgRepo(repoOrigin)
   // Check if any worktree in this repo has the active session
@@ -451,6 +472,7 @@ function RepoGroup({
                 onRename={onRename}
                 onArchive={onArchive}
                 onToggleHidden={onToggleHidden}
+                onOpenChain={onOpenChain}
               />
             ))}
           </SidebarMenuSub>
@@ -470,6 +492,7 @@ function WorktreeNode({
   onRename,
   onArchive,
   onToggleHidden,
+  onOpenChain,
 }: {
   project: ProjectInfoWithHidden
   sessions: SessionRecord[]
@@ -478,13 +501,35 @@ function WorktreeNode({
   onRename: (sessionId: string, title: string) => void
   onArchive: (sessionId: string, archived: boolean) => void
   onToggleHidden: (projectName: string) => void
+  onOpenChain: (issueNumber: number) => void
 }) {
   const hasActive = sessions.some((s) => s.id === activeSessionId)
   const hasSessions = sessions.length > 0
   const isHidden = project.hidden === true
   const [maxVisible, setMaxVisible] = useState(5)
-  const displayed = sessions.slice(0, maxVisible)
-  const hasMore = sessions.length > maxVisible
+
+  // Partition sessions into kataIssue chain groups and orphan rows.
+  const chainGroups = new Map<number, SessionRecord[]>()
+  const orphanSessions: SessionRecord[] = []
+  for (const s of sessions) {
+    if (typeof s.kataIssue === 'number') {
+      const arr = chainGroups.get(s.kataIssue)
+      if (arr) arr.push(s)
+      else chainGroups.set(s.kataIssue, [s])
+    } else {
+      orphanSessions.push(s)
+    }
+  }
+  // Sort chain entries by freshest-member activity (desc).
+  const chainEntries = Array.from(chainGroups.entries()).sort(([, a], [, b]) => {
+    const aFirst = a[0]
+    const bFirst = b[0]
+    const aTime = aFirst ? new Date(aFirst.lastActivity ?? aFirst.updatedAt).getTime() : 0
+    const bTime = bFirst ? new Date(bFirst.lastActivity ?? bFirst.updatedAt).getTime() : 0
+    return bTime - aTime
+  })
+  const displayedOrphans = orphanSessions.slice(0, maxVisible)
+  const hasMore = orphanSessions.length > maxVisible
 
   if (!hasSessions) {
     // Worktree with no sessions — show as a leaf with branch info
@@ -534,7 +579,19 @@ function WorktreeNode({
         </CollapsibleTrigger>
         <CollapsibleContent>
           <SidebarMenuSub>
-            {displayed.map((session) => (
+            {chainEntries.map(([issueNumber, chainSessions]) => (
+              <ChainNode
+                key={`chain-${issueNumber}`}
+                issueNumber={issueNumber}
+                sessions={chainSessions}
+                activeSessionId={activeSessionId}
+                onSelect={onSelect}
+                onRename={onRename}
+                onArchive={onArchive}
+                onOpenChain={onOpenChain}
+              />
+            ))}
+            {displayedOrphans.map((session) => (
               <SidebarMenuSubItem key={session.id}>
                 <SessionContextMenu session={session} onRename={onRename} onArchive={onArchive}>
                   <SidebarMenuSubButton
@@ -551,11 +608,134 @@ function WorktreeNode({
               <SidebarMenuSubItem>
                 <SidebarMenuSubButton onClick={() => setMaxVisible((v) => v + 10)}>
                   <span className="text-muted-foreground">
-                    {sessions.length - maxVisible} more...
+                    {orphanSessions.length - maxVisible} more...
                   </span>
                 </SidebarMenuSubButton>
               </SidebarMenuSubItem>
             )}
+          </SidebarMenuSub>
+        </CollapsibleContent>
+      </SidebarMenuSubItem>
+    </Collapsible>
+  )
+}
+
+// ── Chain node (groups sessions by kataIssue within a worktree) ────
+
+/** Pipeline stage order for the 5-dot indicator. */
+const CHAIN_STAGES: ReadonlyArray<{ key: string; match: (mode: string) => boolean }> = [
+  { key: 'research', match: (m) => m === 'research' },
+  { key: 'planning', match: (m) => m === 'planning' },
+  { key: 'implementation', match: (m) => m === 'implementation' || m === 'task' },
+  { key: 'verify', match: (m) => m === 'verify' },
+  { key: 'close', match: (m) => m === 'close' },
+]
+
+/** Runner is attached and working (or waiting on user/gate). */
+function isLiveStatus(status: string | null | undefined): boolean {
+  return (
+    status === 'running' ||
+    status === 'waiting_input' ||
+    status === 'waiting_permission' ||
+    status === 'waiting_gate'
+  )
+}
+
+/** "Completed" — finished a turn and no longer live. */
+function isCompletedSession(session: SessionRecord): boolean {
+  // Backend parks finished sessions as `idle` (FilterChipBar: 'completed'
+  // → s.status === 'idle'). Require at least one turn so fresh drafts
+  // don't light up the dot.
+  const s = session.status as string
+  if (s === 'completed') return true
+  return s === 'idle' && (session.numTurns ?? 0) > 0
+}
+
+function PipelineDots({ sessions }: { sessions: SessionRecord[] }) {
+  const parts = CHAIN_STAGES.map((stage) => {
+    const inStage = sessions.filter((s) => (s.kataMode ? stage.match(s.kataMode) : false))
+    if (inStage.some((s) => isLiveStatus(s.status))) {
+      return { char: '*', className: 'text-blue-400' }
+    }
+    if (inStage.some((s) => isCompletedSession(s))) {
+      return { char: '\u25CF', className: 'text-foreground' }
+    }
+    return { char: 'o', className: 'text-muted-foreground' }
+  })
+  return (
+    <span className="ml-auto shrink-0 font-mono text-[10px] leading-none" aria-hidden>
+      [
+      {parts.map((p, i) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: fixed-length stage list
+        <span key={i}>
+          {i > 0 && <span className="text-muted-foreground">-</span>}
+          <span className={p.className}>{p.char}</span>
+        </span>
+      ))}
+      ]
+    </span>
+  )
+}
+
+function ChainNode({
+  issueNumber,
+  sessions,
+  activeSessionId,
+  onSelect,
+  onRename,
+  onArchive,
+  onOpenChain,
+}: {
+  issueNumber: number
+  sessions: SessionRecord[]
+  activeSessionId: string | null
+  onSelect: (session: SessionRecord) => void
+  onRename: (sessionId: string, title: string) => void
+  onArchive: (sessionId: string, archived: boolean) => void
+  onOpenChain: (issueNumber: number) => void
+}) {
+  const hasActive = sessions.some((s) => s.id === activeSessionId)
+  const sorted = [...sessions].sort(byActivity)
+  const title = sorted[0]?.title?.trim() || ''
+
+  const handleDoubleClick = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault()
+      e.stopPropagation()
+      onOpenChain(issueNumber)
+    },
+    [issueNumber, onOpenChain],
+  )
+
+  return (
+    <Collapsible asChild defaultOpen={hasActive} className="group/chain">
+      <SidebarMenuSubItem>
+        <CollapsibleTrigger asChild>
+          <SidebarMenuSubButton onDoubleClick={handleDoubleClick}>
+            <Layers className="size-3 shrink-0" />
+            <span className="truncate">
+              {title ? `#${issueNumber} ${title}` : `#${issueNumber}`}
+            </span>
+            <PipelineDots sessions={sessions} />
+            <ChevronRight className="ml-0.5 size-2.5 shrink-0 transition-transform duration-200 group-data-[state=open]/chain:rotate-90" />
+          </SidebarMenuSubButton>
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <SidebarMenuSub>
+            {sorted.map((session) => (
+              <SidebarMenuSubItem key={session.id}>
+                <SessionContextMenu session={session} onRename={onRename} onArchive={onArchive}>
+                  <SidebarMenuSubButton
+                    isActive={activeSessionId === session.id}
+                    onClick={() => onSelect(session)}
+                    title={session.id}
+                  >
+                    <StatusDot status={session.status || 'idle'} numTurns={session.numTurns ?? 0} />
+                    <span className="truncate">{session.kataMode || getDisplayName(session)}</span>
+                  </SidebarMenuSubButton>
+                </SessionContextMenu>
+              </SidebarMenuSubItem>
+            ))}
           </SidebarMenuSub>
         </CollapsibleContent>
       </SidebarMenuSubItem>
