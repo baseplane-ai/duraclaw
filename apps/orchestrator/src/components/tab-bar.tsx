@@ -36,6 +36,7 @@ import {
 import { agentSessionsCollection, type SessionRecord } from '~/db/agent-sessions-collection'
 import { StatusDot } from '~/features/agent-orch/session-utils'
 import { useIsMobile } from '~/hooks/use-mobile'
+import { isDraftTabId } from '~/hooks/use-tab-sync'
 import { cn } from '~/lib/utils'
 
 interface TabBarProps {
@@ -43,6 +44,11 @@ interface TabBarProps {
   openTabs: string[]
   /** The session currently being viewed. */
   activeSessionId: string | null
+  /**
+   * {sessionId → project} map from the Yjs tabs entry. Used to label
+   * draft tabs whose sessionId is not yet in the sessions collection.
+   */
+  tabProjects?: Record<string, string | undefined>
   onSelectSession: (sessionId: string) => void
   onCloseTab: (sessionId: string) => void
   onReorder: (fromIndex: number, toIndex: number) => void
@@ -58,6 +64,7 @@ interface TabRow {
 export function TabBar({
   openTabs,
   activeSessionId,
+  tabProjects,
   onSelectSession,
   onCloseTab,
   onReorder,
@@ -177,26 +184,33 @@ export function TabBar({
           onWheel={handleWheel}
         >
           <SortableContext items={openTabs} strategy={horizontalListSortingStrategy}>
-            {rows.map((row) => (
-              <SortableProjectTab
-                key={row.sessionId}
-                sessionId={row.sessionId}
-                session={row.session}
-                isActive={row.sessionId === activeSessionId}
-                onSelect={() => onSelectSession(row.sessionId)}
-                onClose={() => onCloseTab(row.sessionId)}
-                onNewSessionInTab={
-                  onNewSessionInTab && row.session?.project
-                    ? () => onNewSessionInTab(row.session?.project as string)
-                    : undefined
-                }
-                onNewTabForProject={
-                  onNewTabForProject && row.session?.project
-                    ? () => onNewTabForProject(row.session?.project as string)
-                    : undefined
-                }
-              />
-            ))}
+            {rows.map((row) => {
+              const draftProject = isDraftTabId(row.sessionId)
+                ? tabProjects?.[row.sessionId]
+                : undefined
+              const menuProject = row.session?.project ?? draftProject
+              return (
+                <SortableProjectTab
+                  key={row.sessionId}
+                  sessionId={row.sessionId}
+                  session={row.session}
+                  draftProject={draftProject}
+                  isActive={row.sessionId === activeSessionId}
+                  onSelect={() => onSelectSession(row.sessionId)}
+                  onClose={() => onCloseTab(row.sessionId)}
+                  onNewSessionInTab={
+                    onNewSessionInTab && menuProject
+                      ? () => onNewSessionInTab(menuProject)
+                      : undefined
+                  }
+                  onNewTabForProject={
+                    onNewTabForProject && menuProject
+                      ? () => onNewTabForProject(menuProject)
+                      : undefined
+                  }
+                />
+              )
+            })}
           </SortableContext>
         </div>
 
@@ -244,6 +258,8 @@ export function TabBar({
 interface ProjectTabProps {
   sessionId: string
   session: SessionRecord | undefined
+  /** Project for a draft tab (no session row yet). */
+  draftProject?: string | undefined
   isActive: boolean
   isDragging?: boolean
   onSelect: () => void
@@ -274,6 +290,7 @@ function SortableProjectTab(props: ProjectTabProps) {
 function ProjectTab({
   sessionId,
   session,
+  draftProject,
   isActive,
   isDragging,
   onSelect,
@@ -281,6 +298,7 @@ function ProjectTab({
   onNewSessionInTab,
   onNewTabForProject,
 }: ProjectTabProps) {
+  const isDraft = isDraftTabId(sessionId)
   const isMobile = useIsMobile()
   const [menuOpen, setMenuOpen] = useState(false)
 
@@ -376,6 +394,20 @@ function ProjectTab({
             </span>
           </div>
         </>
+      ) : isDraft ? (
+        <>
+          <PlusIcon className="size-3 text-muted-foreground" />
+          <div className="flex flex-col items-start min-w-0">
+            {draftProject && (
+              <span className="text-[11px] text-muted-foreground leading-tight font-normal">
+                {draftProject}
+              </span>
+            )}
+            <span className="max-w-32 truncate leading-tight italic text-muted-foreground">
+              New session
+            </span>
+          </div>
+        </>
       ) : (
         <div className="flex flex-col items-start min-w-0 gap-1 py-0.5">
           <div className="animate-pulse bg-muted h-2 w-12 rounded" />
@@ -390,8 +422,10 @@ function ProjectTab({
     action?.()
   }, [])
 
-  const headingProject = session?.project ?? null
-  const headingTitle = session?.title || session?.project || sessionId.slice(0, 8)
+  const headingProject = session?.project ?? (isDraft ? (draftProject ?? null) : null)
+  const headingTitle = isDraft
+    ? 'New session'
+    : session?.title || session?.project || sessionId.slice(0, 8)
 
   if (isMobile) {
     return (

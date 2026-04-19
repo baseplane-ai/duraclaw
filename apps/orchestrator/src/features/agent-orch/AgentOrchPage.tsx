@@ -16,7 +16,7 @@ import { QuickPromptInput } from '~/components/quick-prompt-input'
 import { TabBar } from '~/components/tab-bar'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { useSwipeTabs } from '~/hooks/use-swipe-tabs'
-import { getTabSyncSnapshot, useTabSync } from '~/hooks/use-tab-sync'
+import { getTabSyncSnapshot, isDraftTabId, newDraftTabId, useTabSync } from '~/hooks/use-tab-sync'
 import { AgentDetailView } from './AgentDetailView'
 import type { SpawnFormConfig } from './SpawnAgentForm'
 import { type SpawnConfig, useCodingAgent } from './use-coding-agent'
@@ -34,8 +34,17 @@ function AgentOrchContent() {
     (search as { newSessionProject?: string }).newSessionProject ?? null
   const searchNewTab = (search as { newTab?: boolean }).newTab ?? false
 
-  const { openTabs, activeSessionId, hydrated, openTab, closeTab, setActive, reorder } =
-    useTabSync()
+  const {
+    openTabs,
+    activeSessionId,
+    tabProjects,
+    hydrated,
+    openTab,
+    closeTab,
+    replaceTab,
+    setActive,
+    reorder,
+  } = useTabSync()
 
   // Deep-link: URL has ?session=X → open & activate that tab.
   // Only creates a tab if the session exists in the collection (has a
@@ -128,13 +137,20 @@ function AgentOrchContent() {
         })
         setQuickPromptHint(null)
 
-        openTab(sessionId, { project: config.project, forceNewTab: config.newTab })
+        // If a draft tab is active, hydrate it in place (keep its slot);
+        // otherwise fall back to the original open-a-tab behavior.
+        const activeDraft = isDraftTabId(activeSessionId) ? activeSessionId : null
+        if (activeDraft) {
+          replaceTab(activeDraft, sessionId)
+        } else {
+          openTab(sessionId, { project: config.project, forceNewTab: config.newTab })
+        }
         navigate({ to: '/', search: { session: sessionId } })
       } catch (err) {
         console.error('[AgentOrch] Spawn failed:', err)
       }
     },
-    [navigate, openTab],
+    [navigate, openTab, replaceTab, activeSessionId],
   )
 
   const handleSelectSession = useCallback(
@@ -165,21 +181,27 @@ function AgentOrchContent() {
   const handleNewSessionInTab = useCallback(
     (project: string) => {
       setSpawnConfig(null)
-      setActive(null)
       setQuickPromptHint({ project, newTab: false })
-      navigate({ to: '/' })
+      // Drop the current project's tab and open an active draft tab in
+      // its place. The composer renders inside this tab's content slot;
+      // on first send, handleSpawn swaps the draft id for the real one.
+      const draftId = newDraftTabId()
+      openTab(draftId, { project, forceNewTab: false })
+      navigate({ to: '/', search: { session: draftId } })
     },
-    [navigate, setActive],
+    [navigate, openTab],
   )
 
   const handleNewTabForProject = useCallback(
     (project: string) => {
       setSpawnConfig(null)
-      setActive(null)
       setQuickPromptHint({ project, newTab: true })
-      navigate({ to: '/' })
+      // Open a draft tab alongside any existing tab for this project.
+      const draftId = newDraftTabId()
+      openTab(draftId, { project, forceNewTab: true })
+      navigate({ to: '/', search: { session: draftId } })
     },
-    [navigate, setActive],
+    [navigate, openTab],
   )
 
   const { swipeProps, swipeDir } = useSwipeTabs(handleSelectSession, activeSessionId)
@@ -224,6 +246,7 @@ function AgentOrchContent() {
           <TabBar
             openTabs={openTabs}
             activeSessionId={activeSessionId}
+            tabProjects={tabProjects}
             onSelectSession={handleSelectSession}
             onCloseTab={handleCloseTab}
             onReorder={reorder}
@@ -241,7 +264,7 @@ function AgentOrchContent() {
           }
           style={{ flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column' }}
         >
-          {activeSessionId ? (
+          {activeSessionId && !isDraftTabId(activeSessionId) ? (
             <AgentDetailWithSpawn
               key={activeSessionId}
               sessionId={activeSessionId}
@@ -250,14 +273,20 @@ function AgentOrchContent() {
           ) : (
             <QuickPromptInput
               key={
-                quickPromptHint
-                  ? `hint-${quickPromptHint.project}-${quickPromptHint.newTab}`
-                  : 'default'
+                activeSessionId && isDraftTabId(activeSessionId)
+                  ? `draft-${activeSessionId}`
+                  : quickPromptHint
+                    ? `hint-${quickPromptHint.project}-${quickPromptHint.newTab}`
+                    : 'default'
               }
               onSubmit={handleSpawn}
               projects={projects}
               projectsLoading={projectsLoading}
-              initialProject={quickPromptHint?.project}
+              initialProject={
+                activeSessionId && isDraftTabId(activeSessionId)
+                  ? tabProjects[activeSessionId]
+                  : quickPromptHint?.project
+              }
               initialNewTab={quickPromptHint?.newTab}
             />
           )}

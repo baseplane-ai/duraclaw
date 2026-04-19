@@ -38,11 +38,34 @@ interface TabEntry {
 
 const ACTIVE_TAB_KEY = 'duraclaw-active-session'
 
+/** Draft tab IDs have this prefix; the rest is a fresh UUID. */
+export const DRAFT_TAB_PREFIX = 'draft:'
+
+/** True if a tab/session id refers to a not-yet-spawned draft session. */
+export function isDraftTabId(id: string | null | undefined): boolean {
+  return typeof id === 'string' && id.startsWith(DRAFT_TAB_PREFIX)
+}
+
+/** Generate a fresh draft tab id. Uses crypto.randomUUID when available. */
+export function newDraftTabId(): string {
+  const rand =
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : Math.random().toString(36).slice(2) + Date.now().toString(36)
+  return `${DRAFT_TAB_PREFIX}${rand}`
+}
+
 export interface UseTabSyncResult {
   /** Ordered list of open session IDs (reactive, sorted by order). */
   openTabs: string[]
   /** Currently focused session ID (local, not synced cross-device). */
   activeSessionId: string | null
+  /**
+   * Per-tab project map. Keyed by sessionId — includes draft tabs that
+   * don't yet have a row in the sessions collection. Useful for rendering
+   * a sane label before the session record exists.
+   */
+  tabProjects: Record<string, string | undefined>
   /**
    * Open or activate a tab. Idempotent — Y.Map keys can't duplicate.
    * When a project is provided, enforces one-tab-per-project (removes
@@ -51,6 +74,12 @@ export interface UseTabSyncResult {
   openTab: (sessionId: string, options?: OpenTabOptions) => void
   /** Remove a session from open tabs. Returns the next active session ID. */
   closeTab: (sessionId: string) => string | null
+  /**
+   * Replace a tab's key (e.g. draft → real session ID) while preserving
+   * order and project metadata. Activates the new id if the old id was
+   * active. No-op if oldId isn't present.
+   */
+  replaceTab: (oldId: string, newId: string) => void
   /** Set the active session (local only). */
   setActive: (sessionId: string | null) => void
   /** True once IndexedDB has loaded local Y.Doc state. */
@@ -95,6 +124,15 @@ function sortedTabIds(tabsMap: Y.Map<string>): string[] {
   })
   entries.sort((a, b) => a.order - b.order)
   return entries.map((e) => e.id)
+}
+
+/** Build a {sessionId → project} map from the Yjs tabs map. */
+function buildProjectMap(tabsMap: Y.Map<string>): Record<string, string | undefined> {
+  const out: Record<string, string | undefined> = {}
+  tabsMap.forEach((val, key) => {
+    out[key] = parseEntry(val).project
+  })
+  return out
 }
 
 // Module-level Y.Doc reference for imperative reads (getTabSyncSnapshot).
@@ -179,12 +217,19 @@ export function useTabSync(): UseTabSyncResult {
   // ── Tab list (Yjs-synced, reactive) ─────────────────────────────────
 
   const [openTabs, setOpenTabs] = useState<string[]>(() => (tabsY ? sortedTabIds(tabsY) : []))
+  const [tabProjects, setTabProjects] = useState<Record<string, string | undefined>>(() =>
+    tabsY ? buildProjectMap(tabsY) : {},
+  )
 
   useEffect(() => {
     if (!tabsY) return
-    const handler = () => setOpenTabs(sortedTabIds(tabsY))
+    const handler = () => {
+      setOpenTabs(sortedTabIds(tabsY))
+      setTabProjects(buildProjectMap(tabsY))
+    }
     tabsY.observe(handler)
     setOpenTabs(sortedTabIds(tabsY))
+    setTabProjects(buildProjectMap(tabsY))
     return () => tabsY.unobserve(handler)
   }, [tabsY])
 
@@ -277,6 +322,28 @@ export function useTabSync(): UseTabSyncResult {
     [doc, tabsY, activeSessionId, setActive],
   )
 
+  const replaceTab = useCallback(
+    (oldId: string, newId: string) => {
+      if (!doc || !tabsY) return
+      if (oldId === newId) return
+      doc.transact(() => {
+        const val = tabsY.get(oldId)
+        if (!val) return
+        // If newId is already open, drop the draft and activate the existing one.
+        if (tabsY.has(newId)) {
+          tabsY.delete(oldId)
+          return
+        }
+        tabsY.delete(oldId)
+        tabsY.set(newId, val)
+      })
+      if (activeSessionId === oldId) {
+        setActive(newId)
+      }
+    },
+    [doc, tabsY, activeSessionId, setActive],
+  )
+
   const reorder = useCallback(
     (fromIndex: number, toIndex: number) => {
       if (!doc || !tabsY) return
@@ -298,5 +365,16 @@ export function useTabSync(): UseTabSyncResult {
     [doc, tabsY],
   )
 
-  return { openTabs, activeSessionId, hydrated, openTab, closeTab, setActive, reorder, status }
+  return {
+    openTabs,
+    activeSessionId,
+    tabProjects,
+    hydrated,
+    openTab,
+    closeTab,
+    replaceTab,
+    setActive,
+    reorder,
+    status,
+  }
 }
