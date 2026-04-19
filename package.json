@@ -23,6 +23,7 @@
     "verify:session:ownership": "bash ./scripts/verify/session-ownership.sh",
     "verify:browser": "bash ./scripts/verify/browser-login-smoke.sh",
     "verify:browser:session": "bash ./scripts/verify/browser-session-smoke.sh",
+    "verify:devcontainer": "bash ./scripts/verify/devcontainer.sh",
     "verify:smoke": "pnpm run verify:preflight && pnpm run verify:auth && pnpm run verify:gateway && pnpm run verify:session && pnpm run verify:browser && pnpm run verify:browser:session",
     "ship": "turbo deploy",
     "ship:worker": "turbo deploy --filter=@duraclaw/orchestrator",

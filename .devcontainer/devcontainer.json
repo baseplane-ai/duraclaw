@@ -1,0 +1,40 @@
+{
+  "$schema": "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.schema.json",
+  "name": "Duraclaw",
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:22",
+  "features": {
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/shyim/devcontainers-features/bun:0": {}
+  },
+  "forwardPorts": [43173, 9877, 8787],
+  "portsAttributes": {
+    "43173": { "label": "Orchestrator (Vite SPA)", "onAutoForward": "notify" },
+    "9877": { "label": "Agent Gateway (WS)", "onAutoForward": "silent" },
+    "8787": { "label": "Miniflare", "onAutoForward": "silent" }
+  },
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "remoteUser": "node",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "biomejs.biome",
+        "bradlc.vscode-tailwindcss",
+        "github.vscode-github-actions",
+        "github.vscode-pull-request-github"
+      ],
+      "settings": {
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "biomejs.biome",
+        "editor.codeActionsOnSave": {
+          "quickfix.biome": "explicit",
+          "source.organizeImports.biome": "explicit"
+        },
+        "[typescript]": { "editor.defaultFormatter": "biomejs.biome" },
+        "[typescriptreact]": { "editor.defaultFormatter": "biomejs.biome" },
+        "[javascript]": { "editor.defaultFormatter": "biomejs.biome" },
+        "[json]": { "editor.defaultFormatter": "biomejs.biome" },
+        "files.eol": "\n"
+      }
+    }
+  }
+}
