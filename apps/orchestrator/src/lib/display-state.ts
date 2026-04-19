@@ -98,10 +98,7 @@ const UNKNOWN: DisplayState = {
  * - Otherwise the `state.status` value is mapped to the matching variant;
  *   anything unexpected falls back to `unknown`.
  */
-export function deriveDisplayState(
-  state: SessionState | null,
-  wsReadyState: number,
-): DisplayState {
+export function deriveDisplayState(state: SessionState | null, wsReadyState: number): DisplayState {
   if (state === null) return UNKNOWN
   if (wsReadyState !== 1) return DISCONNECTED
 

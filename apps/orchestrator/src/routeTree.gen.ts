@@ -52,11 +52,12 @@ const AuthenticatedAdminUsersRoute = AuthenticatedAdminUsersRouteImport.update({
   path: '/admin/users',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
-const AuthenticatedDebugSessionCollectionRoute = AuthenticatedDebugSessionCollectionRouteImport.update({
-  id: '/debug/session-collection',
-  path: '/debug/session-collection',
-  getParentRoute: () => AuthenticatedRouteRoute,
-} as any)
+const AuthenticatedDebugSessionCollectionRoute =
+  AuthenticatedDebugSessionCollectionRouteImport.update({
+    id: '/debug/session-collection',
+    path: '/debug/session-collection',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AuthenticatedIndexRoute
@@ -89,9 +90,23 @@ export interface FileRoutesById {
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/login' | '/maintenance' | '/settings' | '/admin/users' | '/debug/session-collection' | '/session/$id'
+  fullPaths:
+    | '/'
+    | '/login'
+    | '/maintenance'
+    | '/settings'
+    | '/admin/users'
+    | '/debug/session-collection'
+    | '/session/$id'
   fileRoutesByTo: FileRoutesByTo
-  to: '/login' | '/maintenance' | '/settings' | '/' | '/admin/users' | '/debug/session-collection' | '/session/$id'
+  to:
+    | '/login'
+    | '/maintenance'
+    | '/settings'
+    | '/'
+    | '/admin/users'
+    | '/debug/session-collection'
+    | '/session/$id'
   id:
     | '__root__'
     | '/_authenticated'

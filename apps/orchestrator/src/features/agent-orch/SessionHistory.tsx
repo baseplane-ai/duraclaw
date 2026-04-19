@@ -26,8 +26,8 @@ import {
   TableRow,
 } from '~/components/ui/table'
 import {
-  agentSessionsCollection as sessionsCollection,
   type SessionRecord,
+  agentSessionsCollection as sessionsCollection,
 } from '~/db/agent-sessions-collection'
 
 type SortField = 'updatedAt' | 'createdAt' | 'totalCostUsd' | 'durationMs' | 'numTurns'

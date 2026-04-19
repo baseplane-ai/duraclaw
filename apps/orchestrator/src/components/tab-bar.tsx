@@ -310,9 +310,7 @@ function ProjectTab({
   const live = useSessionLiveState(sessionId)
   const tabDisplay = live.state ? deriveDisplayState(live.state, live.wsReadyState ?? 3) : null
   const tabStatus =
-    tabDisplay && tabDisplay.status !== 'unknown'
-      ? tabDisplay.status
-      : (session?.status ?? 'idle')
+    tabDisplay && tabDisplay.status !== 'unknown' ? tabDisplay.status : (session?.status ?? 'idle')
   const tabNumTurns = live.state?.num_turns ?? session?.numTurns ?? 0
 
   useEffect(() => {

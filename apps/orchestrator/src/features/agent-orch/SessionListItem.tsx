@@ -64,7 +64,8 @@ export function SessionListItem({
   // the sessions-collection `status` directly (StatusDot's own switch handles
   // the legacy strings).
   const display = live.state ? deriveDisplayState(live.state, live.wsReadyState ?? 3) : null
-  const status = display && display.status !== 'unknown' ? display.status : (session.status ?? 'idle')
+  const status =
+    display && display.status !== 'unknown' ? display.status : (session.status ?? 'idle')
   const [menuOpen, setMenuOpen] = useState(false)
   const [renameOpen, setRenameOpen] = useState(false)
   const [tagOpen, setTagOpen] = useState(false)
