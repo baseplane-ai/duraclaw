@@ -67,7 +67,7 @@ continuity for context budget.
 Three composable moves. Each is usable on its own; together they enable
 auto-advance.
 
-### 3A. Promote to issue at research close
+### 3A. Promote to issue at research close — **kata-layer feature**
 
 Add a step to `research.md` P5 `present-and-decide` (after the doc is
 committed, before the mode exits):
@@ -101,7 +101,7 @@ Why at research close, not planning P2:
 Non-goals: replace planning's issue creation. When research skipped the
 promote, planning P2 still creates the issue as today.
 
-### 3B. Chain = first-class tab/route
+### 3B. Chain = first-class tab/route — **Duraclaw-layer feature**
 
 Introduce `TabKind = 'session' | 'chain'` on the Yjs tab record.
 
@@ -150,19 +150,42 @@ Query side: `GET /api/sessions?issue=42` already works given the
 the existing `sessionLiveStateCollection` TanStack DB pipeline (issue #12
 unblocks the clean version of this).
 
-### 3C. Session reset on mode enter
+### 3C. Session reset on mode enter — **Duraclaw-layer feature, not kata**
 
-Current: `kata enter <mode>` mutates state in-place; the same
-session-runner process keeps running with the same `sdk_session_id`.
+**Layer attribution matters here.** Kata is a CLI that runs *inside* a
+Claude Code conversation. It can record state, emit hook output, invoke
+skills — but it **cannot** kill its host process, respawn a runner, or
+rotate the `sdk_session_id`. Process lifecycle lives one layer up, in
+Duraclaw: `SessionDO` → `agent-gateway` → `session-runner` owns the
+Claude Agent SDK `query()`.
 
-Proposed: inside an *issue-linked* chain, `kata enter <mode>` does:
+So 3C is a **Duraclaw meta feature**. Kata's only role is to *signal*
+the mode transition — and that signal already flows today:
 
-1. Flush buffered channel & commit any dirty artifacts
-2. `SessionDO.closeRunner()` — clean WS shutdown (close code 1000), runner
-   exits
-3. Kata state records `modeHistory[last].exitedAt`, sets `currentMode`
-4. DO spawns a **new** runner via existing `triggerGatewayDial({type:'execute', …})`
-5. Runner gets a **fresh `sdk_session_id`** and a **seeded first prompt**:
+```
+kata enter <mode>   (inside the CC conversation)
+  └─ writes .kata/sessions/<id>/state.json
+  └─ emits kata_state via the CC hook → runner → WS
+     └─ SessionDO.onMessage('kata_state')
+        └─ syncKataToRegistry()  (existing, session-do.ts:694)
+           └─ D1 agentSessions.{kataMode, kataIssue, kataPhase}
+```
+
+The new move is to add a watcher in `SessionDO` that, when it sees a
+`currentMode` change inside an issue-linked chain, performs the
+session-reset dance:
+
+1. Flush `BufferedChannel`; wait for in-flight `result` + any dirty
+   artifacts to persist
+2. `SessionDO.closeRunner({reason: 'mode_transition', code: 4411})` —
+   clean WS shutdown; runner exits via its existing terminal-close path
+   (same family as `4401` / `4410`)
+3. DO persists `modeHistory[last].exitedAt` on the chain record
+4. DO spawns a **new** runner via the existing
+   `triggerGatewayDial({type:'execute', …})` — fresh `sdk_session_id`,
+   fresh PID
+5. The new runner's first prompt is a DO-generated **artifact-pointer
+   preamble** (not a transcript copy):
 
 ```text
 You are entering {mode} mode for issue #42 ("{title}").
@@ -176,19 +199,34 @@ Read the relevant artifacts before acting. Your kata state is already
 linked: workflowId=GH#42, mode={mode}, phase=p0.
 ```
 
-The hand-off is **artifact-pointer, not transcript-copy**. SDK reads the
-files it needs on first tool call; context stays lean. This is the same
-trick the "orphan case" in `sendMessage` already uses
-(`<prior_conversation>...</prior_conversation>` preamble) but one level
-up.
+The hand-off is **artifact-pointer, not transcript-copy**. The new SDK
+reads the files it needs on its first tool call; context stays lean.
+This is the same trick the orphan case in `sendMessage` already uses
+(`<prior_conversation>…</prior_conversation>` preamble) but one level up
+— mode transitions instead of runner orphan recovery.
 
-UX cue in the chain timeline: a subtle `──✂──` divider between rows marks
-the context reset, so users trust that entering a new mode won't blow
-their tokens.
+What kata does *not* need to change for 3C:
+- `kata enter` still just mutates `.kata` state + prints guidance
+- No new kata flag required for the reset itself — the DO watches mode
+  transitions and decides
 
-Escape hatch: `kata enter <mode> --continue` keeps the current
-sdk_session_id (old behavior). Useful for short mode hops (e.g., `verify`
-→ `debug` → back) where the transcript genuinely matters.
+What kata *could* gain as an optional ergonomic:
+- A `--continue-sdk` hint in the kata state payload that asks the DO to
+  skip the reset (for short mode hops where the transcript matters, e.g.
+  `verify` → `debug` → back). The DO treats it as advisory.
+
+UX cue in the chain timeline: a subtle `──✂──` divider between rows
+marks the runner boundary, so users trust that entering a new mode
+won't blow their context budget.
+
+**Dependencies:**
+- GH#12 (TanStack DB unification) should land first so the UI has a
+  single truth source for "mode changed, old runner gone, new runner
+  warming up" state transitions without races between the 4 channels
+  that carry session state today.
+- GH#14 (message transport on TanStack DB) makes the transcript
+  boundary cleanly renderable — messages from the new runner carry a
+  different `sdk_session_id` and collect under the new row.
 
 ## 4. Auto-advance — the payoff once 3A+3B+3C ship
 
@@ -246,22 +284,23 @@ the loop is how you merge bad specs. But the plumbing is the same.
    `archivedAt`). Archived chains drop out of the sidebar but remain
    routable.
 
-## 6. Minimal shipping sequence
+## 6. Minimal shipping sequence — split by layer
 
-1. **Spec A — research promote-to-issue**
-   Touch: `research.md` P5, `commands/link.ts`, tiny `gh issue create`
-   wrapper. ~1 day.
-2. **Spec B — chain tab surface**
-   Touch: `use-tab-sync.ts` (kind field, new cluster key), new
-   `/chain/:issueNumber` route, `SessionCardList` grouping variant,
-   `GET /api/sessions?issue=<n>` (already works). ~3 days.
-3. **Spec C — mode-enter session reset**
-   Touch: `SessionDO.enterMode()` (new), `session-runner` clean-exit on
-   explicit close, preamble template, `kata enter --continue` flag.
-   Depends on GH#12 landing (single state channel) to avoid the race
-   between runner exit event and DO state update. ~4 days.
-4. **Spec D — auto-advance affordances**
-   Pure UI on top of A+B+C. ~1 day.
+| # | Spec | Layer | Surface area | Rough |
+|---|---|---|---|---|
+| A | Research promote-to-issue | **kata** (CC-layer) | `research.md` P5, `commands/link.ts`, small `gh issue create` wrapper | ~1 day |
+| B | Chain tab surface | **Duraclaw orchestrator** (UI) | `use-tab-sync.ts` (kind field, new cluster key), new `/chain/:issueNumber` route, `SessionCardList` grouping variant, `GET /api/sessions?issue=<n>` already works | ~3 days |
+| C | Mode-enter session reset | **Duraclaw runtime** (DO + runner) | New `SessionDO` watcher on `kata_state.currentMode` transitions, clean-close via new `4411 mode_transition` close code, preamble template, advisory `--continue-sdk` hint in kata payload | ~4 days |
+| D | Auto-advance affordances | **Duraclaw UI** | Inline "Continue to <next> →" actions on chain rows, preconditions table, keyboard bindings | ~1 day |
+
+**The kata / Duraclaw split is load-bearing:**
+- A is the only kata-side change. It's a CLI prompt + a `gh` shell-out.
+  No Duraclaw changes required.
+- B, C, D are all Duraclaw. Kata contributes zero new behaviour beyond
+  what `syncKataToRegistry()` already emits today.
+- Interface contract between the two layers stays narrow: kata writes
+  `{mode, issueNumber, phase}` to state, the runner pipes it to the DO,
+  the DO does everything else.
 
 Total ~9 days to get from "four unrelated sessions" to "one chain tab
 that walks itself through the kata pipeline with a human confirm at each
@@ -269,10 +308,17 @@ mode gate."
 
 ## 7. Recommendation
 
-Ship **3A alone first** — it's the cheapest change, unblocks the chain
-key, and immediately makes `kata link` rarely needed. Then 3B for the
-visible payoff. 3C last because it touches the runtime path and wants
-GH#12's single-channel state. Auto-advance falls out naturally.
+Ship **3A alone first** — it's the cheapest change and the only one
+that touches kata. It unblocks the chain key and immediately makes
+`kata link` rarely needed. Then 3B for the visible payoff (Duraclaw UI
+only). 3C last because it's the Duraclaw-runtime change — touches DO
+lifecycle and runner close codes, and wants GH#12's single-channel
+state to land first. Auto-advance (3D) falls out naturally on top.
+
+The mental model worth keeping straight: **kata signals, Duraclaw
+acts.** Anything that involves killing processes, rotating
+`sdk_session_id`, or rendering UI is a Duraclaw feature. Kata just
+writes `{mode, issueNumber, phase}` and asks nicely.
 
 The user's instinct in the prompt is right: **promote at research close,
 chain is the tab, reset at mode enter**. Nothing in the current code
