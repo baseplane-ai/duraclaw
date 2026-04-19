@@ -417,7 +417,10 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     [agentName, messagesCollection],
   )
 
-  const wsReadyState = state ? 1 : 0
+  // Return the live WS readyState rather than a state-presence proxy: once
+  // `state` arrives and the socket later closes we want consumers to see the
+  // real transition (0 connecting, 1 open, 2 closing, 3 closed).
+  const wsReadyState = connection.readyState
   const isConnecting = isFetching || wsReadyState !== 1
 
   const rewind = useCallback(

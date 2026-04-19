@@ -72,21 +72,32 @@ function formatDate(dateStr: string): string {
  */
 let hydratedOnce = false
 
+let hydrateInFlight: Promise<void> | null = null
+
 async function hydrateSessionHistoryFromRest(): Promise<void> {
   if (hydratedOnce) return
-  hydratedOnce = true
-  try {
-    const resp = await fetch('/api/sessions')
-    if (!resp.ok) return
-    const json = (await resp.json()) as { sessions?: SessionSummary[] }
-    if (!json.sessions) return
-    for (const summary of json.sessions) {
-      seedSessionLiveStateFromSummary(summary)
+  // Dedupe concurrent mounts (StrictMode double-mount, rapid tab switches) by
+  // returning the same in-flight promise until it settles.
+  if (hydrateInFlight) return hydrateInFlight
+  hydrateInFlight = (async () => {
+    try {
+      const resp = await fetch('/api/sessions')
+      if (!resp.ok) return
+      const json = (await resp.json()) as { sessions?: SessionSummary[] }
+      if (!json.sessions) return
+      for (const summary of json.sessions) {
+        seedSessionLiveStateFromSummary(summary)
+      }
+      // Only latch the guard on success — transient network / 5xx failures
+      // leave the flag false so the next mount retries.
+      hydratedOnce = true
+    } catch {
+      // swallow — guard stays false, next mount retries
+    } finally {
+      hydrateInFlight = null
     }
-  } catch {
-    // silent — next mount will retry (module flag already flipped, but a
-    // full page reload or error boundary recovery re-evaluates the module)
-  }
+  })()
+  return hydrateInFlight
 }
 
 export function SessionHistory() {
