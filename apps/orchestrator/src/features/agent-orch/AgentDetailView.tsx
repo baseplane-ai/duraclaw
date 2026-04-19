@@ -226,7 +226,6 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
         sessionId={sessionId}
         disabled={status === 'waiting_gate'}
         status={state?.status}
-        onStop={stop}
         onInterrupt={interrupt}
         draftKey={draftKey}
       />

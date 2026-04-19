@@ -149,51 +149,44 @@ describe('MessageInput compound structure', () => {
   })
 })
 
-describe('MessageInput combined send/stop button', () => {
-  it('shows stop mode + fires onStop when running with an empty draft', () => {
-    const onStop = vi.fn()
-    render(<MessageInput onSend={vi.fn()} status="running" onStop={onStop} />)
+describe('MessageInput combined send/interrupt button', () => {
+  it('shows interrupt mode + fires onInterrupt when running with an empty draft', () => {
+    const onInterrupt = vi.fn()
+    render(<MessageInput onSend={vi.fn()} status="running" onInterrupt={onInterrupt} />)
     const submit = screen.getByTestId('prompt-input-submit')
     expect(submit.getAttribute('data-status')).toBe('streaming')
     expect(submit.getAttribute('data-has-onstop')).toBe('true')
     expect(submit.getAttribute('aria-label')).toBe('Stop')
     submit.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
-    expect(onStop).toHaveBeenCalledWith('Stopped by user')
+    expect(onInterrupt).toHaveBeenCalled()
   })
 
   it('switches back to send mode when the draft has text (steering path)', () => {
     mockControllerState.value = 'please also add tests'
-    const onStop = vi.fn()
-    render(<MessageInput onSend={vi.fn()} status="running" onStop={onStop} />)
+    const onInterrupt = vi.fn()
+    render(<MessageInput onSend={vi.fn()} status="running" onInterrupt={onInterrupt} />)
     const submit = screen.getByTestId('prompt-input-submit')
     expect(submit.getAttribute('data-status')).toBe('')
     expect(submit.getAttribute('data-has-onstop')).toBe('false')
     expect(submit.getAttribute('aria-label')).toBe('Submit')
   })
 
-  it('renders the interrupt button when running with an empty draft', () => {
+  it('hides the interrupt affordance when the session is idle', () => {
+    render(<MessageInput onSend={vi.fn()} status="idle" onInterrupt={vi.fn()} />)
+    const submit = screen.getByTestId('prompt-input-submit')
+    expect(submit.getAttribute('data-status')).toBe('')
+    expect(submit.getAttribute('data-has-onstop')).toBe('false')
+  })
+
+  it('treats waiting_gate like running for the interrupt button', () => {
     const onInterrupt = vi.fn()
     render(
-      <MessageInput onSend={vi.fn()} status="running" onStop={vi.fn()} onInterrupt={onInterrupt} />,
+      <MessageInput onSend={vi.fn()} disabled status="waiting_gate" onInterrupt={onInterrupt} />,
     )
-    const interruptBtn = screen.getByLabelText('Interrupt turn')
-    expect(interruptBtn).toBeTruthy()
-    interruptBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
-    expect(onInterrupt).toHaveBeenCalled()
-  })
-
-  it('hides the interrupt button when the session is idle', () => {
-    render(<MessageInput onSend={vi.fn()} status="idle" onInterrupt={vi.fn()} />)
-    expect(screen.queryByLabelText('Interrupt turn')).toBeNull()
-  })
-
-  it('treats waiting_gate like running for the stop button', () => {
-    const onStop = vi.fn()
-    render(<MessageInput onSend={vi.fn()} disabled status="waiting_gate" onStop={onStop} />)
     const submit = screen.getByTestId('prompt-input-submit')
     expect(submit.getAttribute('data-status')).toBe('streaming')
-    // Stop must remain clickable even though `disabled` is true for the
-    // composer — users should always be able to halt a runaway turn.
+    // Interrupt must remain clickable even though `disabled` is true for
+    // the composer — users should always be able to halt a runaway turn.
     expect(submit.hasAttribute('disabled')).toBe(false)
   })
 })
