@@ -1166,12 +1166,12 @@ export class SessionDO extends Agent<Env, SessionState> {
     gateId: string,
     response: GateResponse,
   ): Promise<{ ok: boolean; error?: string }> {
-    if (this.state.status !== 'waiting_gate' && this.state.status !== 'idle') {
-      return {
-        ok: false,
-        error: `Cannot resolve gate: status is '${this.state.status}', expected 'waiting_gate' or 'idle'`,
-      }
-    }
+    // Relaxed: accept resolveGate in any status. The CLI terminal may have
+    // already resolved the tool (advancing status to 'running'), but the web
+    // UI still has the GateResolver mounted. Rejecting here just blocks the
+    // user with a confusing error. The gate-id lookup below is the real guard
+    // — if the part was already resolved, findPendingGatePart returns null and
+    // we return a clean "not found" error instead of a status mismatch.
 
     // Primary path: the scalar state.gate matches. Fallback: the scalar
     // drifted (dropped broadcast, runner reconnect, multiple in-flight
