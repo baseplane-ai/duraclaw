@@ -126,6 +126,46 @@ function sortedTabIds(tabsMap: Y.Map<string>): string[] {
   return entries.map((e) => e.id)
 }
 
+/**
+ * Decide where to slot a newly opened tab so it "stays put" inside its
+ * project cluster instead of always jumping to the far right.
+ *
+ * Rules (exported for unit testing):
+ *  - `reusedOrder` is set only on the replace path (one-tab-per-project).
+ *    The new tab takes the exact slot of the tab it replaced.
+ *  - Otherwise, if the project already has tabs (force-new-tab alongside
+ *    path), insert immediately after the last same-project tab using a
+ *    fractional order between that tab and the next non-project tab.
+ *  - If no existing project tabs (truly new project), append at end.
+ *  - If `project` is undefined, append at end.
+ *
+ * `entries` must be the tabs snapshot taken BEFORE any replace-delete,
+ * so `reusedOrder` (captured from the deleted tab) is not present in the
+ * list passed here (the caller deletes first and drops them from the
+ * entries list, OR — simpler — the caller passes the vacated order via
+ * `reusedOrder` directly).
+ */
+export function computeInsertOrder(
+  entries: ReadonlyArray<{ order: number; project?: string }>,
+  project: string | undefined,
+  reusedOrder: number | null,
+): number {
+  if (reusedOrder !== null) return reusedOrder
+
+  const maxOrder = entries.reduce((m, e) => (e.order > m ? e.order : m), 0)
+
+  if (!project) return maxOrder + 1
+
+  const sameProject = entries.filter((e) => e.project === project)
+  if (sameProject.length === 0) return maxOrder + 1
+
+  const lastProjectOrder = sameProject.reduce((m, e) => (e.order > m ? e.order : m), -Infinity)
+  const nextOrders = entries.filter((e) => e.order > lastProjectOrder).map((e) => e.order)
+  if (nextOrders.length === 0) return lastProjectOrder + 1
+  const nextOrder = nextOrders.reduce((m, o) => (o < m ? o : m), Infinity)
+  return (lastProjectOrder + nextOrder) / 2
+}
+
 /** Build a {sessionId → project} map from the Yjs tabs map. */
 function buildProjectMap(tabsMap: Y.Map<string>): Record<string, string | undefined> {
   const out: Record<string, string | undefined> = {}
@@ -272,24 +312,35 @@ export function useTabSync(): UseTabSyncResult {
           return
         }
 
-        // One-tab-per-project: remove existing tab for same project.
-        if (!forceNewTab && project) {
-          tabsY.forEach((val, key) => {
-            const entry = parseEntry(val)
-            if (entry.project === project) {
-              tabsY.delete(key)
-            }
-          })
-        }
-
-        // Compute order: after the last existing tab.
-        let maxOrder = 0
-        tabsY.forEach((val) => {
+        // Snapshot the current tab entries up front so we can reason about
+        // ordering without re-reading the map after mutation.
+        const entries: Array<{ id: string; order: number; project?: string }> = []
+        tabsY.forEach((val, key) => {
           const entry = parseEntry(val)
-          if (entry.order > maxOrder) maxOrder = entry.order
+          entries.push({ id: key, order: entry.order, project: entry.project })
         })
 
-        tabsY.set(sessionId, JSON.stringify({ project, order: maxOrder + 1 }))
+        // One-tab-per-project: remove existing tab(s) for the same
+        // project. Remember one of their orders so the replacement slots
+        // back into the same position instead of jumping to the end.
+        let reusedOrder: number | null = null
+        if (!forceNewTab && project) {
+          for (const e of entries) {
+            if (e.project === project) {
+              if (reusedOrder === null) reusedOrder = e.order
+              tabsY.delete(e.id)
+            }
+          }
+        }
+
+        // Exclude any entries we just deleted from the insertion math so
+        // the "next tab after the project cluster" lookup is accurate.
+        const remaining =
+          reusedOrder !== null ? entries.filter((e) => e.project !== project) : entries
+
+        const order = computeInsertOrder(remaining, project, reusedOrder)
+
+        tabsY.set(sessionId, JSON.stringify({ project, order }))
       })
 
       // Activate (local, outside transaction).
