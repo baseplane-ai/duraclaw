@@ -233,15 +233,16 @@ For VPs that need two real signed-in users at once, pre-launch two Chromes
 and target each via `CHROME_DEVTOOLS_AXI_BROWSER_URL`:
 
 ```bash
-scripts/verify/browser-dual-up.sh          # idempotent: launches A on :9222, B on :9223
+scripts/verify/browser-dual-up.sh          # idempotent: launches A + B on per-worktree ports
 scripts/verify/axi-a open http://localhost:43173/login   # drive user A
 scripts/verify/axi-b open http://localhost:43173/login   # drive user B
 scripts/verify/browser-dual-down.sh        # teardown
 ```
 
-Profiles live at `/tmp/duraclaw-chrome-a` and `/tmp/duraclaw-chrome-b` — each
-has its own cookie jar, so sign-in state doesn't cross-contaminate. Headed
-mode via `BROWSER_HEADED=1 scripts/verify/browser-dual-up.sh`.
+Profiles live at `/tmp/duraclaw-chrome-a-<worktree>` and
+`/tmp/duraclaw-chrome-b-<worktree>` — each has its own cookie jar, so
+sign-in state doesn't cross-contaminate between users OR between worktrees.
+Headed mode via `BROWSER_HEADED=1 scripts/verify/browser-dual-up.sh`.
 
 **Ergonomic multi-user helpers** (prefer these over raw `axi-a` / `axi-b`
 whenever both users are involved):
@@ -315,14 +316,13 @@ and returns an explicit error instead of persisting into limbo — if you see
 **Dual-browser bridge isolation** (`axi-a` / `axi-b`):
 `chrome-devtools-axi` tracks its bridge via a PID file at
 `$HOME/.chrome-devtools-axi/bridge.pid` — a SINGLE path, so two concurrent
-wrappers sharing one `$HOME` clobber each other and every invocation ends
-up routed to whichever bridge the PID file currently points at (regardless
-of `CHROME_DEVTOOLS_AXI_BROWSER_URL`). `axi-a` and `axi-b` give each
-wrapper its own `$HOME` (`/tmp/duraclaw-axi-a-state`,
-`/tmp/duraclaw-axi-b-state`) and pin `CHROME_DEVTOOLS_AXI_PORT` to `9224`
-/ `9225` so both bridges can stay alive in parallel and drive their own
-Chrome without cross-talk. Override via `AXI_A_STATE` / `AXI_B_STATE` /
-`AXI_A_BRIDGE_PORT` / `AXI_B_BRIDGE_PORT` if you need different values.
+wrappers sharing one `$HOME` clobber each other. `axi-a` and `axi-b` give
+each wrapper its own `$HOME` (`/tmp/duraclaw-axi-a-<worktree>`,
+`/tmp/duraclaw-axi-b-<worktree>`) and pin `CHROME_DEVTOOLS_AXI_PORT` to
+per-worktree-derived values so both bridges can stay alive in parallel
+without cross-talk — even across concurrent worktree verify sessions.
+All 4 browser ports (CDP A, CDP B, bridge A, bridge B) are auto-derived
+from the worktree path in `common.sh`, same as orch/gateway ports.
 
 **User seeding**: `/api/auth/sign-up/email` is disabled by default. Use
 the token-protected `/api/bootstrap` endpoint (enabled when

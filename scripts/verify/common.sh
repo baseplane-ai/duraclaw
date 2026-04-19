@@ -62,6 +62,29 @@ VERIFY_GATEWAY_PORT="${VERIFY_GATEWAY_PORT:-$_DERIVED_GATEWAY_PORT}"
 # inherited ambient value.
 export CC_GATEWAY_PORT="$VERIFY_GATEWAY_PORT"
 
+# Browser / CDP port derivation (4 ports per worktree, non-overlapping ranges).
+# These prevent two worktrees from fighting for the same Chrome CDP socket
+# or chrome-devtools-axi bridge port.
+_DERIVED_BROWSER_A_PORT=$((11000 + _WORKTREE_PORT_OFFSET))
+_DERIVED_BROWSER_B_PORT=$((12000 + _WORKTREE_PORT_OFFSET))
+_DERIVED_AXI_A_BRIDGE_PORT=$((13000 + _WORKTREE_PORT_OFFSET))
+_DERIVED_AXI_B_BRIDGE_PORT=$((14000 + _WORKTREE_PORT_OFFSET))
+
+BROWSER_A_PORT="${BROWSER_A_PORT:-$_DERIVED_BROWSER_A_PORT}"
+BROWSER_B_PORT="${BROWSER_B_PORT:-$_DERIVED_BROWSER_B_PORT}"
+AXI_A_BRIDGE_PORT="${AXI_A_BRIDGE_PORT:-$_DERIVED_AXI_A_BRIDGE_PORT}"
+AXI_B_BRIDGE_PORT="${AXI_B_BRIDGE_PORT:-$_DERIVED_AXI_B_BRIDGE_PORT}"
+export BROWSER_A_PORT BROWSER_B_PORT AXI_A_BRIDGE_PORT AXI_B_BRIDGE_PORT
+
+# Per-worktree Chrome profile and axi state dirs — prevents cookie/session
+# cross-contamination when multiple worktrees run dual-browser verify.
+_WORKTREE_SLUG="$(basename "$VERIFY_ROOT")"
+BROWSER_A_PROFILE="${BROWSER_A_PROFILE:-/tmp/duraclaw-chrome-a-${_WORKTREE_SLUG}}"
+BROWSER_B_PROFILE="${BROWSER_B_PROFILE:-/tmp/duraclaw-chrome-b-${_WORKTREE_SLUG}}"
+AXI_A_STATE="${AXI_A_STATE:-/tmp/duraclaw-axi-a-${_WORKTREE_SLUG}}"
+AXI_B_STATE="${AXI_B_STATE:-/tmp/duraclaw-axi-b-${_WORKTREE_SLUG}}"
+export BROWSER_A_PROFILE BROWSER_B_PROFILE AXI_A_STATE AXI_B_STATE
+
 if [[ -f "$VERIFY_RUNTIME_FILE" ]]; then
   # shellcheck disable=SC1090
   source "$VERIFY_RUNTIME_FILE"

@@ -24,10 +24,9 @@ source "$(dirname "$0")/common.sh"
 
 require_cmd curl
 
-BROWSER_A_PORT="${BROWSER_A_PORT:-9222}"
-BROWSER_B_PORT="${BROWSER_B_PORT:-9223}"
-BROWSER_A_PROFILE="${BROWSER_A_PROFILE:-/tmp/duraclaw-chrome-a}"
-BROWSER_B_PROFILE="${BROWSER_B_PROFILE:-/tmp/duraclaw-chrome-b}"
+# Ports and profiles are derived per-worktree in common.sh — no hardcoded
+# defaults here. BROWSER_A_PORT, BROWSER_B_PORT, BROWSER_A_PROFILE, and
+# BROWSER_B_PROFILE are already exported by common.sh above.
 BROWSER_A_PID_FILE="${BROWSER_A_PID_FILE:-$VERIFY_STATE_DIR/browser-a.pid}"
 BROWSER_B_PID_FILE="${BROWSER_B_PID_FILE:-$VERIFY_STATE_DIR/browser-b.pid}"
 BROWSER_A_LOG_FILE="${BROWSER_A_LOG_FILE:-$VERIFY_LOG_DIR/browser-a.log}"

@@ -16,22 +16,15 @@ set -euo pipefail
 # was skipped, e.g. agent harness invocations).
 source "$(dirname "$0")/common.sh" >/dev/null 2>&1 || true
 
-BROWSER_A_PORT="${BROWSER_A_PORT:-9222}"
+# Ports and state dirs are derived per-worktree in common.sh (sourced above).
+# BROWSER_A_PORT, AXI_A_BRIDGE_PORT, and AXI_A_STATE are already set.
 export CHROME_DEVTOOLS_AXI_BROWSER_URL="http://127.0.0.1:${BROWSER_A_PORT}"
-# Each wrapper needs its OWN bridge, and chrome-devtools-axi finds its
-# already-running bridge via a PID file at ~/.chrome-devtools-axi/
-# bridge.pid — a SINGLE shared path, which means two concurrent wrappers
-# on one $HOME clobber each other (last writer wins, the other's bridge
-# becomes unreachable and re-invocations get routed to whichever bridge
-# the PID file currently points at).
-#
-# Fix: give each wrapper its own HOME so each has its own state dir.
-# We also pin CHROME_DEVTOOLS_AXI_PORT so the bridge never collides with
-# the peer wrapper when both happen to start fresh.
-_AXI_A_STATE="${AXI_A_STATE:-/tmp/duraclaw-axi-a-state}"
-mkdir -p "$_AXI_A_STATE"
-export HOME="$_AXI_A_STATE"
-export CHROME_DEVTOOLS_AXI_PORT="${AXI_A_BRIDGE_PORT:-9224}"
+# Each wrapper needs its OWN HOME so its bridge PID file doesn't clobber
+# the peer's. Pin CHROME_DEVTOOLS_AXI_PORT so bridges don't fight for
+# the same socket — both values are per-worktree unique via common.sh.
+mkdir -p "$AXI_A_STATE"
+export HOME="$AXI_A_STATE"
+export CHROME_DEVTOOLS_AXI_PORT="$AXI_A_BRIDGE_PORT"
 
 # Prefer the on-PATH binary but fall back to the known global path so the
 # script keeps working on a barely-configured machine.
