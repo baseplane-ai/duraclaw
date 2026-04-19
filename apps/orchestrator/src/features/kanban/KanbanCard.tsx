@@ -13,10 +13,12 @@ import { toast } from 'sonner'
 import { PipelineDots } from '~/components/layout/nav-sessions'
 import { Button } from '~/components/ui/button'
 import type { SessionRecord } from '~/db/agent-sessions-collection'
+import { WorktreeConflictModal } from '~/features/chain/WorktreeConflictModal'
 import { formatTimeAgo } from '~/features/agent-orch/session-utils'
+import { useChainCheckout } from '~/hooks/use-chain-checkout'
 import { useNextModePrecondition } from '~/hooks/use-chain-preconditions'
 import { useTabSync } from '~/hooks/use-tab-sync'
-import type { ChainSummary } from '~/lib/types'
+import type { ChainSummary, WorktreeReservation } from '~/lib/types'
 import { AdvanceConfirmModal } from './AdvanceConfirmModal'
 import { advanceChain, hasActiveSession } from './advance-chain'
 
@@ -55,8 +57,10 @@ export function KanbanCard({ chain }: KanbanCardProps) {
   const navigate = useNavigate()
   const { openTab } = useTabSync()
   const { nextMode, nextLabel, canAdvance, reason, loading } = useNextModePrecondition(chain)
+  const { forceRelease } = useChainCheckout()
   const [modalOpen, setModalOpen] = useState(false)
   const [pending, setPending] = useState(false)
+  const [conflict, setConflict] = useState<WorktreeReservation | null>(null)
 
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `card:${chain.issueNumber}`,
@@ -80,23 +84,54 @@ export function KanbanCard({ chain }: KanbanCardProps) {
     setModalOpen(true)
   }, [nextMode, canAdvance])
 
-  const handleConfirm = useCallback(async () => {
-    if (!nextMode) return
+  const runAdvance = useCallback(async (): Promise<boolean> => {
+    if (!nextMode) return false
     setPending(true)
     const res = await advanceChain(chain, nextMode)
     setPending(false)
-    setModalOpen(false)
     if (!res.ok) {
+      if (res.conflict) {
+        setModalOpen(false)
+        setConflict(res.conflict)
+        return false
+      }
       toast.error(res.error ?? 'Failed to advance chain')
-      return
+      return false
     }
+    setModalOpen(false)
     toast.success(`Started ${nextMode} for #${chain.issueNumber}`)
     navigate({
       to: '/chain/$issueNumber',
       params: { issueNumber: String(chain.issueNumber) },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any)
+    return true
   }, [chain, nextMode, navigate])
+
+  const handleConfirm = useCallback(async () => {
+    await runAdvance()
+  }, [runAdvance])
+
+  const handlePickDifferent = useCallback(() => {
+    // No in-app worktree picker yet — close modal and let the user pick a
+    // different worktree via the existing spawn form / worktrees panel.
+    setConflict(null)
+  }, [])
+
+  const handleForceRelease = useCallback(async () => {
+    if (!conflict) return
+    setPending(true)
+    const res = await forceRelease(conflict.issueNumber, conflict.worktree)
+    if (!res.ok) {
+      setPending(false)
+      toast.error(res.error ?? 'Force release failed')
+      return
+    }
+    // Clear conflict modal; retry the full advance (checkout re-runs).
+    setConflict(null)
+    setPending(false)
+    await runAdvance()
+  }, [conflict, forceRelease, runAdvance])
 
   const focus = pickFocusSession(chain.sessions)
   const focusTs = focus?.lastActivity ?? focus?.createdAt ?? chain.lastActivity
@@ -188,6 +223,18 @@ export function KanbanCard({ chain }: KanbanCardProps) {
           worktreeReserved={!!chain.worktreeReservation}
           onConfirm={handleConfirm}
           pending={pending}
+        />
+      ) : null}
+      {conflict ? (
+        <WorktreeConflictModal
+          open={true}
+          onOpenChange={(open) => {
+            if (!open) setConflict(null)
+          }}
+          conflict={conflict}
+          onPickDifferent={handlePickDifferent}
+          onForceRelease={handleForceRelease}
+          conflictTitle={`Blocking advance of #${chain.issueNumber}`}
         />
       ) : null}
     </>

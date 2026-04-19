@@ -120,6 +120,10 @@ function AgentOrchContent() {
   const handleSpawn = useCallback(
     async (config: SpawnFormConfig & { newTab?: boolean }) => {
       try {
+        // TODO: wire worktree checkout here when AgentOrchPage learns
+        // kataIssue from the spawn form. Chain-scoped code-touching spawns
+        // from the kanban go through advance-chain.ts which handles this;
+        // freeform spawns from this form currently bypass the gate.
         const resp = await fetch('/api/sessions', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

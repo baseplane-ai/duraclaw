@@ -1,10 +1,10 @@
 import { Agent, type Connection, type ConnectionContext, callable } from 'agents'
 import type { SessionMessage, SessionMessagePart } from 'agents/experimental/memory/session'
 import { Session } from 'agents/experimental/memory/session'
-import { asc, eq } from 'drizzle-orm'
+import { and, asc, eq } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import * as schema from '~/db/schema'
-import { agentSessions } from '~/db/schema'
+import { agentSessions, worktreeReservations } from '~/db/schema'
 import { generateActionToken } from '~/lib/action-token'
 import { runMigrations } from '~/lib/do-migrations'
 import { contentToParts, transcriptUserContentToParts } from '~/lib/message-parts'
@@ -700,6 +700,28 @@ export class SessionDO extends Agent<Env, SessionState> {
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to sync kata to D1:`, err)
     }
+
+    // Chain UX B11: refresh the worktree reservation's last_activity_at on
+    // every kata_state event so stale gating (7-day inactivity) tracks real
+    // session usage. Also clears a previously-set `stale` flag.
+    if (kataState?.issueNumber != null && this.state.project) {
+      try {
+        await this.d1
+          .update(worktreeReservations)
+          .set({ lastActivityAt: updatedAt, stale: false })
+          .where(
+            and(
+              eq(worktreeReservations.issueNumber, kataState.issueNumber),
+              eq(worktreeReservations.worktree, this.state.project),
+            ),
+          )
+      } catch (err) {
+        console.error(
+          `[SessionDO:${this.ctx.id}] failed to refresh reservation activity:`,
+          err,
+        )
+      }
+    }
   }
 
   /**
@@ -758,6 +780,11 @@ export class SessionDO extends Agent<Env, SessionState> {
       } catch {
         /* ignore */
       }
+      // Explicitly clear the callback token so the poll below proceeds on the
+      // happy path. onClose only clears this when status is running/waiting_gate,
+      // which doesn't cover every mode-transition case — without this clear the
+      // poll below always falls through to the 5s timeout.
+      this.updateState({ active_callback_token: undefined })
     }
 
     // 4. Wait up to 5s for the runner to exit — signalled by the DO's onClose

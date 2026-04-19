@@ -1338,6 +1338,15 @@ export function createApiApp() {
       return c.json({ error: 'Missing required fields: project, prompt' }, 400)
     }
 
+    // Validate kataIssue — must be a positive integer if supplied. This
+    // protects downstream consumers (chain joins, worktree reservations)
+    // from negative / fractional / NaN issue numbers.
+    if (body.kataIssue !== undefined && body.kataIssue !== null) {
+      if (!Number.isInteger(body.kataIssue) || body.kataIssue <= 0) {
+        return c.json({ error: 'invalid_kata_issue' }, 400)
+      }
+    }
+
     const projectPath = await resolveProjectPath(c.env, body.project)
 
     const doId = c.env.SESSION_AGENT.newUniqueId()
@@ -1758,6 +1767,7 @@ export function createApiApp() {
   })
 
   app.post('/api/chains/:issue/release', async (c) => {
+    const userId = c.get('userId')
     const issueNumber = Number.parseInt(c.req.param('issue'), 10)
     if (!Number.isFinite(issueNumber)) {
       return c.json({ error: 'Invalid issue number' }, 400)
@@ -1769,12 +1779,28 @@ export function createApiApp() {
       .from(worktreeReservations)
       .where(eq(worktreeReservations.issueNumber, issueNumber))
     if (targets.length === 0) {
-      return c.json({ message: 'No reservation for this chain' }, 404)
+      // Idempotent — no reservation means nothing to release.
+      return c.json({ released: true, count: 0 })
+    }
+
+    // Ownership check — only the reservation owner may call /release.
+    // Non-owners must use /force-release (which enforces the stale gate).
+    const nonOwned = targets.filter((r) => r.ownerId !== userId)
+    if (nonOwned.length > 0) {
+      return c.json({ error: 'not_owner', reservation: nonOwned[0] }, 403)
     }
 
     await db
       .delete(worktreeReservations)
       .where(eq(worktreeReservations.issueNumber, issueNumber))
+
+    for (const r of targets) {
+      await db.insert(auditLog).values({
+        action: 'reservation_released',
+        userId,
+        details: JSON.stringify({ issueNumber, worktree: r.worktree }),
+      })
+    }
 
     return c.json({ released: true, count: targets.length })
   })

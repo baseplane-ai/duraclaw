@@ -12,15 +12,20 @@
  * channel. The caller is expected to toast success and navigate.
  */
 
-import type { ChainSummary } from '~/lib/types'
+import type { ChainSummary, WorktreeReservation } from '~/lib/types'
 
 const ACTIVE_STATUSES = new Set(['running', 'waiting_input', 'waiting_permission', 'idle'])
 
-export interface AdvanceChainResult {
-  ok: boolean
-  sessionId?: string
-  error?: string
-}
+/**
+ * Code-touching kata modes that require an exclusive worktree checkout
+ * before a session may spawn (spec 16-chain-ux B11). `research` and
+ * `planning` are read-only and skip the checkout gate.
+ */
+const CODE_TOUCHING_MODES = new Set(['implementation', 'verify', 'debug', 'task'])
+
+export type AdvanceChainResult =
+  | { ok: true; sessionId: string }
+  | { ok: false; error?: string; conflict?: WorktreeReservation }
 
 function latestActiveSession(
   chain: ChainSummary,
@@ -94,6 +99,33 @@ export async function advanceChain(
     return { ok: false, error: 'No project for chain' }
   }
   try {
+    // B11: code-touching modes must reserve the worktree before spawn.
+    // Read-only modes (research, planning) skip the gate.
+    if (CODE_TOUCHING_MODES.has(nextMode)) {
+      const checkoutResp = await fetch(
+        `/api/chains/${chain.issueNumber}/checkout`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ worktree: project, modeAtCheckout: nextMode }),
+        },
+      )
+      if (checkoutResp.status === 409) {
+        const body = (await checkoutResp.json().catch(() => null)) as
+          | { conflict?: WorktreeReservation; message?: string }
+          | null
+        return {
+          ok: false,
+          error: body?.message ?? 'Worktree already held',
+          conflict: body?.conflict,
+        }
+      }
+      if (!checkoutResp.ok) {
+        return { ok: false, error: `Checkout failed: ${checkoutResp.status}` }
+      }
+    }
+
     const active = latestActiveSession(chain)
     if (active) {
       await abortSession(active.id)
