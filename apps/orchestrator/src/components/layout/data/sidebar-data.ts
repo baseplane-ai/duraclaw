@@ -1,4 +1,4 @@
-import { Bug, MessagesSquare, Settings, Users } from 'lucide-react'
+import { Bug, LayoutGrid, MessagesSquare, Settings, Users } from 'lucide-react'
 import type { NavGroup, SidebarData } from '../types'
 
 export const sidebarData: SidebarData = {
@@ -10,6 +10,11 @@ export const sidebarData: SidebarData = {
           title: 'Sessions',
           url: '/',
           icon: MessagesSquare,
+        },
+        {
+          title: 'Board',
+          url: '/board',
+          icon: LayoutGrid,
         },
         {
           title: 'Settings',

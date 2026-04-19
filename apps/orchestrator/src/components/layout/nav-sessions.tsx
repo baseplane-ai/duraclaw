@@ -651,7 +651,7 @@ function isCompletedSession(session: SessionRecord): boolean {
   return s === 'idle' && (session.numTurns ?? 0) > 0
 }
 
-function PipelineDots({ sessions }: { sessions: SessionRecord[] }) {
+export function PipelineDots({ sessions }: { sessions: SessionRecord[] }) {
   const parts = CHAIN_STAGES.map((stage) => {
     const inStage = sessions.filter((s) => (s.kataMode ? stage.match(s.kataMode) : false))
     if (inStage.some((s) => isLiveStatus(s.status))) {
