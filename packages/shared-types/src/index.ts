@@ -59,6 +59,8 @@ export interface StreamInputCommand {
   type: 'stream-input'
   session_id: string
   message: { role: 'user'; content: string | ContentBlock[] }
+  /** Optional client-proposed message id for server-accepts-client-ID echo reconciliation (GH#14 B6). */
+  client_message_id?: string
 }
 
 export interface PermissionResponseCommand {

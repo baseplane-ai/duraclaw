@@ -94,7 +94,7 @@ describe('messages-collection', () => {
     expect(mockPersistedCollectionOptions).not.toHaveBeenCalled()
   })
 
-  it('wraps with persistedCollectionOptions (schemaVersion 3) when persistence is available', async () => {
+  it('wraps with persistedCollectionOptions (schemaVersion 4) when persistence is available', async () => {
     vi.resetModules()
 
     vi.doMock('./db-instance', () => ({
@@ -107,7 +107,7 @@ describe('messages-collection', () => {
 
     expect(mockPersistedCollectionOptions).toHaveBeenCalledWith(
       expect.objectContaining({
-        schemaVersion: 3,
+        schemaVersion: 4,
         persistence: expect.objectContaining({ adapter: {} }),
       }),
     )

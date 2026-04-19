@@ -9,6 +9,7 @@
  * `branchInfo` remain as local React state.
  */
 
+import { createTransaction } from '@tanstack/db'
 import { useAgent } from 'agents/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type * as Y from 'yjs'
@@ -74,19 +75,12 @@ export interface UseCodingAgentResult {
   navigateBranch: (messageId: string, direction: 'prev' | 'next') => Promise<void>
 }
 
-const TURN_ID_RE = /^(?:usr|msg|err)-(\d+)$/
-
-/** Compute the highest server-assigned turn number from the current message set. */
-function maxServerTurn(messages: CachedMessage[]): number {
-  let max = 0
-  for (const m of messages) {
-    const match = TURN_ID_RE.exec(m.id)
-    if (match) {
-      const n = Number.parseInt(match[1], 10)
-      if (n > max) max = n
-    }
+/** Generate a client-proposed message id for server-accepts-client-ID echo reconciliation (GH#14 B6). */
+function newClientMessageId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `usr-client-${crypto.randomUUID()}`
   }
-  return max
+  return `usr-client-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 }
 
 /** Convert the collection row shape back to the SessionMessage shape consumers expect. */
@@ -192,33 +186,6 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     [agentName, bulkUpsert, messagesCollection],
   )
 
-  /** Drop the oldest `usr-optimistic-*` row for this session (FIFO; one echo → one clear). */
-  const clearOldestOptimisticRow = useCallback(() => {
-    let oldestId: string | null = null
-    let oldestTs = Number.POSITIVE_INFINITY
-    try {
-      for (const [id, row] of messagesCollection as Iterable<[string, CachedMessage]>) {
-        if (row.sessionId !== agentName) continue
-        const match = /^usr-optimistic-(\d+)$/.exec(id)
-        if (!match) continue
-        const ts = Number.parseInt(match[1], 10)
-        if (ts < oldestTs) {
-          oldestTs = ts
-          oldestId = id
-        }
-      }
-    } catch {
-      return
-    }
-    if (oldestId) {
-      try {
-        messagesCollection.delete(oldestId)
-      } catch {
-        // Already gone (raced with another echo or rollback).
-      }
-    }
-  }, [agentName, messagesCollection])
-
   /**
    * Apply a `{type:'messages', seq, payload}` frame from the DO (B1/B3).
    *
@@ -264,12 +231,10 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       // kind === 'delta'
       if (frame.seq === lastSeq + 1) {
         const upsertList = frame.payload.upsert ?? []
-        for (const m of upsertList) {
-          if (m.role === 'user' && !m.id.startsWith('usr-optimistic-')) {
-            clearOldestOptimisticRow()
-          }
-          upsert(m)
-        }
+        // GH#14 P3: user echoes reconcile via id match alone. The DO accepts
+        // the client-proposed `client_message_id` as the primary id, so
+        // TanStack DB deep-equality retires the optimistic row silently.
+        for (const m of upsertList) upsert(m)
         const removeList = frame.payload.remove ?? []
         if (removeList.length > 0) {
           try {
@@ -291,7 +256,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       // frame.seq <= lastSeq — stale/duplicate; drop silently.
       return
     },
-    [agentName, upsert, clearOldestOptimisticRow, replaceAllMessages, messagesCollection],
+    [agentName, upsert, replaceAllMessages, messagesCollection],
   )
 
   const connection = useAgent<SessionState>({
@@ -549,50 +514,47 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     [connection, agentName, branchInfo, refreshBranchInfo, replaceAllMessages],
   )
 
-  /** Insert an optimistic user row; returns its id so callers can roll it back. */
-  const insertOptimistic = useCallback(
-    (content: string | ContentBlock[]): string => {
-      const optimisticId = `usr-optimistic-${Date.now()}`
-      const turnHint = maxServerTurn(cachedMessages) + 1
-      try {
-        messagesCollection.insert({
-          id: optimisticId,
-          sessionId: agentName,
-          role: 'user',
-          parts: contentToParts(content),
-          createdAt: new Date(),
-          turnHint,
-        } as CachedMessage & Record<string, unknown>)
-      } catch {
-        // Duplicate id (extremely unlikely) — swallow.
-      }
-      return optimisticId
-    },
-    [agentName, cachedMessages, messagesCollection],
-  )
-
-  const deleteOptimistic = useCallback(
-    (id: string) => {
-      try {
-        messagesCollection.delete(id)
-      } catch {
-        // Already gone.
-      }
-    },
-    [messagesCollection],
-  )
-
+  /**
+   * GH#14 P3: optimistic user-row inserts use `createTransaction` with
+   * server-accepts-client-ID reconciliation. The DO accepts the
+   * `client_message_id` as the primary id, so echoes reconcile via
+   * TanStack DB deep-equality — no manual delete+insert churn, no
+   * turnHint sort hints, no maxServerTurn bookkeeping.
+   */
   const sendMessage = useCallback(
     async (content: string | ContentBlock[], opts?: { submitId?: string }) => {
-      const optimisticId = insertOptimistic(content)
-      const result = (await connection.call('sendMessage', [content, opts])) as {
-        ok: boolean
-        error?: string
+      const clientMessageId = newClientMessageId()
+      const optimisticRow: CachedMessage & Record<string, unknown> = {
+        id: clientMessageId,
+        sessionId: agentName,
+        role: 'user',
+        parts: contentToParts(content),
+        createdAt: new Date(),
       }
-      if (!result.ok) deleteOptimistic(optimisticId)
-      return result
+      const tx = createTransaction<CachedMessage & Record<string, unknown>>({
+        mutationFn: async () => {
+          const result = (await connection.call('sendMessage', [
+            content,
+            { ...opts, client_message_id: clientMessageId },
+          ])) as { ok: boolean; error?: string; recoverable?: string }
+          if (!result.ok) {
+            throw new Error(result.error ?? 'sendMessage failed')
+          }
+          return result
+        },
+      })
+      tx.mutate(() => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(messagesCollection as any).insert(optimisticRow)
+      })
+      try {
+        await tx.isPersisted.promise
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) }
+      }
     },
-    [connection, insertOptimistic, deleteOptimistic],
+    [agentName, connection, messagesCollection],
   )
 
   /** Draft submit: optimistically clear a shared Y.Text, send, restore on failure. */
@@ -630,20 +592,34 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         return { ok: false, sent: false, error: 'mock failure' }
       }
 
-      const optimisticId = insertOptimistic(text)
+      const clientMessageId = newClientMessageId()
+      const optimisticRow: CachedMessage & Record<string, unknown> = {
+        id: clientMessageId,
+        sessionId: agentName,
+        role: 'user',
+        parts: contentToParts(text),
+        createdAt: new Date(),
+      }
+      const tx = createTransaction<CachedMessage & Record<string, unknown>>({
+        mutationFn: async () => {
+          const result = (await connection.call('sendMessage', [
+            text,
+            { submitId, client_message_id: clientMessageId },
+          ])) as { ok: boolean; error?: string }
+          if (!result.ok) {
+            throw new Error(result.error ?? 'sendMessage failed')
+          }
+          return result
+        },
+      })
+      tx.mutate(() => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(messagesCollection as any).insert(optimisticRow)
+      })
       try {
-        const result = (await connection.call('sendMessage', [text, { submitId }])) as {
-          ok: boolean
-          error?: string
-        }
-        if (!result.ok) {
-          deleteOptimistic(optimisticId)
-          runRestore()
-          return { ok: false, sent: false, error: result.error }
-        }
+        await tx.isPersisted.promise
         return { ok: true, sent: true }
       } catch (err) {
-        deleteOptimistic(optimisticId)
         runRestore()
         return {
           ok: false,
@@ -652,20 +628,50 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         }
       }
     },
-    [connection, insertOptimistic, deleteOptimistic],
+    [agentName, connection, messagesCollection],
   )
 
   const forkWithHistory = useCallback(
     async (content: string | ContentBlock[]) => {
-      const optimisticId = insertOptimistic(content)
-      const result = (await connection.call('forkWithHistory', [content])) as {
-        ok: boolean
-        error?: string
+      const clientMessageId = newClientMessageId()
+      const optimisticRow: CachedMessage & Record<string, unknown> = {
+        id: clientMessageId,
+        sessionId: agentName,
+        role: 'user',
+        parts: contentToParts(content),
+        createdAt: new Date(),
       }
-      if (!result.ok) deleteOptimistic(optimisticId)
-      return result
+      const tx = createTransaction<CachedMessage & Record<string, unknown>>({
+        mutationFn: async () => {
+          // NB: DO-side forkWithHistory does not currently accept
+          // client_message_id (the DO-authored user row carries its own
+          // `usr-N` id). The optimistic row stays keyed on
+          // `usr-client-<uuid>`; the server echo arrives with a different id
+          // but the snapshot emitted by forkWithHistory + replaceAllMessages
+          // still converges the collection. Documented as a deviation in
+          // GH#14 P3.
+          const result = (await connection.call('forkWithHistory', [content])) as {
+            ok: boolean
+            error?: string
+          }
+          if (!result.ok) {
+            throw new Error(result.error ?? 'forkWithHistory failed')
+          }
+          return result
+        },
+      })
+      tx.mutate(() => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(messagesCollection as any).insert(optimisticRow)
+      })
+      try {
+        await tx.isPersisted.promise
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) }
+      }
     },
-    [connection, insertOptimistic, deleteOptimistic],
+    [agentName, connection, messagesCollection],
   )
 
   return {

@@ -83,6 +83,18 @@ const DEFAULT_STATE: SessionState = {
  */
 const WATCHDOG_INTERVAL_MS = 30_000
 
+/**
+ * Parse a canonical user-turn ordinal from a message id or canonical_turn_id.
+ * Returns `N` if the id matches `/^usr-(\d+)$/`, otherwise `undefined`.
+ * Used by DO cold-start turnCounter recovery (GH#14 P3) and the client
+ * sort-key derivation.
+ */
+function parseTurnOrdinal(id?: string): number | undefined {
+  if (!id) return undefined
+  const m = /^usr-(\d+)$/.exec(id)
+  return m ? Number.parseInt(m[1], 10) : undefined
+}
+
 // Stale threshold is resolved per-alarm via resolveStaleThresholdMs(env) so
 // config changes take effect on the next DO wake without a code change.
 // Default is 90s — see DEFAULT_STALE_THRESHOLD_MS in session-do-helpers.
@@ -113,6 +125,24 @@ export class SessionDO extends Agent<Env, SessionState> {
     const turnState = loadTurnState(this.sql.bind(this), pathLength)
     this.turnCounter = turnState.turnCounter
     this.currentTurnMessageId = turnState.currentTurnMessageId
+
+    // Guard against DO eviction: if SQLite history survived but the
+    // persisted turnCounter is 0 or stale, scan user-turn rows for the
+    // max ordinal. Prevents canonical-ID collisions (GH#14 P3 B6).
+    try {
+      const history = this.session.getHistory()
+      let maxOrdinal = 0
+      for (const msg of history) {
+        const canonical = (msg as { canonical_turn_id?: string }).canonical_turn_id
+        const ord = parseTurnOrdinal(canonical) ?? parseTurnOrdinal(msg.id)
+        if (ord !== undefined && ord > maxOrdinal) maxOrdinal = ord
+      }
+      if (maxOrdinal > this.turnCounter) {
+        this.turnCounter = maxOrdinal
+      }
+    } catch {
+      // History scan is best-effort; never fatal on cold start.
+    }
 
     // Populate gateway connection ID cache (in case we're waking from hibernation)
     this.cachedGatewayConnId = getGatewayConnectionId(this.sql.bind(this))
@@ -1281,11 +1311,12 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // Persist initial prompt as a user message so it survives reload
     this.turnCounter++
     const userMsgId = `usr-${this.turnCounter}`
-    const userMsg: SessionMessage = {
+    const userMsg: SessionMessage & { canonical_turn_id?: string } = {
       id: userMsgId,
       role: 'user',
       parts: contentToParts(config.prompt),
       createdAt: new Date(),
+      canonical_turn_id: userMsgId,
     }
     try {
       await this.session.appendMessage(userMsg)
@@ -1346,7 +1377,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // Persist resume prompt as a user message
     this.turnCounter++
     const userMsgId = `usr-${this.turnCounter}`
-    const userMsg: SessionMessage = {
+    const userMsg: SessionMessage & { canonical_turn_id?: string } = {
       id: userMsgId,
       role: 'user',
       parts: [
@@ -1356,6 +1387,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         },
       ],
       createdAt: new Date(),
+      canonical_turn_id: userMsgId,
     }
     try {
       await this.session.appendMessage(userMsg)
@@ -1524,7 +1556,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
   @callable()
   async sendMessage(
     content: string | ContentBlock[],
-    opts?: { submitId?: string },
+    opts?: { submitId?: string; client_message_id?: string },
   ): Promise<{ ok: boolean; error?: string; recoverable?: 'forkWithHistory' }> {
     // Idempotency: if a submitId was supplied and we've already accepted it,
     // treat this as a duplicate of that prior call and no-op. Rows older than
@@ -1603,12 +1635,14 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // Persist user message (only after orphan preflight so we don't have to
     // roll it back on the auto-fork branch — forkWithHistory appends itself).
     this.turnCounter++
-    const userMsgId = `usr-${this.turnCounter}`
-    const userMsg: SessionMessage = {
+    const canonicalTurnId = `usr-${this.turnCounter}`
+    const userMsgId = opts?.client_message_id ?? canonicalTurnId
+    const userMsg: SessionMessage & { canonical_turn_id?: string } = {
       id: userMsgId,
       role: 'user',
       parts: contentToParts(content),
       createdAt: new Date(),
+      canonical_turn_id: canonicalTurnId,
     }
     try {
       await this.session.appendMessage(userMsg)
@@ -1627,6 +1661,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         type: 'stream-input',
         session_id: this.state.session_id ?? '',
         message: { role: 'user', content },
+        ...(opts?.client_message_id ? { client_message_id: opts.client_message_id } : {}),
       })
     } else if (isResumable) {
       this.updateState({ status: 'running', gate: null, error: null })
@@ -1699,11 +1734,12 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // transcript prefix — that's only for the SDK's fresh context.
     this.turnCounter++
     const userMsgId = `usr-${this.turnCounter}`
-    const userMsg: SessionMessage = {
+    const userMsg: SessionMessage & { canonical_turn_id?: string } = {
       id: userMsgId,
       role: 'user',
       parts: contentToParts(content),
       createdAt: new Date(),
+      canonical_turn_id: userMsgId,
     }
     try {
       await this.session.appendMessage(userMsg)
@@ -1906,11 +1942,12 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // 3. Create new user message as sibling branch
     this.turnCounter++
     const newUserMsgId = `usr-${this.turnCounter}`
-    const newUserMsg: SessionMessage = {
+    const newUserMsg: SessionMessage & { canonical_turn_id?: string } = {
       id: newUserMsgId,
       role: 'user',
       parts: [{ type: 'text', text: newContent }],
       createdAt: new Date(),
+      canonical_turn_id: newUserMsgId,
     }
 
     try {

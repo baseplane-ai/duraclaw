@@ -3,8 +3,9 @@
  * `GET /api/sessions/:id/messages` and persisted to OPFS SQLite.
  *
  * - Collection id: `messages:<agentName>` (one collection per SessionDO tab)
- * - Persisted to OPFS SQLite (schemaVersion 3 — bump from v2; v2 rows load
- *   compatibly, turnHint is still present at this phase and retired in P3)
+ * - Persisted to OPFS SQLite (schemaVersion 4 — bump from v3; v3 rows re-
+ *   hydrate via queryFn on first read, turnHint is silently dropped on first
+ *   write. Retired in P3 in favor of `canonical_turn_id` on user rows.)
  * - syncMode: 'on-demand' — queryFn only fires on explicit fetch / first
  *   subscriber. WS snapshots are the push channel; the query is the pull
  *   channel for cold-start and reconnect-with-stale-cache.
@@ -35,16 +36,12 @@ export interface CachedMessage {
   parts: SessionMessagePart[]
   createdAt?: Date | string
   /**
-   * Frozen turn position for optimistic rows. Set at insert time to
-   * `maxServerTurn + 1` so the optimistic message sorts in the correct
-   * chronological position rather than at `MAX_SAFE_INTEGER`. Without this,
-   * assistant messages that arrive before the server echo sort *above* the
-   * optimistic user message, making it "stay behind" at the bottom.
-   *
-   * Retired in P3 along with `insertOptimistic` / `deleteOptimistic` — do
-   * not remove this field until then.
+   * Canonical turn ordinal (`usr-N`) for user rows. Populated server-side on
+   * user-message persistence; absent on assistant/tool rows. Drives the
+   * messages-collection sort-key so user turns stay in monotonic order even
+   * as optimistic rows (id=`usr-client-<uuid>`) reconcile with server echoes.
    */
-  turnHint?: number
+  canonical_turn_id?: string
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -57,12 +54,14 @@ const collectionsByAgent = new Map<string, MessagesCollection>()
 
 /** Map a server SessionMessage → cached row stamped with the session key. */
 function toCachedMessage(msg: SessionMessage, sessionId: string): CachedMessage {
+  const canonical = (msg as { canonical_turn_id?: string }).canonical_turn_id
   return {
     id: msg.id,
     sessionId,
     role: msg.role,
     parts: msg.parts,
     createdAt: msg.createdAt,
+    ...(canonical ? { canonical_turn_id: canonical } : {}),
   }
 }
 
@@ -106,7 +105,7 @@ export function createMessagesCollection(agentName: string): MessagesCollection 
     const opts = persistedCollectionOptions({
       ...queryOpts,
       persistence,
-      schemaVersion: 3,
+      schemaVersion: 4,
     })
     // TanStackDB beta: persistedCollectionOptions adds a schema type that
     // conflicts with createCollection overloads. Runtime behavior is correct.
