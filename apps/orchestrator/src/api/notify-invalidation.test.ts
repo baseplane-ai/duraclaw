@@ -143,7 +143,8 @@ describe('notifyInvalidation fires once per mutation endpoint', () => {
 
   it('POST /api/user-settings/tabs calls notify with user_tabs', async () => {
     fakeDb.data.queue.push([{ max: 0 }]) // MAX(position) lookup
-    fakeDb.data.queue.push([{ id: 't1', userId: 'user-1', position: 1 }]) // returning row
+    fakeDb.data.queue.push([]) // dedup SELECT — no existing tab for this sessionId
+    fakeDb.data.queue.push([{ id: 't1', userId: 'user-1', position: 1 }]) // INSERT returning row
     const app = makeApp(env)
     const res = await app.request('/api/user-settings/tabs', {
       method: 'POST',

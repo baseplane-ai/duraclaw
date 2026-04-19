@@ -3,6 +3,7 @@
  */
 
 import { useState } from 'react'
+import { toast } from 'sonner'
 import { Badge } from '~/components/ui/badge'
 import { Button } from '~/components/ui/button'
 import { Input } from '~/components/ui/input'
@@ -39,7 +40,14 @@ export function GateResolver({ gate, onResolve, onResolved }: GateResolverProps)
   const handleResolve = async (response: GateResponse) => {
     setResolving(true)
     try {
-      await onResolve(gate.id, response)
+      const result = (await onResolve(gate.id, response)) as
+        | { ok: boolean; error?: string }
+        | undefined
+      if (result && !result.ok) {
+        toast.error(result.error || 'Failed to submit response')
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to submit response')
     } finally {
       setResolving(false)
       setAnswer('')

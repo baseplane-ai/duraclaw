@@ -64,11 +64,10 @@ vi.mock('~/db/messages-collection', () => ({
 
 vi.mock('~/db/sessions-collection', () => ({
   sessionsCollection: {
-    // Production code writes through utils.writeUpdate.
-    utils: { writeUpdate: vi.fn() },
     update: vi.fn(),
     insert: vi.fn(),
     has: vi.fn().mockReturnValue(true),
+    utils: { writeUpdate: vi.fn() },
   },
 }))
 

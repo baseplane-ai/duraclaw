@@ -541,6 +541,86 @@ export class SessionDO extends Agent<Env, SessionState> {
     this.broadcastToClients(JSON.stringify({ type: 'message', message }))
   }
 
+  /**
+   * Promote an existing tool-use part (created by the `assistant` event) to a
+   * gate part so the UI renders a GateResolver instead of a plain tool pill.
+   *
+   * Scans ALL messages (latest first) for a part whose `toolCallId` matches,
+   * then flips its `type`, `toolName`, and `state` in place.  This avoids the
+   * old approach of appending a *second* part via a message-ID lookup that
+   * could miss when `turnCounter` drifted between the `assistant` and gate
+   * events.
+   *
+   * If no matching part is found (edge case: the `assistant` event hasn't
+   * been processed yet, or was lost), a standalone assistant message is
+   * created as a fallback so the gate is never silently dropped.
+   */
+  private promoteToolPartToGate(
+    toolCallId: string,
+    newType: string,
+    newToolName: string,
+    input: Record<string, unknown>,
+  ) {
+    // Walk messages newest-first looking for the part the assistant event
+    // already created (type = `tool-{SdkToolName}`, toolCallId matches).
+    const history = this.session.getHistory()
+    let promoted = false
+    for (let i = history.length - 1; i >= 0; i--) {
+      const msg = history[i]
+      const idx = msg.parts.findIndex((p) => p.toolCallId === toolCallId)
+      if (idx === -1) continue
+
+      const updatedParts = [...msg.parts]
+      updatedParts[idx] = {
+        ...updatedParts[idx],
+        type: newType,
+        toolName: newToolName,
+        input: updatedParts[idx].input ?? input, // keep SDK input if present
+        state: 'approval-requested',
+      }
+      const updatedMsg: SessionMessage = { ...msg, parts: updatedParts }
+      try {
+        this.session.updateMessage(updatedMsg)
+        this.broadcastMessage(updatedMsg)
+      } catch (err) {
+        console.error(`[SessionDO:${this.ctx.id}] Failed to promote gate part:`, err)
+        this.broadcastToClients(
+          JSON.stringify({ type: 'raw_event', event: { type: newType, tool_call_id: toolCallId } }),
+        )
+      }
+      promoted = true
+      break
+    }
+
+    // Fallback: assistant event hasn't created the part yet — create a
+    // standalone message so the gate is never invisible.
+    if (!promoted) {
+      console.warn(
+        `[SessionDO:${this.ctx.id}] promoteToolPartToGate: no part with toolCallId '${toolCallId}' — creating standalone gate message`,
+      )
+      const gateMsg: SessionMessage = {
+        id: `gate-${toolCallId}`,
+        role: 'assistant',
+        parts: [
+          {
+            type: newType,
+            toolCallId,
+            toolName: newToolName,
+            input,
+            state: 'approval-requested',
+          },
+        ],
+        createdAt: new Date(),
+      }
+      try {
+        void this.session.appendMessage(gateMsg)
+        this.broadcastMessage(gateMsg)
+      } catch (err) {
+        console.error(`[SessionDO:${this.ctx.id}] Failed to create standalone gate:`, err)
+      }
+    }
+  }
+
   private persistTurnState() {
     try {
       this
@@ -1119,34 +1199,38 @@ export class SessionDO extends Agent<Env, SessionState> {
       return { ok: false, error: 'Invalid response for gate type' }
     }
 
-    // Update the message part state for the resolved gate
-    if (this.currentTurnMessageId || this.turnCounter > 0) {
-      const currentMsgId = this.currentTurnMessageId ?? `msg-${this.turnCounter}`
-      const existing = this.session.getMessage(currentMsgId)
-      if (existing) {
-        const updatedParts = existing.parts.map((p) => {
-          if (p.toolCallId === gateId) {
-            if (response.approved !== undefined) {
-              return {
-                ...p,
-                state: response.approved ? 'output-available' : 'output-denied',
-                ...(response.approved && response.answer ? { output: response.answer } : {}),
-              }
-            }
-            if (response.answer !== undefined) {
-              return { ...p, state: 'output-available', output: response.answer }
-            }
+    // Update the message part state for the resolved gate.  Scan all
+    // messages (newest-first) for the matching toolCallId rather than
+    // guessing the message ID via currentTurnMessageId / turnCounter — the
+    // part may live in any message after promoteToolPartToGate.
+    const history = this.session.getHistory()
+    for (let i = history.length - 1; i >= 0; i--) {
+      const msg = history[i]
+      const partIdx = msg.parts.findIndex((p) => p.toolCallId === gateId)
+      if (partIdx === -1) continue
+
+      const updatedParts = msg.parts.map((p) => {
+        if (p.toolCallId !== gateId) return p
+        if (response.approved !== undefined) {
+          return {
+            ...p,
+            state: response.approved ? 'output-available' : 'output-denied',
+            ...(response.approved && response.answer ? { output: response.answer } : {}),
           }
-          return p
-        })
-        const updatedMsg: SessionMessage = { ...existing, parts: updatedParts }
-        try {
-          this.session.updateMessage(updatedMsg)
-          this.broadcastMessage(updatedMsg)
-        } catch (err) {
-          console.error(`[SessionDO:${this.ctx.id}] Failed to update gate resolution:`, err)
         }
+        if (response.answer !== undefined) {
+          return { ...p, state: 'output-available', output: response.answer }
+        }
+        return p
+      })
+      const updatedMsg: SessionMessage = { ...msg, parts: updatedParts }
+      try {
+        this.session.updateMessage(updatedMsg)
+        this.broadcastMessage(updatedMsg)
+      } catch (err) {
+        console.error(`[SessionDO:${this.ctx.id}] Failed to update gate resolution:`, err)
       }
+      break
     }
 
     this.updateState({ status: 'running', gate: null })
@@ -1689,29 +1773,18 @@ export class SessionDO extends Agent<Env, SessionState> {
       }
 
       case 'ask_user': {
-        // Add ask_user part to current assistant message
-        const currentMsgId = this.currentTurnMessageId ?? `msg-${this.turnCounter}`
-        const existing = this.session.getMessage(currentMsgId)
-        if (existing) {
-          const updatedParts: SessionMessagePart[] = [
-            ...existing.parts,
-            {
-              type: 'tool-ask_user',
-              toolCallId: event.tool_call_id,
-              toolName: 'ask_user',
-              input: { questions: event.questions },
-              state: 'approval-requested',
-            },
-          ]
-          const updatedMsg: SessionMessage = { ...existing, parts: updatedParts }
-          try {
-            this.session.updateMessage(updatedMsg)
-            this.broadcastMessage(updatedMsg)
-          } catch (err) {
-            console.error(`[SessionDO:${this.ctx.id}] Failed to persist ask_user:`, err)
-            this.broadcastToClients(JSON.stringify({ type: 'raw_event', event }))
-          }
-        }
+        // Promote the existing tool-AskUserQuestion part (created by the
+        // `assistant` event's tool_use block) to a gate part.  The assistant
+        // event already persisted the part with the full input (including
+        // the questions array) and the correct toolCallId — we just flip its
+        // type + state so the UI renders a GateResolver instead of a pill.
+        //
+        // This avoids the old design's race: previously we appended a
+        // *second* part looked up via currentTurnMessageId which could miss
+        // if turnCounter drifted between the assistant and ask_user events.
+        this.promoteToolPartToGate(event.tool_call_id, 'tool-ask_user', 'ask_user', {
+          questions: event.questions,
+        })
 
         // PRESERVE existing side effects exactly
         this.updateState({
@@ -1738,29 +1811,12 @@ export class SessionDO extends Agent<Env, SessionState> {
       }
 
       case 'permission_request': {
-        // Add permission part to current assistant message
-        const currentMsgId = this.currentTurnMessageId ?? `msg-${this.turnCounter}`
-        const existing = this.session.getMessage(currentMsgId)
-        if (existing) {
-          const updatedParts: SessionMessagePart[] = [
-            ...existing.parts,
-            {
-              type: 'tool-permission',
-              toolCallId: event.tool_call_id,
-              toolName: 'permission',
-              input: { tool_name: event.tool_name, tool_call_id: event.tool_call_id },
-              state: 'approval-requested',
-            },
-          ]
-          const updatedMsg: SessionMessage = { ...existing, parts: updatedParts }
-          try {
-            this.session.updateMessage(updatedMsg)
-            this.broadcastMessage(updatedMsg)
-          } catch (err) {
-            console.error(`[SessionDO:${this.ctx.id}] Failed to persist permission:`, err)
-            this.broadcastToClients(JSON.stringify({ type: 'raw_event', event }))
-          }
-        }
+        // Same strategy as ask_user: promote the existing tool part created
+        // by the assistant event rather than appending a duplicate.
+        this.promoteToolPartToGate(event.tool_call_id, 'tool-permission', 'permission', {
+          tool_name: event.tool_name,
+          tool_call_id: event.tool_call_id,
+        })
 
         // PRESERVE all existing side effects (state update, D1 sync, action token, push)
         this.updateState({

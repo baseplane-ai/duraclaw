@@ -1,41 +1,34 @@
 /**
  * Tests for the WS bridge in useCodingAgent.
  *
- * Validates that onStateUpdate calls sessionsCollection.update
+ * Validates that onStateUpdate calls sessionsCollection.utils.writeUpdate
  * with the correct status, updatedAt, and numTurns fields.
  *
  * @vitest-environment jsdom
  */
 
-import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import { beforeEach, afterEach, describe, expect, test, vi } from 'vitest'
 
-// ── Capture the onStateUpdate callback from useAgent ──────────────────
-
-let capturedOnStateUpdate: ((state: Record<string, unknown>) => void) | null = null
+// Capture the onStateUpdate callback so tests can invoke it directly
+let capturedOnStateUpdate: ((state: unknown) => void) | null = null
 
 vi.mock('agents/react', () => ({
-  useAgent: (opts: {
-    onStateUpdate?: (state: Record<string, unknown>) => void
-    onMessage?: (msg: MessageEvent) => void
-  }) => {
-    capturedOnStateUpdate = opts.onStateUpdate ?? null
+  useAgent: (_opts: { agent: string; name: string; onStateUpdate?: (s: unknown) => void }) => {
+    capturedOnStateUpdate = _opts.onStateUpdate ?? null
     return {
       call: vi.fn().mockResolvedValue([]),
     }
   },
 }))
 
-const mockCollectionUpdate = vi.fn()
 const mockCollectionHas = vi.fn().mockReturnValue(true)
+const mockWriteUpdate = vi.fn()
 
 vi.mock('~/db/sessions-collection', () => ({
   sessionsCollection: {
-    // New production code writes through utils.writeUpdate (the
-    // queryCollectionOptions doesn't expose a direct .update API); keep
-    // the legacy `update` spy as an alias so existing assertions still work.
-    utils: { writeUpdate: (...args: unknown[]) => mockCollectionUpdate(...args) },
-    update: (...args: unknown[]) => mockCollectionUpdate(...args),
+    update: vi.fn(),
     has: (...args: unknown[]) => mockCollectionHas(...args),
+    utils: { writeUpdate: (...args: unknown[]) => mockWriteUpdate(...args) },
   },
 }))
 
@@ -73,7 +66,7 @@ describe('WS bridge in useCodingAgent', () => {
     vi.restoreAllMocks()
   })
 
-  test('onStateUpdate calls sessionsCollection.utils.writeUpdate with status and updated_at', () => {
+  test('onStateUpdate calls sessionsCollection.utils.writeUpdate with patch', () => {
     renderHook(() => useCodingAgent('test-session'))
 
     expect(capturedOnStateUpdate).toBeTruthy()
@@ -85,8 +78,7 @@ describe('WS bridge in useCodingAgent', () => {
       capturedOnStateUpdate!({ status: 'running', num_turns: 5 })
     })
 
-    // Production code passes a single patch object to utils.writeUpdate.
-    expect(mockCollectionUpdate).toHaveBeenCalledWith(
+    expect(mockWriteUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
         id: 'test-session',
         status: 'running',
@@ -103,10 +95,10 @@ describe('WS bridge in useCodingAgent', () => {
       capturedOnStateUpdate!({ status: 'idle', num_turns: null })
     })
 
-    const patch = mockCollectionUpdate.mock.calls[0][0] as Record<string, unknown>
+    const patch = mockWriteUpdate.mock.calls[0][0] as Record<string, unknown>
     expect(patch.status).toBe('idle')
-    // numTurns should NOT be present on the patch when num_turns is null
-    expect('numTurns' in patch).toBe(false)
+    // num_turns null → not included in patch
+    expect(patch).not.toHaveProperty('numTurns')
   })
 
   test('onStateUpdate skips num_turns when undefined', () => {
@@ -116,8 +108,8 @@ describe('WS bridge in useCodingAgent', () => {
       capturedOnStateUpdate!({ status: 'running' })
     })
 
-    const patch = mockCollectionUpdate.mock.calls[0][0] as Record<string, unknown>
-    expect('numTurns' in patch).toBe(false)
+    const patch = mockWriteUpdate.mock.calls[0][0] as Record<string, unknown>
+    expect(patch).not.toHaveProperty('numTurns')
   })
 
   test('onStateUpdate skips update when collection item does not exist', () => {
@@ -131,7 +123,7 @@ describe('WS bridge in useCodingAgent', () => {
       })
     }).not.toThrow()
 
-    expect(mockCollectionUpdate).not.toHaveBeenCalled()
+    expect(mockWriteUpdate).not.toHaveBeenCalled()
   })
 
   test('uses agentName as the collection key', () => {
@@ -141,7 +133,7 @@ describe('WS bridge in useCodingAgent', () => {
       capturedOnStateUpdate!({ status: 'idle' })
     })
 
-    expect(mockCollectionUpdate).toHaveBeenCalledWith(
+    expect(mockWriteUpdate).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'my-specific-agent', status: 'idle' }),
     )
   })
@@ -159,6 +151,6 @@ describe('WS bridge in useCodingAgent', () => {
       capturedOnStateUpdate!({ status: 'idle', num_turns: 10 })
     })
 
-    expect(mockCollectionUpdate).toHaveBeenCalledTimes(3)
+    expect(mockWriteUpdate).toHaveBeenCalledTimes(3)
   })
 })

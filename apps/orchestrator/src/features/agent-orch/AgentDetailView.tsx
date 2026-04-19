@@ -177,6 +177,7 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
         onSend={sendMessage}
         submitDraft={submitDraft}
         sessionId={sessionId}
+        disabled={status === 'waiting_gate'}
         draftKey={draftKey}
       />
     </div>
