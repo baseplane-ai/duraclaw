@@ -1,8 +1,12 @@
+import { type FSWatcher, watch } from 'node:fs'
+import fs from 'node:fs/promises'
+import nodePath from 'node:path'
 import type { BufferedChannel } from '@duraclaw/shared-transport'
 import type {
   ContentBlock,
   ExecuteCommand,
   GatewayEvent,
+  KataSessionState,
   ResumeCommand,
 } from '@duraclaw/shared-types'
 import { handleQueryCommand } from './commands.js'
@@ -12,6 +16,97 @@ import type { RunnerSessionContext } from './types.js'
 
 /** How often to send a heartbeat on the WS to prevent idle timeout (ms). */
 const HEARTBEAT_INTERVAL_MS = 15_000
+
+/** Debounce interval for kata state file changes (ms). Matches gateway. */
+const KATA_DEBOUNCE_MS = 150
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+/**
+ * Find the most recent kata session state for a project.
+ * Same algorithm as packages/agent-gateway/src/kata.ts.
+ */
+async function findLatestKataState(projectPath: string): Promise<KataSessionState | null> {
+  const sessionsDir = nodePath.join(projectPath, '.kata', 'sessions')
+  let names: string[]
+  try {
+    names = await fs.readdir(sessionsDir)
+  } catch {
+    return null
+  }
+
+  let latest: { id: string; mtimeMs: number } | null = null
+  for (const name of names) {
+    if (!UUID_RE.test(name)) continue
+    const stateFile = nodePath.join(sessionsDir, name, 'state.json')
+    try {
+      const { mtimeMs } = await fs.stat(stateFile)
+      if (!latest || mtimeMs > latest.mtimeMs) {
+        latest = { id: name, mtimeMs }
+      }
+    } catch {
+      /* no state.json — skip */
+    }
+  }
+  if (!latest) return null
+
+  try {
+    const raw = await fs.readFile(nodePath.join(sessionsDir, latest.id, 'state.json'), 'utf-8')
+    return JSON.parse(raw) as KataSessionState
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Watch `.kata/sessions/` for state.json changes and emit KataStateEvent
+ * over the runner's dial-back channel. Also emits the initial state on startup.
+ *
+ * Returns a cleanup function. Errors are swallowed — kata state is best-effort.
+ */
+function startKataWatcher(
+  projectPath: string,
+  project: string,
+  ch: BufferedChannel,
+  ctx: RunnerSessionContext,
+): () => void {
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null
+  let watcher: FSWatcher | null = null
+
+  const emitState = async () => {
+    try {
+      const state = await findLatestKataState(projectPath)
+      send(ch, { type: 'kata_state', session_id: ctx.sessionId, project, kata_state: state }, ctx)
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  // Emit initial state so the DO syncs immediately on connect.
+  emitState()
+
+  const sessionsDir = nodePath.join(projectPath, '.kata', 'sessions')
+  try {
+    watcher = watch(sessionsDir, { recursive: true }, (_event, filename) => {
+      if (!filename?.endsWith('state.json')) return
+      if (debounceTimer) clearTimeout(debounceTimer)
+      debounceTimer = setTimeout(() => {
+        debounceTimer = null
+        emitState()
+      }, KATA_DEBOUNCE_MS)
+    })
+  } catch {
+    // .kata/sessions/ may not exist yet — that's fine.
+  }
+
+  return () => {
+    if (debounceTimer) clearTimeout(debounceTimer)
+    if (watcher) {
+      watcher.close()
+      watcher = null
+    }
+  }
+}
 
 /**
  * Detect SDK "idle stop" — the model emitted "No response requested." and hit
@@ -282,6 +377,7 @@ export class ClaudeRunner {
 
     let sdkSessionId: string | null = null
     const stopHeartbeat = startHeartbeat(ch, sessionId, ctx)
+    const stopKataWatcher = startKataWatcher(projectPath, cmd.project, ch, ctx)
 
     try {
       // Dynamic import -- the SDK is ESM-only
@@ -682,6 +778,7 @@ export class ClaudeRunner {
       }
     } finally {
       stopHeartbeat()
+      stopKataWatcher()
       // Clean up the message queue and query reference
       queue.done()
       ctx.messageQueue = null
