@@ -1,5 +1,7 @@
 import { timingSafeEqual } from 'node:crypto'
 
+import type { SessionMessage } from 'agents/experimental/memory/session'
+
 /** Minimal tagged-template SQL interface used by extracted helper functions. */
 export type SqlFn = <T>(
   strings: TemplateStringsArray,
@@ -182,4 +184,33 @@ export function claimSubmitId(
   const cutoff = now - SUBMIT_ID_TTL_MS
   sql`DELETE FROM submit_ids WHERE created_at < ${cutoff}`
   return { ok: true, duplicate: false }
+}
+
+export type PendingGateType = 'ask_user' | 'permission_request'
+
+/**
+ * Walk message history newest-first looking for a still-pending gate part
+ * whose `toolCallId` matches `gateId`. Used as the fallback in
+ * `SessionDO.resolveGate` when the scalar `state.gate.id` has drifted from
+ * what the client last rendered (dropped broadcasts, runner reconnect,
+ * multiple in-flight gates).
+ *
+ * Returns `null` when no part with that id exists, or the matching part
+ * has already moved past `approval-requested` (output-available /
+ * output-denied).
+ */
+export function findPendingGatePart(
+  history: SessionMessage[],
+  gateId: string,
+): { type: PendingGateType } | null {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const msg = history[i]
+    for (const p of msg.parts) {
+      if (p.toolCallId !== gateId) continue
+      if (p.state !== 'approval-requested') continue
+      if (p.type === 'tool-ask_user') return { type: 'ask_user' }
+      if (p.type === 'tool-permission') return { type: 'permission_request' }
+    }
+  }
+  return null
 }

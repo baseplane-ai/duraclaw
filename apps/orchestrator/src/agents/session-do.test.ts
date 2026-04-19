@@ -6,6 +6,7 @@ import {
   claimSubmitId,
   constantTimeEquals,
   DEFAULT_STALE_THRESHOLD_MS,
+  findPendingGatePart,
   getGatewayConnectionId,
   loadTurnState,
   resolveStaleThresholdMs,
@@ -896,6 +897,81 @@ describe('SessionDO terminal-state clears active_callback_token', () => {
     }
     expect(partial.status).toBe('idle')
     expect(partial.error).toBeNull()
+  })
+})
+
+// ── findPendingGatePart (resolveGate fallback) ───────────────────────
+//
+// Regression: when the scalar state.gate drifts from what the client is
+// rendering (dropped broadcast, multiple gates in flight), resolveGate
+// must still accept an answer targeted at any history part that's still
+// in 'approval-requested'. See apps/orchestrator/src/agents/session-do.ts
+// resolveGate(), and the freeform-mode diagnosis of the "Stale gate ID"
+// user report.
+
+describe('findPendingGatePart', () => {
+  type Msg = Parameters<typeof findPendingGatePart>[0][number]
+
+  const mkMsg = (parts: Msg['parts']): Msg => ({
+    id: 'm1',
+    role: 'assistant',
+    parts,
+    createdAt: new Date(),
+  })
+
+  it('returns ask_user when a tool-ask_user part is approval-requested', () => {
+    const msg = mkMsg([
+      { type: 'tool-ask_user', toolCallId: 'toolu_A', state: 'approval-requested' },
+    ])
+    expect(findPendingGatePart([msg], 'toolu_A')).toEqual({ type: 'ask_user' })
+  })
+
+  it('returns permission_request when a tool-permission part is approval-requested', () => {
+    const msg = mkMsg([
+      { type: 'tool-permission', toolCallId: 'toolu_B', state: 'approval-requested' },
+    ])
+    expect(findPendingGatePart([msg], 'toolu_B')).toEqual({ type: 'permission_request' })
+  })
+
+  it('returns null for a part that has moved past approval-requested', () => {
+    const msg = mkMsg([
+      { type: 'tool-ask_user', toolCallId: 'toolu_C', state: 'output-available', output: 'ok' },
+    ])
+    expect(findPendingGatePart([msg], 'toolu_C')).toBeNull()
+  })
+
+  it('returns null when the toolCallId is not in history', () => {
+    const msg = mkMsg([
+      { type: 'tool-ask_user', toolCallId: 'toolu_X', state: 'approval-requested' },
+    ])
+    expect(findPendingGatePart([msg], 'toolu_MISSING')).toBeNull()
+  })
+
+  it('walks newest-first and returns the most recent pending match', () => {
+    const older = mkMsg([
+      { type: 'tool-ask_user', toolCallId: 'toolu_OLD', state: 'approval-requested' },
+    ])
+    const newer = mkMsg([
+      { type: 'tool-ask_user', toolCallId: 'toolu_NEW', state: 'approval-requested' },
+    ])
+    expect(findPendingGatePart([older, newer], 'toolu_OLD')).toEqual({ type: 'ask_user' })
+    expect(findPendingGatePart([older, newer], 'toolu_NEW')).toEqual({ type: 'ask_user' })
+  })
+
+  it('ignores non-gate tool parts with matching toolCallId', () => {
+    const msg = mkMsg([
+      {
+        type: 'tool-Edit',
+        toolCallId: 'toolu_D',
+        state: 'approval-requested',
+        toolName: 'Edit',
+      },
+    ])
+    expect(findPendingGatePart([msg], 'toolu_D')).toBeNull()
+  })
+
+  it('returns null for an empty history', () => {
+    expect(findPendingGatePart([], 'toolu_A')).toBeNull()
   })
 })
 

@@ -32,6 +32,7 @@ import {
   buildGatewayStartUrl,
   claimSubmitId,
   constantTimeEquals,
+  findPendingGatePart,
   getGatewayConnectionId,
   loadTurnState,
   resolveStaleThresholdMs,
@@ -1172,14 +1173,29 @@ export class SessionDO extends Agent<Env, SessionState> {
       }
     }
 
-    if (!this.state.gate || this.state.gate.id !== gateId) {
-      return {
-        ok: false,
-        error: `Stale gate ID: expected '${this.state.gate?.id}', got '${gateId}'`,
-      }
+    // Primary path: the scalar state.gate matches. Fallback: the scalar
+    // drifted (dropped broadcast, runner reconnect, multiple in-flight
+    // gates) but the caller is answering a real pending part. Accept any
+    // toolCallId that maps to a history part still in 'approval-requested'.
+    // Only clear the scalar state.gate when we resolved against it — if a
+    // newer gate is live, leave it so the UI keeps rendering the new
+    // question.
+    const scalarMatched = !!(this.state.gate && this.state.gate.id === gateId)
+    let gate: { id: string; type: 'ask_user' | 'permission_request' } | null = scalarMatched
+      ? (this.state.gate as { id: string; type: 'ask_user' | 'permission_request' })
+      : null
+
+    if (!gate) {
+      const match = findPendingGatePart(this.session.getHistory(), gateId)
+      if (match) gate = { id: gateId, type: match.type }
     }
 
-    const gate = this.state.gate
+    if (!gate) {
+      return {
+        ok: false,
+        error: `Gate '${gateId}' not found (no pending part); current scalar='${this.state.gate?.id ?? 'none'}'`,
+      }
+    }
 
     if (gate.type === 'permission_request' && response.approved !== undefined) {
       this.sendToGateway({
@@ -1233,7 +1249,13 @@ export class SessionDO extends Agent<Env, SessionState> {
       break
     }
 
-    this.updateState({ status: 'running', gate: null })
+    if (scalarMatched) {
+      this.updateState({ status: 'running', gate: null })
+    }
+    // else: a newer gate is still live in state.gate — leave the scalar
+    // alone. The resolved part has already been flipped to
+    // output-available/denied above, so the UI will drop its GateResolver
+    // for this toolCallId while the live gate remains pending.
     return { ok: true }
   }
 
@@ -1449,9 +1471,41 @@ export class SessionDO extends Agent<Env, SessionState> {
 
   @callable()
   async interrupt(): Promise<{ ok: boolean; error?: string }> {
-    if (this.state.status !== 'running') {
+    if (this.state.status !== 'running' && this.state.status !== 'waiting_gate') {
       return { ok: false, error: `Cannot interrupt: status is '${this.state.status}'` }
     }
+
+    // If a gate is pending, release it locally so the UI isn't stuck on a
+    // GateResolver while the runner unwinds. Flip the corresponding tool
+    // part to `output-denied` with an "Interrupted" marker and clear the
+    // scalar state.gate — the subsequent `interrupt` command to the runner
+    // will cause the SDK to abort its in-flight canUseTool promise (no
+    // explicit per-gate cancel command exists, so we rely on the SDK
+    // interrupt to release the pending answer/permission wait).
+    const pendingGate = this.state.gate
+    if (pendingGate) {
+      const history = this.session.getHistory()
+      for (let i = history.length - 1; i >= 0; i--) {
+        const msg = history[i]
+        const idx = msg.parts.findIndex((p) => p.toolCallId === pendingGate.id)
+        if (idx === -1) continue
+        const updatedParts = msg.parts.map((p) =>
+          p.toolCallId === pendingGate.id
+            ? { ...p, state: 'output-denied' as const, output: 'Interrupted' }
+            : p,
+        )
+        const updatedMsg: SessionMessage = { ...msg, parts: updatedParts }
+        try {
+          this.session.updateMessage(updatedMsg)
+          this.broadcastMessage(updatedMsg)
+        } catch (err) {
+          console.error(`[SessionDO:${this.ctx.id}] Failed to mark gate interrupted:`, err)
+        }
+        break
+      }
+      this.updateState({ status: 'running', gate: null })
+    }
+
     this.sendToGateway({ type: 'interrupt', session_id: this.state.session_id ?? '' })
     return { ok: true }
   }
