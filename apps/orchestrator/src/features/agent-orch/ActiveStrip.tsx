@@ -4,7 +4,7 @@
  * Hides entirely when no qualifying sessions exist.
  */
 
-import type { SessionRecord } from '~/db/sessions-collection'
+import type { SessionRecord } from '~/db/agent-sessions-collection'
 import { cn } from '~/lib/utils'
 import { getPreviewText, getProjectInitials } from './session-utils'
 

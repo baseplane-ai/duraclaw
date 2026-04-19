@@ -25,7 +25,10 @@ import {
   TableHeader,
   TableRow,
 } from '~/components/ui/table'
-import { type SessionRecord, sessionsCollection } from '~/db/sessions-collection'
+import {
+  agentSessionsCollection as sessionsCollection,
+  type SessionRecord,
+} from '~/db/agent-sessions-collection'
 
 type SortField = 'updatedAt' | 'createdAt' | 'totalCostUsd' | 'durationMs' | 'numTurns'
 type SortDir = 'asc' | 'desc'

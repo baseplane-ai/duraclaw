@@ -28,8 +28,9 @@ import {
   DropdownMenuTrigger,
 } from '~/components/ui/dropdown-menu'
 import { Input } from '~/components/ui/input'
-import type { SessionRecord } from '~/db/sessions-collection'
+import type { SessionRecord } from '~/db/agent-sessions-collection'
 import { useSessionLiveState } from '~/hooks/use-session-live-state'
+import { deriveDisplayState } from '~/lib/display-state'
 import { cn } from '~/lib/utils'
 import { formatCost, formatTimeAgo, getPreviewText, StatusDot } from './session-utils'
 
@@ -56,9 +57,14 @@ export function SessionListItem({
   // sessions collection's (30s-stale) `status` when this tab hasn't observed
   // the session on WS yet.
   const live = useSessionLiveState(session.id)
-  const status = live.state?.status ?? session.status ?? 'idle'
   const numTurns = live.state?.num_turns ?? session.numTurns ?? 0
   const isLive = live.isLive
+  // Route status display through `deriveDisplayState` so this surface agrees
+  // with the status bar + tab bar. When no live row exists yet, fall back to
+  // the sessions-collection `status` directly (StatusDot's own switch handles
+  // the legacy strings).
+  const display = live.state ? deriveDisplayState(live.state, live.wsReadyState ?? 3) : null
+  const status = display && display.status !== 'unknown' ? display.status : (session.status ?? 'idle')
   const [menuOpen, setMenuOpen] = useState(false)
   const [renameOpen, setRenameOpen] = useState(false)
   const [tagOpen, setTagOpen] = useState(false)

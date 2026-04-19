@@ -38,7 +38,7 @@ import {
   SidebarMenuSubItem,
   useSidebar,
 } from '~/components/ui/sidebar'
-import type { SessionRecord } from '~/db/sessions-collection'
+import type { SessionRecord } from '~/db/agent-sessions-collection'
 import { getPreviewText, StatusDot } from '~/features/agent-orch/session-utils'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import type { PrInfo, ProjectInfo } from '~/lib/types'

@@ -24,8 +24,8 @@ vi.mock('agents/react', () => ({
 const mockCollectionHas = vi.fn().mockReturnValue(true)
 const mockWriteUpdate = vi.fn()
 
-vi.mock('~/db/sessions-collection', () => ({
-  sessionsCollection: {
+vi.mock('~/db/agent-sessions-collection', () => ({
+  agentSessionsCollection: {
     update: vi.fn(),
     has: (...args: unknown[]) => mockCollectionHas(...args),
     utils: { writeUpdate: (...args: unknown[]) => mockWriteUpdate(...args) },

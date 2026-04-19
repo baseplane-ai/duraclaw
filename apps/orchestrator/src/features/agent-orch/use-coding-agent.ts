@@ -14,7 +14,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type * as Y from 'yjs'
 import { type CachedMessage, messagesCollection } from '~/db/messages-collection'
 import { upsertSessionLiveState } from '~/db/session-live-state-collection'
-import { sessionsCollection } from '~/db/sessions-collection'
+import { agentSessionsCollection as sessionsCollection } from '~/db/agent-sessions-collection'
 import { useMessagesCollection } from '~/hooks/use-messages-collection'
 import { useSessionLiveState } from '~/hooks/use-session-live-state'
 import { contentToParts } from '~/lib/message-parts'
@@ -224,7 +224,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       // round-trip). `utils.writeUpdate` because `.update()` needs an onUpdate
       // handler that queryCollectionOptions doesn't configure.
       if (sessionsCollection.has(agentName)) {
-        const patch: Partial<import('~/db/sessions-collection').SessionRecord> = {
+        const patch: Partial<import('~/db/agent-sessions-collection').SessionRecord> = {
           id: agentName,
           status: newState.status,
           updatedAt: new Date().toISOString(),

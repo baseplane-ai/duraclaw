@@ -6,7 +6,7 @@
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { SessionRecord } from '~/db/sessions-collection'
+import type { SessionRecord } from '~/db/agent-sessions-collection'
 
 // Mock TanStack Router
 const mockNavigate = vi.fn()

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { SessionRecord } from '~/db/sessions-collection'
+import type { SessionRecord } from '~/db/agent-sessions-collection'
 import { isQualifyingSession } from '../ActiveStrip'
 
 function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {

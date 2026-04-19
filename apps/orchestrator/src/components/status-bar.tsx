@@ -8,6 +8,7 @@
 import { GitBranchIcon } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useSessionLiveState } from '~/hooks/use-session-live-state'
+import { deriveDisplayState } from '~/lib/display-state'
 import type { KataSessionState, PrInfo, SessionState } from '~/lib/types'
 import { cn } from '~/lib/utils'
 import type { ContextUsage, WorktreeInfo } from '~/stores/status-bar'
@@ -219,8 +220,12 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
     useSessionLiveState(sessionId)
 
   if (!sessionId || !state) return null
-  const status = state.status
   const readyState = wsReadyState ?? 3
+  const display = deriveDisplayState(state, readyState)
+  // Bar chrome is keyed on the raw SessionState.status so the "running" tint
+  // and "waiting_gate" warning chrome survive a transient WS drop. The
+  // semantic display (dot, label) still goes through `deriveDisplayState`.
+  const status = state.status
 
   return (
     <div
@@ -229,6 +234,7 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
         getBarClasses(status),
       )}
       data-testid="status-bar"
+      data-display-status={display.status}
     >
       {/* Row 1: status + project + branch + model */}
       <div className="flex min-w-0 items-center gap-2">

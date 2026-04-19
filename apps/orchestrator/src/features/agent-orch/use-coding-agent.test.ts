@@ -62,8 +62,8 @@ vi.mock('~/db/messages-collection', () => ({
   },
 }))
 
-vi.mock('~/db/sessions-collection', () => ({
-  sessionsCollection: {
+vi.mock('~/db/agent-sessions-collection', () => ({
+  agentSessionsCollection: {
     update: vi.fn(),
     insert: vi.fn(),
     has: vi.fn().mockReturnValue(true),

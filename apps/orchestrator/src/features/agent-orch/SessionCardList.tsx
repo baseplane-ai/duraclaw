@@ -9,8 +9,9 @@ import { useDrag } from '@use-gesture/react'
 import { ArchiveIcon, ChevronDownIcon, ChevronRightIcon } from 'lucide-react'
 import { useState } from 'react'
 import { Badge } from '~/components/ui/badge'
-import type { SessionRecord } from '~/db/sessions-collection'
+import type { SessionRecord } from '~/db/agent-sessions-collection'
 import { useSessionLiveState } from '~/hooks/use-session-live-state'
+import { deriveDisplayState } from '~/lib/display-state'
 import { cn } from '~/lib/utils'
 import { useWorkspaceStore } from '~/stores/workspace'
 import { ActiveStrip } from './ActiveStrip'
@@ -87,9 +88,11 @@ function SwipeableCard({
   }
 
   const live = useSessionLiveState(session.id)
-  const status = live.state?.status ?? session.status ?? 'idle'
   const numTurns = live.state?.num_turns ?? session.numTurns ?? 0
   const isLive = live.isLive
+  const display = live.state ? deriveDisplayState(live.state, live.wsReadyState ?? 3) : null
+  const status =
+    display && display.status !== 'unknown' ? display.status : (session.status ?? 'idle')
   const displayName = session.title || getPreviewText(session) || session.id.slice(0, 8)
 
   return (
@@ -145,9 +148,11 @@ function SwipeableCard({
 
 function OlderSessionRow({ session, onClick }: { session: SessionRecord; onClick: () => void }) {
   const live = useSessionLiveState(session.id)
-  const status = live.state?.status ?? session.status ?? 'idle'
   const numTurns = live.state?.num_turns ?? session.numTurns ?? 0
   const isLive = live.isLive
+  const display = live.state ? deriveDisplayState(live.state, live.wsReadyState ?? 3) : null
+  const status =
+    display && display.status !== 'unknown' ? display.status : (session.status ?? 'idle')
   return (
     <button
       type="button"

@@ -31,8 +31,8 @@ vi.mock('@tanstack/db', () => ({
   })),
 }))
 
-vi.mock('~/db/sessions-collection', () => ({
-  sessionsCollection: {
+vi.mock('~/db/agent-sessions-collection', () => ({
+  agentSessionsCollection: {
     insert: vi.fn(),
     update: vi.fn(),
     has: vi.fn().mockReturnValue(true),
@@ -44,7 +44,7 @@ vi.mock('~/hooks/use-notification-watcher', () => ({
   useNotificationWatcher: vi.fn(),
 }))
 
-import { sessionsCollection } from '~/db/sessions-collection'
+import { agentSessionsCollection as sessionsCollection } from '~/db/agent-sessions-collection'
 // Import after mocks
 import { useSessionsCollection } from './use-sessions-collection'
 
