@@ -62,6 +62,11 @@ export interface Env {
    *  filter incoming webhook payloads — events for other repos are ack'd-but-
    *  ignored. */
   GITHUB_REPO?: string
+  /** Optional GitHub API token (classic PAT or fine-grained) used to
+   *  authenticate issue/PR list calls from `/api/chains` — raises the rate
+   *  limit from 60/hr unauthenticated to 5000/hr. Read-only scope is
+   *  sufficient since we only list public issues + PRs. */
+  GITHUB_API_TOKEN?: string
 }
 
 // ── D1 row response shapes (issue #7 p2) ───────────────────────────
@@ -120,6 +125,52 @@ export interface WorktreeReservation {
   lastActivityAt: string // ISO
   modeAtCheckout: string
   stale: boolean
+}
+
+/**
+ * Chain summary — one entry per kata-linked GitHub issue (GH#16 Feature 3D).
+ * Response shape of `GET /api/chains`. Merges D1 session/reservation state
+ * with GitHub issue metadata (cached 5min module-level). `column` is derived
+ * by `deriveColumn()` from the latest qualifying session's kataMode plus the
+ * issue's open/closed state.
+ */
+export interface ChainSummary {
+  issueNumber: number
+  issueTitle: string
+  issueType: 'enhancement' | 'bug' | 'other' | string
+  issueState: 'open' | 'closed'
+  column: 'backlog' | 'research' | 'planning' | 'implementation' | 'verify' | 'done'
+  sessions: Array<{
+    id: string
+    kataMode: string | null
+    status: string
+    lastActivity: string | null
+    createdAt: string
+    project: string
+  }>
+  worktreeReservation: {
+    worktree: string
+    heldSince: string
+    lastActivityAt: string
+    ownerId: string
+    stale: boolean
+  } | null
+  prNumber?: number
+  lastActivity: string
+}
+
+/** Response envelope for `GET /api/chains/:issue/spec-status`. */
+export interface SpecStatusResponse {
+  exists: boolean
+  status?: string | null
+  path?: string | null
+}
+
+/** Response envelope for `GET /api/chains/:issue/vp-status`. */
+export interface VpStatusResponse {
+  exists: boolean
+  passed?: boolean | null
+  path?: string | null
 }
 
 export interface UserPreferencesRow {

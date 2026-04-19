@@ -8,10 +8,13 @@ import { createAuth } from '~/lib/auth'
 import { type PushPayload, sendPushNotification } from '~/lib/push'
 import type {
   AgentSessionRow,
+  ChainSummary,
   ContentBlock,
   ProjectInfo,
+  SpecStatusResponse,
   UserPreferencesRow,
   UserTabRow,
+  VpStatusResponse,
   WorktreeReservation,
 } from '~/lib/types'
 import { authMiddleware } from './auth-middleware'
@@ -194,6 +197,298 @@ async function getOwnedSession(
   }
 
   return { ok: true, session: row as AgentSessionRow }
+}
+
+// ── GH#16 P3 Unit 1 — chain list + precondition helpers ────────────
+//
+// Module-level caches for GitHub issue/PR lists. Keyed by repo (we only
+// ever target `env.GITHUB_REPO`, but keying by repo keeps the cache correct
+// if the env changes between requests — e.g. a test worker). TTL 5 minutes
+// per spec "Resolved Questions". Cache is process-local; every Worker isolate
+// keeps its own copy, which is fine for a 5min TTL and low QPS.
+
+interface GhIssue {
+  number: number
+  title: string
+  state: 'open' | 'closed'
+  updated_at?: string
+  labels?: Array<{ name: string }>
+  pull_request?: unknown // when present, the issue is actually a PR
+}
+
+interface GhPull {
+  number: number
+  head?: { ref?: string }
+  body?: string | null
+}
+
+interface GhIssueCacheEntry {
+  issues: GhIssue[]
+  moreAvailable: boolean
+  expiresAt: number
+}
+
+interface GhPullCacheEntry {
+  pulls: GhPull[]
+  expiresAt: number
+}
+
+const GH_CACHE_TTL_MS = 5 * 60 * 1000
+const ghIssueCache = new Map<string, GhIssueCacheEntry>()
+const ghPullCache = new Map<string, GhPullCacheEntry>()
+
+function ghHeaders(env: ApiAppEnv['Bindings']): Record<string, string> {
+  const headers: Record<string, string> = {
+    Accept: 'application/vnd.github+json',
+    'User-Agent': 'duraclaw',
+  }
+  if (env.GITHUB_API_TOKEN) {
+    headers.Authorization = `Bearer ${env.GITHUB_API_TOKEN}`
+  }
+  return headers
+}
+
+/**
+ * Fetch up to 300 issues (3 pages × 100) from the configured GH repo.
+ * Response includes a `moreAvailable` flag set when page 3 came back full
+ * (indicating the caller truncated the feed). PR entries are filtered out
+ * at merge time — the issues endpoint returns both but GH tags PRs with a
+ * `pull_request` sub-object.
+ */
+async function fetchGithubIssues(
+  env: ApiAppEnv['Bindings'],
+): Promise<{ issues: GhIssue[]; moreAvailable: boolean }> {
+  const repo = env.GITHUB_REPO
+  if (!repo) return { issues: [], moreAvailable: false }
+
+  const cached = ghIssueCache.get(repo)
+  if (cached && cached.expiresAt > Date.now()) {
+    return { issues: cached.issues, moreAvailable: cached.moreAvailable }
+  }
+
+  const all: GhIssue[] = []
+  let moreAvailable = false
+  for (let page = 1; page <= 3; page++) {
+    const url = `https://api.github.com/repos/${repo}/issues?state=all&per_page=100&page=${page}`
+    const resp = await fetch(url, { headers: ghHeaders(env) })
+    if (!resp.ok) {
+      // Degrade gracefully — return whatever we have; do not populate cache
+      // on error so the next call retries.
+      return { issues: all, moreAvailable: false }
+    }
+    const batch = (await resp.json()) as GhIssue[]
+    all.push(...batch)
+    if (batch.length < 100) {
+      break
+    }
+    if (page === 3 && batch.length === 100) {
+      moreAvailable = true
+    }
+  }
+
+  ghIssueCache.set(repo, {
+    issues: all,
+    moreAvailable,
+    expiresAt: Date.now() + GH_CACHE_TTL_MS,
+  })
+  return { issues: all, moreAvailable }
+}
+
+/** Fetch up to 300 PRs from the configured GH repo, same cache strategy as issues. */
+async function fetchGithubPulls(env: ApiAppEnv['Bindings']): Promise<GhPull[]> {
+  const repo = env.GITHUB_REPO
+  if (!repo) return []
+
+  const cached = ghPullCache.get(repo)
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.pulls
+  }
+
+  const all: GhPull[] = []
+  for (let page = 1; page <= 3; page++) {
+    const url = `https://api.github.com/repos/${repo}/pulls?state=all&per_page=100&page=${page}`
+    const resp = await fetch(url, { headers: ghHeaders(env) })
+    if (!resp.ok) {
+      return all
+    }
+    const batch = (await resp.json()) as GhPull[]
+    all.push(...batch)
+    if (batch.length < 100) break
+  }
+
+  ghPullCache.set(repo, { pulls: all, expiresAt: Date.now() + GH_CACHE_TTL_MS })
+  return all
+}
+
+function deriveIssueType(
+  labels: Array<{ name: string }> | undefined,
+): 'bug' | 'enhancement' | 'other' {
+  const names = new Set((labels ?? []).map((l) => l.name))
+  // Precedence per spec B7: bug > enhancement > other
+  if (names.has('bug')) return 'bug'
+  if (names.has('enhancement')) return 'enhancement'
+  return 'other'
+}
+
+const COLUMN_QUALIFYING_MODES = new Set([
+  'research',
+  'planning',
+  'implementation',
+  'task',
+  'verify',
+])
+
+function modeToColumn(mode: string): ChainSummary['column'] | null {
+  switch (mode) {
+    case 'research':
+      return 'research'
+    case 'planning':
+      return 'planning'
+    case 'implementation':
+    case 'task':
+      return 'implementation'
+    case 'verify':
+      return 'verify'
+    default:
+      return null
+  }
+}
+
+/**
+ * Pick the current kanban column for a chain. Rules (spec B7):
+ *   1. Issue closed → `done`
+ *   2. No sessions → `backlog`
+ *   3. Latest session whose kataMode is in the qualifying set (research,
+ *      planning, implementation, task, verify) — skip debug/freeform side
+ *      quests. Use the session's lastActivity (fall back to createdAt) for
+ *      "latest".
+ *   4. Fallback `backlog`.
+ */
+function deriveColumn(
+  sessions: Array<{ kataMode: string | null; lastActivity: string | null; createdAt: string }>,
+  issueState: 'open' | 'closed',
+): ChainSummary['column'] {
+  if (issueState === 'closed') return 'done'
+  if (!sessions.length) return 'backlog'
+
+  let bestMode: string | null = null
+  let bestTs = -Infinity
+  for (const s of sessions) {
+    if (!s.kataMode || !COLUMN_QUALIFYING_MODES.has(s.kataMode)) continue
+    const ts = new Date(s.lastActivity ?? s.createdAt).getTime()
+    if (Number.isFinite(ts) && ts > bestTs) {
+      bestTs = ts
+      bestMode = s.kataMode
+    }
+  }
+
+  if (bestMode) {
+    const col = modeToColumn(bestMode)
+    if (col) return col
+  }
+  return 'backlog'
+}
+
+/**
+ * Find a matching PR for an issue. Two detection strategies (first match
+ * wins per PR; we scan all PRs and return the first that binds):
+ *   1. Branch pattern `^(feature|fix|feat)/(\d+)[-_]` on `pull_request.head.ref`
+ *   2. Body contains `Closes #N` or `Fixes #N` (case-insensitive)
+ */
+function findPrForIssue(pulls: GhPull[], issueNumber: number): number | undefined {
+  for (const pr of pulls) {
+    const branch = pr.head?.ref ?? ''
+    const branchMatch = branch.match(/^(?:feature|fix|feat)\/(\d+)[-_]/)
+    if (branchMatch && Number.parseInt(branchMatch[1], 10) === issueNumber) {
+      return pr.number
+    }
+    const body = pr.body ?? ''
+    // `m` flag so multi-line bodies are scanned per line; `i` for case insensitivity.
+    const bodyRe = new RegExp(`(?:closes|fixes)\\s+#${issueNumber}(?![0-9])`, 'i')
+    if (bodyRe.test(body)) {
+      return pr.number
+    }
+  }
+  return undefined
+}
+
+/**
+ * Tiny YAML frontmatter parser — handles `---\n<lines>\n---\n` blocks with
+ * `key: value` lines. Values are trimmed and stripped of matching outer
+ * quotes. Good enough for spec/VP metadata where we only read `status`-style
+ * scalars; does not support nested maps or arrays.
+ */
+function parseFrontmatter(markdown: string): Record<string, string> {
+  if (!markdown.startsWith('---\n')) return {}
+  const end = markdown.indexOf('\n---\n', 4)
+  if (end < 0) return {}
+  const block = markdown.slice(4, end)
+  const out: Record<string, string> = {}
+  for (const line of block.split('\n')) {
+    const m = line.match(/^([a-zA-Z_][\w-]*):\s*(.*)$/)
+    if (m) out[m[1]] = m[2].replace(/^["']|["']$/g, '').trim()
+  }
+  return out
+}
+
+/**
+ * Read a file from the gateway's project-browse endpoint. Returns null on
+ * any gateway error (matches spec "graceful degrade" for spec/VP status).
+ */
+async function fetchGatewayFile(
+  env: ApiAppEnv['Bindings'],
+  projectName: string,
+  relPath: string,
+): Promise<string | null> {
+  if (!env.CC_GATEWAY_URL) return null
+  const httpBase = env.CC_GATEWAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+  const url = new URL(
+    `/projects/${encodeURIComponent(projectName)}/files/${relPath
+      .split('/')
+      .map(encodeURIComponent)
+      .join('/')}`,
+    httpBase,
+  )
+  const headers: Record<string, string> = {}
+  if (env.CC_GATEWAY_SECRET) headers.Authorization = `Bearer ${env.CC_GATEWAY_SECRET}`
+  try {
+    const resp = await fetch(url.toString(), { headers })
+    if (!resp.ok) return null
+    return await resp.text()
+  } catch {
+    return null
+  }
+}
+
+interface GatewayFileEntry {
+  name: string
+  path?: string
+  type?: string
+  modified?: string | number
+}
+
+/** List files under a project-relative directory via the gateway. */
+async function listGatewayFiles(
+  env: ApiAppEnv['Bindings'],
+  projectName: string,
+  dirPath: string,
+): Promise<GatewayFileEntry[] | null> {
+  if (!env.CC_GATEWAY_URL) return null
+  const httpBase = env.CC_GATEWAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+  const url = new URL(`/projects/${encodeURIComponent(projectName)}/files`, httpBase)
+  url.searchParams.set('path', dirPath)
+  url.searchParams.set('depth', '1')
+  const headers: Record<string, string> = {}
+  if (env.CC_GATEWAY_SECRET) headers.Authorization = `Bearer ${env.CC_GATEWAY_SECRET}`
+  try {
+    const resp = await fetch(url.toString(), { headers })
+    if (!resp.ok) return null
+    const data = (await resp.json()) as { entries?: GatewayFileEntry[] } | GatewayFileEntry[]
+    if (Array.isArray(data)) return data
+    return data.entries ?? []
+  } catch {
+    return null
+  }
 }
 
 export function createApiApp() {
@@ -1549,6 +1844,262 @@ export function createApiApp() {
     }
 
     return c.json({ released: true, forced: true, count: targets.length })
+  })
+
+  // ── Chain list + precondition endpoints (GH#16 P3 U1) ────────────
+
+  app.get('/api/chains', async (c) => {
+    const userId = c.get('userId')
+    const db = getDb(c.env)
+
+    // Parse + validate stale filter early so we can 400 before doing work.
+    const staleParam = c.req.query('stale')
+    let staleCutoff: number | null = null
+    if (typeof staleParam === 'string' && staleParam.length > 0) {
+      const m = staleParam.match(/^(\d+)d$/)
+      if (!m) return c.json({ error: 'Invalid stale format — expected `{N}d`' }, 400)
+      const days = Number.parseInt(m[1], 10)
+      if (!Number.isFinite(days) || days <= 0) {
+        return c.json({ error: 'Invalid stale format — expected `{N}d` with N > 0' }, 400)
+      }
+      staleCutoff = Date.now() - days * 86_400_000
+    }
+
+    const mineFilter = c.req.query('mine') !== undefined
+    const laneFilter = c.req.query('lane')
+    const columnFilter = c.req.query('column')
+    const projectFilter = c.req.query('project')
+
+    // 1. Collect issue numbers from D1.
+    const d1IssueRows = await db
+      .selectDistinct({ kataIssue: agentSessions.kataIssue })
+      .from(agentSessions)
+      .where(sql`${agentSessions.kataIssue} IS NOT NULL`)
+    const d1IssueNumbers = new Set<number>()
+    for (const row of d1IssueRows) {
+      if (typeof row.kataIssue === 'number' && Number.isFinite(row.kataIssue)) {
+        d1IssueNumbers.add(row.kataIssue)
+      }
+    }
+
+    // 2. Fetch GH issues (cached).
+    const { issues: ghIssues, moreAvailable } = await fetchGithubIssues(c.env)
+    const ghIssueByNumber = new Map<number, GhIssue>()
+    for (const issue of ghIssues) {
+      // Filter out PRs — GH's /issues endpoint interleaves them.
+      if (issue.pull_request) continue
+      ghIssueByNumber.set(issue.number, issue)
+    }
+
+    // 3. Union of issue numbers.
+    const allIssueNumbers = new Set<number>([...d1IssueNumbers, ...ghIssueByNumber.keys()])
+
+    // Fetch PRs once for matching (also cached).
+    const pulls = await fetchGithubPulls(c.env)
+
+    // Pre-fetch all relevant sessions + reservations in two bulk queries to
+    // avoid N×M SELECTs.
+    const issueNumArray = Array.from(allIssueNumbers)
+    const allSessions = issueNumArray.length
+      ? ((await db
+          .select()
+          .from(agentSessions)
+          .where(inArray(agentSessions.kataIssue, issueNumArray))
+          .orderBy(asc(agentSessions.createdAt))) as AgentSessionRow[])
+      : []
+    const sessionsByIssue = new Map<number, AgentSessionRow[]>()
+    for (const s of allSessions) {
+      if (typeof s.kataIssue !== 'number') continue
+      const list = sessionsByIssue.get(s.kataIssue) ?? []
+      list.push(s)
+      sessionsByIssue.set(s.kataIssue, list)
+    }
+
+    const allReservations = issueNumArray.length
+      ? await db
+          .select()
+          .from(worktreeReservations)
+          .where(inArray(worktreeReservations.issueNumber, issueNumArray))
+      : []
+    const reservationByIssue = new Map<number, (typeof allReservations)[number]>()
+    for (const r of allReservations) {
+      if (!reservationByIssue.has(r.issueNumber)) {
+        reservationByIssue.set(r.issueNumber, r)
+      }
+    }
+
+    // 4. Build ChainSummary[].
+    const chains: ChainSummary[] = []
+    for (const issueNumber of allIssueNumbers) {
+      const ghIssue = ghIssueByNumber.get(issueNumber)
+      const sessions = sessionsByIssue.get(issueNumber) ?? []
+
+      let issueTitle: string
+      let issueState: 'open' | 'closed'
+      let issueType: string
+      if (ghIssue) {
+        issueTitle = ghIssue.title
+        issueState = ghIssue.state
+        issueType = deriveIssueType(ghIssue.labels)
+      } else {
+        // D1-only — issue off-page or deleted.
+        issueTitle = `Issue #${issueNumber}`
+        issueState = 'open'
+        issueType = 'other'
+      }
+
+      const column = deriveColumn(
+        sessions.map((s) => ({
+          kataMode: s.kataMode,
+          lastActivity: s.lastActivity,
+          createdAt: s.createdAt,
+        })),
+        issueState,
+      )
+
+      const reservation = reservationByIssue.get(issueNumber)
+      const worktreeReservation = reservation
+        ? {
+            worktree: reservation.worktree,
+            heldSince: reservation.heldSince,
+            lastActivityAt: reservation.lastActivityAt,
+            ownerId: reservation.ownerId,
+            stale: !!reservation.stale,
+          }
+        : null
+
+      const prNumber = findPrForIssue(pulls, issueNumber)
+
+      // lastActivity: max of (sessions' lastActivity || createdAt); fall back
+      // to GH issue updated_at; empty string as a last resort.
+      let lastActivity = ''
+      let lastActivityTs = -Infinity
+      for (const s of sessions) {
+        const tsStr = s.lastActivity ?? s.createdAt
+        const ts = new Date(tsStr).getTime()
+        if (Number.isFinite(ts) && ts > lastActivityTs) {
+          lastActivityTs = ts
+          lastActivity = tsStr
+        }
+      }
+      if (!lastActivity) {
+        lastActivity = ghIssue?.updated_at ?? ''
+      }
+
+      const chain: ChainSummary = {
+        issueNumber,
+        issueTitle,
+        issueType,
+        issueState,
+        column,
+        sessions: sessions.map((s) => ({
+          id: s.id,
+          kataMode: s.kataMode,
+          status: s.status,
+          lastActivity: s.lastActivity,
+          createdAt: s.createdAt,
+          project: s.project,
+        })),
+        worktreeReservation,
+        lastActivity,
+        ...(prNumber !== undefined ? { prNumber } : {}),
+      }
+
+      // Preserve a reference to the underlying sessions for filter logic
+      // below without exposing it in the response. We re-use the mapped
+      // `sessions` array which already has `userId` stripped, so apply
+      // owner-filter against the original rows.
+      if (mineFilter) {
+        const anyOwned = sessions.some((s) => s.userId === userId)
+        if (!anyOwned) continue
+      }
+      if (laneFilter && chain.issueType !== laneFilter) continue
+      if (columnFilter && chain.column !== columnFilter) continue
+      if (projectFilter) {
+        const hasProject = sessions.some((s) => s.project === projectFilter)
+        if (!hasProject) continue
+      }
+      if (staleCutoff !== null) {
+        const ts = new Date(chain.lastActivity).getTime()
+        if (!Number.isFinite(ts) || ts >= staleCutoff) continue
+      }
+
+      chains.push(chain)
+    }
+
+    // Sort by lastActivity DESC (empty strings sink to the bottom).
+    chains.sort((a, b) => {
+      const ta = a.lastActivity ? new Date(a.lastActivity).getTime() : -Infinity
+      const tb = b.lastActivity ? new Date(b.lastActivity).getTime() : -Infinity
+      return tb - ta
+    })
+
+    return c.json({ chains, more_issues_available: moreAvailable })
+  })
+
+  app.get('/api/chains/:issue/spec-status', async (c) => {
+    const issueNumber = Number.parseInt(c.req.param('issue'), 10)
+    if (!Number.isFinite(issueNumber)) {
+      return c.json({ error: 'Invalid issue number' }, 400)
+    }
+    const project = c.req.query('project')
+    if (!project) {
+      return c.json({ error: 'Missing required query param: project' }, 400)
+    }
+
+    const entries = await listGatewayFiles(c.env, project, 'planning/specs')
+    if (!entries) {
+      return c.json<SpecStatusResponse>({ exists: false, status: null, path: null })
+    }
+
+    const pattern = new RegExp(`^${issueNumber}-.*\\.md$`)
+    const matches = entries.filter((e) => pattern.test(e.name))
+    if (matches.length === 0) {
+      return c.json<SpecStatusResponse>({ exists: false, status: null, path: null })
+    }
+
+    // Pick latest by `modified` timestamp (numeric or ISO string both work).
+    matches.sort((a, b) => {
+      const ta = a.modified ? new Date(a.modified as string | number).getTime() : 0
+      const tb = b.modified ? new Date(b.modified as string | number).getTime() : 0
+      return tb - ta
+    })
+    const winner = matches[0]
+    const relPath = winner.path ?? `planning/specs/${winner.name}`
+
+    const content = await fetchGatewayFile(c.env, project, relPath)
+    if (content === null) {
+      return c.json<SpecStatusResponse>({ exists: false })
+    }
+
+    const fm = parseFrontmatter(content)
+    const status = fm.status ?? null
+    return c.json<SpecStatusResponse>({ exists: true, status, path: relPath })
+  })
+
+  app.get('/api/chains/:issue/vp-status', async (c) => {
+    const issueNumber = Number.parseInt(c.req.param('issue'), 10)
+    if (!Number.isFinite(issueNumber)) {
+      return c.json({ error: 'Invalid issue number' }, 400)
+    }
+    const project = c.req.query('project')
+    if (!project) {
+      return c.json({ error: 'Missing required query param: project' }, 400)
+    }
+
+    const relPath = `.kata/verification-evidence/vp-${issueNumber}.json`
+    const content = await fetchGatewayFile(c.env, project, relPath)
+    if (content === null) {
+      return c.json<VpStatusResponse>({ exists: false, passed: null, path: null })
+    }
+
+    try {
+      const parsed = JSON.parse(content) as { overallPassed?: unknown }
+      const passed = typeof parsed.overallPassed === 'boolean' ? parsed.overallPassed : null
+      return c.json<VpStatusResponse>({ exists: true, passed, path: relPath })
+    } catch {
+      return c.json<VpStatusResponse>({ exists: false, passed: null, path: null })
+    }
   })
 
   app.post('/api/sessions/:id/answers', async (c) => {
