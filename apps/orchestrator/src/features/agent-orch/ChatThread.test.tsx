@@ -23,6 +23,7 @@ vi.mock('@duraclaw/ai-elements', () => ({
     </div>
   ),
   ConversationScrollButton: () => <div data-testid="scroll-button" />,
+  useAutoScrollContext: () => ({ scrollToBottom: () => {}, isAtBottom: true }),
   Message: ({ children, from }: Record<string, unknown>) => (
     <div data-testid={`message-${from}`}>{children as React.ReactNode}</div>
   ),

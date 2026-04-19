@@ -102,6 +102,21 @@ export interface UseCodingAgentResult {
   navigateBranch: (messageId: string, direction: 'prev' | 'next') => Promise<void>
 }
 
+const TURN_ID_RE = /^(?:usr|msg|err)-(\d+)$/
+
+/** Compute the highest server-assigned turn number from the current message set. */
+function maxServerTurn(messages: CachedMessage[]): number {
+  let max = 0
+  for (const m of messages) {
+    const match = TURN_ID_RE.exec(m.id)
+    if (match) {
+      const n = Number.parseInt(match[1], 10)
+      if (n > max) max = n
+    }
+  }
+  return max
+}
+
 /** Convert the collection row shape back to the SessionMessage shape consumers expect. */
 function toSessionMessage(row: CachedMessage): SessionMessage {
   return {
@@ -574,6 +589,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   const sendMessage = useCallback(
     async (content: string | ContentBlock[], opts?: { submitId?: string }) => {
       const optimisticId = `usr-optimistic-${Date.now()}`
+      const turnHint = maxServerTurn(cachedMessages) + 1
       try {
         messagesCollection.insert({
           id: optimisticId,
@@ -581,6 +597,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           role: 'user',
           parts: contentToParts(content),
           createdAt: new Date(),
+          turnHint,
         } as CachedMessage & Record<string, unknown>)
       } catch {
         // Duplicate optimistic id (extremely unlikely) — swallow
@@ -598,7 +615,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       }
       return result
     },
-    [connection, agentName],
+    [connection, agentName, cachedMessages],
   )
 
   /**
@@ -656,6 +673,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       }
 
       const optimisticId = `usr-optimistic-${Date.now()}`
+      const turnHint = maxServerTurn(cachedMessages) + 1
       try {
         messagesCollection.insert({
           id: optimisticId,
@@ -663,6 +681,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           role: 'user',
           parts: contentToParts(text),
           createdAt: new Date(),
+          turnHint,
         } as CachedMessage & Record<string, unknown>)
       } catch {
         // dup id — swallow
@@ -699,12 +718,13 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         }
       }
     },
-    [connection, agentName],
+    [connection, agentName, cachedMessages],
   )
 
   const forkWithHistory = useCallback(
     async (content: string | ContentBlock[]) => {
       const optimisticId = `usr-optimistic-${Date.now()}`
+      const turnHint = maxServerTurn(cachedMessages) + 1
       try {
         messagesCollection.insert({
           id: optimisticId,
@@ -712,6 +732,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           role: 'user',
           parts: contentToParts(content),
           createdAt: new Date(),
+          turnHint,
         } as CachedMessage & Record<string, unknown>)
       } catch {
         // dup id — swallow
@@ -729,7 +750,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       }
       return result
     },
-    [connection, agentName],
+    [connection, agentName, cachedMessages],
   )
 
   return {

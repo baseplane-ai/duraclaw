@@ -24,6 +24,14 @@ export interface CachedMessage {
   role: string
   parts: SessionMessagePart[]
   createdAt?: Date | string
+  /**
+   * Frozen turn position for optimistic rows. Set at insert time to
+   * `maxServerTurn + 1` so the optimistic message sorts in the correct
+   * chronological position rather than at `MAX_SAFE_INTEGER`. Without this,
+   * assistant messages that arrive before the server echo sort *above* the
+   * optimistic user message, making it "stay behind" at the bottom.
+   */
+  turnHint?: number
 }
 
 const persistence = await dbReady

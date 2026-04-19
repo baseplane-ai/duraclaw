@@ -34,8 +34,9 @@ function createdAtMs(row: CachedMessage): number {
 
 /**
  * Returns [primary, secondary] sort tuple. Lower values sort first. Server
- * turn rows use finite primaries; optimistic + unknown rows use
- * Number.MAX_SAFE_INTEGER so they always trail the server-ordered section.
+ * turn rows use finite primaries; optimistic rows use their frozen
+ * `turnHint` (falling back to MAX_SAFE_INTEGER for legacy rows without
+ * one); unknown id formats use MAX_SAFE_INTEGER + createdAt.
  */
 function sortKey(row: CachedMessage): [number, number] {
   const turnMatch = TURN_ID_RE.exec(row.id)
@@ -44,6 +45,14 @@ function sortKey(row: CachedMessage): [number, number] {
   }
   const optimisticMatch = OPTIMISTIC_ID_RE.exec(row.id)
   if (optimisticMatch) {
+    // When turnHint is set (frozen at insert time to maxServerTurn + 1),
+    // sort at [turnHint, 0.5] so the optimistic row lands after any
+    // server-assigned row with the same turn but before the next turn.
+    // This prevents assistant messages (turn N+1) from rendering above
+    // the optimistic user message (turn N).
+    if (row.turnHint != null) {
+      return [row.turnHint, 0.5]
+    }
     return [Number.MAX_SAFE_INTEGER, Number.parseInt(optimisticMatch[1], 10)]
   }
   return [Number.MAX_SAFE_INTEGER, createdAtMs(row)]

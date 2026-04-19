@@ -179,6 +179,48 @@ describe('useMessagesCollection', () => {
     ])
   })
 
+  it('uses turnHint for optimistic rows so assistant messages sort after them', () => {
+    // Simulates: user sends → optimistic row gets turnHint=11 (maxTurn was 10)
+    // → assistant response arrives as msg-12 BEFORE the server echo usr-11.
+    // Without turnHint, the optimistic row would sort at MAX_SAFE_INTEGER
+    // and the assistant message would render ABOVE the user message.
+    mockLiveQueryData = [
+      makeMessage({ id: 'msg-10', sessionId: 'session-abc' }),
+      makeMessage({
+        id: 'usr-optimistic-9999',
+        sessionId: 'session-abc',
+        turnHint: 11,
+      }),
+      makeMessage({ id: 'msg-12', sessionId: 'session-abc' }),
+    ]
+
+    const { result } = renderHook(() => useMessagesCollection('session-abc'))
+
+    // Optimistic (turnHint=11) should sort between msg-10 and msg-12
+    expect(result.current.messages.map((m) => m.id)).toEqual([
+      'msg-10',
+      'usr-optimistic-9999',
+      'msg-12',
+    ])
+  })
+
+  it('falls back to MAX_SAFE_INTEGER for optimistic rows without turnHint', () => {
+    // Legacy optimistic rows (no turnHint) still sort at the end
+    mockLiveQueryData = [
+      makeMessage({ id: 'msg-10', sessionId: 'session-abc' }),
+      makeMessage({ id: 'usr-optimistic-9999', sessionId: 'session-abc' }),
+      makeMessage({ id: 'msg-12', sessionId: 'session-abc' }),
+    ]
+
+    const { result } = renderHook(() => useMessagesCollection('session-abc'))
+
+    expect(result.current.messages.map((m) => m.id)).toEqual([
+      'msg-10',
+      'msg-12',
+      'usr-optimistic-9999',
+    ])
+  })
+
   it('sorts err-N rows inline with the turn sequence', () => {
     mockLiveQueryData = [
       makeMessage({ id: 'msg-3', sessionId: 'session-abc' }),

@@ -20,6 +20,7 @@ import {
   type ToolHeaderProps,
   ToolInput,
   ToolOutput,
+  useAutoScrollContext,
 } from '@duraclaw/ai-elements'
 import {
   BrainIcon,
@@ -30,7 +31,7 @@ import {
   FileIcon,
   HistoryIcon,
 } from 'lucide-react'
-import { type ReactNode, useCallback, useMemo, useRef, useState } from 'react'
+import { type ReactNode, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Badge } from '~/components/ui/badge'
 import {
   Sheet,
@@ -478,6 +479,36 @@ function renderPart(
   return null
 }
 
+/**
+ * Scroll-to-bottom when the user sends a new message. Resets the auto-scroll
+ * `escaped` flag so subsequent assistant content streams into view instead of
+ * the user message "staying behind" at the bottom.
+ *
+ * Must live inside <Conversation> to access the scroll context.
+ */
+function ScrollOnUserSend({ messages }: { messages: SessionMessage[] }) {
+  const { scrollToBottom } = useAutoScrollContext()
+  const seenRef = useRef<string | null>(null)
+
+  useLayoutEffect(() => {
+    // Detect when a new optimistic user message appears in the list.
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i]
+      if (msg.role === 'user' && msg.id.startsWith('usr-optimistic-')) {
+        if (msg.id !== seenRef.current) {
+          seenRef.current = msg.id
+          scrollToBottom()
+        }
+        return
+      }
+      // Only look at the trailing user messages
+      if (msg.role !== 'user') break
+    }
+  }, [messages, scrollToBottom])
+
+  return null
+}
+
 export function ChatThread({
   messages,
   gate,
@@ -737,6 +768,7 @@ export function ChatThread({
         */}
         {pinnedGateNode}
       </ConversationContent>
+      <ScrollOnUserSend messages={messages} />
       <ConversationScrollButton />
     </Conversation>
   )

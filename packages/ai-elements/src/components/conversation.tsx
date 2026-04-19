@@ -36,7 +36,7 @@ interface AutoScrollContext {
 
 const Ctx = createContext<AutoScrollContext | null>(null)
 
-function useAutoScrollContext() {
+export function useAutoScrollContext() {
   const ctx = useContext(Ctx)
   if (!ctx) throw new Error('useAutoScrollContext must be used within <Conversation>')
   return ctx
