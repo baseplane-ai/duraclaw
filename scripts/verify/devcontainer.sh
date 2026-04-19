@@ -33,11 +33,11 @@ jq -e '
 echo "Required fields present"
 
 jq -e '
-  (.forwardPorts | index(43173))
-  and (.forwardPorts | index(9877))
+  (.forwardPorts | index("43000-43799"))
+  and (.forwardPorts | index("9800-10599"))
   and (.forwardPorts | index(8787))
 ' "$CONFIG" >/dev/null
-echo "Forward ports 43173 / 9877 / 8787 declared"
+echo "Forward port ranges 43000-43799 / 9800-10599 / 8787 declared"
 
 jq -e '
   .features | has("ghcr.io/shyim/devcontainers-features/bun:0")

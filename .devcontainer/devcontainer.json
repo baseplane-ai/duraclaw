@@ -6,10 +6,10 @@
     "ghcr.io/devcontainers/features/github-cli:1": {},
     "ghcr.io/shyim/devcontainers-features/bun:0": {}
   },
-  "forwardPorts": [43173, 9877, 8787],
+  "forwardPorts": ["43000-43799", "9800-10599", 8787],
   "portsAttributes": {
-    "43173": { "label": "Orchestrator (Vite SPA)", "onAutoForward": "notify" },
-    "9877": { "label": "Agent Gateway (WS)", "onAutoForward": "silent" },
+    "43000-43799": { "label": "Orchestrator (Vite SPA)", "onAutoForward": "notify" },
+    "9800-10599": { "label": "Agent Gateway (WS)", "onAutoForward": "silent" },
     "8787": { "label": "Miniflare", "onAutoForward": "silent" }
   },
   "postCreateCommand": "bash .devcontainer/post-create.sh",
