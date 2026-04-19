@@ -149,9 +149,9 @@ export function KanbanBoard() {
       <Header>
         <h1 className="text-lg font-semibold">Board</h1>
       </Header>
-      <Main fluid>
+      <Main fluid fixed>
         <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
-          <div className="flex flex-col gap-3">
+          <div className="flex flex-1 flex-col gap-3 overflow-y-auto">
             {isLoading && chains.length === 0 ? (
               <p className="text-sm text-muted-foreground">Loading chains…</p>
             ) : null}

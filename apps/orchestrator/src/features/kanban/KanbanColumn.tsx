@@ -1,8 +1,8 @@
 /**
  * KanbanColumn — one phase column inside a lane row.
  *
- * P3 U3: becomes a droppable via `@dnd-kit/core`, plus an inline
- * "Create chain" form on the Backlog column only.
+ * Uses a fixed min-width so the parent's horizontal scroll activates on
+ * narrow viewports. On desktop the columns flex-grow to fill available space.
  */
 
 import { useDroppable } from '@dnd-kit/core'
@@ -47,12 +47,12 @@ function BacklogNewCardForm() {
       <Input
         value={value}
         onChange={(e) => setValue(e.target.value)}
-        placeholder="Issue #"
-        className="h-7 text-[11px]"
+        placeholder="#"
+        className="h-8 min-w-0 flex-1 text-xs"
         inputMode="numeric"
       />
-      <Button type="submit" size="sm" variant="outline" className="h-7 px-2 text-[11px]">
-        Create
+      <Button type="submit" size="sm" variant="outline" className="h-8 shrink-0 px-3 text-xs">
+        Add
       </Button>
     </form>
   )
@@ -64,15 +64,25 @@ export function KanbanColumn({ title, cards, dropId, isBacklog }: KanbanColumnPr
   return (
     <div
       ref={setNodeRef}
-      className={`flex flex-col gap-2 rounded-md border border-dashed p-2 ${
-        isOver ? 'border-primary bg-primary/5' : 'border-border/60'
+      className={`flex min-w-[180px] flex-1 shrink-0 snap-start flex-col gap-2 rounded-lg border p-2.5 transition-colors ${
+        isOver
+          ? 'border-primary bg-primary/5'
+          : 'border-border/50 bg-background/50'
       }`}
     >
-      <div className="flex items-center justify-between px-1 text-[11px] uppercase tracking-wide text-muted-foreground">
-        <span>{title}</span>
-        <span>{cards.length}</span>
+      {/* Column header */}
+      <div className="flex items-center justify-between px-0.5">
+        <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+          {title}
+        </span>
+        <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-muted px-1.5 text-[10px] font-medium text-muted-foreground">
+          {cards.length}
+        </span>
       </div>
+
       {isBacklog ? <BacklogNewCardForm /> : null}
+
+      {/* Card stack */}
       <div className="flex flex-col gap-2">
         {cards.map((chain) => (
           <KanbanCard key={chain.issueNumber} chain={chain} />

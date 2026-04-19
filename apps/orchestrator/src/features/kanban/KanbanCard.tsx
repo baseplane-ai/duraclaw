@@ -158,40 +158,38 @@ export function KanbanCard({ chain }: KanbanCardProps) {
     <>
       <div
         ref={setNodeRef}
-        className={`flex flex-col gap-1 rounded-md border border-border bg-card px-2 py-2 text-xs ${
-          isDragging ? 'opacity-50' : ''
+        className={`flex flex-col gap-1.5 rounded-lg border border-border bg-card p-3 text-sm shadow-sm transition-shadow hover:shadow-md ${
+          isDragging ? 'opacity-50 shadow-lg' : ''
         }`}
         {...attributes}
         {...listeners}
       >
-        <div className="truncate font-medium">
-          #{chain.issueNumber} — {chain.issueTitle}
-        </div>
-        <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
-          <span>{chain.issueType}</span>
+        <div className="line-clamp-2 text-xs font-medium leading-snug">
+          <span className="text-muted-foreground">#{chain.issueNumber}</span>{' '}
+          {chain.issueTitle}
         </div>
         <div className="flex items-center gap-2 text-[11px]">
           <PipelineDots sessions={sessionsForDots} />
           {focus ? (
-            <>
-              <span className="text-muted-foreground">
-                {shortMode(focus.kataMode)} {shortStatusLabel(focus.status)}
-              </span>
-              <span className="text-muted-foreground">{formatTimeAgo(focusTs)}</span>
-            </>
+            <span className="text-muted-foreground">
+              {shortMode(focus.kataMode)} &middot; {shortStatusLabel(focus.status)}
+              {focusTs ? ` &middot; ${formatTimeAgo(focusTs)}` : ''}
+            </span>
           ) : (
             <span className="text-muted-foreground">no sessions</span>
           )}
         </div>
         {worktree ? (
-          <div className="text-[10px] text-muted-foreground">wt: {worktree}</div>
+          <div className="text-[11px] text-muted-foreground">
+            <span className="font-mono">{worktree}</span>
+          </div>
         ) : null}
-        <div className="mt-1 flex flex-wrap gap-1">
+        <div className="mt-0.5 flex flex-wrap gap-1.5">
           {/* Prevent dnd-kit from intercepting the click on the buttons. */}
           <Button
             size="sm"
             variant="outline"
-            className="h-6 px-2 text-[11px]"
+            className="h-7 px-2.5 text-xs"
             onClick={handleOpen}
             onPointerDown={(e) => e.stopPropagation()}
           >
@@ -201,7 +199,7 @@ export function KanbanCard({ chain }: KanbanCardProps) {
             <Button
               size="sm"
               variant="outline"
-              className="h-6 px-2 text-[11px]"
+              className="h-7 px-2.5 text-xs"
               onClick={handleStartNext}
               onPointerDown={(e) => e.stopPropagation()}
               disabled={!canAdvance || loading}
