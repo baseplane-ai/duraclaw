@@ -1,7 +1,7 @@
 import { Agent, type Connection, type ConnectionContext, callable } from 'agents'
 import type { SessionMessage, SessionMessagePart } from 'agents/experimental/memory/session'
 import { Session } from 'agents/experimental/memory/session'
-import { eq } from 'drizzle-orm'
+import { asc, eq } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import * as schema from '~/db/schema'
 import { agentSessions } from '~/db/schema'
@@ -699,6 +699,175 @@ export class SessionDO extends Agent<Env, SessionState> {
         .where(eq(agentSessions.id, sessionId))
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to sync kata to D1:`, err)
+    }
+  }
+
+  /**
+   * Chain UX P4 — mode-enter session reset.
+   *
+   * Triggered when a chain-linked session observes a `kata_state` event with
+   * a different `currentMode` than previously seen and `continueSdk` is not
+   * set. Flushes the outbound channel, kicks the active runner WS with close
+   * code 4411 (mode_transition), waits up to 5s for the runner to exit, then
+   * spawns a fresh runner in the new mode with an artifact-pointer preamble.
+   */
+  private async handleModeTransition(kataState: KataSessionState, fromMode: string | null) {
+    const sessionId = this.state.session_id ?? this.ctx.id.toString()
+    const toMode = kataState.currentMode ?? ''
+    const issueNumber = kataState.issueNumber ?? 0
+
+    console.log(
+      `[SessionDO:${this.ctx.id}] mode transition ${fromMode ?? '(none)'}→${toMode} issue=#${issueNumber}`,
+    )
+
+    // 1. Announce the transition to browsers so the chain timeline UI picks it up.
+    this.broadcastGatewayEvent({
+      type: 'mode_transition',
+      session_id: sessionId,
+      from: fromMode,
+      to: toMode,
+      issueNumber,
+      at: new Date().toISOString(),
+    })
+
+    // 2. Flush window — BufferedChannel has no in-flight-send introspection,
+    //    so the best we can do is a short pause to let the runner's final
+    //    pre-transition events land before we slam the WS shut.
+    await new Promise((r) => setTimeout(r, 2000))
+
+    // 3. Close the runner WS with 4411 (mode_transition). Mirrors the 4410
+    //    rotation path in triggerGatewayDial.
+    const gwConnId = this.getGatewayConnectionId()
+    if (gwConnId) {
+      for (const conn of this.getConnections()) {
+        if (conn.id === gwConnId) {
+          try {
+            conn.close(4411, 'mode_transition')
+          } catch (err) {
+            console.error(
+              `[SessionDO:${this.ctx.id}] Failed to close runner WS on mode transition:`,
+              err,
+            )
+          }
+          break
+        }
+      }
+      this.cachedGatewayConnId = null
+      try {
+        this.sql`DELETE FROM kv WHERE key = 'gateway_conn_id'`
+      } catch {
+        /* ignore */
+      }
+    }
+
+    // 4. Wait up to 5s for the runner to exit — signalled by the DO's onClose
+    //    handler clearing `active_callback_token` (or the token rotating to a
+    //    new value). Poll state.active_callback_token at 100ms granularity.
+    const startTok = this.state.active_callback_token
+    const exited = await new Promise<boolean>((resolve) => {
+      let settled = false
+      const done = (value: boolean) => {
+        if (settled) return
+        settled = true
+        clearInterval(interval)
+        clearTimeout(timeout)
+        resolve(value)
+      }
+      const check = () => {
+        const tok = this.state.active_callback_token
+        if (!tok || tok !== startTok) done(true)
+      }
+      const interval = setInterval(check, 100)
+      const timeout = setTimeout(() => done(false), 5000)
+      check()
+    })
+
+    if (!exited) {
+      console.warn(
+        `[SessionDO:${this.ctx.id}] mode transition: runner did not exit within 5s — proceeding (token rotation in triggerGatewayDial will evict lingering runner via 4410)`,
+      )
+      this.broadcastGatewayEvent({
+        type: 'mode_transition_timeout',
+        session_id: sessionId,
+        issueNumber,
+        at: new Date().toISOString(),
+        note: 'runner did not exit within 5s; proceeding with fresh spawn',
+      })
+    }
+
+    // 5. Build preamble (degrade gracefully on failure).
+    const preamble = await this.buildModePreamble(kataState)
+
+    // 6. Spawn fresh runner in the new mode. triggerGatewayDial handles any
+    //    lingering runner via 4410 rotation.
+    await this.triggerGatewayDial({
+      type: 'execute',
+      project: this.state.project,
+      prompt: preamble,
+      agent: toMode,
+      model: this.state.model ?? 'sonnet',
+    })
+  }
+
+  /**
+   * Build the artifact-pointer preamble prepended to the fresh runner's first
+   * prompt on a chain mode transition. Queries D1 for prior sessions linked
+   * to the same issueNumber and emits a one-line pointer per completed mode.
+   * On any failure, falls back to the degraded template from the spec and
+   * emits `mode_transition_preamble_degraded` so the UI can surface it.
+   */
+  private async buildModePreamble(ks: KataSessionState): Promise<string> {
+    const issueNumber = ks.issueNumber ?? 0
+    const mode = ks.currentMode ?? 'unknown'
+    const phase = ks.currentPhase ?? 'p0'
+    const sessionId = this.state.session_id ?? this.ctx.id.toString()
+
+    // Issue title is not a first-class field on the DO — leave as 'untitled'
+    // until chain metadata plumbing lands (downstream P5 work).
+    const issueTitle = 'untitled'
+
+    const degraded = () =>
+      `You are entering ${mode} mode for issue #${issueNumber}. Prior-artifact listing is unavailable — use the kata CLI (\`kata status\`) to inspect chain state. Your kata state is already linked: workflowId=GH#${issueNumber}, mode=${mode}, phase=${phase}.`
+
+    try {
+      const rows = await this.d1
+        .select({
+          id: agentSessions.id,
+          status: agentSessions.status,
+          kataMode: agentSessions.kataMode,
+          createdAt: agentSessions.createdAt,
+        })
+        .from(agentSessions)
+        .where(eq(agentSessions.kataIssue, issueNumber))
+        .orderBy(asc(agentSessions.createdAt))
+
+      const artifactLines: string[] = []
+      for (const row of rows) {
+        if (row.status !== 'completed') continue
+        const rowMode = row.kataMode ?? 'unknown'
+        const idTail = row.id.slice(-8)
+        artifactLines.push(`- ${rowMode}: session ${idTail}`)
+      }
+
+      const artifacts = artifactLines.length > 0 ? artifactLines.join('\n') : '- (none yet)'
+
+      return `You are entering ${mode} mode for issue #${issueNumber} ("${issueTitle}").
+
+Prior artifacts in this chain:
+${artifacts}
+
+Read the relevant artifacts before acting. Your kata state is already linked: workflowId=GH#${issueNumber}, mode=${mode}, phase=${phase}.`
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err)
+      console.error(`[SessionDO:${this.ctx.id}] buildModePreamble failed:`, err)
+      this.broadcastGatewayEvent({
+        type: 'mode_transition_preamble_degraded',
+        session_id: sessionId,
+        issueNumber,
+        at: new Date().toISOString(),
+        reason,
+      })
+      return degraded()
     }
   }
 
@@ -2091,6 +2260,31 @@ export class SessionDO extends Agent<Env, SessionState> {
           console.error(`[SessionDO:${this.ctx.id}] Failed to persist kata state:`, err)
         }
         this.syncKataToD1(event.kata_state, new Date().toISOString())
+
+        // Chain UX P4: detect mode transitions on chain-linked sessions and
+        // reset the runner so each mode gets a fresh SDK session context.
+        const ks = event.kata_state
+        if (ks && ks.currentMode && ks.issueNumber != null) {
+          const prev = this.state.lastKataMode
+          const next = ks.currentMode
+          if (prev !== next) {
+            this.updateState({ lastKataMode: next })
+            if (ks.continueSdk === true) {
+              console.log(
+                `[SessionDO:${this.ctx.id}] mode change ${prev ?? '(none)'}→${next} with continueSdk=true, skipping reset`,
+              )
+            } else {
+              // Fire-and-forget — the runner close + respawn involves multi-
+              // second awaits that shouldn't block gateway event processing.
+              this.handleModeTransition(ks, prev ?? null).catch((err) => {
+                console.error(
+                  `[SessionDO:${this.ctx.id}] handleModeTransition failed:`,
+                  err,
+                )
+              })
+            }
+          }
+        }
         break
       }
 

@@ -18,12 +18,15 @@ export interface DialBackClientOptions {
   logger?: DialBackClientLogger
   /**
    * Called when the client gives up permanently — either the DO signalled a
-   * terminal close code (4401 invalid token / 4410 token rotated) or we hit
-   * MAX_POST_CONNECT_ATTEMPTS back-to-back reconnect failures after the
-   * initial success. The session-runner uses this to exit cleanly instead of
-   * spinning in a 30s reconnect loop forever (i.e. becoming an orphan).
+   * terminal close code (4401 invalid token / 4410 token rotated / 4411 mode
+   * transition) or we hit MAX_POST_CONNECT_ATTEMPTS back-to-back reconnect
+   * failures after the initial success. The session-runner uses this to exit
+   * cleanly instead of spinning in a 30s reconnect loop forever (i.e.
+   * becoming an orphan).
    */
-  onTerminate?: (reason: 'invalid_token' | 'token_rotated' | 'reconnect_exhausted') => void
+  onTerminate?: (
+    reason: 'invalid_token' | 'token_rotated' | 'mode_transition' | 'reconnect_exhausted',
+  ) => void
 }
 
 const BACKOFF_BASE = 1000
@@ -37,6 +40,7 @@ const MAX_POST_CONNECT_ATTEMPTS = 20
 /** WS close codes the DO uses to signal "don't reconnect, you're done". */
 const CLOSE_INVALID_TOKEN = 4401
 const CLOSE_TOKEN_ROTATED = 4410
+const CLOSE_MODE_TRANSITION = 4411
 
 export class DialBackClient {
   private callbackUrl: string
@@ -151,10 +155,20 @@ export class DialBackClient {
       )
 
       // DO-sent terminal close codes: don't reconnect, don't orphan.
-      if (code === CLOSE_INVALID_TOKEN || code === CLOSE_TOKEN_ROTATED) {
+      if (
+        code === CLOSE_INVALID_TOKEN ||
+        code === CLOSE_TOKEN_ROTATED ||
+        code === CLOSE_MODE_TRANSITION
+      ) {
         this.stopped = true
         this.onStateChange?.('closed')
-        this.onTerminate?.(code === CLOSE_INVALID_TOKEN ? 'invalid_token' : 'token_rotated')
+        const reason: 'invalid_token' | 'token_rotated' | 'mode_transition' =
+          code === CLOSE_INVALID_TOKEN
+            ? 'invalid_token'
+            : code === CLOSE_TOKEN_ROTATED
+              ? 'token_rotated'
+              : 'mode_transition'
+        this.onTerminate?.(reason)
         return
       }
 
