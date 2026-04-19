@@ -144,4 +144,50 @@ describe('useMessagesCollection', () => {
     expect(result.current.messages).toHaveLength(1)
     expect(result.current.messages[0].id).toBe('m2')
   })
+
+  it('sorts server-assigned rows by turn number regardless of createdAt', () => {
+    // Rig timestamps so createdAt order DISAGREES with turn order — this
+    // matches the clock-skew / rapid-burst scenarios where sorting purely by
+    // createdAt produced out-of-order display. Turn number wins.
+    mockLiveQueryData = [
+      makeMessage({ id: 'msg-4', sessionId: 'session-abc', createdAt: '2026-01-01T00:00:00Z' }),
+      makeMessage({ id: 'usr-2', sessionId: 'session-abc', createdAt: '2026-01-03T00:00:00Z' }),
+      makeMessage({ id: 'msg-3', sessionId: 'session-abc', createdAt: '2026-01-02T00:00:00Z' }),
+      makeMessage({ id: 'usr-1', sessionId: 'session-abc', createdAt: '2026-01-04T00:00:00Z' }),
+    ]
+
+    const { result } = renderHook(() => useMessagesCollection('session-abc'))
+
+    expect(result.current.messages.map((m) => m.id)).toEqual(['usr-1', 'usr-2', 'msg-3', 'msg-4'])
+  })
+
+  it('places optimistic rows after all server-assigned rows, FIFO by embedded timestamp', () => {
+    mockLiveQueryData = [
+      makeMessage({ id: 'usr-optimistic-2000', sessionId: 'session-abc' }),
+      makeMessage({ id: 'msg-10', sessionId: 'session-abc' }),
+      makeMessage({ id: 'usr-optimistic-1000', sessionId: 'session-abc' }),
+      makeMessage({ id: 'usr-9', sessionId: 'session-abc' }),
+    ]
+
+    const { result } = renderHook(() => useMessagesCollection('session-abc'))
+
+    expect(result.current.messages.map((m) => m.id)).toEqual([
+      'usr-9',
+      'msg-10',
+      'usr-optimistic-1000',
+      'usr-optimistic-2000',
+    ])
+  })
+
+  it('sorts err-N rows inline with the turn sequence', () => {
+    mockLiveQueryData = [
+      makeMessage({ id: 'msg-3', sessionId: 'session-abc' }),
+      makeMessage({ id: 'err-2', sessionId: 'session-abc' }),
+      makeMessage({ id: 'usr-1', sessionId: 'session-abc' }),
+    ]
+
+    const { result } = renderHook(() => useMessagesCollection('session-abc'))
+
+    expect(result.current.messages.map((m) => m.id)).toEqual(['usr-1', 'err-2', 'msg-3'])
+  })
 })

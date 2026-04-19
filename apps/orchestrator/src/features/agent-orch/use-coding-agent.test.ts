@@ -358,6 +358,55 @@ describe('type: "message" wire format', () => {
     expect(result.current.messages[0].id).toBe('server-usr-1')
   })
 
+  test('on rapid double-send, a single server echo clears only the oldest optimistic (FIFO)', async () => {
+    const { result } = renderHook(() => useCodingAgent('test-session'))
+
+    mockCall.mockResolvedValue({ ok: true })
+
+    // Send A, then B before A echoes. The embedded Date.now() suffix on the
+    // optimistic id is what drives FIFO; stub Date.now so we can order them
+    // deterministically without relying on setTimeout/real-clock gaps.
+    const dateNowSpy = vi.spyOn(Date, 'now')
+    dateNowSpy.mockReturnValueOnce(1000) // for A
+    act(() => {
+      result.current.sendMessage('A')
+    })
+    dateNowSpy.mockReturnValueOnce(2000) // for B
+    act(() => {
+      result.current.sendMessage('B')
+    })
+    dateNowSpy.mockRestore()
+
+    expect(result.current.messages).toHaveLength(2)
+    expect(result.current.messages.map((m) => m.id)).toEqual([
+      'usr-optimistic-1000',
+      'usr-optimistic-2000',
+    ])
+
+    // Server echoes A (as usr-1). We MUST retire only A's optimistic, not B's.
+    // The old clearOptimisticRows() wiped both, causing B to flash out of the
+    // UI until its own echo arrived — the "repetitive display" bug.
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage({
+          type: 'message',
+          message: {
+            id: 'usr-1',
+            role: 'user',
+            parts: [{ type: 'text', text: 'A' }],
+          },
+        }),
+      )
+    })
+
+    expect(result.current.messages).toHaveLength(2)
+    const ids = result.current.messages.map((m) => m.id)
+    // usr-1 ends up in turn-1 slot; B's optimistic survives at the tail.
+    expect(ids).toContain('usr-1')
+    expect(ids).toContain('usr-optimistic-2000')
+    expect(ids).not.toContain('usr-optimistic-1000')
+  })
+
   test('appends multiple messages in sequence', () => {
     const { result } = renderHook(() => useCodingAgent('test-session'))
 

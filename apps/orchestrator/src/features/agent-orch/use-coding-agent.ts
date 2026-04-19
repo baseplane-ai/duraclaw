@@ -227,23 +227,41 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     [agentName, bulkUpsert],
   )
 
-  /** Clear all `usr-optimistic-*` rows for this session (on server echo). */
-  const clearOptimisticRows = useCallback(() => {
-    const toDelete: string[] = []
+  /**
+   * Drop the single oldest `usr-optimistic-*` row for this session (FIFO
+   * correspondence with server user-echo broadcasts).
+   *
+   * Previously this wiped ALL optimistic rows on every echo, which corrupted
+   * rapid-send bursts: sending A then B before A's echo arrived meant A's
+   * echo would nuke B's optimistic row too — B briefly vanished from the UI
+   * and then reappeared when its own echo landed, reading as a repeated /
+   * duplicated message. One echo → one cleared optimistic matches the
+   * server's strictly-serialized turnCounter semantics, and the id's
+   * embedded `Date.now()` gives a stable FIFO ordering.
+   */
+  const clearOldestOptimisticRow = useCallback(() => {
+    let oldestId: string | null = null
+    let oldestTs = Number.POSITIVE_INFINITY
     try {
       for (const [id, row] of messagesCollection as Iterable<[string, CachedMessage]>) {
-        if (row.sessionId === agentName && id.startsWith('usr-optimistic-')) {
-          toDelete.push(id)
+        if (row.sessionId !== agentName) continue
+        const match = /^usr-optimistic-(\d+)$/.exec(id)
+        if (!match) continue
+        const ts = Number.parseInt(match[1], 10)
+        if (ts < oldestTs) {
+          oldestTs = ts
+          oldestId = id
         }
       }
     } catch {
       return
     }
-    if (toDelete.length > 0) {
+    if (oldestId) {
       try {
-        messagesCollection.delete(toDelete)
+        messagesCollection.delete(oldestId)
       } catch {
-        // swallow
+        // swallow — already gone, racing with another echo or the failure
+        // rollback in sendMessage / submitDraft. Either way the row is gone.
       }
     }
   }, [agentName])
@@ -316,11 +334,12 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         // SessionMessage wire format — single message upsert
         if (parsed.type === 'message' && parsed.message) {
           const msg = parsed.message as SessionMessage
-          // When the server echoes a canonical user turn, wipe any
-          // usr-optimistic-* rows for this session so the UI doesn't
-          // double-display the send.
+          // When the server echoes a canonical user turn, retire exactly
+          // ONE pending optimistic row (oldest-first, FIFO). The DO
+          // serializes user turns through a single turnCounter so one echo
+          // <-> one optimistic row is the invariant we want to preserve.
           if (msg.role === 'user' && !msg.id.startsWith('usr-optimistic-')) {
-            clearOptimisticRows()
+            clearOldestOptimisticRow()
           }
           upsert(msg)
           return
