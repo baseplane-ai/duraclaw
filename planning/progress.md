@@ -1,6 +1,6 @@
 # Duraclaw v2 — Progress Tracker
 
-> Updated 2026-04-15. Issue #38 AskUserQuestion gate fix shipped — canUseTool migration, structured question UI. Issue #27 VPS session discovery shipped prior.
+> Updated 2026-04-19. GH#16 Chain UX epic shipped (chain tabs, kanban board with project filter, mode-enter reset, worktree checkout). GH#18 kata_state emission fix. GH#12 TanStack DB unification. Kanban board mobile layout fix. Issue #27 VPS session discovery shipped prior.
 
 **Status key:** `not-started` | `spec` | `in-progress` | `done`
 
@@ -31,6 +31,20 @@
 | 30 | Cmd+K Fuzzy Finder + Keyboard Nav (11.3-11.4) | not-started | — | #29 (cards exist first) |
 | 31 | Mobile Swipe + Live Card Previews (11.5-11.6) | not-started | — | #29 |
 | 38 | AskUserQuestion Gate Fix | done | [38-askuserquestion-gate-fix.md](specs/38-askuserquestion-gate-fix.md) | — |
+| GH#12 | Client Data Layer Unification (TanStack DB) | done | — | — |
+| GH#16 | Chain UX Epic | done | [16-chain-ux.md](specs/16-chain-ux.md) | — |
+| GH#18 | kata_state Emission Fix | done | — | GH#16 P4 |
+
+### Chain UX (GH#16) — Kanban Board + Chain Tabs + Mode Reset
+
+Shipped via PR #17 (squash-merged) + GH#18 fix. Four sub-features:
+
+| Sub | Name | Status | Notes |
+|-----|------|--------|-------|
+| 3B | Chain Tab Surface | done | Yjs-backed chain tabs one-per-issue. Sidebar groups sessions under chain nodes with 5-dot pipeline indicator. `/chain/:issueNumber` route renders vertical timeline of mode sessions. Auto-opens on session spawn when `kataIssue` is set. |
+| 3C | Mode-Enter Session Reset | done | `handleModeTransition` in SessionDO closes runner WS with code `4411 mode_transition`, waits 5s, builds preamble from prior session context, respawns in new mode. Emitter path: session-runner watches `.kata/sessions/` state.json, emits `KataStateEvent` over dial-back WS (GH#18 fix). |
+| 3D | Kanban Board (`/board`) | done | Swim lanes by issue type (enhancement/bug/other). 6-column pipeline: backlog → research → planning → impl → verify → done. Column derived from latest session's kataMode + issue open/closed state. Drag-to-advance with single-step adjacency rule + precondition gates. Project filter dropdown scopes board to chains with sessions in a specific worktree. Horizontal scroll layout for mobile (min-w-180px columns, snap scroll). |
+| 3E | Worktree Checkout | done | D1 `worktree_reservations` table (migration 0009). Code-touching modes (implementation/verify/debug/task) acquire exclusive worktree lock via `/api/chains/:issue/checkout`. 409 conflict with force-release modal. Checkout auto-runs on advance. |
 
 ### Agent-Orch Drop-In (new — accelerates Phases 1-3)
 
@@ -53,6 +67,8 @@ Port baseplane's agent-orch UI + extract shared ai-elements package. Replaces bu
 | #16 Pluggable Gateway | Phase 5.4 (executor abstraction), 10.3 (multi-provider) |
 | #15 Tray App | Phase 9 (deployment/packaging), distribution story |
 | Agent-orch drop-in (A.1-A.4) | Phase 1 (chat quality), 2 (dashboard/sidebar), 3.5 (image upload) |
+| GH#12 Client Data Unification | Phase 8.1 (TanStack DB) |
+| GH#16 Chain UX | Phase 2 (dashboard — kanban board), 3 (session management — chain tabs, mode reset), 5.3 (kata state — emission fix) |
 | Voice input (A.5) | Phase 1.3 (mobile chat experience) |
 | AIChatAgent migration (A.2) | Phase 1.4 (error handling — resumable streaming, auto-reconnect) |
 | #24 UX Ergonomics | Phase 2.5-2.6 (workspaces, tabs), 4 (notifications), 6.1+6.3 (settings, theming), 7.4 (command palette) |
@@ -142,7 +158,7 @@ Port baseplane's agent-orch UI + extract shared ai-elements package. Replaces bu
 
 | Sub | Name | Status | Spec |
 |-----|------|--------|------|
-| 8.1 | TanStack DB Integration (Web) | not-started | — |
+| 8.1 | TanStack DB Integration (Web) | done | GH#12. Unified client data layer on TanStack DB collections. Session live state, messages, agent sessions, and chains all served from OPFS-persisted collections. Retired manual hydrate/optimistic/replace reconciliation. |
 | 8.2 | Offline Capabilities | not-started | — |
 | 8.3 | Capacitor Native Shell | not-started | — |
 
