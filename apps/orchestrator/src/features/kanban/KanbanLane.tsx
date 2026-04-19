@@ -2,7 +2,9 @@
  * KanbanLane — horizontal swim lane grouping by issue type.
  *
  * Renders a header (name + count + collapse toggle) plus a 6-column grid
- * of KanbanColumns when expanded.
+ * of KanbanColumns when expanded. Each column becomes a droppable whose
+ * id is `drop:<lane>:<column>` so KanbanBoard's onDragEnd can resolve the
+ * target column.
  */
 
 import { ChevronDown, ChevronRight } from 'lucide-react'
@@ -56,7 +58,15 @@ export function KanbanLane({ name, cards, collapsed, onToggle }: KanbanLaneProps
         <div className="grid grid-cols-6 gap-2">
           {COLUMNS.map((col) => {
             const colCards = cards.filter((c) => c.column === col)
-            return <KanbanColumn key={col} title={COLUMN_LABELS[col]} cards={colCards} />
+            return (
+              <KanbanColumn
+                key={col}
+                title={COLUMN_LABELS[col]}
+                cards={colCards}
+                dropId={`drop:${name}:${col}`}
+                isBacklog={col === 'backlog'}
+              />
+            )
           })}
         </div>
       )}

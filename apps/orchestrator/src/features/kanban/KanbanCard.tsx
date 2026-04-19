@@ -1,17 +1,24 @@
 /**
  * KanbanCard — single chain summary card on the /board surface.
  *
- * Read-only (P3 U2): no drag, no Start-next, no PR chip. U3 adds those.
+ * P3 U3 adds: Start-next button (with precondition gating + confirmation
+ * modal), draggable-by-handle via `@dnd-kit/core`. PR chip, lane collapse,
+ * and drag-to-advance live on the parent surfaces.
  */
 
+import { useDraggable } from '@dnd-kit/core'
 import { useNavigate } from '@tanstack/react-router'
-import { useCallback } from 'react'
+import { useCallback, useState } from 'react'
+import { toast } from 'sonner'
 import { PipelineDots } from '~/components/layout/nav-sessions'
 import { Button } from '~/components/ui/button'
 import type { SessionRecord } from '~/db/agent-sessions-collection'
 import { formatTimeAgo } from '~/features/agent-orch/session-utils'
+import { useNextModePrecondition } from '~/hooks/use-chain-preconditions'
 import { useTabSync } from '~/hooks/use-tab-sync'
 import type { ChainSummary } from '~/lib/types'
+import { AdvanceConfirmModal } from './AdvanceConfirmModal'
+import { advanceChain, hasActiveSession } from './advance-chain'
 
 interface KanbanCardProps {
   chain: ChainSummary
@@ -47,6 +54,14 @@ function shortMode(mode: string | null | undefined): string {
 export function KanbanCard({ chain }: KanbanCardProps) {
   const navigate = useNavigate()
   const { openTab } = useTabSync()
+  const { nextMode, nextLabel, canAdvance, reason, loading } = useNextModePrecondition(chain)
+  const [modalOpen, setModalOpen] = useState(false)
+  const [pending, setPending] = useState(false)
+
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: `card:${chain.issueNumber}`,
+    data: { chain },
+  })
 
   const handleOpen = useCallback(() => {
     openTab(`chain:${chain.issueNumber}`, {
@@ -60,9 +75,33 @@ export function KanbanCard({ chain }: KanbanCardProps) {
     } as any)
   }, [chain.issueNumber, navigate, openTab])
 
+  const handleStartNext = useCallback(() => {
+    if (!nextMode || !canAdvance) return
+    setModalOpen(true)
+  }, [nextMode, canAdvance])
+
+  const handleConfirm = useCallback(async () => {
+    if (!nextMode) return
+    setPending(true)
+    const res = await advanceChain(chain, nextMode)
+    setPending(false)
+    setModalOpen(false)
+    if (!res.ok) {
+      toast.error(res.error ?? 'Failed to advance chain')
+      return
+    }
+    toast.success(`Started ${nextMode} for #${chain.issueNumber}`)
+    navigate({
+      to: '/chain/$issueNumber',
+      params: { issueNumber: String(chain.issueNumber) },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any)
+  }, [chain, nextMode, navigate])
+
   const focus = pickFocusSession(chain.sessions)
   const focusTs = focus?.lastActivity ?? focus?.createdAt ?? chain.lastActivity
-  const worktree = chain.worktreeReservation?.worktree
+  const worktree = chain.worktreeReservation?.worktree ?? null
+  const currentMode = focus?.kataMode ?? chain.column
 
   // PipelineDots expects SessionRecord[]. ChainSummary.sessions carry the
   // fields it reads (status, kataMode); numTurns is absent but only
@@ -70,35 +109,87 @@ export function KanbanCard({ chain }: KanbanCardProps) {
   // safe under-report. Cast is deliberate.
   const sessionsForDots = chain.sessions as unknown as SessionRecord[]
 
+  const hasActive = hasActiveSession(chain)
+  const startLabel = nextMode
+    ? hasActive
+      ? `Close current + start ${nextLabel}`
+      : `Start ${nextLabel}`
+    : ''
+  const disabledTitle = loading
+    ? 'Checking preconditions…'
+    : reason || (canAdvance ? '' : 'Precondition not met')
+
   return (
-    <div className="flex flex-col gap-1 rounded-md border border-border bg-card px-2 py-2 text-xs">
-      <div className="truncate font-medium">
-        #{chain.issueNumber} — {chain.issueTitle}
+    <>
+      <div
+        ref={setNodeRef}
+        className={`flex flex-col gap-1 rounded-md border border-border bg-card px-2 py-2 text-xs ${
+          isDragging ? 'opacity-50' : ''
+        }`}
+        {...attributes}
+        {...listeners}
+      >
+        <div className="truncate font-medium">
+          #{chain.issueNumber} — {chain.issueTitle}
+        </div>
+        <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
+          <span>{chain.issueType}</span>
+        </div>
+        <div className="flex items-center gap-2 text-[11px]">
+          <PipelineDots sessions={sessionsForDots} />
+          {focus ? (
+            <>
+              <span className="text-muted-foreground">
+                {shortMode(focus.kataMode)} {shortStatusLabel(focus.status)}
+              </span>
+              <span className="text-muted-foreground">{formatTimeAgo(focusTs)}</span>
+            </>
+          ) : (
+            <span className="text-muted-foreground">no sessions</span>
+          )}
+        </div>
+        {worktree ? (
+          <div className="text-[10px] text-muted-foreground">wt: {worktree}</div>
+        ) : null}
+        <div className="mt-1 flex flex-wrap gap-1">
+          {/* Prevent dnd-kit from intercepting the click on the buttons. */}
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-6 px-2 text-[11px]"
+            onClick={handleOpen}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            Open
+          </Button>
+          {nextMode ? (
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-6 px-2 text-[11px]"
+              onClick={handleStartNext}
+              onPointerDown={(e) => e.stopPropagation()}
+              disabled={!canAdvance || loading}
+              title={disabledTitle || undefined}
+            >
+              {startLabel}
+            </Button>
+          ) : null}
+        </div>
       </div>
-      <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
-        <span>{chain.issueType}</span>
-      </div>
-      <div className="flex items-center gap-2 text-[11px]">
-        <PipelineDots sessions={sessionsForDots} />
-        {focus ? (
-          <>
-            <span className="text-muted-foreground">
-              {shortMode(focus.kataMode)} {shortStatusLabel(focus.status)}
-            </span>
-            <span className="text-muted-foreground">{formatTimeAgo(focusTs)}</span>
-          </>
-        ) : (
-          <span className="text-muted-foreground">no sessions</span>
-        )}
-      </div>
-      {worktree ? (
-        <div className="text-[10px] text-muted-foreground">wt: {worktree}</div>
+      {nextMode ? (
+        <AdvanceConfirmModal
+          open={modalOpen}
+          onOpenChange={setModalOpen}
+          issueNumber={chain.issueNumber}
+          currentMode={currentMode}
+          nextMode={nextMode}
+          worktree={worktree}
+          worktreeReserved={!!chain.worktreeReservation}
+          onConfirm={handleConfirm}
+          pending={pending}
+        />
       ) : null}
-      <div className="mt-1">
-        <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]" onClick={handleOpen}>
-          Open
-        </Button>
-      </div>
-    </div>
+    </>
   )
 }

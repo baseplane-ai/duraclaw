@@ -1,9 +1,11 @@
 /**
  * ChainTimelineRow — one mode session in the chain timeline.
  *
- * P1 stub: status dot, mode badge, status label, relative timestamp.
- * Artifact chips are deferred to a follow-up unit that wires the
- * gateway project-browse glob.
+ * P3 U3: optional PR artifact chip rendered when `prNumber` is set AND
+ * this row is the implementation session (PRs are produced by the impl
+ * mode). Kept intentionally as a non-anchor badge for now — the external
+ * GitHub URL isn't resolvable client-side without plumbing `GITHUB_REPO`
+ * through another endpoint. Linking is deferred.
  */
 
 import type { SessionRecord } from '~/db/agent-sessions-collection'
@@ -14,6 +16,8 @@ interface ChainTimelineRowProps {
   session: SessionRecord
   active: boolean
   liveText?: string
+  /** PR number from the chain's `ChainSummary.prNumber`, if any. */
+  prNumber?: number
 }
 
 function deriveStatusLabel(session: SessionRecord): string {
@@ -29,10 +33,11 @@ function deriveStatusLabel(session: SessionRecord): string {
   return 'idle'
 }
 
-export function ChainTimelineRow({ session, active, liveText }: ChainTimelineRowProps) {
+export function ChainTimelineRow({ session, active, liveText, prNumber }: ChainTimelineRowProps) {
   const ts = session.lastActivity ?? session.createdAt
   const mode = session.kataMode ?? 'session'
   const statusLabel = deriveStatusLabel(session)
+  const showPrChip = typeof prNumber === 'number' && session.kataMode === 'implementation'
 
   return (
     <div
@@ -50,7 +55,7 @@ export function ChainTimelineRow({ session, active, liveText }: ChainTimelineRow
         </span>
         <span className="text-xs text-muted-foreground">{formatTimeAgo(ts)}</span>
         <div className="ml-auto flex gap-1">
-          {/* TODO P1.x: artifact chips (research doc, spec, PR) */}
+          {showPrChip ? <Badge variant="outline">PR #{prNumber}</Badge> : null}
         </div>
       </div>
       {active && liveText ? (

@@ -30,6 +30,11 @@ interface CreateSessionBody {
   system_prompt?: string
   sdk_session_id?: string
   agent?: string
+  /** Optional GH issue number stamp — used by the kanban Start-next /
+   *  drag-to-advance flow (GH#16 P3 U3) so the newly spawned session
+   *  shows up in its chain immediately, before kata's own sync writes
+   *  the value back. */
+  kataIssue?: number
 }
 
 const ACTIVE_STATUSES = ['running', 'waiting_input', 'waiting_permission'] as const
@@ -1390,7 +1395,7 @@ export function createApiApp() {
       totalCostUsd: null as number | null,
       messageCount: null as number | null,
       kataMode: null as string | null,
-      kataIssue: null as number | null,
+      kataIssue: typeof body.kataIssue === 'number' ? body.kataIssue : (null as number | null),
       kataPhase: null as string | null,
     }
 
