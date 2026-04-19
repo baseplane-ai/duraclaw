@@ -64,8 +64,14 @@ continuity for context budget.
 
 ## 3. Design proposal
 
-Three composable moves. Each is usable on its own; together they enable
+Composable moves. Each is usable on its own; together they enable
 auto-advance.
+
+> **Naming note.** We keep **"chain"** as the term for the container
+> (one issue → many mode sessions). "Thread" would collide with the
+> existing session transcript ("chat thread"), which is already the
+> primary meaning of the word in this UI. "Chain" stays out of the way
+> and reads fine alongside "session," "transcript," and "tab."
 
 ### 3A. Promote to issue at research close — **kata-layer feature**
 
@@ -339,6 +345,147 @@ mode. Same muscle memory as Linear.
 - Gives unlinked research/debug/freeform sessions a visible parking
   lot ("Unassigned" lane at the bottom)
 
+### 3E. Worktree checkout — chains reserve their workspace — **Duraclaw-layer feature**
+
+A worktree is a physical resource. Today `ProjectRegistry` already
+tracks "worktree locks + session index" but the lock is **per-session**
+— when the session ends the lock drops, even if the chain is still mid-
+flight. Two failure modes fall out:
+
+1. Chain #42 finishes research, user walks away, reaper kills the
+   runner, lock releases. Chain #43 grabs the same worktree. User
+   comes back, enters planning for #42, now we're writing specs
+   against a worktree that's already being mutated for #43.
+2. Two chains in the same project both want to start impl — there's
+   no visible signal until one of them fails.
+
+**Proposal: lift the lock from session → chain.** When a chain enters
+a code-touching mode (impl / verify / debug / task), it **checks out**
+a worktree and holds it across mode transitions until the chain
+completes or explicitly releases.
+
+**State** (extend `ProjectRegistry` DO):
+
+```ts
+worktreeReservations: Record<WorktreePath, {
+  issueNumber: number        // chain key
+  chainOwner: UserId         // who holds it
+  heldSince: ISODate
+  lastActivityAt: ISODate    // for stale detection
+  modeAtCheckout: KataMode   // first mode that claimed it
+}>
+```
+
+**Which modes check out?**
+
+| Mode | Reservation behavior |
+|---|---|
+| research, planning, freeform | no worktree needed (docs/specs live in `planning/`, not the worktree) |
+| implementation, verify, debug, task | reserve on first session in this mode within the chain |
+| close | doesn't reserve, releases on issue-close |
+
+A chain holds **zero or one** worktree. If planning's spec needs more
+than one worktree (rare — multi-repo feature), the chain fans out into
+sub-reservations keyed by `chainKey + subPath`.
+
+**Check-out trigger points:**
+
+1. First `kata enter impl --issue=42` in a chain → `POST
+   /api/chains/42/checkout { worktree }`
+2. Kanban drag from Planning → Impl column → prompt "Which worktree?"
+   → same checkout call
+3. User opens the chain tab and clicks "Attach worktree" → same
+
+**Conflict UX** (the key affordance):
+
+```
+┌────────────────────────────────────────────────────┐
+│ Worktree duraclaw-dev2 is held by chain #42        │
+│ ● @alice · since Apr 18 (2h ago)                   │
+│ ● last activity: planning session · 12m ago        │
+│                                                    │
+│  [ Message @alice ]   [ Pick different worktree ]  │
+│  [ Force release ]  (only if stale > 7d)           │
+└────────────────────────────────────────────────────┘
+```
+
+"Force release" is gated by a configurable staleness threshold (default
+7 days of no activity) and logs an audit entry with the user who
+forced it. No silent stomp.
+
+**Release triggers:**
+
+- Chain enters `close` mode and exits cleanly
+- Issue closed (GH webhook → DO)
+- PR merged (GH webhook → DO)
+- User explicitly releases from chain tab ("Release worktree")
+- Stale force-release (>7d + confirmation)
+
+**Visual surfacing:**
+
+- Kanban card footer: worktree chip (`🔒 duraclaw-dev2`) colored by
+  chain accent color
+- Worktree picker in session-create form: held worktrees grayed out
+  with `held by #42 (@alice · 2h)` tooltip
+- Sidebar `nav-sessions.tsx`: each worktree node shows a lock icon if
+  held, with issue number
+- Chain tab header: "workspace: `duraclaw-dev2` · [release]"
+
+**Multi-user cooperation** (pairs with GH#11 rehearsal path):
+
+Within a chain, **any user** can start a new session in the chain's
+held worktree — the reservation is chain-level, not user-level. Useful
+for pair programming and reviewer sessions. The session-level git lock
+in `ProjectRegistry` still prevents two runners mutating the same
+worktree simultaneously (git refuses anyway); the chain reservation is
+purely about *which chain owns this workspace*.
+
+**Auto-suggestion when starting a chain:**
+
+When research promotes to an issue (3A) with `type:feature` or
+`type:refactor`, offer to create a fresh worktree:
+
+```
+  Issue #42 created.
+
+  Reserve a worktree for implementation?
+  [Y] Create feature/42-pluggable-gateway from main  (default)
+  [p] Pick an existing worktree...
+  [n] Not yet
+```
+
+On Y, the DO runs `git worktree add` against the project root (via the
+agent-gateway's existing project-browsing endpoints), reserves it, and
+the chain walks straight into planning with a workspace already
+attached. Bugs reuse an existing worktree by default (they patch
+existing code, not feature branches).
+
+**API:**
+
+- `POST /api/chains/:issue/checkout { worktree }` → 200 or 409 with
+  reservation details
+- `POST /api/chains/:issue/release` → 200
+- `POST /api/chains/:issue/force-release { confirmation }` → 200 or 403
+- `GET /api/worktrees` (existing, extend response with `reservation:
+  {issueNumber, owner, ...} | null`)
+
+**Why this matters:**
+
+- **No more silent stomps.** Today, the only feedback that a worktree
+  is occupied is git itself refusing a branch switch. With chain
+  reservations, the UI surfaces the conflict before you even try.
+- **Work queues naturally.** Want to start impl on #51 but the only
+  Node worktree is held by #42? Kanban shows it, you either wait or
+  ask @alice.
+- **Makes the kanban honest.** Cards in Impl column *have a
+  workspace*; cards in Backlog don't. You can see at a glance what's
+  reserved vs. what's available.
+
+**Dependencies:** none. `ProjectRegistry` already exists as a
+singleton DO with worktree awareness — this is just extending the
+lock-key from `sessionId` to `issueNumber`. Could ship before or in
+parallel with 3B/3D.
+
 ## 4. Auto-advance — the payoff once 3A+3B+3C ship
 
 With the chain as a first-class surface and mode-entry as a known-safe
@@ -403,7 +550,8 @@ the loop is how you merge bad specs. But the plumbing is the same.
 | B | Chain tab surface | **Duraclaw orchestrator** (UI) | `use-tab-sync.ts` (kind field, new cluster key), new `/chain/:issueNumber` route, `SessionCardList` grouping variant, `GET /api/sessions?issue=<n>` already works | ~3 days |
 | C | Mode-enter session reset | **Duraclaw runtime** (DO + runner) | New `SessionDO` watcher on `kata_state.currentMode` transitions, clean-close via new `4411 mode_transition` close code, preamble template, advisory `--continue-sdk` hint in kata payload | ~4 days |
 | D | Kanban home + swim lanes | **Duraclaw UI + API** | New `/` (or `/board`) route with column/lane layout, `GET /api/chains` endpoint (joins GH issues + sessions + PRs), drag-to-advance with confirmation, card component reusing chain-tab internals, Yjs-backed lane collapse state, new-card mini form calling `gh issue create` | ~4 days |
-| E | Auto-advance affordances | **Duraclaw UI** | Inline "Continue to <next> →" actions on chain rows + cards, preconditions table, keyboard bindings | ~1 day |
+| E | Worktree checkout | **Duraclaw runtime** (ProjectRegistry DO) | Extend `ProjectRegistry` worktree lock from session-key to chain-key, `POST /api/chains/:issue/checkout \| /release \| /force-release`, conflict UI (busy modal with owner/time), lock chip in kanban card + worktree picker, stale-detection GC (7d default) | ~3 days |
+| F | Auto-advance affordances | **Duraclaw UI** | Inline "Continue to <next> →" actions on chain rows + cards, preconditions table, keyboard bindings | ~1 day |
 
 **The kata / Duraclaw split is load-bearing:**
 - A is the only kata-side change. It's a CLI prompt + a `gh` shell-out.
@@ -414,26 +562,30 @@ the loop is how you merge bad specs. But the plumbing is the same.
   `{mode, issueNumber, phase}` to state, the runner pipes it to the DO,
   the DO does everything else.
 
-Total ~13 days to get from "four unrelated sessions" to "kanban home
-where every card walks itself through the kata pipeline with a human
-confirm at each mode gate."
+Total ~16 days to get from "four unrelated sessions" to "kanban home
+where every card walks itself through the kata pipeline, reserves its
+workspace, and confirms at each mode gate."
 
 **Dependency graph:**
 
 ```
 A (promote) ──┐
-              ├──▶ B (chain tab) ──▶ D (kanban) ──▶ E (auto-advance)
-              │          │
-              │          ▼
-              └──▶ C (reset) ────────┘
+              ├──▶ B (chain tab) ──▶ D (kanban) ──▶ F (auto-advance)
+              │          │               ▲
+              │          ▼               │
+              └──▶ C (reset) ────────────┘
                         ▲
                 GH#12 (TanStack DB unification)
                 GH#14 (message transport on DB)
+
+E (worktree checkout) — independent; ships anywhere after A
+                       (chain key must exist); surfaces strongest in D
 ```
 
 A is standalone and ships first. B depends on A (needs issue as chain
-key) but nothing else. C depends on GH#12 landing. D depends on B
-(reuses the chain card). E is icing, depends on everything.
+key). C depends on GH#12 landing. D depends on B (reuses the chain
+card). E is independent — only needs A's chain key — and its UI
+benefits are most visible once D exists. F is icing.
 
 ## 7. Recommendation
 
@@ -441,10 +593,11 @@ Ship **3A alone first** — it's the cheapest change and the only one
 that touches kata. It unblocks the chain key and immediately makes
 `kata link` rarely needed. Then 3B for the chain detail view. Then 3D
 for the kanban home — this is the feature that changes how it *feels*
-to use Duraclaw, because starting new work becomes "click card, pick
-mode" instead of "navigate to worktree, remember issue number, open
-session form." 3C can slot in at any point (waiting on GH#12);
-auto-advance (3E) is the last mile.
+to use Duraclaw. 3E (worktree checkout) should land around the same
+time as 3D: the kanban is where worktree reservations become visible,
+and reservations are what keep parallel chains from stomping on each
+other. 3C can slot in at any point (waiting on GH#12); auto-advance
+(3F) is the last mile.
 
 The mental model worth keeping straight: **kata signals, Duraclaw
 acts.** Anything that involves killing processes, rotating
