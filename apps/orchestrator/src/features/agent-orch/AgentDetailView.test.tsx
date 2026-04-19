@@ -11,6 +11,12 @@ import { useStatusBarStore } from '~/stores/status-bar'
 import { AgentDetailView } from './AgentDetailView'
 import type { UseCodingAgentResult } from './use-coding-agent'
 
+// Stub out StatusBar so AgentDetailView tests don't exercise the live-state
+// collection or useLiveQuery machinery.
+vi.mock('~/components/status-bar', () => ({
+  StatusBar: () => <div data-testid="status-bar-stub" />,
+}))
+
 // Mock child components to isolate AgentDetailView rendering
 vi.mock('./ChatThread', () => ({
   ChatThread: (props: Record<string, unknown>) => (
@@ -131,21 +137,14 @@ describe('AgentDetailView', () => {
     expect(screen.getByTestId('message-input')).toBeTruthy()
   })
 
-  it('syncs session data to the global status bar store', () => {
+  it('syncs stop/interrupt callbacks to the status bar store', () => {
     const stopFn = vi.fn()
     const interruptFn = vi.fn()
-    const agent = makeAgent({
-      stop: stopFn,
-      interrupt: interruptFn,
-      contextUsage: { totalTokens: 1000, maxTokens: 200000, percentage: 0.5 },
-    })
+    const agent = makeAgent({ stop: stopFn, interrupt: interruptFn })
 
     render(<AgentDetailView name="test" agent={agent} />)
 
     const store = useStatusBarStore.getState()
-    expect(store.state).toBe(agent.state)
-    expect(store.wsReadyState).toBe(1)
-    expect(store.contextUsage).toEqual({ totalTokens: 1000, maxTokens: 200000, percentage: 0.5 })
     expect(store.onStop).toBe(stopFn)
     expect(store.onInterrupt).toBe(interruptFn)
   })
@@ -164,15 +163,15 @@ describe('AgentDetailView', () => {
     const agent = makeAgent()
     const { unmount } = render(<AgentDetailView name="test" agent={agent} />)
 
-    // Verify store is populated
-    expect(useStatusBarStore.getState().state).toBe(agent.state)
+    // Verify callbacks are populated
+    expect(useStatusBarStore.getState().onStop).toBe(agent.stop)
 
     unmount()
 
     // Store should be cleared
     const store = useStatusBarStore.getState()
-    expect(store.state).toBeNull()
     expect(store.onStop).toBeNull()
+    expect(store.onInterrupt).toBeNull()
   })
 
   it('renders ConversationDownload with messages and sessionId', () => {

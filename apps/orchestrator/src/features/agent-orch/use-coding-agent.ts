@@ -27,9 +27,10 @@
  */
 
 import { useAgent } from 'agents/react'
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type * as Y from 'yjs'
 import { type CachedMessage, messagesCollection } from '~/db/messages-collection'
+import { upsertSessionLiveState } from '~/db/session-live-state-collection'
 import { sessionsCollection } from '~/db/sessions-collection'
 import { useMessagesCollection } from '~/hooks/use-messages-collection'
 import { contentToParts } from '~/lib/message-parts'
@@ -288,6 +289,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       const prevStatus = prevStatusRef.current
       prevStatusRef.current = newState.status
       setState(newState)
+      upsertSessionLiveState(agentName, { state: newState, wsReadyState: 1 })
       // WS bridge: update sessions collection with fresh status. This is a
       // local-only mirror of the WS state (no server round-trip), so we use
       // utils.writeUpdate — the direct .update() API requires an onUpdate
@@ -378,30 +380,36 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
 
           // Capture kata session state
           if (event.type === 'kata_state') {
-            setKataState((event as unknown as { kata_state: KataSessionState }).kata_state)
+            const kataState = (event as unknown as { kata_state: KataSessionState }).kata_state
+            setKataState(kataState)
+            upsertSessionLiveState(agentName, { kataState })
           }
 
           // Capture context usage from get-context-usage response
           if (event.type === 'context_usage') {
             const usage = (event as unknown as { usage: Record<string, unknown> }).usage
-            setContextUsage({
+            const contextUsage: ContextUsage = {
               totalTokens: (usage.totalTokens as number) ?? 0,
               maxTokens: (usage.maxTokens as number) ?? 0,
               percentage: (usage.percentage as number) ?? 0,
               model: usage.model as string | undefined,
               isAutoCompactEnabled: usage.isAutoCompactEnabled as boolean | undefined,
               autoCompactThreshold: usage.autoCompactThreshold as number | undefined,
-            })
+            }
+            setContextUsage(contextUsage)
+            upsertSessionLiveState(agentName, { contextUsage })
           }
 
           // Capture cost/duration from result event
           if (event.type === 'result') {
             const resultEvent = event as { total_cost_usd?: number; duration_ms?: number }
             if (resultEvent.total_cost_usd != null || resultEvent.duration_ms != null) {
-              setSessionResult({
+              const sessionResult = {
                 total_cost_usd: resultEvent.total_cost_usd ?? 0,
                 duration_ms: resultEvent.duration_ms ?? 0,
-              })
+              }
+              setSessionResult(sessionResult)
+              upsertSessionLiveState(agentName, { sessionResult })
             }
           }
         }
@@ -410,6 +418,14 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       }
     },
   })
+
+  // Mirror WS connection readyState into the live-state collection so
+  // components reading from the collection can detect disconnect (spec B10).
+  // Observes every transition — including reconnects — even when no new
+  // state payload arrives.
+  useEffect(() => {
+    upsertSessionLiveState(agentName, { wsReadyState: connection.readyState })
+  }, [agentName, connection.readyState])
 
   /** Fetch persisted messages and write them into the collection. */
   async function hydrateMessages(conn: typeof connection): Promise<number> {

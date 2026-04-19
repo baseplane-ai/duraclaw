@@ -1,14 +1,16 @@
 /**
- * Session Status LocalOnlyCollection — caches status-bar-relevant snapshots
- * in OPFS SQLite so tab switches render instantly without waiting on the
- * WS state sync, getContextUsage RPC, kata WS event, or /api/gateway/projects
- * fetch.
+ * Session Live State LocalOnlyCollection — the single render source for
+ * per-session live state (connection, context usage, kata, worktree, result).
  *
- * - Collection id: 'session_status'
+ * This collection replaces the old `session_status` OPFS cache. Instead of
+ * threading transient WS/context/kata data through React context + stores
+ * + a cache-behind mirror, components read directly from this collection
+ * and AgentDetailView / the WS layer write through it on every update.
+ *
+ * - Collection id: 'session_live_state'
  * - Persisted to OPFS SQLite (schema version 1)
- * - One row per sessionId; shape mirrors useStatusBarStore fields
- * - Write-through: AgentDetailView upserts on every live update
- * - Read path: synchronous .get(id) for hydration before first paint
+ * - One row per sessionId; mirrors the fields the status bar + composer need
+ * - Synchronous read via TanStackDB live queries (no loading flash on tab switch)
  */
 
 import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence'
@@ -17,23 +19,24 @@ import type { KataSessionState, SessionState } from '~/lib/types'
 import type { ContextUsage, WorktreeInfo } from '~/stores/status-bar'
 import { dbReady } from './db-instance'
 
-/** Cached snapshot for a single session — powers the status bar cache-first. */
-export interface CachedSessionStatus {
+/** Live state snapshot for a single session — render source for status/composer. */
+export interface SessionLiveState {
   id: string
   state: SessionState | null
   contextUsage: ContextUsage | null
   kataState: KataSessionState | null
   worktreeInfo: WorktreeInfo | null
   sessionResult: { total_cost_usd: number; duration_ms: number } | null
+  wsReadyState: number
   updatedAt: string
 }
 
 const persistence = await dbReady
 
-function createSessionStatusCollection() {
-  const localOpts = localOnlyCollectionOptions<CachedSessionStatus, string>({
-    id: 'session_status',
-    getKey: (item: CachedSessionStatus) => item.id,
+function createSessionLiveStateCollection() {
+  const localOpts = localOnlyCollectionOptions<SessionLiveState, string>({
+    id: 'session_live_state',
+    getKey: (item: SessionLiveState) => item.id,
   })
 
   if (persistence) {
@@ -51,7 +54,7 @@ function createSessionStatusCollection() {
   return createCollection(localOpts)
 }
 
-export const sessionStatusCollection = createSessionStatusCollection()
+export const sessionLiveStateCollection = createSessionLiveStateCollection()
 
 /**
  * Strip sensitive / non-persistable fields from SessionState before caching.
@@ -71,22 +74,24 @@ function sanitizeState(s: SessionState | null): SessionState | null {
 /**
  * Upsert a partial snapshot for a session. Fields omitted from `patch`
  * preserve their prior cached values (patch-style merge, not replace).
+ * Insert path fills nulls for omitted fields; `wsReadyState` defaults to
+ * 3 (closed) when not in patch.
  */
-export function writeSessionStatusCache(
+export function upsertSessionLiveState(
   sessionId: string,
-  patch: Partial<Omit<CachedSessionStatus, 'id' | 'updatedAt'>>,
+  patch: Partial<Omit<SessionLiveState, 'id' | 'updatedAt'>>,
 ): void {
   const updatedAt = new Date().toISOString()
-  const normalized: Partial<CachedSessionStatus> = { ...patch, updatedAt }
+  const normalized: Partial<SessionLiveState> = { ...patch, updatedAt }
   if ('state' in normalized) {
     normalized.state = sanitizeState(normalized.state ?? null)
   }
 
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const coll = sessionStatusCollection as any
+    const coll = sessionLiveStateCollection as any
     if (coll.has?.(sessionId)) {
-      coll.update(sessionId, (draft: CachedSessionStatus) => {
+      coll.update(sessionId, (draft: SessionLiveState) => {
         Object.assign(draft, normalized)
       })
     } else {
@@ -97,27 +102,11 @@ export function writeSessionStatusCache(
         kataState: null,
         worktreeInfo: null,
         sessionResult: null,
+        wsReadyState: 3,
         ...normalized,
-      } as CachedSessionStatus)
+      } as SessionLiveState)
     }
   } catch {
     // collection may not be ready; swallow
-  }
-}
-
-/**
- * Synchronous read — safe to call in useLayoutEffect before first paint so
- * StatusBar hydrates cache-first and avoids the blank-flash on tab switch.
- * Returns null when the row doesn't exist, the collection isn't ready, or
- * OPFS is unavailable.
- */
-export function readSessionStatusCache(sessionId: string): CachedSessionStatus | null {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const coll = sessionStatusCollection as any
-    const row = coll.get?.(sessionId)
-    return (row as CachedSessionStatus | undefined) ?? null
-  } catch {
-    return null
   }
 }

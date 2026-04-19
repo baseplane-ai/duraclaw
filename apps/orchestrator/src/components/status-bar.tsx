@@ -1,13 +1,23 @@
 /**
  * StatusBar — VS Code-style fixed-bottom status bar showing session state.
- * Reads from the Zustand status-bar store (populated by AgentDetailView).
+ * Reads the active session's live state directly from
+ * `sessionLiveStateCollection` via `useLiveQuery` — no Zustand store / React
+ * context. The `sessionId` prop is passed in from AgentDetailView (which
+ * already receives it as a prop from its parent route); deriving it from a
+ * URL param would require `useParams()` plumbing that the current route
+ * shape (`/?session=X`, a query param on `/`) doesn't provide cleanly.
  */
 
+import { useLiveQuery } from '@tanstack/react-db'
 import { GitBranchIcon } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import {
+  type SessionLiveState,
+  sessionLiveStateCollection,
+} from '~/db/session-live-state-collection'
 import type { KataSessionState, PrInfo, SessionState } from '~/lib/types'
 import { cn } from '~/lib/utils'
-import { type ContextUsage, useStatusBarStore, type WorktreeInfo } from '~/stores/status-bar'
+import type { ContextUsage, WorktreeInfo } from '~/stores/status-bar'
 
 function formatDuration(ms: number): string {
   const seconds = Math.floor(ms / 1000)
@@ -211,13 +221,19 @@ function KataStatusItem({ kataState }: { kataState: KataSessionState }) {
   )
 }
 
-export function StatusBar() {
-  const { state, wsReadyState, contextUsage, sessionResult, kataState, worktreeInfo } =
-    useStatusBarStore()
+export function StatusBar({ sessionId }: { sessionId: string | null }) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data } = useLiveQuery((q) => q.from({ live_state: sessionLiveStateCollection as any }))
 
-  const status = state?.status
+  const row = useMemo(() => {
+    if (!sessionId || !data) return null
+    return (data as unknown as SessionLiveState[]).find((r) => r.id === sessionId) ?? null
+  }, [data, sessionId])
 
-  if (!state) return null
+  if (!sessionId || !row?.state) return null
+
+  const { state, wsReadyState, contextUsage, sessionResult, kataState, worktreeInfo } = row
+  const status = state.status
 
   return (
     <div
