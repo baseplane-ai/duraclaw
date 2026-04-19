@@ -108,19 +108,34 @@ cp .env.example .env        # fill in CC_GATEWAY_API_TOKEN + BOOTSTRAP_TOKEN
 scripts/verify/dev-up.sh    # generates .dev.vars, starts gateway + orchestrator
 ```
 
-**Port derivation** — each worktree auto-derives a unique port pair from its path (no manual allocation):
+**Port derivation** — each worktree auto-derives a unique set of ports from
+its absolute path via `cksum % 800`. No manual allocation needed — any new
+clone Just Works.
 
-| Worktree | Orch port | Gateway port |
-|----------|-----------|-------------|
-| duraclaw | 43307 | 10107 |
-| duraclaw-dev1 | 43054 | 9854 |
-| duraclaw-dev2 | 43613 | 10413 |
-| duraclaw-dev3 | 43537 | 10337 |
+| Worktree | Orch | Gateway | CDP-A | CDP-B | Bridge-A | Bridge-B | Axi |
+|----------|------|---------|-------|-------|----------|----------|-----|
+| duraclaw | 43307 | 10107 | 11307 | 12307 | 13307 | 14307 | 15307 |
+| duraclaw-dev1 | 43054 | 9854 | 11054 | 12054 | 13054 | 14054 | 15054 |
+| duraclaw-dev2 | 43613 | 10413 | 11613 | 12613 | 13613 | 14613 | 15613 |
+| duraclaw-dev3 | 43537 | 10337 | 11537 | 12537 | 13537 | 14537 | 15537 |
+
+Port ranges (all non-overlapping):
+
+| Range | Purpose |
+|-------|---------|
+| 9800–10599 | Gateway |
+| 11000–11799 | Browser A CDP (dual-browser) |
+| 12000–12799 | Browser B CDP (dual-browser) |
+| 13000–13799 | AXI-A bridge (dual-browser) |
+| 14000–14799 | AXI-B bridge (dual-browser) |
+| 15000–15799 | AXI bridge (single-browser via `scripts/axi`) |
+| 43000–43799 | Orchestrator |
 
 **Rules:**
 - Never set `CC_GATEWAY_PORT` in `.env` — it collides across worktrees. Use `VERIFY_GATEWAY_PORT` to override.
 - `.dev.vars` is generated — never hand-edit. Override via `.env` + `dev-up.sh`.
 - `.env` is gitignored. `.env.example` is the canonical template.
+- Use `scripts/axi` (not raw `chrome-devtools-axi`) so browser sessions are isolated per worktree.
 
 ## Packages
 
@@ -280,11 +295,11 @@ the Chrome profile directly — no fragile snapshot-ref scraping.
 ### Verify-mode local stack
 
 `scripts/verify/dev-up.sh` starts a local orchestrator (miniflare) and
-local agent-gateway for the current worktree — each on a **worktree-
-derived port pair** so parallel worktrees don't collide. The pair comes
-from `cksum($VERIFY_ROOT) % 800`, giving every checkout a stable slot in
-`43000–43799` (orchestrator) + `9800–10599` (gateway) without manual
-allocation.
+local agent-gateway for the current worktree — each on **worktree-derived
+ports** so parallel worktrees don't collide. The offset comes from
+`cksum($VERIFY_ROOT) % 800`, giving every checkout a stable slot across
+7 non-overlapping port ranges (see port table in "New Worktree Setup")
+without manual allocation.
 
 `scripts/verify/common.sh`:
 
@@ -318,15 +333,11 @@ and returns an explicit error instead of persisting into limbo — if you see
 `Gateway not configured for this worker`, fill in `.dev.vars`.
 
 **Dual-browser bridge isolation** (`axi-a` / `axi-b`):
-`chrome-devtools-axi` tracks its bridge via a PID file at
-`$HOME/.chrome-devtools-axi/bridge.pid` — a SINGLE path, so two concurrent
-wrappers sharing one `$HOME` clobber each other. `axi-a` and `axi-b` give
-each wrapper its own `$HOME` (`/tmp/duraclaw-axi-a-<worktree>`,
-`/tmp/duraclaw-axi-b-<worktree>`) and pin `CHROME_DEVTOOLS_AXI_PORT` to
-per-worktree-derived values so both bridges can stay alive in parallel
-without cross-talk — even across concurrent worktree verify sessions.
-All 4 browser ports (CDP A, CDP B, bridge A, bridge B) are auto-derived
-from the worktree path in `common.sh`, same as orch/gateway ports.
+All browser ports (CDP, bridge) and profile/state dirs are per-worktree
+isolated via `common.sh` — see port table in "New Worktree Setup". Each
+wrapper gets its own `$HOME` (`/tmp/duraclaw-axi-{a,b}-<worktree>`) so
+`chrome-devtools-axi`'s bridge PID file doesn't clobber the peer's, even
+across concurrent worktree verify sessions.
 
 **User seeding**: `/api/auth/sign-up/email` is disabled by default. Use
 the token-protected `/api/bootstrap` endpoint (enabled when
@@ -351,10 +362,9 @@ line (`[session-runner] project miss: name=...`) when filtered out.
 
 ### Portless mode (stable subdomains, multi-worktree-safe)
 
-Direct-port mode (`dev-up.sh`) collides between worktrees because both
-`43173` (orchestrator) and `9877` (gateway) are fixed. Portless mode runs
-each service behind a stable `.localhost` subdomain so `.dev.vars` is
-portable and parallel worktrees can each bring up their own stack.
+Direct-port mode (`dev-up.sh`) already derives per-worktree ports, but
+portless mode offers stable `.localhost` subdomains as an alternative —
+useful when URLs need to be constant across restarts or shared in config.
 
 One-time setup:
 
