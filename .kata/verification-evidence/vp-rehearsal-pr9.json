@@ -1,0 +1,106 @@
+{
+  "phaseId": "rehearsal",
+  "prNumber": 9,
+  "issueNumber": 7,
+  "timestamp": "2026-04-18T14:32:00.000Z",
+  "vpSource": "apps/orchestrator/scripts/cutover-rehearsal.sh (9 steps) + idempotency and 0009-gate regression added",
+  "environment": {
+    "wrangler": "4.81.1",
+    "tsx": "v4.21.0",
+    "node": "v22.22.2",
+    "jq": "/usr/bin/jq",
+    "d1": "local miniflare (duraclaw-auth, db id c5b4d822-9bc6-467f-9ad6-7ee779b82e0c)"
+  },
+  "dump": {
+    "file": "apps/orchestrator/dump.json (fabricated)",
+    "agent_sessions": 3,
+    "user_tabs": 3,
+    "user_preferences": 2,
+    "edge_cases": [
+      "NULL sdk_session_id on sess-rehearsal-002 (tests ON CONFLICT(id) upsert path)",
+      "apostrophe in prompt (O'Brien)",
+      "pre-escaped apostrophe in title (O''Brien) to stress-test escape function",
+      "boolean archived:true vs archived:0 mix",
+      "NULL model, max_budget, hidden_projects_json on user-bob"
+    ],
+    "real_prod_data": "scripts/sync-local-d1.sh pulled real prod D1 via OAuth (ben@baseplane.ai account 87bd3030…). Confirmed 2 real users (Ben + Chris), migrations 0001-0005 applied in prod. Prod D1 has agent_sessions/user_tabs/user_preferences tables (from prior deploys) but 0 rows in each — data still in DOs pre-cutover. dump.json was built referencing real user IDs (4MPlzz0B…, 6tcmTw5l…). Full rehearsal re-run with real FK parents passed: migrate 0006-0008 → seed users → export → load → 0009 → idempotency all green."
+  },
+  "steps": [
+    {
+      "id": "VP-R1",
+      "description": "Pre-flight — tsx, wrangler, jq, dump.json available",
+      "passed": true,
+      "actual": "pnpm tsx v4.21.0, wrangler 4.81.1, jq at /usr/bin/jq, dump.json 3.2KB with 3/3/2 rows"
+    },
+    {
+      "id": "VP-R2",
+      "description": "Wipe local D1 via `PRAGMA writable_schema=1; DELETE FROM sqlite_master; VACUUM;`",
+      "passed": false,
+      "expected": "tables dropped, fresh schema",
+      "actual": "wrangler local D1 sandbox refuses SQLITE_AUTH on writable_schema PRAGMA. Workaround: physically remove .wrangler/state/v3/d1/miniflare-D1DatabaseObject/*.sqlite* files. Rehearsal then proceeds.",
+      "finding": "cutover-rehearsal.sh Step 2 does not work against miniflare v3 / wrangler 4.81.1 local D1 — PRAGMA writable_schema is not permitted. The production remote D1 should not hit this because step 2 only targets local. However, any operator running the rehearsal on the shipped wrangler version will fail here."
+    },
+    {
+      "id": "VP-R3",
+      "description": "Apply migrations through 0008; assert 0009 not pre-staged",
+      "passed": true,
+      "actual": "0009 confirmed absent from migrations/ (pending/ only); wrangler applied 0001-0008 in order, 3 commands executed for 0008 (RENAME + CREATE). Final table set: agent_sessions, user_preferences, user_preferences_legacy, user_tabs present."
+    },
+    {
+      "id": "VP-R4",
+      "description": "pnpm tsx scripts/export-do-state.ts dump.json > export.sql",
+      "passed": true,
+      "actual": "12 lines generated — header (2) + BEGIN + 3 agent_sessions INSERTs + 3 user_tabs INSERTs + 2 user_preferences INSERTs + COMMIT. ON CONFLICT(id) DO UPDATE for agent_sessions/user_tabs (keyed on PK as documented in header comment); ON CONFLICT(user_id) for user_preferences. Apostrophe escaping correct: O'Brien → O''Brien; pre-doubled O''Brien → O''''Brien. NULLs rendered as bare NULL. Boolean archived:true → 1."
+    },
+    {
+      "id": "VP-R5",
+      "description": "Load export.sql via wrangler d1 execute --local --file=",
+      "passed": false,
+      "expected": "INSERTs succeed",
+      "actual": "First attempt failed: FOREIGN KEY constraint (SQLITE_CONSTRAINT_FOREIGNKEY) — user-alice/user-bob not in users table. After manual seed of users rows, load succeeded.",
+      "finding": "cutover-rehearsal.sh assumes the users table is already populated with the dumped user_ids. After Step 2 wipes the whole schema, users is empty, and Step 5 will fail on FK. For real production cutover this is fine (users rows already live in D1), but for local rehearsal the script should either (a) not wipe users or (b) seed stub users from the dump's distinct user_ids before step 5. Worth filing as a follow-up — especially with issue #11 (multi-user dump endpoint) on the horizon, where multi-user rehearsals will amplify this gap."
+    },
+    {
+      "id": "VP-R6",
+      "description": "Row counts match dump",
+      "passed": true,
+      "actual": "agent_sessions=3, user_tabs=3, user_preferences=2, user_preferences_legacy=0 — all match dump.json. String round-trip verified: prompt='edge-case: O'Brien' and title='Null-sdk peer (null) and O''Brien tests' returned as expected."
+    },
+    {
+      "id": "VP-R7",
+      "description": "Stage 0009, apply, clean up",
+      "passed": true,
+      "actual": "cp pending/0009 → migrations/; wrangler migrations apply applied 1 migration (DROP TABLE user_preferences_legacy) via 2 commands; post-apply, only user_preferences remains (legacy gone). 0009 copy removed from migrations/, pending/ copy preserved."
+    },
+    {
+      "id": "VP-R8",
+      "description": "Idempotency — re-run export.sql",
+      "passed": true,
+      "actual": "Second `wrangler d1 execute --file=export.sql` succeeded. Row counts unchanged (3/3/2). Confirms ON CONFLICT DO UPDATE behaviour on the id/user_id primary keys works as documented."
+    },
+    {
+      "id": "VP-R9",
+      "description": "0009-gate regression — pre-stage 0009, expect refusal",
+      "passed": true,
+      "actual": "Gate logic (if [ -f deployed_0009 ] then exit 1) exits 1 and prints the 'already exists — would apply too early' message. Note: when invoked as a full-script run with piped input, Step 2's SQLITE_AUTH failure short-circuits before Step 3's gate fires — so the gate only protects operators whose environment can pass Step 2. Related to the Step 2 finding above."
+    }
+  ],
+  "allStepsPassed": false,
+  "summary": {
+    "passed": 7,
+    "failed": 2,
+    "findings": [
+      "F1: Step 2 (`PRAGMA writable_schema=1; DELETE FROM sqlite_master`) is rejected by wrangler/miniflare v3 with SQLITE_AUTH. Rehearsal is not runnable on this environment as-shipped. Workaround: physically delete the .wrangler local D1 sqlite files.",
+      "F2: Step 5 (load export.sql) fails on FOREIGN KEY constraint because Step 2 wipes the users table and nothing re-seeds it before load. Operators must either pre-load users or the script must seed stubs from the dump's distinct user_ids.",
+      "F3: Because F1 blocks before Step 3, the 0009 pre-staged gate is only reached on environments where Step 2 succeeds. Gate logic itself is sound when executed directly.",
+      "F4 (resolved): .env had getelevra API token blocking sync. Fixed by commenting .env token, using OAuth (wrangler login from duraclaw-dev3). sync-local-d1.sh then succeeded. Note: operators on this VPS need to `unset CLOUDFLARE_API_TOKEN` or comment .env before running sync-local-d1.sh because wrangler auto-reads .env from cwd and API token takes precedence over OAuth."
+    ],
+    "mechanics_verified": [
+      "export-do-state.ts SQL generation: column order, escape rules, ON CONFLICT keys, NULL/boolean handling",
+      "Migration 0008 semantics: RENAME-then-CREATE preserves old data as user_preferences_legacy",
+      "Migration 0009 semantics: DROP TABLE IF EXISTS removes the renamed legacy table",
+      "0009-gate structural check refuses early application",
+      "Idempotency: export.sql is safe to re-run via ON CONFLICT DO UPDATE"
+    ]
+  }
+}
