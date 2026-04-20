@@ -2,11 +2,17 @@
 include ':capacitor-android'
 project(':capacitor-android').projectDir = new File('../../../node_modules/.pnpm/@capacitor+android@8.3.1_@capacitor+core@8.3.1/node_modules/@capacitor/android/capacitor')
 
+include ':capacitor-community-sqlite'
+project(':capacitor-community-sqlite').projectDir = new File('../../../node_modules/.pnpm/@capacitor-community+sqlite@8.1.0_@capacitor+core@8.3.1/node_modules/@capacitor-community/sqlite/android')
+
 include ':capacitor-app'
 project(':capacitor-app').projectDir = new File('../../../node_modules/.pnpm/@capacitor+app@8.1.0_@capacitor+core@8.3.1/node_modules/@capacitor/app/android')
+
+include ':capacitor-network'
+project(':capacitor-network').projectDir = new File('../../../node_modules/.pnpm/@capacitor+network@8.0.1_@capacitor+core@8.3.1/node_modules/@capacitor/network/android')
 
 include ':capacitor-preferences'
 project(':capacitor-preferences').projectDir = new File('../../../node_modules/.pnpm/@capacitor+preferences@8.0.1_@capacitor+core@8.3.1/node_modules/@capacitor/preferences/android')
 
-include ':capacitor-community-sqlite'
-project(':capacitor-community-sqlite').projectDir = new File('../../../node_modules/.pnpm/@capacitor-community+sqlite@8.1.0_@capacitor+core@8.3.1/node_modules/@capacitor-community/sqlite/android')
+include ':capacitor-push-notifications'
+project(':capacitor-push-notifications').projectDir = new File('../../../node_modules/.pnpm/@capacitor+push-notifications@8.0.3_@capacitor+core@8.3.1/node_modules/@capacitor/push-notifications/android')
