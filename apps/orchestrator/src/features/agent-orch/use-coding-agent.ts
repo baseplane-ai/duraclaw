@@ -20,6 +20,7 @@ import { upsertSessionLiveState } from '~/db/session-live-state-collection'
 import { useMessagesCollection } from '~/hooks/use-messages-collection'
 import { useSessionLiveState } from '~/hooks/use-session-live-state'
 import { contentToParts } from '~/lib/message-parts'
+import { wsBaseUrl } from '~/lib/platform'
 import type {
   ContentBlock,
   GateResponse,
@@ -278,6 +279,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   const connection = useAgent<SessionState>({
     agent: 'session-agent',
     name: agentName,
+    ...(wsBaseUrl() ? { host: wsBaseUrl() } : {}),
     onStateUpdate: (newState) => {
       // Mirror summary-ish fields onto the top level of the live-state row
       // so session-list readers (tab-bar, SessionListItem, SessionHistory)

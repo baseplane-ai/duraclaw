@@ -1,5 +1,13 @@
 /// <reference types="vite/client" />
 
+declare global {
+  interface ImportMetaEnv {
+    readonly VITE_PLATFORM?: string
+    readonly VITE_API_BASE_URL?: string
+    readonly VITE_WORKER_PUBLIC_URL?: string
+  }
+}
+
 /**
  * Platform detection helpers for Capacitor vs web.
  *
@@ -14,7 +22,11 @@
  * (relative URLs against `window.location.origin`), the deployed Worker
  * URL on Capacitor (substituted at build time via `VITE_API_BASE_URL`).
  *
- * `wsBaseUrl()` lands in P3a alongside the WS-URL refactor.
+ * `wsBaseUrl()` returns the bare host used by partysocket / agents
+ * `useAgent()` to dial the SessionDO. Empty on web → partysocket falls
+ * back to `window.location.host`. On Capacitor builds: the hostname from
+ * `VITE_WORKER_PUBLIC_URL` so the sandboxed `capacitor://localhost` page
+ * connects to the cloud Worker over wss.
  */
 
 export function isNative(): boolean {
@@ -40,4 +52,22 @@ export function apiUrl(path: string): string {
   if (!base) return path
   // Avoid double-slash if base ends with / and path starts with /
   return base.replace(/\/$/, '') + (path.startsWith('/') ? path : `/${path}`)
+}
+
+/**
+ * Bare host (no protocol) used by partysocket / agents `useAgent()` to
+ * dial the SessionDO. Empty on web → partysocket falls back to
+ * `window.location.host`. On Capacitor builds: the hostname from
+ * `VITE_WORKER_PUBLIC_URL` (e.g. `duraclaw.example.com`), so the
+ * sandboxed `capacitor://localhost` page connects to the cloud Worker
+ * over wss.
+ */
+export function wsBaseUrl(): string {
+  const url = import.meta.env.VITE_WORKER_PUBLIC_URL ?? ''
+  if (!url) return ''
+  try {
+    return new URL(url).host
+  } catch {
+    return url
+  }
 }

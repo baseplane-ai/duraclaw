@@ -47,6 +47,9 @@ export default defineConfig({
     // overrides via apps/mobile/.env.production (set in P5).
     'import.meta.env.VITE_API_BASE_URL': JSON.stringify(process.env.VITE_API_BASE_URL ?? ''),
     'import.meta.env.VITE_PLATFORM': JSON.stringify(process.env.VITE_PLATFORM ?? ''),
+    'import.meta.env.VITE_WORKER_PUBLIC_URL': JSON.stringify(
+      process.env.VITE_WORKER_PUBLIC_URL ?? '',
+    ),
   },
   plugins: [
     reactRefreshPreamble(),

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { apiBaseUrl, apiUrl, isNative } from './platform'
+import { apiBaseUrl, apiUrl, isNative, wsBaseUrl } from './platform'
 
 describe('isNative', () => {
   afterEach(() => {
@@ -61,5 +61,31 @@ describe('apiUrl', () => {
   it('inserts slash when path is missing the leading slash', () => {
     vi.stubEnv('VITE_API_BASE_URL', 'https://duraclaw.example.com')
     expect(apiUrl('api/sessions')).toBe('https://duraclaw.example.com/api/sessions')
+  })
+})
+
+describe('wsBaseUrl', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
+  it('returns empty string when VITE_WORKER_PUBLIC_URL is unset', () => {
+    vi.stubEnv('VITE_WORKER_PUBLIC_URL', '')
+    expect(wsBaseUrl()).toBe('')
+  })
+
+  it('extracts the host from an https URL', () => {
+    vi.stubEnv('VITE_WORKER_PUBLIC_URL', 'https://duraclaw.example.com')
+    expect(wsBaseUrl()).toBe('duraclaw.example.com')
+  })
+
+  it('extracts host:port from a wss URL with non-default port', () => {
+    vi.stubEnv('VITE_WORKER_PUBLIC_URL', 'wss://duraclaw.example.com:8443')
+    expect(wsBaseUrl()).toBe('duraclaw.example.com:8443')
+  })
+
+  it('returns the raw value when the URL is unparseable', () => {
+    vi.stubEnv('VITE_WORKER_PUBLIC_URL', 'not a url')
+    expect(wsBaseUrl()).toBe('not a url')
   })
 })
