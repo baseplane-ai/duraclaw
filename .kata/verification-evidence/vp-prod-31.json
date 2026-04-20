@@ -1,0 +1,129 @@
+{
+  "issueNumber": 31,
+  "run": "post-merge-prod-verification",
+  "timestamp": "2026-04-20T18:30:00.000Z",
+  "branch": "main",
+  "commit": "79065ea",
+  "target": "https://dura.baseplane.ai",
+  "prod_build_hash": "ba021f5eeb9930e2",
+  "prod_build_ts": "2026-04-20T18:19:14.221Z",
+  "summary": "Static VP10 audit + build-gate re-run against HEAD. Behavioral VP1–VP9/VP11 blocked on prod credentials.",
+  "build_gate": {
+    "typecheck": "pass — 10/10 turbo tasks clean",
+    "tests": "pass — 11/11 turbo tasks clean, 834/834 tests, 73/73 files (after fixing cd515da test regression)"
+  },
+  "prod_liveness": {
+    "root": "HTTP 200 in 104ms",
+    "api_health": "{\"ok\":true}",
+    "build_hash_fresh": true
+  },
+  "steps": [
+    {
+      "id": "VP1",
+      "title": "Persisted messageSeq survives DO eviction (B1)",
+      "status": "blocked",
+      "reason": "Requires prod session + /admin/evict-do endpoint (may not exist on prod). Pre-merge evidence: pass."
+    },
+    {
+      "id": "VP2",
+      "title": "branchInfo arrives on delta (B2)",
+      "status": "blocked",
+      "reason": "Requires logged-in prod session. Pre-merge evidence: pass."
+    },
+    {
+      "id": "VP3",
+      "title": "Dead gateway_event re-broadcasts gone (B3)",
+      "status": "blocked",
+      "reason": "Requires logged-in prod session with WS capture. Pre-merge evidence: pass."
+    },
+    {
+      "id": "VP4",
+      "title": "contextUsage REST endpoint (B4)",
+      "status": "blocked",
+      "reason": "Requires prod cookie + gateway log access. Pre-merge evidence: pass."
+    },
+    {
+      "id": "VP5",
+      "title": "kataState REST endpoint (B5)",
+      "status": "blocked",
+      "reason": "Requires prod VPS pkill access. Pre-merge evidence: pass."
+    },
+    {
+      "id": "VP6",
+      "title": "Bug 1 — message ordering (B8)",
+      "status": "blocked",
+      "reason": "Requires logged-in prod session. Pre-merge evidence: pass."
+    },
+    {
+      "id": "VP7",
+      "title": "Bug 2 — stop/send button state (B6)",
+      "status": "blocked",
+      "reason": "Requires logged-in prod session. Pre-merge evidence: pass."
+    },
+    {
+      "id": "VP8",
+      "title": "Bug 3 — ask_user prompt hides (B7)",
+      "status": "blocked",
+      "reason": "Requires logged-in prod session. Pre-merge evidence: pass."
+    },
+    {
+      "id": "VP9",
+      "title": "SDK state suppression (B9)",
+      "status": "blocked",
+      "reason": "Requires logged-in prod session with WS capture. Pre-merge evidence: pass."
+    },
+    {
+      "id": "VP10.1",
+      "title": "SessionState grep audit",
+      "status": "pass",
+      "evidence": "61 matches across apps/orchestrator/src (44) and packages/shared-types/src (17). All comments / KataSessionState / test assertions / historical references — matches pre-merge count. No live usage of removed SessionState blob type."
+    },
+    {
+      "id": "VP10.2",
+      "title": "No callers destructure .gate / .sessionResult from useSessionLiveState",
+      "status": "pass",
+      "evidence": "Grep `.gate\\b|.sessionResult\\b` in src/: 20 occurrences, all in DO-side code (this.state.gate), test assertions (session-do.test.ts), or explanatory comments referencing the deleted path. Zero useSessionLiveState callers destructure these. `status` field intentionally retained (D1-mirror for non-active callers, per CLAUDE.md)."
+    },
+    {
+      "id": "VP10.3",
+      "title": "setState / updateState only DO-internal",
+      "status": "pass",
+      "evidence": "Grep `this\\.setState\\(|updateState\\(` in apps/orchestrator/src/agents/: 30 matches in session-do.ts only. shouldSendProtocolMessages => false makes these no-ops over WS."
+    },
+    {
+      "id": "VP10.4",
+      "title": "session-live-state-collection.ts exists, narrowed",
+      "status": "pass",
+      "evidence": "File EXISTS. Type `SessionLiveState` contains status?: SessionStatus (retained D1 mirror) and no `gate`/`sessionResult` fields. Matches spec's deferred-consumer-issue scope."
+    },
+    {
+      "id": "VP10.5",
+      "title": "Typecheck clean",
+      "status": "pass",
+      "evidence": "pnpm typecheck → 10 successful, 10 total, 0 errors. Cached 4/10."
+    },
+    {
+      "id": "VP10.6",
+      "title": "D1 mirror /api/sessions shape",
+      "status": "blocked",
+      "reason": "Auth-gated endpoint, requires prod session cookie."
+    },
+    {
+      "id": "VP11",
+      "title": "Full integration smoke (all behaviors)",
+      "status": "blocked",
+      "reason": "Composite of VP1–VP9; requires logged-in prod session."
+    }
+  ],
+  "side_fixes": [
+    {
+      "issue": "server.test.ts broken by cd515da",
+      "root_cause": "cd515da added `import { SessionCollabDO } from './agents/session-collab-do-legacy'` to server.ts without mirroring the vi.mock() stub in server.test.ts; the new legacy file imports from 'cloudflare:workers' which vitest can't resolve. Same commit renamed the SessionCollabDO export in session-collab-do.ts to SessionCollabDOv2, so the existing vi.mock for that path was also stale.",
+      "fix": "server.test.ts — added vi.mock('./agents/session-collab-do-legacy', ...) and updated vi.mock('./agents/session-collab-do', ...) to expose SessionCollabDOv2.",
+      "verification": "pnpm test → 73/73 files, 834/834 tests, 11/11 turbo tasks, all pass."
+    }
+  ],
+  "overallPassed": "partial",
+  "allStepsPassed": false,
+  "verdict": "Static subset (6 steps) pass against HEAD. Behavioral steps (11) blocked on missing prod credentials — pre-merge VP (local verify stack) already recorded all 11 as pass at 2026-04-20T17:40Z. Prod is live and serving the correct build. cd515da test regression discovered and fixed during this run."
+}

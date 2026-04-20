@@ -21,6 +21,9 @@ vi.mock('./agents/user-settings-do', () => ({
   UserSettingsDO: class {},
 }))
 vi.mock('./agents/session-collab-do', () => ({
+  SessionCollabDOv2: class {},
+}))
+vi.mock('./agents/session-collab-do-legacy', () => ({
   SessionCollabDO: class {},
 }))
 
