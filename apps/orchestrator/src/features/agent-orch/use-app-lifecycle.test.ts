@@ -1,5 +1,5 @@
 /**
- * Tests for useAppLifecycle (B6 — Capacitor app-lifecycle hook).
+ * Tests for useAppLifecycle (Capacitor app-lifecycle hook).
  *
  * @vitest-environment jsdom
  */
@@ -51,21 +51,8 @@ vi.mock('@capacitor/app', () => ({
 
 import { useAppLifecycle } from './use-app-lifecycle'
 
-// ── Helpers ──────────────────────────────────────────────────────────
-
-function makeConnection() {
-  return {
-    readyState: 1,
-    close: vi.fn(),
-    reconnect: vi.fn(),
-  }
-}
-
 /** Wait until the async IIFE inside useEffect has installed its listener. */
 async function flushAsync() {
-  // Loop until addListener has run (dynamic import + await chain). Cap
-  // attempts so a real failure shows up as a stuck listener instead of
-  // an infinite hang.
   for (let i = 0; i < 50; i++) {
     if (mocks.addListenerMock.mock.calls.length > 0 && mocks.listenerCb() != null) return
     await Promise.resolve()
@@ -86,66 +73,49 @@ afterEach(() => {
 describe('useAppLifecycle', () => {
   it('is a no-op when isNative() is false (no listener added)', async () => {
     mocks.setIsNative(false)
-    const connection = makeConnection()
     const hydrate = vi.fn()
-    renderHook(() => useAppLifecycle({ connection, hydrate }))
+    renderHook(() => useAppLifecycle({ hydrate }))
     await flushAsync()
     expect(mocks.addListenerMock).not.toHaveBeenCalled()
   })
 
-  it('background → 5s timer triggers connection.close()', async () => {
-    const connection = makeConnection()
+  it('foreground calls hydrate()', async () => {
     const hydrate = vi.fn()
-    renderHook(() => useAppLifecycle({ connection, hydrate }))
+    renderHook(() => useAppLifecycle({ hydrate }))
     await flushAsync()
     expect(mocks.addListenerMock).toHaveBeenCalledTimes(1)
 
-    mocks.fire({ isActive: false })
-    expect(connection.close).not.toHaveBeenCalled()
-    vi.advanceTimersByTime(4999)
-    expect(connection.close).not.toHaveBeenCalled()
-    vi.advanceTimersByTime(1)
-    expect(connection.close).toHaveBeenCalledTimes(1)
-  })
-
-  it('foreground within 5s cancels timer, calls hydrate()', async () => {
-    const connection = makeConnection()
-    const hydrate = vi.fn()
-    renderHook(() => useAppLifecycle({ connection, hydrate }))
-    await flushAsync()
-
-    mocks.fire({ isActive: false })
-    vi.advanceTimersByTime(2000)
-    mocks.fire({ isActive: true })
-    expect(hydrate).toHaveBeenCalledTimes(1)
-    vi.advanceTimersByTime(10_000)
-    expect(connection.close).not.toHaveBeenCalled()
-  })
-
-  it('foreground after 5s still calls hydrate()', async () => {
-    const connection = makeConnection()
-    const hydrate = vi.fn()
-    renderHook(() => useAppLifecycle({ connection, hydrate }))
-    await flushAsync()
-
-    mocks.fire({ isActive: false })
-    vi.advanceTimersByTime(5000)
-    expect(connection.close).toHaveBeenCalledTimes(1)
     mocks.fire({ isActive: true })
     expect(hydrate).toHaveBeenCalledTimes(1)
   })
 
-  it('cleanup removes listener and clears pending timer', async () => {
-    const connection = makeConnection()
+  it('background does not call hydrate()', async () => {
     const hydrate = vi.fn()
-    const { unmount } = renderHook(() => useAppLifecycle({ connection, hydrate }))
+    renderHook(() => useAppLifecycle({ hydrate }))
     await flushAsync()
 
     mocks.fire({ isActive: false })
+    vi.advanceTimersByTime(60_000)
+    expect(hydrate).not.toHaveBeenCalled()
+  })
+
+  it('background → foreground cycle calls hydrate() on foreground only', async () => {
+    const hydrate = vi.fn()
+    renderHook(() => useAppLifecycle({ hydrate }))
+    await flushAsync()
+
+    mocks.fire({ isActive: false })
+    expect(hydrate).not.toHaveBeenCalled()
+    mocks.fire({ isActive: true })
+    expect(hydrate).toHaveBeenCalledTimes(1)
+  })
+
+  it('cleanup removes listener', async () => {
+    const hydrate = vi.fn()
+    const { unmount } = renderHook(() => useAppLifecycle({ hydrate }))
+    await flushAsync()
+
     unmount()
     expect(mocks.removeMock).toHaveBeenCalledTimes(1)
-    vi.advanceTimersByTime(10_000)
-    // Timer should have been cleared on unmount.
-    expect(connection.close).not.toHaveBeenCalled()
   })
 })

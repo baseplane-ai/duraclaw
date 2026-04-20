@@ -461,10 +461,10 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     upsertSessionLiveState(agentName, { wsReadyState: connection.readyState })
   }, [agentName, connection.readyState])
 
-  // B6 (Capacitor only): close the WS proactively when backgrounded >5s
-  // and hydrate missed messages on foreground. No-op on web.
+  // Capacitor only: hydrate missed messages on foreground. The WS itself
+  // is left alone — partysocket auto-reconnects if Android killed it while
+  // backgrounded. No-op on web.
   useAppLifecycle({
-    connection,
     hydrate: useCallback(() => {
       connection.call('getMessages', []).catch(() => {
         // Best-effort hydrate; messages collection still falls back to
