@@ -62,6 +62,37 @@ export function apiUrl(path: string): string {
  * sandboxed `capacitor://localhost` page connects to the cloud Worker
  * over wss.
  */
+/**
+ * Install a global fetch interceptor that injects the bearer token from
+ * Capacitor Preferences on every request to the API base URL. On web
+ * builds this is a no-op (tree-shaken). Must be called once at startup
+ * (entry-client.tsx) AFTER authClientReady resolves.
+ */
+export async function installNativeFetchInterceptor(): Promise<void> {
+  if (!isNative()) return
+  const base = apiBaseUrl()
+  if (!base) return
+
+  const { getCapacitorAuthToken } = await import('better-auth-capacitor/client')
+  const originalFetch = window.fetch.bind(window)
+
+  window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    // Only inject for requests to our API (skip auth endpoints — handled by auth client)
+    if (url.startsWith(base) && !url.includes('/api/auth/')) {
+      const token = await getCapacitorAuthToken({ storagePrefix: 'better-auth' })
+      if (token) {
+        const headers = new Headers(init?.headers)
+        if (!headers.has('Authorization')) {
+          headers.set('Authorization', `Bearer ${token}`)
+        }
+        init = { ...init, headers, credentials: 'omit' }
+      }
+    }
+    return originalFetch(input, init)
+  }
+}
+
 export function wsBaseUrl(): string {
   const url = import.meta.env.VITE_WORKER_PUBLIC_URL ?? ''
   if (!url) return ''

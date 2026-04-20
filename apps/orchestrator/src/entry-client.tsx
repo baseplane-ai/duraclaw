@@ -5,6 +5,7 @@ import { dbReady } from '~/db/db-instance'
 import { evictOldMessages } from '~/db/messages-collection'
 import { installAriaHiddenPatch } from '~/lib/aria-hidden-patch'
 import { authClientReady } from '~/lib/auth-client'
+import { installNativeFetchInterceptor } from '~/lib/platform'
 import { getRouter } from './router'
 
 installAriaHiddenPatch()
@@ -18,6 +19,12 @@ async function bootstrap() {
   // microtask. The Proxy-based `authClient` / `useSession` exports throw
   // if accessed before this resolves.
   await Promise.all([dbReady, authClientReady])
+
+  // Patch window.fetch on Capacitor so every API call includes the bearer
+  // token from Preferences. Must run after authClientReady so the
+  // better-auth-capacitor module is loaded.
+  await installNativeFetchInterceptor()
+
   try {
     evictOldMessages()
   } catch {
