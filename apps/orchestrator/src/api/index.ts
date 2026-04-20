@@ -765,6 +765,35 @@ export function createApiApp() {
     return c.body(null, 204)
   })
 
+  // Mobile OTA updater manifest — public endpoint (no auth). Capacitor
+  // shell POSTs {platform, version_name}; we return {version, url} when the
+  // deployed web bundle is newer, or {message} when it's current. The
+  // worker reads `/mobile/version.json` from its own static assets —
+  // written into dist/client/mobile/ by apps/mobile/scripts/build-android.sh.
+  app.post('/api/mobile/updates/manifest', async (c) => {
+    let body: { platform?: string; version_name?: string } = {}
+    try {
+      body = await c.req.json()
+    } catch {}
+    const current = body.version_name ?? ''
+
+    const versionRes = await c.env.ASSETS.fetch(
+      new Request(`${new URL(c.req.url).origin}/mobile/version.json`),
+    )
+    if (!versionRes.ok) {
+      return c.json({ message: 'No new version available' })
+    }
+    const manifest = (await versionRes.json()) as { version?: string; path?: string }
+    if (!manifest.version || !manifest.path || manifest.version === current) {
+      return c.json({ message: 'No new version available' })
+    }
+    const origin = new URL(c.req.url).origin
+    return c.json({
+      version: manifest.version,
+      url: `${origin}${manifest.path}`,
+    })
+  })
+
   app.use('/api/*', authMiddleware)
 
   // ── User settings (tabs) — direct D1 CRUD (B-API-2) ──────────────

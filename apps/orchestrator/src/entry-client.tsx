@@ -5,6 +5,7 @@ import { dbReady } from '~/db/db-instance'
 import { evictOldMessages } from '~/db/messages-collection'
 import { installAriaHiddenPatch } from '~/lib/aria-hidden-patch'
 import { authClientReady } from '~/lib/auth-client'
+import { initMobileUpdater } from '~/lib/mobile-updater'
 import { installNativeFetchInterceptor } from '~/lib/platform'
 import { installReactOffscreenPatch } from '~/lib/react-offscreen-patch'
 import { getRouter } from './router'
@@ -43,6 +44,8 @@ async function bootstrap() {
       <RouterProvider router={getRouter()} />
     </StrictMode>,
   )
+
+  void initMobileUpdater()
 }
 
 void bootstrap()

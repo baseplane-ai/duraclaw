@@ -41,6 +41,9 @@ importers:
       '@capacitor/push-notifications':
         specifier: ^8.0.1
         version: 8.0.3(@capacitor/core@8.3.1)
+      '@capgo/capacitor-updater':
+        specifier: ^7.0.0
+        version: 7.43.3(@capacitor/core@8.3.1)
       '@tanstack/capacitor-db-sqlite-persistence':
         specifier: 0.1.9
         version: 0.1.9(@capacitor-community/sqlite@8.1.0(@capacitor/core@8.3.1))(typescript@5.8.3)
@@ -66,6 +69,9 @@ importers:
       '@capacitor/push-notifications':
         specifier: ^8.0.1
         version: 8.0.3(@capacitor/core@8.3.1)
+      '@capgo/capacitor-updater':
+        specifier: ^7.0.0
+        version: 7.43.3(@capacitor/core@8.3.1)
       '@cloudflare/ai-chat':
         specifier: ^0.4.0
         version: 0.4.0(@ai-sdk/react@3.0.144(react@19.2.4)(zod@4.3.6))(agents@0.11.0)(ai@6.0.142(zod@4.3.6))(react@19.2.4)(zod@4.3.6)
@@ -1296,6 +1302,11 @@ packages:
     resolution: {integrity: sha512-jmBBoJvOzmzem8YoO9dQJBPFiM1bksTNAoV7yksCBN10BybAOtmBF19vFPt/jr2KGAirnPZz0ne2X0OH/rRGtg==}
     peerDependencies:
       '@capacitor/core': '>=8.0.0'
+
+  '@capgo/capacitor-updater@7.43.3':
+    resolution: {integrity: sha512-vKBDRwqnQv500rlaBPhlVJGDR/J6qiOS/YRQQLJkRNg803ZnSmAw+YHZckNfRkt2Bpplt4SK6Glf860DEgSadg==}
+    peerDependencies:
+      '@capacitor/core': '>=7.0.0'
 
   '@cfworker/json-schema@4.1.1':
     resolution: {integrity: sha512-gAmrUZSGtKc3AiBL71iNWxDsyUC5uMaKKGdvzYsBoTW/xi42JQHl7eKV2OYzCUqvc+D2RCcf7EXY2iCyFIk6og==}
@@ -8420,6 +8431,10 @@ snapshots:
       '@capacitor/core': 8.3.1
 
   '@capacitor/push-notifications@8.0.3(@capacitor/core@8.3.1)':
+    dependencies:
+      '@capacitor/core': 8.3.1
+
+  '@capgo/capacitor-updater@7.43.3(@capacitor/core@8.3.1)':
     dependencies:
       '@capacitor/core': 8.3.1
 

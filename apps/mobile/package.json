@@ -17,6 +17,7 @@
     "@capacitor/network": "^8.0.1",
     "@capacitor/preferences": "^8.0.1",
     "@capacitor/push-notifications": "^8.0.1",
+    "@capgo/capacitor-updater": "^7.0.0",
     "@tanstack/capacitor-db-sqlite-persistence": "0.1.9"
   },
   "devDependencies": {
