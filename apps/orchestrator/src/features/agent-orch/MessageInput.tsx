@@ -16,6 +16,7 @@ import {
   PromptInputSubmit,
   PromptInputTextarea,
   usePromptInputController,
+  VoiceInputButton,
 } from '@duraclaw/ai-elements'
 import { ImageIcon, SquareIcon, XIcon } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -24,6 +25,7 @@ import type * as Y from 'yjs'
 import { CursorOverlay } from '~/components/cursor-overlay'
 import { TypingIndicator } from '~/components/typing-indicator'
 import { useSessionCollab } from '~/hooks/use-session-collab'
+import { useVoiceInputEnabled } from '~/hooks/use-voice-input-enabled'
 import type { ContentBlock, SessionStatus } from '~/lib/types'
 import { cn } from '~/lib/utils'
 
@@ -94,6 +96,7 @@ export function MessageInput({
 }: MessageInputProps) {
   const [images, setImages] = useState<ImagePreview[]>([])
   const [error, setError] = useState<string | null>(null)
+  const { enabled: voiceEnabled } = useVoiceInputEnabled()
 
   // Open the collab room for this session. When no sessionId is provided
   // (legacy callers / tests without a session), we fall back to a
@@ -114,6 +117,25 @@ export function MessageInput({
   const collabActive = Boolean(sessionId)
   const collabReady = collabActive && collabStatus === 'connected'
   const isAuthFailed = collabActive && collabStatus === 'auth-failed'
+
+  const appendTranscriptToDraft = useCallback(
+    (transcript: string) => {
+      if (!transcript) return
+      if (!collabReady) {
+        // Collab not ready — fall back to inserting into the textarea
+        // via its native DOM API. Safe no-op if the ref is detached.
+        const el = textareaRef.current
+        if (!el) return
+        const prefix = el.value.length && !el.value.endsWith(' ') ? ' ' : ''
+        el.value = `${el.value}${prefix}${transcript}`
+        el.dispatchEvent(new Event('input', { bubbles: true }))
+        return
+      }
+      const prefix = ytext.length > 0 && !ytext.toString().endsWith(' ') ? ' ' : ''
+      ytext.insert(ytext.length, `${prefix}${transcript}`)
+    },
+    [collabReady, ytext],
+  )
 
   const processFile = useCallback((file: File) => {
     if (!file.type.startsWith('image/')) return
@@ -289,6 +311,11 @@ export function MessageInput({
             />
             <ImageIcon className="size-4" />
           </label>
+          <VoiceInputButton
+            enabled={voiceEnabled && !textareaDisabled}
+            onFinalTranscript={appendTranscriptToDraft}
+            onError={(err) => toast.error(`Voice input: ${err}`)}
+          />
           <ComposerActions
             ytext={collabReady ? ytext : null}
             disabled={textareaDisabled}

@@ -2,12 +2,14 @@
  * GateResolver — UI for resolving CodingAgent permission/question gates.
  */
 
+import { VoiceInputButton } from '@duraclaw/ai-elements'
 import { useState } from 'react'
 import { toast } from 'sonner'
 import { Badge } from '~/components/ui/badge'
 import { Button } from '~/components/ui/button'
 import { Input } from '~/components/ui/input'
 import { Label } from '~/components/ui/label'
+import { useVoiceInputEnabled } from '~/hooks/use-voice-input-enabled'
 import type { GateResponse } from '~/lib/types'
 import { cn } from '~/lib/utils'
 
@@ -36,6 +38,7 @@ export function GateResolver({ gate, onResolve, onResolved }: GateResolverProps)
   const [resolving, setResolving] = useState(false)
   const [selections, setSelections] = useState<Map<number, Set<string>>>(new Map())
   const [otherText, setOtherText] = useState('')
+  const { enabled: voiceEnabled } = useVoiceInputEnabled()
 
   const handleResolve = async (response: GateResponse) => {
     setResolving(true)
@@ -123,6 +126,16 @@ export function GateResolver({ gate, onResolve, onResolved }: GateResolverProps)
                   handleAskUserResolve(answer.trim())
                 }
               }}
+            />
+            <VoiceInputButton
+              enabled={voiceEnabled && !resolving}
+              onFinalTranscript={(transcript) => {
+                setAnswer((prev) => {
+                  if (!prev) return transcript
+                  return prev.endsWith(' ') ? `${prev}${transcript}` : `${prev} ${transcript}`
+                })
+              }}
+              onError={(err) => toast.error(`Voice input: ${err}`)}
             />
             <Button
               size="sm"

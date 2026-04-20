@@ -1,0 +1,1 @@
+ALTER TABLE `user_preferences` ADD `voice_input_enabled` integer;

@@ -49,6 +49,7 @@ const PREF_PATCH_KEYS = new Set([
   'thinkingMode',
   'effort',
   'hiddenProjects',
+  'voiceInputEnabled',
 ])
 
 const PERMISSION_MODES = new Set(['default', 'acceptAll', 'acceptEdits', 'plan'])
@@ -480,6 +481,7 @@ export function createApiApp() {
       thinkingMode: 'adaptive',
       effort: 'high',
       hiddenProjects: null,
+      voiceInputEnabled: null,
       updatedAt: new Date().toISOString(),
     }
     return c.json(defaults)
@@ -518,6 +520,13 @@ export function createApiApp() {
       if (typeof body.hiddenProjects !== 'string') {
         return c.json({ error: 'hiddenProjects must be a JSON string or null' }, 400)
       }
+    }
+    if (
+      body.voiceInputEnabled !== undefined &&
+      body.voiceInputEnabled !== null &&
+      typeof body.voiceInputEnabled !== 'boolean'
+    ) {
+      return c.json({ error: 'voiceInputEnabled must be a boolean or null' }, 400)
     }
 
     const updatedAt = new Date().toISOString()

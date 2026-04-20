@@ -15,6 +15,13 @@
       "when": 1776510668061,
       "tag": "0009_drop_user_preferences_legacy",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1776638545130,
+      "tag": "0010_add_voice_input_enabled",
+      "breakpoints": true
     }
   ]
 }

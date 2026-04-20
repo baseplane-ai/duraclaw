@@ -105,5 +105,13 @@ export interface UserPreferencesRow {
   thinkingMode: string | null
   effort: string | null
   hiddenProjects: string | null
+  /**
+   * Voice-input preference (A.5 · Phase 1).
+   * - `null` — not yet set. Client decides on first-run based on
+   *   `window.SpeechRecognition` availability.
+   * - `true` — user has opted in.
+   * - `false` — user has explicitly opted out.
+   */
+  voiceInputEnabled: boolean | null
   updatedAt: string
 }
