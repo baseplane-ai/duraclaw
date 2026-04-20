@@ -77,13 +77,13 @@ if [[ -z "${ANDROID_HOME:-}" && -z "${ANDROID_SDK_ROOT:-}" ]]; then
 fi
 
 SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
-APKSIGNER="$SDK_ROOT/build-tools/34.0.0/apksigner"
+APKSIGNER="$SDK_ROOT/build-tools/36.0.0/apksigner"
 if [[ ! -x "$APKSIGNER" ]]; then
   if command -v apksigner >/dev/null 2>&1; then
     APKSIGNER=$(command -v apksigner)
   else
     echo "!!  apksigner not found at $APKSIGNER and not on PATH." >&2
-    echo "!!  Install build-tools;34.0.0 via sdkmanager." >&2
+    echo "!!  Install build-tools;36.0.0 via sdkmanager." >&2
     exit 1
   fi
 fi
