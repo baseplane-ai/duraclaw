@@ -53,12 +53,13 @@ new_sqlite_classes = ["SessionDO", "ProjectRegistry"]
 tag = "v2"
 new_sqlite_classes = ["UserSettingsDO"]
 
-# SessionCollabDO was deployed as non-sqlite DO (cannot migrate). Replaced
-# with SessionCollabDOv2 (fresh sqlite-backed class, same binding name).
-# Old SessionCollabDO instances orphaned (legacy binding, harmless).
+# v3 created SessionCollabDO. DO NOT edit this tag — Cloudflare tracks
+# migrations by tag name and silently skips ones it has already applied,
+# so rewriting v3's body is a no-op against deployed workers. New classes
+# must be introduced by a NEW tag (see v6 below).
 [[migrations]]
 tag = "v3"
-new_sqlite_classes = ["SessionCollabDOv2"]
+new_sqlite_classes = ["SessionCollabDO"]
 
 # Issue #7 p3: UserSettingsDO is now a stateless PartyServer fanout.
 # The class no longer touches its SQLite — storage from the v2
@@ -73,6 +74,18 @@ tag = "v4"
 [[migrations]]
 tag = "v5"
 deleted_classes = ["ProjectRegistry"]
+
+# v6: introduce SessionCollabDOv2 as a fresh sqlite-backed class.
+# Why a new class: the original SessionCollabDO was deployed non-sqlite,
+# so `new_sqlite_classes` in v3 couldn't upgrade it (CF error 10074,
+# "can't add sqlite to existing non-sqlite DO class"). The
+# SESSION_COLLAB binding now points at v2; the legacy SessionCollabDO
+# class is kept alive via the SESSION_COLLAB_LEGACY binding + stub in
+# src/agents/session-collab-do-legacy.ts to avoid implicit delete-class
+# (CF error 10061).
+[[migrations]]
+tag = "v6"
+new_sqlite_classes = ["SessionCollabDOv2"]
 
 # D1 database for auth.
 #
