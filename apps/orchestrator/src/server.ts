@@ -117,8 +117,18 @@ export default {
           return stub.fetch(wsRequest)
         }
 
-        // Browser auth: require Better Auth session
-        const authSession = await getRequestSession(env, request)
+        // Browser auth: require Better Auth session. WebSocket can't send
+        // custom headers, so Capacitor clients pass the bearer token as a
+        // `_authToken` query param. Inject it as an Authorization header so
+        // the bearer() plugin converts it to a session cookie for getRequestSession.
+        let authRequest = request
+        const bearerToken = url.searchParams.get('_authToken')
+        if (bearerToken && !request.headers.get('Authorization')) {
+          const headers = new Headers(request.headers)
+          headers.set('Authorization', `Bearer ${bearerToken}`)
+          authRequest = new Request(request, { headers })
+        }
+        const authSession = await getRequestSession(env, authRequest)
         if (!authSession) {
           return new Response('Unauthorized', { status: 401 })
         }

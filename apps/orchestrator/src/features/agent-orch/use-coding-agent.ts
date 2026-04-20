@@ -20,7 +20,7 @@ import { upsertSessionLiveState } from '~/db/session-live-state-collection'
 import { useMessagesCollection } from '~/hooks/use-messages-collection'
 import { useSessionLiveState } from '~/hooks/use-session-live-state'
 import { contentToParts } from '~/lib/message-parts'
-import { wsBaseUrl } from '~/lib/platform'
+import { isNative, wsBaseUrl } from '~/lib/platform'
 import type {
   ContentBlock,
   GateResponse,
@@ -296,6 +296,18 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     agent: 'session-agent',
     name: agentName,
     ...(wsBaseUrl() ? { host: wsBaseUrl() } : {}),
+    // Capacitor WS can't send cookies cross-origin; pass bearer token as
+    // query param so the Worker can inject it as an Authorization header.
+    ...(isNative()
+      ? {
+          query: async (): Promise<Record<string, string | null>> => {
+            const { getCapacitorAuthToken } = await import('better-auth-capacitor/client')
+            const token = await getCapacitorAuthToken({ storagePrefix: 'better-auth' })
+            return token ? { _authToken: token } : {}
+          },
+          queryDeps: [],
+        }
+      : {}),
     onStateUpdate: (newState) => {
       // Mirror summary-ish fields onto the top level of the live-state row
       // so session-list readers (tab-bar, SessionListItem, SessionHistory)
