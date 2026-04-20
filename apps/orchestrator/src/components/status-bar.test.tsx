@@ -2,12 +2,27 @@
  * @vitest-environment jsdom
  */
 import { cleanup, render, screen } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   sessionLiveStateCollection,
   upsertSessionLiveState,
 } from '~/db/session-live-state-collection'
 import type { SessionState } from '~/lib/types'
+
+// Spec-31 P4b B6: StatusBar derives `status` from messages via
+// `useDerivedStatus`. These tests still target the StatusBar rendering
+// surface (chrome classes, value pass-through, WS dot) keyed on a
+// sessionLiveStateCollection row; stub the derivation hook to return a
+// per-test value via `setDerivedStatus()` so the existing assertions stay
+// meaningful without forcing each test to also seed the messages collection.
+let derivedStatusValue: SessionState['status'] = 'idle'
+function setDerivedStatus(s: SessionState['status']) {
+  derivedStatusValue = s
+}
+vi.mock('~/hooks/use-derived-status', () => ({
+  useDerivedStatus: () => derivedStatusValue,
+}))
+
 import { StatusBar } from './status-bar'
 
 const TEST_ID = 'test-session'
@@ -50,6 +65,7 @@ function clearRow() {
 describe('StatusBar', () => {
   beforeEach(() => {
     clearRow()
+    setDerivedStatus('idle')
   })
 
   afterEach(() => {
@@ -74,6 +90,7 @@ describe('StatusBar', () => {
   })
 
   it('shows session data when collection has row', () => {
+    setDerivedStatus('running')
     upsertSessionLiveState(TEST_ID, {
       state: makeState({ status: 'running', project: 'duraclaw', model: 'opus-4', num_turns: 12 }),
       wsReadyState: 1,
@@ -153,6 +170,7 @@ describe('StatusBar', () => {
   })
 
   it('applies blue background classes when running', () => {
+    setDerivedStatus('running')
     upsertSessionLiveState(TEST_ID, { state: makeState({ status: 'running' }) })
     render(<StatusBar sessionId={TEST_ID} />)
     const bar = screen.getByTestId('status-bar')
@@ -161,6 +179,7 @@ describe('StatusBar', () => {
   })
 
   it('applies warning background classes when waiting_gate', () => {
+    setDerivedStatus('waiting_gate')
     upsertSessionLiveState(TEST_ID, { state: makeState({ status: 'waiting_gate' }) })
     render(<StatusBar sessionId={TEST_ID} />)
     const bar = screen.getByTestId('status-bar')
@@ -183,6 +202,7 @@ describe('StatusBar', () => {
   })
 
   it('applies warning background for waiting_input', () => {
+    setDerivedStatus('waiting_input')
     upsertSessionLiveState(TEST_ID, { state: makeState({ status: 'waiting_input' }) })
     render(<StatusBar sessionId={TEST_ID} />)
     const bar = screen.getByTestId('status-bar')

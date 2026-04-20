@@ -41,6 +41,7 @@ import {
   SheetTitle,
 } from '~/components/ui/sheet'
 import { Skeleton } from '~/components/ui/skeleton'
+import type { DerivedGatePayload } from '~/hooks/use-derived-gate'
 import { getImagePartDataUrl } from '~/lib/message-parts'
 import type { GateResponse, SessionMessage, SessionMessagePart, SessionState } from '~/lib/types'
 import { GateResolver } from './GateResolver'
@@ -91,18 +92,15 @@ function isGateCandidate(part: SessionMessagePart): boolean {
 function isPendingGate(
   part: SessionMessagePart,
   readOnly: boolean | undefined,
-  gate: SessionState['gate'],
-  status: SessionState['status'],
+  derivedGate: DerivedGatePayload | null,
 ): boolean {
   if (!isGateCandidate(part) || readOnly) return false
-  // Dual signal — treat the gate as pending if EITHER the part's persisted
-  // state says 'approval-requested' OR the live session gate points at this
-  // part. Either alone is enough: when the tab is backgrounded and
-  // broadcastMessage state-update events are throttled/batched, the two can
-  // arrive out of order. Accepting both prevents "gate active but UI absent"
-  // after refocus.
+  // Spec-31 B7: message-derived gate. The part's own state is the primary
+  // signal; we also accept the derived-gate pointer as a defensive match
+  // in case the part's state hasn't propagated yet (parity with the
+  // pre-P4b dual signal, minus the SessionState.gate path).
   if (part.state === 'approval-requested') return true
-  if (gate && status === 'waiting_gate' && gate.id === part.toolCallId) return true
+  if (derivedGate && part.toolCallId && derivedGate.id === part.toolCallId) return true
   return false
 }
 
@@ -326,8 +324,13 @@ function CopyMessageButton({ text }: { text: string }) {
 
 interface ChatThreadProps {
   messages: SessionMessage[]
-  gate: SessionState['gate']
-  status: SessionState['status']
+  /**
+   * Spec-31 P4b: message-derived gate payload, computed upstream via
+   * `useDerivedGate(agentName)`. Supersedes the pre-P4b `(gate, status)`
+   * dual signal sourced from `SessionState`. Non-active callers that don't
+   * mount `useCodingAgent` pass `null`.
+   */
+  derivedGate: DerivedGatePayload | null
   state: SessionState | null
   isConnecting?: boolean
   onResolveGate: (gateId: string, response: GateResponse) => Promise<unknown>
@@ -342,8 +345,7 @@ interface ChatThreadProps {
 function renderPart(
   part: SessionMessagePart,
   index: number,
-  gate: SessionState['gate'],
-  status: SessionState['status'],
+  derivedGate: DerivedGatePayload | null,
   onResolveGate: (gateId: string, response: GateResponse) => Promise<unknown>,
   readOnly?: boolean,
   onQaResolved?: (question: string, answer: string) => void,
@@ -395,8 +397,11 @@ function renderPart(
   // The server validates the gateId on resolveGate (returns stale-gate error
   // if the gate moved on), and once resolved the part state transitions away
   // from 'approval-requested' via broadcastMessage so this stops rendering.
-  if (isPendingGate(part, readOnly, gate, status) && part.toolCallId) {
-    const partGate =
+  if (isPendingGate(part, readOnly, derivedGate) && part.toolCallId) {
+    // Reconstruct the gate payload from the persisted part — the derived
+    // gate lookup already matched by toolCallId, so the part IS the
+    // authoritative source. No live SessionState.gate merge needed.
+    const resolvedGate =
       part.type === 'tool-ask_user'
         ? {
             id: part.toolCallId,
@@ -408,10 +413,6 @@ function renderPart(
             type: 'permission_request' as const,
             detail: part.input,
           }
-    // Prefer live gate object when status matches (preserves any server-side
-    // detail enrichment), otherwise reconstruct from the persisted part.
-    const resolvedGate =
-      gate && status === 'waiting_gate' && gate.id === part.toolCallId ? gate : partGate
     return (
       <GateResolver
         key={index}
@@ -517,8 +518,7 @@ function ScrollOnUserSend({ messages }: { messages: SessionMessage[] }) {
 
 export function ChatThread({
   messages,
-  gate,
-  status,
+  derivedGate,
   state: _state,
   isConnecting,
   onResolveGate,
@@ -537,7 +537,7 @@ export function ChatThread({
     outer: for (const msg of messages) {
       if (msg.role !== 'assistant') continue
       for (const part of msg.parts) {
-        if (isPendingGate(part, readOnly, gate, status)) {
+        if (isPendingGate(part, readOnly, derivedGate)) {
           pendingGatePart = part
           break outer
         }
@@ -548,7 +548,7 @@ export function ChatThread({
 
   const pinnedGateNode = pendingGatePart?.toolCallId
     ? (() => {
-        const partGate =
+        const resolvedGate =
           pendingGatePart.type === 'tool-ask_user'
             ? {
                 id: pendingGatePart.toolCallId,
@@ -560,10 +560,6 @@ export function ChatThread({
                 type: 'permission_request' as const,
                 detail: pendingGatePart.input,
               }
-        const resolvedGate =
-          gate && status === 'waiting_gate' && gate.id === pendingGatePart.toolCallId
-            ? gate
-            : partGate
         return (
           <GateResolver gate={resolvedGate} onResolve={onResolveGate} onResolved={onQaResolved} />
         )
@@ -713,7 +709,7 @@ export function ChatThread({
                 const isGroupableTool =
                   part.type?.startsWith('tool-') &&
                   !isGateCandidate(part) &&
-                  !isPendingGate(part, readOnly, gate, status)
+                  !isPendingGate(part, readOnly, derivedGate)
                 if (isGroupableTool) {
                   // Buffer alongside any accumulated reasoning — both flush
                   // together on the next text part so that even when the agent
@@ -742,8 +738,7 @@ export function ChatThread({
                   renderPart(
                     part,
                     i,
-                    gate,
-                    status,
+                    derivedGate,
                     onResolveGate,
                     readOnly,
                     onQaResolved,

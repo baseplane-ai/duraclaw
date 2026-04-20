@@ -428,12 +428,15 @@ describe('useCodingAgent cache-first hydration', () => {
   })
 
   test('resets state when agentName changes', () => {
+    // Spec-31 P4b: onStateUpdate is a no-op; exercise state presence via a
+    // direct upsert into the mocked live-state store instead.
     const { result, rerender } = renderHook(({ name }: { name: string }) => useCodingAgent(name), {
       initialProps: { name: 'session-a' },
     })
 
     act(() => {
-      capturedUseAgentConfig?.onStateUpdate?.({ status: 'running', num_turns: 5 })
+      liveStateStore.set('session-a', { state: { status: 'running', num_turns: 5 } })
+      bumpLiveState()
     })
 
     expect(result.current.state).not.toBeNull()
@@ -1057,27 +1060,10 @@ describe('legacy gateway_event handling', () => {
     })
   })
 
-  test('processes result events', () => {
-    const { result } = renderHook(() => useCodingAgent('test-session'))
-
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'gateway_event',
-          event: {
-            type: 'result',
-            total_cost_usd: 0.42,
-            duration_ms: 15000,
-          },
-        }),
-      )
-    })
-
-    expect(result.current.sessionResult).toEqual({
-      total_cost_usd: 0.42,
-      duration_ms: 15000,
-    })
-  })
+  // Spec-31 P4b B3: `result` gateway_event client handler removed; cost
+  // and duration are served via D1 REST for non-active callers, and the
+  // running → idle transition is driven by `useDerivedStatus`. The prior
+  // `processes result events` test is therefore intentionally absent.
 
   test('does NOT create messages from assistant gateway_events (stripped)', () => {
     const { result } = renderHook(() => useCodingAgent('test-session'))

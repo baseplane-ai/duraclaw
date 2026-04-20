@@ -370,25 +370,13 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           queryDeps: [],
         }
       : {}),
-    onStateUpdate: (newState) => {
-      // Mirror summary-ish fields onto the top level of the live-state row
-      // so session-list readers (tab-bar, SessionListItem, SessionHistory)
-      // can see them without a parallel session-summary dual-write.
-      upsertSessionLiveState(agentName, {
-        state: newState,
-        wsReadyState: 1,
-        status: newState.status,
-        numTurns: newState.num_turns,
-        totalCostUsd: newState.total_cost_usd,
-        durationMs: newState.duration_ms,
-        model: newState.model,
-        project: newState.project,
-        prompt: newState.prompt,
-      })
-      // Hydration is owned by the queryCollection (`messagesCollection` factory
-      // + `useMessagesCollection`). The WS snapshot still writes directly to
-      // the collection as a latency optimisation; the queryFn is the
-      // cold-start / stale-cache fallback with retry: 1, retryDelay: 500.
+    onStateUpdate: () => {
+      // Spec-31 P4b: no-op. Status, gate, sessionResult and other live-state
+      // derivations for ACTIVE sessions now come from `useDerivedStatus` /
+      // `useDerivedGate` / `useMessagesCollection`, and the top-level
+      // summary fields (numTurns, totalCostUsd, model, …) are served from
+      // D1 REST to the non-active callers. This callback is removed
+      // entirely in P5 alongside `SessionState` deletion.
     },
     onMessage: (message: MessageEvent) => {
       try {
@@ -461,17 +449,12 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
             upsertSessionLiveState(agentName, { contextUsage })
           }
 
-          // Capture cost/duration from result event
-          if (event.type === 'result') {
-            const resultEvent = event as { total_cost_usd?: number; duration_ms?: number }
-            if (resultEvent.total_cost_usd != null || resultEvent.duration_ms != null) {
-              const sessionResult = {
-                total_cost_usd: resultEvent.total_cost_usd ?? 0,
-                duration_ms: resultEvent.duration_ms ?? 0,
-              }
-              upsertSessionLiveState(agentName, { sessionResult })
-            }
-          }
+          // Spec-31 P4b B3: `result` gateway_event handler removed — the
+          // running → idle transition is now driven by `useDerivedStatus`
+          // reading the final persisted message, and cost/duration are
+          // surfaced via the D1 REST endpoint for non-active callers.
+          // `sessionResult` stops being written here; `sessionLiveStateCollection`
+          // narrowing to drop the field happens in P5.
         }
       } catch {
         // Ignore non-JSON messages (state sync handled by onStateUpdate)

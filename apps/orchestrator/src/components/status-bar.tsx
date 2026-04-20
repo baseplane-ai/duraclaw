@@ -7,6 +7,7 @@
 
 import { GitBranchIcon } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { useDerivedStatus } from '~/hooks/use-derived-status'
 import { useSessionLiveState } from '~/hooks/use-session-live-state'
 import { deriveDisplayState } from '~/lib/display-state'
 import type { KataSessionState, PrInfo, SessionState } from '~/lib/types'
@@ -218,14 +219,22 @@ function KataStatusItem({ kataState }: { kataState: KataSessionState }) {
 export function StatusBar({ sessionId }: { sessionId: string | null }) {
   const { state, wsReadyState, contextUsage, sessionResult, kataState, worktreeInfo } =
     useSessionLiveState(sessionId)
+  // Spec-31 P4b B6: derive status from messages rather than the
+  // legacy SessionState.status channel. StatusBar is an active-session
+  // caller (mounted alongside useCodingAgent), so this hook observes the
+  // same messagesCollection that the WS handlers write into.
+  const derivedStatus = useDerivedStatus(sessionId ?? '')
 
   if (!sessionId || !state) return null
   const readyState = wsReadyState ?? 3
-  const display = deriveDisplayState(state, readyState)
-  // Bar chrome is keyed on the raw SessionState.status so the "running" tint
-  // and "waiting_gate" warning chrome survive a transient WS drop. The
-  // semantic display (dot, label) still goes through `deriveDisplayState`.
-  const status = state.status
+  // Swap the state's status field for the derived value so `deriveDisplayState`
+  // (shared with non-active callers that still pass raw state) returns the
+  // correct display variant without widening its signature.
+  const stateWithDerived: SessionState = { ...state, status: derivedStatus }
+  const display = deriveDisplayState(stateWithDerived, readyState)
+  // Bar chrome now tracks the derived status too so the "running" tint and
+  // "waiting_gate" warning chrome stay aligned with the label.
+  const status = derivedStatus
 
   return (
     <div
@@ -255,7 +264,7 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
 
       {/* Right-aligned timer — action buttons moved to the composer footer */}
       <div className="ml-auto flex shrink-0 items-center gap-2">
-        <ElapsedTimer state={state} />
+        <ElapsedTimer state={stateWithDerived} />
         {sessionResult?.duration_ms != null && (
           <span className="text-muted-foreground">{formatDuration(sessionResult.duration_ms)}</span>
         )}

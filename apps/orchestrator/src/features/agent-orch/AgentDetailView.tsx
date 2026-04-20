@@ -8,6 +8,7 @@ import { StatusBar } from '~/components/status-bar'
 import { type BranchInfoRow, createBranchInfoCollection } from '~/db/branch-info-collection'
 import { projectsCollection } from '~/db/projects-collection'
 import { upsertSessionLiveState } from '~/db/session-live-state-collection'
+import { useDerivedGate } from '~/hooks/use-derived-gate'
 import type { ProjectInfo } from '~/lib/types'
 import { useStatusBarStore } from '~/stores/status-bar'
 import { ChatThread } from './ChatThread'
@@ -115,6 +116,11 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
 
   const status = state?.status ?? 'idle'
 
+  // Spec-31 P4b: compute the message-derived gate once here, pass to
+  // ChatThread. Replaces the pre-P4b `(gate, status)` dual signal sourced
+  // from SessionState.
+  const derivedGate = useDerivedGate(sessionId)
+
   // Draft key scopes localStorage drafts. Now that tabs ARE sessions (Yjs
   // Y.Array of sessionIds), use sessionId directly — no separate tab ID.
   const draftKey = sessionId
@@ -132,8 +138,7 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
 
       <ChatThread
         messages={messages}
-        gate={state?.gate ?? null}
-        status={status}
+        derivedGate={derivedGate}
         state={state}
         isConnecting={isConnecting}
         onResolveGate={resolveGate}
