@@ -47,13 +47,13 @@ pnpm exec cap sync android
 echo ""
 echo "==> [4/4] Gradle assembleRelease"
 if [[ -z "${JAVA_HOME:-}" ]]; then
-  echo "!!  JAVA_HOME is not set. Install JDK 17 and export JAVA_HOME before running this script." >&2
+  echo "!!  JAVA_HOME is not set. Install JDK 21 (Capacitor 8 default) and export JAVA_HOME before running this script." >&2
   exit 1
 fi
 if [[ -z "${ANDROID_HOME:-}" && -z "${ANDROID_SDK_ROOT:-}" ]]; then
   echo "!!  ANDROID_HOME (or ANDROID_SDK_ROOT) is not set." >&2
-  echo "!!  Install Android SDK with cmdline-tools/latest, platform-tools, platforms;android-34," >&2
-  echo "!!  build-tools;34.0.0 and export ANDROID_HOME=\$HOME/Android/sdk." >&2
+  echo "!!  Install Android SDK with cmdline-tools/latest, platform-tools, platforms;android-36," >&2
+  echo "!!  build-tools;36.0.0 and export ANDROID_HOME=\$HOME/Android/sdk." >&2
   exit 1
 fi
 
