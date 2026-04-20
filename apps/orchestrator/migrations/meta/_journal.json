@@ -36,6 +36,13 @@
       "when": 1776700000000,
       "tag": "0013_projects",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1776720000000,
+      "tag": "0014_user_tabs_meta",
+      "breakpoints": true
     }
   ]
 }

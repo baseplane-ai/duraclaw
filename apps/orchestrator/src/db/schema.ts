@@ -180,6 +180,12 @@ export const userTabs = sqliteTable(
     position: integer('position').notNull(),
     createdAt: text('created_at').notNull(),
     deletedAt: text('deleted_at'),
+    // Stringified `TabMeta` JSON (client parses). Carries the rich semantics
+    // that the Yjs tab-sync hook previously held in its per-entry value —
+    // `kind`, `project`, `issueNumber`, `activeSessionId`. Kept opaque on
+    // the server (no server-side predicates) so adding a new meta field is
+    // a pure client change.
+    meta: text('meta'),
   },
   (t) => ({
     userPosition: index('idx_user_tabs_user_position').on(t.userId, t.position),

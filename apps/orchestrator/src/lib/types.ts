@@ -113,12 +113,30 @@ export interface AgentSessionRow {
   kataPhase: string | null
 }
 
+/**
+ * Tab semantics that used to live on the Yjs `TabEntry` value. Persisted as
+ * a stringified JSON blob on `user_tabs.meta` so adding a field is a pure
+ * client-side change. Absent/empty meta is equivalent to `{kind: 'session'}`.
+ */
+export interface TabMeta {
+  /** Absent → 'session' (legacy rows). */
+  kind?: 'chain' | 'session'
+  /** One-tab-per-project cluster key for session tabs. */
+  project?: string
+  /** Required when kind === 'chain' — one-chain-per-issue cluster key. */
+  issueNumber?: number
+  /** For chain tabs: which mode-session inside the chain is currently live. */
+  activeSessionId?: string
+}
+
 export interface UserTabRow {
   id: string
   userId: string
   sessionId: string | null
   position: number
   createdAt: string
+  /** Stringified `TabMeta` — null for legacy rows. */
+  meta?: string | null
 }
 
 /**

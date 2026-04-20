@@ -62,7 +62,7 @@ const SESSION_PATCH_KEYS = new Set([
   'project',
 ])
 
-const TAB_PATCH_KEYS = new Set(['sessionId', 'position'])
+const TAB_PATCH_KEYS = new Set(['sessionId', 'position', 'meta'])
 
 const PREF_PATCH_KEYS = new Set([
   'permissionMode',
@@ -786,6 +786,7 @@ export function createApiApp() {
       id?: string
       sessionId?: string | null
       position?: number
+      meta?: string | null
     } | null
     if (!body || typeof body !== 'object') {
       return c.json({ error: 'Invalid body' }, 400)
@@ -823,6 +824,7 @@ export function createApiApp() {
 
     const id = typeof body.id === 'string' && body.id.length > 0 ? body.id : crypto.randomUUID()
     const createdAt = new Date().toISOString()
+    const meta = typeof body.meta === 'string' ? body.meta : null
     const inserted = await db
       .insert(userTabs)
       .values({
@@ -831,6 +833,7 @@ export function createApiApp() {
         sessionId,
         position,
         createdAt,
+        meta,
       })
       .returning()
 

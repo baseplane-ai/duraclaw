@@ -1,33 +1,59 @@
 /**
- * useTabSync — Yjs-backed tab list, local active tab.
+ * useTabSync — D1-backed tab list (via `userTabsCollection`), local active tab.
  *
- * Y.Doc schema (synced cross-device via UserSettingsDO):
- *   - Y.Map<string> "tabs" — key: sessionId, value: JSON { project, order }
+ * Row model (user_tabs, one row per open tab):
+ *   - `id`          — random row id (surrogate key for PATCH / DELETE)
+ *   - `sessionId`   — external key consumed by the UI. Either a real
+ *                     agent_session id, a draft id (`draft:<uuid>`), or a
+ *                     chain key (`chain:<issueNumber>`).
+ *   - `position`    — integer, `ORDER BY position` drives render order.
+ *                     Fractional inserts and drag reorders are expressed
+ *                     as contiguous rewrites — see `computeInsertOrder`.
+ *   - `meta` (JSON) — stringified `TabMeta`: `{kind, project, issueNumber,
+ *                     activeSessionId}`. Adding a meta field is a pure
+ *                     client change — the server stores it opaquely.
  *
- * Active tab is LOCAL (useState + localStorage). Cross-device tab *list*
- * sync is the useful part; cross-device active-tab sync creates fights
- * (device A's click yanks device B's focus) and effect ping-pong loops
- * (deep-link reads URL → sets Yjs → URL-sync reads Yjs → navigates →
- * deep-link fires again).
+ * Active tab is LOCAL (useState + localStorage under
+ * `duraclaw-active-session`). Cross-device tab *list* sync is the useful
+ * part; cross-device active-tab sync creates fights (device A's click
+ * yanks device B's focus) and effect ping-pong (deep-link reads URL →
+ * mutates synced state → URL-sync reads it back → navigates → deep-link
+ * fires again).
  *
- * Why Y.Map instead of Y.Array:
- * Y.Array push() creates unique CRDT items. Push before IndexedDB
- * hydration + hydration load = two items for the same session.
- * Y.Map.set() on the same key converges to one entry. No duplicates.
+ * Why surrogate `id` instead of keying by `sessionId`:
+ * The D1 server-echo reconciliation on `userTabsCollection` requires a
+ * stable primary key that survives rename (draft → real session id). A
+ * separate `id` lets `replaceTab(oldSessionId, newSessionId)` be a
+ * PATCH on the existing row rather than a delete+insert (which would
+ * drop the row's `position` and any pending drafts).
  *
- * One-tab-per-project: openTab scans the map for an existing entry with
- * the same project name and removes it before inserting the new one.
+ * One-tab-per-project: `openTab` scans the local collection for an
+ * existing row with matching `meta.project` and removes it before
+ * inserting the new one — the new row inherits the deleted tab's
+ * position via `reusedOrder` so it doesn't jump to the end.
  *
- * One-chain-per-issue: chain tabs use `kind: 'chain'` + `issueNumber`
- * as a separate cluster key. A chain tab for an issue that already has
- * one simply re-focuses the existing tab instead of replacing.
+ * One-chain-per-issue: chain tabs carry `meta.kind === 'chain'` +
+ * `meta.issueNumber`. A chain tab for an issue that already has one
+ * simply re-focuses the existing tab instead of replacing.
  */
 
+import { useLiveQuery } from '@tanstack/react-db'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import useYProvider from 'y-partyserver/react'
-import * as Y from 'yjs'
-import { useSession } from '~/lib/auth-client'
-import { partyHost } from '~/lib/platform'
+import { userTabsCollection } from '~/db/user-tabs-collection'
+import { apiUrl } from '~/lib/platform'
+import type { TabMeta, UserTabRow } from '~/lib/types'
+import { useUserStream } from './use-user-stream'
+
+// Collection types come through from TanStack DB as `Record<string, unknown>`
+// due to the `as any` erasure inside `createSyncedCollection`. Cast once at
+// module scope so call sites stay readable.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const tabs = userTabsCollection as unknown as {
+  insert: (row: UserTabRow) => void
+  update: (id: string, fn: (draft: UserTabRow) => void) => void
+  delete: (id: string) => void
+  toArray: UserTabRow[]
+}
 
 export interface OpenTabOptions {
   /** Project name for one-tab-per-project enforcement. */
@@ -76,7 +102,7 @@ function entryKind(e: Pick<TabEntry, 'kind'>): 'chain' | 'session' {
 }
 
 export interface UseTabSyncResult {
-  /** Ordered list of open session IDs (reactive, sorted by order). */
+  /** Ordered list of open session IDs (reactive, sorted by position). */
   openTabs: string[]
   /** Currently focused session ID (local, not synced cross-device). */
   activeSessionId: string | null
@@ -93,65 +119,81 @@ export interface UseTabSyncResult {
    */
   tabEntries: Record<string, TabEntry>
   /**
-   * Open or activate a tab. Idempotent — Y.Map keys can't duplicate.
-   * When a project is provided, enforces one-tab-per-project (removes
-   * existing tab for the same project unless forceNewTab is set).
+   * Open or activate a tab. Idempotent — a tab for an existing sessionId
+   * is activated rather than re-created. When a project is provided,
+   * enforces one-tab-per-project (removes existing tab for the same
+   * project unless forceNewTab is set).
    */
   openTab: (sessionId: string, options?: OpenTabOptions) => void
   /** Remove a session from open tabs. Returns the next active session ID. */
   closeTab: (sessionId: string) => string | null
   /**
-   * Replace a tab's key (e.g. draft → real session ID) while preserving
-   * order and project metadata. Activates the new id if the old id was
-   * active. No-op if oldId isn't present.
+   * Replace a tab's sessionId (e.g. draft → real session ID) while
+   * preserving order and project metadata. Activates the new id if the
+   * old id was active. No-op if oldId isn't present.
    */
   replaceTab: (oldId: string, newId: string) => void
   /** Set the active session (local only). */
   setActive: (sessionId: string | null) => void
-  /** Find an existing chain tab for an issue. Returns its Y.Map key or null. */
+  /** Find an existing chain tab for an issue. Returns its sessionId or null. */
   findTabByIssue: (issueNumber: number) => string | null
-  /** True once IndexedDB has loaded local Y.Doc state. */
+  /** True once the collection has loaded its initial data. */
   hydrated: boolean
   /** Reorder: move the tab at fromIndex to toIndex. */
   reorder: (fromIndex: number, toIndex: number) => void
-  /** Yjs provider connection status. */
+  /** User-stream WS status, mapped to the legacy shape for existing callers. */
   status: 'connecting' | 'connected' | 'disconnected'
 }
 
+/** Snapshot shape used by `getTabSyncSnapshot`. */
+interface TabRowLite {
+  id: string
+  sessionId: string | null
+  position: number
+  meta: TabMeta
+}
+
+/** Parse the stringified `meta` JSON with a forgiving fallback. */
+function parseMeta(raw: string | null | undefined): TabMeta {
+  if (!raw) return {}
+  try {
+    const v = JSON.parse(raw)
+    return v && typeof v === 'object' ? (v as TabMeta) : {}
+  } catch {
+    return {}
+  }
+}
+
+/** Stringify `TabMeta` dropping undefined fields to keep payloads small. */
+function stringifyMeta(m: TabMeta): string {
+  const out: TabMeta = {}
+  if (m.kind) out.kind = m.kind
+  if (m.project !== undefined) out.project = m.project
+  if (m.issueNumber !== undefined) out.issueNumber = m.issueNumber
+  if (m.activeSessionId !== undefined) out.activeSessionId = m.activeSessionId
+  return JSON.stringify(out)
+}
+
 /**
- * Imperative read for keyboard handlers and other non-React callers.
+ * Project the collection's rows into ordered TabRowLite. Soft-deleted rows
+ * are already filtered by the REST GET handler; this is a defensive filter
+ * for any that arrive via delta frames before the server's soft-delete
+ * semantics are honoured by all writers.
  */
-export function getTabSyncSnapshot(): {
-  openTabs: string[]
-  activeSessionId: string | null
-} {
-  if (!sharedDoc) return { openTabs: [], activeSessionId: null }
-  return {
-    openTabs: sortedTabIds(sharedDoc.getMap<string>('tabs')),
-    activeSessionId: localStorage.getItem(ACTIVE_TAB_KEY),
+function projectRows(rows: readonly UserTabRow[]): TabRowLite[] {
+  const out: TabRowLite[] = []
+  for (const r of rows) {
+    if ((r as { deletedAt?: string | null }).deletedAt) continue
+    if (!r.sessionId) continue
+    out.push({
+      id: r.id,
+      sessionId: r.sessionId,
+      position: r.position,
+      meta: parseMeta(r.meta),
+    })
   }
-}
-
-/** Parse a tab entry value (JSON string → TabEntry). */
-function parseEntry(val: unknown): TabEntry {
-  if (typeof val === 'string') {
-    try {
-      return JSON.parse(val) as TabEntry
-    } catch {
-      return { order: 0 }
-    }
-  }
-  return { order: 0 }
-}
-
-/** Return session IDs sorted by their order field. */
-function sortedTabIds(tabsMap: Y.Map<string>): string[] {
-  const entries: Array<{ id: string; order: number }> = []
-  tabsMap.forEach((val, key) => {
-    entries.push({ id: key, order: parseEntry(val).order })
-  })
-  entries.sort((a, b) => a.order - b.order)
-  return entries.map((e) => e.id)
+  out.sort((a, b) => a.position - b.position)
+  return out
 }
 
 /**
@@ -221,135 +263,78 @@ export function computeInsertOrder(
   return (lastClusterOrder + nextOrder) / 2
 }
 
-/** Build a {sessionId → project} map from the Yjs tabs map. */
-function buildProjectMap(tabsMap: Y.Map<string>): Record<string, string | undefined> {
-  const out: Record<string, string | undefined> = {}
-  tabsMap.forEach((val, key) => {
-    out[key] = parseEntry(val).project
-  })
-  return out
+/**
+ * Imperative read for keyboard handlers and other non-React callers.
+ * Reads from the collection's in-memory array — no React subscription.
+ */
+export function getTabSyncSnapshot(): {
+  openTabs: string[]
+  activeSessionId: string | null
+} {
+  const rows = (tabs.toArray as UserTabRow[]) ?? []
+  const projected = projectRows(rows)
+  return {
+    openTabs: projected.map((r) => r.sessionId as string),
+    activeSessionId:
+      typeof localStorage !== 'undefined' ? localStorage.getItem(ACTIVE_TAB_KEY) : null,
+  }
 }
 
-/** Build a {sessionId → TabEntry} map from the Yjs tabs map. */
-function buildEntriesMap(tabsMap: Y.Map<string>): Record<string, TabEntry> {
-  const out: Record<string, TabEntry> = {}
-  tabsMap.forEach((val, key) => {
-    out[key] = parseEntry(val)
-  })
-  return out
+/** Short random id for new `user_tabs` rows. */
+function newRowId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID().slice(0, 8)
+  }
+  return Math.random().toString(36).slice(2, 10)
 }
-
-// Module-level Y.Doc reference for imperative reads (getTabSyncSnapshot).
-let sharedDoc: Y.Doc | null = null
-let sharedDocMountCount = 0
 
 export function useTabSync(): UseTabSyncResult {
-  const { data: session } = useSession() as {
-    data: { user?: { id?: string } } | null | undefined
-  }
-  const userId = session?.user?.id ?? null
+  // Reactive subscription to the collection. Cast because TanStack DB's beta
+  // generics don't perfectly match the NonSingleResult overload; see
+  // use-sessions-collection.ts for the same pattern.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data, isLoading } = useLiveQuery(userTabsCollection as any)
 
-  const doc = useMemo(() => {
-    if (!userId) return null
-    const d = new Y.Doc()
-    d.guid = `user-settings:${userId}`
-    return d
-  }, [userId])
+  const rows = useMemo(() => projectRows((data as UserTabRow[]) ?? []), [data])
 
-  useEffect(() => {
-    if (!doc) return
-    sharedDoc = doc
-    sharedDocMountCount++
-    return () => {
-      sharedDocMountCount--
-      if (sharedDocMountCount === 0) sharedDoc = null
+  const openTabs = useMemo(() => rows.map((r) => r.sessionId as string), [rows])
+
+  const tabEntries = useMemo(() => {
+    const out: Record<string, TabEntry> = {}
+    for (const r of rows) {
+      const m = r.meta
+      const entry: TabEntry = { order: r.position }
+      if (m.project !== undefined) entry.project = m.project
+      if (m.kind === 'chain') entry.kind = 'chain'
+      if (m.issueNumber !== undefined) entry.issueNumber = m.issueNumber
+      if (m.activeSessionId !== undefined) entry.activeSessionId = m.activeSessionId
+      out[r.sessionId as string] = entry
     }
-  }, [doc])
+    return out
+  }, [rows])
 
-  // "tabs" Y.Map — synced cross-device.
-  const tabsY = useMemo(() => doc?.getMap<string>('tabs') ?? null, [doc])
+  const tabProjects = useMemo(() => {
+    const out: Record<string, string | undefined> = {}
+    for (const r of rows) out[r.sessionId as string] = r.meta.project
+    return out
+  }, [rows])
 
-  const host = partyHost()
-
-  const provider = useYProvider({
-    host,
-    room: userId ?? '',
-    party: 'user-settings',
-    doc: doc ?? undefined,
-    options: { connect: Boolean(userId) },
-  })
-
-  // IndexedDB persistence for offline cold-start.
-  // `hydrated` signals when local state has been loaded so the UI can
-  // avoid rendering an empty tab bar that flashes before data arrives.
-  const [hydrated, setHydrated] = useState(false)
-  useEffect(() => {
-    if (!userId || !doc) return
-    setHydrated(false)
-    let destroyed = false
-    let idb: { destroy: () => void } | null = null
-    import('y-indexeddb').then(({ IndexeddbPersistence }) => {
-      if (destroyed) return
-      const persistence = new IndexeddbPersistence(`user-settings:${userId}`, doc)
-      idb = persistence
-      persistence.once('synced', () => {
-        if (!destroyed) setHydrated(true)
-      })
-    })
-    return () => {
-      destroyed = true
-      idb?.destroy()
-    }
-  }, [userId, doc])
-
-  // Connection status tracking.
-  const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting')
-  useEffect(() => {
-    if (!provider) return
-    const onStatus = (payload: { status?: string } | undefined) => {
-      const next = payload?.status
-      if (next === 'connected' || next === 'connecting' || next === 'disconnected') {
-        setStatus(next)
-      }
-    }
-    provider.on('status', onStatus as never)
-    return () => {
-      provider.off('status', onStatus as never)
-    }
-  }, [provider])
-
-  // ── Tab list (Yjs-synced, reactive) ─────────────────────────────────
-
-  const [openTabs, setOpenTabs] = useState<string[]>(() => (tabsY ? sortedTabIds(tabsY) : []))
-  const [tabProjects, setTabProjects] = useState<Record<string, string | undefined>>(() =>
-    tabsY ? buildProjectMap(tabsY) : {},
-  )
-  const [tabEntries, setTabEntries] = useState<Record<string, TabEntry>>(() =>
-    tabsY ? buildEntriesMap(tabsY) : {},
-  )
-
-  useEffect(() => {
-    if (!tabsY) return
-    const handler = () => {
-      setOpenTabs(sortedTabIds(tabsY))
-      setTabProjects(buildProjectMap(tabsY))
-      setTabEntries(buildEntriesMap(tabsY))
-    }
-    tabsY.observe(handler)
-    setOpenTabs(sortedTabIds(tabsY))
-    setTabProjects(buildProjectMap(tabsY))
-    setTabEntries(buildEntriesMap(tabsY))
-    return () => tabsY.unobserve(handler)
-  }, [tabsY])
+  /** sessionId → row.id lookup for PATCH / DELETE. */
+  const idBySessionId = useMemo(() => {
+    const out = new Map<string, string>()
+    for (const r of rows) out.set(r.sessionId as string, r.id)
+    return out
+  }, [rows])
 
   // ── Active tab (local, persisted to localStorage) ───────────────────
 
   const [activeSessionId, setActiveState] = useState<string | null>(() =>
-    localStorage.getItem(ACTIVE_TAB_KEY),
+    typeof localStorage !== 'undefined' ? localStorage.getItem(ACTIVE_TAB_KEY) : null,
   )
 
   const setActive = useCallback((sessionId: string | null) => {
     setActiveState(sessionId)
+    if (typeof localStorage === 'undefined') return
     if (sessionId) {
       localStorage.setItem(ACTIVE_TAB_KEY, sessionId)
     } else {
@@ -359,21 +344,23 @@ export function useTabSync(): UseTabSyncResult {
 
   const findTabByIssue = useCallback(
     (issueNumber: number): string | null => {
-      if (!tabsY) return null
-      let found: string | null = null
-      tabsY.forEach((val, key) => {
-        if (found) return
-        const e = parseEntry(val)
-        if (entryKind(e) === 'chain' && e.issueNumber === issueNumber) {
-          found = key
+      for (const r of rows) {
+        if (r.meta.kind === 'chain' && r.meta.issueNumber === issueNumber) {
+          return r.sessionId as string
         }
-      })
-      return found
+      }
+      return null
     },
-    [tabsY],
+    [rows],
   )
 
   // ── Actions ─────────────────────────────────────────────────────────
+  //
+  // Writes go through `userTabsCollection` — its `onInsert` / `onUpdate` /
+  // `onDelete` handlers POST / PATCH / DELETE against
+  // `/api/user-settings/tabs`, and the server rebroadcasts as a delta via
+  // `broadcastSyncedDelta`. Local optimistic state reconciles with the
+  // server echo through TanStack DB's deep-equality loopback.
 
   const openTab = useCallback(
     (sessionId: string, opts?: OpenTabOptions) => {
@@ -381,29 +368,38 @@ export function useTabSync(): UseTabSyncResult {
       const forceNewTab = opts?.forceNewTab ?? false
       const kind: 'chain' | 'session' = opts?.kind === 'chain' ? 'chain' : 'session'
       const issueNumber = opts?.issueNumber
-      if (!doc || !tabsY) return
 
       // Guard: chain tab requires a numeric issueNumber.
       if (kind === 'chain' && typeof issueNumber !== 'number') return
 
-      // One-chain-per-issue: if a chain tab for this issue already exists
-      // (under any key), focus it instead of adding another.
+      // One-chain-per-issue: if a chain tab for this issue already exists,
+      // focus it instead of adding another.
       if (kind === 'chain' && typeof issueNumber === 'number') {
-        let existingKey: string | null = null
-        tabsY.forEach((val, key) => {
-          if (existingKey) return
-          const e = parseEntry(val)
-          if (entryKind(e) === 'chain' && e.issueNumber === issueNumber) {
-            existingKey = key
-          }
-        })
-        if (existingKey) {
-          setActive(existingKey)
+        const existing = rows.find(
+          (r) => r.meta.kind === 'chain' && r.meta.issueNumber === issueNumber,
+        )
+        if (existing) {
+          setActive(existing.sessionId as string)
           return
         }
       }
 
-      // Derive cluster key for insertion order math.
+      // Already-open under this exact sessionId — update meta.project for
+      // session tabs (chain tabs don't carry project), then activate.
+      const same = rows.find((r) => r.sessionId === sessionId)
+      if (same) {
+        if (kind === 'session' && project && same.meta.project !== project) {
+          const rowId = idBySessionId.get(sessionId)
+          if (rowId) {
+            tabs.update(rowId, (draft: UserTabRow) => {
+              draft.meta = stringifyMeta({ ...same.meta, project })
+            })
+          }
+        }
+        setActive(sessionId)
+        return
+      }
+
       const clusterKey: string | null =
         kind === 'chain' && typeof issueNumber === 'number'
           ? `issue:${issueNumber}`
@@ -411,155 +407,161 @@ export function useTabSync(): UseTabSyncResult {
             ? `project:${project}`
             : null
 
-      doc.transact(() => {
-        const existing = tabsY.get(sessionId)
-
-        if (existing) {
-          // Already open under this exact key — update project for session
-          // tabs only (chain tabs are keyed by stable chain key, and
-          // project isn't meaningful on them).
-          if (kind === 'session' && project) {
-            const entry = parseEntry(existing)
-            if (entry.project !== project) {
-              tabsY.set(sessionId, JSON.stringify({ ...entry, project }))
-            }
-          }
-          // Activate (local).
-          setActive(sessionId)
-          return
-        }
-
-        // Snapshot the current tab entries up front so we can reason about
-        // ordering without re-reading the map after mutation.
-        const entries: Array<{
-          id: string
-          order: number
-          project?: string
-          kind?: 'chain' | 'session'
-          issueNumber?: number
-        }> = []
-        tabsY.forEach((val, key) => {
-          const entry = parseEntry(val)
-          entries.push({
-            id: key,
-            order: entry.order,
-            project: entry.project,
-            kind: entry.kind,
-            issueNumber: entry.issueNumber,
-          })
-        })
-
-        // One-tab-per-project (session tabs only): remove existing tab(s)
-        // for the same project. Remember one of their orders so the
-        // replacement slots back into the same position instead of
-        // jumping to the end. Chain tabs bypass this — their cluster is
-        // keyed by issueNumber and we've already handled dedupe above.
-        let reusedOrder: number | null = null
-        if (kind === 'session' && !forceNewTab && project) {
-          for (const e of entries) {
-            if (entryKind(e) !== 'chain' && e.project === project) {
-              if (reusedOrder === null) reusedOrder = e.order
-              tabsY.delete(e.id)
-            }
+      // One-tab-per-project (session tabs only): find existing tab(s) for
+      // the same project and delete them. Remember one of their orders so
+      // the replacement slots back into the same position.
+      let reusedOrder: number | null = null
+      if (kind === 'session' && !forceNewTab && project) {
+        for (const r of rows) {
+          if (r.meta.kind !== 'chain' && r.meta.project === project) {
+            if (reusedOrder === null) reusedOrder = r.position
+            tabs.delete(r.id)
           }
         }
+      }
 
-        // Exclude any entries we just deleted from the insertion math so
-        // the "next tab after the cluster" lookup is accurate.
-        const remaining =
-          reusedOrder !== null
-            ? entries.filter((e) => !(entryKind(e) !== 'chain' && e.project === project))
-            : entries
+      const remainingEntries =
+        reusedOrder !== null
+          ? rows
+              .filter((r) => !(r.meta.kind !== 'chain' && r.meta.project === project))
+              .map((r) => ({
+                order: r.position,
+                project: r.meta.project,
+                kind: r.meta.kind,
+                issueNumber: r.meta.issueNumber,
+              }))
+          : rows.map((r) => ({
+              order: r.position,
+              project: r.meta.project,
+              kind: r.meta.kind,
+              issueNumber: r.meta.issueNumber,
+            }))
 
-        const order = computeInsertOrder(remaining, clusterKey, reusedOrder)
+      const order = computeInsertOrder(remainingEntries, clusterKey, reusedOrder)
 
-        // Persist. Only write `kind: 'chain'` explicitly — session tabs
-        // keep the legacy shape {project, order} so old clients still
-        // parse them correctly.
-        const payload: TabEntry =
-          kind === 'chain' ? { order, kind: 'chain', issueNumber } : { project, order }
-        tabsY.set(sessionId, JSON.stringify(payload))
+      const meta: TabMeta =
+        kind === 'chain' ? { kind: 'chain', issueNumber } : project !== undefined ? { project } : {}
+
+      // Optimistic insert. `userId` is server-populated.
+      tabs.insert({
+        id: newRowId(),
+        userId: '',
+        sessionId,
+        position: order,
+        createdAt: new Date().toISOString(),
+        meta: stringifyMeta(meta),
+        // deletedAt intentionally omitted — NULL on insert.
       })
 
-      // Activate (local, outside transaction).
       setActive(sessionId)
     },
-    [doc, tabsY, setActive],
+    [rows, idBySessionId, setActive],
   )
 
   const closeTab = useCallback(
     (sessionId: string): string | null => {
-      if (!doc || !tabsY) return null
+      const row = rows.find((r) => r.sessionId === sessionId)
+      if (!row) return null
+
+      const sorted = rows.map((r) => r.sessionId as string)
+      const idx = sorted.indexOf(sessionId)
+
+      tabs.delete(row.id)
+
       let nextActive: string | null = null
-      doc.transact(() => {
-        if (!tabsY.has(sessionId)) return
-        const sorted = sortedTabIds(tabsY)
-        const idx = sorted.indexOf(sessionId)
-        tabsY.delete(sessionId)
-
-        if (activeSessionId === sessionId) {
-          const remaining = sorted.filter((id) => id !== sessionId)
-          nextActive = remaining[Math.min(idx, remaining.length - 1)] ?? null
-        }
-      })
-
       if (activeSessionId === sessionId) {
+        const remaining = sorted.filter((id) => id !== sessionId)
+        nextActive = remaining[Math.min(idx, remaining.length - 1)] ?? null
         setActive(nextActive)
       }
       return nextActive
     },
-    [doc, tabsY, activeSessionId, setActive],
+    [rows, activeSessionId, setActive],
   )
 
   const replaceTab = useCallback(
     (oldId: string, newId: string) => {
-      if (!doc || !tabsY) return
       if (oldId === newId) return
-      doc.transact(() => {
-        const val = tabsY.get(oldId)
-        if (!val) return
-        // If newId is already open, drop the draft and activate the existing one.
-        if (tabsY.has(newId)) {
-          tabsY.delete(oldId)
-          return
-        }
-        tabsY.delete(oldId)
-        tabsY.set(newId, val)
-      })
-      if (activeSessionId === oldId) {
-        setActive(newId)
+      const row = rows.find((r) => r.sessionId === oldId)
+      if (!row) return
+
+      // If newId is already open, drop the draft and activate the existing one.
+      const dupe = rows.find((r) => r.sessionId === newId)
+      if (dupe) {
+        tabs.delete(row.id)
+        if (activeSessionId === oldId) setActive(newId)
+        return
       }
+
+      tabs.update(row.id, (draft: UserTabRow) => {
+        draft.sessionId = newId
+      })
+      if (activeSessionId === oldId) setActive(newId)
     },
-    [doc, tabsY, activeSessionId, setActive],
+    [rows, activeSessionId, setActive],
   )
 
   const reorder = useCallback(
     (fromIndex: number, toIndex: number) => {
-      if (!doc || !tabsY) return
-      doc.transact(() => {
-        const sorted = sortedTabIds(tabsY)
-        if (fromIndex < 0 || fromIndex >= sorted.length) return
-        if (toIndex < 0 || toIndex >= sorted.length) return
+      if (rows.length === 0) return
+      if (fromIndex < 0 || fromIndex >= rows.length) return
+      if (toIndex < 0 || toIndex >= rows.length) return
 
-        const moved = sorted.splice(fromIndex, 1)[0]
-        sorted.splice(toIndex, 0, moved)
+      const ids = rows.map((r) => r.id)
+      const moved = ids.splice(fromIndex, 1)[0]
+      ids.splice(toIndex, 0, moved)
 
-        for (let i = 0; i < sorted.length; i++) {
-          const id = sorted[i]
-          const entry = parseEntry(tabsY.get(id))
-          tabsY.set(id, JSON.stringify({ ...entry, order: i + 1 }))
-        }
+      // Optimistically rewrite local positions so the reactive UI updates
+      // before the server confirms. The bulk `/reorder` endpoint will
+      // broadcast back the canonical positions.
+      for (let i = 0; i < ids.length; i++) {
+        const id = ids[i]
+        tabs.update(id, (draft: UserTabRow) => {
+          draft.position = i
+        })
+      }
+
+      // Bulk reorder via the purpose-built endpoint — one transactional
+      // write + one delta frame, rather than N PATCHes.
+      void fetch(apiUrl('/api/user-settings/tabs/reorder'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orderedIds: ids }),
       })
     },
-    [doc, tabsY],
+    [rows],
   )
+
+  // ── Cross-tab localStorage sync ─────────────────────────────────────
+  // The Yjs implementation had an implicit cross-tab active-tab sync via
+  // the shared Y.Doc. The D1 model keeps activeSessionId purely local, so
+  // mirror the `storage` event explicitly to avoid divergence when the
+  // user interacts with multiple browser tabs on the same device.
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== ACTIVE_TAB_KEY) return
+      setActiveState(e.newValue)
+    }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [])
+
+  // Map the user-stream status to the legacy shape the UI expects.
+  const { status: streamStatus } = useUserStream()
+  const status: 'connecting' | 'connected' | 'disconnected' =
+    streamStatus === 'open'
+      ? 'connected'
+      : streamStatus === 'connecting'
+        ? 'connecting'
+        : 'disconnected'
 
   return {
     openTabs,
     activeSessionId,
     tabProjects,
     tabEntries,
-    hydrated,
+    hydrated: !isLoading,
     openTab,
     closeTab,
     replaceTab,
