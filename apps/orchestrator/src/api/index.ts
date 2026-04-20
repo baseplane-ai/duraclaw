@@ -1494,8 +1494,13 @@ export function createApiApp() {
       return c.json({ error: 'Session not found' }, response.status === 403 ? 403 : 404)
     }
 
-    const messages = await response.json()
-    return c.json({ messages })
+    // SessionDO /messages already returns `{messages: SessionMessage[]}`; pass
+    // through verbatim. Previously we re-wrapped the whole body as `{messages}`,
+    // producing `{messages: {messages: [...]}}` which broke the client
+    // queryFn's `json.messages.map(...)` → empty collection → existing sessions
+    // rendered blank on cold start / OPFS rehydrate (post GH#14).
+    const body = (await response.json()) as { messages: unknown }
+    return c.json({ messages: body.messages })
   })
 
   app.patch('/api/sessions/:id', async (c) => {
