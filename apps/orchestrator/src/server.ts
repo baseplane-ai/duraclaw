@@ -28,6 +28,7 @@ function corsHeaders(origin: string | null, env: Env): HeadersInit | null {
     'Access-Control-Allow-Headers':
       'Content-Type, Authorization, X-Requested-With, capacitor-origin, x-skip-oauth-proxy',
     'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+    'Access-Control-Expose-Headers': 'set-auth-token',
     'Access-Control-Max-Age': '86400',
   }
 }

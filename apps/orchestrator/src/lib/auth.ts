@@ -1,6 +1,6 @@
 import { betterAuth } from 'better-auth'
 import { drizzleAdapter } from 'better-auth/adapters/drizzle'
-import { admin } from 'better-auth/plugins'
+import { admin, bearer } from 'better-auth/plugins'
 import { capacitor } from 'better-auth-capacitor'
 import { drizzle } from 'drizzle-orm/d1'
 import * as schema from '~/db/schema'
@@ -65,7 +65,12 @@ export function createAuth(
     // and enables bearer-token replay for Capacitor clients (which have no
     // cookie jar that survives WebView restarts). The `https://localhost`
     // origin (from androidScheme:'https') is added above in trustedOrigins.
-    plugins: [admin(), capacitor()],
+    // bearer() extracts session tokens from Set-Cookie into a
+    // `set-auth-token` response header (+ Access-Control-Expose-Headers)
+    // so the Capacitor client can store the token. It also converts
+    // incoming `Authorization: Bearer <token>` to session cookies for
+    // server-side session lookup.
+    plugins: [admin(), bearer(), capacitor()],
   })
 }
 
