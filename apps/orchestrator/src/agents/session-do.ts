@@ -3027,14 +3027,23 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           const next = ks.currentMode
           if (prev !== next) {
             this.updateState({ lastKataMode: next })
-            if (ks.continueSdk === true) {
+            // Initial mode observation on a fresh session is NOT a transition —
+            // only rotate the runner when we've seen a prior mode. Firing
+            // handleModeTransition on the first kata_state would kill the
+            // runner that just spawned with the user's typed prompt and
+            // replace it with the mode-preamble text.
+            if (prev == null) {
               console.log(
-                `[SessionDO:${this.ctx.id}] mode change ${prev ?? '(none)'}→${next} with continueSdk=true, skipping reset`,
+                `[SessionDO:${this.ctx.id}] initial mode observed: ${next} — no runner reset`,
+              )
+            } else if (ks.continueSdk === true) {
+              console.log(
+                `[SessionDO:${this.ctx.id}] mode change ${prev}→${next} with continueSdk=true, skipping reset`,
               )
             } else {
               // Fire-and-forget — the runner close + respawn involves multi-
               // second awaits that shouldn't block gateway event processing.
-              this.handleModeTransition(ks, prev ?? null).catch((err) => {
+              this.handleModeTransition(ks, prev).catch((err) => {
                 console.error(`[SessionDO:${this.ctx.id}] handleModeTransition failed:`, err)
               })
             }
