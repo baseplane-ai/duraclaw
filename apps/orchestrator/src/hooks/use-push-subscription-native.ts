@@ -16,26 +16,31 @@ export function usePushSubscriptionNative() {
   useEffect(() => {
     let cleanup: (() => void) | null = null
     ;(async () => {
-      const { PushNotifications } = await import('@capacitor/push-notifications')
-      const regHandle = await PushNotifications.addListener('registration', async (t) => {
-        setToken(t.value)
-        setIsSubscribed(true)
-        try {
-          await fetch(apiUrl('/api/push/fcm-subscribe'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ token: t.value, platform: 'android' }),
-          })
-        } catch {
-          // best-effort
+      try {
+        const { PushNotifications } = await import('@capacitor/push-notifications')
+        const regHandle = await PushNotifications.addListener('registration', async (t) => {
+          setToken(t.value)
+          setIsSubscribed(true)
+          try {
+            await fetch(apiUrl('/api/push/fcm-subscribe'), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ token: t.value, platform: 'android' }),
+            })
+          } catch {
+            // best-effort
+          }
+        })
+        const errHandle = await PushNotifications.addListener('registrationError', () => {
+          setIsSubscribed(false)
+        })
+        cleanup = () => {
+          regHandle.remove()
+          errHandle.remove()
         }
-      })
-      const errHandle = await PushNotifications.addListener('registrationError', () => {
-        setIsSubscribed(false)
-      })
-      cleanup = () => {
-        regHandle.remove()
-        errHandle.remove()
+      } catch {
+        // FCM not configured — listeners can't be added, skip silently
+        setPermission('unsupported')
       }
     })()
     return () => {
@@ -44,12 +49,19 @@ export function usePushSubscriptionNative() {
   }, [])
 
   const subscribe = useCallback(async () => {
-    const { PushNotifications } = await import('@capacitor/push-notifications')
-    const status = await PushNotifications.requestPermissions()
-    setPermission(status.receive as Permission)
-    if (status.receive !== 'granted') return false
-    await PushNotifications.register()
-    return true
+    try {
+      const { PushNotifications } = await import('@capacitor/push-notifications')
+      const status = await PushNotifications.requestPermissions()
+      setPermission(status.receive as Permission)
+      if (status.receive !== 'granted') return false
+      await PushNotifications.register()
+      return true
+    } catch (err) {
+      // FCM not configured (missing google-services.json) — fail gracefully
+      console.warn('[push] registration failed:', err)
+      setPermission('unsupported')
+      return false
+    }
   }, [])
 
   const unsubscribe = useCallback(async () => {
