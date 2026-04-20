@@ -43,4 +43,29 @@ describe('authMiddleware', () => {
     expect(response.status).toBe(200)
     await expect(response.json()).resolves.toEqual({ userId: 'user-123' })
   })
+
+  it('bypasses auth for /api/gateway/projects/sync (Bearer-authed push)', async () => {
+    const app = new Hono<{ Variables: { userId: string } }>()
+    app.use('/api/*', authMiddleware)
+    app.post('/api/gateway/projects/sync', (c) => c.json({ ok: true }))
+
+    const response = await app.request('http://example.com/api/gateway/projects/sync', {
+      method: 'POST',
+    })
+
+    expect(response.status).toBe(200)
+    expect(mockedGetRequestSession).not.toHaveBeenCalled()
+  })
+
+  it('still enforces session auth for browser-facing /api/gateway/projects', async () => {
+    mockedGetRequestSession.mockResolvedValue(null)
+
+    const app = new Hono<{ Variables: { userId: string } }>()
+    app.use('/api/*', authMiddleware)
+    app.get('/api/gateway/projects', (c) => c.json({ ok: true }))
+
+    const response = await app.request('http://example.com/api/gateway/projects')
+
+    expect(response.status).toBe(401)
+  })
 })
