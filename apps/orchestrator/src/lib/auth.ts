@@ -32,13 +32,17 @@ export function createAuth(
     'http://[::1]:*',
   ].filter((origin): origin is string => Boolean(origin))
 
+  // Capacitor WebView with androidScheme:'https' sends Origin: https://localhost.
+  // The capacitor() plugin only adds capacitor:// to trustedOrigins (for the
+  // capacitor:// scheme), so we must always include https://localhost for the
+  // mobile app to pass Better Auth's CSRF check in production.
   const trustedOrigins = isLocalDev
     ? (request?: Request) => {
         const reqOrigin = request?.headers.get('origin')
         const extras = reqOrigin ? [reqOrigin] : []
         return [...new Set([...staticOrigins, ...extras])]
       }
-    : undefined
+    : ['https://localhost']
 
   return betterAuth({
     database: drizzleAdapter(db, {
@@ -57,9 +61,10 @@ export function createAuth(
       enabled: true,
       disableSignUp: !opts?.allowSignUp,
     },
-    // capacitor() auto-injects `capacitor://localhost` into trustedOrigins
-    // via its `init` hook and enables bearer-token replay for Capacitor
-    // clients (which have no cookie jar that survives WebView restarts).
+    // capacitor() adds `capacitor://` to trustedOrigins via its `init` hook
+    // and enables bearer-token replay for Capacitor clients (which have no
+    // cookie jar that survives WebView restarts). The `https://localhost`
+    // origin (from androidScheme:'https') is added above in trustedOrigins.
     plugins: [admin(), capacitor()],
   })
 }
