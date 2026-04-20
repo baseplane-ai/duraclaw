@@ -38,4 +38,9 @@
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- OTA APK updates: lets the user install an APK fetched from the
+         orchestrator. Required when the app prompts the user to update a
+         native-layer change (Capacitor version, new plugin). Web-bundle
+         updates via Capgo don't need this — see mobile-updater.ts. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 </manifest>

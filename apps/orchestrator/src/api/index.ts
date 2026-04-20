@@ -794,6 +794,24 @@ export function createApiApp() {
     })
   })
 
+  // Mobile native-APK manifest — public endpoint (no auth). Returns the
+  // latest signed-APK version + URL so the Capacitor shell can prompt the
+  // user to install a native-layer update (new plugin, Capacitor bump).
+  // Reads `/mobile/apk-version.json` from Worker assets. Absence → no
+  // APK available (common — only set when there's a real native bump).
+  app.get('/api/mobile/apk/latest', async (c) => {
+    const res = await c.env.ASSETS.fetch(
+      new Request(`${new URL(c.req.url).origin}/mobile/apk-version.json`),
+    )
+    if (!res.ok) return c.json({ message: 'No APK available' })
+    const manifest = (await res.json()) as { version?: string; path?: string }
+    if (!manifest.version || !manifest.path) {
+      return c.json({ message: 'No APK available' })
+    }
+    const origin = new URL(c.req.url).origin
+    return c.json({ version: manifest.version, url: `${origin}${manifest.path}` })
+  })
+
   app.use('/api/*', authMiddleware)
 
   // ── User settings (tabs) — direct D1 CRUD (B-API-2) ──────────────
