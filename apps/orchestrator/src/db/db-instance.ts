@@ -1,6 +1,9 @@
 /**
- * TanStackDB persistence instance with OPFS SQLite fallback.
+ * TanStackDB persistence instance with OPFS SQLite (web) or native SQLite
+ * (Capacitor) backends.
  *
+ * - Capacitor branch: when `isNative()` is true, dynamically imports the
+ *   Capacitor adapter so the native plugin is tree-shaken out of the web bundle.
  * - OPFS detection: checks `navigator.storage?.getDirectory` existence
  * - Blocking: `dbReady` MUST be top-level-awaited by every collection module
  *   so `createCollection` always sees a non-null persistence on the OPFS path.
@@ -18,13 +21,29 @@ import {
   openBrowserWASQLiteOPFSDatabase,
 } from '@tanstack/browser-db-sqlite-persistence'
 import { QueryClient } from '@tanstack/query-core'
+import { isNative } from '../lib/platform'
 
+// Both adapters expose the same structural persistence shape; pin the alias
+// to the browser adapter's return type to avoid pulling a second copy of
+// `@tanstack/db-sqlite-persistence-core` whose types diverge across versions.
 type Persistence = Awaited<ReturnType<typeof createBrowserWASQLitePersistence>>
 
 /** Shared QueryClient instance for TanStackDB collections */
 export const queryClient = new QueryClient()
 
 async function initPersistence(): Promise<Persistence | null> {
+  if (isNative()) {
+    try {
+      const { createCapacitorPersistence } = await import('./persistence-capacitor')
+      // Capacitor adapter ships its own copy of db-sqlite-persistence-core
+      // types; the runtime shape is identical, so cast through `unknown`.
+      return (await createCapacitorPersistence()) as unknown as Persistence
+    } catch (err) {
+      console.warn('[duraclaw-db] Capacitor SQLite init failed', err)
+      return null
+    }
+  }
+
   if (typeof navigator === 'undefined') return null
 
   try {

@@ -23,6 +23,8 @@
     "cutover:dump-my-state": "bash scripts/dump-my-state.sh"
   },
   "dependencies": {
+    "@capacitor-community/sqlite": "^8.1.0",
+    "@capacitor/core": "^8.3.1",
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
@@ -52,6 +54,7 @@
     "@react-spring/web": "^10.0.3",
     "@tailwindcss/vite": "^4.2.2",
     "@tanstack/browser-db-sqlite-persistence": "0.1.8",
+    "@tanstack/capacitor-db-sqlite-persistence": "0.1.9",
     "@tanstack/db": "0.6.4",
     "@tanstack/query-core": "5.99.0",
     "@tanstack/query-db-collection": "1.0.35",

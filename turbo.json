@@ -24,6 +24,11 @@
       "dependsOn": ["build"],
       "cache": false
     },
+    "build:android": {
+      "dependsOn": ["@duraclaw/orchestrator#build"],
+      "outputs": ["apps/mobile/android/app/build/outputs/**"],
+      "cache": false
+    },
     "dev": {
       "cache": false,
       "persistent": true
