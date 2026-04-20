@@ -7,7 +7,7 @@
  * continue to consume the SessionSummary-shaped projection unchanged.
  */
 
-import type { SessionSummary, SyncedCollectionFrame } from '@duraclaw/shared-types'
+import type { SessionSummary } from '@duraclaw/shared-types'
 import { createTransaction } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
 import { useCallback, useEffect, useMemo, useRef } from 'react'
@@ -19,7 +19,7 @@ import {
 } from '~/db/session-live-state-collection'
 import type { SessionRecord } from '~/db/session-record'
 import { useNotificationWatcher } from '~/hooks/use-notification-watcher'
-import { onUserStreamReconnect, subscribeUserStream } from '~/hooks/use-user-stream'
+import { onUserStreamReconnect } from '~/hooks/use-user-stream'
 import { apiUrl } from '~/lib/platform'
 
 export type { SessionRecord }
@@ -216,47 +216,33 @@ export function useSessionsCollection(
     }
   }, [])
 
-  // Cold-start: if the collection is empty after initial load, backfill from
-  // REST. On web this almost never fires (OPFS carries data); on Capacitor
-  // (fresh install, different origin) it populates the sidebar on first visit.
-  const didBackfill = useRef(false)
+  // Sync from REST on mount and on WS reconnect. seedSessionLiveStateFromSummary
+  // is a patch-merge (Object.assign) so D1-mirrored fields update without
+  // clobbering transient live-state fields (contextUsage, kataState, etc.)
+  // that are written by use-coding-agent's WS handlers.
+  const didMount = useRef(false)
   useEffect(() => {
-    if (isLoading || didBackfill.current) return
-    if (!data || (data as SessionLiveState[]).length === 0) {
-      didBackfill.current = true
+    if (isLoading) return
+    if (!didMount.current) {
+      didMount.current = true
       void backfillFromRest()
     }
-  }, [isLoading, data, backfillFromRest])
+  }, [isLoading, backfillFromRest])
 
-  // Subscribe to `sessions` delta frames from the user-stream WS so
-  // sessions created/updated in other clients (or by the DO) appear in
-  // this client's list without a full page reload.
+  // Re-sync from REST after the user-stream WS reconnects (covers
+  // disconnects, tab sleep, network changes) and on window re-focus
+  // (covers tab switches in multi-client setups).
   useEffect(() => {
-    const unsubFrame = subscribeUserStream('sessions', (frame: SyncedCollectionFrame<unknown>) => {
-      for (const op of frame.ops) {
-        if (op.type === 'insert' || op.type === 'update') {
-          seedSessionLiveStateFromSummary(op.value as SessionSummary)
-        } else if (op.type === 'delete') {
-          try {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const coll = sessionLiveStateCollection as any
-            if (coll.has?.(op.key)) coll.delete(op.key)
-          } catch {
-            // collection may not be ready
-          }
-        }
-      }
-    })
-
-    // On WS reconnect, refetch the full session list to close any gaps
-    // that occurred while disconnected.
     const unsubReconnect = onUserStreamReconnect(() => {
       void backfillFromRest()
     })
 
+    const onFocus = () => void backfillFromRest()
+    window.addEventListener('focus', onFocus)
+
     return () => {
-      unsubFrame()
       unsubReconnect()
+      window.removeEventListener('focus', onFocus)
     }
   }, [backfillFromRest])
 

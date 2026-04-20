@@ -1577,10 +1577,6 @@ export function createApiApp() {
       await db.insert(agentSessions).values(baseRow)
     }
 
-    c.executionCtx.waitUntil(
-      broadcastSyncedDelta(c.env, userId, 'sessions', [{ type: 'insert', value: baseRow }]),
-    )
-
     return c.json({ session_id: sessionId }, 201)
   })
 
@@ -1740,12 +1736,6 @@ export function createApiApp() {
       // user — collapsed to 404 to avoid existence disclosure (B-API-1).
       return c.json({ error: 'Session not found' }, 404)
     }
-
-    c.executionCtx.waitUntil(
-      broadcastSyncedDelta(c.env, userId, 'sessions', [
-        { type: 'update', value: updated[0] as AgentSessionRow },
-      ]),
-    )
 
     return c.json({ session: updated[0] as AgentSessionRow })
   })
