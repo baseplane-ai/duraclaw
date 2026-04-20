@@ -15,6 +15,7 @@ function LoginPage() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
 
   // B7: when redirectToLogin('expired') runs from a 401-handling fetch
   // site it sets an `auth.redirect.reason` flag in sessionStorage; pick
@@ -35,18 +36,27 @@ function LoginPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError('')
+    setLoading(true)
 
-    const { error: authError } = await authClient.signIn.email({
-      email,
-      password,
-    })
+    try {
+      const { error: authError } = await authClient.signIn.email({
+        email,
+        password,
+      })
 
-    if (authError) {
-      setError(authError.message ?? 'Authentication failed')
-      return
+      if (authError) {
+        setError(authError.message ?? 'Authentication failed')
+        return
+      }
+
+      navigate({ to: '/', search: {} })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error('[login] signIn threw:', err)
+      setError(`Sign-in error: ${msg}`)
+    } finally {
+      setLoading(false)
     }
-
-    navigate({ to: '/', search: {} })
   }
 
   return (
@@ -100,8 +110,8 @@ function LoginPage() {
                   {error}
                 </div>
               )}
-              <Button className="min-h-11 w-full" type="submit">
-                Sign In
+              <Button className="min-h-11 w-full" disabled={loading} type="submit">
+                {loading ? 'Signing in…' : 'Sign In'}
               </Button>
             </form>
           </CardContent>

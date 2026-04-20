@@ -25,7 +25,8 @@ function corsHeaders(origin: string | null, env: Env): HeadersInit | null {
   return {
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Credentials': 'true',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With',
+    'Access-Control-Allow-Headers':
+      'Content-Type, Authorization, X-Requested-With, capacitor-origin, x-skip-oauth-proxy',
     'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
     'Access-Control-Max-Age': '86400',
   }
