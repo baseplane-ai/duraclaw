@@ -158,7 +158,7 @@ describe('createMessagesCollection retry behavior', () => {
     vi.restoreAllMocks()
   })
 
-  it('configures retry: 1, retryDelay: 500, staleTime: Infinity, refetchInterval: undefined, syncMode: on-demand', async () => {
+  it('configures retry: 1, retryDelay: 500, staleTime: Infinity, refetchInterval: undefined, syncMode: eager', async () => {
     vi.resetModules()
     const mod = await import('./messages-collection')
 
@@ -179,7 +179,7 @@ describe('createMessagesCollection retry behavior', () => {
     expect(config.retryDelay).toBe(500)
     expect(config.staleTime).toBe(Number.POSITIVE_INFINITY)
     expect(config.refetchInterval).toBeUndefined()
-    expect(config.syncMode).toBe('on-demand')
+    expect(config.syncMode).toBe('eager')
   })
 
   it('queryFn fetches from the REST /api/sessions/:id/messages endpoint', async () => {

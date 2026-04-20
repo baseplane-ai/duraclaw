@@ -93,7 +93,7 @@ export function createMessagesCollection(agentName: string): MessagesCollection 
     },
     queryClient,
     getKey: (item: CachedMessage) => item.id,
-    syncMode: 'on-demand',
+    syncMode: 'eager',
     refetchInterval: undefined,
     staleTime: Number.POSITIVE_INFINITY,
     retry: 1,
