@@ -17,6 +17,7 @@ import usePartySocket from 'partysocket/react'
 import { useCallback } from 'react'
 import { userPreferencesCollection } from '~/db/user-preferences-collection'
 import { useSession } from '~/lib/auth-client'
+import { partyHost } from '~/lib/platform'
 
 interface InvalidatableCollection {
   utils: { refetch: () => Promise<unknown> }
@@ -53,7 +54,7 @@ export function useInvalidationChannel() {
   }, [])
 
   usePartySocket({
-    host: typeof window === 'undefined' ? '' : window.location.host,
+    host: partyHost(),
     party: 'user-settings',
     room: userId ?? '',
     // Do not open the socket until we have a userId — the DO room is

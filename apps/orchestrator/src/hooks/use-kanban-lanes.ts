@@ -15,6 +15,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import useYProvider from 'y-partyserver/react'
 import * as Y from 'yjs'
 import { useSession } from '~/lib/auth-client'
+import { partyHost } from '~/lib/platform'
 
 interface LaneEntry {
   collapsed: boolean
@@ -60,7 +61,7 @@ export function useKanbanLanes(): UseKanbanLanesResult {
 
   const lanesY = useMemo(() => doc?.getMap<string>('kanbanLanes') ?? null, [doc])
 
-  const host = typeof window !== 'undefined' && window.location ? window.location.host : ''
+  const host = partyHost()
 
   useYProvider({
     host,

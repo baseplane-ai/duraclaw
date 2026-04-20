@@ -96,6 +96,71 @@ and the tab bar all agree on label / color / icon. `status` is typically
 active sessions track message-derived status while idle / background
 sessions fall back to the D1-mirrored top-level field.
 
+### Synced collections (user-scoped reactive data)
+
+`createSyncedCollection` at `apps/orchestrator/src/db/synced-collection.ts`
+is the canonical factory for user-scoped TanStack DB collections. It wraps
+`queryCollectionOptions` and installs a custom `SyncConfig.sync` so the
+synced layer is driven by WS delta frames from `UserSettingsDO` instead of
+polling. Four collections ride on it today: `user_tabs`,
+`user_preferences`, `projects`, `chains`.
+
+**Two-layer model — don't conflate them:**
+
+- **Optimistic layer** — user-initiated writes via `onInsert / onUpdate /
+  onDelete` handlers (`mutationFn` POSTs the REST endpoint, rolls back on
+  throw). Lives in TanStack DB's `optimisticUpserts` / `optimisticDeletes`
+  maps and disappears when the write settles.
+- **Synced layer** — authoritative state from D1. Populated cold by
+  `queryFn` (initial load + reconnect resync) and kept hot by WS delta
+  frames dispatched through `begin / write / commit` on
+  `SyncConfig.sync`'s params. The server echo of the user's own write
+  reconciles via TanStack DB's `deepEquals` loopback guard — no
+  watermark, no tombstone, no client-side dedup.
+
+**Wire protocol** — `SyncedCollectionFrame` in
+`packages/shared-types/src/index.ts`. Discriminated union, no optional
+`value` / `key` fields:
+
+```typescript
+type SyncedCollectionOp<TRow> =
+  | { type: 'insert'; value: TRow }
+  | { type: 'update'; value: TRow }
+  | { type: 'delete'; key: string }
+
+interface SyncedCollectionFrame<TRow> {
+  type: 'synced-collection-delta'
+  collection: string
+  ops: Array<SyncedCollectionOp<TRow>>
+}
+```
+
+**Fanout path** — API writes call `broadcastSyncedDelta(env, userId,
+collection, ops)` (`apps/orchestrator/src/lib/broadcast-synced-delta.ts`)
+wrapped in `ctx.waitUntil`. The helper POSTs `/broadcast` on the user's
+`UserSettingsDO` with `Authorization: Bearer ${SYNC_BROADCAST_SECRET}`.
+The DO validates the frame shape, iterates its socket set (hibernation-
+aware — rehydrated from `this.ctx.getWebSockets()` on init), and
+broadcasts the JSON payload. 256 KiB cap enforced; use `chunkOps()` in
+`apps/orchestrator/src/lib/chunk-frame.ts` for bulk syncs.
+
+**Cross-user fanout** (projects) — `/api/gateway/projects/sync`
+reconciles D1 then queries `SELECT user_id FROM user_presence` (the
+active-user index, maintained by `UserSettingsDO`'s ref-counted
+connect/disconnect 0↔1 transitions) and fans out via
+`Promise.allSettled` so one dead DO doesn't abort the rest.
+
+**Reconnect semantics** (B7) — the hook's `onUserStreamReconnect`
+handler calls `queryClient.invalidateQueries({queryKey})` on every
+registered collection, which triggers `queryFn` re-fetch through the
+query-collection layer. In-flight optimistic mutations settle via their
+own mutationFn resolution (success → deep-equal reconcile, throw →
+rollback). The "optimistic delete reappears because mutationFn threw
+offline" path is explicitly accepted behavior, not a bug.
+
+**Secrets** — `SYNC_BROADCAST_SECRET` (worker → DO) and
+`CC_GATEWAY_SECRET` (gateway → worker) rotate independently.
+
 ## Monorepo Structure
 
 ```

@@ -15,6 +15,27 @@
       "when": 1776510668061,
       "tag": "0009_drop_user_preferences_legacy",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1776698402883,
+      "tag": "0011_user_presence",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1776699484548,
+      "tag": "0012_user_tabs_soft_delete",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1776700000000,
+      "tag": "0013_projects",
+      "breakpoints": true
     }
   ]
 }

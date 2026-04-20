@@ -4,7 +4,7 @@ type: project
 issue_type: feature
 status: draft
 priority: high
-github_issue: null
+github_issue: 32
 created: 2026-04-20
 updated: 2026-04-20
 phases:

@@ -1,16 +1,22 @@
-import { and, asc, desc, eq, inArray, like, or, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, isNull, like, or, sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import { Hono } from 'hono'
+import { constantTimeEquals } from '~/agents/session-do-helpers'
 import * as schema from '~/db/schema'
 import {
   agentSessions,
   auditLog,
+  projects as projectsTable,
   userPreferences,
+  userPresence,
   userTabs,
   worktreeReservations,
 } from '~/db/schema'
 import { validateActionToken } from '~/lib/action-token'
 import { createAuth } from '~/lib/auth'
+import { broadcastSyncedDelta } from '~/lib/broadcast-synced-delta'
+import { buildChainRowFromContext, type ChainBuildContext } from '~/lib/chains'
+import { chunkOps } from '~/lib/chunk-frame'
 import { type PushPayload, sendPushNotification } from '~/lib/push'
 import type {
   AgentSessionRow,
@@ -29,7 +35,6 @@ import { authMiddleware } from './auth-middleware'
 import { authRoutes } from './auth-routes'
 import { getRequestSession } from './auth-session'
 import type { ApiAppEnv } from './context'
-import { notifyInvalidation } from './notify'
 
 interface CreateSessionBody {
   project?: string
@@ -333,97 +338,9 @@ async function fetchGithubPulls(env: ApiAppEnv['Bindings']): Promise<GhPull[]> {
   return all
 }
 
-function deriveIssueType(
-  labels: Array<{ name: string }> | undefined,
-): 'bug' | 'enhancement' | 'other' {
-  const names = new Set((labels ?? []).map((l) => l.name))
-  // Precedence per spec B7: bug > enhancement > other
-  if (names.has('bug')) return 'bug'
-  if (names.has('enhancement')) return 'enhancement'
-  return 'other'
-}
-
-const COLUMN_QUALIFYING_MODES = new Set([
-  'research',
-  'planning',
-  'implementation',
-  'task',
-  'verify',
-])
-
-function modeToColumn(mode: string): ChainSummary['column'] | null {
-  switch (mode) {
-    case 'research':
-      return 'research'
-    case 'planning':
-      return 'planning'
-    case 'implementation':
-    case 'task':
-      return 'implementation'
-    case 'verify':
-      return 'verify'
-    default:
-      return null
-  }
-}
-
-/**
- * Pick the current kanban column for a chain. Rules (spec B7):
- *   1. Issue closed → `done`
- *   2. No sessions → `backlog`
- *   3. Latest session whose kataMode is in the qualifying set (research,
- *      planning, implementation, task, verify) — skip debug/freeform side
- *      quests. Use the session's lastActivity (fall back to createdAt) for
- *      "latest".
- *   4. Fallback `backlog`.
- */
-function deriveColumn(
-  sessions: Array<{ kataMode: string | null; lastActivity: string | null; createdAt: string }>,
-  issueState: 'open' | 'closed',
-): ChainSummary['column'] {
-  if (issueState === 'closed') return 'done'
-  if (!sessions.length) return 'backlog'
-
-  let bestMode: string | null = null
-  let bestTs = -Infinity
-  for (const s of sessions) {
-    if (!s.kataMode || !COLUMN_QUALIFYING_MODES.has(s.kataMode)) continue
-    const ts = new Date(s.lastActivity ?? s.createdAt).getTime()
-    if (Number.isFinite(ts) && ts > bestTs) {
-      bestTs = ts
-      bestMode = s.kataMode
-    }
-  }
-
-  if (bestMode) {
-    const col = modeToColumn(bestMode)
-    if (col) return col
-  }
-  return 'backlog'
-}
-
-/**
- * Find a matching PR for an issue. Two detection strategies (first match
- * wins per PR; we scan all PRs and return the first that binds):
- *   1. Branch pattern `^(feature|fix|feat)/(\d+)[-_]` on `pull_request.head.ref`
- *   2. Body contains `Closes #N` or `Fixes #N` (case-insensitive)
- */
-function findPrForIssue(pulls: GhPull[], issueNumber: number): number | undefined {
-  for (const pr of pulls) {
-    const branch = pr.head?.ref ?? ''
-    const branchMatch = branch.match(/^(?:feature|fix|feat)\/(\d+)[-_]/)
-    if (branchMatch && Number.parseInt(branchMatch[1], 10) === issueNumber) {
-      return pr.number
-    }
-    const body = pr.body ?? ''
-    // `m` flag so multi-line bodies are scanned per line; `i` for case insensitivity.
-    const bodyRe = new RegExp(`(?:closes|fixes)\\s+#${issueNumber}(?![0-9])`, 'i')
-    if (bodyRe.test(body)) {
-      return pr.number
-    }
-  }
-  return undefined
-}
+// Chain-aggregation helpers (deriveIssueType / deriveColumn / findPrForIssue)
+// now live in ~/lib/chains. The /api/chains handler consumes them indirectly
+// via `buildChainRowFromContext` so the broadcast path shares the exact mapping.
 
 /**
  * Tiny YAML frontmatter parser — handles `---\n<lines>\n---\n` blocks with
@@ -732,6 +649,122 @@ export function createApiApp() {
     return c.json({ released: true, issueNumber, deleted: deleted.length })
   })
 
+  // ── Gateway → Worker project sync (GH#32 phase p4) ────────────────
+  //
+  // Authoritative push path. The agent-gateway posts its current project
+  // manifest here after every scan; we reconcile against D1 `projects`
+  // (upsert present, soft-delete absent) then fan out a
+  // synced-collection-delta frame to every UserSettingsDO with an active
+  // WS (driven by the user_presence mirror).
+  //
+  // Bypasses authMiddleware — auth is Bearer CC_GATEWAY_SECRET, timing-safe.
+  app.post('/api/gateway/projects/sync', async (c) => {
+    const expected = c.env.CC_GATEWAY_SECRET
+    if (!expected) {
+      return c.json({ error: 'CC_GATEWAY_SECRET not configured' }, 401)
+    }
+    const authHeader = c.req.header('authorization') ?? ''
+    const provided = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
+    if (!constantTimeEquals(provided, expected)) {
+      return c.json({ error: 'unauthorized' }, 401)
+    }
+
+    const body = (await c.req.json().catch(() => null)) as {
+      projects?: unknown
+    } | null
+    if (!body || !Array.isArray(body.projects)) {
+      return c.json({ error: 'invalid body: expected {projects: ProjectInfo[]}' }, 400)
+    }
+
+    // Shape-check: `name` is the key, `path` (gateway ProjectInfo) maps onto
+    // `rootPath` in D1. Additional ProjectInfo fields (branch, dirty, pr, …)
+    // ride through in the delta frame but are NOT stored in D1.
+    const incoming = body.projects as Array<ProjectInfo & { displayName?: string }>
+    for (const p of incoming) {
+      if (!p || typeof p !== 'object' || typeof p.name !== 'string' || typeof p.path !== 'string') {
+        return c.json({ error: 'invalid project shape' }, 400)
+      }
+    }
+
+    const now = new Date().toISOString()
+    const db = getDb(c.env)
+
+    // Build the ops list from payload + existing D1 state. We do the SELECT
+    // outside of any transaction so the reconcile can batch the writes.
+    const existingRows = await db
+      .select({ name: projectsTable.name, deletedAt: projectsTable.deletedAt })
+      .from(projectsTable)
+    const existingLive = new Set(existingRows.filter((r) => !r.deletedAt).map((r) => r.name))
+    const incomingNames = new Set(incoming.map((p) => p.name))
+
+    const ops: Array<import('@duraclaw/shared-types').SyncedCollectionOp<ProjectInfo>> = []
+
+    // Upsert every row from the payload.
+    for (const p of incoming) {
+      await db
+        .insert(projectsTable)
+        .values({
+          name: p.name,
+          displayName: p.displayName ?? null,
+          rootPath: p.path,
+          updatedAt: now,
+          deletedAt: null,
+        })
+        .onConflictDoUpdate({
+          target: projectsTable.name,
+          set: {
+            displayName: p.displayName ?? null,
+            rootPath: p.path,
+            updatedAt: now,
+            deletedAt: null,
+          },
+        })
+
+      ops.push({
+        type: existingLive.has(p.name) ? 'update' : 'insert',
+        value: p,
+      })
+    }
+
+    // Soft-delete rows present in D1 but absent from the payload.
+    const toDelete = [...existingLive].filter((name) => !incomingNames.has(name))
+    if (toDelete.length > 0) {
+      await db
+        .update(projectsTable)
+        .set({ deletedAt: now, updatedAt: now })
+        .where(inArray(projectsTable.name, toDelete))
+      for (const name of toDelete) {
+        ops.push({ type: 'delete', key: name })
+      }
+    }
+
+    // Fan out to every active-presence user. Chunk ops to stay under the
+    // 256 KiB /broadcast cap. `allSettled` so a dead DO doesn't abort
+    // the rest — degraded users resync on next reconnect cycle.
+    if (ops.length > 0) {
+      const userRows = await db.select({ userId: userPresence.userId }).from(userPresence)
+      const userIds = userRows.map((r) => r.userId)
+      const chunks = chunkOps(ops, 200 * 1024)
+
+      c.executionCtx.waitUntil(
+        (async () => {
+          for (const chunk of chunks) {
+            const settled = await Promise.allSettled(
+              userIds.map((uid) => broadcastSyncedDelta(c.env, uid, 'projects', chunk)),
+            )
+            settled.forEach((result, idx) => {
+              if (result.status === 'rejected') {
+                console.warn(`[projects/sync] broadcast failed user=${userIds[idx]}`, result.reason)
+              }
+            })
+          }
+        })(),
+      )
+    }
+
+    return c.body(null, 204)
+  })
+
   app.use('/api/*', authMiddleware)
 
   // ── User settings (tabs) — direct D1 CRUD (B-API-2) ──────────────
@@ -742,7 +775,7 @@ export function createApiApp() {
     const tabs = await db
       .select()
       .from(userTabs)
-      .where(eq(userTabs.userId, userId))
+      .where(and(eq(userTabs.userId, userId), isNull(userTabs.deletedAt)))
       .orderBy(asc(userTabs.position))
     return c.json({ tabs: tabs as UserTabRow[] })
   })
@@ -764,7 +797,7 @@ export function createApiApp() {
       const maxRow = await db
         .select({ max: sql<number | null>`MAX(${userTabs.position})` })
         .from(userTabs)
-        .where(eq(userTabs.userId, userId))
+        .where(and(eq(userTabs.userId, userId), isNull(userTabs.deletedAt)))
       const max = maxRow[0]?.max
       position = typeof max === 'number' ? max + 1 : 0
     }
@@ -775,7 +808,13 @@ export function createApiApp() {
       const existing = await db
         .select()
         .from(userTabs)
-        .where(and(eq(userTabs.userId, userId), eq(userTabs.sessionId, sessionId)))
+        .where(
+          and(
+            eq(userTabs.userId, userId),
+            eq(userTabs.sessionId, sessionId),
+            isNull(userTabs.deletedAt),
+          ),
+        )
         .limit(1)
       if (existing.length > 0) {
         return c.json({ tab: existing[0] as UserTabRow }, 200)
@@ -795,8 +834,11 @@ export function createApiApp() {
       })
       .returning()
 
-    await notifyInvalidation(c.env, userId, 'user_tabs')
-    return c.json({ tab: inserted[0] as UserTabRow }, 201)
+    const newRow = inserted[0] as UserTabRow
+    c.executionCtx.waitUntil(
+      broadcastSyncedDelta(c.env, userId, 'user_tabs', [{ type: 'insert', value: newRow }]),
+    )
+    return c.json({ tab: newRow }, 201)
   })
 
   app.patch('/api/user-settings/tabs/:id', async (c) => {
@@ -817,15 +859,18 @@ export function createApiApp() {
     const updated = await db
       .update(userTabs)
       .set(body as Partial<typeof userTabs.$inferInsert>)
-      .where(and(eq(userTabs.id, tabId), eq(userTabs.userId, userId)))
+      .where(and(eq(userTabs.id, tabId), eq(userTabs.userId, userId), isNull(userTabs.deletedAt)))
       .returning()
 
     if (updated.length === 0) {
       return c.json({ error: 'Tab not found' }, 404)
     }
 
-    await notifyInvalidation(c.env, userId, 'user_tabs')
-    return c.json({ tab: updated[0] as UserTabRow })
+    const updatedRow = updated[0] as UserTabRow
+    c.executionCtx.waitUntil(
+      broadcastSyncedDelta(c.env, userId, 'user_tabs', [{ type: 'update', value: updatedRow }]),
+    )
+    return c.json({ tab: updatedRow })
   })
 
   app.delete('/api/user-settings/tabs/:id', async (c) => {
@@ -833,15 +878,18 @@ export function createApiApp() {
     const tabId = c.req.param('id')
     const db = getDb(c.env)
     const deleted = await db
-      .delete(userTabs)
-      .where(and(eq(userTabs.id, tabId), eq(userTabs.userId, userId)))
+      .update(userTabs)
+      .set({ deletedAt: new Date().toISOString() })
+      .where(and(eq(userTabs.id, tabId), eq(userTabs.userId, userId), isNull(userTabs.deletedAt)))
       .returning({ id: userTabs.id })
 
     if (deleted.length === 0) {
       return c.json({ error: 'Tab not found' }, 404)
     }
 
-    await notifyInvalidation(c.env, userId, 'user_tabs')
+    c.executionCtx.waitUntil(
+      broadcastSyncedDelta(c.env, userId, 'user_tabs', [{ type: 'delete', key: tabId }]),
+    )
     return c.body(null, 204)
   })
 
@@ -868,7 +916,9 @@ export function createApiApp() {
       const owned = await tx
         .select({ id: userTabs.id })
         .from(userTabs)
-        .where(and(eq(userTabs.userId, userId), inArray(userTabs.id, ids)))
+        .where(
+          and(eq(userTabs.userId, userId), inArray(userTabs.id, ids), isNull(userTabs.deletedAt)),
+        )
       if (owned.length !== ids.length) {
         return { ok: false as const }
       }
@@ -876,7 +926,9 @@ export function createApiApp() {
         await tx
           .update(userTabs)
           .set({ position: idx })
-          .where(and(eq(userTabs.id, ids[idx]), eq(userTabs.userId, userId)))
+          .where(
+            and(eq(userTabs.id, ids[idx]), eq(userTabs.userId, userId), isNull(userTabs.deletedAt)),
+          )
       }
       return { ok: true as const }
     })
@@ -885,7 +937,20 @@ export function createApiApp() {
       return c.json({ error: 'One or more ids not owned by caller' }, 400)
     }
 
-    await notifyInvalidation(c.env, userId, 'user_tabs')
+    const reorderedRows = (await db
+      .select()
+      .from(userTabs)
+      .where(
+        and(eq(userTabs.userId, userId), inArray(userTabs.id, ids), isNull(userTabs.deletedAt)),
+      )) as UserTabRow[]
+    c.executionCtx.waitUntil(
+      broadcastSyncedDelta(
+        c.env,
+        userId,
+        'user_tabs',
+        reorderedRows.map((row) => ({ type: 'update', value: row })),
+      ),
+    )
     return c.json({ ok: true })
   })
 
@@ -961,8 +1026,13 @@ export function createApiApp() {
       .onConflictDoUpdate({ target: userPreferences.userId, set: setValues })
       .returning()
 
-    await notifyInvalidation(c.env, userId, 'user_preferences')
-    return c.json({ preferences: inserted[0] as UserPreferencesRow })
+    const updatedRow = inserted[0] as UserPreferencesRow
+    c.executionCtx.waitUntil(
+      broadcastSyncedDelta(c.env, userId, 'user_preferences', [
+        { type: 'update', value: updatedRow },
+      ]),
+    )
+    return c.json({ preferences: updatedRow })
   })
 
   app.post('/api/push/subscribe', async (c) => {
@@ -1178,29 +1248,53 @@ export function createApiApp() {
   app.get('/api/projects', async (c) => {
     const userId = c.get('userId')
 
-    try {
-      const projects = await fetchGatewayProjects(c.env)
-      const hiddenSet = await getHiddenProjects(c.env, userId)
-      const visibleProjects =
-        hiddenSet.size > 0 ? projects.filter((p) => !hiddenSet.has(p.name)) : projects
+    // D1-authoritative read (GH#32 p4). The agent-gateway pushes manifest
+    // changes via POST /api/gateway/projects/sync; this handler surfaces
+    // the reconciled D1 view, filtering deleted rows and the caller's
+    // hidden-project preferences.
+    const db = getDb(c.env)
+    const hiddenSet = await getHiddenProjects(c.env, userId)
 
-      const db = getDb(c.env)
-      const merged = await Promise.all(
-        visibleProjects.map(async (project) => {
-          const sessions = await db
-            .select()
-            .from(agentSessions)
-            .where(and(eq(agentSessions.userId, userId), eq(agentSessions.project, project.name)))
-            .orderBy(desc(agentSessions.lastActivity))
-          return { ...project, sessions: sessions as AgentSessionRow[] }
-        }),
-      )
+    const liveRows = await db
+      .select()
+      .from(projectsTable)
+      .where(isNull(projectsTable.deletedAt))
+      .orderBy(asc(projectsTable.name))
 
-      return c.json({ projects: merged })
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Gateway unreachable'
-      return c.json({ error: message }, 502)
-    }
+    const visibleRows =
+      hiddenSet.size > 0 ? liveRows.filter((r) => !hiddenSet.has(r.name)) : liveRows
+
+    // Per-project session merge (kept for parity with prior client
+    // consumers that relied on `projects[i].sessions`). Session rows stay
+    // in agent_sessions — unchanged by p4.
+    const merged = await Promise.all(
+      visibleRows.map(async (row) => {
+        const sessions = await db
+          .select()
+          .from(agentSessions)
+          .where(and(eq(agentSessions.userId, userId), eq(agentSessions.project, row.name)))
+          .orderBy(desc(agentSessions.lastActivity))
+        // D1 projects table only stores the minimal columns authoritative
+        // to duraclaw. Live git-state fields (branch / dirty / ahead /
+        // behind / pr) are populated by the gateway's push frame and
+        // reach the client via synced-collection deltas; cold-start
+        // consumers get neutral defaults here.
+        const base: ProjectInfo = {
+          name: row.name,
+          path: row.rootPath,
+          branch: 'unknown',
+          dirty: false,
+          active_session: null,
+          repo_origin: null,
+          ahead: 0,
+          behind: 0,
+          pr: null,
+        }
+        return { ...base, sessions: sessions as AgentSessionRow[] }
+      }),
+    )
+
+    return c.json({ projects: merged })
   })
 
   app.get('/api/sessions', async (c) => {
@@ -1306,7 +1400,7 @@ export function createApiApp() {
   })
 
   app.post('/api/sessions/sync', async (c) => {
-    const userId = c.get('userId')
+    const _userId = c.get('userId')
 
     if (!c.env.CC_GATEWAY_URL) {
       return c.json({ error: 'CC_GATEWAY_URL not configured' }, 500)
@@ -1379,7 +1473,6 @@ export function createApiApp() {
       }
     })
 
-    await notifyInvalidation(c.env, userId, 'agent_sessions')
     return c.json({ updated, skipped, total: snapshots.length })
   })
 
@@ -1484,7 +1577,6 @@ export function createApiApp() {
       await db.insert(agentSessions).values(baseRow)
     }
 
-    await notifyInvalidation(c.env, userId, 'agent_sessions')
     return c.json({ session_id: sessionId }, 201)
   })
 
@@ -1645,7 +1737,6 @@ export function createApiApp() {
       return c.json({ error: 'Session not found' }, 404)
     }
 
-    await notifyInvalidation(c.env, userId, 'agent_sessions')
     return c.json({ session: updated[0] as AgentSessionRow })
   })
 
@@ -2075,86 +2166,29 @@ export function createApiApp() {
       }
     }
 
-    // 4. Build ChainSummary[].
+    // 4. Build ChainSummary[] via the shared `buildChainRowFromContext`
+    //    mapping so the broadcast path in SessionDO produces byte-identical
+    //    rows (same aggregation, same column derivation, same PR matching).
+    const buildCtx: ChainBuildContext = { ghIssueByNumber, pulls }
     const chains: ChainSummary[] = []
     for (const issueNumber of allIssueNumbers) {
-      const ghIssue = ghIssueByNumber.get(issueNumber)
       const sessions = sessionsByIssue.get(issueNumber) ?? []
+      const reservation = reservationByIssue.get(issueNumber) ?? null
 
-      let issueTitle: string
-      let issueState: 'open' | 'closed'
-      let issueType: string
-      if (ghIssue) {
-        issueTitle = ghIssue.title
-        issueState = ghIssue.state
-        issueType = deriveIssueType(ghIssue.labels)
-      } else {
-        // D1-only — issue off-page or deleted.
-        issueTitle = `Issue #${issueNumber}`
-        issueState = 'open'
-        issueType = 'other'
-      }
+      const mappedSessions = sessions.map((s) => ({
+        id: s.id,
+        kataMode: s.kataMode,
+        status: s.status,
+        lastActivity: s.lastActivity,
+        createdAt: s.createdAt,
+        project: s.project,
+      }))
 
-      const column = deriveColumn(
-        sessions.map((s) => ({
-          kataMode: s.kataMode,
-          lastActivity: s.lastActivity,
-          createdAt: s.createdAt,
-        })),
-        issueState,
-      )
+      const chain = buildChainRowFromContext(issueNumber, mappedSessions, reservation, buildCtx)
+      if (!chain) continue
 
-      const reservation = reservationByIssue.get(issueNumber)
-      const worktreeReservation = reservation
-        ? {
-            worktree: reservation.worktree,
-            heldSince: reservation.heldSince,
-            lastActivityAt: reservation.lastActivityAt,
-            ownerId: reservation.ownerId,
-            stale: !!reservation.stale,
-          }
-        : null
-
-      const prNumber = findPrForIssue(pulls, issueNumber)
-
-      // lastActivity: max of (sessions' lastActivity || createdAt); fall back
-      // to GH issue updated_at; empty string as a last resort.
-      let lastActivity = ''
-      let lastActivityTs = -Infinity
-      for (const s of sessions) {
-        const tsStr = s.lastActivity ?? s.createdAt
-        const ts = new Date(tsStr).getTime()
-        if (Number.isFinite(ts) && ts > lastActivityTs) {
-          lastActivityTs = ts
-          lastActivity = tsStr
-        }
-      }
-      if (!lastActivity) {
-        lastActivity = ghIssue?.updated_at ?? ''
-      }
-
-      const chain: ChainSummary = {
-        issueNumber,
-        issueTitle,
-        issueType,
-        issueState,
-        column,
-        sessions: sessions.map((s) => ({
-          id: s.id,
-          kataMode: s.kataMode,
-          status: s.status,
-          lastActivity: s.lastActivity,
-          createdAt: s.createdAt,
-          project: s.project,
-        })),
-        worktreeReservation,
-        lastActivity,
-        ...(prNumber !== undefined ? { prNumber } : {}),
-      }
-
-      // Preserve a reference to the underlying sessions for filter logic
-      // below without exposing it in the response. We re-use the mapped
-      // `sessions` array which already has `userId` stripped, so apply
+      // Preserve a reference to the underlying rows for filter logic — the
+      // mapped `sessions` on the chain object has user_id stripped, so
       // owner-filter against the original rows.
       if (mineFilter) {
         const anyOwned = sessions.some((s) => s.userId === userId)

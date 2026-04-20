@@ -714,3 +714,27 @@ export interface SessionContext {
     done: () => void
   } | null
 }
+
+// ============================================================================
+// Synced-collection delta-frame wire protocol (GH#32)
+// ============================================================================
+//
+// Shape pushed by UserSettingsDO over the user-stream WS to drive
+// TanStack DB synced-layer writes (begin / write / commit) on the client.
+// The discriminated union on `SyncedCollectionOp` guarantees that
+// `insert` / `update` frames always carry `value` and `delete` frames
+// always carry `key` — no optional fields, malformed frames reject at
+// compile time. No `seq` — reconnect triggers a full-fetch resync via
+// the factory's queryFn, and hot incremental delivery assumes the WS
+// is authoritative while connected.
+
+export type SyncedCollectionOp<TRow = unknown> =
+  | { type: 'insert'; value: TRow }
+  | { type: 'update'; value: TRow }
+  | { type: 'delete'; key: string }
+
+export interface SyncedCollectionFrame<TRow = unknown> {
+  type: 'synced-collection-delta'
+  collection: string
+  ops: Array<SyncedCollectionOp<TRow>>
+}

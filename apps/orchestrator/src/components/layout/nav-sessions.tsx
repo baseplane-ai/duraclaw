@@ -6,6 +6,7 @@
  * 2. Worktrees — repo → worktree (with branch/dirty/PR) → sessions tree
  */
 
+import { useLiveQuery } from '@tanstack/react-db'
 import { Link, useLocation, useNavigate } from '@tanstack/react-router'
 import {
   ArchiveIcon,
@@ -19,7 +20,7 @@ import {
   Layers,
   PlusIcon,
 } from 'lucide-react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '~/components/ui/collapsible'
 import {
   DropdownMenu,
@@ -39,7 +40,9 @@ import {
   SidebarMenuSubItem,
   useSidebar,
 } from '~/components/ui/sidebar'
+import { projectsCollection } from '~/db/projects-collection'
 import type { SessionRecord } from '~/db/session-record'
+import { userPreferencesCollection } from '~/db/user-preferences-collection'
 import { getPreviewText, StatusDot } from '~/features/agent-orch/session-utils'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { useTabSync } from '~/hooks/use-tab-sync'
@@ -219,32 +222,48 @@ export function NavSessions() {
   const navigate = useNavigate()
   const { openTab } = useTabSync()
 
-  // Fetch projects from gateway
-  const [projects, setProjects] = useState<ProjectInfoWithHidden[]>([])
-  const [projectsLoaded, setProjectsLoaded] = useState(false)
+  // Synced collections: projects + user preferences (GH#32 phase p4).
+  // Replaces the old direct GET /api/gateway/projects/all client fetch —
+  // the projects collection is now driven by UserSettingsDO delta frames
+  // and D1-authoritative /api/projects cold-start queryFn.
+  const { data: projectRows } = useLiveQuery(projectsCollection as any)
+  const { data: prefsRows } = useLiveQuery(userPreferencesCollection as any)
 
-  useEffect(() => {
-    fetch(apiUrl('/api/gateway/projects/all'))
-      .then((r) => (r.ok ? r.json() : []))
-      .then((data) => {
-        if (Array.isArray(data)) setProjects(data as ProjectInfoWithHidden[])
-      })
-      .catch(() => {})
-      .finally(() => setProjectsLoaded(true))
-  }, [])
+  const hiddenSet = useMemo(() => {
+    const raw = (prefsRows as Array<{ hiddenProjects?: string | null }> | undefined)?.[0]
+      ?.hiddenProjects
+    if (!raw) return new Set<string>()
+    try {
+      const parsed = JSON.parse(raw)
+      return Array.isArray(parsed)
+        ? new Set(parsed.filter((v): v is string => typeof v === 'string'))
+        : new Set<string>()
+    } catch {
+      return new Set<string>()
+    }
+  }, [prefsRows])
 
-  const handleToggleHidden = useCallback((projectName: string) => {
-    setProjects((prev) => {
-      const updated = prev.map((p) => (p.name === projectName ? { ...p, hidden: !p.hidden } : p))
-      const hiddenList = updated.filter((p) => p.hidden).map((p) => p.name)
+  const projects = useMemo<ProjectInfoWithHidden[]>(() => {
+    const list = (projectRows ?? []) as ProjectInfo[]
+    return list.map((p) => ({ ...p, hidden: hiddenSet.has(p.name) }))
+  }, [projectRows, hiddenSet])
+
+  const projectsLoaded = projectRows !== undefined
+
+  const handleToggleHidden = useCallback(
+    (projectName: string) => {
+      const nextHidden = new Set(hiddenSet)
+      if (nextHidden.has(projectName)) nextHidden.delete(projectName)
+      else nextHidden.add(projectName)
+      const hiddenList = [...nextHidden]
       fetch(apiUrl('/api/user/preferences'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ key: 'hidden_projects', value: JSON.stringify(hiddenList) }),
       }).catch(() => {})
-      return updated
-    })
-  }, [])
+    },
+    [hiddenSet],
+  )
 
   const visible = sessions.filter((s) => !s.archived)
 

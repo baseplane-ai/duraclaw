@@ -27,6 +27,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import useYProvider from 'y-partyserver/react'
 import * as Y from 'yjs'
 import { useSession } from '~/lib/auth-client'
+import { partyHost } from '~/lib/platform'
 
 export interface OpenTabOptions {
   /** Project name for one-tab-per-project enforcement. */
@@ -268,7 +269,7 @@ export function useTabSync(): UseTabSyncResult {
   // "tabs" Y.Map — synced cross-device.
   const tabsY = useMemo(() => doc?.getMap<string>('tabs') ?? null, [doc])
 
-  const host = typeof window !== 'undefined' && window.location ? window.location.host : ''
+  const host = partyHost()
 
   const provider = useYProvider({
     host,

@@ -1,47 +1,48 @@
 /**
- * Chains QueryCollection — wraps GET /api/chains with TanStackDB.
+ * Chains SyncedCollection — wraps GET /api/chains with TanStack DB and
+ * subscribes to `chains` delta frames pushed by UserSettingsDO.
  *
- * One entry per kata-linked GitHub issue (see ChainSummary in lib/types).
- * Mirrors sessionLiveStateCollection siblings: OPFS-persisted, 30s refetch, 15s stale.
+ * Data flow (GH#32 phase p5):
+ *
+ *   SessionDO.syncKataToD1 → D1 agent_sessions
+ *        ↓
+ *     buildChainRow(db, userId, issueNumber) → ChainSummary | null
+ *        ↓
+ *     broadcastSyncedDelta(env, userId, 'chains', [op]) → WS frame
+ *        ↓
+ *     createSyncedCollection sync wrap → begin/write/commit
+ *
+ * Read-only from the user's perspective — no optimistic onInsert/onUpdate/
+ * onDelete handlers; authoritative writes happen server-side via kata
+ * state events and session lifecycle.
+ *
+ * Keys are string-encoded issue numbers so that delete ops (whose wire
+ * `key` is always a string per SyncedCollectionOp) collate correctly
+ * with inserts/updates keyed on the same value.
  */
 
-import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence'
-import { createCollection } from '@tanstack/db'
-import { queryCollectionOptions } from '@tanstack/query-db-collection'
 import { apiUrl } from '~/lib/platform'
 import type { ChainSummary } from '~/lib/types'
-import { dbReady, queryClient } from './db-instance'
-
-const queryOpts = queryCollectionOptions({
-  id: 'chains',
-  queryKey: ['chains'] as const,
-  queryFn: async () => {
-    const resp = await fetch(apiUrl('/api/chains'))
-    const json = (await resp.json()) as { chains: ChainSummary[] }
-    return json.chains
-  },
-  queryClient,
-  getKey: (item: ChainSummary) => item.issueNumber,
-  refetchInterval: 30_000,
-  staleTime: 15_000,
-})
+import { dbReady } from './db-instance'
+import { createSyncedCollection } from './synced-collection'
 
 const persistence = await dbReady
 
 function createChainsCollection() {
-  if (persistence) {
-    const opts = persistedCollectionOptions({
-      ...queryOpts,
-      persistence,
-      schemaVersion: 1,
-    })
-    // TanStackDB beta: persistedCollectionOptions adds a schema type that
-    // conflicts with createCollection overloads. Runtime behavior is correct.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return createCollection(opts as any)
-  }
-
-  return createCollection(queryOpts)
+  return createSyncedCollection<ChainSummary, string>({
+    id: 'chains',
+    queryKey: ['chains'] as const,
+    syncFrameType: 'chains',
+    queryFn: async () => {
+      const resp = await fetch(apiUrl('/api/chains'))
+      if (!resp.ok) throw new Error(`GET /api/chains ${resp.status}`)
+      const json = (await resp.json()) as { chains: ChainSummary[] }
+      return json.chains
+    },
+    getKey: (item) => String(item.issueNumber),
+    persistence,
+    schemaVersion: 1,
+  })
 }
 
 export const chainsCollection = createChainsCollection()

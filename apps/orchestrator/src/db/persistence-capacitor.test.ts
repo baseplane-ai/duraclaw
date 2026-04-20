@@ -3,21 +3,18 @@ import { describe, expect, it, vi } from 'vitest'
 const mockExecute = vi.fn()
 const mockQuery = vi.fn().mockResolvedValue({ values: [{ id: 1 }] })
 const mockOpen = vi.fn()
+const mockDatabase = {
+  open: mockOpen,
+  execute: mockExecute,
+  query: mockQuery,
+}
 
 vi.mock('@capacitor-community/sqlite', () => ({
   CapacitorSQLite: {},
   SQLiteConnection: class {
     isConnection = vi.fn().mockResolvedValue({ result: false })
-    retrieveConnection = vi.fn().mockResolvedValue({
-      open: mockOpen,
-      execute: mockExecute,
-      query: mockQuery,
-    })
-    createConnection = vi.fn().mockResolvedValue({
-      open: mockOpen,
-      execute: mockExecute,
-      query: mockQuery,
-    })
+    createConnection = vi.fn().mockResolvedValue(mockDatabase)
+    retrieveConnection = vi.fn().mockResolvedValue(mockDatabase)
   },
 }))
 

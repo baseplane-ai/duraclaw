@@ -1,39 +1,49 @@
-// UserSettingsDO unit tests — updated for YServer-based implementation.
-//
-// The DO now extends y-partyserver's `YServer` (which extends
-// partyserver's `Server`). We mock both to provide the test shim with
-// `this.env`, `this.name`, `this.getConnections()`, and `this.document`.
-// Auth and /notify are pure logic on top of those primitives.
+// UserSettingsDO unit tests — plain-DurableObject hibernation-API rewrite
+// (GH#32 phase p2a). The DO now owns a Set<WebSocket>, fans out
+// `synced-collection-delta` frames via POST /broadcast, and refcounts
+// presence into the `user_presence` D1 table on 0→1 / N→0 transitions.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import * as Y from 'yjs'
 
-// Mock y-partyserver's YServer with a shim that exposes what our DO needs.
-vi.mock('y-partyserver', () => {
-  class YServer {
-    env: any
-    name: string = ''
-    document: Y.Doc = new Y.Doc()
+// Mock cloudflare:workers DurableObject base class.
+vi.mock('cloudflare:workers', () => {
+  class DurableObject<T = unknown> {
     ctx: any
-    private _connections: any[] = []
-    constructor(ctx: unknown, env: any) {
+    env: T
+    constructor(ctx: unknown, env: T) {
+      this.ctx = ctx as any
       this.env = env
-      this.ctx = ctx
     }
-    getConnections(): Iterable<any> {
-      return this._connections
-    }
-    // Test-only helpers
-    _setConnections(conns: any[]) {
-      this._connections = conns
-    }
-    _setName(name: string) {
-      this.name = name
-    }
-    // onConnect stub — YServer's base does nothing we need for tests
-    async onConnect(_conn: any, _ctx: any) {}
   }
-  return { YServer }
+  return { DurableObject }
+})
+
+// Mock drizzle/d1 — the DO's only D1 interaction is presence insert/delete.
+const insertCalls: any[] = []
+const deleteCalls: any[] = []
+vi.mock('drizzle-orm/d1', () => ({
+  drizzle: () => ({
+    insert: (table: unknown) => ({
+      values: (vals: unknown) => ({
+        onConflictDoNothing: async () => {
+          insertCalls.push({ table, vals })
+        },
+      }),
+    }),
+    delete: (table: unknown) => ({
+      where: async (clause: unknown) => {
+        deleteCalls.push({ table, clause })
+      },
+    }),
+  }),
+}))
+
+vi.mock(import('drizzle-orm'), async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    eq: ((a: unknown, b: unknown) => ({ a, b })) as any,
+  }
 })
 
 vi.mock('~/api/auth-session', () => ({
@@ -45,151 +55,318 @@ import { UserSettingsDO } from './user-settings-do'
 
 const mockedGetRequestSession = vi.mocked(getRequestSession)
 
-function makeDO(name: string = 'user-1'): UserSettingsDO {
-  const env = {} as any
-  // Provide a ctx with storage.sql for the ensureTable/onLoad/onSave path.
+// ── Fake DurableObjectState ─────────────────────────────────────────────
+
+function makeCtx() {
+  const accepted: WebSocket[] = []
+  const attachments = new WeakMap<WebSocket, unknown>()
   const sqlExec = vi.fn(() => ({ toArray: () => [] }))
-  const ctx = { storage: { sql: { exec: sqlExec } } } as any
-  const instance = new UserSettingsDO(ctx, env)
-  ;(instance as any)._setName(name)
-  return instance
+  const ctx = {
+    storage: { sql: { exec: sqlExec } },
+    acceptWebSocket: vi.fn((ws: WebSocket) => {
+      accepted.push(ws)
+    }),
+    getWebSockets: () => [] as WebSocket[],
+    _accepted: accepted,
+    _attachments: attachments,
+  }
+  return ctx
 }
 
-function makeConn() {
-  const closed: Array<{ code: number; reason: string }> = []
+function fakeSocket(): WebSocket {
   const sent: string[] = []
-  const conn = {
-    close: vi.fn((code: number, reason: string) => {
-      closed.push({ code, reason })
-    }),
+  let attached: unknown = null
+  const ws = {
     send: vi.fn((msg: string) => {
       sent.push(msg)
     }),
-    closed,
-    sent,
-  }
-  return conn
+    close: vi.fn(),
+    serializeAttachment: vi.fn((v: unknown) => {
+      attached = v
+    }),
+    deserializeAttachment: vi.fn(() => attached),
+    _sent: sent,
+  } as unknown as WebSocket
+  return ws
 }
 
-describe('UserSettingsDO.onConnect', () => {
+function makeDO(envOverrides: Record<string, unknown> = {}) {
+  const ctx = makeCtx()
+  const env = {
+    AUTH_DB: {} as any,
+    SYNC_BROADCAST_SECRET: 'test-secret',
+    ...envOverrides,
+  } as any
+  // Patch WebSocketPair globally — test environment may not define it.
+  if (typeof (globalThis as any).WebSocketPair === 'undefined') {
+    ;(globalThis as any).WebSocketPair = class {
+      0: WebSocket
+      1: WebSocket
+      constructor() {
+        this[0] = fakeSocket()
+        this[1] = fakeSocket()
+      }
+    }
+  }
+  const instance = new UserSettingsDO(ctx as any, env)
+  return { instance, ctx, env }
+}
+
+describe('UserSettingsDO constructor', () => {
+  it('drops the legacy y_state table on init', () => {
+    const { ctx } = makeDO()
+    const execCalls = (ctx.storage.sql.exec as any).mock.calls.map((c: any[]) => c[0])
+    expect(execCalls.some((s: string) => /DROP TABLE IF EXISTS y_state/.test(s))).toBe(true)
+  })
+
+  it('rehydrates sockets and userId from hibernation store', () => {
+    const ctx = makeCtx()
+    const ws = fakeSocket()
+    ;(ws.deserializeAttachment as any).mockReturnValue({ userId: 'rehydrated-user' })
+    ctx.getWebSockets = () => [ws]
+    const env = { AUTH_DB: {}, SYNC_BROADCAST_SECRET: 'x' } as any
+    const instance = new UserSettingsDO(ctx as any, env)
+    // @ts-expect-error — reach into private set for verification
+    expect(instance.sockets.has(ws)).toBe(true)
+    // @ts-expect-error — private
+    expect(instance.userId).toBe('rehydrated-user')
+  })
+})
+
+describe('UserSettingsDO /broadcast', () => {
+  beforeEach(() => {
+    insertCalls.length = 0
+    deleteCalls.length = 0
+  })
+
+  it('rejects with 401 when Authorization header mismatches', async () => {
+    const { instance } = makeDO()
+    const req = new Request('http://do/broadcast', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer wrong' },
+      body: JSON.stringify({ type: 'synced-collection-delta', collection: 'x', ops: [] }),
+    })
+    const res = await instance.fetch(req)
+    expect(res.status).toBe(401)
+  })
+
+  it('rejects with 405 when method is not POST', async () => {
+    const { instance } = makeDO()
+    const req = new Request('http://do/broadcast', {
+      method: 'GET',
+      headers: { Authorization: 'Bearer test-secret' },
+    })
+    const res = await instance.fetch(req)
+    expect(res.status).toBe(405)
+  })
+
+  it('rejects invalid JSON with 400', async () => {
+    const { instance } = makeDO()
+    const req = new Request('http://do/broadcast', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-secret', 'Content-Type': 'application/json' },
+      body: 'not-json',
+    })
+    const res = await instance.fetch(req)
+    expect(res.status).toBe(400)
+  })
+
+  it('rejects invalid frame shape with 400', async () => {
+    const { instance } = makeDO()
+    const req = new Request('http://do/broadcast', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-secret' },
+      body: JSON.stringify({ type: 'other' }),
+    })
+    const res = await instance.fetch(req)
+    expect(res.status).toBe(400)
+  })
+
+  it('broadcasts a valid frame to every live socket', async () => {
+    const { instance } = makeDO()
+    const s1 = fakeSocket()
+    const s2 = fakeSocket()
+    // @ts-expect-error — seed private set
+    instance.sockets.add(s1)
+    // @ts-expect-error — seed private set
+    instance.sockets.add(s2)
+
+    const frame = {
+      type: 'synced-collection-delta',
+      collection: 'agent_sessions',
+      ops: [{ type: 'insert', value: { id: 's1' } }],
+    }
+    const payload = JSON.stringify(frame)
+    const req = new Request('http://do/broadcast', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-secret' },
+      body: payload,
+    })
+
+    const res = await instance.fetch(req)
+    expect(res.status).toBe(204)
+    expect(s1.send as any).toHaveBeenCalledWith(payload)
+    expect(s2.send as any).toHaveBeenCalledWith(payload)
+  })
+
+  it('removes sockets whose send() throws and continues', async () => {
+    const { instance } = makeDO()
+    const s1 = fakeSocket()
+    ;(s1.send as any).mockImplementationOnce(() => {
+      throw new Error('gone')
+    })
+    const s2 = fakeSocket()
+    // @ts-expect-error — seed private set
+    instance.sockets.add(s1)
+    // @ts-expect-error — seed private set
+    instance.sockets.add(s2)
+
+    const frame = { type: 'synced-collection-delta', collection: 'x', ops: [] }
+    const req = new Request('http://do/broadcast', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-secret' },
+      body: JSON.stringify(frame),
+    })
+    const res = await instance.fetch(req)
+    expect(res.status).toBe(204)
+    // @ts-expect-error — private
+    expect(instance.sockets.has(s1)).toBe(false)
+    // @ts-expect-error — private
+    expect(instance.sockets.has(s2)).toBe(true)
+  })
+
+  it('returns 404 for unknown paths', async () => {
+    const { instance } = makeDO()
+    const req = new Request('http://do/other', { method: 'GET' })
+    const res = await instance.fetch(req)
+    expect(res.status).toBe(404)
+  })
+})
+
+describe('UserSettingsDO WebSocket upgrade', () => {
   beforeEach(() => {
     mockedGetRequestSession.mockReset()
+    insertCalls.length = 0
+    deleteCalls.length = 0
   })
 
-  it('closes 4401 when no auth session', async () => {
+  it('rejects unauthenticated upgrades with 401', async () => {
     mockedGetRequestSession.mockResolvedValue(null)
-    const doInst = makeDO('user-1')
-    const conn = makeConn()
-    const ctx = { request: new Request('http://x/parties/user-settings/user-1') }
-
-    await doInst.onConnect(conn as any, ctx as any)
-
-    expect(conn.close).toHaveBeenCalledOnce()
-    expect(conn.closed[0]).toEqual({ code: 4401, reason: 'unauthenticated' })
+    const { instance } = makeDO()
+    const req = new Request('http://do/parties/user-settings/u1', {
+      headers: { Upgrade: 'websocket' },
+    })
+    const res = await instance.fetch(req)
+    expect(res.status).toBe(401)
   })
 
-  it('closes 4403 when room userId does not match session userId', async () => {
+  it('rejects cross-user upgrades with 403 when ?userId mismatches', async () => {
     mockedGetRequestSession.mockResolvedValue({
       userId: 'attacker',
       role: 'user',
       session: {},
       user: {},
     })
-    const doInst = makeDO('victim')
-    const conn = makeConn()
-    const ctx = { request: new Request('http://x/parties/user-settings/victim') }
-
-    await doInst.onConnect(conn as any, ctx as any)
-
-    expect(conn.close).toHaveBeenCalledOnce()
-    expect(conn.closed[0]).toEqual({ code: 4403, reason: 'forbidden' })
+    const { instance } = makeDO()
+    const req = new Request('http://do/ws?userId=victim', {
+      headers: { Upgrade: 'websocket' },
+    })
+    const res = await instance.fetch(req)
+    expect(res.status).toBe(403)
   })
 
-  it('does not close when room userId equals session userId', async () => {
+  it('accepts the socket and inserts presence on 0→1 transition', async () => {
     mockedGetRequestSession.mockResolvedValue({
-      userId: 'user-1',
+      userId: 'u1',
       role: 'user',
       session: {},
       user: {},
     })
-    const doInst = makeDO('user-1')
-    const conn = makeConn()
-    const ctx = { request: new Request('http://x/parties/user-settings/user-1') }
-
-    await doInst.onConnect(conn as any, ctx as any)
-
-    expect(conn.close).not.toHaveBeenCalled()
-  })
-})
-
-describe('UserSettingsDO.onRequest', () => {
-  it('broadcasts /notify body verbatim to every connection', async () => {
-    const doInst = makeDO('user-1')
-    const c1 = makeConn()
-    const c2 = makeConn()
-    ;(doInst as any)._setConnections([c1, c2])
-
-    const payload = JSON.stringify({ type: 'invalidate', collection: 'agent_sessions' })
-    const req = new Request('http://do/notify', { method: 'POST', body: payload })
-
-    const res = await doInst.onRequest(req)
-
-    expect(res.status).toBe(204)
-    expect(c1.send).toHaveBeenCalledWith(payload)
-    expect(c2.send).toHaveBeenCalledWith(payload)
-  })
-
-  it('swallows send() errors and continues to remaining connections', async () => {
-    const doInst = makeDO('user-1')
-    const c1 = makeConn()
-    c1.send = vi.fn(() => {
-      throw new Error('socket gone')
+    const { instance, ctx } = makeDO()
+    const req = new Request('http://do/parties/user-settings/u1', {
+      headers: { Upgrade: 'websocket' },
     })
-    const c2 = makeConn()
-    ;(doInst as any)._setConnections([c1, c2])
-
-    const req = new Request('http://do/notify', { method: 'POST', body: 'x' })
-    const res = await doInst.onRequest(req)
-
-    expect(res.status).toBe(204)
-    expect(c2.send).toHaveBeenCalledWith('x')
+    // The DO returns `new Response(null, { status: 101, webSocket })` which
+    // the CF Workers runtime permits but the undici Response constructor in
+    // the vitest env does not — we swallow the constructor error since the
+    // side effects we care about (acceptWebSocket, presence insert) have
+    // already fired by the time the Response is constructed.
+    try {
+      await instance.fetch(req)
+    } catch (err) {
+      if (!/status/.test(String(err))) throw err
+    }
+    expect(ctx.acceptWebSocket).toHaveBeenCalledOnce()
+    // @ts-expect-error — private
+    expect(instance.sockets.size).toBe(1)
+    expect(insertCalls.length).toBe(1)
+    expect((insertCalls[0].vals as any).userId).toBe('u1')
   })
 
-  it('returns 404 for non-/notify paths', async () => {
-    const doInst = makeDO('user-1')
-    const req = new Request('http://do/other', { method: 'POST' })
-    const res = await doInst.onRequest(req)
-    expect(res.status).toBe(404)
-  })
-
-  it('returns 404 for /notify with non-POST method', async () => {
-    const doInst = makeDO('user-1')
-    const req = new Request('http://do/notify', { method: 'GET' })
-    const res = await doInst.onRequest(req)
-    expect(res.status).toBe(404)
+  it('does NOT re-insert presence when sockets set was already non-empty', async () => {
+    mockedGetRequestSession.mockResolvedValue({
+      userId: 'u1',
+      role: 'user',
+      session: {},
+      user: {},
+    })
+    const { instance } = makeDO()
+    // Pre-seed an existing socket so the new upgrade is the 1→2 transition.
+    // @ts-expect-error — private
+    instance.sockets.add(fakeSocket())
+    const req = new Request('http://do/ws', { headers: { Upgrade: 'websocket' } })
+    try {
+      await instance.fetch(req)
+    } catch (err) {
+      if (!/status/.test(String(err))) throw err
+    }
+    expect(insertCalls.length).toBe(0)
   })
 })
 
-describe('UserSettingsDO Y.Doc', () => {
-  it('has a Y.Doc with openTabs array and workspace map', async () => {
-    const doInst = makeDO('user-1')
-    // onLoad creates the y_state table and restores from snapshot
-    await doInst.onLoad()
-    const doc = (doInst as any).document as Y.Doc
-    expect(doc.getArray('openTabs')).toBeDefined()
-    expect(doc.getMap('workspace')).toBeDefined()
+describe('UserSettingsDO.webSocketClose / webSocketError', () => {
+  beforeEach(() => {
+    insertCalls.length = 0
+    deleteCalls.length = 0
   })
 
-  it('onSave snapshots the Y.Doc to SQL', async () => {
-    const doInst = makeDO('user-1')
-    const sqlExec = (doInst as any).ctx.storage.sql.exec
-    await doInst.onLoad()
-    // Add a tab to the doc
-    const doc = (doInst as any).document as Y.Doc
-    doc.getArray<string>('openTabs').push(['session-1'])
-    await doInst.onSave()
-    // Should have called exec with INSERT OR REPLACE
-    const lastCall = sqlExec.mock.calls[sqlExec.mock.calls.length - 1]
-    expect(lastCall[0]).toContain('INSERT OR REPLACE')
+  it('removes socket and clears presence on N→0 transition', async () => {
+    const { instance } = makeDO()
+    const ws = fakeSocket()
+    // @ts-expect-error — private
+    instance.sockets.add(ws)
+    // @ts-expect-error — private
+    instance.userId = 'u1'
+    await instance.webSocketClose(ws, 1000, '', true)
+    // @ts-expect-error — private
+    expect(instance.sockets.size).toBe(0)
+    expect(deleteCalls.length).toBe(1)
+  })
+
+  it('does NOT clear presence while other sockets remain', async () => {
+    const { instance } = makeDO()
+    const s1 = fakeSocket()
+    const s2 = fakeSocket()
+    // @ts-expect-error — private
+    instance.sockets.add(s1)
+    // @ts-expect-error — private
+    instance.sockets.add(s2)
+    // @ts-expect-error — private
+    instance.userId = 'u1'
+    await instance.webSocketClose(s1, 1000, '', true)
+    expect(deleteCalls.length).toBe(0)
+  })
+
+  it('also cleans up on webSocketError', async () => {
+    const { instance } = makeDO()
+    const ws = fakeSocket()
+    // @ts-expect-error — private
+    instance.sockets.add(ws)
+    // @ts-expect-error — private
+    instance.userId = 'u1'
+    await instance.webSocketError(ws, new Error('boom'))
+    // @ts-expect-error — private
+    expect(instance.sockets.size).toBe(0)
+    expect(deleteCalls.length).toBe(1)
   })
 })

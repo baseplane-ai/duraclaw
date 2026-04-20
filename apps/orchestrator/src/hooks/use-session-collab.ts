@@ -20,6 +20,7 @@ import useYProvider from 'y-partyserver/react'
 import type { Awareness } from 'y-protocols/awareness'
 import * as Y from 'yjs'
 import { useSession } from '~/lib/auth-client'
+import { partyHost } from '~/lib/platform'
 import { colorForUserId } from '~/lib/presence-colors'
 
 export type SessionCollabStatus = 'connecting' | 'connected' | 'disconnected' | 'auth-failed'
@@ -73,7 +74,8 @@ export function useSessionCollab(opts: { sessionId: string }): UseSessionCollabR
   const ytext = useMemo(() => doc.getText('draft'), [doc])
 
   // host is only meaningful in the browser; SSR/tests get a harmless fallback.
-  const host = typeof window !== 'undefined' && window.location ? window.location.host : 'localhost'
+  // On Capacitor, partyHost() returns the deployed Worker host.
+  const host = partyHost()
 
   const provider = useYProvider({
     host,

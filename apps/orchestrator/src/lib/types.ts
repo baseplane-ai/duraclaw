@@ -72,6 +72,11 @@ export interface Env {
    *  limit from 60/hr unauthenticated to 5000/hr. Read-only scope is
    *  sufficient since we only list public issues + PRs. */
   GITHUB_API_TOKEN?: string
+  /** Bearer token guarding `UserSettingsDO POST /broadcast` (GH#32 phase p2a).
+   *  API handlers that push synced-collection delta frames to a user's
+   *  browsers must authenticate with this secret. Required for broadcast
+   *  calls; missing secret means the DO rejects every broadcast with 401. */
+  SYNC_BROADCAST_SECRET?: string
 }
 
 // ── D1 row response shapes (issue #7 p2) ───────────────────────────

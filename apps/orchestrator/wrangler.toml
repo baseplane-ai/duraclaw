@@ -69,7 +69,7 @@ deleted_classes = ["ProjectRegistry"]
 [[d1_databases]]
 binding = "AUTH_DB"
 database_name = "duraclaw-auth"
-database_id = "c5b4d822-9bc6-467f-9ad6-7ee779b82e0c"
+database_id = "7f7a3c5e-0609-4527-904e-740ca140538d"
 
 [vars]
 VAPID_SUBJECT = "mailto:push@codevibesmatter.com"
@@ -85,3 +85,7 @@ VAPID_SUBJECT = "mailto:push@codevibesmatter.com"
 # FCM_SERVICE_ACCOUNT_JSON — Firebase service account JSON (single-line, GH#26 P1 B5).
 #                            Enables FCM push to Capacitor Android shell. Opt-in:
 #                            unset = no FCM dispatch, web push (VAPID) unaffected.
+# SYNC_BROADCAST_SECRET — Bearer token guarding UserSettingsDO `POST /broadcast`
+#                          (GH#32 phase p2a). API handlers that want to push
+#                          delta frames to a user's browsers authenticate with
+#                          this secret. Set via `wrangler secret put`.

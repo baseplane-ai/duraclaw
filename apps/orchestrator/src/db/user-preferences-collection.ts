@@ -1,75 +1,61 @@
 /**
  * User Preferences QueryCollection -- single-row settings table (B-CLIENT-2b).
  *
- * - Collection id: 'user_preferences'
- * - Persisted to OPFS SQLite (schema version 1)
- * - queryFn fetches GET /api/preferences and wraps the row in `[row]`
- *   (single-row collection keyed on userId)
- * - refetchInterval: false (invalidation channel pushes freshness)
- * - Mutations PUT /api/preferences as a single upsert (per the spec — no
- *   per-field updates; the API treats the row as one envelope)
+ * Built on `createSyncedCollection` (GH#32 phase p3) so WS-pushed
+ * `user_preferences` delta frames and `onUserStreamReconnect` resyncs are
+ * wired by the shared factory.
+ *
+ * Mutations PUT /api/preferences as a single upsert (per the spec — no
+ * per-field updates; the API treats the row as one envelope). The
+ * collection is keyed on `userId`.
  */
 
-import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence'
-import { createCollection } from '@tanstack/db'
-import { queryCollectionOptions } from '@tanstack/query-db-collection'
 import { apiUrl } from '~/lib/platform'
 import type { UserPreferencesRow } from '~/lib/types'
-import { dbReady, queryClient } from './db-instance'
+import { dbReady } from './db-instance'
+import { createSyncedCollection } from './synced-collection'
 
 export type PreferencesRow = UserPreferencesRow
-
-const queryOpts = queryCollectionOptions({
-  id: 'user_preferences',
-  queryKey: ['user_preferences'] as const,
-  queryFn: async () => {
-    const resp = await fetch(apiUrl('/api/preferences'))
-    if (!resp.ok) return [] as UserPreferencesRow[]
-    const row = (await resp.json()) as UserPreferencesRow
-    return [row]
-  },
-  queryClient,
-  getKey: (item: UserPreferencesRow) => item.userId,
-  refetchInterval: false,
-  staleTime: Number.POSITIVE_INFINITY,
-
-  onInsert: async ({ transaction }) => {
-    for (const m of transaction.mutations) {
-      const resp = await fetch(apiUrl('/api/preferences'), {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(m.modified),
-      })
-      if (!resp.ok) throw new Error(`Preferences upsert failed: ${resp.status}`)
-    }
-  },
-
-  onUpdate: async ({ transaction }) => {
-    for (const m of transaction.mutations) {
-      const resp = await fetch(apiUrl('/api/preferences'), {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(m.modified),
-      })
-      if (!resp.ok) throw new Error(`Preferences upsert failed: ${resp.status}`)
-    }
-  },
-})
 
 const persistence = await dbReady
 
 function createUserPreferencesCollection() {
-  if (persistence) {
-    const opts = persistedCollectionOptions({
-      ...queryOpts,
-      persistence,
-      schemaVersion: 1,
-    })
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return createCollection(opts as any)
-  }
+  return createSyncedCollection<UserPreferencesRow, string>({
+    id: 'user_preferences',
+    queryKey: ['user_preferences'] as const,
+    syncFrameType: 'user_preferences',
+    queryFn: async () => {
+      const resp = await fetch(apiUrl('/api/preferences'))
+      if (!resp.ok) return [] as UserPreferencesRow[]
+      const row = (await resp.json()) as UserPreferencesRow
+      return [row]
+    },
+    getKey: (item) => item.userId,
+    persistence,
+    schemaVersion: 1,
 
-  return createCollection(queryOpts)
+    onInsert: async ({ transaction }) => {
+      for (const m of transaction.mutations) {
+        const resp = await fetch(apiUrl('/api/preferences'), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(m.modified),
+        })
+        if (!resp.ok) throw new Error(`Preferences upsert failed: ${resp.status}`)
+      }
+    },
+
+    onUpdate: async ({ transaction }) => {
+      for (const m of transaction.mutations) {
+        const resp = await fetch(apiUrl('/api/preferences'), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(m.modified),
+        })
+        if (!resp.ok) throw new Error(`Preferences upsert failed: ${resp.status}`)
+      }
+    },
+  })
 }
 
 export const userPreferencesCollection = createUserPreferencesCollection()

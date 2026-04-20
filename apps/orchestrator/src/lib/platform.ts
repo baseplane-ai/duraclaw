@@ -102,3 +102,16 @@ export function wsBaseUrl(): string {
     return url
   }
 }
+
+/**
+ * Host for PartyServer / Yjs WebSocket connections. On web builds: returns
+ * `window.location.host` (same-origin, the Worker itself). On Capacitor
+ * builds: returns the deployed Worker host from `VITE_WORKER_PUBLIC_URL`
+ * so WS connections go to the cloud instead of the local WebView.
+ *
+ * Use this instead of raw `window.location.host` in any `useYProvider` /
+ * `partysocket` / invalidation-channel hook.
+ */
+export function partyHost(): string {
+  return wsBaseUrl() || (typeof window !== 'undefined' ? window.location.host : '')
+}

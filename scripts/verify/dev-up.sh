@@ -71,6 +71,11 @@ wait_for_tmux_service() {
 }
 
 start_gateway() {
+  # The gateway needs WORKER_PUBLIC_URL + CC_GATEWAY_SECRET so its scheduled
+  # pushProjectsToWorker() can POST to the worker (GH#32 B4). These are the
+  # same values sync_dev_vars() writes to .dev.vars for the orchestrator side.
+  local _gw_secret="${CC_GATEWAY_SECRET:-${CC_GATEWAY_API_TOKEN:-}}"
+
   nohup bash -lc "
     set -euo pipefail
     cd \"$VERIFY_ROOT\"
@@ -79,6 +84,8 @@ start_gateway() {
       source ./.env
       set +a
     fi
+    export WORKER_PUBLIC_URL=\"$VERIFY_ORCH_URL\"
+    export CC_GATEWAY_SECRET=\"$_gw_secret\"
     exec bun run packages/agent-gateway/src/server.ts
   " >"$GATEWAY_LOG_FILE" 2>&1 &
 
