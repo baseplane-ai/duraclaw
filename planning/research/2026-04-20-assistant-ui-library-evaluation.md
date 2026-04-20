@@ -128,6 +128,47 @@ Our `GateResolver` in `ChatThread.tsx:46,87–107` is bespoke: it renders approv
 - [ ] **Auto-scroll review** — compare our `Conversation` viewport (`conversation.tsx`) against `ThreadPrimitive.Viewport` anchor-preservation logic; port improvements if any.
 - [ ] **Re-evaluate at voice (GH#20)** — if `ComposerPrimitive` + their dictation story saves meaningful effort vs. building from scratch, reconsider selective adoption behind the composer only.
 
+## Addendum: Tool-Call UI Comparison (Follow-up)
+
+The question "aren't their tool components more mature than ai-elements?" is correct — on **five** specific dimensions. But the gap is in *primitives*, not *per-tool renderers*. `@assistant-ui/react-opencode` ships a projection layer only (events → `MessagePart`); per-tool UIs are consumer-registered.
+
+### Side-by-side
+
+| Dimension | ai-elements (today) | assistant-ui |
+|---|---|---|
+| **Per-tool UI registry** | None. `ChatThread.tsx` renders one generic `<Tool>` for every tool; branching on tool name happens ad-hoc | First-class. `makeAssistantToolUI({ toolName, render })` registers a `ToolCallMessagePartComponent` per tool name via `aui.tools().setToolUI()`. Fallback to default if unregistered. (`packages/core/src/react/model-context/makeAssistantToolUI.ts`, `useAssistantToolUI.ts`) |
+| **Streaming tool args** | Waits for full JSON. `ToolInput` does `JSON.stringify(input, null, 2)` on complete input (`tool.tsx:117`). Separate `input-streaming` state exists but renders pending UI, not the partial args | `ToolCallMessagePart` has both `args: TArgs` **and** `argsText: string` — the partial-JSON buffer that updates per delta, so a Bash renderer can show `bash -c "npm "` mid-stream (`packages/core/src/types/message.ts:56–71`) |
+| **Status model** | 7 ad-hoc string states mixing input/output/approval: `'input-streaming'`, `'input-available'`, `'output-available'`, `'output-denied'`, `'output-error'`, `'approval-requested'`, `'approval-responded'` (`tool.tsx`) | Clean 4-state discriminated union: `ToolCallMessagePartStatus = { type: 'running' } \| { type: 'requires-action', reason: 'interrupt' } \| { type: 'complete' } \| { type: 'incomplete', reason: 'cancelled'\|'length'\|… }` (`message.ts:89–112`) |
+| **Approval / HITL flow** | App-wired. `<Confirmation>` renders the UI shell (Request / Accepted / Rejected / Actions). Approve/deny logic lives in app (`GateResolver` → `resolveGate` RPC) | Baked into the part object. The tool renderer receives `addResult(result: TResult \| ToolResponse<TResult>)` and `resume(payload: unknown)` callbacks wired to the runtime. `interrupt?: { type: 'human', payload }` field models the pause point (`MessagePartComponentTypes.ts:55–67`) |
+| **Artifact slot** | No dedicated field; tool-specific state piggybacks on `output` | `ToolCallMessagePart.artifact?: unknown` — first-class place to stash rehydrate-stable rich state (diff tree, terminal buffer, generated image). Survives snapshot replay by design |
+| **Step nesting** | None | `parentId?: string` lets tool calls nest under step-start / step-finish boundaries — directly maps to Claude Code's multi-step plan → tool sequences |
+| **Ships ready-made Read/Bash/Edit viewers?** | No — single generic `<Tool>` | No — `react-opencode` is a projection layer only; consumer writes each `makeAssistantToolUI({ toolName: 'read', render: <ReadViewer /> })` |
+
+### What this changes
+
+The tool-primitive gap is real and worth closing — **independent** of whether we adopt the library. The five items above are extractable patterns we could port into `packages/ai-elements/`:
+
+1. **`ToolUIRegistry`** — a React context + `registerToolUI(name, component)` helper so `ChatThread.tsx` can render `<FileEditDiff>` for `Edit` tool-calls, `<TerminalView>` for `Bash`, etc., with a generic fallback. Replaces the ad-hoc switch that doesn't exist today.
+2. **Add `argsText` to `CachedMessage` tool parts.** Mirror `assistant-stream`'s partial-JSON buffer. Our `gateway-event-mapper.partialAssistantToParts` already handles streaming text — extend to tool input deltas. Unlocks live-typing Bash commands / Edit filenames.
+3. **Collapse the status model** to the 4-state union. The current 7-string ad-hoc set is brittle (the mapping in `statusLabels` / `statusIcons` is duplicated across `tool.tsx` / `confirmation.tsx` / `tool-call-list.tsx`).
+4. **`addResult` / `resume` closure on tool-call parts.** The `GateResolver` → `resolveGate` RPC can be wrapped in a callback attached to the part itself, so renderers don't need to import the connection object.
+5. **`artifact` field** for rich tool-specific state (we'd use it for FileEdit diffs, terminal ANSI buffers, generated artifacts — all things we currently stuff into `output` or lose on snapshot replay).
+6. **`parentId` for step nesting** — groundwork for the step-folding UI we don't have yet.
+
+### Revised recommendation
+
+Original recommendation (don't adopt wholesale) stands. But elevate one follow-up:
+
+- [ ] **New spec issue: "Tool-UI primitive upgrade in ai-elements"** — port the `ToolUIRegistry` + `argsText` + clean status model + `artifact` + `addResult/resume` closure patterns from assistant-ui into our existing `tool.tsx` / `tool-call-list.tsx` / `gateway-event-mapper.ts`. Low risk (additive to ai-elements), high leverage (unlocks per-tool viewers for Read / Edit / Bash / Write), and avoids the streaming/branching migration cost that killed wholesale adoption.
+
+### Additional sources (addendum)
+
+- `/tmp/assistant-ui-probe/packages/core/src/react/model-context/makeAssistantToolUI.ts` (11-line factory)
+- `/tmp/assistant-ui-probe/packages/core/src/react/model-context/useAssistantToolUI.ts` (toolName→render hook)
+- `/tmp/assistant-ui-probe/packages/core/src/react/types/MessagePartComponentTypes.ts:55–67` (`ToolCallMessagePartProps` with `addResult`, `resume`)
+- `/tmp/assistant-ui-probe/packages/core/src/types/message.ts:56–112` (`ToolCallMessagePart` + status union)
+- `/tmp/assistant-ui-probe/packages/react-opencode/src/openCodeMessageProjection.ts:233–248` (event→tool-call mapping — confirms no per-tool renderers shipped)
+
 ## Sources Cited
 
 - github.com/assistant-ui/assistant-ui (repo metadata via `gh-axi api repos/assistant-ui/assistant-ui`)
