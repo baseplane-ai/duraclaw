@@ -521,6 +521,24 @@ export interface KataStateEvent {
   kata_state: KataSessionState | null
 }
 
+// ── Context Usage (shared between DO + client) ─────────────────────
+//
+// Mirror of the canonical shape client-side code writes into
+// `sessionLiveStateCollection.contextUsage`. The SDK's
+// `query.getContextUsage()` returns a `Record<string, unknown>` on the wire
+// (see ContextUsageEvent.usage); this interface is the parsed /
+// strongly-typed projection used by UI consumers and by the new P3 REST
+// cache in SessionDO's `session_meta.context_usage_json` column.
+
+export interface ContextUsage {
+  totalTokens: number
+  maxTokens: number
+  percentage: number
+  model?: string
+  isAutoCompactEnabled?: boolean
+  autoCompactThreshold?: number
+}
+
 // ── Session State ────────────────────────────────────────────────────
 
 export type SessionStatus =

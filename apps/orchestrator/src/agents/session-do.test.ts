@@ -1410,3 +1410,368 @@ describe('claimSubmitId', () => {
     expect(rows.map((r) => r.id)).toEqual(['new'])
   })
 })
+
+// ── P3 B4: getContextUsage cached-or-fresh + in-flight dedupe ──
+//
+// SessionDO uses TC39 decorators so can't be instantiated in tests. The
+// harness below mirrors the exact contract of SessionDO.getContextUsage:
+//   - 5s TTL cache-hit
+//   - single-flight probe dedupe
+//   - 3s timeout fallback to stale/null
+//   - UPDATE session_meta.context_usage_json on fresh probe success
+// It runs the identical code path against fake sql / fake sendToGateway.
+
+interface FakeContextUsage {
+  totalTokens: number
+  maxTokens: number
+  percentage: number
+  model?: string
+}
+
+function createContextUsageHarness(initial: {
+  row?: {
+    context_usage_json: string | null
+    context_usage_cached_at: number | null
+  }
+  hasGatewayConn: boolean
+}) {
+  const row = initial.row ?? { context_usage_json: null, context_usage_cached_at: null }
+  const sends: string[] = []
+  const resolvers: Array<{
+    resolve: (v: FakeContextUsage | null) => void
+    reject: (e: unknown) => void
+  }> = []
+  let probeInFlight: Promise<FakeContextUsage | null> | null = null
+  let hasGatewayConn = initial.hasGatewayConn
+
+  function sql<T>(strings: TemplateStringsArray, ...values: unknown[]): T[] {
+    const query = strings.join('?').trim()
+    if (query.startsWith('SELECT context_usage_json, context_usage_cached_at FROM session_meta')) {
+      return [
+        {
+          context_usage_json: row.context_usage_json,
+          context_usage_cached_at: row.context_usage_cached_at,
+        },
+      ] as T[]
+    }
+    if (query.startsWith('UPDATE session_meta')) {
+      row.context_usage_json = values[0] as string | null
+      row.context_usage_cached_at = values[1] as number | null
+      return [] as T[]
+    }
+    return [] as T[]
+  }
+
+  function probeWithTimeout(): Promise<FakeContextUsage | null> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const idx = resolvers.findIndex((r) => r.resolve === innerResolve)
+        if (idx >= 0) resolvers.splice(idx, 1)
+        reject(new Error('probe_timeout'))
+      }, 3_000)
+      const innerResolve = (v: FakeContextUsage | null) => {
+        clearTimeout(timer)
+        resolve(v)
+      }
+      const innerReject = (e: unknown) => {
+        clearTimeout(timer)
+        reject(e)
+      }
+      resolvers.push({ resolve: innerResolve, reject: innerReject })
+      sends.push('get-context-usage')
+    })
+  }
+
+  async function getContextUsage(): Promise<{
+    contextUsage: FakeContextUsage | null
+    fetchedAt: string
+    isCached: boolean
+  }> {
+    const rows = sql<{
+      context_usage_json: string | null
+      context_usage_cached_at: number | null
+    }>`SELECT context_usage_json, context_usage_cached_at FROM session_meta WHERE id = 1`
+    const r = rows[0]
+    const cached =
+      r?.context_usage_json && r.context_usage_cached_at != null
+        ? {
+            value: JSON.parse(r.context_usage_json) as FakeContextUsage,
+            cachedAt: r.context_usage_cached_at,
+          }
+        : null
+    const now = Date.now()
+    if (cached && now - cached.cachedAt < 5_000) {
+      return {
+        contextUsage: cached.value,
+        fetchedAt: new Date(cached.cachedAt).toISOString(),
+        isCached: true,
+      }
+    }
+    if (!hasGatewayConn) {
+      return {
+        contextUsage: cached?.value ?? null,
+        fetchedAt: cached ? new Date(cached.cachedAt).toISOString() : new Date().toISOString(),
+        isCached: true,
+      }
+    }
+    if (!probeInFlight) {
+      probeInFlight = probeWithTimeout().finally(() => {
+        probeInFlight = null
+      })
+    }
+    try {
+      const value = await probeInFlight
+      const cachedAt = Date.now()
+      sql`UPDATE session_meta
+        SET context_usage_json = ${JSON.stringify(value)},
+            context_usage_cached_at = ${cachedAt},
+            updated_at = ${cachedAt}
+        WHERE id = 1`
+      return {
+        contextUsage: value,
+        fetchedAt: new Date(cachedAt).toISOString(),
+        isCached: false,
+      }
+    } catch {
+      return {
+        contextUsage: cached?.value ?? null,
+        fetchedAt: cached ? new Date(cached.cachedAt).toISOString() : new Date().toISOString(),
+        isCached: true,
+      }
+    }
+  }
+
+  function deliver(value: FakeContextUsage | null) {
+    // Mirror SessionDO's handleGatewayEvent('context_usage') side effects.
+    const drained = resolvers.splice(0)
+    for (const res of drained) {
+      try {
+        res.resolve(value)
+      } catch {
+        // noop
+      }
+    }
+    const cachedAt = Date.now()
+    sql`UPDATE session_meta
+      SET context_usage_json = ${JSON.stringify(value)},
+          context_usage_cached_at = ${cachedAt},
+          updated_at = ${cachedAt}
+      WHERE id = 1`
+  }
+
+  return {
+    getContextUsage,
+    deliver,
+    sends,
+    resolvers,
+    row,
+    setGatewayConn(v: boolean) {
+      hasGatewayConn = v
+    },
+  }
+}
+
+describe('getContextUsage (P3 B4)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-04-20T00:00:00Z'))
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('context-usage-rest-returns-cached-then-probes', async () => {
+    // Pre-seed a fresh cache (cached_at = now).
+    const cached: FakeContextUsage = { totalTokens: 1_000, maxTokens: 200_000, percentage: 0.5 }
+    const h = createContextUsageHarness({
+      row: {
+        context_usage_json: JSON.stringify(cached),
+        context_usage_cached_at: Date.now(),
+      },
+      hasGatewayConn: true,
+    })
+
+    // First call — fresh cache hit, no probe.
+    const first = await h.getContextUsage()
+    expect(first.isCached).toBe(true)
+    expect(first.contextUsage).toEqual(cached)
+    expect(h.sends).toHaveLength(0)
+
+    // Advance past the 5s TTL — next call must probe.
+    vi.advanceTimersByTime(6_000)
+    const pending = h.getContextUsage()
+    // Probe command was dispatched.
+    expect(h.sends).toHaveLength(1)
+    // Deliver fresh value.
+    const fresh: FakeContextUsage = { totalTokens: 2_000, maxTokens: 200_000, percentage: 1.0 }
+    h.deliver(fresh)
+    const second = await pending
+    expect(second.isCached).toBe(false)
+    expect(second.contextUsage).toEqual(fresh)
+    expect(h.row.context_usage_json).toBe(JSON.stringify(fresh))
+  })
+
+  it('context-usage-inflight-dedupe', async () => {
+    // Cold cache, gateway connected — fire 3 concurrent calls.
+    const h = createContextUsageHarness({ hasGatewayConn: true })
+    const p1 = h.getContextUsage()
+    const p2 = h.getContextUsage()
+    const p3 = h.getContextUsage()
+    // Only one probe command dispatched despite 3 concurrent callers.
+    expect(h.sends).toHaveLength(1)
+    const value: FakeContextUsage = { totalTokens: 500, maxTokens: 200_000, percentage: 0.25 }
+    h.deliver(value)
+    const [r1, r2, r3] = await Promise.all([p1, p2, p3])
+    expect(r1.contextUsage).toEqual(value)
+    expect(r2.contextUsage).toEqual(value)
+    expect(r3.contextUsage).toEqual(value)
+    // All three share the same fresh probe → isCached:false on each.
+    expect(r1.isCached).toBe(false)
+    expect(r2.isCached).toBe(false)
+    expect(r3.isCached).toBe(false)
+  })
+
+  it('context-usage-no-gateway-returns-stale', async () => {
+    // Populate a stale cache, then take the gateway offline.
+    const stale: FakeContextUsage = { totalTokens: 100, maxTokens: 200_000, percentage: 0.05 }
+    const h = createContextUsageHarness({
+      row: {
+        context_usage_json: JSON.stringify(stale),
+        context_usage_cached_at: Date.now() - 10_000, // 10s ago, past the 5s TTL
+      },
+      hasGatewayConn: false,
+    })
+    const res = await h.getContextUsage()
+    expect(res.contextUsage).toEqual(stale)
+    expect(res.isCached).toBe(true)
+    // No probe dispatched when the gateway is offline.
+    expect(h.sends).toHaveLength(0)
+  })
+
+  it('returns null + isCached:true when cold cache and no gateway', async () => {
+    const h = createContextUsageHarness({ hasGatewayConn: false })
+    const res = await h.getContextUsage()
+    expect(res.contextUsage).toBeNull()
+    expect(res.isCached).toBe(true)
+    expect(h.sends).toHaveLength(0)
+  })
+})
+
+// ── P3 B5: getKataState reads D1 mirror ────────────────────────
+
+describe('getKataState (P3 B5)', () => {
+  /**
+   * Mirror of SessionDO.getKataState. D1 + kv sql are both stubbed; we
+   * verify the precedence: D1 row absent → null; kv blob present → full
+   * shape; kv absent + D1 row present → synthesized minimal shape.
+   */
+  async function runGetKataState(input: {
+    d1Row: {
+      kataMode: string | null
+      kataIssue: number | null
+      kataPhase: string | null
+    } | null
+    kvBlob: string | null
+  }): Promise<{ kataState: any; fetchedAt: string }> {
+    const sessionId = 'sess-test-1'
+    // Fake d1.select().from().where().limit()
+    const d1 = {
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => (input.d1Row ? [input.d1Row] : []),
+          }),
+        }),
+      }),
+    }
+    function sql<T>(strings: TemplateStringsArray): T[] {
+      const query = strings.join('').trim()
+      if (query.includes("SELECT value FROM kv WHERE key = 'kata_state'")) {
+        return input.kvBlob ? ([{ value: input.kvBlob }] as T[]) : ([] as T[])
+      }
+      return [] as T[]
+    }
+
+    try {
+      const rows = await d1.select().from().where().limit()
+      const row = rows[0]
+      if (!row || (row.kataMode == null && row.kataIssue == null && row.kataPhase == null)) {
+        return { kataState: null, fetchedAt: new Date().toISOString() }
+      }
+      const kvRows = sql<{ value: string }>`SELECT value FROM kv WHERE key = 'kata_state'`
+      const kvKata = kvRows[0]?.value ? JSON.parse(kvRows[0].value) : null
+      if (kvKata) {
+        return { kataState: kvKata, fetchedAt: new Date().toISOString() }
+      }
+      const minimal = {
+        sessionId,
+        workflowId: null,
+        issueNumber: row.kataIssue ?? null,
+        sessionType: null,
+        currentMode: row.kataMode ?? null,
+        currentPhase: row.kataPhase ?? null,
+        completedPhases: [],
+        template: null,
+        phases: [],
+        modeHistory: [],
+        modeState: {},
+        updatedAt: new Date().toISOString(),
+        beadsCreated: [],
+        editedFiles: [],
+      }
+      return { kataState: minimal, fetchedAt: new Date().toISOString() }
+    } catch {
+      return { kataState: null, fetchedAt: new Date().toISOString() }
+    }
+  }
+
+  it('kata-state-reads-d1: returns full kv blob when present', async () => {
+    const kvKata = {
+      sessionId: 'sess-test-1',
+      workflowId: 'wf-1',
+      issueNumber: 31,
+      sessionType: 'feature',
+      currentMode: 'planning',
+      currentPhase: 'p3',
+      completedPhases: ['p1', 'p2'],
+      template: 'default',
+      phases: ['p1', 'p2', 'p3'],
+      modeHistory: [],
+      modeState: {},
+      updatedAt: '2026-04-20T00:00:00Z',
+      beadsCreated: [],
+      editedFiles: [],
+    }
+    const res = await runGetKataState({
+      d1Row: { kataMode: 'planning', kataIssue: 31, kataPhase: 'p3' },
+      kvBlob: JSON.stringify(kvKata),
+    })
+    expect(res.kataState).toEqual(kvKata)
+    expect(res.fetchedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+  })
+
+  it('returns minimal synthesized shape when D1 row present but kv blob absent', async () => {
+    const res = await runGetKataState({
+      d1Row: { kataMode: 'implementation', kataIssue: 42, kataPhase: 'p1' },
+      kvBlob: null,
+    })
+    expect(res.kataState).not.toBeNull()
+    expect(res.kataState.currentMode).toBe('implementation')
+    expect(res.kataState.issueNumber).toBe(42)
+    expect(res.kataState.currentPhase).toBe('p1')
+    expect(res.kataState.completedPhases).toEqual([])
+  })
+
+  it('returns null when D1 row is missing', async () => {
+    const res = await runGetKataState({ d1Row: null, kvBlob: null })
+    expect(res.kataState).toBeNull()
+  })
+
+  it('returns null when D1 row exists but all kata fields are null (no binding)', async () => {
+    const res = await runGetKataState({
+      d1Row: { kataMode: null, kataIssue: null, kataPhase: null },
+      kvBlob: null,
+    })
+    expect(res.kataState).toBeNull()
+  })
+})

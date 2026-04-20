@@ -23,6 +23,7 @@ import { contentToParts } from '~/lib/message-parts'
 import { isNative, wsBaseUrl } from '~/lib/platform'
 import type {
   ContentBlock,
+  ContextUsage,
   GateResponse,
   KataSessionState,
   SessionMessage,
@@ -31,20 +32,17 @@ import type {
 } from '~/lib/types'
 import { useAppLifecycle } from './use-app-lifecycle'
 
-export type { ContentBlock, GateResponse, SessionState as CodingAgentState, SpawnConfig }
+export type {
+  ContentBlock,
+  ContextUsage,
+  GateResponse,
+  SessionState as CodingAgentState,
+  SpawnConfig,
+}
 
 export interface GatewayEvent {
   type: string
   [key: string]: unknown
-}
-
-export interface ContextUsage {
-  totalTokens: number
-  maxTokens: number
-  percentage: number
-  model?: string
-  isAutoCompactEnabled?: boolean
-  autoCompactThreshold?: number
 }
 
 export interface UseCodingAgentResult {
