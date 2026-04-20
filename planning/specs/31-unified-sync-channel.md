@@ -9,13 +9,14 @@ created: 2026-04-20
 updated: 2026-04-20
 phases:
   - id: p1
-    name: "Persist messageSeq in kv (GH#25 fix)"
+    name: "Persist messageSeq in DO-SQLite (GH#25 fix)"
     tasks:
-      - "In `apps/orchestrator/src/agents/session-do.ts`: move `messageSeq` from the non-persisted in-memory field at line 113 into the existing kv storage pattern used by `turnCounter` / `gateway_conn_id` / `sdk_session_id` / `active_callback_token`. Reuse the same kv table; no schema change."
-      - "On DO `onStart()` / rehydrate, load `messageSeq` from kv (default 0 if unset). Set the in-memory field from the loaded value before any `broadcastMessages()` call can fire."
-      - "In `broadcastMessages()` (helper added in spec #14 P1), persist the new `messageSeq` to kv inside the same synchronous block that increments it. Re-use `persistTurnState()`-style INSERT OR REPLACE. Target cost: <= 1ms per broadcast (same as existing turnCounter writes)."
+      - "In `apps/orchestrator/src/agents/session-do.ts`: move `messageSeq` from the non-persisted in-memory field at line 113 into DO-SQLite. Piggyback on the existing `assistant_config` row pattern used by `turnCounter` (see `persistTurnState()` at session-do.ts:775 — `INSERT OR REPLACE INTO assistant_config (session_id, key, value) VALUES ('', 'turnCounter', …)`). Add a sibling row with `key='messageSeq'`. No schema change (table exists)."
+      - "On DO `onStart()` / rehydrate, extend `loadTurnState` (or add a sibling loader) to SELECT `messageSeq` from `assistant_config` alongside `turnCounter` (default 0 if unset). Set the in-memory field from the loaded value before any `broadcastMessages()` call can fire."
+      - "In `broadcastMessages()` (helper added in spec #14 P1), persist the new `messageSeq` to `assistant_config` inside the same synchronous block that increments it. Reuse the `persistTurnState()` INSERT OR REPLACE path. Target cost: <= 1ms per broadcast (same as existing turnCounter writes)."
       - "Do NOT persist on targeted sends (`opts.targetClientId` branch) — those don't advance `messageSeq`, so no write is required. This matches the existing rule in spec #14's Gotchas."
       - "Add a DO cold-start test: persist 3 broadcasts, force DO eviction (via `/admin/evict-do` or unit-test DO reset), reopen. Next broadcast carries `seq = lastPersistedSeq + 1`, not `seq = 1`."
+      - "Terminology note for implementers: DO-SQLite uses multiple tables — `assistant_config` (turnCounter, currentTurnMessageId, messageSeq after P1), `kv` (gateway_conn_id, kata_state), `messages` (managed by Session). `sdk_session_id` and `active_callback_token` currently live in the DO SDK `state` blob and are migrated into DO-SQLite by P2/P4 of this spec — they are NOT already in the kv/assistant_config pattern."
     test_cases:
       - id: "messageseq-persists-across-rehydrate"
         description: "Unit test: broadcast 5 deltas, reset DO instance state, broadcast another delta. Sixth frame's seq is 6, not 1."
@@ -24,7 +25,7 @@ phases:
         description: "Integration smoke: open session, send 3 messages, force DO eviction, send a 4th message. Client's lastSeq transitions cleanly without triggering a requestSnapshot RPC."
         type: "integration"
       - id: "targeted-snapshot-no-persist"
-        description: "Call requestSnapshot() RPC (targeted send — no seq increment). Verify no kv write occurred for messageSeq (spy on persistTurnState or observe kv unchanged)."
+        description: "Call requestSnapshot() RPC (targeted send — no seq increment). Verify no assistant_config write occurred for messageSeq (spy on persistTurnState or observe the row unchanged)."
         type: "unit"
 
   - id: p2
@@ -55,8 +56,8 @@ phases:
     name: "REST endpoints for contextUsage and kataState"
     tasks:
       - "Add two new DO methods in `apps/orchestrator/src/agents/session-do.ts`: `async getContextUsage(): Promise<ContextUsage | null>` and `async getKataState(): Promise<KataState | null>`. These replace the live WS `gateway_event` push."
-      - "`getContextUsage` implementation: (a) read from the existing kv-cached field (populated by `handleGatewayEvent` `context_usage` branch); (b) if the kv value's `cachedAt` is older than 5 seconds AND a gateway connection exists, send a `get-context-usage` GatewayCommand over the existing DialBack WS, await the response via a one-shot promise, cache, return; (c) if no gateway connection, return the stale kv value (or null if unset). Implement in-flight dedupe: if a probe is already awaiting response, subsequent calls within that window await the same promise (single-flight pattern). **Probe MUST have a 3-second timeout** — if the gateway is connected but unresponsive (CPU-bound on a long tool call), the probe promise is rejected; all waiting callers fall through to the stale kv value (or null) rather than blocking the Worker up to its CPU limit. The timeout clears `contextUsageProbeInFlight` so the next caller can retry. Errors during probe (gateway disconnected mid-flight, malformed response) follow the same fallback path: log, return stale/null, clear the in-flight promise."
-      - "Existing kv values for `context_usage` were written as raw `ContextUsage` (pre-spec shape). The new getter reads `{ value: ContextUsage; cachedAt: number }` — on first access after deploy, `cached.cachedAt` is `undefined`, `Date.now() - undefined` is `NaN`, the `< 5000` check fails, and the value is treated as stale. This is correct-by-construction one-time migration behavior — DO NOT add a stricter type guard (`typeof cached.cachedAt === 'number'`) that would change the fallback. First post-deploy call triggers a fresh probe and writes the new shape. Document this in a code comment at the getter."
+      - "`getContextUsage` implementation: P3 introduces DO-SQLite caching of `context_usage` into the `kv` table (key `context_usage`, value `JSON.stringify({ value: ContextUsage, cachedAt: number })`). `context_usage` is NOT persisted anywhere in the DO today — the current code path broadcasts the `gateway_event` straight to clients without server-side storage. P3 adds BOTH (a) a writer in `handleGatewayEvent`'s `context_usage` branch that persists `{value, cachedAt: Date.now()}` to `kv` every time a fresh probe response arrives, AND (b) the getter below. Getter logic: (1) read from `kv` key `context_usage`, JSON.parse. (2) If the row exists and `Date.now() - cached.cachedAt < 5000`, return `cached.value` as-is (fresh cache hit). (3) If older-than-5s or missing AND a gateway connection exists, send a `get-context-usage` GatewayCommand over the existing DialBack WS, await the response via a one-shot promise, persist to `kv`, return. (4) If no gateway connection, return the stale `kv` value (or null if unset). Implement in-flight dedupe: if a probe is already awaiting response, subsequent calls within that window await the same promise (single-flight pattern). **Probe MUST have a 3-second timeout** — if the gateway is connected but unresponsive (CPU-bound on a long tool call), the probe promise is rejected; all waiting callers fall through to the stale `kv` value (or null) rather than blocking the Worker up to its CPU limit. The timeout clears `contextUsageProbeInFlight` so the next caller can retry. Errors during probe (gateway disconnected mid-flight, malformed response) follow the same fallback path: log, return stale/null, clear the in-flight promise."
+      - "Schema shape is fixed from day one: `kv` row `context_usage` stores `JSON.stringify({ value: ContextUsage, cachedAt: number })`. There is no pre-existing shape to migrate from (context_usage was never persisted before P3), so no legacy/undefined-`cachedAt` handling is required. New deploys write the new shape immediately. Document the shape in a code comment at the writer and getter."
       - "`getKataState` implementation: read from D1 `agent_sessions.kataMode / kataIssue / kataPhase` columns (already written by `syncKataToD1()` at session-do.ts:820-868). No gateway probe needed — D1 is the source of truth once mirrored. Return `null` if the row exists but kata fields are all null (no kata session bound)."
       - "Add HTTP route handlers in the orchestrator's TanStack Start API directory (`apps/orchestrator/src/routes/api/sessions/$id/context-usage.ts` and `kata-state.ts`). Each handler: (a) validates session ownership against the authenticated user (same auth middleware as other `/api/sessions/:id/*` routes); (b) forwards to the SessionDO via the existing RPC pattern (env.SESSION_DO.idFromName + get(id).fetch(...) or the SDK's `getAgentByName`); (c) returns JSON. Response shape: `{ contextUsage: ContextUsage | null, fetchedAt: string }` and `{ kataState: KataState | null, fetchedAt: string }`."
       - "KEEP emitting `gateway_event` frames for `context_usage` and `kata_state` in P3. The client's `gateway_event` handlers for these two types (use-coding-agent.ts:363-380) are the sole writers to `sessionLiveStateCollection.contextUsage` and `.kataState` — deleting the server broadcast here would blank those fields immediately, creating a regression window until consumer-issue REST hooks ship. Rule: the REST endpoints go live in P3; removing the redundant WS broadcast is owned by the deferred consumer-migration issue (which also lands the REST consumer hooks). This keeps P3 purely additive — no user-visible change, no regression risk."
@@ -66,11 +67,11 @@ phases:
       - id: "context-usage-rest-returns-cached-then-probes"
         description: "Hit `GET /api/sessions/:id/context-usage` twice in quick succession. First call fires a get-context-usage GatewayCommand (observable in gateway logs) and response body has `isCached: false`. Second call within 5s returns the cached value without a second probe and has `isCached: true`. 6s later, third call re-probes and `isCached: false` again."
         type: "integration"
-      - id: "context-usage-legacy-kv-migration"
-        description: "Seed kv with a legacy-shape `context_usage` entry (raw `ContextUsage`, no `cachedAt` field). Hit the endpoint. Verify: (a) the NaN freshness check routes to the probe branch; (b) a fresh `get-context-usage` probe fires; (c) response `fetchedAt` is a valid ISO string (not `\"Invalid Date\"`); (d) `isCached: false`; (e) post-request kv row is rewritten in `{ value, cachedAt: number }` shape. No `typeof cached.cachedAt === 'number'` guard is needed on the freshness branch for this to pass."
+      - id: "context-usage-cold-cache-probes"
+        description: "Delete the `kv` row for `context_usage` (simulating first-access). Hit the endpoint with the gateway connected. Verify: (a) a fresh `get-context-usage` probe fires; (b) response `fetchedAt` is a valid ISO string; (c) `isCached: false`; (d) post-request `kv` row is written in `{ value, cachedAt: number }` shape."
         type: "integration"
-      - id: "context-usage-legacy-kv-no-gateway"
-        description: "Seed kv with a legacy-shape `context_usage` entry. Kill the gateway connection. Hit the endpoint. Response returns the legacy value (200), `fetchedAt` is a valid ISO string (wall clock, not `\"Invalid Date\"`), `isCached: true`. This exercises the `legacyOrMissing` serialization guard in the no-gateway fallback branch."
+      - id: "context-usage-cold-cache-no-gateway"
+        description: "Delete the `kv` row for `context_usage`. Kill the gateway connection. Hit the endpoint. Response returns `contextUsage: null` with `fetchedAt` a valid ISO string (wall-clock now) and `isCached: false`. No probe fires (gateway absent), no throw."
         type: "integration"
       - id: "context-usage-inflight-dedupe"
         description: "Fire 10 parallel GET requests to `/context-usage` when cache is cold. Gateway receives exactly 1 `get-context-usage` command. All 10 HTTP responses return the same value."
@@ -137,7 +138,7 @@ phases:
     name: "Delete SessionState + sessionLiveStateCollection (active-session path)"
     tasks:
       - "Extend `shouldSendProtocolMessages()` in `session-do.ts:288` to return `false` for browser connections as well as gateway connections. Before this change it suppresses SDK protocol frames only for `role=gateway`; after, it suppresses for all connections. The SDK's `setState()` → `state_update` broadcast stops reaching the client entirely. Verify via wire capture: no `{type:'cf_agent_state'}` frames after the change."
-      - "Delete every `this.setState(...)` / `updateState()` call in `session-do.ts`. Call sites (per research R1): lines 402, 468, 492, 559, 1346, 1411, 1594, 1705, 1714, 1801, 1860, 2018, 2277, 2309, 2439, 2500, 2570. Replace with explicit kv writes for operational fields that actually need persistence: `active_callback_token`, `sdk_session_id`, `gateway_conn_id` (already in kv; just stop mirroring into SessionState). For fields that are pure D1 mirrors (status, model, project, prompt, numTurns, durationMs, totalCostUsd, messageCount, kataMode, kataIssue, kataPhase), call the existing `syncStatusToD1()` / `syncResultToD1()` / `syncKataToD1()` helpers directly — skip the SessionState stopover."
+      - "Delete every `this.setState(...)` / `updateState()` call in `session-do.ts`. Call sites (per research R1): lines 402, 468, 492, 559, 1346, 1411, 1594, 1705, 1714, 1801, 1860, 2018, 2277, 2309, 2439, 2500, 2570. Replace with explicit DO-SQLite writes for operational fields that actually need persistence:\n\n  - `active_callback_token` — currently lives ONLY in the SDK `state` blob. Migrate into the `kv` table (key `active_callback_token`) with `INSERT OR REPLACE INTO kv (key, value) VALUES ('active_callback_token', ${token})` and a matching `DELETE FROM kv WHERE key='active_callback_token'` on clear. All reads (session-do.ts:218, 418, 937, 948) switch from `this.state.active_callback_token` to a `SELECT value FROM kv WHERE key='active_callback_token'` helper.\n  - `sdk_session_id` — currently lives ONLY in the SDK `state` blob. Migrate into the `kv` table (key `sdk_session_id`) following the same pattern.\n  - `gateway_conn_id` — already in the `kv` table (session-do.ts:228, 321, 435, 923). No migration needed; just stop any parallel mirroring into SessionState.\n\n  For fields that are pure D1 mirrors (status, model, project, prompt, numTurns, durationMs, totalCostUsd, messageCount, kataMode, kataIssue, kataPhase), call the existing `syncStatusToD1()` / `syncResultToD1()` / `syncKataToD1()` helpers directly — skip the SessionState stopover. These fields do not need a DO-SQLite row; D1 is authoritative."
       - "Delete `DEFAULT_STATE` constant and `updateState()` helper in `session-do.ts`."
       - "Change DO class declaration from `class SessionDO extends Agent<Env, SessionState>` to `class SessionDO extends Agent<Env>` (drop the second generic). Agents SDK v0.11.0 accepts this — state becomes implicit `unknown` and `initialState` is no longer required."
       - "Delete `SessionState` type from `packages/shared-types/src/index.ts`. Grep for any remaining importers and fix compile errors by using more specific types (or delete dead imports)."
@@ -190,22 +191,30 @@ state-update dispatch machinery.
 - **Trigger:** DO eviction (30min idle, redeploy, random CF rehydration)
   between a broadcast on the old instance and the first broadcast on the
   new instance.
-- **Expected:** New instance loads `messageSeq` from kv on `onStart()`.
-  Next broadcast carries `seq = persistedValue + 1`, not `seq = 1`.
-  Client's `lastSeq` check (`frame.seq === lastSeq + 1`) passes cleanly.
-  No silent drops, no spurious gap + snapshot recovery.
+- **Expected:** New instance loads `messageSeq` from DO-SQLite on
+  `onStart()` (via `loadTurnState` or a sibling loader, from the
+  `assistant_config` table). Next broadcast carries
+  `seq = persistedValue + 1`, not `seq = 1`. Client's `lastSeq` check
+  (`frame.seq === lastSeq + 1`) passes cleanly. No silent drops, no
+  spurious gap + snapshot recovery.
 - **Verify:** Test `messageseq-persists-across-rehydrate` (unit) and
   `no-client-gap-after-rehydrate` (integration). After forced DO eviction
   mid-session, the next message flows through without a `requestSnapshot`
   RPC call.
 - **Source:** `apps/orchestrator/src/agents/session-do.ts:113` (move field
-  into kv); `broadcastMessages()` helper (persist inside the increment
-  block).
+  into DO-SQLite); `persistTurnState()` at session-do.ts:775 (piggyback
+  the messageSeq write alongside turnCounter);  `broadcastMessages()`
+  helper (trigger the persist inside the increment block).
 
 #### Data Layer
-Reuses existing kv table (no schema change). Row: `{ key: 'messageSeq',
-value: <number>, sessionId: <id> }`. Same INSERT OR REPLACE pattern as
-`turnCounter` and `gateway_conn_id`.
+Reuses the existing `assistant_config` table (no schema change). Row:
+`INSERT OR REPLACE INTO assistant_config (session_id, key, value)
+VALUES ('', 'messageSeq', <stringified number>)`. Same shape and
+transaction used for `turnCounter` (session-do.ts:775) and
+`currentTurnMessageId` (session-do.ts:777). Distinct from the `kv`
+table (which holds `gateway_conn_id`, `kata_state`, and — after P3 —
+`context_usage`, and — after P5 — `active_callback_token` /
+`sdk_session_id`).
 
 ---
 
@@ -847,16 +856,17 @@ No new dependencies. All existing:
 **B1 — Persist messageSeq in broadcastMessages** (`session-do.ts`):
 
 ```ts
-private async broadcastMessages(
+private broadcastMessages(
   payload: DeltaPayload | SnapshotPayload,
   opts: { targetClientId?: string } = {},
 ) {
   if (!opts.targetClientId) {
     this.messageSeq += 1
-    // Same kv pattern as turnCounter — fire-and-forget within the
-    // isolate's event loop (DO is single-threaded; subsequent reads
-    // after await-boundary see the write).
-    this.ctx.storage.put('messageSeq', this.messageSeq)
+    // Same SQLite pattern as turnCounter (session-do.ts:775). DO is
+    // single-threaded — this synchronous tagged-template write is
+    // visible to subsequent reads within the same isolate tick.
+    this.sql`INSERT OR REPLACE INTO assistant_config
+      (session_id, key, value) VALUES ('', 'messageSeq', ${String(this.messageSeq)})`
   }
   const frame: MessagesFrame = {
     type: 'messages',
@@ -868,8 +878,12 @@ private async broadcastMessages(
   else this.broadcastToClients(frame)
 }
 
-// onStart():
-this.messageSeq = (await this.ctx.storage.get<number>('messageSeq')) ?? 0
+// In onStart() — extend the existing loadTurnState call (session-do.ts:127)
+// to also SELECT 'messageSeq' from assistant_config, or add a sibling
+// loader. Pattern:
+const row = this.sql<{ value: string }>`
+  SELECT value FROM assistant_config WHERE session_id='' AND key='messageSeq'`
+this.messageSeq = row[0] ? Number(row[0].value) : 0
 ```
 
 **B2 — branchInfo on delta** (`session-do.ts sendMessage` path):
@@ -903,7 +917,13 @@ type ContextUsageResponse = {
 }
 
 async getContextUsage(): Promise<ContextUsageResponse> {
-  const cached = await this.ctx.storage.get<{ value: ContextUsage; cachedAt: number }>('context_usage')
+  // `kv` table row shape (fixed from day one): value is
+  // JSON.stringify({ value: ContextUsage, cachedAt: number }).
+  const rows = this.sql<{ value: string }>`
+    SELECT value FROM kv WHERE key='context_usage'`
+  const cached = rows[0]
+    ? (JSON.parse(rows[0].value) as { value: ContextUsage; cachedAt: number })
+    : null
   const now = Date.now()
   if (cached && now - cached.cachedAt < 5_000) {
     return {
@@ -913,16 +933,13 @@ async getContextUsage(): Promise<ContextUsageResponse> {
     }
   }
   if (!this.getGatewayConnectionId()) {
-    // No runner to probe — return stale or null.
-    // Legacy kv rows (pre-spec shape) have no `cachedAt`; serialize
-    // wall clock rather than Invalid Date to keep the ISO string valid.
-    const legacyOrMissing = !cached || typeof cached.cachedAt !== 'number'
+    // No runner to probe — return stale-cache or null.
     return {
       contextUsage: cached?.value ?? null,
-      fetchedAt: legacyOrMissing
-        ? new Date().toISOString()
-        : new Date(cached.cachedAt).toISOString(),
-      isCached: true,  // either stale-kv or null — no fresh probe happened
+      fetchedAt: cached
+        ? new Date(cached.cachedAt).toISOString()
+        : new Date().toISOString(),
+      isCached: true,  // either stale-cache or null — no fresh probe happened
     }
   }
   if (!this.contextUsageProbeInFlight) {
@@ -932,20 +949,20 @@ async getContextUsage(): Promise<ContextUsageResponse> {
   try {
     const value = await this.contextUsageProbeInFlight
     const cachedAt = Date.now()
-    await this.ctx.storage.put('context_usage', { value, cachedAt })
+    this.sql`INSERT OR REPLACE INTO kv (key, value)
+      VALUES ('context_usage', ${JSON.stringify({ value, cachedAt })})`
     return {
       contextUsage: value,
       fetchedAt: new Date(cachedAt).toISOString(),
       isCached: false,
     }
   } catch {
-    // Timeout or probe error — fall back to stale kv (or null).
-    const legacyOrMissing = !cached || typeof cached.cachedAt !== 'number'
+    // Timeout or probe error — fall back to stale cache (or null).
     return {
       contextUsage: cached?.value ?? null,
-      fetchedAt: legacyOrMissing
-        ? new Date().toISOString()
-        : new Date(cached.cachedAt).toISOString(),
+      fetchedAt: cached
+        ? new Date(cached.cachedAt).toISOString()
+        : new Date().toISOString(),
       isCached: true,
     }
   }
@@ -1054,15 +1071,18 @@ shouldSendProtocolMessages(_connection: Connection): boolean {
 
 ### Gotchas
 
-- **`this.ctx.storage.put` is async but enqueues synchronously** — the
-  DO's transactional storage API means the put is observable to
-  subsequent reads on the same DO even without awaiting. Don't block
-  broadcasts on the await; fire-and-forget is idiomatic (see existing
-  `persistTurnState`).
-- **`messageSeq` kv read in onStart must await before first broadcast** —
-  if `onStart` returns before the read resolves, a concurrent broadcast
-  could use the default 0. Block `onStart` on the read. This is the
-  existing pattern for `turnCounter`.
+- **`this.sql\`\`\`` is synchronous on DO-SQLite** — tagged-template
+  writes complete within the same isolate tick. No await needed for the
+  `assistant_config` / `kv` writes used in this spec. This matches the
+  existing pattern in `persistTurnState()` (session-do.ts:775). Note:
+  this is distinct from `ctx.storage.put/get` (a different, async
+  transactional KV API on DO) — do NOT mix them; stay on `this.sql` for
+  consistency with the rest of the SessionDO codebase.
+- **`messageSeq` SQLite read in onStart must complete before first broadcast** —
+  `this.sql` reads are synchronous, so the natural code ordering (read
+  in `onStart`, broadcasts happen on later ticks) is safe. But do read
+  before returning from `onStart`, not lazily on first broadcast. This
+  is the existing pattern for `turnCounter` (loadTurnState in onStart).
 - **Schema bump on `messagesCollection`** — adding `seq?: number` as
   optional bumps schema; TanStack DB's persisted collection drops old
   rows and re-fetches via queryFn. First load after deploy shows a brief
@@ -1071,25 +1091,14 @@ shouldSendProtocolMessages(_connection: Connection): boolean {
   changes** — TanStack DB `useLiveQuery` with `.limit(10)` materializes
   only the last 10 rows; the derivation runs when those rows change.
   Don't manually memoize with unstable deps inside the selector.
-- **`context_usage` kv shape is migrated in-place** — pre-spec writes stored
-  raw `ContextUsage`; post-spec writes store `{ value, cachedAt }`. Two
-  separate code paths interact with this legacy shape, with opposite
-  type-guard rules:
-  1. **Freshness check** (`Date.now() - cached.cachedAt < 5000`) — must
-     NOT add a `typeof cached.cachedAt === 'number'` guard. On legacy
-     rows, `cached.cachedAt` is `undefined`, `NaN < 5000` is `false`, and
-     the value is correctly treated as stale. Tightening the check would
-     flip this to fresh and skip the probe-refresh that brings the row
-     into the new shape.
-  2. **`fetchedAt` serialization** (returned in the response body) — MUST
-     guard with `typeof cached.cachedAt === 'number'`. Without the guard,
-     `new Date(undefined).toISOString()` produces `"Invalid Date"` in the
-     response, breaking the ISO-string contract. On legacy rows the
-     fallback returns `new Date().toISOString()` (wall clock) instead.
-  The two rules coexist because the freshness check cares about the
-  boolean outcome of a numeric comparison (where `NaN` usefully falls to
-  false), while the serialization path cares about producing a valid
-  string. Add code comments at both sites.
+- **`context_usage` is net-new in DO-SQLite** — P3 is the first code path
+  that persists this key. There is no pre-existing row shape to migrate
+  from; writes use `{ value, cachedAt: Date.now() }` from day one. When
+  the row is missing (first access on any session), the freshness check
+  short-circuits to the probe branch; serialization returns
+  `new Date().toISOString()` as the wall-clock fallback. Do NOT add
+  "legacy shape" handling — there is no legacy shape. Add a code
+  comment at the getter clarifying the invariant.
 - **Probe timeout must clear `contextUsageProbeInFlight`** — the
   `.finally(() => { this.contextUsageProbeInFlight = null })` branch fires
   for both resolution paths and for timeout-reject. If a stuck probe
