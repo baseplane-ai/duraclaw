@@ -12,6 +12,7 @@
  * The caller is expected to toast success and navigate.
  */
 
+import { apiUrl } from '~/lib/platform'
 import type { ChainSummary, WorktreeReservation } from '~/lib/types'
 
 const ACTIVE_STATUSES = new Set(['running', 'waiting_input', 'waiting_permission', 'idle'])
@@ -51,7 +52,7 @@ export function chainProject(chain: ChainSummary): string | null {
 }
 
 async function abortSession(sessionId: string): Promise<void> {
-  const resp = await fetch(`/api/sessions/${sessionId}/abort`, { method: 'POST' })
+  const resp = await fetch(apiUrl(`/api/sessions/${sessionId}/abort`), { method: 'POST' })
   if (!resp.ok) {
     throw new Error(`Abort failed: ${resp.status}`)
   }
@@ -64,7 +65,7 @@ export async function spawnChainSession(input: {
   model?: string
   prompt?: string
 }): Promise<string> {
-  const resp = await fetch('/api/sessions', {
+  const resp = await fetch(apiUrl('/api/sessions'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -100,7 +101,7 @@ export async function advanceChain(
     // B11: code-touching modes must reserve the worktree before spawn.
     // Read-only modes (research, planning) skip the gate.
     if (CODE_TOUCHING_MODES.has(nextMode)) {
-      const checkoutResp = await fetch(`/api/chains/${chain.issueNumber}/checkout`, {
+      const checkoutResp = await fetch(apiUrl(`/api/chains/${chain.issueNumber}/checkout`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',

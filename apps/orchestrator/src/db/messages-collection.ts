@@ -25,6 +25,7 @@
 import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence'
 import { createCollection } from '@tanstack/db'
 import { queryCollectionOptions } from '@tanstack/query-db-collection'
+import { apiUrl } from '~/lib/platform'
 import type { SessionMessage, SessionMessagePart } from '~/lib/types'
 import { dbReady, queryClient } from './db-instance'
 
@@ -81,7 +82,7 @@ export function createMessagesCollection(agentName: string): MessagesCollection 
     id: `messages:${agentName}`,
     queryKey: ['messages', agentName] as const,
     queryFn: async ({ signal }) => {
-      const resp = await fetch(`/api/sessions/${encodeURIComponent(agentName)}/messages`, {
+      const resp = await fetch(apiUrl(`/api/sessions/${encodeURIComponent(agentName)}/messages`), {
         signal,
       })
       if (!resp.ok) {

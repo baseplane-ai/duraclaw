@@ -12,13 +12,14 @@ import type { ProjectInfo } from '@duraclaw/shared-types'
 import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence'
 import { createCollection } from '@tanstack/db'
 import { queryCollectionOptions } from '@tanstack/query-db-collection'
+import { apiUrl } from '~/lib/platform'
 import { dbReady, queryClient } from './db-instance'
 
 const queryOpts = queryCollectionOptions({
   id: 'projects',
   queryKey: ['projects'] as const,
   queryFn: async () => {
-    const resp = await fetch('/api/gateway/projects/all')
+    const resp = await fetch(apiUrl('/api/gateway/projects/all'))
     if (!resp.ok) return []
     return (await resp.json()) as ProjectInfo[]
   },

@@ -18,6 +18,7 @@ import {
   SelectValue,
 } from '~/components/ui/select'
 import { Textarea } from '~/components/ui/textarea'
+import { apiUrl } from '~/lib/platform'
 import type { ContentBlock } from '~/lib/types'
 
 interface Project {
@@ -58,7 +59,7 @@ export function SpawnAgentForm({ onSpawn, disabled, inline }: SpawnAgentFormProp
   useEffect(() => {
     const fetchProjects = async () => {
       try {
-        const resp = await fetch('/api/gateway/projects')
+        const resp = await fetch(apiUrl('/api/gateway/projects'))
         if (resp.ok) {
           const data = (await resp.json()) as Project[] | { projects?: Project[] }
           const list = Array.isArray(data) ? data : (data.projects ?? [])

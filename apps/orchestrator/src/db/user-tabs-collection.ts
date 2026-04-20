@@ -16,6 +16,7 @@
 import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence'
 import { createCollection } from '@tanstack/db'
 import { queryCollectionOptions } from '@tanstack/query-db-collection'
+import { apiUrl } from '~/lib/platform'
 import type { UserTabRow } from '~/lib/types'
 import { dbReady, queryClient } from './db-instance'
 
@@ -25,7 +26,7 @@ const queryOpts = queryCollectionOptions({
   id: 'user_tabs',
   queryKey: ['user_tabs'] as const,
   queryFn: async () => {
-    const resp = await fetch('/api/user-settings/tabs')
+    const resp = await fetch(apiUrl('/api/user-settings/tabs'))
     if (!resp.ok) return [] as UserTabRow[]
     const json = (await resp.json()) as { tabs: UserTabRow[] }
     return json.tabs
@@ -38,7 +39,7 @@ const queryOpts = queryCollectionOptions({
 
   onInsert: async ({ transaction }) => {
     for (const m of transaction.mutations) {
-      const resp = await fetch('/api/user-settings/tabs', {
+      const resp = await fetch(apiUrl('/api/user-settings/tabs'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(m.modified),
@@ -49,7 +50,7 @@ const queryOpts = queryCollectionOptions({
 
   onUpdate: async ({ transaction }) => {
     for (const m of transaction.mutations) {
-      const resp = await fetch(`/api/user-settings/tabs/${m.key}`, {
+      const resp = await fetch(apiUrl(`/api/user-settings/tabs/${m.key}`), {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(m.changes),
@@ -60,7 +61,7 @@ const queryOpts = queryCollectionOptions({
 
   onDelete: async ({ transaction }) => {
     for (const m of transaction.mutations) {
-      const resp = await fetch(`/api/user-settings/tabs/${m.key}`, { method: 'DELETE' })
+      const resp = await fetch(apiUrl(`/api/user-settings/tabs/${m.key}`), { method: 'DELETE' })
       if (!resp.ok) throw new Error(`Tab delete failed: ${resp.status}`)
     }
   },

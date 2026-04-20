@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { apiUrl } from '~/lib/platform'
 
 type PushPermissionState = 'prompt' | 'granted' | 'denied' | 'unsupported'
 
@@ -27,7 +28,7 @@ export function usePushSubscription() {
 
     try {
       // Fetch VAPID public key
-      const resp = await fetch('/api/push/vapid-key')
+      const resp = await fetch(apiUrl('/api/push/vapid-key'))
       if (!resp.ok) return false
       const { publicKey } = (await resp.json()) as { publicKey: string }
 
@@ -46,7 +47,7 @@ export function usePushSubscription() {
       })
 
       const subJson = subscription.toJSON()
-      await fetch('/api/push/subscribe', {
+      await fetch(apiUrl('/api/push/subscribe'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -72,7 +73,7 @@ export function usePushSubscription() {
     const endpoint = sub.endpoint
     await sub.unsubscribe()
 
-    await fetch('/api/push/unsubscribe', {
+    await fetch(apiUrl('/api/push/unsubscribe'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ endpoint }),

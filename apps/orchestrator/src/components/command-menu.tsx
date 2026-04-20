@@ -12,6 +12,7 @@ import {
 } from '~/components/ui/command'
 import { useSearch } from '~/context/search-provider'
 import { useTheme } from '~/context/theme-provider'
+import { apiUrl } from '~/lib/platform'
 import { cn } from '~/lib/utils'
 import { sidebarData } from './layout/data/sidebar-data'
 import { ScrollArea } from './ui/scroll-area'
@@ -36,7 +37,7 @@ export function CommandMenu() {
 
   useEffect(() => {
     if (!open) return
-    fetch('/api/sessions')
+    fetch(apiUrl('/api/sessions'))
       .then((r) => (r.ok ? r.json() : null))
       .then((data: unknown) => {
         const d = data as Record<string, unknown> | null
@@ -47,7 +48,7 @@ export function CommandMenu() {
 
   useEffect(() => {
     if (!open) return
-    fetch('/api/gateway/projects')
+    fetch(apiUrl('/api/gateway/projects'))
       .then((r) => (r.ok ? r.json() : null))
       .then((data: unknown) => {
         const list = Array.isArray(data)

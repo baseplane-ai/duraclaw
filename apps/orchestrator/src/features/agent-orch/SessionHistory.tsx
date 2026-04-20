@@ -27,6 +27,7 @@ import {
 import { seedSessionLiveStateFromSummary } from '~/db/session-live-state-collection'
 import type { SessionRecord } from '~/db/session-record'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
+import { apiUrl } from '~/lib/platform'
 import type { SessionSummary } from '~/lib/types'
 
 type SortField = 'updatedAt' | 'createdAt' | 'totalCostUsd' | 'durationMs' | 'numTurns'
@@ -81,7 +82,7 @@ async function hydrateSessionHistoryFromRest(): Promise<void> {
   if (hydrateInFlight) return hydrateInFlight
   hydrateInFlight = (async () => {
     try {
-      const resp = await fetch('/api/sessions')
+      const resp = await fetch(apiUrl('/api/sessions'))
       if (!resp.ok) return
       const json = (await resp.json()) as { sessions?: SessionSummary[] }
       if (!json.sessions) return
@@ -317,7 +318,7 @@ export function SessionHistory() {
                           onClick={async (e) => {
                             e.stopPropagation()
                             try {
-                              const resp = await fetch('/api/sessions', {
+                              const resp = await fetch(apiUrl('/api/sessions'), {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify({

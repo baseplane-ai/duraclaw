@@ -13,6 +13,7 @@
 import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence'
 import { createCollection } from '@tanstack/db'
 import { queryCollectionOptions } from '@tanstack/query-db-collection'
+import { apiUrl } from '~/lib/platform'
 import type { UserPreferencesRow } from '~/lib/types'
 import { dbReady, queryClient } from './db-instance'
 
@@ -22,7 +23,7 @@ const queryOpts = queryCollectionOptions({
   id: 'user_preferences',
   queryKey: ['user_preferences'] as const,
   queryFn: async () => {
-    const resp = await fetch('/api/preferences')
+    const resp = await fetch(apiUrl('/api/preferences'))
     if (!resp.ok) return [] as UserPreferencesRow[]
     const row = (await resp.json()) as UserPreferencesRow
     return [row]
@@ -34,7 +35,7 @@ const queryOpts = queryCollectionOptions({
 
   onInsert: async ({ transaction }) => {
     for (const m of transaction.mutations) {
-      const resp = await fetch('/api/preferences', {
+      const resp = await fetch(apiUrl('/api/preferences'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(m.modified),
@@ -45,7 +46,7 @@ const queryOpts = queryCollectionOptions({
 
   onUpdate: async ({ transaction }) => {
     for (const m of transaction.mutations) {
-      const resp = await fetch('/api/preferences', {
+      const resp = await fetch(apiUrl('/api/preferences'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(m.modified),

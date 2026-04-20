@@ -41,6 +41,13 @@ export default defineConfig({
       '~': path.resolve(__dirname, './src'),
     },
   },
+  define: {
+    // Stamped into client bundle. Empty defaults so web build uses
+    // window.location.origin and isNative() returns false. Mobile build
+    // overrides via apps/mobile/.env.production (set in P5).
+    'import.meta.env.VITE_API_BASE_URL': JSON.stringify(process.env.VITE_API_BASE_URL ?? ''),
+    'import.meta.env.VITE_PLATFORM': JSON.stringify(process.env.VITE_PLATFORM ?? ''),
+  },
   plugins: [
     reactRefreshPreamble(),
     agents(),

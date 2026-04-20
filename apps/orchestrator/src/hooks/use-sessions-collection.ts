@@ -17,6 +17,7 @@ import {
 } from '~/db/session-live-state-collection'
 import type { SessionRecord } from '~/db/session-record'
 import { useNotificationWatcher } from '~/hooks/use-notification-watcher'
+import { apiUrl } from '~/lib/platform'
 
 export type { SessionRecord }
 
@@ -107,7 +108,7 @@ export function useSessionsCollection(
 
       const tx = createTransaction({
         mutationFn: async () => {
-          const resp = await fetch('/api/sessions', {
+          const resp = await fetch(apiUrl('/api/sessions'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(input),
@@ -138,7 +139,7 @@ export function useSessionsCollection(
   const updateSession = useCallback(async (sessionId: string, patch: Record<string, unknown>) => {
     const tx = createTransaction({
       mutationFn: async () => {
-        const resp = await fetch(`/api/sessions/${sessionId}`, {
+        const resp = await fetch(apiUrl(`/api/sessions/${sessionId}`), {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(patch),
@@ -165,7 +166,7 @@ export function useSessionsCollection(
   const archiveSession = useCallback(async (sessionId: string, archived: boolean) => {
     const tx = createTransaction({
       mutationFn: async () => {
-        const resp = await fetch(`/api/sessions/${sessionId}`, {
+        const resp = await fetch(apiUrl(`/api/sessions/${sessionId}`), {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ archived: archived ? 1 : 0 }),

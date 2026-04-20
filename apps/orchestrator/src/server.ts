@@ -9,6 +9,28 @@ import type { Env } from './lib/types'
 
 // Gateway + session-runner decoupling live on prod as of 2026-04-17 (#1).
 const WS_ROUTE = /^\/(?:api\/sessions|agents\/session-agent)\/([^/]+)(?:\/(ws|agent))?$/
+
+// CORS allowlist for the Capacitor Android shell (#26). The native WebView
+// runs at `capacitor://localhost`; in dev verify-mode the orchestrator and
+// gateway also bind to `http://localhost:<port>` / `127.0.0.1:<port>`. The
+// deployed Worker origin (`BETTER_AUTH_URL`) is allowlisted explicitly so
+// production responses are CORS-credentialled for the mobile app.
+const ALLOWED_ORIGIN_RE =
+  /^(?:capacitor:\/\/localhost|https?:\/\/localhost(?::\d+)?|https?:\/\/127\.0\.0\.1(?::\d+)?)$/
+
+function corsHeaders(origin: string | null, env: Env): HeadersInit | null {
+  if (!origin) return null
+  const allowed = ALLOWED_ORIGIN_RE.test(origin) || origin === env.BETTER_AUTH_URL
+  if (!allowed) return null
+  return {
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Credentials': 'true',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+    'Access-Control-Max-Age': '86400',
+  }
+}
+
 // Two patterns accepted:
 //   /api/collab/:sessionId/ws       — spec canonical
 //   /parties/session-collab/:room    — partyserver's default URL (from useYProvider)
@@ -19,6 +41,14 @@ const apiApp = createApiApp()
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url)
+
+    // CORS preflight for Capacitor + dev origins (#26). WS upgrades skip
+    // CORS entirely (browser CORS rules don't apply to the WS handshake).
+    const origin = request.headers.get('Origin')
+    const cors = corsHeaders(origin, env)
+    if (request.method === 'OPTIONS' && cors) {
+      return new Response(null, { status: 204, headers: cors })
+    }
 
     // Maintenance-mode short-circuit (#7 cutover, B-INFRA-4). Operators flip
     // MAINTENANCE_MODE=1 via wrangler secret to drain traffic during the
@@ -102,7 +132,13 @@ export default {
     }
 
     if (url.pathname.startsWith('/api/')) {
-      return apiApp.fetch(request, env, ctx)
+      const resp = await apiApp.fetch(request, env, ctx)
+      if (cors) {
+        const merged = new Headers(resp.headers)
+        for (const [k, v] of Object.entries(cors)) merged.set(k, v)
+        return new Response(resp.body, { status: resp.status, headers: merged })
+      }
+      return resp
     }
 
     const assetResponse = await env.ASSETS.fetch(request)

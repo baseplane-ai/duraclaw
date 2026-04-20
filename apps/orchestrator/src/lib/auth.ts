@@ -1,6 +1,7 @@
 import { betterAuth } from 'better-auth'
 import { drizzleAdapter } from 'better-auth/adapters/drizzle'
 import { admin } from 'better-auth/plugins'
+import { capacitor } from 'better-auth-capacitor'
 import { drizzle } from 'drizzle-orm/d1'
 import * as schema from '~/db/schema'
 
@@ -56,7 +57,10 @@ export function createAuth(
       enabled: true,
       disableSignUp: !opts?.allowSignUp,
     },
-    plugins: [admin()],
+    // capacitor() auto-injects `capacitor://localhost` into trustedOrigins
+    // via its `init` hook and enables bearer-token replay for Capacitor
+    // clients (which have no cookie jar that survives WebView restarts).
+    plugins: [admin(), capacitor()],
   })
 }
 

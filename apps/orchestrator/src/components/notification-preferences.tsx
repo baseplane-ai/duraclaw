@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Label } from '~/components/ui/label'
 import { Switch } from '~/components/ui/switch'
+import { apiUrl } from '~/lib/platform'
 
 type Preferences = Record<string, string>
 
@@ -17,7 +18,7 @@ export function NotificationPreferences() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    fetch('/api/user/preferences')
+    fetch(apiUrl('/api/user/preferences'))
       .then((r) => r.json())
       .then((data) => setPrefs(data as Preferences))
       .catch(() => {})
@@ -29,7 +30,7 @@ export function NotificationPreferences() {
     setPrefs((prev) => ({ ...prev, [key]: strValue }))
 
     try {
-      await fetch('/api/user/preferences', {
+      await fetch(apiUrl('/api/user/preferences'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ key, value: strValue }),
