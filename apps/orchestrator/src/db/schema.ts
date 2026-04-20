@@ -189,6 +189,12 @@ export const userTabs = sqliteTable(
   },
   (t) => ({
     userPosition: index('idx_user_tabs_user_position').on(t.userId, t.position),
+    // Partial unique index — see migration 0015. Drizzle's `uniqueIndex`
+    // doesn't expose a WHERE clause, so the constraint lives only in the
+    // migration SQL; this entry is here for documentation / future-introspection
+    // and intentionally a plain `index` so drizzle-kit doesn't try to
+    // re-emit it.
+    liveSessionUq: index('idx_user_tabs_live_session_uq').on(t.userId, t.sessionId),
   }),
 )
 

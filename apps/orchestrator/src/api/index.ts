@@ -850,45 +850,56 @@ export function createApiApp() {
       position = typeof max === 'number' ? max + 1 : 0
     }
 
-    // Dedup: if a tab already exists for this (userId, sessionId), return it
     const sessionId = body.sessionId ?? null
-    if (sessionId) {
+    const id = typeof body.id === 'string' && body.id.length > 0 ? body.id : crypto.randomUUID()
+    const createdAt = new Date().toISOString()
+    const meta = typeof body.meta === 'string' ? body.meta : null
+
+    // Insert-then-catch is the atomic dedup path: a partial unique index on
+    // (user_id, session_id) WHERE deleted_at IS NULL AND session_id IS NOT NULL
+    // (migration 0015) makes a concurrent second writer fail at INSERT rather
+    // than slipping past a check-then-insert race. On constraint violation we
+    // return the existing row with status 200 — same shape as a successful
+    // dedup.
+    try {
+      const inserted = await db
+        .insert(userTabs)
+        .values({ id, userId, sessionId, position, createdAt, meta })
+        .returning()
+      const newRow = inserted[0] as UserTabRow
+      c.executionCtx.waitUntil(
+        broadcastSyncedDelta(c.env, userId, 'user_tabs', [{ type: 'insert', value: newRow }]),
+      )
+      return c.json({ tab: newRow }, 201)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      const isUniqueViolation =
+        sessionId !== null &&
+        (msg.includes('UNIQUE constraint failed') || msg.includes('idx_user_tabs_live_session_uq'))
+      if (!isUniqueViolation) throw err
+
       const existing = await db
         .select()
         .from(userTabs)
         .where(
           and(
             eq(userTabs.userId, userId),
-            eq(userTabs.sessionId, sessionId),
+            eq(userTabs.sessionId, sessionId as string),
             isNull(userTabs.deletedAt),
           ),
         )
         .limit(1)
-      if (existing.length > 0) {
-        return c.json({ tab: existing[0] as UserTabRow }, 200)
-      }
+      if (existing.length === 0) throw err
+      // Re-broadcast the canonical row so a peer that POSTed concurrently with
+      // a different optimistic id can converge onto it via the WS delta path
+      // (the optimistic row stays orphaned otherwise — see openTab's local
+      // dedup safeguard for the rendering side of the same race).
+      const canonical = existing[0] as UserTabRow
+      c.executionCtx.waitUntil(
+        broadcastSyncedDelta(c.env, userId, 'user_tabs', [{ type: 'insert', value: canonical }]),
+      )
+      return c.json({ tab: canonical }, 200)
     }
-
-    const id = typeof body.id === 'string' && body.id.length > 0 ? body.id : crypto.randomUUID()
-    const createdAt = new Date().toISOString()
-    const meta = typeof body.meta === 'string' ? body.meta : null
-    const inserted = await db
-      .insert(userTabs)
-      .values({
-        id,
-        userId,
-        sessionId,
-        position,
-        createdAt,
-        meta,
-      })
-      .returning()
-
-    const newRow = inserted[0] as UserTabRow
-    c.executionCtx.waitUntil(
-      broadcastSyncedDelta(c.env, userId, 'user_tabs', [{ type: 'insert', value: newRow }]),
-    )
-    return c.json({ tab: newRow }, 201)
   })
 
   app.patch('/api/user-settings/tabs/:id', async (c) => {

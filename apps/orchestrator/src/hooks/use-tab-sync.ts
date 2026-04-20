@@ -192,8 +192,22 @@ function projectRows(rows: readonly UserTabRow[]): TabRowLite[] {
       meta: parseMeta(r.meta),
     })
   }
-  out.sort((a, b) => a.position - b.position)
-  return out
+  // Defensive sessionId dedup — keep the row with the lexicographically
+  // smallest id so render order is stable. The server-side partial unique
+  // index (`idx_user_tabs_live_session_uq`) prevents this from happening in
+  // steady state, but a same-render double-call to `openTab` can still
+  // create a transient duplicate optimistic row before the server's reject
+  // arrives, and a cross-device race may briefly surface two rows on the
+  // optimistic side.
+  out.sort((a, b) => a.position - b.position || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+  const seen = new Set<string>()
+  const deduped: TabRowLite[] = []
+  for (const r of out) {
+    if (seen.has(r.sessionId as string)) continue
+    seen.add(r.sessionId as string)
+    deduped.push(r)
+  }
+  return deduped
 }
 
 /**
@@ -319,13 +333,6 @@ export function useTabSync(): UseTabSyncResult {
     return out
   }, [rows])
 
-  /** sessionId → row.id lookup for PATCH / DELETE. */
-  const idBySessionId = useMemo(() => {
-    const out = new Map<string, string>()
-    for (const r of rows) out.set(r.sessionId as string, r.id)
-    return out
-  }, [rows])
-
   // ── Active tab (local, persisted to localStorage) ───────────────────
 
   const [activeSessionId, setActiveState] = useState<string | null>(() =>
@@ -372,10 +379,18 @@ export function useTabSync(): UseTabSyncResult {
       // Guard: chain tab requires a numeric issueNumber.
       if (kind === 'chain' && typeof issueNumber !== 'number') return
 
+      // Read live collection state for the existence checks instead of the
+      // React `rows` snapshot — `rows` is stale across the same render cycle,
+      // so two synchronous `openTab(sessionId, …)` calls (e.g. a useEffect
+      // re-fire racing with a click handler) would both miss the existing row
+      // and both insert. `tabs.toArray` reflects the optimistic write from
+      // the first call.
+      const liveRows = projectRows(tabs.toArray)
+
       // One-chain-per-issue: if a chain tab for this issue already exists,
       // focus it instead of adding another.
       if (kind === 'chain' && typeof issueNumber === 'number') {
-        const existing = rows.find(
+        const existing = liveRows.find(
           (r) => r.meta.kind === 'chain' && r.meta.issueNumber === issueNumber,
         )
         if (existing) {
@@ -386,15 +401,12 @@ export function useTabSync(): UseTabSyncResult {
 
       // Already-open under this exact sessionId — update meta.project for
       // session tabs (chain tabs don't carry project), then activate.
-      const same = rows.find((r) => r.sessionId === sessionId)
+      const same = liveRows.find((r) => r.sessionId === sessionId)
       if (same) {
         if (kind === 'session' && project && same.meta.project !== project) {
-          const rowId = idBySessionId.get(sessionId)
-          if (rowId) {
-            tabs.update(rowId, (draft: UserTabRow) => {
-              draft.meta = stringifyMeta({ ...same.meta, project })
-            })
-          }
+          tabs.update(same.id, (draft: UserTabRow) => {
+            draft.meta = stringifyMeta({ ...same.meta, project })
+          })
         }
         setActive(sessionId)
         return
@@ -412,7 +424,7 @@ export function useTabSync(): UseTabSyncResult {
       // the replacement slots back into the same position.
       let reusedOrder: number | null = null
       if (kind === 'session' && !forceNewTab && project) {
-        for (const r of rows) {
+        for (const r of liveRows) {
           if (r.meta.kind !== 'chain' && r.meta.project === project) {
             if (reusedOrder === null) reusedOrder = r.position
             tabs.delete(r.id)
@@ -422,7 +434,7 @@ export function useTabSync(): UseTabSyncResult {
 
       const remainingEntries =
         reusedOrder !== null
-          ? rows
+          ? liveRows
               .filter((r) => !(r.meta.kind !== 'chain' && r.meta.project === project))
               .map((r) => ({
                 order: r.position,
@@ -430,7 +442,7 @@ export function useTabSync(): UseTabSyncResult {
                 kind: r.meta.kind,
                 issueNumber: r.meta.issueNumber,
               }))
-          : rows.map((r) => ({
+          : liveRows.map((r) => ({
               order: r.position,
               project: r.meta.project,
               kind: r.meta.kind,
@@ -455,7 +467,7 @@ export function useTabSync(): UseTabSyncResult {
 
       setActive(sessionId)
     },
-    [rows, idBySessionId, setActive],
+    [setActive],
   )
 
   const closeTab = useCallback(
