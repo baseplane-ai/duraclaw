@@ -113,6 +113,37 @@ mockCollection.update = (...args: unknown[]) =>
   mockUpdate(...(args as [string, (d: CachedMessage) => void]))
 mockCollection.delete = (...args: unknown[]) => mockDelete(...(args as [string | string[]]))
 
+// @tanstack/query-db-collection sync-write API — what the WS handler uses.
+// Route through the same mockInsert/mockUpdate/mockDelete tracking so existing
+// assertions keep working.
+mockCollection.utils.writeUpsert = (data: CachedMessage | CachedMessage[]) => {
+  const items = Array.isArray(data) ? data : [data]
+  for (const item of items) {
+    if (cachedMessagesStore.has(item.id)) {
+      mockUpdate(item.id, (draft: CachedMessage) => {
+        Object.assign(draft, item)
+      })
+    } else {
+      mockInsert(item)
+    }
+  }
+}
+mockCollection.utils.writeInsert = (data: CachedMessage | CachedMessage[]) => {
+  const items = Array.isArray(data) ? data : [data]
+  for (const item of items) mockInsert(item)
+}
+mockCollection.utils.writeUpdate = (
+  data: Partial<CachedMessage> | Array<Partial<CachedMessage>>,
+) => {
+  const items = Array.isArray(data) ? data : [data]
+  for (const item of items) {
+    const id = (item as { id: string }).id
+    if (id) mockUpdate(id, (draft: CachedMessage) => Object.assign(draft, item))
+  }
+}
+mockCollection.utils.writeDelete = (keys: string | string[]) => mockDelete(keys)
+mockCollection.utils.writeBatch = (callback: () => void) => callback()
+
 vi.mock('~/db/messages-collection', () => {
   // Reference via the vi.hoisted() bundle — `mockCollection` the top-level
   // destructured const is in TDZ at vi.mock hoist time.

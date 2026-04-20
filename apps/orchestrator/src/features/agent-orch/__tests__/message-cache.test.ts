@@ -74,36 +74,64 @@ const bumpCollection = () => {
 }
 
 vi.mock('~/db/messages-collection', () => {
+  const insertRow = (row: { id: string } & Record<string, unknown>) => {
+    mockInsert(row)
+    const existingIdx = mockCollectionEntries.findIndex(([k]) => k === row.id)
+    if (existingIdx === -1) mockCollectionEntries.push([row.id, row])
+    bumpCollection()
+  }
+  const updateRow = (id: string, patcher: (draft: Record<string, unknown>) => void) => {
+    const idx = mockCollectionEntries.findIndex(([k]) => k === id)
+    if (idx === -1) return
+    const draft = { ...mockCollectionEntries[idx][1] }
+    patcher(draft)
+    mockCollectionEntries[idx] = [id, draft]
+    bumpCollection()
+  }
+  const deleteKeys = (keys: string | string[]) => {
+    const ids = new Set(Array.isArray(keys) ? keys : [keys])
+    for (let i = mockCollectionEntries.length - 1; i >= 0; i--) {
+      if (ids.has(mockCollectionEntries[i][0])) mockCollectionEntries.splice(i, 1)
+    }
+    bumpCollection()
+  }
   const coll = {
-    insert: (...args: unknown[]) => {
-      mockInsert(...args)
-      const row = args[0] as { id: string } & Record<string, unknown>
-      if (row && row.id) {
-        const existingIdx = mockCollectionEntries.findIndex(([k]) => k === row.id)
-        if (existingIdx === -1) {
-          mockCollectionEntries.push([row.id, row])
-        }
-      }
-      bumpCollection()
-    },
+    insert: (row: { id: string } & Record<string, unknown>) => insertRow(row),
     has: (id: string) => mockCollectionEntries.some(([k]) => k === id),
-    update: (id: string, patcher: (draft: Record<string, unknown>) => void) => {
-      const idx = mockCollectionEntries.findIndex(([k]) => k === id)
-      if (idx === -1) return
-      const draft = { ...mockCollectionEntries[idx][1] }
-      patcher(draft)
-      mockCollectionEntries[idx] = [id, draft]
-      bumpCollection()
-    },
-    delete: (keys: string | string[]) => {
-      const ids = new Set(Array.isArray(keys) ? keys : [keys])
-      for (let i = mockCollectionEntries.length - 1; i >= 0; i--) {
-        if (ids.has(mockCollectionEntries[i][0])) mockCollectionEntries.splice(i, 1)
-      }
-      bumpCollection()
-    },
+    update: (id: string, patcher: (draft: Record<string, unknown>) => void) =>
+      updateRow(id, patcher),
+    delete: (keys: string | string[]) => deleteKeys(keys),
     [Symbol.iterator]: () => mockCollectionEntries[Symbol.iterator](),
-    utils: { isFetching: false },
+    utils: {
+      isFetching: false,
+      // @tanstack/query-db-collection sync-write API — the WS handler uses
+      // these instead of collection.insert/update/delete so IVM sees writes
+      // as synced-layer updates. Route through the same tracking.
+      writeUpsert: (data: Record<string, unknown> | Array<Record<string, unknown>>) => {
+        const items = Array.isArray(data) ? data : [data]
+        for (const item of items) {
+          const id = (item as { id: string }).id
+          if (id && mockCollectionEntries.some(([k]) => k === id)) {
+            updateRow(id, (draft) => Object.assign(draft, item))
+          } else {
+            insertRow(item as { id: string } & Record<string, unknown>)
+          }
+        }
+      },
+      writeInsert: (data: Record<string, unknown> | Array<Record<string, unknown>>) => {
+        const items = Array.isArray(data) ? data : [data]
+        for (const item of items) insertRow(item as { id: string } & Record<string, unknown>)
+      },
+      writeUpdate: (data: Record<string, unknown> | Array<Record<string, unknown>>) => {
+        const items = Array.isArray(data) ? data : [data]
+        for (const item of items) {
+          const id = (item as { id: string }).id
+          if (id) updateRow(id, (draft) => Object.assign(draft, item))
+        }
+      },
+      writeDelete: (keys: string | string[]) => deleteKeys(keys),
+      writeBatch: (callback: () => void) => callback(),
+    },
   }
   return {
     messagesCollection: coll,

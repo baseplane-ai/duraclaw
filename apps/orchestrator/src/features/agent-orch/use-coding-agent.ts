@@ -135,26 +135,29 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   const { messages: cachedMessages, isFetching } = useMessagesCollection(agentName)
   const messages: SessionMessage[] = cachedMessages.map(toSessionMessage)
 
-  /** Upsert a SessionMessage into the collection (dedup via .has()). */
-  const upsert = useCallback(
-    (msg: SessionMessage) => {
-      const row = toRow(msg, agentName)
+  /**
+   * Bulk-upsert SessionMessages into the collection via the sync-write API.
+   *
+   * `collection.insert/update/delete` create *optimistic* mutations on a
+   * separate state layer — those are for user-initiated writes that round-trip
+   * through `onInsert/onUpdate/onDelete` handlers. WS-pushed writes ARE the
+   * server's authoritative state; they must go through `utils.writeUpsert`
+   * (and `writeDelete` / `writeBatch`) which writes directly to the
+   * collection's synced data store — the layer IVM / `useLiveQuery` reads
+   * from. See planning/research/2026-04-20-streamdb-pattern-adoption.md.
+   */
+  const bulkUpsert = useCallback(
+    (msgs: SessionMessage[]) => {
       try {
-        if (messagesCollection.has(msg.id)) {
-          messagesCollection.update(msg.id, (draft: CachedMessage) => {
-            Object.assign(draft, row)
-          })
-        } else {
-          messagesCollection.insert(row)
-        }
+        messagesCollection.utils.writeBatch(() => {
+          for (const m of msgs) messagesCollection.utils.writeUpsert(toRow(m, agentName))
+        })
       } catch {
         // Rare mutation-API contention; next event will retry.
       }
     },
     [agentName, messagesCollection],
   )
-
-  const bulkUpsert = useCallback((msgs: SessionMessage[]) => msgs.forEach(upsert), [upsert])
 
   /** Snapshot reconcile: delete rows for this session not in `messages`, then upsert. */
   const applySnapshot = useCallback(
@@ -166,14 +169,17 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           if (row.sessionId === agentName && !newIds.has(id)) staleIds.push(id)
         }
       } catch {}
-      if (staleIds.length > 0) {
+      // writeDelete throws if the key isn't in syncedData (e.g., an optimistic-
+      // only row from an in-flight user transaction). Skip those — the owning
+      // transaction will settle and the next delta will reconcile.
+      for (const id of staleIds) {
         try {
-          messagesCollection.delete(staleIds)
+          messagesCollection.utils.writeDelete(id)
         } catch {}
       }
       bulkUpsert(messages)
     },
-    [agentName, bulkUpsert, messagesCollection],
+    [bulkUpsert, messagesCollection, agentName],
   )
 
   /**
@@ -252,17 +258,21 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       // kind === 'delta'
       if (frame.seq === lastSeq + 1) {
         const upsertList = frame.payload.upsert ?? []
+        const removeList = frame.payload.remove ?? []
         // GH#14 P3: user echoes reconcile via id match alone. The DO accepts
         // the client-proposed `client_message_id` as the primary id, so
         // TanStack DB deep-equality retires the optimistic row silently.
-        for (const m of upsertList) upsert(m)
-        const removeList = frame.payload.remove ?? []
-        if (removeList.length > 0) {
-          try {
-            messagesCollection.delete(removeList)
-          } catch {
-            // swallow
-          }
+        try {
+          messagesCollection.utils.writeBatch(() => {
+            for (const m of upsertList) {
+              messagesCollection.utils.writeUpsert(toRow(m, agentName))
+            }
+            if (removeList.length > 0) {
+              messagesCollection.utils.writeDelete(removeList)
+            }
+          })
+        } catch {
+          // swallow — next frame will reconcile
         }
         map.set(agentName, frame.seq)
         return
@@ -277,7 +287,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       // frame.seq <= lastSeq — stale/duplicate; drop silently.
       return
     },
-    [agentName, upsert, applySnapshot, messagesCollection],
+    [agentName, applySnapshot, messagesCollection],
   )
 
   const connection = useAgent<SessionState>({
