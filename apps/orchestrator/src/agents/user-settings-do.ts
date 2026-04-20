@@ -1,193 +1,173 @@
-// UserSettingsDO — Yjs-backed per-user tab sync + invalidation fanout.
-//
-// Extends y-partyserver's YServer to hold a Y.Doc per user with:
-//   - Y.Map<string> "tabs" — key: sessionId, value: JSON { project, order }
-//
-// Active tab is local-only (localStorage on the client). The Y.Doc syncs
-// the tab list cross-device; active tab is per-device.
-//
-// Also keeps the POST /notify invalidation fanout for agent_sessions
-// and user_preferences (those collections still live in D1).
-//
-// Auth: onConnect validates cookie userId === room name.
-// Persistence: Y.Doc state snapshotted to DO SQLite (y_state table).
+/**
+ * UserSettingsDO — per-user live-state fanout.
+ *
+ * One DO instance per user (idFromName(userId)). Holds a Set<WebSocket> of
+ * active browser connections and broadcasts delta frames received via
+ * POST /broadcast to all of them. Uses the WebSocket Hibernation API so
+ * the DO can be evicted and reloaded without losing socket references.
+ *
+ * Data authoritative-ness:
+ * - User settings (tabs, preferences) live in D1 under AUTH_DB.
+ * - Active user presence (0→1 / N→0 transitions) is mirrored into
+ *   `user_presence` D1 table via reference-counting on the sockets set.
+ * - The DO itself holds NO persistent state — `y_state` is dropped on
+ *   first post-deploy load.
+ */
 
-import type { Connection, ConnectionContext } from 'partyserver'
-import { YServer } from 'y-partyserver'
-import * as Y from 'yjs'
+import { DurableObject } from 'cloudflare:workers'
+import type { SyncedCollectionFrame } from '@duraclaw/shared-types'
+import { eq } from 'drizzle-orm'
+import { drizzle } from 'drizzle-orm/d1'
 import { getRequestSession } from '~/api/auth-session'
+import * as schema from '~/db/schema'
 import type { Env } from '~/lib/types'
 
-export class UserSettingsDO extends YServer {
-  static options = { hibernate: true }
+const MAX_BROADCAST_BODY = 256 * 1024 // 256 KiB
+const USER_ID_ATTACHMENT_KEY = 'userId'
 
-  static callbackOptions = {
-    debounceWait: 2000,
-    debounceMaxWait: 10000,
-    timeout: 5000,
-  }
+export class UserSettingsDO extends DurableObject<Env> {
+  private sockets = new Set<WebSocket>()
+  private userId: string | null = null
 
-  private ensureTable() {
-    this.ctx.storage.sql.exec(`
-      CREATE TABLE IF NOT EXISTS y_state (
-        id TEXT PRIMARY KEY,
-        data BLOB NOT NULL,
-        updated_at INTEGER NOT NULL
-      )
-    `)
-  }
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env)
 
-  async onLoad() {
-    this.ensureTable()
-    const rows = this.ctx.storage.sql
-      .exec("SELECT data FROM y_state WHERE id = 'snapshot' LIMIT 1")
-      .toArray()
-    if (rows.length > 0) {
-      const data = rows[0].data as ArrayBuffer | Uint8Array
-      const bytes = data instanceof Uint8Array ? data : new Uint8Array(data)
-      Y.applyUpdate(this.document, bytes)
+    // WebSocket hibernation: rehydrate in-memory socket set from the
+    // platform's authoritative store on every DO init.
+    for (const ws of this.ctx.getWebSockets()) {
+      this.sockets.add(ws)
+      const attached = ws.deserializeAttachment() as { [USER_ID_ATTACHMENT_KEY]?: string } | null
+      if (attached?.[USER_ID_ATTACHMENT_KEY]) this.userId = attached[USER_ID_ATTACHMENT_KEY]
     }
 
-    // Migrate: Y.Array "openTabs" → Y.Map "tabs" (one-time).
-    this.migrateArrayToMap()
-
-    // If Y.Map "tabs" is still empty, seed from D1.
-    const tabs = this.document.getMap<string>('tabs')
-    if (tabs.size === 0) {
-      await this.seedFromD1()
-    }
+    // One-time cleanup: drop the dead y_state table from the prior Y.Doc era.
+    this.ctx.storage.sql.exec('DROP TABLE IF EXISTS y_state')
   }
 
-  /**
-   * One-time migration: copy session IDs from the legacy Y.Array "openTabs"
-   * into the new Y.Map "tabs" with project names from D1.
-   */
-  private async migrateArrayToMap() {
-    const tabs = this.document.getMap<string>('tabs')
-    if (tabs.size > 0) return // Already migrated.
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url)
 
-    try {
-      const oldArray = this.document.getArray<string>('openTabs')
-      if (oldArray.length === 0) return
-
-      const items = oldArray.toArray()
-      const seen = new Set<string>()
-      const unique = items.filter((id) => {
-        if (seen.has(id)) return false
-        seen.add(id)
-        return true
-      })
-
-      // Look up project names from D1 so one-tab-per-project works.
-      const projectMap = new Map<string, string>()
-      try {
-        const env = this.env as unknown as Env
-        if (env.AUTH_DB && unique.length > 0) {
-          const placeholders = unique.map(() => '?').join(',')
-          const result = await env.AUTH_DB.prepare(
-            `SELECT id, project FROM agent_sessions WHERE id IN (${placeholders})`,
-          )
-            .bind(...unique)
-            .all()
-          for (const row of result.results ?? []) {
-            if (row.id && row.project) {
-              projectMap.set(row.id as string, row.project as string)
-            }
-          }
-        }
-      } catch {
-        // Best-effort — tabs without project still work, just no dedup.
-      }
-
-      this.document.transact(() => {
-        let order = 1
-        for (const sessionId of unique) {
-          const project = projectMap.get(sessionId)
-          tabs.set(sessionId, JSON.stringify({ project, order }))
-          order++
-        }
-        oldArray.delete(0, oldArray.length)
-      })
-      console.log(`[UserSettingsDO] Migrated ${unique.length} tabs from Y.Array to Y.Map`)
-    } catch {
-      // No legacy array or type mismatch — nothing to do.
+    if (url.pathname === '/broadcast') {
+      return this.handleBroadcast(request)
     }
-  }
 
-  async onSave() {
-    const update = Y.encodeStateAsUpdate(this.document)
-    this.ctx.storage.sql.exec(
-      `INSERT OR REPLACE INTO y_state (id, data, updated_at)
-       VALUES ('snapshot', ?, ?)`,
-      update,
-      Date.now(),
-    )
-  }
-
-  /**
-   * One-time migration: read the user's D1 tabs and populate the Y.Doc.
-   * Runs only when tabs map is empty (first connect after upgrade).
-   */
-  private async seedFromD1() {
-    try {
-      const env = this.env as unknown as Env
-      const userId = this.name
-      if (!userId || !env.AUTH_DB) return
-
-      const result = await env.AUTH_DB.prepare(
-        'SELECT session_id FROM user_tabs WHERE user_id = ? ORDER BY position ASC',
-      )
-        .bind(userId)
-        .all()
-
-      if (result.results && result.results.length > 0) {
-        const tabs = this.document.getMap<string>('tabs')
-        this.document.transact(() => {
-          let order = 1
-          for (const row of result.results) {
-            const sessionId = row.session_id as string
-            if (sessionId) {
-              tabs.set(sessionId, JSON.stringify({ order }))
-              order++
-            }
-          }
-        })
-      }
-    } catch (err) {
-      // Migration is best-effort — empty tabs is better than a crash.
-      console.warn('[UserSettingsDO] D1 tab seed failed:', err)
+    if (request.headers.get('Upgrade') === 'websocket') {
+      return this.handleWebSocketUpgrade(request)
     }
-  }
 
-  async onConnect(conn: Connection, ctx: ConnectionContext) {
-    const session = await getRequestSession(this.env as unknown as Env, ctx.request)
-    if (!session) {
-      conn.close(4401, 'unauthenticated')
-      return
-    }
-    const roomUserId = this.name
-    if (roomUserId && roomUserId !== session.userId) {
-      conn.close(4403, 'forbidden')
-      return
-    }
-    // Let YServer handle Yjs sync protocol setup.
-    await super.onConnect(conn, ctx)
-  }
-
-  // Keep /notify for invalidation broadcasts (agent_sessions, user_preferences).
-  async onRequest(req: Request): Promise<Response> {
-    const url = new URL(req.url)
-    if (url.pathname === '/notify' && req.method === 'POST') {
-      const body = await req.text()
-      for (const conn of this.getConnections()) {
-        try {
-          conn.send(body)
-        } catch {
-          // Dropped sockets — partyserver reaps on next webSocketClose.
-        }
-      }
-      return new Response(null, { status: 204 })
-    }
     return new Response('not found', { status: 404 })
   }
+
+  private async handleWebSocketUpgrade(request: Request): Promise<Response> {
+    // Auth: the caller must present a valid session cookie. The DO ID is
+    // keyed by userId (via idFromName), so we also verify the requesting
+    // user matches the DO's room.
+    const session = await getRequestSession(this.env, request)
+    if (!session?.userId) return new Response('unauthorized', { status: 401 })
+
+    const url = new URL(request.url)
+    const roomUserId = url.searchParams.get('userId') ?? session.userId
+    if (session.userId !== roomUserId) return new Response('forbidden', { status: 403 })
+
+    const pair = new WebSocketPair()
+    const [client, server] = [pair[0], pair[1]]
+
+    // Reference-count: this is the 0→1 transition for this user's
+    // presence if the sockets set was empty BEFORE accepting.
+    const wasEmpty = this.sockets.size === 0
+
+    this.ctx.acceptWebSocket(server)
+    server.serializeAttachment({ [USER_ID_ATTACHMENT_KEY]: session.userId })
+    this.sockets.add(server)
+    this.userId = session.userId
+
+    if (wasEmpty) {
+      try {
+        const db = drizzle(this.env.AUTH_DB, { schema })
+        await db
+          .insert(schema.userPresence)
+          .values({ userId: session.userId, firstConnectedAt: new Date().toISOString() })
+          .onConflictDoNothing()
+      } catch (err) {
+        console.error('[user-settings-do] user_presence INSERT failed', err)
+      }
+    }
+
+    return new Response(null, { status: 101, webSocket: client })
+  }
+
+  private async handleBroadcast(request: Request): Promise<Response> {
+    if (request.method !== 'POST') return new Response('method not allowed', { status: 405 })
+
+    const auth = request.headers.get('Authorization')
+    const expected = `Bearer ${this.env.SYNC_BROADCAST_SECRET ?? ''}`
+    if (!auth || auth !== expected) return new Response('unauthorized', { status: 401 })
+
+    const contentLength = Number(request.headers.get('Content-Length') ?? 0)
+    if (contentLength > MAX_BROADCAST_BODY)
+      return new Response('payload too large', { status: 413 })
+
+    let body: unknown
+    try {
+      body = await request.json()
+    } catch {
+      return new Response('invalid json', { status: 400 })
+    }
+
+    if (!isSyncedCollectionFrame(body)) return new Response('invalid frame shape', { status: 400 })
+
+    const payload = JSON.stringify(body)
+    if (payload.length > MAX_BROADCAST_BODY)
+      return new Response('payload too large', { status: 413 })
+
+    for (const ws of [...this.sockets]) {
+      try {
+        ws.send(payload)
+      } catch (err) {
+        console.warn('[user-settings-do] socket send failed, removing', err)
+        this.sockets.delete(ws)
+      }
+    }
+
+    return new Response(null, { status: 204 })
+  }
+
+  async webSocketClose(ws: WebSocket, _code: number, _reason: string, _wasClean: boolean) {
+    this.sockets.delete(ws)
+    await this.maybeClearPresence()
+  }
+
+  async webSocketError(ws: WebSocket, _error: unknown) {
+    this.sockets.delete(ws)
+    await this.maybeClearPresence()
+  }
+
+  private async maybeClearPresence() {
+    if (this.sockets.size !== 0) return
+    if (!this.userId) return
+    try {
+      const db = drizzle(this.env.AUTH_DB, { schema })
+      await db.delete(schema.userPresence).where(eq(schema.userPresence.userId, this.userId))
+    } catch (err) {
+      console.error('[user-settings-do] user_presence DELETE failed', err)
+    }
+  }
+}
+
+function isSyncedCollectionFrame(body: unknown): body is SyncedCollectionFrame {
+  if (typeof body !== 'object' || body === null) return false
+  const b = body as { type?: unknown; collection?: unknown; ops?: unknown }
+  if (b.type !== 'synced-collection-delta') return false
+  if (typeof b.collection !== 'string') return false
+  if (!Array.isArray(b.ops)) return false
+  for (const op of b.ops) {
+    if (typeof op !== 'object' || op === null) return false
+    const o = op as { type?: unknown; value?: unknown; key?: unknown }
+    if (o.type === 'insert' || o.type === 'update') {
+      if (typeof o.value !== 'object' || o.value === null) return false
+    } else if (o.type === 'delete') {
+      if (typeof o.key !== 'string') return false
+    } else return false
+  }
+  return true
 }

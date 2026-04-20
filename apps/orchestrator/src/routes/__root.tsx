@@ -3,7 +3,7 @@ import { useEffect } from 'react'
 import { OfflineBanner } from '~/components/offline-banner'
 import { Toaster } from '~/components/ui/sonner'
 import { ThemeProvider } from '~/context/theme-provider'
-import { useInvalidationChannel } from '~/hooks/use-invalidation-channel'
+import { setUserStreamIdentity } from '~/hooks/use-user-stream'
 import { useSession } from '~/lib/auth-client'
 import '~/styles.css'
 
@@ -16,10 +16,17 @@ function RootComponent() {
   const navigate = useNavigate()
   const { data: session, isPending } = useSession()
   const isLogin = location.pathname === '/login'
+  const userId = (session as { user?: { id?: string } } | undefined)?.user?.id ?? null
 
-  // PartyKit invalidation channel — opens once a userId is available, no-op
-  // until then. Sole subscriber to D1 row-change broadcasts (B-CLIENT-5).
-  useInvalidationChannel()
+  // Bind the singleton user-stream WS to the authenticated identity. Null
+  // userId (signed out) closes the socket; switching userIds re-opens
+  // against the new room. GH#32 replaces the prior useInvalidationChannel.
+  useEffect(() => {
+    setUserStreamIdentity(userId)
+    return () => {
+      setUserStreamIdentity(null)
+    }
+  }, [userId])
 
   useEffect(() => {
     if (isPending) return

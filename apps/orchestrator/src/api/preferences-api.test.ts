@@ -11,8 +11,8 @@ vi.mock('./auth-routes', async () => {
   return { authRoutes: new Hono() }
 })
 
-vi.mock('./notify', () => ({
-  notifyInvalidation: vi.fn().mockResolvedValue(undefined),
+vi.mock('~/lib/broadcast-synced-delta', () => ({
+  broadcastSyncedDelta: vi.fn().mockResolvedValue(undefined),
 }))
 
 vi.mock('drizzle-orm/d1', () => ({
@@ -43,11 +43,12 @@ function createMockEnv() {
 
 function makeApp(env: any) {
   const app = createApiApp()
+  const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() } as any
   return {
     async request(path: string, init?: RequestInit) {
       const url = `http://localhost${path}`
       const req = new Request(url, init)
-      return app.fetch(req, env)
+      return app.fetch(req, env, ctx)
     },
   }
 }

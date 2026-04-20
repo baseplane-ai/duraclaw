@@ -19,8 +19,8 @@ vi.mock('~/lib/auth', () => ({
   createAuth: vi.fn(),
 }))
 
-vi.mock('./notify', () => ({
-  notifyInvalidation: vi.fn().mockResolvedValue(undefined),
+vi.mock('~/lib/broadcast-synced-delta', () => ({
+  broadcastSyncedDelta: vi.fn().mockResolvedValue(undefined),
 }))
 
 vi.mock('drizzle-orm/d1', () => ({
