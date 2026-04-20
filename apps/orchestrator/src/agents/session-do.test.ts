@@ -1230,12 +1230,18 @@ function createSessionMetaSql() {
   return { sql: fakeSql, row, writes }
 }
 
+// Kept in sync with MESSAGE_SEQ_PERSIST_EVERY in session-do.ts — streaming
+// `partial_assistant` frames would otherwise trigger per-frame SQL writes.
+const MESSAGE_SEQ_PERSIST_EVERY = 10
+
 describe('messageSeq persistence (session_meta B1)', () => {
   /**
    * Simulates SessionDO.broadcastMessages' seq+persist contract exactly:
    *   if (!opts.targetClientId) {
    *     this.messageSeq += 1
-   *     this.sql`UPDATE session_meta SET message_seq = ${n}, updated_at = ${t} WHERE id = 1`
+   *     if (this.messageSeq % MESSAGE_SEQ_PERSIST_EVERY === 0) {
+   *       this.sql`UPDATE session_meta SET message_seq = ${n}, updated_at = ${t} WHERE id = 1`
+   *     }
    *   }
    */
   function makeBroadcaster(sql: ReturnType<typeof createSessionMetaSql>['sql'], seed: number) {
@@ -1244,7 +1250,9 @@ describe('messageSeq persistence (session_meta B1)', () => {
       broadcast(opts: { targetClientId?: string } = {}): number {
         if (!opts.targetClientId) {
           messageSeq += 1
-          sql`UPDATE session_meta SET message_seq = ${messageSeq}, updated_at = ${Date.now()} WHERE id = 1`
+          if (messageSeq % MESSAGE_SEQ_PERSIST_EVERY === 0) {
+            sql`UPDATE session_meta SET message_seq = ${messageSeq}, updated_at = ${Date.now()} WHERE id = 1`
+          }
         }
         return messageSeq
       },
@@ -1252,51 +1260,61 @@ describe('messageSeq persistence (session_meta B1)', () => {
     }
   }
 
-  it('persists messageSeq on every broadcast', () => {
+  it('batches persistence to every Nth broadcast (streaming perf)', () => {
     const { sql, row, writes } = createSessionMetaSql()
     const b = makeBroadcaster(sql, 0)
 
-    expect(b.broadcast()).toBe(1)
-    expect(b.broadcast()).toBe(2)
-    expect(b.broadcast()).toBe(3)
+    // First N-1 broadcasts advance the in-memory seq but do not hit SQLite.
+    for (let i = 1; i < MESSAGE_SEQ_PERSIST_EVERY; i++) {
+      expect(b.broadcast()).toBe(i)
+    }
+    expect(writes).toHaveLength(0)
+    expect(row.message_seq).toBe(0)
 
-    expect(row.message_seq).toBe(3)
-    expect(writes.map((w) => w.message_seq)).toEqual([1, 2, 3])
+    // Nth broadcast flushes to SQLite.
+    expect(b.broadcast()).toBe(MESSAGE_SEQ_PERSIST_EVERY)
+    expect(writes.map((w) => w.message_seq)).toEqual([MESSAGE_SEQ_PERSIST_EVERY])
+    expect(row.message_seq).toBe(MESSAGE_SEQ_PERSIST_EVERY)
   })
 
-  it('rehydrates messageSeq across a DO restart', () => {
+  it('rehydrates messageSeq across a DO restart from the last persisted Nth', () => {
     const { sql, row } = createSessionMetaSql()
 
-    // First instance: 5 broadcasts.
+    // First instance: enough broadcasts to cross two persist boundaries plus
+    // some un-persisted remainder (frame-precise recovery not required —
+    // clients snapshot on reconnect).
+    const total = MESSAGE_SEQ_PERSIST_EVERY * 2 + 3
     const b1 = makeBroadcaster(sql, 0)
-    for (let i = 0; i < 5; i++) b1.broadcast()
-    expect(row.message_seq).toBe(5)
+    for (let i = 0; i < total; i++) b1.broadcast()
+    expect(row.message_seq).toBe(MESSAGE_SEQ_PERSIST_EVERY * 2)
 
     // Simulate onStart on a fresh DO instance — re-read persisted seq.
     const metaRows = sql<{
       message_seq: number
     }>`SELECT message_seq FROM session_meta WHERE id = 1`
     const rehydrated = metaRows[0]?.message_seq ?? 0
-    expect(rehydrated).toBe(5)
+    expect(rehydrated).toBe(MESSAGE_SEQ_PERSIST_EVERY * 2)
 
-    // Sixth broadcast on the new instance should be seq=6.
+    // Next broadcast on the new instance continues from the persisted point.
     const b2 = makeBroadcaster(sql, rehydrated)
-    expect(b2.broadcast()).toBe(6)
-    expect(row.message_seq).toBe(6)
+    expect(b2.broadcast()).toBe(MESSAGE_SEQ_PERSIST_EVERY * 2 + 1)
   })
 
   it('targeted broadcasts do NOT increment or persist seq', () => {
     const { sql, row, writes } = createSessionMetaSql()
     const b = makeBroadcaster(sql, 0)
 
-    b.broadcast() // seq=1
-    expect(row.message_seq).toBe(1)
+    // Drive to the first persist boundary so we have something to observe.
+    for (let i = 0; i < MESSAGE_SEQ_PERSIST_EVERY; i++) b.broadcast()
+    expect(row.message_seq).toBe(MESSAGE_SEQ_PERSIST_EVERY)
+    expect(writes).toHaveLength(1)
 
-    // Targeted sends echo current seq — must not advance shared counter.
-    expect(b.broadcast({ targetClientId: 'client-A' })).toBe(1)
-    expect(b.broadcast({ targetClientId: 'client-B' })).toBe(1)
+    // Targeted sends echo current seq — must not advance shared counter
+    // and must not emit a SQL write.
+    expect(b.broadcast({ targetClientId: 'client-A' })).toBe(MESSAGE_SEQ_PERSIST_EVERY)
+    expect(b.broadcast({ targetClientId: 'client-B' })).toBe(MESSAGE_SEQ_PERSIST_EVERY)
 
-    expect(row.message_seq).toBe(1)
+    expect(row.message_seq).toBe(MESSAGE_SEQ_PERSIST_EVERY)
     expect(writes).toHaveLength(1)
   })
 

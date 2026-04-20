@@ -85,6 +85,14 @@ export interface SessionMeta {
   lastKataMode?: string
 }
 
+/**
+ * How often `messageSeq` is persisted to `session_meta`. Set > 1 so streaming
+ * `partial_assistant` frames don't trigger per-frame SQL writes; the persisted
+ * seq is only consulted on DO rehydrate after eviction, where reconnecting
+ * clients fetch a snapshot anyway.
+ */
+const MESSAGE_SEQ_PERSIST_EVERY = 10
+
 const DEFAULT_META: SessionMeta = {
   status: 'idle',
   session_id: null,
@@ -898,8 +906,14 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   private broadcastMessages(payload: MessagesPayload, opts: { targetClientId?: string } = {}) {
     if (!opts.targetClientId) {
       this.messageSeq += 1
-      this
-        .sql`UPDATE session_meta SET message_seq = ${this.messageSeq}, updated_at = ${Date.now()} WHERE id = 1`
+      // Persist only every Nth increment — per-frame SQL writes during streaming
+      // `partial_assistant` turns are wasteful, and the persisted seq is only
+      // consulted on DO eviction / rehydrate, where clients reconnect with a
+      // snapshot anyway (frame-level precision unnecessary).
+      if (this.messageSeq % MESSAGE_SEQ_PERSIST_EVERY === 0) {
+        this
+          .sql`UPDATE session_meta SET message_seq = ${this.messageSeq}, updated_at = ${Date.now()} WHERE id = 1`
+      }
     }
     const frame: MessagesFrame = {
       type: 'messages',

@@ -89,8 +89,14 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
       const addCol = (col: string, ddl: string) => {
         try {
           sql.exec(`ALTER TABLE session_meta ADD COLUMN ${col} ${ddl}`)
-        } catch {
-          // column may already exist
+        } catch (e: unknown) {
+          // Only swallow the idempotent "column already exists" case. Anything
+          // else (corruption, permission failure, malformed DDL) must surface.
+          const msg = e instanceof Error ? e.message : String(e)
+          if (!msg.toLowerCase().includes('duplicate column')) {
+            console.warn('[migration v7] unexpected error adding column', col, e)
+            throw e
+          }
         }
       }
       addCol('status', "TEXT NOT NULL DEFAULT 'idle'")
