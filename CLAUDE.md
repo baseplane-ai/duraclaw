@@ -83,6 +83,7 @@ cards, and the tab bar all agree on label / color / icon.
 ```
 apps/
   orchestrator/          # CF Workers + TanStack Start (React 19, Vite 7)
+  mobile/                # Capacitor 8 Android shell (thin client, GH#26)
 packages/
   agent-gateway/         # VPS control plane (Bun HTTP server, systemd)
   session-runner/        # Per-session SDK owner (spawned by gateway)
@@ -181,6 +182,15 @@ Port ranges (all non-overlapping):
 - **Environment** (wrangler secrets): `CC_GATEWAY_URL` (http(s) URL to gateway), `CC_GATEWAY_SECRET` (bearer matched by gateway), `WORKER_PUBLIC_URL` (wss base the runner uses to dial the DO), `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`
 - **D1 Database**: `duraclaw-auth`
 - **Entry point**: `src/server.ts` exports DO classes + TanStack Start default handler
+
+### apps/mobile (Capacitor 8 Android shell)
+
+- **Thin client** — wraps the orchestrator React bundle as a sandboxed `capacitor://localhost` WebView that talks to the deployed Worker over HTTPS / WSS. No local server in the APK.
+- **Native swaps**: OPFS sqlite → `@capacitor-community/sqlite`; cookie auth → `better-auth-capacitor` bearer; Web Push → FCM HTTP v1 via `jose`-signed JWT (`apps/orchestrator/src/lib/push-fcm.ts`); WS host overridden via `useAgent({ host: wsBaseUrl() })`.
+- **Platform gating** lives in `apps/orchestrator/src/lib/platform.ts` — `isNative()` keys off `import.meta.env.VITE_PLATFORM === 'capacitor'`, dead-code-eliminated from the web bundle by Vite. Native imports (`@capacitor/*`) are dynamic so they're tree-shaken from the web build.
+- **Build** — `pnpm --filter @duraclaw/mobile build:android` runs `apps/mobile/scripts/build-android.sh` (env load → vite build → cap sync → gradle assembleRelease). Sign with `apps/mobile/scripts/sign-android.sh` (KEYSTORE_PATH/PASS/KEY_ALIAS/KEY_PASS env vars).
+- **Toolchain pins** — JDK 21, Android SDK platform 36, build-tools 36.0.0. See `apps/mobile/README.md` for full prerequisites, FCM provisioning, dev-keystore generation, and source map.
+- **Spec**: `planning/specs/26-capacitor-android-mobile-shell.md`. GitHub: issue #26, PR #29.
 
 ### packages/agent-gateway (VPS control plane)
 
