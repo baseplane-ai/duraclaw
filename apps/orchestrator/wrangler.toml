@@ -69,7 +69,7 @@ deleted_classes = ["ProjectRegistry"]
 [[d1_databases]]
 binding = "AUTH_DB"
 database_name = "duraclaw-auth"
-database_id = "c5b4d822-9bc6-467f-9ad6-7ee779b82e0c"
+database_id = "7f7a3c5e-0609-4527-904e-740ca140538d"
 
 [vars]
 VAPID_SUBJECT = "mailto:push@codevibesmatter.com"
