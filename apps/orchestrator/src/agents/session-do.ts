@@ -2130,7 +2130,13 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
               this.broadcastToClients(JSON.stringify({ type: 'raw_event', event }))
             }
           } else {
-            // First partial of this turn — append new message
+            // First partial of this turn — append new message. Parent defaults
+            // to latestLeafRow() (the user row just persisted in sendMessage),
+            // whose id may be `usr-N` OR `usr-client-<uuid>` depending on
+            // whether the client supplied a `client_message_id` (GH#14 B6).
+            // Passing an explicit `usr-${turnCounter}` used to silently land
+            // parent_id=NULL when the user row was keyed on the client id —
+            // orphaning every assistant and collapsing getHistory() to one row.
             const msg: SessionMessage = {
               id: msgId,
               role: 'assistant',
@@ -2138,7 +2144,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
               createdAt: new Date(),
             }
             try {
-              this.session.appendMessage(msg, `usr-${this.turnCounter}`)
+              this.session.appendMessage(msg)
               this.persistTurnState()
               this.broadcastMessage(msg)
             } catch (err) {
@@ -2219,7 +2225,10 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           if (existing) {
             this.session.updateMessage(msg)
           } else {
-            this.session.appendMessage(msg, `usr-${this.turnCounter}`)
+            // No partial fired first — append from scratch. Parent defaults to
+            // latestLeafRow(), which is the user row this assistant replies
+            // to. See partial_assistant branch for the full rationale.
+            this.session.appendMessage(msg)
           }
           this.currentTurnMessageId = null
           this.persistTurnState()
