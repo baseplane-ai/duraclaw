@@ -10,12 +10,13 @@
     "build:android": "bash scripts/build-android.sh"
   },
   "dependencies": {
+    "@capacitor-community/sqlite": "^8.1.0",
     "@capacitor/android": "^8.3.1",
     "@capacitor/app": "^8.0.1",
     "@capacitor/core": "^8.3.1",
     "@capacitor/network": "^8.0.1",
     "@capacitor/preferences": "^8.0.1",
-    "@capacitor-community/sqlite": "^8.1.0",
+    "@capacitor/push-notifications": "^8.0.1",
     "@tanstack/capacitor-db-sqlite-persistence": "0.1.9"
   },
   "devDependencies": {

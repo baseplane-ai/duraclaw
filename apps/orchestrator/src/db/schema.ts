@@ -108,6 +108,23 @@ export const pushSubscriptions = sqliteTable(
   }),
 )
 
+export const fcmSubscriptions = sqliteTable(
+  'fcm_subscriptions',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    token: text('token').notNull(),
+    platform: text('platform').notNull().default('android'),
+    createdAt: text('created_at').notNull().default(sql`(datetime('now'))`),
+  },
+  (t) => ({
+    byUser: index('idx_fcm_user_id').on(t.userId),
+    tokenUnique: uniqueIndex('idx_fcm_token').on(t.token),
+  }),
+)
+
 export const agentSessions = sqliteTable(
   'agent_sessions',
   {

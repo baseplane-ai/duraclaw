@@ -50,6 +50,11 @@ export interface Env {
   VAPID_PUBLIC_KEY?: string
   VAPID_PRIVATE_KEY?: string
   VAPID_SUBJECT?: string
+  /** Firebase service account JSON (set via `wrangler secret`). When
+   *  present, SessionDO push fan-out also dispatches to FCM tokens for
+   *  the Capacitor Android shell (GH#26 P1 B5). When unset, FCM dispatch
+   *  is silently skipped — opt-in deployment. */
+  FCM_SERVICE_ACCOUNT_JSON?: string
   BOOTSTRAP_TOKEN?: string
   /** Watchdog stale threshold in ms. Default 90_000 when unset. */
   STALE_THRESHOLD_MS?: string

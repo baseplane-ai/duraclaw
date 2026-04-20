@@ -38,6 +38,9 @@ importers:
       '@capacitor/preferences':
         specifier: ^8.0.1
         version: 8.0.1(@capacitor/core@8.3.1)
+      '@capacitor/push-notifications':
+        specifier: ^8.0.1
+        version: 8.0.3(@capacitor/core@8.3.1)
       '@tanstack/capacitor-db-sqlite-persistence':
         specifier: 0.1.9
         version: 0.1.9(@capacitor-community/sqlite@8.1.0(@capacitor/core@8.3.1))(typescript@5.8.3)
@@ -60,6 +63,9 @@ importers:
       '@capacitor/core':
         specifier: ^8.3.1
         version: 8.3.1
+      '@capacitor/push-notifications':
+        specifier: ^8.0.1
+        version: 8.0.3(@capacitor/core@8.3.1)
       '@cloudflare/ai-chat':
         specifier: ^0.4.0
         version: 0.4.0(@ai-sdk/react@3.0.144(react@19.2.4)(zod@4.3.6))(agents@0.11.0)(ai@6.0.142(zod@4.3.6))(react@19.2.4)(zod@4.3.6)
@@ -195,6 +201,9 @@ importers:
       input-otp:
         specifier: ^1.4.2
         version: 1.4.2(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+      jose:
+        specifier: ^6.2.2
+        version: 6.2.2
       lucide-react:
         specifier: ^1.7.0
         version: 1.7.0(react@19.2.4)
@@ -1280,6 +1289,11 @@ packages:
 
   '@capacitor/preferences@8.0.1':
     resolution: {integrity: sha512-T6no3ebi79XJCk91U3Jp/liJUwgBdvHR+s6vhvPkPxSuch7z3zx5Rv1bdWM6sWruNx+pViuEGqZvbfCdyBvcHQ==}
+    peerDependencies:
+      '@capacitor/core': '>=8.0.0'
+
+  '@capacitor/push-notifications@8.0.3':
+    resolution: {integrity: sha512-jmBBoJvOzmzem8YoO9dQJBPFiM1bksTNAoV7yksCBN10BybAOtmBF19vFPt/jr2KGAirnPZz0ne2X0OH/rRGtg==}
     peerDependencies:
       '@capacitor/core': '>=8.0.0'
 
@@ -8402,6 +8416,10 @@ snapshots:
       '@capacitor/core': 8.3.1
 
   '@capacitor/preferences@8.0.1(@capacitor/core@8.3.1)':
+    dependencies:
+      '@capacitor/core': 8.3.1
+
+  '@capacitor/push-notifications@8.0.3(@capacitor/core@8.3.1)':
     dependencies:
       '@capacitor/core': 8.3.1
 

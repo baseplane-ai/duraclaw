@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
-import { apiUrl } from '~/lib/platform'
+import { apiUrl, isNative } from '~/lib/platform'
+import { usePushSubscriptionNative } from './use-push-subscription-native'
 
 type PushPermissionState = 'prompt' | 'granted' | 'denied' | 'unsupported'
 
-export function usePushSubscription() {
+export function usePushSubscriptionWeb() {
   const [permission, setPermission] = useState<PushPermissionState>(() => {
     if (typeof window === 'undefined' || !('Notification' in window)) return 'unsupported'
     return Notification.permission as PushPermissionState
@@ -83,4 +84,19 @@ export function usePushSubscription() {
   }, [])
 
   return { permission, isSubscribed, subscribe, unsubscribe }
+}
+
+/**
+ * Platform-aware push subscription. Both implementations return the same
+ * shape. `isNative()` is a build-time constant after Vite dead-code-
+ * elimination, so the picked hook is effectively static per build — we
+ * resolve once at module load to keep React's rules-of-hooks happy
+ * (single call site, stable identity per build). The native hook still
+ * dynamic-imports `@capacitor/push-notifications` internally so it's
+ * tree-shaken from the web bundle.
+ */
+const platformHook = isNative() ? usePushSubscriptionNative : usePushSubscriptionWeb
+
+export function usePushSubscription() {
+  return platformHook()
 }

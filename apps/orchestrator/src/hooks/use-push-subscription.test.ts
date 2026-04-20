@@ -3,7 +3,7 @@
  */
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { usePushSubscription } from './use-push-subscription'
+import { usePushSubscriptionWeb as usePushSubscription } from './use-push-subscription'
 
 // Helpers to build mock subscription and registration
 function makeMockSubscription(endpoint = 'https://push.example.com/sub1') {

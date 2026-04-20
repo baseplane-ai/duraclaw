@@ -1020,6 +1020,54 @@ export function createApiApp() {
     return c.body(null, 204)
   })
 
+  // ── FCM (Capacitor Android) push subscriptions ───────────────────
+  // Native Android shell registers its FCM token here. Web push (VAPID)
+  // continues to use /api/push/{subscribe,unsubscribe}. The fan-out side
+  // (apps/orchestrator/src/agents/session-do.ts) reads both tables and
+  // dispatches per platform.
+
+  app.post('/api/push/fcm-subscribe', async (c) => {
+    const userId = c.get('userId')
+    const body = (await c.req.json()) as { token?: string; platform?: string }
+
+    if (!body.token) {
+      return c.json({ error: 'Missing required field: token' }, 400)
+    }
+
+    const platform = body.platform ?? 'android'
+    const id = crypto.randomUUID()
+
+    // INSERT OR REPLACE on the unique token index — reassigns ownership
+    // when the same token has rotated to a different user (token rotation
+    // / device hand-off). Keeps the existing id when same user re-registers.
+    await c.env.AUTH_DB.prepare(
+      `INSERT OR REPLACE INTO fcm_subscriptions (id, user_id, token, platform)
+       VALUES (
+         COALESCE((SELECT id FROM fcm_subscriptions WHERE token = ? AND user_id = ?), ?),
+         ?, ?, ?
+       )`,
+    )
+      .bind(body.token, userId, id, userId, body.token, platform)
+      .run()
+
+    return c.json({ ok: true }, 201)
+  })
+
+  app.post('/api/push/fcm-unsubscribe', async (c) => {
+    const userId = c.get('userId')
+    const body = (await c.req.json()) as { token?: string }
+
+    if (!body.token) {
+      return c.json({ error: 'Missing required field: token' }, 400)
+    }
+
+    await c.env.AUTH_DB.prepare('DELETE FROM fcm_subscriptions WHERE user_id = ? AND token = ?')
+      .bind(userId, body.token)
+      .run()
+
+    return c.body(null, 204)
+  })
+
   /**
    * Debug endpoint — send a test push notification to all of the caller's
    * subscribed devices with an arbitrary session URL.

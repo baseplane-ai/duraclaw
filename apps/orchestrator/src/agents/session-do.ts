@@ -15,6 +15,7 @@ import { generateActionToken } from '~/lib/action-token'
 import { runMigrations } from '~/lib/do-migrations'
 import { contentToParts, transcriptUserContentToParts } from '~/lib/message-parts'
 import { type PushPayload, sendPushNotification } from '~/lib/push'
+import { sendFcmNotification } from '~/lib/push-fcm'
 import type {
   ContentBlock,
   Env,
@@ -1325,6 +1326,49 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           console.log(`${tag} deleted stale subscription ${sub.id}`)
         } catch (err) {
           console.error(`${tag} failed to delete stale subscription ${sub.id}:`, err)
+        }
+      }
+    }
+
+    // FCM fan-out (Capacitor Android shell). Reads `FCM_SERVICE_ACCOUNT_JSON`
+    // — a Worker secret containing the Firebase service account JSON. Opt-in:
+    // when unset, the FCM path is silently skipped (no Capacitor deployment).
+    const fcmServiceAccount = this.env.FCM_SERVICE_ACCOUNT_JSON
+    if (fcmServiceAccount) {
+      let fcmRows: Array<{ id: string; token: string }> = []
+      try {
+        const fcmResult = await this.env.AUTH_DB.prepare(
+          'SELECT id, token FROM fcm_subscriptions WHERE user_id = ?',
+        )
+          .bind(userId)
+          .all<{ id: string; token: string }>()
+        fcmRows = fcmResult.results
+      } catch (err) {
+        console.error(`${tag} fcm subscription lookup failed:`, err)
+      }
+
+      if (fcmRows.length > 0) {
+        console.log(`${tag} fcm ${fcmRows.length} subscription(s)`)
+        for (const row of fcmRows) {
+          try {
+            const tokenSummary = row.token.slice(0, 16)
+            const result = await sendFcmNotification(row.token, payload, fcmServiceAccount)
+            console.log(
+              `${tag} fcm send sub=${row.id} token=${tokenSummary}... ok=${result.ok} status=${result.status ?? 'n/a'} gone=${Boolean(result.gone)}`,
+            )
+            if (result.gone) {
+              try {
+                await this.env.AUTH_DB.prepare('DELETE FROM fcm_subscriptions WHERE id = ?')
+                  .bind(row.id)
+                  .run()
+                console.log(`${tag} fcm deleted stale subscription ${row.id}`)
+              } catch (err) {
+                console.error(`${tag} fcm failed to delete stale subscription ${row.id}:`, err)
+              }
+            }
+          } catch (err) {
+            console.error(`${tag} fcm send threw for sub=${row.id}:`, err)
+          }
         }
       }
     }
