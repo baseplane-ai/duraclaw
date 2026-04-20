@@ -87,15 +87,10 @@ deleted_classes = ["ProjectRegistry"]
 tag = "v6"
 new_sqlite_classes = ["SessionCollabDOv2"]
 
-# D1 database for auth.
-#
-# IMPORTANT: `c5b4d822` is the ID on the Ben@baseplane.ai account
-# (87bd3030), which is where the infra pipeline deploys. The other ID
-# that keeps reappearing in history (`7f7a3c5e-...`) lives on the
-# Team@getelevra.com account (c5f1240e) — a local `wrangler d1
-# migrations apply --remote` from that account's auth context will
-# "correct" this value to the wrong one and break the next deploy.
-# See commits 60ad996 (fix) and 0c1e011 (accidental revert via #33).
+# D1 database for auth — `c5b4d822` on Ben@baseplane.ai (account
+# `87bd3030`), where the infra pipeline deploys. Do NOT let wrangler
+# rewrite `database_id` on remote-migration apply; always pass
+# `CLOUDFLARE_ACCOUNT_ID=87bd3030c315cfdc6e9f9c04ad6f37bc` explicitly.
 [[d1_databases]]
 binding = "AUTH_DB"
 database_name = "duraclaw-auth"
