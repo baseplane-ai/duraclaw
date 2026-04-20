@@ -52,23 +52,11 @@ pnpm exec cap sync android
 echo ""
 echo "==> [3b/4] Emitting mobile OTA bundle zip"
 # Must run AFTER cap sync so the zip doesn't get bundled into the APK
-# (which would double the binary size and defeat OTA updates).
-BUNDLE_DIR="$REPO_ROOT/apps/orchestrator/dist/client"
-MOBILE_OUT="$BUNDLE_DIR/mobile"
-BUNDLE_ZIP="$MOBILE_OUT/bundle-$APP_VERSION.zip"
-mkdir -p "$MOBILE_OUT"
-# Zip the client bundle from a staging dir that excludes the /mobile/
-# output dir itself (avoids self-nesting).
-STAGE_DIR=$(mktemp -d)
-trap 'rm -rf "$STAGE_DIR"' EXIT
-cp -r "$BUNDLE_DIR"/. "$STAGE_DIR/"
-rm -rf "$STAGE_DIR/mobile"
-(cd "$STAGE_DIR" && zip -qr "$BUNDLE_ZIP" .)
-cat > "$MOBILE_OUT/version.json" <<EOF
-{"version":"$APP_VERSION","path":"/mobile/bundle-$APP_VERSION.zip"}
-EOF
-echo "    wrote $BUNDLE_ZIP"
-echo "    wrote $MOBILE_OUT/version.json"
+# (which would double the binary size and defeat OTA updates). The
+# actual work is shared with the infra deploy pipeline — see
+# scripts/build-mobile-ota-bundle.sh.
+cd "$REPO_ROOT"
+APP_VERSION="$APP_VERSION" bash scripts/build-mobile-ota-bundle.sh
 
 echo ""
 echo "==> [4/4] Gradle assembleRelease"

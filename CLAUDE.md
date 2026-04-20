@@ -422,6 +422,24 @@ Every event is stamped with a monotonic `seq` by the runner's BufferedChannel so
 
 All deploys are handled by the infra server — pushing to `main` on `origin` triggers the pipeline that builds and ships both the orchestrator (CF Workers) and the agent-gateway (systemd on VPS). Do not run `pnpm ship`, `wrangler deploy`, or the gateway install script manually.
 
+**Infra-pipeline contract for mobile OTA** — the pipeline must (a)
+build the orchestrator with `VITE_APP_VERSION` stamped in, and (b)
+between build and `wrangler deploy`, run
+`scripts/build-mobile-ota-bundle.sh` to emit
+`apps/orchestrator/dist/client/mobile/{bundle-<sha>.zip,version.json}`.
+The Worker then serves the current web bundle over
+`/api/mobile/updates/manifest` for Capgo to pull. Without either step
+the OTA channel is dead — every native shell polls, sees no newer
+version, and stays on the bundle the APK shipped with.
+
+```bash
+export APP_VERSION=$(git rev-parse --short HEAD)
+VITE_APP_VERSION="$APP_VERSION" \
+  pnpm --filter @duraclaw/orchestrator build
+bash scripts/build-mobile-ota-bundle.sh   # emits dist/client/mobile/*
+wrangler deploy --cwd apps/orchestrator
+```
+
 ## Progress Tracking
 
 - **Roadmap:** `planning/specs/roadmap-v2-full-vision.md` — full vision with all detail
