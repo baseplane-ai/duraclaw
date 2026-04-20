@@ -17,6 +17,7 @@ import { TabBar } from '~/components/tab-bar'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { useSwipeTabs } from '~/hooks/use-swipe-tabs'
 import { getTabSyncSnapshot, isDraftTabId, newDraftTabId, useTabSync } from '~/hooks/use-tab-sync'
+import { apiUrl } from '~/lib/platform'
 import { AgentDetailView } from './AgentDetailView'
 import type { SpawnFormConfig } from './SpawnAgentForm'
 import { type SpawnConfig, useCodingAgent } from './use-coding-agent'
@@ -100,7 +101,7 @@ function AgentOrchContent() {
   const [projectsLoading, setProjectsLoading] = useState(true)
 
   useEffect(() => {
-    fetch('/api/gateway/projects')
+    fetch(apiUrl('/api/gateway/projects'))
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         const d = data as
@@ -124,7 +125,7 @@ function AgentOrchContent() {
         // kataIssue from the spawn form. Chain-scoped code-touching spawns
         // from the kanban go through advance-chain.ts which handles this;
         // freeform spawns from this form currently bypass the gate.
-        const resp = await fetch('/api/sessions', {
+        const resp = await fetch(apiUrl('/api/sessions'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

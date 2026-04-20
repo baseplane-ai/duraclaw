@@ -8,6 +8,7 @@
 import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence'
 import { createCollection } from '@tanstack/db'
 import { queryCollectionOptions } from '@tanstack/query-db-collection'
+import { apiUrl } from '~/lib/platform'
 import type { ChainSummary } from '~/lib/types'
 import { dbReady, queryClient } from './db-instance'
 
@@ -15,7 +16,7 @@ const queryOpts = queryCollectionOptions({
   id: 'chains',
   queryKey: ['chains'] as const,
   queryFn: async () => {
-    const resp = await fetch('/api/chains')
+    const resp = await fetch(apiUrl('/api/chains'))
     const json = (await resp.json()) as { chains: ChainSummary[] }
     return json.chains
   },

@@ -1,0 +1,25 @@
+{
+  "name": "@duraclaw/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "cap:sync": "cap sync android",
+    "cap:open": "cap open android",
+    "cap:run:android": "cap run android",
+    "build:android": "bash scripts/build-android.sh"
+  },
+  "dependencies": {
+    "@capacitor-community/sqlite": "^8.1.0",
+    "@capacitor/android": "^8.3.1",
+    "@capacitor/app": "^8.0.1",
+    "@capacitor/core": "^8.3.1",
+    "@capacitor/network": "^8.0.1",
+    "@capacitor/preferences": "^8.0.1",
+    "@capacitor/push-notifications": "^8.0.1",
+    "@tanstack/capacitor-db-sqlite-persistence": "0.1.9"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.3.1"
+  }
+}

@@ -14,6 +14,7 @@ import {
   SidebarMenuItem,
   useSidebar,
 } from '~/components/ui/sidebar'
+import { apiUrl } from '~/lib/platform'
 import type { ProjectInfo } from '~/lib/types'
 import { useWorkspaceStore } from '~/stores/workspace'
 
@@ -73,7 +74,7 @@ export function WorkspaceSelector() {
   const { activeWorkspace, setWorkspace } = useWorkspaceStore()
 
   useEffect(() => {
-    fetch('/api/gateway/projects')
+    fetch(apiUrl('/api/gateway/projects'))
       .then((r) => r.json() as Promise<ProjectInfo[] | { error: string }>)
       .then((data) => {
         if (Array.isArray(data)) {

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { apiUrl } from '~/lib/platform'
 import type { UserPreferences } from '~/lib/types'
 
 const DEFAULTS: UserPreferences = {
@@ -25,7 +26,7 @@ export function useUserDefaults() {
     }
 
     // Fetch from server via registry DO
-    fetch('/api/preferences')
+    fetch(apiUrl('/api/preferences'))
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data && Object.keys(data).length > 0) {
@@ -44,7 +45,7 @@ export function useUserDefaults() {
       setPreferences(updated)
       localStorage.setItem('user-preferences', JSON.stringify(updated))
 
-      await fetch('/api/preferences', {
+      await fetch(apiUrl('/api/preferences'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(patch),

@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Duraclaw</string>
+    <string name="title_activity_main">Duraclaw</string>
+    <string name="package_name">com.baseplane.duraclaw</string>
+    <string name="custom_url_scheme">com.baseplane.duraclaw</string>
+</resources>

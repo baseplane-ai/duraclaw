@@ -20,6 +20,7 @@ import { upsertSessionLiveState } from '~/db/session-live-state-collection'
 import { useMessagesCollection } from '~/hooks/use-messages-collection'
 import { useSessionLiveState } from '~/hooks/use-session-live-state'
 import { contentToParts } from '~/lib/message-parts'
+import { wsBaseUrl } from '~/lib/platform'
 import type {
   ContentBlock,
   GateResponse,
@@ -28,6 +29,7 @@ import type {
   SessionState,
   SpawnConfig,
 } from '~/lib/types'
+import { useAppLifecycle } from './use-app-lifecycle'
 
 export type { ContentBlock, GateResponse, SessionState as CodingAgentState, SpawnConfig }
 
@@ -293,6 +295,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   const connection = useAgent<SessionState>({
     agent: 'session-agent',
     name: agentName,
+    ...(wsBaseUrl() ? { host: wsBaseUrl() } : {}),
     onStateUpdate: (newState) => {
       // Mirror summary-ish fields onto the top level of the live-state row
       // so session-list readers (tab-bar, SessionListItem, SessionHistory)
@@ -402,6 +405,18 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   useEffect(() => {
     upsertSessionLiveState(agentName, { wsReadyState: connection.readyState })
   }, [agentName, connection.readyState])
+
+  // B6 (Capacitor only): close the WS proactively when backgrounded >5s
+  // and hydrate missed messages on foreground. No-op on web.
+  useAppLifecycle({
+    connection,
+    hydrate: useCallback(() => {
+      connection.call('getMessages', []).catch(() => {
+        // Best-effort hydrate; messages collection still falls back to
+        // its queryFn for cold-start / stale-cache.
+      })
+    }, [connection]),
+  })
 
   const spawn = useCallback(
     (config: SpawnConfig) => connection.call('spawn', [config]),

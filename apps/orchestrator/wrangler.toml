@@ -82,3 +82,6 @@ VAPID_SUBJECT = "mailto:push@codevibesmatter.com"
 # VAPID_PUBLIC_KEY     — Web Push VAPID public key (base64url)
 # VAPID_PRIVATE_KEY    — Web Push VAPID private key (base64url)
 # WORKER_PUBLIC_URL    — Public URL of this worker (e.g. https://duraclaw.workers.dev)
+# FCM_SERVICE_ACCOUNT_JSON — Firebase service account JSON (single-line, GH#26 P1 B5).
+#                            Enables FCM push to Capacitor Android shell. Opt-in:
+#                            unset = no FCM dispatch, web push (VAPID) unaffected.

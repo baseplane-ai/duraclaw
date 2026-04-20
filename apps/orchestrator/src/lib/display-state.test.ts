@@ -36,7 +36,7 @@ describe('deriveDisplayState', () => {
   it('returns disconnected when wsReadyState !== 1 (CONNECTING)', () => {
     const result = deriveDisplayState(makeState('running'), 0)
     expect(result.status).toBe('disconnected')
-    expect(result.label).toBe('Disconnected')
+    expect(result.label).toBe('Reconnecting…')
     expect(result.color).toBe('gray')
     expect(result.icon).toBe('wifi-off')
     expect(result.isInteractive).toBe(false)

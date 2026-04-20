@@ -12,6 +12,7 @@ import {
   DropdownMenuTrigger,
 } from '~/components/ui/dropdown-menu'
 import type { SessionRecord } from '~/db/session-record'
+import { apiUrl } from '~/lib/platform'
 import type { ProjectInfo } from '~/lib/types'
 import { useWorkspaceStore } from '~/stores/workspace'
 
@@ -46,7 +47,7 @@ function WorkspaceChip() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    fetch('/api/gateway/projects')
+    fetch(apiUrl('/api/gateway/projects'))
       .then((r) => r.json() as Promise<ProjectInfo[] | { error: string }>)
       .then((data) => {
         if (Array.isArray(data)) {

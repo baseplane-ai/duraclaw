@@ -4,6 +4,7 @@ import ReactDOM from 'react-dom/client'
 import { dbReady } from '~/db/db-instance'
 import { evictOldMessages } from '~/db/messages-collection'
 import { installAriaHiddenPatch } from '~/lib/aria-hidden-patch'
+import { authClientReady } from '~/lib/auth-client'
 import { getRouter } from './router'
 
 installAriaHiddenPatch()
@@ -12,7 +13,11 @@ async function bootstrap() {
   // Block React mount until OPFS persistence has resolved.
   // Otherwise *-collection modules import a null persistence handle
   // and fall into the non-persisted branch (B-CLIENT-1).
-  await dbReady
+  // Also await the auth client — on Capacitor the better-auth-capacitor
+  // wrapper is loaded via dynamic import; on web this resolves in one
+  // microtask. The Proxy-based `authClient` / `useSession` exports throw
+  // if accessed before this resolves.
+  await Promise.all([dbReady, authClientReady])
   try {
     evictOldMessages()
   } catch {

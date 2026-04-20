@@ -4,9 +4,9 @@ type: project
 issue_type: feature
 status: approved
 priority: high
-github_issue: null
+github_issue: 26
 created: 2026-04-19
-updated: 2026-04-19
+updated: 2026-04-20
 prerequisites:
   - "GH#12 — Unify client data layer on TanStack DB collections (must be landed or in-flight)"
 phases:
@@ -132,7 +132,7 @@ phases:
 
 # Capacitor Android Mobile Shell — Cloud-Only Thin Client
 
-> GitHub Issue: TBD (file after spec approval)
+> GitHub Issue: [#26](https://github.com/baseplane-ai/duraclaw/issues/26)
 >
 > Prerequisite: [GH#12 — Unify client data layer on TanStack DB collections](https://github.com/baseplane-ai/duraclaw/issues/12) (must land first or be in-flight with stable collection API)
 

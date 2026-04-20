@@ -43,6 +43,7 @@ import type { SessionRecord } from '~/db/session-record'
 import { getPreviewText, StatusDot } from '~/features/agent-orch/session-utils'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { useTabSync } from '~/hooks/use-tab-sync'
+import { apiUrl } from '~/lib/platform'
 import type { PrInfo, ProjectInfo } from '~/lib/types'
 import { cn } from '~/lib/utils'
 
@@ -223,7 +224,7 @@ export function NavSessions() {
   const [projectsLoaded, setProjectsLoaded] = useState(false)
 
   useEffect(() => {
-    fetch('/api/gateway/projects/all')
+    fetch(apiUrl('/api/gateway/projects/all'))
       .then((r) => (r.ok ? r.json() : []))
       .then((data) => {
         if (Array.isArray(data)) setProjects(data as ProjectInfoWithHidden[])
@@ -236,7 +237,7 @@ export function NavSessions() {
     setProjects((prev) => {
       const updated = prev.map((p) => (p.name === projectName ? { ...p, hidden: !p.hidden } : p))
       const hiddenList = updated.filter((p) => p.hidden).map((p) => p.name)
-      fetch('/api/user/preferences', {
+      fetch(apiUrl('/api/user/preferences'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ key: 'hidden_projects', value: JSON.stringify(hiddenList) }),
