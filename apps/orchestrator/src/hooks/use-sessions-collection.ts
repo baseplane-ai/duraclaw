@@ -7,11 +7,13 @@
  * continue to consume the SessionSummary-shaped projection unchanged.
  */
 
+import type { SessionSummary } from '@duraclaw/shared-types'
 import { createTransaction } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
-import { useCallback, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import {
   type SessionLiveState,
+  seedSessionLiveStateFromSummary,
   sessionLiveStateCollection,
   upsertSessionLiveState,
 } from '~/db/session-live-state-collection'
@@ -190,10 +192,39 @@ export function useSessionsCollection(
     await tx.isPersisted.promise
   }, [])
 
-  // sessionLiveStateCollection is localOnly; refresh is a no-op. Callers
-  // that really need a server refetch should hit GET /api/sessions via a
-  // one-shot fetch (see seedSessionLiveStateFromSummary).
-  const refresh = useCallback(async () => {}, [])
+  // Fetch sessions from REST and seed the local collection. Used for
+  // cold-start (empty OPFS — e.g. Capacitor fresh install) and manual refresh.
+  const backfillFromRest = useCallback(async () => {
+    try {
+      const resp = await fetch(apiUrl('/api/sessions'), {
+        headers: { 'Content-Type': 'application/json' },
+      })
+      if (!resp.ok) return
+      const body = (await resp.json()) as { sessions?: SessionSummary[] }
+      const summaries = body.sessions
+      if (Array.isArray(summaries)) {
+        for (const s of summaries) {
+          seedSessionLiveStateFromSummary(s as SessionSummary)
+        }
+      }
+    } catch {
+      // best-effort — WS will populate on next connection
+    }
+  }, [])
+
+  // Cold-start: if the collection is empty after initial load, backfill from
+  // REST. On web this almost never fires (OPFS carries data); on Capacitor
+  // (fresh install, different origin) it populates the sidebar on first visit.
+  const didBackfill = useRef(false)
+  useEffect(() => {
+    if (isLoading || didBackfill.current) return
+    if (!data || (data as SessionLiveState[]).length === 0) {
+      didBackfill.current = true
+      void backfillFromRest()
+    }
+  }, [isLoading, data, backfillFromRest])
+
+  const refresh = backfillFromRest
 
   return {
     sessions,
