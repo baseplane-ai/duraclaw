@@ -2,7 +2,13 @@ import { and, asc, desc, eq, inArray, like, or, sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import { Hono } from 'hono'
 import * as schema from '~/db/schema'
-import { agentSessions, auditLog, userPreferences, userTabs, worktreeReservations } from '~/db/schema'
+import {
+  agentSessions,
+  auditLog,
+  userPreferences,
+  userTabs,
+  worktreeReservations,
+} from '~/db/schema'
 import { validateActionToken } from '~/lib/action-token'
 import { createAuth } from '~/lib/auth'
 import { type PushPayload, sendPushNotification } from '~/lib/push'
@@ -704,10 +710,7 @@ export function createApiApp() {
       }
 
       if (issueNumber === undefined || !Number.isFinite(issueNumber)) {
-        console.log(
-          '[gh-webhook] PR merged without linkable issue:',
-          payload.pull_request.number,
-        )
+        console.log('[gh-webhook] PR merged without linkable issue:', payload.pull_request.number)
         return c.json({ ignored: 'no linkable issue' })
       }
     } else {
@@ -1660,9 +1663,7 @@ export function createApiApp() {
   const FORCE_RELEASE_STALE_DAYS = 7
   const FORCE_RELEASE_STALE_MS = FORCE_RELEASE_STALE_DAYS * 86_400_000
 
-  function reservationToDto(
-    r: typeof worktreeReservations.$inferSelect,
-  ): WorktreeReservation {
+  function reservationToDto(r: typeof worktreeReservations.$inferSelect): WorktreeReservation {
     return {
       issueNumber: r.issueNumber,
       worktree: r.worktree,
@@ -1790,9 +1791,7 @@ export function createApiApp() {
       return c.json({ error: 'not_owner', reservation: nonOwned[0] }, 403)
     }
 
-    await db
-      .delete(worktreeReservations)
-      .where(eq(worktreeReservations.issueNumber, issueNumber))
+    await db.delete(worktreeReservations).where(eq(worktreeReservations.issueNumber, issueNumber))
 
     for (const r of targets) {
       await db.insert(auditLog).values({
@@ -1859,9 +1858,7 @@ export function createApiApp() {
 
     // All targets pass the gate — delete + audit.
     for (const r of targets) {
-      await db
-        .delete(worktreeReservations)
-        .where(eq(worktreeReservations.worktree, r.worktree))
+      await db.delete(worktreeReservations).where(eq(worktreeReservations.worktree, r.worktree))
       await db.insert(auditLog).values({
         action: 'force_release_worktree',
         userId,

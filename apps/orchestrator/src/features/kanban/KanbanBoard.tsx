@@ -122,37 +122,34 @@ export function KanbanBoard() {
   } | null>(null)
   const [pending, setPending] = useState(false)
 
-  const handleDragEnd = useCallback(
-    async (event: DragEndEvent) => {
-      const over = event.over
-      const chain = event.active.data.current?.chain as ChainSummary | undefined
-      if (!over || !chain) return
-      const dest = parseDropId(String(over.id))
-      if (!dest) return
+  const handleDragEnd = useCallback(async (event: DragEndEvent) => {
+    const over = event.over
+    const chain = event.active.data.current?.chain as ChainSummary | undefined
+    if (!over || !chain) return
+    const dest = parseDropId(String(over.id))
+    if (!dest) return
 
-      const fromIdx = COLUMN_ORDER.indexOf(chain.column)
-      const toIdx = COLUMN_ORDER.indexOf(dest.column)
-      if (fromIdx < 0 || toIdx < 0) return
-      if (toIdx === fromIdx) return
-      if (toIdx < fromIdx) {
-        toast.error("Can't move backwards")
-        return
-      }
-      if (toIdx !== fromIdx + 1) {
-        toast.error("Can't move to non-adjacent column")
-        return
-      }
+    const fromIdx = COLUMN_ORDER.indexOf(chain.column)
+    const toIdx = COLUMN_ORDER.indexOf(dest.column)
+    if (fromIdx < 0 || toIdx < 0) return
+    if (toIdx === fromIdx) return
+    if (toIdx < fromIdx) {
+      toast.error("Can't move backwards")
+      return
+    }
+    if (toIdx !== fromIdx + 1) {
+      toast.error("Can't move to non-adjacent column")
+      return
+    }
 
-      const sessionsForChain = chain.sessions
-      const res = await checkPrecondition(chain, sessionsForChain)
-      if (!res.canAdvance || !res.nextMode) {
-        toast.error(res.reason || 'Precondition not met')
-        return
-      }
-      setPendingAdvance({ chain, nextMode: res.nextMode })
-    },
-    [],
-  )
+    const sessionsForChain = chain.sessions
+    const res = await checkPrecondition(chain, sessionsForChain)
+    if (!res.canAdvance || !res.nextMode) {
+      toast.error(res.reason || 'Precondition not met')
+      return
+    }
+    setPendingAdvance({ chain, nextMode: res.nextMode })
+  }, [])
 
   const handleConfirm = useCallback(async () => {
     if (!pendingAdvance) return

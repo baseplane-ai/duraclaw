@@ -492,9 +492,15 @@ function ScrollOnUserSend({ messages }: { messages: SessionMessage[] }) {
 
   useLayoutEffect(() => {
     // Detect when a new optimistic user message appears in the list.
+    // P3 (GH#14): optimistic user rows are keyed on `usr-client-<uuid>` by
+    // `newClientMessageId()`; `usr-optimistic-*` is the legacy prototype id
+    // still used by the debug session-collection route.
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i]
-      if (msg.role === 'user' && msg.id.startsWith('usr-optimistic-')) {
+      if (
+        msg.role === 'user' &&
+        (msg.id.startsWith('usr-client-') || msg.id.startsWith('usr-optimistic-'))
+      ) {
         if (msg.id !== seenRef.current) {
           seenRef.current = msg.id
           scrollToBottom()

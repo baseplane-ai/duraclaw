@@ -4,16 +4,18 @@
  * Render source for the message list is `messagesCollection` (OPFS-persisted)
  * via `useMessagesCollection`; server-authoritative live state (status,
  * context usage, kata, session result) is read from `sessionLiveStateCollection`
- * via `useSessionLiveState`. WS handlers below write into those collections
- * on state / gateway-event delivery. Only `events` (debug log) and
- * `branchInfo` remain as local React state.
+ * via `useSessionLiveState`. Per-turn branch info is a reactive read from
+ * `branchInfoCollection` via `useBranchInfo` — DO-pushed on snapshot
+ * payloads (B7). WS handlers below write into those collections on state /
+ * gateway-event / messages-frame delivery.
  */
 
+import { createTransaction } from '@tanstack/db'
 import { useAgent } from 'agents/react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import type * as Y from 'yjs'
-import { agentSessionsCollection as sessionsCollection } from '~/db/agent-sessions-collection'
-import { type CachedMessage, messagesCollection } from '~/db/messages-collection'
+import { type BranchInfoRow, createBranchInfoCollection } from '~/db/branch-info-collection'
+import { type CachedMessage, createMessagesCollection } from '~/db/messages-collection'
 import { upsertSessionLiveState } from '~/db/session-live-state-collection'
 import { useMessagesCollection } from '~/hooks/use-messages-collection'
 import { useSessionLiveState } from '~/hooks/use-session-live-state'
@@ -45,7 +47,6 @@ export interface ContextUsage {
 
 export interface UseCodingAgentResult {
   state: SessionState | null
-  events: Array<{ ts: string; type: string; data?: unknown }>
   messages: SessionMessage[]
   sessionResult: { total_cost_usd: number; duration_ms: number } | null
   kataState: KataSessionState | null
@@ -65,8 +66,6 @@ export interface UseCodingAgentResult {
   forkWithHistory: (content: string | ContentBlock[]) => Promise<unknown>
   rewind: (turnIndex: number) => Promise<{ ok: boolean; error?: string }>
   injectQaPair: (question: string, answer: string) => void
-  branchInfo: Map<string, { current: number; total: number; siblings: string[] }>
-  getBranches: (messageId: string) => Promise<SessionMessage[]>
   resubmitMessage: (
     messageId: string,
     content: string,
@@ -74,19 +73,12 @@ export interface UseCodingAgentResult {
   navigateBranch: (messageId: string, direction: 'prev' | 'next') => Promise<void>
 }
 
-const TURN_ID_RE = /^(?:usr|msg|err)-(\d+)$/
-
-/** Compute the highest server-assigned turn number from the current message set. */
-function maxServerTurn(messages: CachedMessage[]): number {
-  let max = 0
-  for (const m of messages) {
-    const match = TURN_ID_RE.exec(m.id)
-    if (match) {
-      const n = Number.parseInt(match[1], 10)
-      if (n > max) max = n
-    }
+/** Generate a client-proposed message id for server-accepts-client-ID echo reconciliation (GH#14 B6). */
+function newClientMessageId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `usr-client-${crypto.randomUUID()}`
   }
-  return max
+  return `usr-client-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 }
 
 /** Convert the collection row shape back to the SessionMessage shape consumers expect. */
@@ -116,13 +108,14 @@ function toRow(msg: SessionMessage, sessionId: string): CachedMessage & Record<s
 
 /** Connect to a SessionDO instance by name; returns live state, messages, and RPC helpers. */
 export function useCodingAgent(agentName: string): UseCodingAgentResult {
-  const [events, setEvents] = useState<Array<{ ts: string; type: string; data?: unknown }>>([])
-  const [branchInfo, setBranchInfo] = useState<
-    Map<string, { current: number; total: number; siblings: string[] }>
-  >(new Map())
-  const hydratedRef = useRef(false)
-  const prevStatusRef = useRef<string | null>(null)
   const prevAgentNameRef = useRef(agentName)
+  // Per-session watermark for MessagesFrame `seq` (B1/B3). Keyed by agentName
+  // so concurrent session tabs each keep their own highest-applied seq.
+  const lastSeqRef = useRef<Map<string, number>>(new Map())
+
+  // Per-agentName collection (memoised inside createMessagesCollection, so the
+  // same factory call returns the same instance on re-render).
+  const messagesCollection = useMemo(() => createMessagesCollection(agentName), [agentName])
 
   // Server-authoritative live state from the TanStack DB collection.
   const { state, contextUsage, kataState, sessionResult } = useSessionLiveState(agentName)
@@ -130,15 +123,16 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   // Reset per-session transient state on agentName change (tab switch without
   // remount). Collection rows for other sessions are untouched.
   if (prevAgentNameRef.current !== agentName) {
+    lastSeqRef.current.delete(prevAgentNameRef.current)
     prevAgentNameRef.current = agentName
-    hydratedRef.current = false
-    prevStatusRef.current = null
-    setEvents([])
-    setBranchInfo(new Map())
+    // branch-info collection is per-agentName (factory memoises); switching
+    // sessions auto-swaps the backing collection via `createBranchInfoCollection`.
   }
 
   // Render source for messages: reactive live query on the persisted collection.
-  const { messages: cachedMessages } = useMessagesCollection(agentName)
+  // `isFetching` proxies the query-collection fetch state and feeds the
+  // `isConnecting` derivation below.
+  const { messages: cachedMessages, isFetching } = useMessagesCollection(agentName)
   const messages: SessionMessage[] = cachedMessages.map(toSessionMessage)
 
   /** Upsert a SessionMessage into the collection (dedup via .has()). */
@@ -147,7 +141,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       const row = toRow(msg, agentName)
       try {
         if (messagesCollection.has(msg.id)) {
-          messagesCollection.update(msg.id, (draft) => {
+          messagesCollection.update(msg.id, (draft: CachedMessage) => {
             Object.assign(draft, row)
           })
         } else {
@@ -157,138 +151,198 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         // Rare mutation-API contention; next event will retry.
       }
     },
-    [agentName],
+    [agentName, messagesCollection],
   )
 
   const bulkUpsert = useCallback((msgs: SessionMessage[]) => msgs.forEach(upsert), [upsert])
 
-  /** Replace this session's message set; deletes rows not in `newMsgs`, then upserts them. */
-  const replaceAllMessages = useCallback(
-    (newMsgs: SessionMessage[]) => {
-      const newIds = new Set(newMsgs.map((m) => m.id))
+  /** Snapshot reconcile: delete rows for this session not in `messages`, then upsert. */
+  const applySnapshot = useCallback(
+    (messages: SessionMessage[]) => {
+      const newIds = new Set(messages.map((m) => m.id))
       const staleIds: string[] = []
       try {
         for (const [id, row] of messagesCollection as Iterable<[string, CachedMessage]>) {
           if (row.sessionId === agentName && !newIds.has(id)) staleIds.push(id)
         }
-      } catch {
-        // Iteration rarely throws; skip stale cleanup.
-      }
+      } catch {}
       if (staleIds.length > 0) {
         try {
           messagesCollection.delete(staleIds)
-        } catch {
-          // swallow
-        }
+        } catch {}
       }
-      bulkUpsert(newMsgs)
+      bulkUpsert(messages)
     },
-    [agentName, bulkUpsert],
+    [agentName, bulkUpsert, messagesCollection],
   )
 
-  /** Drop the oldest `usr-optimistic-*` row for this session (FIFO; one echo → one clear). */
-  const clearOldestOptimisticRow = useCallback(() => {
-    let oldestId: string | null = null
-    let oldestTs = Number.POSITIVE_INFINITY
-    try {
-      for (const [id, row] of messagesCollection as Iterable<[string, CachedMessage]>) {
-        if (row.sessionId !== agentName) continue
-        const match = /^usr-optimistic-(\d+)$/.exec(id)
-        if (!match) continue
-        const ts = Number.parseInt(match[1], 10)
-        if (ts < oldestTs) {
-          oldestTs = ts
-          oldestId = id
+  /**
+   * Apply a `{type:'messages', seq, payload}` frame from the DO (B1/B3).
+   *
+   * Rules:
+   *   - `snapshot`: always apply regardless of seq, and bump the watermark to
+   *     `max(lastSeq, payload.version)` so subsequent in-flight deltas that
+   *     predated the snapshot (seq <= version) are dropped as stale.
+   *   - `delta` with seq === lastSeq + 1: contiguous, apply upserts + removes
+   *     and advance watermark.
+   *   - `delta` with seq > lastSeq + 1: gap — invoke `onGap` (caller requests
+   *     a snapshot). Do NOT apply and do NOT advance seq.
+   *   - `delta` with seq <= lastSeq: stale/duplicate — drop.
+   *
+   * The `onGap` callback is supplied by `onMessage` because `connection` is
+   * created below this hook; passing it in keeps this callback's deps stable.
+   */
+  const handleMessagesFrame = useCallback(
+    (
+      frame: {
+        type: 'messages'
+        sessionId: string
+        seq: number
+        payload:
+          | { kind: 'delta'; upsert?: SessionMessage[]; remove?: string[] }
+          | {
+              kind: 'snapshot'
+              version: number
+              messages: SessionMessage[]
+              reason: string
+            }
+      },
+      onGap: () => void,
+    ) => {
+      const map = lastSeqRef.current
+      const lastSeq = map.get(agentName) ?? 0
+
+      if (frame.payload.kind === 'snapshot') {
+        applySnapshot(frame.payload.messages)
+        map.set(agentName, Math.max(lastSeq, frame.payload.version))
+        // B7: DO pushes branchInfo alongside snapshot payloads on reconnect,
+        // rewind, resubmit, and branch-navigate. Upsert each row into the
+        // per-session branchInfoCollection; the `useBranchInfo` hook reads
+        // reactively.
+        const branchInfo = (frame.payload as { branchInfo?: BranchInfoRow[] }).branchInfo
+        if (branchInfo && branchInfo.length > 0) {
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const biColl = createBranchInfoCollection(agentName) as any
+            for (const row of branchInfo) {
+              try {
+                if (biColl.has?.(row.parentMsgId)) {
+                  biColl.update(row.parentMsgId, (draft: BranchInfoRow) => {
+                    Object.assign(draft, row)
+                  })
+                } else {
+                  biColl.insert(row)
+                }
+              } catch {
+                // ignore — next snapshot retries
+              }
+            }
+          } catch {
+            // collection may not be ready; next snapshot retries
+          }
         }
+        return
       }
-    } catch {
+
+      // kind === 'delta'
+      if (frame.seq === lastSeq + 1) {
+        const upsertList = frame.payload.upsert ?? []
+        // GH#14 P3: user echoes reconcile via id match alone. The DO accepts
+        // the client-proposed `client_message_id` as the primary id, so
+        // TanStack DB deep-equality retires the optimistic row silently.
+        for (const m of upsertList) upsert(m)
+        const removeList = frame.payload.remove ?? []
+        if (removeList.length > 0) {
+          try {
+            messagesCollection.delete(removeList)
+          } catch {
+            // swallow
+          }
+        }
+        map.set(agentName, frame.seq)
+        return
+      }
+
+      if (frame.seq > lastSeq + 1) {
+        // True gap — request snapshot; do NOT apply delta or advance seq.
+        onGap()
+        return
+      }
+
+      // frame.seq <= lastSeq — stale/duplicate; drop silently.
       return
-    }
-    if (oldestId) {
-      try {
-        messagesCollection.delete(oldestId)
-      } catch {
-        // Already gone (raced with another echo or rollback).
-      }
-    }
-  }, [agentName])
+    },
+    [agentName, upsert, applySnapshot, messagesCollection],
+  )
 
   const connection = useAgent<SessionState>({
     agent: 'session-agent',
     name: agentName,
     onStateUpdate: (newState) => {
-      const prevStatus = prevStatusRef.current
-      prevStatusRef.current = newState.status
-      upsertSessionLiveState(agentName, { state: newState, wsReadyState: 1 })
-      // Mirror WS state into the sessions query collection (local-only, no
-      // round-trip). `utils.writeUpdate` because `.update()` needs an onUpdate
-      // handler that queryCollectionOptions doesn't configure.
-      if (sessionsCollection.has(agentName)) {
-        const patch: Partial<import('~/db/agent-sessions-collection').SessionRecord> = {
-          id: agentName,
-          status: newState.status,
-          updatedAt: new Date().toISOString(),
-        }
-        if (newState.num_turns != null) patch.numTurns = newState.num_turns
-        if (newState.total_cost_usd != null) patch.totalCostUsd = newState.total_cost_usd
-        if (newState.duration_ms != null) patch.durationMs = newState.duration_ms
-        sessionsCollection.utils.writeUpdate(patch)
-      }
-      // Hydrate messages on first state sync. Only flip the ref on non-empty
-      // so a transient empty doesn't permanently gate future attempts.
-      if (!hydratedRef.current) {
-        hydrateMessages(connection)
-          .then((msgCount) => {
-            if (msgCount > 0) hydratedRef.current = true
-            else if (newState.sdk_session_id) {
-              // History expected but gateway may not be hydrated yet; retry once.
-              setTimeout(() => {
-                hydrateMessages(connection)
-                  .then((n) => {
-                    if (n > 0) hydratedRef.current = true
-                  })
-                  .catch(() => {})
-              }, 500)
-            } else {
-              hydratedRef.current = true
-            }
-          })
-          .catch(() => {})
-      }
-      // Re-hydrate when a resumed session completes.
-      if (prevStatus === 'running' && newState.status === 'idle') {
-        hydrateMessages(connection).catch(() => {})
-      }
+      // Mirror summary-ish fields onto the top level of the live-state row
+      // so session-list readers (tab-bar, SessionListItem, SessionHistory)
+      // can see them without a parallel session-summary dual-write.
+      upsertSessionLiveState(agentName, {
+        state: newState,
+        wsReadyState: 1,
+        status: newState.status,
+        numTurns: newState.num_turns,
+        totalCostUsd: newState.total_cost_usd,
+        durationMs: newState.duration_ms,
+        model: newState.model,
+        project: newState.project,
+        prompt: newState.prompt,
+      })
+      // Hydration is owned by the queryCollection (`messagesCollection` factory
+      // + `useMessagesCollection`). The WS snapshot still writes directly to
+      // the collection as a latency optimisation; the queryFn is the
+      // cold-start / stale-cache fallback with retry: 1, retryDelay: 500.
     },
     onMessage: (message: MessageEvent) => {
       try {
         const parsed = JSON.parse(typeof message.data === 'string' ? message.data : '')
 
-        // Single SessionMessage upsert. Echoes of canonical user turns retire
-        // exactly one pending optimistic row (FIFO; one echo → one clear).
-        if (parsed.type === 'message' && parsed.message) {
-          const msg = parsed.message as SessionMessage
-          if (msg.role === 'user' && !msg.id.startsWith('usr-optimistic-')) {
-            clearOldestOptimisticRow()
+        // Unified {type:'messages'} frame (B1/B3). Supports the new
+        // `{seq, payload}` shape with gap detection, and (for deploy
+        // rollover safety) still tolerates the legacy `{messages}` shape
+        // in case an old DO build emits it during the window.
+        if (parsed.type === 'messages') {
+          if (
+            typeof parsed.seq === 'number' &&
+            parsed.payload &&
+            typeof parsed.payload.kind === 'string'
+          ) {
+            const frame = parsed as {
+              type: 'messages'
+              sessionId: string
+              seq: number
+              payload:
+                | { kind: 'delta'; upsert?: SessionMessage[]; remove?: string[] }
+                | {
+                    kind: 'snapshot'
+                    version: number
+                    messages: SessionMessage[]
+                    reason: string
+                  }
+            }
+            handleMessagesFrame(frame, () => {
+              connection.call('requestSnapshot', []).catch(() => {
+                // Non-critical; reconnect path will eventually resync.
+              })
+            })
+            return
           }
-          upsert(msg)
-          return
-        }
-
-        // Bulk message replay on connect.
-        if (parsed.type === 'messages' && Array.isArray(parsed.messages)) {
-          replaceAllMessages(parsed.messages as SessionMessage[])
-          hydratedRef.current = true
+          // Legacy shape: {type:'messages', messages: SessionMessage[]}
+          if (Array.isArray((parsed as { messages?: unknown }).messages)) {
+            applySnapshot((parsed as { messages: SessionMessage[] }).messages)
+            return
+          }
           return
         }
 
         // Legacy gateway_event format (non-message events only)
         if (parsed.type === 'gateway_event' && parsed.event) {
           const event = parsed.event as GatewayEvent & { uuid?: string; content?: unknown[] }
-          setEvents((prev) => [
-            ...prev,
-            { ts: new Date().toISOString(), type: event.type, data: event },
-          ])
 
           // Capture kata session state
           if (event.type === 'kata_state') {
@@ -334,19 +388,6 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     upsertSessionLiveState(agentName, { wsReadyState: connection.readyState })
   }, [agentName, connection.readyState])
 
-  /** Fetch persisted messages and write them into the collection. */
-  async function hydrateMessages(conn: typeof connection): Promise<number> {
-    const hints = { session_hint: agentName }
-    const serverMessages = (await conn.call('getMessages', [{ ...hints }])) as SessionMessage[]
-
-    if (serverMessages.length > 0) {
-      bulkUpsert(serverMessages)
-      // Refresh branch info after hydration
-      refreshBranchInfo(serverMessages).catch(() => {})
-    }
-    return serverMessages.length
-  }
-
   const spawn = useCallback(
     (config: SpawnConfig) => connection.call('spawn', [config]),
     [connection],
@@ -373,158 +414,119 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         // duplicate id or collection not ready — drop
       }
     },
-    [agentName],
+    [agentName, messagesCollection],
   )
 
-  const wsReadyState = state ? 1 : 0
-  const isConnecting = !hydratedRef.current
+  // Return the live WS readyState rather than a state-presence proxy: once
+  // `state` arrives and the socket later closes we want consumers to see the
+  // real transition (0 connecting, 1 open, 2 closing, 3 closed).
+  const wsReadyState = connection.readyState
+  const isConnecting = isFetching || wsReadyState !== 1
 
   const rewind = useCallback(
     async (turnIndex: number) => {
-      const result = (await connection.call('rewind', [turnIndex])) as {
+      // DO broadcasts a reason='rewind' snapshot (B2) that reconciles via
+      // the normal handleMessagesFrame path — no client-side replace.
+      return (await connection.call('rewind', [turnIndex])) as {
         ok: boolean
         error?: string
       }
-      if (result.ok) {
-        // Trim displayed thread; deleted rows propagate via the live query.
-        const kept = cachedMessages.slice(0, turnIndex + 1).map(toSessionMessage)
-        replaceAllMessages(kept)
-      }
-      return result
-    },
-    [connection, cachedMessages, replaceAllMessages],
-  )
-
-  const refreshBranchInfo = useCallback(
-    async (msgs: SessionMessage[]) => {
-      const newBranchInfo = new Map<
-        string,
-        { current: number; total: number; siblings: string[] }
-      >()
-
-      for (const msg of msgs) {
-        if (msg.role === 'user') {
-          try {
-            const msgIdx = msgs.findIndex((m) => m.id === msg.id)
-            const parentId = msgIdx > 0 ? msgs[msgIdx - 1].id : null
-
-            if (parentId) {
-              const siblings = (await connection.call('getBranches', [
-                parentId,
-              ])) as SessionMessage[]
-              const userSiblings = siblings.filter((s) => s.role === 'user')
-              if (userSiblings.length > 1) {
-                const currentIdx = userSiblings.findIndex((s) => s.id === msg.id)
-                newBranchInfo.set(msg.id, {
-                  current: currentIdx + 1,
-                  total: userSiblings.length,
-                  siblings: userSiblings.map((s) => s.id),
-                })
-              }
-            }
-          } catch {
-            // Skip — non-critical
-          }
-        }
-      }
-
-      setBranchInfo(newBranchInfo)
-    },
-    [connection],
-  )
-
-  const getBranches = useCallback(
-    async (messageId: string) => {
-      return connection.call('getBranches', [messageId]) as Promise<SessionMessage[]>
     },
     [connection],
   )
 
   const resubmitMessage = useCallback(
     async (messageId: string, content: string) => {
-      const result = (await connection.call('resubmitMessage', [messageId, content])) as {
+      // The DO's `resubmitMessage` path emits a reason='resubmit' snapshot
+      // (B2) carrying both the new leaf's history AND the parent's fresh
+      // branchInfo row (B7). The snapshot handler in `handleMessagesFrame`
+      // reconciles both collections server-side — the client only fires the
+      // RPC and awaits the pushed snapshot frame.
+      return (await connection.call('resubmitMessage', [messageId, content])) as {
         ok: boolean
         leafId?: string
         error?: string
       }
-      if (result.ok && result.leafId) {
-        const newMessages = (await connection.call('getMessages', [
-          { session_hint: agentName, leafId: result.leafId },
-        ])) as SessionMessage[]
-        if (newMessages.length > 0) {
-          replaceAllMessages(newMessages)
-          await refreshBranchInfo(newMessages)
-        }
-      }
-      return result
     },
-    [connection, agentName, refreshBranchInfo, replaceAllMessages],
+    [connection],
   )
 
   const navigateBranch = useCallback(
     async (messageId: string, direction: 'prev' | 'next') => {
-      const info = branchInfo.get(messageId)
-      if (!info) return
-
-      const currentIdx = info.current - 1
-      const targetIdx = direction === 'prev' ? currentIdx - 1 : currentIdx + 1
-      if (targetIdx < 0 || targetIdx >= info.siblings.length) return
-
-      const targetSiblingId = info.siblings[targetIdx]
-
-      const branchMessages = (await connection.call('getMessages', [
-        { session_hint: agentName, leafId: targetSiblingId },
-      ])) as SessionMessage[]
-
-      if (branchMessages.length > 0) {
-        replaceAllMessages(branchMessages)
-        await refreshBranchInfo(branchMessages)
-      }
-    },
-    [connection, agentName, branchInfo, refreshBranchInfo, replaceAllMessages],
-  )
-
-  /** Insert an optimistic user row; returns its id so callers can roll it back. */
-  const insertOptimistic = useCallback(
-    (content: string | ContentBlock[]): string => {
-      const optimisticId = `usr-optimistic-${Date.now()}`
-      const turnHint = maxServerTurn(cachedMessages) + 1
+      // `messageId` is the currently-rendered user-turn id (ChatThread
+      // passes `msg.id`). Find its row by matching `activeId` so we can
+      // compute the next/prev sibling id to request.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const biColl = createBranchInfoCollection(agentName) as any
+      let row: BranchInfoRow | undefined
       try {
-        messagesCollection.insert({
-          id: optimisticId,
-          sessionId: agentName,
-          role: 'user',
-          parts: contentToParts(content),
-          createdAt: new Date(),
-          turnHint,
-        } as CachedMessage & Record<string, unknown>)
+        for (const [, r] of biColl as Iterable<[string, BranchInfoRow]>) {
+          if (r.activeId === messageId) {
+            row = r
+            break
+          }
+        }
       } catch {
-        // Duplicate id (extremely unlikely) — swallow.
+        // collection not ready
       }
-      return optimisticId
+      if (!row) return
+      const idx = row.siblings.indexOf(row.activeId)
+      if (idx < 0) return
+      const targetId = direction === 'next' ? row.siblings[idx + 1] : row.siblings[idx - 1]
+      if (!targetId) return
+      // DO responds with a reason='branch-navigate' snapshot carrying both
+      // the target branch's history AND updated branchInfo rows. The
+      // collection subscriptions converge the view from the pushed frame.
+      try {
+        await connection.call('getBranchHistory', [targetId])
+      } catch {
+        // Non-fatal: the client stays on the current branch.
+      }
     },
-    [agentName, cachedMessages],
+    [connection, agentName],
   )
 
-  const deleteOptimistic = useCallback((id: string) => {
-    try {
-      messagesCollection.delete(id)
-    } catch {
-      // Already gone.
-    }
-  }, [])
-
+  /**
+   * GH#14 P3: optimistic user-row inserts use `createTransaction` with
+   * server-accepts-client-ID reconciliation. The DO accepts the
+   * `client_message_id` as the primary id, so echoes reconcile via
+   * TanStack DB deep-equality — a single insert followed by the server
+   * echo updating the same row in place, no delete+reinsert churn.
+   */
   const sendMessage = useCallback(
     async (content: string | ContentBlock[], opts?: { submitId?: string }) => {
-      const optimisticId = insertOptimistic(content)
-      const result = (await connection.call('sendMessage', [content, opts])) as {
-        ok: boolean
-        error?: string
+      const clientMessageId = newClientMessageId()
+      const optimisticRow: CachedMessage & Record<string, unknown> = {
+        id: clientMessageId,
+        sessionId: agentName,
+        role: 'user',
+        parts: contentToParts(content),
+        createdAt: new Date(),
       }
-      if (!result.ok) deleteOptimistic(optimisticId)
-      return result
+      const tx = createTransaction<CachedMessage & Record<string, unknown>>({
+        mutationFn: async () => {
+          const result = (await connection.call('sendMessage', [
+            content,
+            { ...opts, client_message_id: clientMessageId },
+          ])) as { ok: boolean; error?: string; recoverable?: string }
+          if (!result.ok) {
+            throw new Error(result.error ?? 'sendMessage failed')
+          }
+          return result
+        },
+      })
+      tx.mutate(() => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(messagesCollection as any).insert(optimisticRow)
+      })
+      try {
+        await tx.isPersisted.promise
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) }
+      }
     },
-    [connection, insertOptimistic, deleteOptimistic],
+    [agentName, connection, messagesCollection],
   )
 
   /** Draft submit: optimistically clear a shared Y.Text, send, restore on failure. */
@@ -562,20 +564,34 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         return { ok: false, sent: false, error: 'mock failure' }
       }
 
-      const optimisticId = insertOptimistic(text)
+      const clientMessageId = newClientMessageId()
+      const optimisticRow: CachedMessage & Record<string, unknown> = {
+        id: clientMessageId,
+        sessionId: agentName,
+        role: 'user',
+        parts: contentToParts(text),
+        createdAt: new Date(),
+      }
+      const tx = createTransaction<CachedMessage & Record<string, unknown>>({
+        mutationFn: async () => {
+          const result = (await connection.call('sendMessage', [
+            text,
+            { submitId, client_message_id: clientMessageId },
+          ])) as { ok: boolean; error?: string }
+          if (!result.ok) {
+            throw new Error(result.error ?? 'sendMessage failed')
+          }
+          return result
+        },
+      })
+      tx.mutate(() => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(messagesCollection as any).insert(optimisticRow)
+      })
       try {
-        const result = (await connection.call('sendMessage', [text, { submitId }])) as {
-          ok: boolean
-          error?: string
-        }
-        if (!result.ok) {
-          deleteOptimistic(optimisticId)
-          runRestore()
-          return { ok: false, sent: false, error: result.error }
-        }
+        await tx.isPersisted.promise
         return { ok: true, sent: true }
       } catch (err) {
-        deleteOptimistic(optimisticId)
         runRestore()
         return {
           ok: false,
@@ -584,25 +600,54 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         }
       }
     },
-    [connection, insertOptimistic, deleteOptimistic],
+    [agentName, connection, messagesCollection],
   )
 
   const forkWithHistory = useCallback(
     async (content: string | ContentBlock[]) => {
-      const optimisticId = insertOptimistic(content)
-      const result = (await connection.call('forkWithHistory', [content])) as {
-        ok: boolean
-        error?: string
+      const clientMessageId = newClientMessageId()
+      const optimisticRow: CachedMessage & Record<string, unknown> = {
+        id: clientMessageId,
+        sessionId: agentName,
+        role: 'user',
+        parts: contentToParts(content),
+        createdAt: new Date(),
       }
-      if (!result.ok) deleteOptimistic(optimisticId)
-      return result
+      const tx = createTransaction<CachedMessage & Record<string, unknown>>({
+        mutationFn: async () => {
+          // NB: DO-side forkWithHistory does not currently accept
+          // client_message_id (the DO-authored user row carries its own
+          // `usr-N` id). The optimistic row stays keyed on
+          // `usr-client-<uuid>`; the server echo arrives with a different id
+          // but the snapshot emitted by forkWithHistory reconciles via
+          // handleMessagesFrame and still converges the collection.
+          // Documented as a deviation in GH#14 P3.
+          const result = (await connection.call('forkWithHistory', [content])) as {
+            ok: boolean
+            error?: string
+          }
+          if (!result.ok) {
+            throw new Error(result.error ?? 'forkWithHistory failed')
+          }
+          return result
+        },
+      })
+      tx.mutate(() => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(messagesCollection as any).insert(optimisticRow)
+      })
+      try {
+        await tx.isPersisted.promise
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) }
+      }
     },
-    [connection, insertOptimistic, deleteOptimistic],
+    [agentName, connection, messagesCollection],
   )
 
   return {
     state,
-    events,
     messages,
     sessionResult,
     kataState,
@@ -620,8 +665,6 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     forkWithHistory,
     rewind,
     injectQaPair,
-    branchInfo,
-    getBranches,
     resubmitMessage,
     navigateBranch,
   }

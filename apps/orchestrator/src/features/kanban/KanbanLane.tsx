@@ -49,11 +49,7 @@ export function KanbanLane({ name, cards, collapsed, onToggle }: KanbanLaneProps
         onClick={onToggle}
         aria-expanded={!collapsed}
       >
-        {collapsed ? (
-          <ChevronRight className="size-4" />
-        ) : (
-          <ChevronDown className="size-4" />
-        )}
+        {collapsed ? <ChevronRight className="size-4" /> : <ChevronDown className="size-4" />}
         <span className="capitalize">{name}</span>
         <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
           {cards.length}

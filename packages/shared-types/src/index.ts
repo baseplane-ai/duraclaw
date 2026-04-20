@@ -59,6 +59,8 @@ export interface StreamInputCommand {
   type: 'stream-input'
   session_id: string
   message: { role: 'user'; content: string | ContentBlock[] }
+  /** Optional client-proposed message id for server-accepts-client-ID echo reconciliation (GH#14 B6). */
+  client_message_id?: string
 }
 
 export interface PermissionResponseCommand {
@@ -631,6 +633,64 @@ export interface StoredMessage {
   type: string
   data: string
   created_at: string
+}
+
+// ── Messages Frame (SessionDO → Browser, unified {type:'messages'} channel) ──
+
+/**
+ * Wire-level shape of a session message. Mirrors the SDK's `SessionMessage`
+ * (from `agents/experimental/memory/session`) as serialised over the
+ * DO→browser WS channel. Additional fields may be present on the wire; this
+ * interface only declares fields we read client-side and on the gateway.
+ */
+export interface SessionMessage {
+  id: string
+  sessionId?: string
+  role: 'user' | 'assistant' | 'tool' | string
+  parts: unknown[]
+  createdAt?: string | number | Date
+  /**
+   * Optional canonical turn id (`usr-N`). Populated by SessionDO on user
+   * turns; absent on assistant and tool rows. Introduced in P3 (B6); safe to
+   * declare now as an optional field so P1 MessagesFrame types compile.
+   */
+  canonical_turn_id?: string
+}
+
+export interface DeltaPayload {
+  kind: 'delta'
+  upsert?: SessionMessage[]
+  /**
+   * Reserved. No current DO call site populates `remove`; the field exists
+   * so the client-side handler can be correct-by-construction when a future
+   * feature (e.g. "delete attachment") adds a producer.
+   */
+  remove?: string[]
+}
+
+export interface BranchInfoRow {
+  parentMsgId: string
+  sessionId: string
+  siblings: string[]
+  activeId: string
+  updatedAt: string
+}
+
+export interface SnapshotPayload {
+  kind: 'snapshot'
+  version: number // equals SessionDO's current messageSeq at broadcast time
+  messages: SessionMessage[]
+  reason: 'reconnect' | 'rewind' | 'resubmit' | 'branch-navigate'
+  branchInfo?: BranchInfoRow[]
+}
+
+export type MessagesPayload = DeltaPayload | SnapshotPayload
+
+export interface MessagesFrame {
+  type: 'messages'
+  sessionId: string
+  seq: number // per-session monotonic, assigned by SessionDO at broadcast
+  payload: MessagesPayload
 }
 
 // ── User Preferences ────────────────────────────────────────────────

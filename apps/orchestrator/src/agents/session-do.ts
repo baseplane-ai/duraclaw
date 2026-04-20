@@ -1,3 +1,9 @@
+import type {
+  BranchInfoRow,
+  MessagesFrame,
+  MessagesPayload,
+  SessionMessage as WireSessionMessage,
+} from '@duraclaw/shared-types'
 import { Agent, type Connection, type ConnectionContext, callable } from 'agents'
 import type { SessionMessage, SessionMessagePart } from 'agents/experimental/memory/session'
 import { Session } from 'agents/experimental/memory/session'
@@ -78,6 +84,18 @@ const DEFAULT_STATE: SessionState = {
  */
 const WATCHDOG_INTERVAL_MS = 30_000
 
+/**
+ * Parse a canonical user-turn ordinal from a message id or canonical_turn_id.
+ * Returns `N` if the id matches `/^usr-(\d+)$/`, otherwise `undefined`.
+ * Used by DO cold-start turnCounter recovery (GH#14 P3) and the client
+ * sort-key derivation.
+ */
+function parseTurnOrdinal(id?: string): number | undefined {
+  if (!id) return undefined
+  const m = /^usr-(\d+)$/.exec(id)
+  return m ? Number.parseInt(m[1], 10) : undefined
+}
+
 // Stale threshold is resolved per-alarm via resolveStaleThresholdMs(env) so
 // config changes take effect on the next DO wake without a code change.
 // Default is 90s — see DEFAULT_STALE_THRESHOLD_MS in session-do-helpers.
@@ -91,6 +109,8 @@ export class SessionDO extends Agent<Env, SessionState> {
   private cachedGatewayConnId: string | null = null
   /** Timestamp of the last gateway event received on the WS connection. */
   private lastGatewayActivity = 0
+  /** Per-session monotonic sequence for MessagesFrame broadcasts (B1). Not persisted — resets to 0 on DO cold start; snapshots re-establish client watermark. */
+  private messageSeq = 0
 
   // ── Lifecycle ──────────────────────────────────────────────────
 
@@ -106,6 +126,24 @@ export class SessionDO extends Agent<Env, SessionState> {
     const turnState = loadTurnState(this.sql.bind(this), pathLength)
     this.turnCounter = turnState.turnCounter
     this.currentTurnMessageId = turnState.currentTurnMessageId
+
+    // Guard against DO eviction: if SQLite history survived but the
+    // persisted turnCounter is 0 or stale, scan user-turn rows for the
+    // max ordinal. Prevents canonical-ID collisions (GH#14 P3 B6).
+    try {
+      const history = this.session.getHistory()
+      let maxOrdinal = 0
+      for (const msg of history) {
+        const canonical = (msg as { canonical_turn_id?: string }).canonical_turn_id
+        const ord = parseTurnOrdinal(canonical) ?? parseTurnOrdinal(msg.id)
+        if (ord !== undefined && ord > maxOrdinal) maxOrdinal = ord
+      }
+      if (maxOrdinal > this.turnCounter) {
+        this.turnCounter = maxOrdinal
+      }
+    } catch {
+      // History scan is best-effort; never fatal on cold start.
+    }
 
     // Populate gateway connection ID cache (in case we're waking from hibernation)
     this.cachedGatewayConnId = getGatewayConnectionId(this.sql.bind(this))
@@ -195,16 +233,40 @@ export class SessionDO extends Agent<Env, SessionState> {
 
     // Browser connection: replay full message history. Always send the frame
     // (even empty) so the client has an explicit "history fetched" signal and
-    // doesn't sit gated on a `{type:'messages'}` frame that would never arrive
-    // for a session with no local history. If the DO is cold and has nothing
-    // in SQLite yet, the client's getMessages RPC will trigger gateway-side
+    // doesn't sit gated waiting for a snapshot that would never arrive for a
+    // session with no local history. If the DO is cold and has nothing in
+    // SQLite yet, the client's getMessages RPC will trigger gateway-side
     // hydration as the source of truth.
     try {
       const messages = this.session.getHistory()
-      connection.send(JSON.stringify({ type: 'messages', messages }))
+      // Targeted reconnect snapshot (B1 + B2 single-client scope). The
+      // legacy `{type:'messages', messages}` emit was retired in P1
+      // sub-phase 1b; the unified frame carries the reconnect payload.
+      // B7: include branchInfo for every user turn with siblings so the
+      // client's branch-info collection hydrates on first paint.
+      this.broadcastMessages(
+        {
+          kind: 'snapshot',
+          version: this.messageSeq,
+          messages: messages as unknown as WireSessionMessage[],
+          reason: 'reconnect',
+          branchInfo: this.computeBranchInfo(messages),
+        },
+        { targetClientId: connection.id },
+      )
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to replay history:`, err)
-      connection.send(JSON.stringify({ type: 'messages', messages: [] }))
+      // Explicit empty-history snapshot so the client isn't left without a
+      // "history fetched" signal on the error path.
+      this.broadcastMessages(
+        {
+          kind: 'snapshot',
+          version: this.messageSeq,
+          messages: [],
+          reason: 'reconnect',
+        },
+        { targetClientId: connection.id },
+      )
     }
 
     // Re-emit gate if session is waiting
@@ -539,7 +601,91 @@ export class SessionDO extends Agent<Env, SessionState> {
   }
 
   private broadcastMessage(message: SessionMessage) {
-    this.broadcastToClients(JSON.stringify({ type: 'message', message }))
+    // Unified {type:'messages'} delta frame (B1). The legacy per-message
+    // `{type:'message'}` emit was retired in P1 sub-phase 1b now that the
+    // client dispatches exclusively on the unified shape.
+    this.broadcastMessages({ kind: 'delta', upsert: [message as unknown as WireSessionMessage] })
+  }
+
+  /**
+   * Compute `BranchInfoRow[]` for every user turn in the given linear history
+   * that has siblings (> 1 user-message branch under the same parent).
+   *
+   * Parent resolution: the Session API (`agents/experimental/memory/session`)
+   * exposes `getBranches(messageId)` but no `getParent()`. We derive the
+   * parent from the ordering of the linear history — the message immediately
+   * preceding a user turn on the active branch is its parent. Turns with no
+   * preceding message (the first turn) are skipped.
+   *
+   * Rows with `siblings.length <= 1` are omitted — the client's
+   * `useBranchInfo` only shows arrows when `total > 1` anyway, and this
+   * keeps the payload small.
+   *
+   * See GH#14 B7.
+   */
+  private computeBranchInfo(history: SessionMessage[]): BranchInfoRow[] {
+    const rows: BranchInfoRow[] = []
+    const nowIso = new Date().toISOString()
+    for (let i = 0; i < history.length; i++) {
+      const msg = history[i]
+      if (msg.role !== 'user') continue
+      const parentId = i > 0 ? history[i - 1].id : null
+      if (!parentId) continue
+      try {
+        const branches = this.session.getBranches(parentId)
+        const siblings = branches.filter((m) => m.role === 'user').map((m) => m.id)
+        if (siblings.length <= 1) continue
+        rows.push({
+          parentMsgId: parentId,
+          sessionId: this.name,
+          siblings,
+          activeId: msg.id,
+          updatedAt: nowIso,
+        })
+      } catch {
+        // Skip on error — branches may be unresolvable if the Session is
+        // mid-mutation; the next snapshot will recompute.
+      }
+    }
+    return rows
+  }
+
+  /**
+   * Broadcast a MessagesFrame (B1) with monotonic seq. If `targetClientId` is
+   * provided, sends only to that connection and does NOT increment `messageSeq`
+   * — targeted sends echo current seq so non-recipients' lastSeq stream stays
+   * aligned (see spec B2 API Layer → "Targeted snapshots MUST NOT advance the
+   * shared seq counter").
+   */
+  private broadcastMessages(payload: MessagesPayload, opts: { targetClientId?: string } = {}) {
+    if (!opts.targetClientId) this.messageSeq += 1
+    const frame: MessagesFrame = {
+      type: 'messages',
+      sessionId: this.name,
+      seq: this.messageSeq,
+      payload,
+    }
+    const data = JSON.stringify(frame)
+    if (opts.targetClientId) {
+      this.sendToClient(opts.targetClientId, data)
+    } else {
+      this.broadcastToClients(data)
+    }
+  }
+
+  /** Send raw stringified payload to a specific client connection (skips gateway conn). */
+  private sendToClient(connectionId: string, data: string) {
+    const gwConnId = this.getGatewayConnectionId()
+    for (const conn of this.getConnections()) {
+      if (conn.id === gwConnId) continue
+      if (conn.id !== connectionId) continue
+      try {
+        conn.send(data)
+      } catch {
+        // Connection already closed — drop silently
+      }
+      return
+    }
   }
 
   /**
@@ -716,10 +862,7 @@ export class SessionDO extends Agent<Env, SessionState> {
             ),
           )
       } catch (err) {
-        console.error(
-          `[SessionDO:${this.ctx.id}] failed to refresh reservation activity:`,
-          err,
-        )
+        console.error(`[SessionDO:${this.ctx.id}] failed to refresh reservation activity:`, err)
       }
     }
   }
@@ -1215,11 +1358,12 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // Persist initial prompt as a user message so it survives reload
     this.turnCounter++
     const userMsgId = `usr-${this.turnCounter}`
-    const userMsg: SessionMessage = {
+    const userMsg: SessionMessage & { canonical_turn_id?: string } = {
       id: userMsgId,
       role: 'user',
       parts: contentToParts(config.prompt),
       createdAt: new Date(),
+      canonical_turn_id: userMsgId,
     }
     try {
       await this.session.appendMessage(userMsg)
@@ -1280,7 +1424,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // Persist resume prompt as a user message
     this.turnCounter++
     const userMsgId = `usr-${this.turnCounter}`
-    const userMsg: SessionMessage = {
+    const userMsg: SessionMessage & { canonical_turn_id?: string } = {
       id: userMsgId,
       role: 'user',
       parts: [
@@ -1290,6 +1434,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         },
       ],
       createdAt: new Date(),
+      canonical_turn_id: userMsgId,
     }
     try {
       await this.session.appendMessage(userMsg)
@@ -1458,7 +1603,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
   @callable()
   async sendMessage(
     content: string | ContentBlock[],
-    opts?: { submitId?: string },
+    opts?: { submitId?: string; client_message_id?: string },
   ): Promise<{ ok: boolean; error?: string; recoverable?: 'forkWithHistory' }> {
     // Idempotency: if a submitId was supplied and we've already accepted it,
     // treat this as a duplicate of that prior call and no-op. Rows older than
@@ -1537,12 +1682,14 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // Persist user message (only after orphan preflight so we don't have to
     // roll it back on the auto-fork branch — forkWithHistory appends itself).
     this.turnCounter++
-    const userMsgId = `usr-${this.turnCounter}`
-    const userMsg: SessionMessage = {
+    const canonicalTurnId = `usr-${this.turnCounter}`
+    const userMsgId = opts?.client_message_id ?? canonicalTurnId
+    const userMsg: SessionMessage & { canonical_turn_id?: string } = {
       id: userMsgId,
       role: 'user',
       parts: contentToParts(content),
       createdAt: new Date(),
+      canonical_turn_id: canonicalTurnId,
     }
     try {
       await this.session.appendMessage(userMsg)
@@ -1561,6 +1708,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         type: 'stream-input',
         session_id: this.state.session_id ?? '',
         message: { role: 'user', content },
+        ...(opts?.client_message_id ? { client_message_id: opts.client_message_id } : {}),
       })
     } else if (isResumable) {
       this.updateState({ status: 'running', gate: null, error: null })
@@ -1633,11 +1781,12 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // transcript prefix — that's only for the SDK's fresh context.
     this.turnCounter++
     const userMsgId = `usr-${this.turnCounter}`
-    const userMsg: SessionMessage = {
+    const userMsg: SessionMessage & { canonical_turn_id?: string } = {
       id: userMsgId,
       role: 'user',
       parts: contentToParts(content),
       createdAt: new Date(),
+      canonical_turn_id: userMsgId,
     }
     try {
       await this.session.appendMessage(userMsg)
@@ -1732,6 +1881,26 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       session_id: this.state.session_id ?? '',
       message_id: messageId,
     })
+    // DO-authored snapshot (B2): broadcast the trimmed history so all clients
+    // converge on the post-rewind view without round-tripping through gateway.
+    try {
+      const history = this.session.getHistory()
+      const idx = history.findIndex((m) => m.id === messageId)
+      const trimmed = idx >= 0 ? history.slice(0, idx + 1) : history
+      this.broadcastMessages({
+        kind: 'snapshot',
+        version: this.messageSeq,
+        messages: trimmed as unknown as WireSessionMessage[],
+        reason: 'rewind',
+        // B7: rewind may change sibling lists if it removes branches.
+        // Compute fresh rows for the trimmed view; client upserts override
+        // stale rows (the remove-on-empty case isn't supported, but rewind
+        // typically trims rather than deletes branches).
+        branchInfo: this.computeBranchInfo(trimmed),
+      })
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Failed to broadcast rewind snapshot:`, err)
+    }
     return { ok: true }
   }
 
@@ -1785,16 +1954,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
   }
 
   @callable()
-  async getBranches(messageId: string): Promise<SessionMessage[]> {
-    try {
-      return this.session.getBranches(messageId)
-    } catch (err) {
-      console.error(`[SessionDO:${this.ctx.id}] Failed to get branches:`, err)
-      return []
-    }
-  }
-
-  @callable()
   async resubmitMessage(
     originalMessageId: string,
     newContent: string,
@@ -1825,17 +1984,31 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // 3. Create new user message as sibling branch
     this.turnCounter++
     const newUserMsgId = `usr-${this.turnCounter}`
-    const newUserMsg: SessionMessage = {
+    const newUserMsg: SessionMessage & { canonical_turn_id?: string } = {
       id: newUserMsgId,
       role: 'user',
       parts: [{ type: 'text', text: newContent }],
       createdAt: new Date(),
+      canonical_turn_id: newUserMsgId,
     }
 
     try {
       this.session.appendMessage(newUserMsg, parentId)
       this.persistTurnState()
       this.broadcastMessage(newUserMsg)
+      // DO-authored snapshot (B2): broadcast the branch view so all clients
+      // realign onto the new leaf. getHistory(leafId) returns the path ending
+      // at newUserMsg.id.
+      const resubmitHistory = this.session.getHistory(newUserMsg.id)
+      this.broadcastMessages({
+        kind: 'snapshot',
+        version: this.messageSeq,
+        messages: resubmitHistory as unknown as WireSessionMessage[],
+        reason: 'resubmit',
+        // B7: the affected parent now has a new sibling — compute fresh
+        // branchInfo for the resubmitted branch's history.
+        branchInfo: this.computeBranchInfo(resubmitHistory),
+      })
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to create branch:`, err)
       return { ok: false, error: 'Failed to create branch' }
@@ -1851,6 +2024,52 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     })
 
     return { ok: true, leafId: newUserMsgId }
+  }
+
+  @callable()
+  async getBranchHistory(
+    leafId: string,
+  ): Promise<{ ok: true } | { ok: false; error: 'unknown_leaf' | 'not_on_branch' }> {
+    const history = this.session.getHistory()
+    const found = history.find((m) => m.id === leafId)
+    if (!found) return { ok: false, error: 'unknown_leaf' }
+    if (found.role !== 'user') return { ok: false, error: 'not_on_branch' }
+    // Known limitation: scope branch-navigate snapshot to the requesting
+    // client once `@callable` surfaces the caller connection id. The agents
+    // SDK (v0.11) dispatches RPCs via `super.onMessage` with no public
+    // callback for caller identity, so we broadcast to all browser
+    // connections. Harmless over-delivery — matches B1 correctness and the
+    // client's per-session `lastSeq` watermark still drops stale frames.
+    const messages = this.session.getHistory(leafId) ?? history
+    this.broadcastMessages({
+      kind: 'snapshot',
+      version: this.messageSeq,
+      messages: messages as unknown as WireSessionMessage[],
+      reason: 'branch-navigate',
+      // B7: target branch's sibling map so the recipient's UI updates in
+      // lockstep with the history swap.
+      branchInfo: this.computeBranchInfo(messages),
+    })
+    return { ok: true }
+  }
+
+  @callable()
+  async requestSnapshot(): Promise<{ ok: true } | { ok: false; error: 'session_empty' }> {
+    const messages = this.session.getHistory()
+    if (messages.length === 0) return { ok: false, error: 'session_empty' }
+    // Known limitation: scope reconnect snapshot to the requesting client
+    // once `@callable` surfaces the caller connection id. Broadcast to all
+    // clients for now — harmless over-delivery in multi-client sessions
+    // (the client's per-session `lastSeq` watermark drops stale frames).
+    this.broadcastMessages({
+      kind: 'snapshot',
+      version: this.messageSeq,
+      messages: messages as unknown as WireSessionMessage[],
+      reason: 'reconnect',
+      // B7: hydrate branch-info collection alongside the history.
+      branchInfo: this.computeBranchInfo(messages),
+    })
+    return { ok: true }
   }
 
   @callable()
@@ -2291,7 +2510,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         // Chain UX P4: detect mode transitions on chain-linked sessions and
         // reset the runner so each mode gets a fresh SDK session context.
         const ks = event.kata_state
-        if (ks && ks.currentMode && ks.issueNumber != null) {
+        if (ks?.currentMode && ks.issueNumber != null) {
           const prev = this.state.lastKataMode
           const next = ks.currentMode
           if (prev !== next) {
@@ -2304,10 +2523,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
               // Fire-and-forget — the runner close + respawn involves multi-
               // second awaits that shouldn't block gateway event processing.
               this.handleModeTransition(ks, prev ?? null).catch((err) => {
-                console.error(
-                  `[SessionDO:${this.ctx.id}] handleModeTransition failed:`,
-                  err,
-                )
+                console.error(`[SessionDO:${this.ctx.id}] handleModeTransition failed:`, err)
               })
             }
           }

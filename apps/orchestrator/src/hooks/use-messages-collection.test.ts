@@ -20,14 +20,21 @@ vi.mock('@tanstack/react-db', () => ({
   }),
 }))
 
-vi.mock('~/db/messages-collection', () => ({
-  messagesCollection: {
+const mockCreateMessagesCollection = vi.hoisted(() => vi.fn())
+
+vi.mock('~/db/messages-collection', () => {
+  const coll = {
     insert: vi.fn(),
     delete: vi.fn(),
     [Symbol.iterator]: vi.fn().mockReturnValue([][Symbol.iterator]()),
-    utils: {},
-  },
-}))
+    utils: { isFetching: false },
+  }
+  mockCreateMessagesCollection.mockImplementation(() => coll)
+  return {
+    messagesCollection: coll,
+    createMessagesCollection: mockCreateMessagesCollection,
+  }
+})
 
 import { useMessagesCollection } from './use-messages-collection'
 
@@ -70,10 +77,11 @@ describe('useMessagesCollection', () => {
     expect(result.current.isLoading).toBe(true)
   })
 
-  it('filters messages by sessionId', () => {
+  it('returns all rows from the per-session collection (factory scopes by sessionId)', () => {
+    // After P2: the collection itself is per-agentName, so the hook no longer
+    // filters — every row in the collection belongs to this session.
     mockLiveQueryData = [
       makeMessage({ id: 'm1', sessionId: 'session-abc' }),
-      makeMessage({ id: 'm2', sessionId: 'session-xyz' }),
       makeMessage({ id: 'm3', sessionId: 'session-abc' }),
     ]
 
@@ -126,110 +134,104 @@ describe('useMessagesCollection', () => {
     expect(result.current.messages).toHaveLength(2)
   })
 
-  it('updates when sessionId changes', () => {
-    mockLiveQueryData = [
-      makeMessage({ id: 'm1', sessionId: 'session-abc' }),
-      makeMessage({ id: 'm2', sessionId: 'session-xyz' }),
-    ]
+  it('re-memoises the collection when sessionId changes', () => {
+    mockLiveQueryData = [makeMessage({ id: 'm1', sessionId: 'session-abc' })]
 
-    const { result, rerender } = renderHook(({ sessionId }) => useMessagesCollection(sessionId), {
+    const { rerender } = renderHook(({ sessionId }) => useMessagesCollection(sessionId), {
       initialProps: { sessionId: 'session-abc' },
     })
 
-    expect(result.current.messages).toHaveLength(1)
-    expect(result.current.messages[0].id).toBe('m1')
+    expect(mockCreateMessagesCollection).toHaveBeenCalledWith('session-abc')
 
     rerender({ sessionId: 'session-xyz' })
-
-    expect(result.current.messages).toHaveLength(1)
-    expect(result.current.messages[0].id).toBe('m2')
+    expect(mockCreateMessagesCollection).toHaveBeenCalledWith('session-xyz')
   })
 
-  it('sorts server-assigned rows by turn number regardless of createdAt', () => {
-    // Rig timestamps so createdAt order DISAGREES with turn order — this
-    // matches the clock-skew / rapid-burst scenarios where sorting purely by
-    // createdAt produced out-of-order display. Turn number wins.
+  it('sorts user-turn rows by canonical_turn_id regardless of createdAt', () => {
+    // GH#14 P3: user rows carry canonical_turn_id = 'usr-N'; assistant rows
+    // interleave by createdAt. Rig timestamps so createdAt DISAGREES with
+    // turn order to prove the ordinal wins for user rows.
     mockLiveQueryData = [
-      makeMessage({ id: 'msg-4', sessionId: 'session-abc', createdAt: '2026-01-01T00:00:00Z' }),
-      makeMessage({ id: 'usr-2', sessionId: 'session-abc', createdAt: '2026-01-03T00:00:00Z' }),
-      makeMessage({ id: 'msg-3', sessionId: 'session-abc', createdAt: '2026-01-02T00:00:00Z' }),
-      makeMessage({ id: 'usr-1', sessionId: 'session-abc', createdAt: '2026-01-04T00:00:00Z' }),
-    ]
-
-    const { result } = renderHook(() => useMessagesCollection('session-abc'))
-
-    expect(result.current.messages.map((m) => m.id)).toEqual(['usr-1', 'usr-2', 'msg-3', 'msg-4'])
-  })
-
-  it('places optimistic rows after all server-assigned rows, FIFO by embedded timestamp', () => {
-    mockLiveQueryData = [
-      makeMessage({ id: 'usr-optimistic-2000', sessionId: 'session-abc' }),
-      makeMessage({ id: 'msg-10', sessionId: 'session-abc' }),
-      makeMessage({ id: 'usr-optimistic-1000', sessionId: 'session-abc' }),
-      makeMessage({ id: 'usr-9', sessionId: 'session-abc' }),
-    ]
-
-    const { result } = renderHook(() => useMessagesCollection('session-abc'))
-
-    expect(result.current.messages.map((m) => m.id)).toEqual([
-      'usr-9',
-      'msg-10',
-      'usr-optimistic-1000',
-      'usr-optimistic-2000',
-    ])
-  })
-
-  it('uses turnHint for optimistic rows so assistant messages sort after them', () => {
-    // Simulates: user sends → optimistic row gets turnHint=11 (maxTurn was 10)
-    // → assistant response arrives as msg-12 BEFORE the server echo usr-11.
-    // Without turnHint, the optimistic row would sort at MAX_SAFE_INTEGER
-    // and the assistant message would render ABOVE the user message.
-    mockLiveQueryData = [
-      makeMessage({ id: 'msg-10', sessionId: 'session-abc' }),
       makeMessage({
-        id: 'usr-optimistic-9999',
+        id: 'usr-2',
         sessionId: 'session-abc',
-        turnHint: 11,
+        canonical_turn_id: 'usr-2',
+        createdAt: '2026-01-03T00:00:00Z',
       }),
-      makeMessage({ id: 'msg-12', sessionId: 'session-abc' }),
+      makeMessage({
+        id: 'usr-1',
+        sessionId: 'session-abc',
+        canonical_turn_id: 'usr-1',
+        createdAt: '2026-01-04T00:00:00Z',
+      }),
     ]
 
     const { result } = renderHook(() => useMessagesCollection('session-abc'))
 
-    // Optimistic (turnHint=11) should sort between msg-10 and msg-12
+    expect(result.current.messages.map((m) => m.id)).toEqual(['usr-1', 'usr-2'])
+  })
+
+  it('interleaves assistant/tool rows by createdAt between user turns', () => {
+    // Assistant rows have no canonical_turn_id — they sort by createdAt at
+    // [Infinity, ts] so the browser sees user turns first, then assistant
+    // rows by time.
+    mockLiveQueryData = [
+      makeMessage({
+        id: 'msg-assist-2',
+        sessionId: 'session-abc',
+        createdAt: '2026-01-02T00:00:00Z',
+      }),
+      makeMessage({
+        id: 'usr-2',
+        sessionId: 'session-abc',
+        canonical_turn_id: 'usr-2',
+        createdAt: '2026-01-03T00:00:00Z',
+      }),
+      makeMessage({
+        id: 'msg-assist-1',
+        sessionId: 'session-abc',
+        createdAt: '2026-01-01T00:00:00Z',
+      }),
+      makeMessage({
+        id: 'usr-1',
+        sessionId: 'session-abc',
+        canonical_turn_id: 'usr-1',
+        createdAt: '2026-01-04T00:00:00Z',
+      }),
+    ]
+
+    const { result } = renderHook(() => useMessagesCollection('session-abc'))
+
+    // Sort key: [ord,0] for usr-1/usr-2; [Inf, ts] for msg-assist-1/msg-assist-2
     expect(result.current.messages.map((m) => m.id)).toEqual([
-      'msg-10',
-      'usr-optimistic-9999',
-      'msg-12',
+      'usr-1',
+      'usr-2',
+      'msg-assist-1',
+      'msg-assist-2',
     ])
   })
 
-  it('falls back to MAX_SAFE_INTEGER for optimistic rows without turnHint', () => {
-    // Legacy optimistic rows (no turnHint) still sort at the end
+  it('optimistic user rows (usr-client-<uuid>) without canonical_turn_id interleave by createdAt', () => {
+    // Until the server echo arrives, an optimistic row has no
+    // canonical_turn_id; it falls through to the createdAt branch and sits
+    // at the tail of the thread. Once the echo updates the row with the
+    // canonical id, the same row pops into its turn slot.
     mockLiveQueryData = [
-      makeMessage({ id: 'msg-10', sessionId: 'session-abc' }),
-      makeMessage({ id: 'usr-optimistic-9999', sessionId: 'session-abc' }),
-      makeMessage({ id: 'msg-12', sessionId: 'session-abc' }),
+      makeMessage({
+        id: 'usr-1',
+        sessionId: 'session-abc',
+        canonical_turn_id: 'usr-1',
+        createdAt: '2026-01-01T00:00:00Z',
+      }),
+      makeMessage({
+        id: 'usr-client-abc',
+        sessionId: 'session-abc',
+        createdAt: '2026-01-02T00:00:00Z',
+      }),
     ]
 
     const { result } = renderHook(() => useMessagesCollection('session-abc'))
 
-    expect(result.current.messages.map((m) => m.id)).toEqual([
-      'msg-10',
-      'msg-12',
-      'usr-optimistic-9999',
-    ])
-  })
-
-  it('sorts err-N rows inline with the turn sequence', () => {
-    mockLiveQueryData = [
-      makeMessage({ id: 'msg-3', sessionId: 'session-abc' }),
-      makeMessage({ id: 'err-2', sessionId: 'session-abc' }),
-      makeMessage({ id: 'usr-1', sessionId: 'session-abc' }),
-    ]
-
-    const { result } = renderHook(() => useMessagesCollection('session-abc'))
-
-    expect(result.current.messages.map((m) => m.id)).toEqual(['usr-1', 'err-2', 'msg-3'])
+    expect(result.current.messages.map((m) => m.id)).toEqual(['usr-1', 'usr-client-abc'])
   })
 })

@@ -16,16 +16,8 @@ import {
   useSortable,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { useLiveQuery } from '@tanstack/react-db'
 import { useLocation, useNavigate } from '@tanstack/react-router'
-import {
-  ChevronLeftIcon,
-  ChevronRightIcon,
-  CopyPlusIcon,
-  Layers,
-  PlusIcon,
-  X,
-} from 'lucide-react'
+import { ChevronLeftIcon, ChevronRightIcon, CopyPlusIcon, Layers, PlusIcon, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   DropdownMenu,
@@ -41,10 +33,11 @@ import {
   SheetHeader,
   SheetTitle,
 } from '~/components/ui/sheet'
-import { agentSessionsCollection, type SessionRecord } from '~/db/agent-sessions-collection'
+import type { SessionRecord } from '~/db/session-record'
 import { StatusDot } from '~/features/agent-orch/session-utils'
 import { useIsMobile } from '~/hooks/use-mobile'
 import { useSessionLiveState } from '~/hooks/use-session-live-state'
+import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { isDraftTabId, type TabEntry, useTabSync } from '~/hooks/use-tab-sync'
 import { deriveDisplayState } from '~/lib/display-state'
 import { cn } from '~/lib/utils'
@@ -85,11 +78,9 @@ export function TabBar({
   onNewSessionInTab,
   onNewTabForProject,
 }: TabBarProps) {
-  // Fetch all sessions for display metadata join.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data: allSessions } = useLiveQuery((q: any) =>
-    q.from({ session: agentSessionsCollection }),
-  )
+  // Include archived sessions so historical tabs (sessions the user archived
+  // but still has open in their tab strip) continue to label correctly.
+  const { sessions: allSessions } = useSessionsCollection({ includeArchived: true })
 
   const { tabEntries } = useTabSync()
   const location = useLocation()
@@ -97,8 +88,7 @@ export function TabBar({
 
   const sessionsMap = useMemo(() => {
     const m = new Map<string, SessionRecord>()
-    if (!allSessions) return m
-    for (const row of allSessions as SessionRecord[]) {
+    for (const row of allSessions) {
       m.set(row.id, row)
     }
     return m
@@ -108,8 +98,7 @@ export function TabBar({
   // to the chain — build a lookup once per sessions snapshot.
   const sessionsByIssue = useMemo(() => {
     const m = new Map<number, SessionRecord>()
-    if (!allSessions) return m
-    for (const row of allSessions as SessionRecord[]) {
+    for (const row of allSessions) {
       if (typeof row.kataIssue === 'number' && !m.has(row.kataIssue)) {
         m.set(row.kataIssue, row)
       }

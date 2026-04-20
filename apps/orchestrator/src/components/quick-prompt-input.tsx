@@ -14,7 +14,6 @@ import {
   PromptInputSubmit,
   PromptInputTextarea,
 } from '@duraclaw/ai-elements'
-import { useLiveQuery } from '@tanstack/react-db'
 import { ImageIcon, XIcon } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Checkbox } from '~/components/ui/checkbox'
@@ -28,7 +27,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '~/components/ui/select'
-import { agentSessionsCollection } from '~/db/agent-sessions-collection'
+import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { useTabSync } from '~/hooks/use-tab-sync'
 import { useUserDefaults } from '~/hooks/use-user-defaults'
 import type { ContentBlock } from '~/lib/types'
@@ -94,14 +93,12 @@ export function QuickPromptInput({
   // tabs + sessions collection to see if any open tab's session matches the
   // selected project.
   const { openTabs: openTabIds } = useTabSync()
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data: allSessions } = useLiveQuery((q: any) =>
-    q.from({ session: agentSessionsCollection }),
-  )
+  // Include archived so historical tabs still resolve their project for the
+  // "existing tab" detection below.
+  const { sessions: allSessions } = useSessionsCollection({ includeArchived: true })
   const existingTab = useMemo(() => {
-    if (!allSessions) return undefined
     const sessionsMap = new Map<string, { project?: string }>()
-    for (const row of allSessions as Array<{ id: string; project?: string }>) {
+    for (const row of allSessions) {
       sessionsMap.set(row.id, row)
     }
     return openTabIds.find((id) => sessionsMap.get(id)?.project === selectedProject)

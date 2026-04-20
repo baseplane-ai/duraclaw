@@ -9,7 +9,7 @@
  *
  * Row shape matches the D1 `user_tabs` table after p1 / p2:
  * `{id, userId, sessionId, position, createdAt}` — no `project`, `title`, or
- * `draft`. Consumers join with `agentSessionsCollection` to derive display
+ * `draft`. Consumers join with `sessionLiveStateCollection` to derive display
  * fields (project / title) reactively.
  */
 

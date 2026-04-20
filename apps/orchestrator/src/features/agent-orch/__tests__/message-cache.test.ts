@@ -2,8 +2,10 @@
  * Tests for message cache-behind writes and cache-first hydration in useCodingAgent.
  *
  * Validates that:
- * - SessionMessage events are written to messagesCollection (cache-behind)
- * - Bulk message replay is written to messagesCollection
+ * - Unified {type:'messages', seq, payload:{kind:'delta'}} frames are written
+ *   to messagesCollection (cache-behind)
+ * - Bulk message replay (legacy {messages} shape — deploy rollover tolerance)
+ *   is written to messagesCollection
  * - Hydrated messages are written to messagesCollection
  * - On first state sync, cached messages are loaded before WS hydration (cache-first)
  * - Duplicate insert errors are silently ignored
@@ -32,12 +34,30 @@ vi.mock('agents/react', () => ({
   },
 }))
 
-vi.mock('~/db/agent-sessions-collection', () => ({
-  agentSessionsCollection: {
+// Stub the live-state collection so upsertSessionLiveState from the onStateUpdate
+// path doesn't reach OPFS in tests. message-cache.test does not assert on
+// live-state writes — this mock is a no-op to satisfy the import.
+vi.mock('~/db/session-live-state-collection', () => ({
+  sessionLiveStateCollection: {
+    [Symbol.iterator]: () => [][Symbol.iterator](),
+    has: () => false,
+    insert: vi.fn(),
     update: vi.fn(),
-    has: vi.fn().mockReturnValue(true),
-    utils: { writeUpdate: vi.fn() },
+    delete: vi.fn(),
   },
+  upsertSessionLiveState: vi.fn(),
+}))
+
+vi.mock('~/hooks/use-session-live-state', () => ({
+  useSessionLiveState: () => ({
+    state: null,
+    contextUsage: null,
+    kataState: null,
+    worktreeInfo: null,
+    sessionResult: null,
+    wsReadyState: null,
+    isLive: false,
+  }),
 }))
 
 // ── Messages collection mock ──────────────────────────────────────
@@ -53,8 +73,8 @@ const bumpCollection = () => {
   for (const cb of collectionSubs) cb()
 }
 
-vi.mock('~/db/messages-collection', () => ({
-  messagesCollection: {
+vi.mock('~/db/messages-collection', () => {
+  const coll = {
     insert: (...args: unknown[]) => {
       mockInsert(...args)
       const row = args[0] as { id: string } & Record<string, unknown>
@@ -83,8 +103,13 @@ vi.mock('~/db/messages-collection', () => ({
       bumpCollection()
     },
     [Symbol.iterator]: () => mockCollectionEntries[Symbol.iterator](),
-  },
-}))
+    utils: { isFetching: false },
+  }
+  return {
+    messagesCollection: coll,
+    createMessagesCollection: () => coll,
+  }
+})
 
 // Reactive live-query mock — subscribes to mutation bumps and re-renders
 // the consuming hook. Wraps iteration in try/catch so the
@@ -115,7 +140,7 @@ vi.mock('~/hooks/use-messages-collection', async () => {
           const bTime = b.createdAt ? new Date(b.createdAt as string).getTime() : 0
           return aTime - bTime
         })
-      return { messages: filtered, isLoading: false }
+      return { messages: filtered, isLoading: false, isFetching: false }
     },
   }
 })
@@ -127,12 +152,24 @@ function makeWsMessage(data: unknown): MessageEvent {
   return { data: JSON.stringify(data) } as MessageEvent
 }
 
+let msgSeq = 0
+function deltaFrame(upsert: Array<Record<string, unknown>>, sessionId = 'test-session') {
+  msgSeq += 1
+  return {
+    type: 'messages',
+    sessionId,
+    seq: msgSeq,
+    payload: { kind: 'delta', upsert },
+  }
+}
+
 describe('message cache-behind writes (SessionMessage format)', () => {
   beforeEach(() => {
     capturedOnStateUpdate = null
     capturedOnMessage = null
     vi.clearAllMocks()
     mockCollectionEntries.length = 0
+    msgSeq = 0
     vi.useFakeTimers()
   })
 
@@ -141,20 +178,21 @@ describe('message cache-behind writes (SessionMessage format)', () => {
     vi.restoreAllMocks()
   })
 
-  test('single message event triggers cache-behind write', () => {
+  test('single delta frame triggers cache-behind write', () => {
     renderHook(() => useCodingAgent('test-session'))
 
     act(() => {
       capturedOnMessage!(
-        makeWsMessage({
-          type: 'message',
-          message: {
-            id: 'msg-1',
-            role: 'assistant',
-            parts: [{ type: 'text', text: 'Hello world' }],
-            createdAt: '2026-04-13T12:00:00Z',
-          },
-        }),
+        makeWsMessage(
+          deltaFrame([
+            {
+              id: 'msg-1',
+              role: 'assistant',
+              parts: [{ type: 'text', text: 'Hello world' }],
+              createdAt: '2026-04-13T12:00:00Z',
+            },
+          ]),
+        ),
       )
     })
 
@@ -227,14 +265,15 @@ describe('message cache-behind writes (SessionMessage format)', () => {
     expect(() => {
       act(() => {
         capturedOnMessage!(
-          makeWsMessage({
-            type: 'message',
-            message: {
-              id: 'dup-msg',
-              role: 'assistant',
-              parts: [{ type: 'text', text: 'duplicate' }],
-            },
-          }),
+          makeWsMessage(
+            deltaFrame([
+              {
+                id: 'dup-msg',
+                role: 'assistant',
+                parts: [{ type: 'text', text: 'duplicate' }],
+              },
+            ]),
+          ),
         )
       })
     }).not.toThrow()
@@ -247,6 +286,7 @@ describe('message cache-first hydration', () => {
     capturedOnMessage = null
     vi.clearAllMocks()
     mockCollectionEntries.length = 0
+    msgSeq = 0
     mockCall.mockResolvedValue([])
   })
 
@@ -378,17 +418,18 @@ describe('message cache-first hydration', () => {
       capturedOnStateUpdate!({ status: 'idle' })
     })
 
-    // Now send a message event with the same id -- should upsert in place
+    // Now send a delta frame with the same id -- should upsert in place
     act(() => {
       capturedOnMessage!(
-        makeWsMessage({
-          type: 'message',
-          message: {
-            id: 'cached-evt',
-            role: 'assistant',
-            parts: [{ type: 'text', text: 'updated' }],
-          },
-        }),
+        makeWsMessage(
+          deltaFrame([
+            {
+              id: 'cached-evt',
+              role: 'assistant',
+              parts: [{ type: 'text', text: 'updated' }],
+            },
+          ]),
+        ),
       )
     })
 
@@ -428,62 +469,6 @@ describe('message cache-first hydration', () => {
   })
 })
 
-describe('hydration writes to collection', () => {
-  beforeEach(() => {
-    capturedOnStateUpdate = null
-    capturedOnMessage = null
-    vi.clearAllMocks()
-    mockCollectionEntries.length = 0
-  })
-
-  afterEach(() => {
-    vi.restoreAllMocks()
-  })
-
-  test('hydrateMessages writes hydrated messages to collection', async () => {
-    const hydratedMessages = [
-      {
-        id: 'usr-1',
-        role: 'user',
-        parts: [{ type: 'text', text: 'hello' }],
-        createdAt: '2026-01-01T00:00:00Z',
-      },
-      {
-        id: 'asst-1',
-        role: 'assistant',
-        parts: [{ type: 'text', text: 'hi back' }],
-        createdAt: '2026-01-01T01:00:00Z',
-      },
-    ]
-
-    mockCall.mockResolvedValueOnce(hydratedMessages).mockResolvedValue([])
-
-    renderHook(() => useCodingAgent('test-session'))
-
-    // Trigger first state sync which calls hydrateMessages
-    await act(async () => {
-      capturedOnStateUpdate!({ status: 'idle' })
-      // Allow hydrateMessages promise to resolve
-      await new Promise((r) => setTimeout(r, 0))
-    })
-
-    // Should have written both messages to collection
-    expect(mockInsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'usr-1',
-        sessionId: 'test-session',
-        role: 'user',
-        parts: [{ type: 'text', text: 'hello' }],
-      }),
-    )
-
-    expect(mockInsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'asst-1',
-        sessionId: 'test-session',
-        role: 'assistant',
-        parts: [{ type: 'text', text: 'hi back' }],
-      }),
-    )
-  })
-})
+// P2: `hydrateMessages` has been retired — hydration is now owned by the
+// per-agentName queryCollection's queryFn (REST GET /api/sessions/:id/messages).
+// Tests for the old RPC-based hydration path have been removed.

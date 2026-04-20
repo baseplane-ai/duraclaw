@@ -3,10 +3,9 @@
  * Uses TanStackDB sessions collection for client-side sort/filter/search.
  */
 
-import { useLiveQuery } from '@tanstack/react-db'
 import { useNavigate } from '@tanstack/react-router'
 import { ArrowDownIcon, ArrowUpIcon, SearchIcon } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Badge } from '~/components/ui/badge'
 import { Button } from '~/components/ui/button'
 import { Input } from '~/components/ui/input'
@@ -25,10 +24,10 @@ import {
   TableHeader,
   TableRow,
 } from '~/components/ui/table'
-import {
-  type SessionRecord,
-  agentSessionsCollection as sessionsCollection,
-} from '~/db/agent-sessions-collection'
+import { seedSessionLiveStateFromSummary } from '~/db/session-live-state-collection'
+import type { SessionRecord } from '~/db/session-record'
+import { useSessionsCollection } from '~/hooks/use-sessions-collection'
+import type { SessionSummary } from '~/lib/types'
 
 type SortField = 'updatedAt' | 'createdAt' | 'totalCostUsd' | 'durationMs' | 'numTurns'
 type SortDir = 'asc' | 'desc'
@@ -64,6 +63,43 @@ function formatDate(dateStr: string): string {
   })
 }
 
+/**
+ * Module-level guard so the one-shot REST hydrate fires once per page load
+ * no matter how many SessionHistory mounts race (tab close/reopen, StrictMode
+ * double-mount). On first mount the hook POSTs nothing — it just GETs
+ * /api/sessions and seeds the live-state collection so rows for sessions
+ * never opened in this browser are visible.
+ */
+let hydratedOnce = false
+
+let hydrateInFlight: Promise<void> | null = null
+
+async function hydrateSessionHistoryFromRest(): Promise<void> {
+  if (hydratedOnce) return
+  // Dedupe concurrent mounts (StrictMode double-mount, rapid tab switches) by
+  // returning the same in-flight promise until it settles.
+  if (hydrateInFlight) return hydrateInFlight
+  hydrateInFlight = (async () => {
+    try {
+      const resp = await fetch('/api/sessions')
+      if (!resp.ok) return
+      const json = (await resp.json()) as { sessions?: SessionSummary[] }
+      if (!json.sessions) return
+      for (const summary of json.sessions) {
+        seedSessionLiveStateFromSummary(summary)
+      }
+      // Only latch the guard on success — transient network / 5xx failures
+      // leave the flag false so the next mount retries.
+      hydratedOnce = true
+    } catch {
+      // swallow — guard stays false, next mount retries
+    } finally {
+      hydrateInFlight = null
+    }
+  })()
+  return hydrateInFlight
+}
+
 export function SessionHistory() {
   const navigate = useNavigate()
 
@@ -73,11 +109,15 @@ export function SessionHistory() {
   const [projectFilter, setProjectFilter] = useState<string>('')
   const [searchQuery, setSearchQuery] = useState('')
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data: allSessions, isLoading } = useLiveQuery(sessionsCollection as any)
+  // Include archived so the history surface shows the full set.
+  const { sessions: allSessions, isLoading } = useSessionsCollection({ includeArchived: true })
+
+  // One-shot REST hydrate on first mount so never-opened sessions appear.
+  useEffect(() => {
+    void hydrateSessionHistoryFromRest()
+  }, [])
 
   const filtered = useMemo(() => {
-    if (!allSessions) return []
     let result = [...allSessions] as SessionRecord[]
 
     // Status filter
@@ -106,8 +146,7 @@ export function SessionHistory() {
   }, [allSessions, statusFilter, projectFilter, searchQuery, sortBy, sortDir])
 
   const projects = useMemo(() => {
-    if (!allSessions) return []
-    return [...new Set((allSessions as SessionRecord[]).map((s) => s.project).filter(Boolean))]
+    return [...new Set(allSessions.map((s) => s.project).filter(Boolean))]
   }, [allSessions])
 
   const toggleSort = (field: SortField) => {

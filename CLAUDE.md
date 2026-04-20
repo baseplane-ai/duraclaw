@@ -34,11 +34,46 @@ Key invariants:
 
 ### Client data flow (session live state)
 
-The browser has exactly one render source for per-session live state:
-`sessionLiveStateCollection` (TanStack DB, OPFS-persisted). WS handlers in
-`use-coding-agent.ts` write `SessionState` / `gateway_event` payloads into
-the collection via `upsertSessionLiveState`; components read via
-`useSessionLiveState(sessionId)` (thin wrapper around `useLiveQuery`).
+The browser has three render sources for per-session state, all TanStack DB
+collections (OPFS-persisted, reactive via `useLiveQuery`):
+
+1. `sessionLiveStateCollection` — per-session live state (status, gate,
+   context usage, kata state, session metadata). WS handlers in
+   `use-coding-agent.ts` write `SessionState` / `gateway_event` payloads
+   via `upsertSessionLiveState`; components read via
+   `useSessionLiveState(sessionId)`.
+2. `messagesCollection` — per-session message history, one collection per
+   agentName (memoised by `createMessagesCollection`). Query-backed with a
+   REST fallback (`GET /api/sessions/:id/messages`) for cold-start and
+   reconnect-with-stale-cache; WS is the live push channel.
+3. `branchInfoCollection` — per-session branch siblings for rewind /
+   resubmit / navigate. Populated by DO-pushed snapshots alongside
+   messages; the `useBranchInfo` hook drives the branch arrows in the UI.
+
+**Seq'd `{type:'messages'}` wire protocol** (GH#14 B1–B3): the SessionDO
+stamps every broadcast with a per-session monotonic `seq`. The client
+tracks `lastSeq` per agentName in a ref. `kind:'delta'` frames whose
+`seq === lastSeq + 1` apply directly (upsert / delete on `messagesCollection`
+plus any `branchInfo` upserts piggybacked on the frame). Out-of-order or
+gap-detected frames trigger a `requestSnapshot()` RPC to the DO. The
+server replies with `kind:'snapshot'` (reason: `reconnect` / `rewind` /
+`resubmit` / `branch-navigate`) carrying the full linear history plus
+refreshed branchInfo rows; the snapshot handler replaces the collection
+contents for that session and resets `lastSeq`.
+
+**DO-authored snapshots** — rewind / resubmit / branch-navigate are
+computed server-side via `session.getHistory(leafId)` and pushed to every
+connected client as a `kind:'snapshot'` frame. The client RPCs
+(`rewind`, `resubmitMessage`, `getBranchHistory`) fire-and-await; no
+client-side history mutation, no per-tab divergence.
+
+**Optimistic user turns** (GH#14 B5–B6) use
+`createTransaction({mutationFn})` with client-generated
+`usr-client-<uuid>` ids. The DO accepts the client id as the primary
+`SessionMessage.id`, so the server echo reconciles via TanStack DB
+deep-equality — a single row that updates in place, no delete+insert
+churn and no client-side sort hints.
+
 Display derivation goes through `deriveDisplayState(state, wsReadyState)`
 in `apps/orchestrator/src/lib/display-state.ts` so StatusBar, sidebar
 cards, and the tab bar all agree on label / color / icon.

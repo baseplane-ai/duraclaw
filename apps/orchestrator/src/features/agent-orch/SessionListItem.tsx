@@ -28,7 +28,7 @@ import {
   DropdownMenuTrigger,
 } from '~/components/ui/dropdown-menu'
 import { Input } from '~/components/ui/input'
-import type { SessionRecord } from '~/db/agent-sessions-collection'
+import type { SessionRecord } from '~/db/session-record'
 import { useSessionLiveState } from '~/hooks/use-session-live-state'
 import { deriveDisplayState } from '~/lib/display-state'
 import { cn } from '~/lib/utils'

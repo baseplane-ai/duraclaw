@@ -10,7 +10,6 @@
  * GH#16 Feature 3E B13 in `planning/specs/16-chain-ux.md`.
  */
 
-import type { WorktreeReservation } from '~/lib/types'
 import { Button } from '~/components/ui/button'
 import {
   Dialog,
@@ -21,6 +20,7 @@ import {
   DialogTitle,
 } from '~/components/ui/dialog'
 import { formatTimeAgo } from '~/features/agent-orch/session-utils'
+import type { WorktreeReservation } from '~/lib/types'
 
 export interface WorktreeConflictModalProps {
   open: boolean
@@ -34,8 +34,7 @@ export interface WorktreeConflictModalProps {
   conflictTitle?: string
 }
 
-const FORCE_RELEASE_DISABLED_TOOLTIP =
-  'Reservation not stale — 7 days of inactivity required'
+const FORCE_RELEASE_DISABLED_TOOLTIP = 'Reservation not stale — 7 days of inactivity required'
 
 export function WorktreeConflictModal({
   open,

@@ -213,10 +213,7 @@ export function computeInsertOrder(
   const sameCluster = entries.filter(matches)
   if (sameCluster.length === 0) return maxOrder + 1
 
-  const lastClusterOrder = sameCluster.reduce(
-    (m, e) => (e.order > m ? e.order : m),
-    -Infinity,
-  )
+  const lastClusterOrder = sameCluster.reduce((m, e) => (e.order > m ? e.order : m), -Infinity)
   const nextOrders = entries.filter((e) => e.order > lastClusterOrder).map((e) => e.order)
   if (nextOrders.length === 0) return lastClusterOrder + 1
   const nextOrder = nextOrders.reduce((m, o) => (o < m ? o : m), Infinity)
@@ -479,9 +476,7 @@ export function useTabSync(): UseTabSyncResult {
         // keep the legacy shape {project, order} so old clients still
         // parse them correctly.
         const payload: TabEntry =
-          kind === 'chain'
-            ? { order, kind: 'chain', issueNumber }
-            : { project, order }
+          kind === 'chain' ? { order, kind: 'chain', issueNumber } : { project, order }
         tabsY.set(sessionId, JSON.stringify(payload))
       })
 

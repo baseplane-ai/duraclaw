@@ -8,8 +8,8 @@
  * through another endpoint. Linking is deferred.
  */
 
-import type { SessionRecord } from '~/db/agent-sessions-collection'
 import { Badge } from '~/components/ui/badge'
+import type { SessionRecord } from '~/db/session-record'
 import { formatTimeAgo, StatusDot } from '~/features/agent-orch/session-utils'
 
 interface ChainTimelineRowProps {
@@ -50,9 +50,7 @@ export function ChainTimelineRow({ session, active, liveText, prNumber }: ChainT
         <Badge variant="outline" className="font-mono">
           {mode}
         </Badge>
-        <span className="text-xs text-muted-foreground uppercase tracking-wide">
-          {statusLabel}
-        </span>
+        <span className="text-xs text-muted-foreground uppercase tracking-wide">{statusLabel}</span>
         <span className="text-xs text-muted-foreground">{formatTimeAgo(ts)}</span>
         <div className="ml-auto flex gap-1">
           {showPrChip ? <Badge variant="outline">PR #{prNumber}</Badge> : null}

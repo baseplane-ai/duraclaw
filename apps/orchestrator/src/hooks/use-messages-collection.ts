@@ -1,29 +1,33 @@
 /**
- * Hook for reading cached messages from the local messages collection.
+ * Hook for reading cached messages from the per-session messages collection.
  *
- * Returns messages filtered by sessionId, sorted into stable turn order.
+ * Returns messages for the given `sessionId`, sorted into stable turn order.
+ * The collection is produced by `createMessagesCollection(sessionId)` and
+ * memoised per agentName — no sessionId filter needed because the collection
+ * is already scoped.
  *
  * Sort contract (primary → tiebreaker):
- *   1. Server-assigned rows (`usr-N` / `msg-N` / `err-N`) sort by N, which is
- *      the SessionDO's strictly-monotonic `turnCounter`. This is the only
- *      source of truth for chronological order — client `createdAt` can
- *      differ from server `createdAt` for the same logical message (clock
- *      skew), and timestamps can tie on rapid bursts.
- *   2. Optimistic rows (`usr-optimistic-<ms>`) sort AFTER every server row,
- *      in FIFO order by the timestamp embedded in the id. Until the server
- *      echo arrives they belong at the tail of the thread; once the echo
- *      lands and `clearOldestOptimisticRow` trims one, the real `usr-N`
- *      falls into its proper turn-N slot.
- *   3. Unknown id formats fall back to `createdAt` as a last-resort
- *      tiebreaker so forward-compat rows still render in something sensible.
+ *   1. User-turn rows with a `canonical_turn_id` (`usr-N`) sort by N — the
+ *      SessionDO's strictly-monotonic `turnCounter`. This drives every
+ *      reconciled user turn into a stable monotonic slot.
+ *   2. Every other row (assistant, tool, optimistic user rows whose echo
+ *      has not yet arrived, streaming partials) sorts by `createdAt` at
+ *      the tail. Assistant rows anchored to turn N interleave between
+ *      turn N and turn N+1 because their `createdAt` falls in that window.
+ *
+ * The canonical-id-driven sort (B5/B6) gives every reconciled user turn a
+ * stable monotonic slot without client-side ordering hints. See GH#14.
  */
 
 import { useLiveQuery } from '@tanstack/react-db'
 import { useMemo } from 'react'
-import { type CachedMessage, messagesCollection } from '~/db/messages-collection'
+import { type CachedMessage, createMessagesCollection } from '~/db/messages-collection'
 
-const TURN_ID_RE = /^(?:usr|msg|err)-(\d+)$/
-const OPTIMISTIC_ID_RE = /^usr-optimistic-(\d+)$/
+function parseTurnOrdinal(id?: string): number | undefined {
+  if (!id) return undefined
+  const m = /^usr-(\d+)$/.exec(id)
+  return m ? Number.parseInt(m[1], 10) : undefined
+}
 
 function createdAtMs(row: CachedMessage): number {
   if (!row.createdAt) return 0
@@ -33,46 +37,41 @@ function createdAtMs(row: CachedMessage): number {
 }
 
 /**
- * Returns [primary, secondary] sort tuple. Lower values sort first. Server
- * turn rows use finite primaries; optimistic rows use their frozen
- * `turnHint` (falling back to MAX_SAFE_INTEGER for legacy rows without
- * one); unknown id formats use MAX_SAFE_INTEGER + createdAt.
+ * Returns [primary, secondary] sort tuple. Lower values sort first. Rows
+ * with `canonical_turn_id = usr-N` pin to `[N, 0]`; everything else falls
+ * through to `[Infinity, createdAt]` so assistant/tool/optimistic rows
+ * interleave naturally by server-assigned createdAt.
  */
 function sortKey(row: CachedMessage): [number, number] {
-  const turnMatch = TURN_ID_RE.exec(row.id)
-  if (turnMatch) {
-    return [Number.parseInt(turnMatch[1], 10), 0]
-  }
-  const optimisticMatch = OPTIMISTIC_ID_RE.exec(row.id)
-  if (optimisticMatch) {
-    // When turnHint is set (frozen at insert time to maxServerTurn + 1),
-    // sort at [turnHint, 0.5] so the optimistic row lands after any
-    // server-assigned row with the same turn but before the next turn.
-    // This prevents assistant messages (turn N+1) from rendering above
-    // the optimistic user message (turn N).
-    if (row.turnHint != null) {
-      return [row.turnHint, 0.5]
-    }
-    return [Number.MAX_SAFE_INTEGER, Number.parseInt(optimisticMatch[1], 10)]
-  }
-  return [Number.MAX_SAFE_INTEGER, createdAtMs(row)]
+  const ord = parseTurnOrdinal(row.canonical_turn_id)
+  if (ord !== undefined) return [ord, 0]
+  return [Number.POSITIVE_INFINITY, createdAtMs(row)]
 }
 
 export function useMessagesCollection(sessionId: string) {
+  const collection = useMemo(() => createMessagesCollection(sessionId), [sessionId])
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, isLoading } = useLiveQuery((q) => q.from({ messages: messagesCollection as any }))
+  const { data, isLoading } = useLiveQuery(
+    (q) => q.from({ messages: collection as any }),
+    [collection],
+  )
 
   const messages = useMemo(() => {
     if (!data) return []
-    return (data as unknown as CachedMessage[])
-      .filter((m) => m.sessionId === sessionId)
-      .sort((a, b) => {
-        const [aP, aS] = sortKey(a)
-        const [bP, bS] = sortKey(b)
-        if (aP !== bP) return aP - bP
-        return aS - bS
-      })
-  }, [data, sessionId])
+    return (data as unknown as CachedMessage[]).slice().sort((a, b) => {
+      const [aP, aS] = sortKey(a)
+      const [bP, bS] = sortKey(b)
+      if (aP !== bP) return aP - bP
+      return aS - bS
+    })
+  }, [data])
 
-  return { messages, isLoading }
+  // `isFetching` mirrors queryCollection's fetch state (true while the queryFn
+  // is running, including during the retry window). Components derive
+  // `isConnecting = isFetching || wsReadyState !== 1`.
+  const utils = (collection as unknown as { utils?: { isFetching?: boolean } }).utils
+  const isFetching = utils?.isFetching ?? false
+
+  return { messages, isLoading, isFetching }
 }

@@ -1,0 +1,140 @@
+{
+  "vpSource": "planning/specs/14-messages-transport-unification.md (§ Verification Plan)",
+  "prNumber": 24,
+  "branch": "feat/14-messages-transport-unification",
+  "issue": 14,
+  "timestamp": "2026-04-20T02:45:00Z",
+  "method": "CDP Network.webSocketFrameReceived/Sent tap via scripts/verify/ws-tap.mjs → /data/projects/duraclaw-dev3/.kata/verification-evidence/vp1-ws-frames-14.ndjson",
+  "environment": {
+    "worktree": "/data/projects/duraclaw-dev3",
+    "verifyMode": "dev-up (direct ports)",
+    "orchPort": 43537,
+    "gatewayPort": 10337,
+    "chromeA_CDP": 11537
+  },
+  "priorGateEvidence": {
+    "phases": {
+      "p1": { "build": true, "typecheck": true, "tests": true },
+      "p2": { "build": true, "typecheck": true, "tests": true },
+      "p3": { "build": true, "typecheck": true, "tests": true },
+      "p4": { "build": true, "typecheck": true, "tests": true },
+      "p5": { "build": true, "typecheck": true, "tests": true }
+    },
+    "unitTestCount": "697/697 across 59 suites (per PR body)"
+  },
+  "vpResults": [
+    {
+      "id": "VP1",
+      "title": "Delta-seq monotonicity (B1, B3)",
+      "status": "pass_with_finding",
+      "evidence": {
+        "captureMethod": "CDP Network.webSocketFrameReceived via ws-tap.mjs",
+        "agentWsRequestId": "2030722.2492",
+        "url": "ws://127.0.0.1:43537/agents/session-agent/75f2f66c103a7e9b10d0a9970be801268b37bf9f7a752e4decede16a54b6cdfd",
+        "initialFrame": {
+          "type": "messages",
+          "seq": 0,
+          "kind": "snapshot",
+          "reason": "reconnect",
+          "branchInfoPresent": true
+        },
+        "subsequentStreamingFrames_allType": "messages",
+        "subsequentStreamingFrames_allKind": "delta",
+        "clientProposedUserIds_accepted_by_server": [
+          "usr-client-754c232f-07ae-46d1-a496-1b16b64f7ad6",
+          "usr-client-f31526e4-16ed-4006-9da0-e1df99199879",
+          "usr-client-6b58d917-1eec-4995-8071-36cef240f78d"
+        ],
+        "serverAssignedAssistantIds": ["msg-4", "msg-5", "msg-6"],
+        "observedSeqStream": [0, 1, 2, 3, 1, 2, 3, 4, 5, 6]
+      },
+      "assertions": {
+        "initial_on_connect_is_snapshot_reconnect": true,
+        "streaming_frames_are_kind_delta": true,
+        "every_frame_carries_type_messages_with_seq": true,
+        "server_accepts_client_proposed_user_id_as_primary_id (VP3/B5/B6)": true,
+        "seq_strictly_monotonic_within_single_DO_instance_lifetime": "PASS for msg#1 batch (1,2,3) and msg#3 batch (4,5,6); seq reset observed between msg#1 and msg#2"
+      },
+      "finding": {
+        "severity": "moderate (dev-env confirmed; production behavior requires confirmation)",
+        "description": "SessionDO.messageSeq is declared as `private messageSeq = 0` (apps/orchestrator/src/agents/session-do.ts:113) — an in-memory class field with no persistence to `this.storage`. When the DO instance is evicted and re-hydrated (observable in miniflare dev after ~25s idle between turns), the counter resets to 0. The client's wire handler (apps/orchestrator/src/features/agent-orch/use-coding-agent.ts:272) silently drops frames where `seq <= lastSeq` — so post-reset frames bearing seq values the client has already seen are discarded WITHOUT triggering the gap-snapshot recovery path (`onGap` only fires when `seq > lastSeq + 1`).",
+        "observedImpact": "Across three user turns (ONE / THREE / FOUR) over a single live WebSocket (same CDP requestId, no reconnect event), the seq stream was 0,1,2,3 → 1,2,3 → 4,5,6. Client's lastSeq after the first batch = 3. The second batch's seq=1,2,3 frames (carrying the `usr-client-f31526e4-…` user-echo and `msg-5` assistant reply) were silently dropped by the client. The UI's REST fallback (`/api/sessions/:id/messages`) and the DO-side history persistence kept server state consistent (10 turns, 889 ctx tokens), so the bug is latent until a client needs the dropped rows (e.g., cold tab, rehydrate from persist, branch-nav).",
+        "repro": [
+          "Create a session, send one message, wait for reply.",
+          "Wait ~25s (enough for miniflare to evict the idle DO instance).",
+          "Send another message. Capture WS frames via CDP Network.webSocketFrameReceived.",
+          "Observe: `seq` resets to 1 on the next broadcast post-rehydrate despite the client's lastSeq ≥ 1."
+        ],
+        "suggestedFix": "Persist messageSeq to DO storage (`ctx.storage.put('messageSeq', this.messageSeq)` on every advance; rehydrate on `constructor`/`blockConcurrencyWhile`). Alternatively, always emit a `{kind:'snapshot', reason:'reconnect'}` to a reconnecting client on DO rehydrate so the client resets its `lastSeq` via `Math.max(lastSeq, frame.payload.version)`.",
+        "reproducibility": "Confirmed in this verify session; raw frames at `.kata/verification-evidence/vp1-ws-frames-14.ndjson`.",
+        "productionRelevance": "Cloudflare DOs evict on worker redeploy, memory pressure, and cold starts in normal production. The reset should be verifiable on staging; unit tests (697/697) do not cover the DO-rehydrate path because they exercise broadcast within a single in-memory instance."
+      }
+    },
+    {
+      "id": "VP2",
+      "title": "Cold-DO hydrate retry (B4)",
+      "status": "pass_partial",
+      "evidence": {
+        "onConnectSnapshot": "seq=0 kind=snapshot reason=reconnect carried prior msg-3 (TWO) from pre-reload DO state — confirms the DO-pushed snapshot-on-connect hydrates the client.",
+        "restFallback": "GET /api/sessions/<id>/messages returned HTTP 200 with body `{messages: {messages: [...]}}` — endpoint exists; body shape nested one level deeper than VP2 step 4 assumes, may want confirmation that `queryCollectionOptions` unwraps correctly."
+      }
+    },
+    {
+      "id": "VP3",
+      "title": "Optimistic send + echo reconciliation (B5, B6)",
+      "status": "pass_via_wire_inspection",
+      "evidence": {
+        "clientProposedIdsEchoed": "All three `usr-client-<uuid>` ids sent by the client came back from the DO verbatim in delta frames, matching the B5/B6 'server accepts client id as primary id' design.",
+        "renderCountAssertion": "Not verified — would require React-Profiler init-script; not in scope of this tap."
+      }
+    },
+    {
+      "id": "VP4",
+      "title": "Rewind and resubmit broadcast snapshots (B2)",
+      "status": "deferred",
+      "reason": "Rewind/resubmit UI actions not exercised in this run. Tap is now proven; a follow-up session can click rewind and resubmit and capture the expected `reason:'rewind'|'resubmit'` snapshot frames."
+    },
+    {
+      "id": "VP5",
+      "title": "Branch navigation without getBranches RPCs (B7)",
+      "status": "pass_partial",
+      "evidence": {
+        "resourceTimingLegacyRpcs": 0,
+        "branchInfoOnInitialSnapshot": "Initial snapshot carried `branchInfo: []` — field present, confirming the piggyback channel wired per spec."
+      }
+    },
+    {
+      "id": "VP6",
+      "title": "Cleanup audit (B8–B10)",
+      "status": "pass",
+      "evidence": {
+        "agentSessionsCollection_refs": 0,
+        "legacy_reconciliation_names_refs": 0,
+        "file_agent_sessions_collection_ts": "DELETED"
+      }
+    },
+    {
+      "id": "VP7",
+      "title": "Full integration smoke (B1–B11)",
+      "status": "pass_partial",
+      "evidence": "Session create → 3 user turns → server-assigned assistant ids → ctx tokens advance → num_turns=10 → UI remains Connected/idle. Rewind/resubmit/branch-nav + reload steps not exercised."
+    }
+  ],
+  "netVerdict": {
+    "passing": [
+      "VP1 (protocol shape + client-id acceptance)",
+      "VP3 (wire-level)",
+      "VP5 (negative-half)",
+      "VP6 (static audit)"
+    ],
+    "partial": ["VP2", "VP7"],
+    "deferred": ["VP4"],
+    "findings": [
+      "messageSeq non-persistence under DO rehydrate → silent client-side frame drops. Not a spec regression (PR spec did not mandate persistence) but a correctness gap the seq-based wire protocol should close. Recommend filing as a follow-up issue gated on staging repro."
+    ]
+  },
+  "artifacts": {
+    "rawFrames": ".kata/verification-evidence/vp1-ws-frames-14.ndjson",
+    "tapScript": "scripts/verify/ws-tap.mjs"
+  }
+}

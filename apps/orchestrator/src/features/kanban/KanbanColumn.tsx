@@ -65,9 +65,7 @@ export function KanbanColumn({ title, cards, dropId, isBacklog }: KanbanColumnPr
     <div
       ref={setNodeRef}
       className={`flex min-w-[180px] flex-1 shrink-0 snap-start flex-col gap-2 rounded-lg border p-2.5 transition-colors ${
-        isOver
-          ? 'border-primary bg-primary/5'
-          : 'border-border/50 bg-background/50'
+        isOver ? 'border-primary bg-primary/5' : 'border-border/50 bg-background/50'
       }`}
     >
       {/* Column header */}
