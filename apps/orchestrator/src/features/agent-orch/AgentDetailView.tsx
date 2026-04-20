@@ -8,6 +8,9 @@ import { StatusBar } from '~/components/status-bar'
 import { type BranchInfoRow, createBranchInfoCollection } from '~/db/branch-info-collection'
 import { projectsCollection } from '~/db/projects-collection'
 import { upsertSessionLiveState } from '~/db/session-live-state-collection'
+import { useDerivedGate } from '~/hooks/use-derived-gate'
+import { useDerivedStatus } from '~/hooks/use-derived-status'
+import { useSessionLiveState } from '~/hooks/use-session-live-state'
 import type { ProjectInfo } from '~/lib/types'
 import { useStatusBarStore } from '~/stores/status-bar'
 import { ChatThread } from './ChatThread'
@@ -23,7 +26,6 @@ interface AgentDetailViewProps {
 
 export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps) {
   const {
-    state,
     messages,
     kataState,
     isConnecting,
@@ -36,6 +38,12 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
     injectQaPair,
     navigateBranch,
   } = agent
+
+  // Spec #31 P5 B10: status / project / model / sdkSessionId come from the
+  // D1-mirrored SessionLiveState row + message-derived status. Replaces
+  // the pre-P5 reads off the (now-deleted) SessionState blob.
+  const live = useSessionLiveState(sessionId)
+  const derivedStatus = useDerivedStatus(sessionId)
 
   // GH#14 B7: derive a Map<parentMsgId, {current,total,siblings}> from the
   // per-session `branchInfoCollection` (DO-authored). ChatThread accepts the
@@ -79,7 +87,7 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
   // Keep worktree info in the live-state collection. projectsCollection is
   // a query-backed collection with a 30s refetch interval — replaces the
   // old manual poll that used to live here.
-  const projectName = state?.project
+  const projectName = live.project
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data: projectsData } = useLiveQuery((q) => q.from({ p: projectsCollection as any }))
 
@@ -113,7 +121,12 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
     [sendMessage],
   )
 
-  const status = state?.status ?? 'idle'
+  const status = derivedStatus ?? live.status ?? 'idle'
+
+  // Spec-31 P4b: compute the message-derived gate once here, pass to
+  // ChatThread. Replaces the pre-P4b `(gate, status)` dual signal sourced
+  // from SessionState.
+  const derivedGate = useDerivedGate(sessionId)
 
   // Draft key scopes localStorage drafts. Now that tabs ARE sessions (Yjs
   // Y.Array of sessionIds), use sessionId directly — no separate tab ID.
@@ -127,14 +140,15 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
       <KataStatePanel kataState={kataState} />
 
       <div className="flex items-center justify-end px-4 py-1">
-        <ConversationDownload messages={messages} sessionId={state?.session_id ?? 'unknown'} />
+        <ConversationDownload
+          messages={messages}
+          sessionId={live.sdkSessionId ?? sessionId ?? 'unknown'}
+        />
       </div>
 
       <ChatThread
         messages={messages}
-        gate={state?.gate ?? null}
-        status={status}
-        state={state}
+        derivedGate={derivedGate}
         isConnecting={isConnecting}
         onResolveGate={resolveGate}
         onQaResolved={injectQaPair}
@@ -150,7 +164,7 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
         submitDraft={submitDraft}
         sessionId={sessionId}
         disabled={status === 'waiting_gate'}
-        status={state?.status}
+        status={derivedStatus ?? live.status}
         onInterrupt={interrupt}
         draftKey={draftKey}
       />

@@ -138,10 +138,101 @@ describe('SESSION_DO_MIGRATIONS', () => {
     })
   })
 
+  describe('migration v6: session_meta table', () => {
+    it('exists as version 6', () => {
+      const v6 = SESSION_DO_MIGRATIONS.find((m) => m.version === 6)
+      expect(v6).toBeDefined()
+      expect(v6!.description).toContain('session_meta')
+    })
+
+    it('creates the session_meta table with the expected columns', () => {
+      const v6 = SESSION_DO_MIGRATIONS.find((m) => m.version === 6)!
+      const executed: string[] = []
+      const fakeSql = {
+        exec(query: string) {
+          executed.push(query)
+          return { toArray: () => [] }
+        },
+      }
+
+      v6.up(fakeSql as any)
+
+      const createStmt = executed.find(
+        (q) => q.includes('CREATE TABLE') && q.includes('session_meta'),
+      )
+      expect(createStmt).toBeTruthy()
+      expect(createStmt).toContain('id INTEGER PRIMARY KEY CHECK (id = 1)')
+      expect(createStmt).toContain('message_seq INTEGER NOT NULL DEFAULT 0')
+      expect(createStmt).toContain('sdk_session_id TEXT')
+      expect(createStmt).toContain('active_callback_token TEXT')
+      expect(createStmt).toContain('context_usage_json TEXT')
+      expect(createStmt).toContain('context_usage_cached_at INTEGER')
+      expect(createStmt).toContain('updated_at INTEGER NOT NULL DEFAULT 0')
+    })
+
+    it('seeds the singleton row via INSERT OR IGNORE', () => {
+      const v6 = SESSION_DO_MIGRATIONS.find((m) => m.version === 6)!
+      const executed: string[] = []
+      const fakeSql = {
+        exec(query: string) {
+          executed.push(query)
+          return { toArray: () => [] }
+        },
+      }
+
+      v6.up(fakeSql as any)
+
+      const insertStmt = executed.find(
+        (q) => q.includes('INSERT OR IGNORE') && q.includes('session_meta'),
+      )
+      expect(insertStmt).toBeTruthy()
+      expect(insertStmt).toContain('(1, 0)')
+    })
+
+    it('runs end-to-end against an in-memory SQLite-like harness', () => {
+      // Simulate a minimal DO sql.exec that records DDL + row state so we can
+      // assert the table exists and the singleton row is in place after v6.
+      const tables = new Set<string>()
+      const sessionMetaRows: Array<{ id: number; message_seq: number; updated_at: number }> = []
+      const fakeSql = {
+        exec(query: string, ..._bindings: unknown[]) {
+          if (/CREATE TABLE IF NOT EXISTS session_meta/.test(query)) {
+            tables.add('session_meta')
+            return { toArray: () => [] }
+          }
+          if (/INSERT OR IGNORE INTO session_meta/.test(query)) {
+            if (!sessionMetaRows.find((r) => r.id === 1)) {
+              sessionMetaRows.push({ id: 1, message_seq: 0, updated_at: 0 })
+            }
+            return { toArray: () => [] }
+          }
+          if (/SELECT name FROM sqlite_master/.test(query)) {
+            return {
+              toArray: () =>
+                Array.from(tables).map((name) => ({ name })) as Array<{ name: string }>,
+            }
+          }
+          return { toArray: () => [] }
+        },
+      }
+
+      const v6 = SESSION_DO_MIGRATIONS.find((m) => m.version === 6)!
+      v6.up(fakeSql as any)
+
+      const rows = (
+        fakeSql.exec(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='session_meta'",
+        ) as { toArray: () => Array<{ name: string }> }
+      ).toArray()
+      expect(rows).toEqual([{ name: 'session_meta' }])
+      expect(sessionMetaRows).toEqual([{ id: 1, message_seq: 0, updated_at: 0 }])
+    })
+  })
+
   describe('migration chain integrity', () => {
-    it('has sequential version numbers from 1 to 5', () => {
+    it('has sequential version numbers from 1 to 7', () => {
       const versions = SESSION_DO_MIGRATIONS.map((m) => m.version)
-      expect(versions).toEqual([1, 2, 3, 4, 5])
+      expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7])
     })
 
     it('all migrations have descriptions', () => {
@@ -1114,6 +1205,137 @@ describe('SessionDO watchdog env threshold', () => {
   })
 })
 
+// ── messageSeq persistence via session_meta (B1) ───────────────
+//
+// Mirrors the exact onStart read + broadcastMessages write the DO uses.
+// We can't construct SessionDO directly (TC39 decorators), so we stand up
+// the same two statements against an in-memory session_meta row.
+
+function createSessionMetaSql() {
+  const row = { message_seq: 0, updated_at: 0 }
+  const writes: Array<{ message_seq: number; updated_at: number }> = []
+  function fakeSql<T>(strings: TemplateStringsArray, ...values: unknown[]): T[] {
+    const query = strings.join('?').trim()
+    if (query.startsWith('SELECT message_seq FROM session_meta')) {
+      return [{ message_seq: row.message_seq }] as T[]
+    }
+    if (query.startsWith('UPDATE session_meta SET message_seq =')) {
+      row.message_seq = values[0] as number
+      row.updated_at = values[1] as number
+      writes.push({ message_seq: row.message_seq, updated_at: row.updated_at })
+      return [] as T[]
+    }
+    return [] as T[]
+  }
+  return { sql: fakeSql, row, writes }
+}
+
+// Kept in sync with MESSAGE_SEQ_PERSIST_EVERY in session-do.ts — streaming
+// `partial_assistant` frames would otherwise trigger per-frame SQL writes.
+const MESSAGE_SEQ_PERSIST_EVERY = 10
+
+describe('messageSeq persistence (session_meta B1)', () => {
+  /**
+   * Simulates SessionDO.broadcastMessages' seq+persist contract exactly:
+   *   if (!opts.targetClientId) {
+   *     this.messageSeq += 1
+   *     if (this.messageSeq % MESSAGE_SEQ_PERSIST_EVERY === 0) {
+   *       this.sql`UPDATE session_meta SET message_seq = ${n}, updated_at = ${t} WHERE id = 1`
+   *     }
+   *   }
+   */
+  function makeBroadcaster(sql: ReturnType<typeof createSessionMetaSql>['sql'], seed: number) {
+    let messageSeq = seed
+    return {
+      broadcast(opts: { targetClientId?: string } = {}): number {
+        if (!opts.targetClientId) {
+          messageSeq += 1
+          if (messageSeq % MESSAGE_SEQ_PERSIST_EVERY === 0) {
+            sql`UPDATE session_meta SET message_seq = ${messageSeq}, updated_at = ${Date.now()} WHERE id = 1`
+          }
+        }
+        return messageSeq
+      },
+      getSeq: () => messageSeq,
+    }
+  }
+
+  it('batches persistence to every Nth broadcast (streaming perf)', () => {
+    const { sql, row, writes } = createSessionMetaSql()
+    const b = makeBroadcaster(sql, 0)
+
+    // First N-1 broadcasts advance the in-memory seq but do not hit SQLite.
+    for (let i = 1; i < MESSAGE_SEQ_PERSIST_EVERY; i++) {
+      expect(b.broadcast()).toBe(i)
+    }
+    expect(writes).toHaveLength(0)
+    expect(row.message_seq).toBe(0)
+
+    // Nth broadcast flushes to SQLite.
+    expect(b.broadcast()).toBe(MESSAGE_SEQ_PERSIST_EVERY)
+    expect(writes.map((w) => w.message_seq)).toEqual([MESSAGE_SEQ_PERSIST_EVERY])
+    expect(row.message_seq).toBe(MESSAGE_SEQ_PERSIST_EVERY)
+  })
+
+  it('rehydrates messageSeq across a DO restart from the last persisted Nth', () => {
+    const { sql, row } = createSessionMetaSql()
+
+    // First instance: enough broadcasts to cross two persist boundaries plus
+    // some un-persisted remainder (frame-precise recovery not required —
+    // clients snapshot on reconnect).
+    const total = MESSAGE_SEQ_PERSIST_EVERY * 2 + 3
+    const b1 = makeBroadcaster(sql, 0)
+    for (let i = 0; i < total; i++) b1.broadcast()
+    expect(row.message_seq).toBe(MESSAGE_SEQ_PERSIST_EVERY * 2)
+
+    // Simulate onStart on a fresh DO instance — re-read persisted seq.
+    const metaRows = sql<{
+      message_seq: number
+    }>`SELECT message_seq FROM session_meta WHERE id = 1`
+    const rehydrated = metaRows[0]?.message_seq ?? 0
+    expect(rehydrated).toBe(MESSAGE_SEQ_PERSIST_EVERY * 2)
+
+    // Next broadcast on the new instance continues from the persisted point.
+    const b2 = makeBroadcaster(sql, rehydrated)
+    expect(b2.broadcast()).toBe(MESSAGE_SEQ_PERSIST_EVERY * 2 + 1)
+  })
+
+  it('targeted broadcasts do NOT increment or persist seq', () => {
+    const { sql, row, writes } = createSessionMetaSql()
+    const b = makeBroadcaster(sql, 0)
+
+    // Drive to the first persist boundary so we have something to observe.
+    for (let i = 0; i < MESSAGE_SEQ_PERSIST_EVERY; i++) b.broadcast()
+    expect(row.message_seq).toBe(MESSAGE_SEQ_PERSIST_EVERY)
+    expect(writes).toHaveLength(1)
+
+    // Targeted sends echo current seq — must not advance shared counter
+    // and must not emit a SQL write.
+    expect(b.broadcast({ targetClientId: 'client-A' })).toBe(MESSAGE_SEQ_PERSIST_EVERY)
+    expect(b.broadcast({ targetClientId: 'client-B' })).toBe(MESSAGE_SEQ_PERSIST_EVERY)
+
+    expect(row.message_seq).toBe(MESSAGE_SEQ_PERSIST_EVERY)
+    expect(writes).toHaveLength(1)
+  })
+
+  it('onStart falls back to 0 when the session_meta row is missing (defensive)', () => {
+    // The v6 migration INSERT OR IGNOREs the row, but belt-and-suspenders:
+    // the DO uses `?? 0`. Simulate an empty table.
+    function emptySql<T>(strings: TemplateStringsArray): T[] {
+      const query = strings.join('').trim()
+      if (query.startsWith('SELECT message_seq FROM session_meta')) {
+        return [] as T[]
+      }
+      return [] as T[]
+    }
+    const metaRows = emptySql<{
+      message_seq: number
+    }>`SELECT message_seq FROM session_meta WHERE id = 1`
+    const seed = metaRows[0]?.message_seq ?? 0
+    expect(seed).toBe(0)
+  })
+})
+
 // ── claimSubmitId (sendMessage idempotency) ────────────────────
 
 /**
@@ -1204,5 +1426,534 @@ describe('claimSubmitId', () => {
     // Insert at now = 62_000 → cutoff 2_000 → 'old' (created_at 1_000) evicted.
     claimSubmitId(sql, 'new', 62_000)
     expect(rows.map((r) => r.id)).toEqual(['new'])
+  })
+})
+
+// ── P3 B4: getContextUsage cached-or-fresh + in-flight dedupe ──
+//
+// SessionDO uses TC39 decorators so can't be instantiated in tests. The
+// harness below mirrors the exact contract of SessionDO.getContextUsage:
+//   - 5s TTL cache-hit
+//   - single-flight probe dedupe
+//   - 3s timeout fallback to stale/null
+//   - UPDATE session_meta.context_usage_json on fresh probe success
+// It runs the identical code path against fake sql / fake sendToGateway.
+
+interface FakeContextUsage {
+  totalTokens: number
+  maxTokens: number
+  percentage: number
+  model?: string
+}
+
+function createContextUsageHarness(initial: {
+  row?: {
+    context_usage_json: string | null
+    context_usage_cached_at: number | null
+  }
+  hasGatewayConn: boolean
+}) {
+  const row = initial.row ?? { context_usage_json: null, context_usage_cached_at: null }
+  const sends: string[] = []
+  const resolvers: Array<{
+    resolve: (v: FakeContextUsage | null) => void
+    reject: (e: unknown) => void
+  }> = []
+  let probeInFlight: Promise<FakeContextUsage | null> | null = null
+  let hasGatewayConn = initial.hasGatewayConn
+
+  function sql<T>(strings: TemplateStringsArray, ...values: unknown[]): T[] {
+    const query = strings.join('?').trim()
+    if (query.startsWith('SELECT context_usage_json, context_usage_cached_at FROM session_meta')) {
+      return [
+        {
+          context_usage_json: row.context_usage_json,
+          context_usage_cached_at: row.context_usage_cached_at,
+        },
+      ] as T[]
+    }
+    if (query.startsWith('UPDATE session_meta')) {
+      row.context_usage_json = values[0] as string | null
+      row.context_usage_cached_at = values[1] as number | null
+      return [] as T[]
+    }
+    return [] as T[]
+  }
+
+  function probeWithTimeout(): Promise<FakeContextUsage | null> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const idx = resolvers.findIndex((r) => r.resolve === innerResolve)
+        if (idx >= 0) resolvers.splice(idx, 1)
+        reject(new Error('probe_timeout'))
+      }, 3_000)
+      const innerResolve = (v: FakeContextUsage | null) => {
+        clearTimeout(timer)
+        resolve(v)
+      }
+      const innerReject = (e: unknown) => {
+        clearTimeout(timer)
+        reject(e)
+      }
+      resolvers.push({ resolve: innerResolve, reject: innerReject })
+      sends.push('get-context-usage')
+    })
+  }
+
+  async function getContextUsage(): Promise<{
+    contextUsage: FakeContextUsage | null
+    fetchedAt: string
+    isCached: boolean
+  }> {
+    const rows = sql<{
+      context_usage_json: string | null
+      context_usage_cached_at: number | null
+    }>`SELECT context_usage_json, context_usage_cached_at FROM session_meta WHERE id = 1`
+    const r = rows[0]
+    const cached =
+      r?.context_usage_json && r.context_usage_cached_at != null
+        ? {
+            value: JSON.parse(r.context_usage_json) as FakeContextUsage,
+            cachedAt: r.context_usage_cached_at,
+          }
+        : null
+    const now = Date.now()
+    if (cached && now - cached.cachedAt < 5_000) {
+      return {
+        contextUsage: cached.value,
+        fetchedAt: new Date(cached.cachedAt).toISOString(),
+        isCached: true,
+      }
+    }
+    if (!hasGatewayConn) {
+      return {
+        contextUsage: cached?.value ?? null,
+        fetchedAt: cached ? new Date(cached.cachedAt).toISOString() : new Date().toISOString(),
+        isCached: true,
+      }
+    }
+    if (!probeInFlight) {
+      probeInFlight = probeWithTimeout().finally(() => {
+        probeInFlight = null
+      })
+    }
+    try {
+      const value = await probeInFlight
+      const cachedAt = Date.now()
+      sql`UPDATE session_meta
+        SET context_usage_json = ${JSON.stringify(value)},
+            context_usage_cached_at = ${cachedAt},
+            updated_at = ${cachedAt}
+        WHERE id = 1`
+      return {
+        contextUsage: value,
+        fetchedAt: new Date(cachedAt).toISOString(),
+        isCached: false,
+      }
+    } catch {
+      return {
+        contextUsage: cached?.value ?? null,
+        fetchedAt: cached ? new Date(cached.cachedAt).toISOString() : new Date().toISOString(),
+        isCached: true,
+      }
+    }
+  }
+
+  function deliver(value: FakeContextUsage | null) {
+    // Mirror SessionDO's handleGatewayEvent('context_usage') side effects.
+    const drained = resolvers.splice(0)
+    for (const res of drained) {
+      try {
+        res.resolve(value)
+      } catch {
+        // noop
+      }
+    }
+    const cachedAt = Date.now()
+    sql`UPDATE session_meta
+      SET context_usage_json = ${JSON.stringify(value)},
+          context_usage_cached_at = ${cachedAt},
+          updated_at = ${cachedAt}
+      WHERE id = 1`
+  }
+
+  return {
+    getContextUsage,
+    deliver,
+    sends,
+    resolvers,
+    row,
+    setGatewayConn(v: boolean) {
+      hasGatewayConn = v
+    },
+  }
+}
+
+describe('getContextUsage (P3 B4)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-04-20T00:00:00Z'))
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('context-usage-rest-returns-cached-then-probes', async () => {
+    // Pre-seed a fresh cache (cached_at = now).
+    const cached: FakeContextUsage = { totalTokens: 1_000, maxTokens: 200_000, percentage: 0.5 }
+    const h = createContextUsageHarness({
+      row: {
+        context_usage_json: JSON.stringify(cached),
+        context_usage_cached_at: Date.now(),
+      },
+      hasGatewayConn: true,
+    })
+
+    // First call — fresh cache hit, no probe.
+    const first = await h.getContextUsage()
+    expect(first.isCached).toBe(true)
+    expect(first.contextUsage).toEqual(cached)
+    expect(h.sends).toHaveLength(0)
+
+    // Advance past the 5s TTL — next call must probe.
+    vi.advanceTimersByTime(6_000)
+    const pending = h.getContextUsage()
+    // Probe command was dispatched.
+    expect(h.sends).toHaveLength(1)
+    // Deliver fresh value.
+    const fresh: FakeContextUsage = { totalTokens: 2_000, maxTokens: 200_000, percentage: 1.0 }
+    h.deliver(fresh)
+    const second = await pending
+    expect(second.isCached).toBe(false)
+    expect(second.contextUsage).toEqual(fresh)
+    expect(h.row.context_usage_json).toBe(JSON.stringify(fresh))
+  })
+
+  it('context-usage-inflight-dedupe', async () => {
+    // Cold cache, gateway connected — fire 3 concurrent calls.
+    const h = createContextUsageHarness({ hasGatewayConn: true })
+    const p1 = h.getContextUsage()
+    const p2 = h.getContextUsage()
+    const p3 = h.getContextUsage()
+    // Only one probe command dispatched despite 3 concurrent callers.
+    expect(h.sends).toHaveLength(1)
+    const value: FakeContextUsage = { totalTokens: 500, maxTokens: 200_000, percentage: 0.25 }
+    h.deliver(value)
+    const [r1, r2, r3] = await Promise.all([p1, p2, p3])
+    expect(r1.contextUsage).toEqual(value)
+    expect(r2.contextUsage).toEqual(value)
+    expect(r3.contextUsage).toEqual(value)
+    // All three share the same fresh probe → isCached:false on each.
+    expect(r1.isCached).toBe(false)
+    expect(r2.isCached).toBe(false)
+    expect(r3.isCached).toBe(false)
+  })
+
+  it('context-usage-no-gateway-returns-stale', async () => {
+    // Populate a stale cache, then take the gateway offline.
+    const stale: FakeContextUsage = { totalTokens: 100, maxTokens: 200_000, percentage: 0.05 }
+    const h = createContextUsageHarness({
+      row: {
+        context_usage_json: JSON.stringify(stale),
+        context_usage_cached_at: Date.now() - 10_000, // 10s ago, past the 5s TTL
+      },
+      hasGatewayConn: false,
+    })
+    const res = await h.getContextUsage()
+    expect(res.contextUsage).toEqual(stale)
+    expect(res.isCached).toBe(true)
+    // No probe dispatched when the gateway is offline.
+    expect(h.sends).toHaveLength(0)
+  })
+
+  it('returns null + isCached:true when cold cache and no gateway', async () => {
+    const h = createContextUsageHarness({ hasGatewayConn: false })
+    const res = await h.getContextUsage()
+    expect(res.contextUsage).toBeNull()
+    expect(res.isCached).toBe(true)
+    expect(h.sends).toHaveLength(0)
+  })
+})
+
+// ── P3 B5: getKataState reads D1 mirror ────────────────────────
+
+describe('getKataState (P3 B5)', () => {
+  /**
+   * Mirror of SessionDO.getKataState. D1 + kv sql are both stubbed; we
+   * verify the precedence: D1 row absent → null; kv blob present → full
+   * shape; kv absent + D1 row present → synthesized minimal shape.
+   */
+  async function runGetKataState(input: {
+    d1Row: {
+      kataMode: string | null
+      kataIssue: number | null
+      kataPhase: string | null
+    } | null
+    kvBlob: string | null
+  }): Promise<{ kataState: any; fetchedAt: string }> {
+    const sessionId = 'sess-test-1'
+    // Fake d1.select().from().where().limit()
+    const d1 = {
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => (input.d1Row ? [input.d1Row] : []),
+          }),
+        }),
+      }),
+    }
+    function sql<T>(strings: TemplateStringsArray): T[] {
+      const query = strings.join('').trim()
+      if (query.includes("SELECT value FROM kv WHERE key = 'kata_state'")) {
+        return input.kvBlob ? ([{ value: input.kvBlob }] as T[]) : ([] as T[])
+      }
+      return [] as T[]
+    }
+
+    try {
+      const rows = await d1.select().from().where().limit()
+      const row = rows[0]
+      if (!row || (row.kataMode == null && row.kataIssue == null && row.kataPhase == null)) {
+        return { kataState: null, fetchedAt: new Date().toISOString() }
+      }
+      const kvRows = sql<{ value: string }>`SELECT value FROM kv WHERE key = 'kata_state'`
+      const kvKata = kvRows[0]?.value ? JSON.parse(kvRows[0].value) : null
+      if (kvKata) {
+        return { kataState: kvKata, fetchedAt: new Date().toISOString() }
+      }
+      const minimal = {
+        sessionId,
+        workflowId: null,
+        issueNumber: row.kataIssue ?? null,
+        sessionType: null,
+        currentMode: row.kataMode ?? null,
+        currentPhase: row.kataPhase ?? null,
+        completedPhases: [],
+        template: null,
+        phases: [],
+        modeHistory: [],
+        modeState: {},
+        updatedAt: new Date().toISOString(),
+        beadsCreated: [],
+        editedFiles: [],
+      }
+      return { kataState: minimal, fetchedAt: new Date().toISOString() }
+    } catch {
+      return { kataState: null, fetchedAt: new Date().toISOString() }
+    }
+  }
+
+  it('kata-state-reads-d1: returns full kv blob when present', async () => {
+    const kvKata = {
+      sessionId: 'sess-test-1',
+      workflowId: 'wf-1',
+      issueNumber: 31,
+      sessionType: 'feature',
+      currentMode: 'planning',
+      currentPhase: 'p3',
+      completedPhases: ['p1', 'p2'],
+      template: 'default',
+      phases: ['p1', 'p2', 'p3'],
+      modeHistory: [],
+      modeState: {},
+      updatedAt: '2026-04-20T00:00:00Z',
+      beadsCreated: [],
+      editedFiles: [],
+    }
+    const res = await runGetKataState({
+      d1Row: { kataMode: 'planning', kataIssue: 31, kataPhase: 'p3' },
+      kvBlob: JSON.stringify(kvKata),
+    })
+    expect(res.kataState).toEqual(kvKata)
+    expect(res.fetchedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+  })
+
+  it('returns minimal synthesized shape when D1 row present but kv blob absent', async () => {
+    const res = await runGetKataState({
+      d1Row: { kataMode: 'implementation', kataIssue: 42, kataPhase: 'p1' },
+      kvBlob: null,
+    })
+    expect(res.kataState).not.toBeNull()
+    expect(res.kataState.currentMode).toBe('implementation')
+    expect(res.kataState.issueNumber).toBe(42)
+    expect(res.kataState.currentPhase).toBe('p1')
+    expect(res.kataState.completedPhases).toEqual([])
+  })
+
+  it('returns null when D1 row is missing', async () => {
+    const res = await runGetKataState({ d1Row: null, kvBlob: null })
+    expect(res.kataState).toBeNull()
+  })
+
+  it('returns null when D1 row exists but all kata fields are null (no binding)', async () => {
+    const res = await runGetKataState({
+      d1Row: { kataMode: null, kataIssue: null, kataPhase: null },
+      kvBlob: null,
+    })
+    expect(res.kataState).toBeNull()
+  })
+})
+
+// ── session_meta rehydrates across DO restart (#31 P5 B10) ──────
+//
+// `hydrateMetaFromSql()` runs in onStart. After the Agents SDK's
+// `setState` JSON is lost on eviction, the DO restores status / project
+// / session_id / etc. from the persisted `session_meta` row so the next
+// caller sees a consistent state. We can't construct SessionDO directly
+// (TC39 decorators block instantiation in tests) — we mirror the exact
+// hydrate contract against an in-memory row, which is the same approach
+// used above for `messageSeq persistence`.
+
+describe('session_meta persists across rehydrate (P5 B10)', () => {
+  /**
+   * The column map the DO uses in `hydrateMetaFromSql` — kept in sync
+   * with META_COLUMN_MAP in session-do.ts. If a field moves, this test
+   * and the production map move together.
+   */
+  const COLUMN_MAP: Record<string, string> = {
+    status: 'status',
+    session_id: 'session_id',
+    project: 'project',
+    project_path: 'project_path',
+    model: 'model',
+    prompt: 'prompt',
+    userId: 'user_id',
+    started_at: 'started_at',
+    completed_at: 'completed_at',
+    num_turns: 'num_turns',
+    total_cost_usd: 'total_cost_usd',
+    duration_ms: 'duration_ms',
+    gate: 'gate_json',
+    created_at: 'created_at',
+    error: 'error',
+    summary: 'summary',
+    sdk_session_id: 'sdk_session_id',
+    active_callback_token: 'active_callback_token',
+    lastKataMode: 'last_kata_mode',
+  }
+
+  /**
+   * Mirrors `hydrateMetaFromSql`: read the single `session_meta` row and
+   * apply any non-null columns back onto a fresh default meta. `gate` is
+   * the only JSON-encoded column.
+   */
+  function hydrateFromRow(
+    row: Record<string, unknown> | undefined,
+    defaults: Record<string, unknown>,
+  ): Record<string, unknown> {
+    if (!row) return { ...defaults }
+    const out = { ...defaults }
+    for (const [key, col] of Object.entries(COLUMN_MAP)) {
+      if (!(col in row)) continue
+      const raw = row[col]
+      if (raw === null || raw === undefined) continue
+      if (key === 'gate') {
+        try {
+          out[key] = typeof raw === 'string' ? JSON.parse(raw as string) : raw
+        } catch {
+          // invalid json — skip
+        }
+      } else {
+        out[key] = raw
+      }
+    }
+    return out
+  }
+
+  const DEFAULTS = {
+    status: 'idle',
+    session_id: null,
+    project: '',
+    project_path: '',
+    model: null,
+    prompt: '',
+    userId: null,
+    started_at: null,
+    completed_at: null,
+    num_turns: 0,
+    total_cost_usd: null,
+    duration_ms: null,
+    gate: null,
+    created_at: '',
+    error: null,
+    summary: null,
+    sdk_session_id: null,
+  }
+
+  it('restores status / project / session_id after a simulated DO eviction', () => {
+    // Persisted row after a running session — this is what SQLite holds
+    // after the DO ran a turn and setState has been lost.
+    const persisted = {
+      status: 'running',
+      session_id: 'sess-123',
+      project: 'duraclaw',
+      project_path: '/data/projects/duraclaw',
+      model: 'claude-opus-4-0',
+      prompt: 'help me',
+      user_id: 'u1',
+      num_turns: 3,
+      created_at: '2026-01-01T00:00:00Z',
+      sdk_session_id: 'sdk-abc',
+      gate_json: null,
+    }
+
+    const rehydrated = hydrateFromRow(persisted, DEFAULTS)
+
+    expect(rehydrated.status).toBe('running')
+    expect(rehydrated.session_id).toBe('sess-123')
+    expect(rehydrated.project).toBe('duraclaw')
+    expect(rehydrated.project_path).toBe('/data/projects/duraclaw')
+    expect(rehydrated.model).toBe('claude-opus-4-0')
+    expect(rehydrated.prompt).toBe('help me')
+    expect(rehydrated.userId).toBe('u1')
+    expect(rehydrated.num_turns).toBe(3)
+    expect(rehydrated.sdk_session_id).toBe('sdk-abc')
+    expect(rehydrated.gate).toBeNull()
+  })
+
+  it('deserialises a persisted gate JSON blob back into an object', () => {
+    const gate = {
+      id: 'tool-use-xyz',
+      type: 'permission_request',
+      detail: { tool: 'Write', path: '/tmp/foo' },
+    }
+    const persisted = {
+      status: 'waiting_gate',
+      session_id: 's1',
+      gate_json: JSON.stringify(gate),
+    }
+
+    const rehydrated = hydrateFromRow(persisted, DEFAULTS)
+
+    expect(rehydrated.status).toBe('waiting_gate')
+    expect(rehydrated.gate).toEqual(gate)
+  })
+
+  it('no-ops when the session_meta row is missing (cold-start, pre-migration data)', () => {
+    const rehydrated = hydrateFromRow(undefined, DEFAULTS)
+    // Entire default meta is preserved — hydrate should not poison fields.
+    expect(rehydrated).toEqual(DEFAULTS)
+  })
+
+  it('skips null columns so defaults survive (defensive)', () => {
+    const persisted = {
+      status: null,
+      project: 'only-this-field',
+      session_id: null,
+    }
+    const rehydrated = hydrateFromRow(persisted, DEFAULTS)
+    expect(rehydrated.status).toBe('idle') // default preserved
+    expect(rehydrated.project).toBe('only-this-field')
+    expect(rehydrated.session_id).toBeNull()
+  })
+
+  it('silently skips an unparseable gate_json instead of throwing', () => {
+    const persisted = {
+      status: 'running',
+      gate_json: '{this is not valid json',
+    }
+    const rehydrated = hydrateFromRow(persisted, DEFAULTS)
+    expect(rehydrated.status).toBe('running')
+    expect(rehydrated.gate).toBeNull() // fell back to default
   })
 })

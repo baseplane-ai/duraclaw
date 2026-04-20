@@ -220,8 +220,9 @@ vi.mock('~/hooks/use-messages-collection', async () => {
 
 // useSessionLiveState + upsertSessionLiveState are the new ingress/egress for
 // server-authoritative state. Mock them together with a shared in-memory map
-// so onStateUpdate / onMessage writes round-trip back through the hook and
-// tests can assert on result.current.state / kataState / etc.
+// so onMessage writes round-trip back through the hook and tests can assert
+// on result.current.kataState / contextUsage / etc. (Spec #31 P5 B10:
+// `state` / `sessionResult` no longer exposed.)
 const liveStateStore = new Map<string, Record<string, unknown>>()
 const liveStateSubs = new Set<() => void>()
 const bumpLiveState = () => {
@@ -242,13 +243,12 @@ vi.mock('~/hooks/use-session-live-state', async () => {
       }, [])
       const row = sessionId ? liveStateStore.get(sessionId) : undefined
       return {
-        state: (row?.state as unknown) ?? null,
         contextUsage: (row?.contextUsage as unknown) ?? null,
         kataState: (row?.kataState as unknown) ?? null,
         worktreeInfo: (row?.worktreeInfo as unknown) ?? null,
-        sessionResult: (row?.sessionResult as unknown) ?? null,
         wsReadyState: (row?.wsReadyState as number | undefined) ?? null,
         isLive: row?.wsReadyState === 1,
+        status: (row?.status as unknown) ?? undefined,
       }
     },
   }
@@ -383,7 +383,8 @@ describe('useCodingAgent cache-first hydration', () => {
     expect(result.current.messages).toHaveLength(2)
     expect(result.current.messages[0].parts[0].text).toBe('Hello from cache')
     expect(result.current.messages[1].parts[0].toolName).toBe('bash')
-    expect(result.current.state).toBeNull()
+    // Spec #31 P5 B10: `state` is no longer surfaced by useCodingAgent.
+    expect(result.current.kataState).toBeNull()
   })
 
   test('loads cached messages eagerly on agentName change (session switch)', () => {
@@ -427,19 +428,22 @@ describe('useCodingAgent cache-first hydration', () => {
     expect(result.current.messages).toHaveLength(0)
   })
 
-  test('resets state when agentName changes', () => {
+  test('resets per-session kataState when agentName changes', () => {
+    // Spec #31 P5 B10: `state` / `sessionResult` are no longer on the hook
+    // return. Exercise per-session isolation via `kataState` instead, which
+    // is still surfaced through `useSessionLiveState`.
     const { result, rerender } = renderHook(({ name }: { name: string }) => useCodingAgent(name), {
       initialProps: { name: 'session-a' },
     })
 
     act(() => {
-      capturedUseAgentConfig?.onStateUpdate?.({ status: 'running', num_turns: 5 })
+      liveStateStore.set('session-a', { kataState: { currentMode: 'impl' } })
+      bumpLiveState()
     })
 
-    expect(result.current.state).not.toBeNull()
+    expect(result.current.kataState).not.toBeNull()
     rerender({ name: 'session-b' })
-    expect(result.current.state).toBeNull()
-    expect(result.current.sessionResult).toBeNull()
+    expect(result.current.kataState).toBeNull()
   })
 
   test('cached messages sorted by createdAt', () => {
@@ -1057,27 +1061,10 @@ describe('legacy gateway_event handling', () => {
     })
   })
 
-  test('processes result events', () => {
-    const { result } = renderHook(() => useCodingAgent('test-session'))
-
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'gateway_event',
-          event: {
-            type: 'result',
-            total_cost_usd: 0.42,
-            duration_ms: 15000,
-          },
-        }),
-      )
-    })
-
-    expect(result.current.sessionResult).toEqual({
-      total_cost_usd: 0.42,
-      duration_ms: 15000,
-    })
-  })
+  // Spec-31 P4b B3: `result` gateway_event client handler removed; cost
+  // and duration are served via D1 REST for non-active callers, and the
+  // running → idle transition is driven by `useDerivedStatus`. The prior
+  // `processes result events` test is therefore intentionally absent.
 
   test('does NOT create messages from assistant gateway_events (stripped)', () => {
     const { result } = renderHook(() => useCodingAgent('test-session'))
@@ -1283,5 +1270,173 @@ describe('branch tracking (P4)', () => {
     const row = branchInfoStore.get('msg-0')!
     expect(row.siblings).toEqual(['usr-1', 'usr-3'])
     expect(row.activeId).toBe('usr-1')
+  })
+
+  // P2 B2: deltas can piggyback branchInfo — user-turn mutations that add a
+  // sibling ship the updated BranchInfoRow on the same frame as the message
+  // upsert. Mirrors the snapshot path, applied inline on the delta handler.
+  test('delta payload branchInfo.upsert lands in the branch-info collection', () => {
+    renderHook(() => useCodingAgent('test-session'))
+    msgSeq = 0
+
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage({
+          type: 'messages',
+          sessionId: 'test-session',
+          seq: 1,
+          payload: {
+            kind: 'delta',
+            upsert: [{ id: 'usr-2', role: 'user', parts: [{ type: 'text', text: 'v2' }] }],
+            branchInfo: {
+              upsert: [
+                {
+                  parentMsgId: 'msg-0',
+                  sessionId: 'test-session',
+                  siblings: ['usr-1', 'usr-2'],
+                  activeId: 'usr-2',
+                  updatedAt: '2026-04-20T00:00:00Z',
+                },
+              ],
+            },
+          },
+        }),
+      )
+    })
+
+    expect(branchInfoStore.has('msg-0')).toBe(true)
+    const row = branchInfoStore.get('msg-0')!
+    expect(row.siblings).toEqual(['usr-1', 'usr-2'])
+    expect(row.activeId).toBe('usr-2')
+  })
+
+  test('delta payload branchInfo.upsert updates existing row', () => {
+    renderHook(() => useCodingAgent('test-session'))
+    msgSeq = 0
+
+    // Seed an existing row.
+    branchInfoStore.set('msg-0', {
+      parentMsgId: 'msg-0',
+      sessionId: 'test-session',
+      siblings: ['usr-1'],
+      activeId: 'usr-1',
+      updatedAt: '2026-04-19T00:00:00Z',
+    })
+
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage({
+          type: 'messages',
+          sessionId: 'test-session',
+          seq: 1,
+          payload: {
+            kind: 'delta',
+            upsert: [{ id: 'usr-3', role: 'user', parts: [{ type: 'text', text: 'v3' }] }],
+            branchInfo: {
+              upsert: [
+                {
+                  parentMsgId: 'msg-0',
+                  sessionId: 'test-session',
+                  siblings: ['usr-1', 'usr-3'],
+                  activeId: 'usr-3',
+                  updatedAt: '2026-04-20T00:00:00Z',
+                },
+              ],
+            },
+          },
+        }),
+      )
+    })
+
+    const row = branchInfoStore.get('msg-0')!
+    expect(row.siblings).toEqual(['usr-1', 'usr-3'])
+    expect(row.activeId).toBe('usr-3')
+  })
+
+  test('delta without branchInfo does not touch branch-info collection', () => {
+    renderHook(() => useCodingAgent('test-session'))
+    msgSeq = 0
+
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage(
+          deltaFrame([{ id: 'usr-1', role: 'user', parts: [{ type: 'text', text: 'hi' }] }]),
+        ),
+      )
+    })
+
+    expect(branchInfoStore.size).toBe(0)
+  })
+})
+
+// ── spec-31 P4a B8: wire seq stamping on message rows ──────────────────
+
+describe('seq stamping (P4a B8)', () => {
+  beforeEach(() => {
+    cachedMessagesStore.clear()
+    liveStateStore.clear()
+    collectionSubs.clear()
+    liveStateSubs.clear()
+    capturedUseAgentConfig = null
+    msgSeq = 0
+    vi.clearAllMocks()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  test('delta-stamps-seq: applied delta rows carry frame.seq', () => {
+    renderHook(() => useCodingAgent('test-session'))
+
+    // 6 no-op deltas to push msgSeq up; then seq=7 delta.
+    for (let i = 0; i < 6; i++) {
+      act(() => {
+        capturedUseAgentConfig?.onMessage?.(
+          makeWsMessage(
+            deltaFrame([
+              { id: `pad-${i}`, role: 'assistant', parts: [{ type: 'text', text: 'x' }] },
+            ]),
+          ),
+        )
+      })
+    }
+
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage(
+          deltaFrame([
+            { id: 'stamped-7', role: 'assistant', parts: [{ type: 'text', text: 'hi' }] },
+          ]),
+        ),
+      )
+    })
+
+    const row = cachedMessagesStore.get('stamped-7') as CachedMessage & { seq?: number }
+    expect(row).toBeDefined()
+    expect(row.seq).toBe(7)
+  })
+
+  test('snapshot-stamps-version: snapshot rows all carry payload.version', () => {
+    renderHook(() => useCodingAgent('test-session'))
+
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage(
+          snapshotFrame(
+            [
+              { id: 's-1', role: 'user', parts: [{ type: 'text', text: 'u' }] },
+              { id: 's-2', role: 'assistant', parts: [{ type: 'text', text: 'a' }] },
+            ],
+            { version: 3 },
+          ),
+        ),
+      )
+    })
+
+    const r1 = cachedMessagesStore.get('s-1') as CachedMessage & { seq?: number }
+    const r2 = cachedMessagesStore.get('s-2') as CachedMessage & { seq?: number }
+    expect(r1.seq).toBe(3)
+    expect(r2.seq).toBe(3)
   })
 })

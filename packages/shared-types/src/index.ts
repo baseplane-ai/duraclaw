@@ -521,6 +521,24 @@ export interface KataStateEvent {
   kata_state: KataSessionState | null
 }
 
+// ── Context Usage (shared between DO + client) ─────────────────────
+//
+// Mirror of the canonical shape client-side code writes into
+// `sessionLiveStateCollection.contextUsage`. The SDK's
+// `query.getContextUsage()` returns a `Record<string, unknown>` on the wire
+// (see ContextUsageEvent.usage); this interface is the parsed /
+// strongly-typed projection used by UI consumers and by the new P3 REST
+// cache in SessionDO's `session_meta.context_usage_json` column.
+
+export interface ContextUsage {
+  totalTokens: number
+  maxTokens: number
+  percentage: number
+  model?: string
+  isAutoCompactEnabled?: boolean
+  autoCompactThreshold?: number
+}
+
 // ── Session State ────────────────────────────────────────────────────
 
 export type SessionStatus =
@@ -530,56 +548,12 @@ export type SessionStatus =
   | 'waiting_permission'
   | 'waiting_gate'
 
-export interface SessionState {
-  status: SessionStatus
-  session_id: string | null
-  project: string
-  project_path: string
-  model: string | null
-  prompt: string
-  userId: string | null
-  started_at: string | null
-  completed_at: string | null
-  num_turns: number
-  total_cost_usd: number | null
-  duration_ms: number | null
-  gate: {
-    id: string
-    type: 'permission_request' | 'ask_user'
-    detail: unknown
-  } | null
-  created_at: string
-  updated_at: string
-  result: string | null
-  error: string | null
-  summary: string | null
-  sdk_session_id: string | null
-  /**
-   * Per-session UUID minted by the DO on each triggerGatewayDial and sent to
-   * the gateway as the WS dial-back bearer (?token=<uuid>). Validated timing-
-   * safely on gateway-role onConnect. Rotated on new dial, cleared on terminal
-   * state. Lives in the DO's setState JSON blob — no SQLite migration.
-   */
-  active_callback_token?: string
-  /**
-   * Last `currentMode` observed on a `kata_state` event. Used by the chain
-   * UX mode-transition detector: when a new kata_state arrives with a
-   * different `currentMode` the DO kicks the runner and respawns in the new
-   * mode. Stored in the DO's setState JSON blob — no SQLite migration.
-   */
-  lastKataMode?: string
-  /** @deprecated Use gate instead */
-  pending_question?: {
-    tool_call_id: string
-    questions: unknown[]
-  } | null
-  /** @deprecated Use gate instead */
-  pending_permission?: {
-    tool_call_id: string
-    tool_name: string
-    input: Record<string, unknown>
-  } | null
-}
+// SessionState deleted (#31 P5 / B10). Status / gate / result are now derived
+// client-side from `messagesCollection`; context usage and kata state go over
+// REST; all other ex-SessionState fields moved into the DO's typed
+// `session_meta` SQLite table (see `SessionMeta` in session-do.ts).
+// `SessionStatus` is retained — still used by status-derivation hooks and the
+// D1-mirrored SessionSummary row.
 
 export interface SpawnConfig {
   project: string
@@ -666,6 +640,20 @@ export interface DeltaPayload {
    * feature (e.g. "delete attachment") adds a producer.
    */
   remove?: string[]
+  /**
+   * P2 B2: DO piggybacks affected parents' sibling lists onto the same delta
+   * frame that carries the user-turn upsert (after sendMessage / forkWithHistory
+   * mutations that add a sibling). Snapshot payloads already carry
+   * `BranchInfoRow[]` — this brings deltas to parity.
+   *
+   * `remove` is reserved for future producers (message deletion reducing
+   * siblings). No current DO call site populates it — the field exists so the
+   * client handler is correct-by-construction.
+   */
+  branchInfo?: {
+    upsert?: BranchInfoRow[]
+    remove?: string[]
+  }
 }
 
 export interface BranchInfoRow {

@@ -23,34 +23,23 @@ import { contentToParts } from '~/lib/message-parts'
 import { isNative, wsBaseUrl } from '~/lib/platform'
 import type {
   ContentBlock,
+  ContextUsage,
   GateResponse,
   KataSessionState,
   SessionMessage,
-  SessionState,
   SpawnConfig,
 } from '~/lib/types'
 import { useAppLifecycle } from './use-app-lifecycle'
 
-export type { ContentBlock, GateResponse, SessionState as CodingAgentState, SpawnConfig }
+export type { ContentBlock, ContextUsage, GateResponse, SpawnConfig }
 
 export interface GatewayEvent {
   type: string
   [key: string]: unknown
 }
 
-export interface ContextUsage {
-  totalTokens: number
-  maxTokens: number
-  percentage: number
-  model?: string
-  isAutoCompactEnabled?: boolean
-  autoCompactThreshold?: number
-}
-
 export interface UseCodingAgentResult {
-  state: SessionState | null
   messages: SessionMessage[]
-  sessionResult: { total_cost_usd: number; duration_ms: number } | null
   kataState: KataSessionState | null
   contextUsage: ContextUsage | null
   wsReadyState: number
@@ -97,14 +86,25 @@ function toSessionMessage(row: CachedMessage): SessionMessage {
   } as SessionMessage
 }
 
-/** Stamp a SessionMessage with its sessionId for the collection row. */
-function toRow(msg: SessionMessage, sessionId: string): CachedMessage & Record<string, unknown> {
+/**
+ * Stamp a SessionMessage with its sessionId (and optionally wire seq) for
+ * the collection row. Spec-31 P4a B8: delta handlers pass `frame.seq`;
+ * snapshot handlers pass `frame.payload.version`. Optimistic and cold-start
+ * rows omit seq — those rows sort last within their group by tuple
+ * `[seq ?? Infinity, turnOrdinal ?? Infinity, createdAt]`.
+ */
+function toRow(
+  msg: SessionMessage,
+  sessionId: string,
+  seq?: number,
+): CachedMessage & Record<string, unknown> {
   return {
     id: msg.id,
     sessionId,
     role: msg.role,
     parts: msg.parts,
     createdAt: msg.createdAt,
+    ...(seq !== undefined ? { seq } : {}),
   } as CachedMessage & Record<string, unknown>
 }
 
@@ -120,7 +120,11 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   const messagesCollection = useMemo(() => createMessagesCollection(agentName), [agentName])
 
   // Server-authoritative live state from the TanStack DB collection.
-  const { state, contextUsage, kataState, sessionResult } = useSessionLiveState(agentName)
+  // Spec #31 P5 B10: `state` / `sessionResult` narrowed off. Status / gate
+  // / result come from `useDerivedStatus` / `useDerivedGate` over
+  // `messagesCollection`; `contextUsage` / `kataState` remain on the
+  // live-state collection.
+  const { contextUsage, kataState } = useSessionLiveState(agentName)
 
   // Reset per-session transient state on agentName change (tab switch without
   // remount). Collection rows for other sessions are untouched.
@@ -149,10 +153,10 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
    * from. See planning/research/2026-04-20-streamdb-pattern-adoption.md.
    */
   const bulkUpsert = useCallback(
-    (msgs: SessionMessage[]) => {
+    (msgs: SessionMessage[], seq?: number) => {
       try {
         messagesCollection.utils.writeBatch(() => {
-          for (const m of msgs) messagesCollection.utils.writeUpsert(toRow(m, agentName))
+          for (const m of msgs) messagesCollection.utils.writeUpsert(toRow(m, agentName, seq))
         })
       } catch {
         // Rare mutation-API contention; next event will retry.
@@ -161,9 +165,15 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     [agentName, messagesCollection],
   )
 
-  /** Snapshot reconcile: delete rows for this session not in `messages`, then upsert. */
+  /**
+   * Snapshot reconcile: delete rows for this session not in `messages`, then
+   * upsert. Spec-31 P4a B8: every row gets stamped with `seq` (the
+   * snapshot's `payload.version`). Rows within the snapshot tie on seq and
+   * fall through to the `turnOrdinal → createdAt` secondary — correct,
+   * since the snapshot's history was already ordered at emit time.
+   */
   const applySnapshot = useCallback(
-    (messages: SessionMessage[]) => {
+    (messages: SessionMessage[], seq?: number) => {
       const newIds = new Set(messages.map((m) => m.id))
       const staleIds: string[] = []
       try {
@@ -179,7 +189,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           messagesCollection.utils.writeDelete(id)
         } catch {}
       }
-      bulkUpsert(messages)
+      bulkUpsert(messages, seq)
     },
     [bulkUpsert, messagesCollection, agentName],
   )
@@ -207,7 +217,12 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         sessionId: string
         seq: number
         payload:
-          | { kind: 'delta'; upsert?: SessionMessage[]; remove?: string[] }
+          | {
+              kind: 'delta'
+              upsert?: SessionMessage[]
+              remove?: string[]
+              branchInfo?: { upsert?: BranchInfoRow[]; remove?: string[] }
+            }
           | {
               kind: 'snapshot'
               version: number
@@ -221,7 +236,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       const lastSeq = map.get(agentName) ?? 0
 
       if (frame.payload.kind === 'snapshot') {
-        applySnapshot(frame.payload.messages)
+        applySnapshot(frame.payload.messages, frame.payload.version)
         // Reset lastSeq to the snapshot's version unconditionally. The old
         // `Math.max(lastSeq, version)` prevented the client from accepting a
         // lower version after a DO rehydrate (messageSeq resets to 0 in-memory
@@ -267,7 +282,9 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         try {
           messagesCollection.utils.writeBatch(() => {
             for (const m of upsertList) {
-              messagesCollection.utils.writeUpsert(toRow(m, agentName))
+              // Spec-31 P4a B8: stamp delta rows with `frame.seq` so the
+              // messages-collection sort orders by wire arrival order.
+              messagesCollection.utils.writeUpsert(toRow(m, agentName, frame.seq))
             }
             if (removeList.length > 0) {
               messagesCollection.utils.writeDelete(removeList)
@@ -275,6 +292,46 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           })
         } catch {
           // swallow — next frame will reconcile
+        }
+        // P2 B2: deltas can piggyback branchInfo when a user-turn mutation
+        // changes a parent's sibling list. Apply upserts/removes into the
+        // per-session branchInfoCollection — same pattern as snapshot payloads.
+        const deltaBranchInfo = (
+          frame.payload as {
+            branchInfo?: { upsert?: BranchInfoRow[]; remove?: string[] }
+          }
+        ).branchInfo
+        if (deltaBranchInfo) {
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const biColl = createBranchInfoCollection(agentName) as any
+            if (deltaBranchInfo.upsert && deltaBranchInfo.upsert.length > 0) {
+              for (const row of deltaBranchInfo.upsert) {
+                try {
+                  if (biColl.has?.(row.parentMsgId)) {
+                    biColl.update(row.parentMsgId, (draft: BranchInfoRow) => {
+                      Object.assign(draft, row)
+                    })
+                  } else {
+                    biColl.insert(row)
+                  }
+                } catch {
+                  // ignore — next snapshot retries
+                }
+              }
+            }
+            if (deltaBranchInfo.remove && deltaBranchInfo.remove.length > 0) {
+              for (const id of deltaBranchInfo.remove) {
+                try {
+                  biColl.delete?.(id)
+                } catch {
+                  // ignore — next snapshot retries
+                }
+              }
+            }
+          } catch {
+            // collection may not be ready; next snapshot retries
+          }
         }
         map.set(agentName, frame.seq)
         return
@@ -292,7 +349,10 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     [agentName, applySnapshot, messagesCollection],
   )
 
-  const connection = useAgent<SessionState>({
+  // Spec #31 P5 B10: no DO-side setState broadcast anymore
+  // (shouldSendProtocolMessages returns false). The generic is unused for
+  // state sync but `useAgent` still requires one — pass `unknown`.
+  const connection = useAgent<unknown>({
     agent: 'session-agent',
     name: agentName,
     ...(wsBaseUrl() ? { host: wsBaseUrl() } : {}),
@@ -308,26 +368,9 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           queryDeps: [],
         }
       : {}),
-    onStateUpdate: (newState) => {
-      // Mirror summary-ish fields onto the top level of the live-state row
-      // so session-list readers (tab-bar, SessionListItem, SessionHistory)
-      // can see them without a parallel session-summary dual-write.
-      upsertSessionLiveState(agentName, {
-        state: newState,
-        wsReadyState: 1,
-        status: newState.status,
-        numTurns: newState.num_turns,
-        totalCostUsd: newState.total_cost_usd,
-        durationMs: newState.duration_ms,
-        model: newState.model,
-        project: newState.project,
-        prompt: newState.prompt,
-      })
-      // Hydration is owned by the queryCollection (`messagesCollection` factory
-      // + `useMessagesCollection`). The WS snapshot still writes directly to
-      // the collection as a latency optimisation; the queryFn is the
-      // cold-start / stale-cache fallback with retry: 1, retryDelay: 500.
-    },
+    // Spec #31 P5 B9: SDK state broadcast suppressed via
+    // `shouldSendProtocolMessages() => false` on the DO. The `SessionState`
+    // shape is gone and `onStateUpdate` would never fire — omitted.
     onMessage: (message: MessageEvent) => {
       try {
         const parsed = JSON.parse(typeof message.data === 'string' ? message.data : '')
@@ -347,7 +390,12 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
               sessionId: string
               seq: number
               payload:
-                | { kind: 'delta'; upsert?: SessionMessage[]; remove?: string[] }
+                | {
+                    kind: 'delta'
+                    upsert?: SessionMessage[]
+                    remove?: string[]
+                    branchInfo?: { upsert?: BranchInfoRow[]; remove?: string[] }
+                  }
                 | {
                     kind: 'snapshot'
                     version: number
@@ -394,17 +442,12 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
             upsertSessionLiveState(agentName, { contextUsage })
           }
 
-          // Capture cost/duration from result event
-          if (event.type === 'result') {
-            const resultEvent = event as { total_cost_usd?: number; duration_ms?: number }
-            if (resultEvent.total_cost_usd != null || resultEvent.duration_ms != null) {
-              const sessionResult = {
-                total_cost_usd: resultEvent.total_cost_usd ?? 0,
-                duration_ms: resultEvent.duration_ms ?? 0,
-              }
-              upsertSessionLiveState(agentName, { sessionResult })
-            }
-          }
+          // Spec-31 P4b B3: `result` gateway_event handler removed — the
+          // running → idle transition is now driven by `useDerivedStatus`
+          // reading the final persisted message, and cost/duration are
+          // surfaced via the D1 REST endpoint for non-active callers.
+          // `sessionResult` stops being written here; `sessionLiveStateCollection`
+          // narrowing to drop the field happens in P5.
         }
       } catch {
         // Ignore non-JSON messages (state sync handled by onStateUpdate)
@@ -689,9 +732,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   )
 
   return {
-    state,
     messages,
-    sessionResult,
     kataState,
     contextUsage,
     wsReadyState,

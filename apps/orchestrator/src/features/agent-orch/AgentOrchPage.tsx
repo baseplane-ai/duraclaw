@@ -334,13 +334,17 @@ function AgentDetailWithSpawn({
   const spawnedRef = useRef(false)
 
   useEffect(() => {
-    if (spawnConfig && agent.state && !spawnedRef.current) {
+    // Spec #31 P5 B10: `agent.state` is gone. Gate on the WS being OPEN
+    // (readyState === 1) instead — semantically this matches the old
+    // "initial state delivered" trigger since the state push immediately
+    // followed connection establishment.
+    if (spawnConfig && agent.wsReadyState === 1 && !spawnedRef.current) {
       spawnedRef.current = true
       agent.spawn(spawnConfig).catch((err: unknown) => {
         console.error('[AgentOrch] Spawn failed:', err)
       })
     }
-  }, [spawnConfig, agent.state, agent.spawn])
+  }, [spawnConfig, agent.wsReadyState, agent.spawn])
 
   return <AgentDetailView name={sessionId} agent={agent} />
 }

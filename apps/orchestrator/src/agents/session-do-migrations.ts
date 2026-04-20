@@ -66,4 +66,56 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
       )`)
     },
   },
+  {
+    version: 6,
+    description: 'Add typed session_meta table for per-session server state (B1)',
+    up: (sql) => {
+      sql.exec(`CREATE TABLE IF NOT EXISTS session_meta (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        message_seq INTEGER NOT NULL DEFAULT 0,
+        sdk_session_id TEXT,
+        active_callback_token TEXT,
+        context_usage_json TEXT,
+        context_usage_cached_at INTEGER,
+        updated_at INTEGER NOT NULL DEFAULT 0
+      )`)
+      sql.exec(`INSERT OR IGNORE INTO session_meta (id, updated_at) VALUES (1, 0)`)
+    },
+  },
+  {
+    version: 7,
+    description: 'Expand session_meta with ex-SessionState fields (B10 #31)',
+    up: (sql) => {
+      const addCol = (col: string, ddl: string) => {
+        try {
+          sql.exec(`ALTER TABLE session_meta ADD COLUMN ${col} ${ddl}`)
+        } catch (e: unknown) {
+          // Only swallow the idempotent "column already exists" case. Anything
+          // else (corruption, permission failure, malformed DDL) must surface.
+          const msg = e instanceof Error ? e.message : String(e)
+          if (!msg.toLowerCase().includes('duplicate column')) {
+            console.warn('[migration v7] unexpected error adding column', col, e)
+            throw e
+          }
+        }
+      }
+      addCol('status', "TEXT NOT NULL DEFAULT 'idle'")
+      addCol('session_id', 'TEXT')
+      addCol('project', "TEXT NOT NULL DEFAULT ''")
+      addCol('project_path', "TEXT NOT NULL DEFAULT ''")
+      addCol('model', 'TEXT')
+      addCol('prompt', "TEXT NOT NULL DEFAULT ''")
+      addCol('user_id', 'TEXT')
+      addCol('started_at', 'TEXT')
+      addCol('completed_at', 'TEXT')
+      addCol('num_turns', 'INTEGER NOT NULL DEFAULT 0')
+      addCol('total_cost_usd', 'REAL')
+      addCol('duration_ms', 'INTEGER')
+      addCol('gate_json', 'TEXT')
+      addCol('created_at', "TEXT NOT NULL DEFAULT ''")
+      addCol('error', 'TEXT')
+      addCol('summary', 'TEXT')
+      addCol('last_kata_mode', 'TEXT')
+    },
+  },
 ]

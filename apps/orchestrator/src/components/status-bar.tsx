@@ -7,9 +7,10 @@
 
 import { GitBranchIcon } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { useDerivedStatus } from '~/hooks/use-derived-status'
 import { useSessionLiveState } from '~/hooks/use-session-live-state'
-import { deriveDisplayState } from '~/lib/display-state'
-import type { KataSessionState, PrInfo, SessionState } from '~/lib/types'
+import { deriveDisplayStateFromStatus } from '~/lib/display-state'
+import type { KataSessionState, PrInfo, SessionStatus } from '~/lib/types'
 import { cn } from '~/lib/utils'
 import type { ContextUsage, WorktreeInfo } from '~/stores/status-bar'
 
@@ -58,15 +59,21 @@ function ContextBar({ contextUsage }: { contextUsage: ContextUsage }) {
   )
 }
 
-function ElapsedTimer({ state }: { state: SessionState }) {
+function ElapsedTimer({
+  status,
+  startedAt,
+}: {
+  status: SessionStatus
+  startedAt: string | null | undefined
+}) {
   const [elapsedMs, setElapsedMs] = useState(0)
 
   useEffect(() => {
-    if (state.status !== 'running' || !state.started_at) {
+    if (status !== 'running' || !startedAt) {
       setElapsedMs(0)
       return
     }
-    const startTime = new Date(state.started_at).getTime()
+    const startTime = new Date(startedAt).getTime()
     if (Number.isNaN(startTime)) return
 
     setElapsedMs(Date.now() - startTime)
@@ -75,9 +82,9 @@ function ElapsedTimer({ state }: { state: SessionState }) {
       setElapsedMs(Date.now() - startTime)
     }, 1000)
     return () => clearInterval(interval)
-  }, [state.status, state.started_at])
+  }, [status, startedAt])
 
-  if (state.status !== 'running' || !state.started_at || elapsedMs <= 0) return null
+  if (status !== 'running' || !startedAt || elapsedMs <= 0) return null
   return <span className="text-muted-foreground">{formatDuration(elapsedMs)}</span>
 }
 
@@ -216,16 +223,22 @@ function KataStatusItem({ kataState }: { kataState: KataSessionState }) {
 }
 
 export function StatusBar({ sessionId }: { sessionId: string | null }) {
-  const { state, wsReadyState, contextUsage, sessionResult, kataState, worktreeInfo } =
-    useSessionLiveState(sessionId)
+  const live = useSessionLiveState(sessionId)
+  // Spec-31 P5: status is derived client-side from messages; summary
+  // columns (project / model / numTurns / totalCostUsd / durationMs)
+  // come from the D1-mirrored SessionLiveState fields seeded by
+  // SessionSummary, not the (now-deleted) full SessionState blob.
+  const derivedStatus = useDerivedStatus(sessionId ?? '')
 
-  if (!sessionId || !state) return null
-  const readyState = wsReadyState ?? 3
-  const display = deriveDisplayState(state, readyState)
-  // Bar chrome is keyed on the raw SessionState.status so the "running" tint
-  // and "waiting_gate" warning chrome survive a transient WS drop. The
-  // semantic display (dot, label) still goes through `deriveDisplayState`.
-  const status = state.status
+  if (!sessionId) return null
+  const readyState = live.wsReadyState ?? 3
+  const display = deriveDisplayStateFromStatus(derivedStatus, readyState)
+  const status = derivedStatus
+  const project = live.project ?? ''
+  const model = live.model ?? null
+  const numTurns = live.numTurns ?? 0
+  const totalCostUsd = live.totalCostUsd ?? null
+  const durationMs = live.durationMs ?? null
 
   return (
     <div
@@ -240,24 +253,24 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
       <div className="flex min-w-0 items-center gap-2">
         <WsDot readyState={readyState} />
         <span className="text-foreground">{status}</span>
-        <span className="truncate text-muted-foreground">{state.project || '--'}</span>
+        <span className="truncate text-muted-foreground">{project || '--'}</span>
       </div>
-      {worktreeInfo && <WorktreeStatusItem info={worktreeInfo} />}
-      <span className="truncate text-muted-foreground">{state.model || '--'}</span>
+      {live.worktreeInfo && <WorktreeStatusItem info={live.worktreeInfo} />}
+      <span className="truncate text-muted-foreground">{model || '--'}</span>
 
       {/* Row 2 (wraps on mobile): turns + cost + ctx + kata + timer + actions */}
-      <span className="text-muted-foreground">{state.num_turns} turns</span>
-      {sessionResult?.total_cost_usd != null && (
-        <span className="text-muted-foreground">${sessionResult.total_cost_usd.toFixed(4)}</span>
+      <span className="text-muted-foreground">{numTurns} turns</span>
+      {totalCostUsd != null && (
+        <span className="text-muted-foreground">${totalCostUsd.toFixed(4)}</span>
       )}
-      {contextUsage && <ContextBar contextUsage={contextUsage} />}
-      {kataState && <KataStatusItem kataState={kataState} />}
+      {live.contextUsage && <ContextBar contextUsage={live.contextUsage} />}
+      {live.kataState && <KataStatusItem kataState={live.kataState} />}
 
       {/* Right-aligned timer — action buttons moved to the composer footer */}
       <div className="ml-auto flex shrink-0 items-center gap-2">
-        <ElapsedTimer state={state} />
-        {sessionResult?.duration_ms != null && (
-          <span className="text-muted-foreground">{formatDuration(sessionResult.duration_ms)}</span>
+        <ElapsedTimer status={status} startedAt={live.lastActivity ?? null} />
+        {durationMs != null && (
+          <span className="text-muted-foreground">{formatDuration(durationMs)}</span>
         )}
       </div>
     </div>

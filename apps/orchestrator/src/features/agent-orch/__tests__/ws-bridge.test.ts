@@ -1,24 +1,28 @@
 /**
  * Tests for the WS bridge in useCodingAgent.
  *
- * Validates that onStateUpdate calls upsertSessionLiveState with the new
- * state payload plus mirrored top-level fields (status, numTurns, model,
- * project, prompt, totalCostUsd, durationMs) so session-list readers can
- * project SessionRecord-shaped rows.
+ * Spec-31 P5 B9/B10: `onStateUpdate` is no longer registered — the DO
+ * suppresses SDK protocol state frames via
+ * `shouldSendProtocolMessages() => false`. `SessionState` is deleted;
+ * components derive status/gate from messages via `useDerivedStatus` /
+ * `useDerivedGate`. These tests lock in the new contract: no
+ * `onStateUpdate` callback is passed to `useAgent`, and no SessionState
+ * patches are ever written into the live-state collection.
  *
  * @vitest-environment jsdom
  */
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
-// Capture the onStateUpdate callback so tests can invoke it directly
-let capturedOnStateUpdate: ((state: unknown) => void) | null = null
+// Capture the onStateUpdate option (if any) passed to useAgent.
+let capturedOnStateUpdate: ((state: unknown) => void) | null | undefined = null
 
 vi.mock('agents/react', () => ({
   useAgent: (_opts: { agent: string; name: string; onStateUpdate?: (s: unknown) => void }) => {
-    capturedOnStateUpdate = _opts.onStateUpdate ?? null
+    capturedOnStateUpdate = _opts.onStateUpdate
     return {
       call: vi.fn().mockResolvedValue([]),
+      readyState: 3,
     }
   },
 }))
@@ -45,22 +49,20 @@ vi.mock('~/hooks/use-messages-collection', () => ({
   useMessagesCollection: () => ({ messages: [], isLoading: false, isFetching: false }),
 }))
 
-// useSessionLiveState owns state/contextUsage/kataState/sessionResult. Stub
+// useSessionLiveState owns contextUsage/kataState/worktreeInfo. Stub
 // it so the hook doesn't subscribe to the real collection across tests.
 vi.mock('~/hooks/use-session-live-state', () => ({
   useSessionLiveState: () => ({
-    state: null,
     contextUsage: null,
     kataState: null,
     worktreeInfo: null,
-    sessionResult: null,
     wsReadyState: null,
     isLive: false,
   }),
 }))
 
-// upsertSessionLiveState is the single write path out of onStateUpdate.
-// Capture all calls so we can assert on the payload shape.
+// upsertSessionLiveState is observed to prove the hook never writes
+// SessionState-shaped patches into the collection (P5 B10).
 const mockUpsert = vi.fn()
 
 vi.mock('~/db/session-live-state-collection', () => ({
@@ -75,7 +77,7 @@ vi.mock('~/db/session-live-state-collection', () => ({
 }))
 
 // Import after mocks
-import { act, renderHook } from '@testing-library/react'
+import { renderHook } from '@testing-library/react'
 import { useCodingAgent } from '../use-coding-agent'
 
 describe('WS bridge in useCodingAgent', () => {
@@ -90,94 +92,22 @@ describe('WS bridge in useCodingAgent', () => {
     vi.restoreAllMocks()
   })
 
-  test('onStateUpdate calls upsertSessionLiveState with mirrored fields', () => {
+  test('onStateUpdate is NOT registered on useAgent (P5 B9)', () => {
+    // Spec #31 P5 B9: the DO suppresses SDK state broadcast; the client
+    // no longer supplies an `onStateUpdate` handler because the frame
+    // shape (`SessionState`) is deleted.
     renderHook(() => useCodingAgent('test-session'))
-
-    expect(capturedOnStateUpdate).toBeTruthy()
-
-    act(() => {
-      capturedOnStateUpdate!({ status: 'running', num_turns: 5 })
-    })
-
-    // Find the onStateUpdate call (there's also a wsReadyState mirror effect).
-    const stateCalls = mockUpsert.mock.calls.filter(
-      (c) => (c[1] as { state?: unknown }).state !== undefined,
-    )
-    expect(stateCalls.length).toBeGreaterThan(0)
-    const [agentName, patch] = stateCalls[stateCalls.length - 1]
-    expect(agentName).toBe('test-session')
-    expect(patch).toMatchObject({
-      state: { status: 'running', num_turns: 5 },
-      wsReadyState: 1,
-      status: 'running',
-      numTurns: 5,
-    })
+    expect(capturedOnStateUpdate).toBeUndefined()
   })
 
-  test('onStateUpdate mirrors num_turns when null (kept as-is)', () => {
+  test('useCodingAgent never writes SessionState-shaped patches into live-state collection (P5 B10)', () => {
     renderHook(() => useCodingAgent('test-session'))
-
-    act(() => {
-      capturedOnStateUpdate!({ status: 'idle', num_turns: null })
-    })
-
-    const stateCalls = mockUpsert.mock.calls.filter(
+    // wsReadyState mirror effect legitimately upserts, but no call should
+    // carry a `state` field (the field is gone from the narrowed
+    // SessionLiveState).
+    const stateWrites = mockUpsert.mock.calls.filter(
       (c) => (c[1] as { state?: unknown }).state !== undefined,
     )
-    const patch = stateCalls[stateCalls.length - 1][1] as Record<string, unknown>
-    expect(patch.status).toBe('idle')
-    // Current-state contract: numTurns mirrors newState.num_turns verbatim
-    // (including null). Consumers treat null as "unknown" and fall back.
-    expect(patch).toHaveProperty('numTurns', null)
-  })
-
-  test('onStateUpdate mirrors num_turns when undefined (kept as-is)', () => {
-    renderHook(() => useCodingAgent('test-session'))
-
-    act(() => {
-      capturedOnStateUpdate!({ status: 'running' })
-    })
-
-    const stateCalls = mockUpsert.mock.calls.filter(
-      (c) => (c[1] as { state?: unknown }).state !== undefined,
-    )
-    const patch = stateCalls[stateCalls.length - 1][1] as Record<string, unknown>
-    expect(patch.status).toBe('running')
-    expect(patch).toHaveProperty('numTurns', undefined)
-  })
-
-  test('uses agentName as the live-state key', () => {
-    renderHook(() => useCodingAgent('my-specific-agent'))
-
-    act(() => {
-      capturedOnStateUpdate!({ status: 'idle' })
-    })
-
-    const stateCalls = mockUpsert.mock.calls.filter(
-      (c) => (c[1] as { state?: unknown }).state !== undefined,
-    )
-    expect(stateCalls.length).toBeGreaterThan(0)
-    const [agentName, patch] = stateCalls[stateCalls.length - 1]
-    expect(agentName).toBe('my-specific-agent')
-    expect((patch as Record<string, unknown>).status).toBe('idle')
-  })
-
-  test('upserts live state on every state change', () => {
-    renderHook(() => useCodingAgent('session-1'))
-
-    act(() => {
-      capturedOnStateUpdate!({ status: 'idle' })
-    })
-    act(() => {
-      capturedOnStateUpdate!({ status: 'running', num_turns: 1 })
-    })
-    act(() => {
-      capturedOnStateUpdate!({ status: 'idle', num_turns: 10 })
-    })
-
-    const stateCalls = mockUpsert.mock.calls.filter(
-      (c) => (c[1] as { state?: unknown }).state !== undefined,
-    )
-    expect(stateCalls.length).toBe(3)
+    expect(stateWrites.length).toBe(0)
   })
 })

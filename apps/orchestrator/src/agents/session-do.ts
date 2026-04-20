@@ -20,12 +20,13 @@ import { type PushPayload, sendPushNotification } from '~/lib/push'
 import { sendFcmNotification } from '~/lib/push-fcm'
 import type {
   ContentBlock,
+  ContextUsage,
   Env,
   GateResponse,
   GatewayCommand,
   GatewayEvent,
   KataSessionState,
-  SessionState,
+  SessionStatus,
   SpawnConfig,
 } from '~/lib/types'
 import { getSessionStatus, listSessions, parseEvent } from '~/lib/vps-client'
@@ -48,7 +49,53 @@ import {
 } from './session-do-helpers'
 import { SESSION_DO_MIGRATIONS } from './session-do-migrations'
 
-const DEFAULT_STATE: SessionState = {
+/**
+ * Internal meta shape — replaces the old public `SessionState` type (#31
+ * B10). Fields that are durable across DO rehydrate are persisted to the
+ * typed `session_meta` SQLite table (migration v7); transient fields
+ * (`updated_at`, `active_callback_token`) stay in the setState JSON blob.
+ *
+ * Nothing outside session-do.ts should reference this shape — clients now
+ * derive status / gate from messages and read summary / cost / turns from
+ * D1 via REST.
+ */
+export interface SessionMeta {
+  status: SessionStatus
+  session_id: string | null
+  project: string
+  project_path: string
+  model: string | null
+  prompt: string
+  userId: string | null
+  started_at: string | null
+  completed_at: string | null
+  num_turns: number
+  total_cost_usd: number | null
+  duration_ms: number | null
+  gate: {
+    id: string
+    type: 'permission_request' | 'ask_user'
+    detail: unknown
+  } | null
+  created_at: string
+  updated_at: string
+  result: string | null
+  error: string | null
+  summary: string | null
+  sdk_session_id: string | null
+  active_callback_token?: string
+  lastKataMode?: string
+}
+
+/**
+ * How often `messageSeq` is persisted to `session_meta`. Set > 1 so streaming
+ * `partial_assistant` frames don't trigger per-frame SQL writes; the persisted
+ * seq is only consulted on DO rehydrate after eviction, where reconnecting
+ * clients fetch a snapshot anyway.
+ */
+const MESSAGE_SEQ_PERSIST_EVERY = 10
+
+const DEFAULT_META: SessionMeta = {
   status: 'idle',
   session_id: null,
   project: '',
@@ -69,6 +116,31 @@ const DEFAULT_STATE: SessionState = {
   summary: null,
   sdk_session_id: null,
   active_callback_token: undefined,
+}
+
+// Map `SessionMeta` keys to their `session_meta` column names. Keys not in
+// this map are treated as non-persistent (e.g. `result`, `updated_at` —
+// `updated_at` is written explicitly below; `result` is legacy).
+const META_COLUMN_MAP: Partial<Record<keyof SessionMeta, string>> = {
+  status: 'status',
+  session_id: 'session_id',
+  project: 'project',
+  project_path: 'project_path',
+  model: 'model',
+  prompt: 'prompt',
+  userId: 'user_id',
+  started_at: 'started_at',
+  completed_at: 'completed_at',
+  num_turns: 'num_turns',
+  total_cost_usd: 'total_cost_usd',
+  duration_ms: 'duration_ms',
+  gate: 'gate_json',
+  created_at: 'created_at',
+  error: 'error',
+  summary: 'summary',
+  sdk_session_id: 'sdk_session_id',
+  active_callback_token: 'active_callback_token',
+  lastKataMode: 'last_kata_mode',
 }
 
 /**
@@ -103,8 +175,8 @@ function parseTurnOrdinal(id?: string): number | undefined {
 // config changes take effect on the next DO wake without a code change.
 // Default is 90s — see DEFAULT_STALE_THRESHOLD_MS in session-do-helpers.
 
-export class SessionDO extends Agent<Env, SessionState> {
-  initialState = DEFAULT_STATE
+export class SessionDO extends Agent<Env, SessionMeta> {
+  initialState = DEFAULT_META
   private session!: Session
   private turnCounter = 0
   private currentTurnMessageId: string | null = null
@@ -112,13 +184,44 @@ export class SessionDO extends Agent<Env, SessionState> {
   private cachedGatewayConnId: string | null = null
   /** Timestamp of the last gateway event received on the WS connection. */
   private lastGatewayActivity = 0
-  /** Per-session monotonic sequence for MessagesFrame broadcasts (B1). Not persisted — resets to 0 on DO cold start; snapshots re-establish client watermark. */
+  /** Per-session monotonic sequence for MessagesFrame broadcasts (B1). Persisted in typed `session_meta.message_seq`; survives DO rehydrate. */
   private messageSeq = 0
+  /**
+   * P3 B4: single-flight in-flight probe for `getContextUsage`. Concurrent
+   * callers await the same promise; cleared on settle (resolve / reject /
+   * timeout) so the next caller can issue a fresh probe.
+   */
+  private contextUsageProbeInFlight: Promise<ContextUsage | null> | null = null
+  /**
+   * P3 B4: pending resolvers for the next `context_usage` gateway_event. The
+   * handler in `handleGatewayEvent` drains them on arrival. Multiple entries
+   * exist only transiently when the probe times out and a new probe races in
+   * before the timed-out resolver is swept — the timeout path removes its
+   * own slot so late arrivals don't leak.
+   */
+  private contextUsageResolvers: Array<{
+    resolve: (v: ContextUsage | null) => void
+    reject: (e: unknown) => void
+  }> = []
 
   // ── Lifecycle ──────────────────────────────────────────────────
 
   async onStart() {
     runMigrations(this.ctx.storage.sql, SESSION_DO_MIGRATIONS)
+
+    // Rehydrate per-session monotonic seq from typed session_meta (B1). The
+    // v6 migration INSERT OR IGNOREs row id=1 so the `?? 0` is belt-and-
+    // suspenders. Must run before any code path that can broadcastMessages.
+    const metaRows = this.sql<{
+      message_seq: number
+    }>`SELECT message_seq FROM session_meta WHERE id = 1`
+    this.messageSeq = metaRows[0]?.message_seq ?? 0
+
+    // Rehydrate ex-SessionState fields from `session_meta` (#31 B10). Merges
+    // into the existing state blob so we pick up newly-persisted columns
+    // while preserving any transient fields the setState JSON still holds.
+    this.hydrateMetaFromSql()
+
     this.session = Session.create(this)
 
     // Trigger Session's lazy table initialization (creates assistant_config etc.)
@@ -196,6 +299,39 @@ export class SessionDO extends Agent<Env, SessionState> {
     if (request.method === 'GET' && url.pathname === '/messages') {
       try {
         return new Response(JSON.stringify({ messages: this.session.getHistory() }), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      } catch (err) {
+        return new Response(
+          JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+    }
+
+    // P3: REST scaffolding for contextUsage (B4). Returns cached value when
+    // fresh (<5s), probes the gateway when stale-or-missing, falls back to
+    // stale/null when the runner is disconnected.
+    if (request.method === 'GET' && url.pathname === '/context-usage') {
+      try {
+        const body = await this.getContextUsage()
+        return new Response(JSON.stringify(body), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      } catch (err) {
+        return new Response(
+          JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+    }
+
+    // P3: REST scaffolding for kataState (B5). Reads the D1 mirror (source
+    // of truth) so the route returns a value even when the runner is dead.
+    if (request.method === 'GET' && url.pathname === '/kata-state') {
+      try {
+        const body = await this.getKataState()
+        return new Response(JSON.stringify(body), {
           headers: { 'Content-Type': 'application/json' },
         })
       } catch (err) {
@@ -287,10 +423,16 @@ export class SessionDO extends Agent<Env, SessionState> {
     }
   }
 
-  /** Suppress Agent SDK protocol messages (identity, state, MCP) for gateway connections. */
-  shouldSendProtocolMessages(_connection: Connection, ctx: ConnectionContext): boolean {
-    const url = new URL(ctx.request.url)
-    return url.searchParams.get('role') !== 'gateway'
+  /**
+   * Suppress all Agent SDK protocol messages (`cf_agent_state`, identity,
+   * MCP) for every connection (spec #31 B9). The messages channel is the
+   * sole live-state source — status/gate/result are derived client-side via
+   * `useDerivedStatus` / `useDerivedGate`; `contextUsage` / `kataState` are
+   * served via REST. Returning `false` here silences the legacy state
+   * broadcast that the new architecture doesn't consume.
+   */
+  shouldSendProtocolMessages(_connection: Connection, _ctx: ConnectionContext): boolean {
+    return false
   }
 
   onMessage(connection: Connection, data: string | ArrayBuffer) {
@@ -579,12 +721,88 @@ export class SessionDO extends Agent<Env, SessionState> {
 
   // ── Helpers ────────────────────────────────────────────────────
 
-  private updateState(partial: Partial<SessionState>) {
+  /**
+   * Patch-merge into the Agent's state blob and mirror the durable subset
+   * into `session_meta` (migration v7). Fields without a column mapping
+   * (e.g. `updated_at`, `result`) stay only in the in-memory JSON blob —
+   * clients no longer consume them and DO rehydrate pulls from SQLite.
+   */
+  private updateState(partial: Partial<SessionMeta>) {
     this.setState({
       ...this.state,
       ...partial,
       updated_at: new Date().toISOString(),
     })
+    this.persistMetaPatch(partial)
+  }
+
+  private persistMetaPatch(partial: Partial<SessionMeta>) {
+    const cols: string[] = []
+    const vals: unknown[] = []
+    for (const [key, value] of Object.entries(partial) as Array<
+      [keyof SessionMeta, SessionMeta[keyof SessionMeta]]
+    >) {
+      const col = META_COLUMN_MAP[key]
+      if (!col) continue
+      if (key === 'gate') {
+        cols.push(`${col} = ?`)
+        vals.push(value ? JSON.stringify(value) : null)
+      } else {
+        cols.push(`${col} = ?`)
+        vals.push(value ?? null)
+      }
+    }
+    if (cols.length === 0) return
+    cols.push('updated_at = ?')
+    vals.push(Date.now())
+    try {
+      this.ctx.storage.sql.exec(
+        `UPDATE session_meta SET ${cols.join(', ')} WHERE id = 1`,
+        ...(vals as (string | number | null)[]),
+      )
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] persistMetaPatch failed:`, err)
+    }
+  }
+
+  /**
+   * Rehydrate `this.state` from `session_meta` on onStart (#31 P5). Agent's
+   * initialState seed runs once on first wake; on subsequent rehydrates the
+   * setState JSON blob is lost if the DO was evicted without a setState
+   * call in the final turn — restoring from SQLite keeps `project`,
+   * `status`, `session_id`, etc. intact for the next caller.
+   */
+  private hydrateMetaFromSql() {
+    try {
+      const rows = this.sql<Record<string, unknown>>`SELECT * FROM session_meta WHERE id = 1`
+      const row = rows[0]
+      if (!row) return
+      const patch: Partial<SessionMeta> = {}
+      for (const [key, col] of Object.entries(META_COLUMN_MAP) as Array<
+        [keyof SessionMeta, string]
+      >) {
+        if (!(col in row)) continue
+        const raw = row[col]
+        if (raw === null || raw === undefined) continue
+        if (key === 'gate') {
+          try {
+            ;(patch as Record<string, unknown>)[key] =
+              typeof raw === 'string' ? JSON.parse(raw) : raw
+          } catch {
+            // Invalid gate JSON — skip.
+          }
+        } else {
+          ;(patch as Record<string, unknown>)[key] = raw
+        }
+      }
+      if (Object.keys(patch).length === 0) return
+      this.setState({
+        ...this.state,
+        ...patch,
+      })
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] hydrateMetaFromSql failed:`, err)
+    }
   }
 
   private broadcastToClients(data: string) {
@@ -654,6 +872,33 @@ export class SessionDO extends Agent<Env, SessionState> {
   }
 
   /**
+   * Compute a single BranchInfoRow for the parent of `msg` if that parent now
+   * has >1 siblings. Returns `undefined` if no parent or no siblings. Used by
+   * sendMessage / forkWithHistory to piggyback branch-info onto the user-turn
+   * delta (P2 B2).
+   */
+  private computeBranchInfoForUserTurn(msg: SessionMessage): BranchInfoRow | undefined {
+    try {
+      const history = this.session.getHistory()
+      const idx = history.findIndex((m) => m.id === msg.id)
+      if (idx <= 0) return undefined
+      const parentId = history[idx - 1].id
+      const branches = this.session.getBranches(parentId)
+      const siblings = branches.filter((m) => m.role === 'user').map((m) => m.id)
+      if (siblings.length <= 1) return undefined
+      return {
+        parentMsgId: parentId,
+        sessionId: this.name,
+        siblings,
+        activeId: msg.id,
+        updatedAt: new Date().toISOString(),
+      }
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
    * Broadcast a MessagesFrame (B1) with monotonic seq. If `targetClientId` is
    * provided, sends only to that connection and does NOT increment `messageSeq`
    * — targeted sends echo current seq so non-recipients' lastSeq stream stays
@@ -661,7 +906,17 @@ export class SessionDO extends Agent<Env, SessionState> {
    * shared seq counter").
    */
   private broadcastMessages(payload: MessagesPayload, opts: { targetClientId?: string } = {}) {
-    if (!opts.targetClientId) this.messageSeq += 1
+    if (!opts.targetClientId) {
+      this.messageSeq += 1
+      // Persist only every Nth increment — per-frame SQL writes during streaming
+      // `partial_assistant` turns are wasteful, and the persisted seq is only
+      // consulted on DO eviction / rehydrate, where clients reconnect with a
+      // snapshot anyway (frame-level precision unnecessary).
+      if (this.messageSeq % MESSAGE_SEQ_PERSIST_EVERY === 0) {
+        this
+          .sql`UPDATE session_meta SET message_seq = ${this.messageSeq}, updated_at = ${Date.now()} WHERE id = 1`
+      }
+    }
     const frame: MessagesFrame = {
       type: 'messages',
       sessionId: this.name,
@@ -1422,8 +1677,8 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     const now = new Date().toISOString()
     const id = this.ctx.id.toString()
 
-    this.setState({
-      ...DEFAULT_STATE,
+    const freshState: SessionMeta = {
+      ...DEFAULT_META,
       status: 'running',
       session_id: id,
       userId: this.state.userId,
@@ -1434,7 +1689,9 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       started_at: now,
       created_at: this.state.created_at || now,
       updated_at: now,
-    })
+    }
+    this.setState(freshState)
+    this.persistMetaPatch(freshState)
 
     // Persist initial prompt as a user message so it survives reload
     this.turnCounter++
@@ -1487,8 +1744,8 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     const now = new Date().toISOString()
     const id = this.ctx.id.toString()
 
-    this.setState({
-      ...DEFAULT_STATE,
+    const resumeState: SessionMeta = {
+      ...DEFAULT_META,
       status: 'running',
       session_id: id,
       userId: this.state.userId,
@@ -1500,7 +1757,9 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       created_at: this.state.created_at || now,
       updated_at: now,
       sdk_session_id: sdkSessionId,
-    })
+    }
+    this.setState(resumeState)
+    this.persistMetaPatch(resumeState)
 
     // Persist resume prompt as a user message
     this.turnCounter++
@@ -1775,7 +2034,14 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     try {
       await this.session.appendMessage(userMsg)
       this.persistTurnState()
-      this.broadcastMessage(userMsg)
+      // P2 B2: piggyback affected parent's sibling list onto the same delta
+      // (instead of separately broadcasting a snapshot).
+      const branchInfoRow = this.computeBranchInfoForUserTurn(userMsg)
+      this.broadcastMessages({
+        kind: 'delta',
+        upsert: [userMsg as unknown as WireSessionMessage],
+        ...(branchInfoRow ? { branchInfo: { upsert: [branchInfoRow] } } : {}),
+      })
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to persist user message:`, err)
     }
@@ -1872,7 +2138,13 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     try {
       await this.session.appendMessage(userMsg)
       this.persistTurnState()
-      this.broadcastMessage(userMsg)
+      // P2 B2: piggyback affected parent's sibling list onto the same delta.
+      const branchInfoRow = this.computeBranchInfoForUserTurn(userMsg)
+      this.broadcastMessages({
+        kind: 'delta',
+        upsert: [userMsg as unknown as WireSessionMessage],
+        ...(branchInfoRow ? { branchInfo: { upsert: [branchInfoRow] } } : {}),
+      })
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] forkWithHistory: persist user msg failed:`, err)
     }
@@ -1945,14 +2217,164 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     return { ok: true }
   }
 
+  /**
+   * P3 B4: cached-or-fresh context usage reader.
+   *
+   * Semantics:
+   * - Fresh cache hit (<5s old) → return cached value, `isCached: true`.
+   * - Stale-or-missing + gateway connected → single-flight probe with 3s
+   *   timeout; on success UPDATE the cache and return `isCached: false`.
+   * - No gateway connection → return stale cache (or null) with
+   *   `isCached: true`.
+   * - Probe timeout or error → fall through to stale cache / null.
+   *
+   * Retained as `@callable()` so the existing client-side
+   * `connection.call('getContextUsage', [])` trigger continues to work.
+   * Also invoked via HTTP by `onRequest`'s `GET /context-usage` route
+   * (backing `/api/sessions/:id/context-usage`).
+   */
   @callable()
-  async getContextUsage(): Promise<{ ok: boolean; error?: string }> {
-    const gwConnId = this.getGatewayConnectionId()
-    if (!gwConnId) {
-      return { ok: false, error: 'No active gateway connection' }
+  async getContextUsage(): Promise<{
+    contextUsage: ContextUsage | null
+    fetchedAt: string
+    isCached: boolean
+  }> {
+    const rows = this.sql<{
+      context_usage_json: string | null
+      context_usage_cached_at: number | null
+    }>`SELECT context_usage_json, context_usage_cached_at FROM session_meta WHERE id = 1`
+    const row = rows[0]
+    const cached =
+      row?.context_usage_json && row.context_usage_cached_at != null
+        ? {
+            value: JSON.parse(row.context_usage_json) as ContextUsage,
+            cachedAt: row.context_usage_cached_at,
+          }
+        : null
+    const now = Date.now()
+    if (cached && now - cached.cachedAt < 5_000) {
+      return {
+        contextUsage: cached.value,
+        fetchedAt: new Date(cached.cachedAt).toISOString(),
+        isCached: true,
+      }
     }
-    this.sendToGateway({ type: 'get-context-usage', session_id: this.state.session_id ?? '' })
-    return { ok: true }
+    if (!this.getGatewayConnectionId()) {
+      return {
+        contextUsage: cached?.value ?? null,
+        fetchedAt: cached ? new Date(cached.cachedAt).toISOString() : new Date().toISOString(),
+        isCached: true,
+      }
+    }
+    if (!this.contextUsageProbeInFlight) {
+      this.contextUsageProbeInFlight = this.probeContextUsageWithTimeout().finally(() => {
+        this.contextUsageProbeInFlight = null
+      })
+    }
+    try {
+      const value = await this.contextUsageProbeInFlight
+      const cachedAt = Date.now()
+      this.sql`UPDATE session_meta
+        SET context_usage_json = ${JSON.stringify(value)},
+            context_usage_cached_at = ${cachedAt},
+            updated_at = ${cachedAt}
+        WHERE id = 1`
+      return {
+        contextUsage: value,
+        fetchedAt: new Date(cachedAt).toISOString(),
+        isCached: false,
+      }
+    } catch {
+      return {
+        contextUsage: cached?.value ?? null,
+        fetchedAt: cached ? new Date(cached.cachedAt).toISOString() : new Date().toISOString(),
+        isCached: true,
+      }
+    }
+  }
+
+  /**
+   * P3 B4: dispatch a `get-context-usage` GatewayCommand and await the
+   * matched `context_usage` gateway_event. 3s timeout — if the runner is
+   * unresponsive we reject and the caller falls back to stale / null rather
+   * than blocking the Worker up to its CPU limit.
+   */
+  private probeContextUsageWithTimeout(): Promise<ContextUsage | null> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        // Remove this resolver so a late gateway reply doesn't leak into
+        // the next probe's resolver slot.
+        const idx = this.contextUsageResolvers.findIndex((r) => r.resolve === innerResolve)
+        if (idx >= 0) this.contextUsageResolvers.splice(idx, 1)
+        reject(new Error('probe_timeout'))
+      }, 3_000)
+      const innerResolve = (v: ContextUsage | null) => {
+        clearTimeout(timer)
+        resolve(v)
+      }
+      const innerReject = (e: unknown) => {
+        clearTimeout(timer)
+        reject(e)
+      }
+      this.contextUsageResolvers.push({ resolve: innerResolve, reject: innerReject })
+      this.sendToGateway({ type: 'get-context-usage', session_id: this.state.session_id ?? '' })
+    })
+  }
+
+  /**
+   * P3 B5: kataState reader backed by the D1 `agent_sessions` mirror (source
+   * of truth — written by `syncKataToD1` on every `kata_state` event). Also
+   * consults the DO-local `kv.kata_state` blob for the richer full shape;
+   * falls back to a minimal shape synthesized from the D1 columns if the kv
+   * blob is absent (e.g. after cold-start before the first kata_state event).
+   *
+   * Returns `null` when the session has no kata binding. The route returns a
+   * value even when the runner is dead because the D1 mirror survives.
+   */
+  async getKataState(): Promise<{ kataState: KataSessionState | null; fetchedAt: string }> {
+    const sessionId = this.state.session_id ?? this.ctx.id.toString()
+    try {
+      const rows = await this.d1
+        .select({
+          kataMode: agentSessions.kataMode,
+          kataIssue: agentSessions.kataIssue,
+          kataPhase: agentSessions.kataPhase,
+        })
+        .from(agentSessions)
+        .where(eq(agentSessions.id, sessionId))
+        .limit(1)
+      const row = rows[0]
+      if (!row || (row.kataMode == null && row.kataIssue == null && row.kataPhase == null)) {
+        return { kataState: null, fetchedAt: new Date().toISOString() }
+      }
+      // Read the full kata_state blob from the kv table for richer fields if present.
+      const kvRows = this.sql<{ value: string }>`SELECT value FROM kv WHERE key = 'kata_state'`
+      const kvKata = kvRows[0]?.value ? (JSON.parse(kvRows[0].value) as KataSessionState) : null
+      if (kvKata) {
+        return { kataState: kvKata, fetchedAt: new Date().toISOString() }
+      }
+      // Fallback: synthesize a minimal KataSessionState from D1 columns.
+      const minimal: KataSessionState = {
+        sessionId,
+        workflowId: null,
+        issueNumber: row.kataIssue ?? null,
+        sessionType: null,
+        currentMode: row.kataMode ?? null,
+        currentPhase: row.kataPhase ?? null,
+        completedPhases: [],
+        template: null,
+        phases: [],
+        modeHistory: [],
+        modeState: {},
+        updatedAt: new Date().toISOString(),
+        beadsCreated: [],
+        editedFiles: [],
+      }
+      return { kataState: minimal, fetchedAt: new Date().toISOString() }
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] getKataState failed:`, err)
+      return { kataState: null, fetchedAt: new Date().toISOString() }
+    }
   }
 
   @callable()
@@ -2670,9 +3092,51 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       case 'heartbeat':
         break
 
+      // P3 B4: parse `context_usage` to `ContextUsage`, drain probe resolvers,
+      // and update `session_meta.context_usage_json` + cached_at. The original
+      // gateway_event broadcast is retained (per P3 brief Non-Goals: keep
+      // existing client handlers live until the deferred consumer-migration
+      // issue swaps them to REST).
+      case 'context_usage': {
+        const rawUsage = event.usage ?? {}
+        const parsed: ContextUsage = {
+          totalTokens: (rawUsage.totalTokens as number) ?? 0,
+          maxTokens: (rawUsage.maxTokens as number) ?? 0,
+          percentage: (rawUsage.percentage as number) ?? 0,
+          model: rawUsage.model as string | undefined,
+          isAutoCompactEnabled: rawUsage.isAutoCompactEnabled as boolean | undefined,
+          autoCompactThreshold: rawUsage.autoCompactThreshold as number | undefined,
+        }
+        // Drain any awaiters first so they settle on the fresh value rather
+        // than the pre-write cache.
+        const resolvers = this.contextUsageResolvers.splice(0)
+        for (const r of resolvers) {
+          try {
+            r.resolve(parsed)
+          } catch {
+            // Defensive: never let a resolver throw tank the event loop.
+          }
+        }
+        // Persist into the typed session_meta cache so subsequent calls
+        // within the 5s TTL hit the fresh row without re-probing.
+        try {
+          const cachedAt = Date.now()
+          this.sql`UPDATE session_meta
+            SET context_usage_json = ${JSON.stringify(parsed)},
+                context_usage_cached_at = ${cachedAt},
+                updated_at = ${cachedAt}
+            WHERE id = 1`
+        } catch (err) {
+          console.error(`[SessionDO:${this.ctx.id}] Failed to persist context_usage cache:`, err)
+        }
+        // Retained WS broadcast — consumer migration is a separate issue.
+        this.broadcastGatewayEvent(event)
+        break
+      }
+
       // Events that don't produce message parts — just broadcast raw
       default: {
-        // context_usage, rewind_result, session_state_changed, rate_limit,
+        // rewind_result, session_state_changed, rate_limit,
         // task_started, task_progress, task_notification — broadcast as-is
         this.broadcastGatewayEvent(event)
         break

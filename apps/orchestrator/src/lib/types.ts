@@ -4,6 +4,7 @@
 export type {
   BrowserCommand,
   ContentBlock,
+  ContextUsage,
   GateResponse,
   GatewayCommand,
   GatewayEvent,
@@ -11,7 +12,6 @@ export type {
   PrInfo,
   ProjectInfo,
   ResumeCommand,
-  SessionState,
   SessionStatus,
   SessionSummary,
   SpawnConfig,

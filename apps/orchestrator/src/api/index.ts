@@ -22,6 +22,8 @@ import type {
   AgentSessionRow,
   ChainSummary,
   ContentBlock,
+  ContextUsage,
+  KataSessionState,
   ProjectInfo,
   SpecStatusResponse,
   UserPreferencesRow,
@@ -1641,6 +1643,70 @@ export function createApiApp() {
     // rendered blank on cold start / OPFS rehydrate (post GH#14).
     const body = (await response.json()) as { messages: unknown }
     return c.json({ messages: body.messages })
+  })
+
+  // P3 B4: REST endpoint for context usage. Scaffolding only — consumer
+  // migration (swapping the client's WS `context_usage` handler to poll this)
+  // is deferred to a separate issue per spec Non-Goals.
+  app.get('/api/sessions/:id/context-usage', async (c) => {
+    const userId = c.get('userId')
+    const ownership = await getOwnedSession(c.env, c.req.param('id'), userId)
+    if (!ownership.ok) {
+      return c.json(
+        { error: ownership.status === 404 ? 'Session not found' : 'Forbidden' },
+        ownership.status,
+      )
+    }
+    const doId = getSessionDoId(c.env, ownership.session.id)
+    const sessionDO = c.env.SESSION_AGENT.get(doId)
+    const response = await sessionDO.fetch(
+      new Request('https://session/context-usage', {
+        headers: {
+          'x-partykit-room': ownership.session.id,
+          'x-user-id': userId,
+        },
+      }),
+    )
+    if (!response.ok) {
+      return c.json({ error: 'Session not found' }, response.status === 403 ? 403 : 404)
+    }
+    const body = (await response.json()) as {
+      contextUsage: ContextUsage | null
+      fetchedAt: string
+      isCached: boolean
+    }
+    return c.json(body)
+  })
+
+  // P3 B5: REST endpoint for kata state, backed by the D1 mirror. Survives
+  // runner teardown — the D1 row persists even when the runner is dead.
+  app.get('/api/sessions/:id/kata-state', async (c) => {
+    const userId = c.get('userId')
+    const ownership = await getOwnedSession(c.env, c.req.param('id'), userId)
+    if (!ownership.ok) {
+      return c.json(
+        { error: ownership.status === 404 ? 'Session not found' : 'Forbidden' },
+        ownership.status,
+      )
+    }
+    const doId = getSessionDoId(c.env, ownership.session.id)
+    const sessionDO = c.env.SESSION_AGENT.get(doId)
+    const response = await sessionDO.fetch(
+      new Request('https://session/kata-state', {
+        headers: {
+          'x-partykit-room': ownership.session.id,
+          'x-user-id': userId,
+        },
+      }),
+    )
+    if (!response.ok) {
+      return c.json({ error: 'Session not found' }, response.status === 403 ? 403 : 404)
+    }
+    const body = (await response.json()) as {
+      kataState: KataSessionState | null
+      fetchedAt: string
+    }
+    return c.json(body)
   })
 
   app.patch('/api/sessions/:id', async (c) => {

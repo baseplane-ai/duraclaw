@@ -16,18 +16,27 @@
 import type { SessionSummary } from '@duraclaw/shared-types'
 import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence'
 import { createCollection, localOnlyCollectionOptions } from '@tanstack/db'
-import type { KataSessionState, SessionState, SessionStatus } from '~/lib/types'
+import type { KataSessionState, SessionStatus } from '~/lib/types'
 import type { ContextUsage, WorktreeInfo } from '~/stores/status-bar'
 import { dbReady } from './db-instance'
 
-/** Live state snapshot for a single session — render source for status/composer. */
+/**
+ * Live state snapshot for a single session.
+ *
+ * Spec #31 P5 B10 narrowing: `state` (full SessionState), `sessionResult`,
+ * and any non-D1-mirrored live fields are removed. Status / gate / result
+ * are derived client-side from `messagesCollection` via `useDerivedStatus`
+ * / `useDerivedGate`. `contextUsage` / `kataState` remain on the collection
+ * pending the deferred consumer-migration issue. The `status` (top-level)
+ * and other summary fields are kept as the D1-mirrored source for non-
+ * active callers (SessionListItem, SessionCardList, SessionHistory,
+ * ChainPage) that don't mount `useCodingAgent`.
+ */
 export interface SessionLiveState {
   id: string
-  state: SessionState | null
   contextUsage: ContextUsage | null
   kataState: KataSessionState | null
   worktreeInfo: WorktreeInfo | null
-  sessionResult: { total_cost_usd: number; duration_ms: number } | null
   wsReadyState: number
   updatedAt: string
   // GH#14 B8 — schema v2: expanded to subsume SessionSummary fields so
@@ -55,6 +64,9 @@ export interface SessionLiveState {
   kataMode?: string | null
   kataIssue?: number | null
   kataPhase?: string | null
+  /** D1-mirrored session status for non-active sidebar readers. Live
+   *  (active-session) callers derive status from `useDerivedStatus` over
+   *  `messagesCollection` instead. */
   status?: SessionStatus
 }
 
@@ -70,7 +82,10 @@ function createSessionLiveStateCollection() {
     const opts = persistedCollectionOptions({
       ...localOpts,
       persistence,
-      schemaVersion: 2,
+      // Schema bump (#31 P5 B10): SessionLiveState narrowed — old rows with
+      // `state` / `sessionResult` columns are dropped on upgrade per
+      // persistedCollectionOptions semantics.
+      schemaVersion: 3,
     })
     // TanStackDB beta: persistedCollectionOptions adds a schema type that
     // conflicts with createCollection overloads. Runtime behavior is correct.
@@ -84,21 +99,6 @@ function createSessionLiveStateCollection() {
 export const sessionLiveStateCollection = createSessionLiveStateCollection()
 
 /**
- * Strip sensitive / non-persistable fields from SessionState before caching.
- * `active_callback_token` is a gateway-dial bearer; don't round-trip it into
- * OPFS even though the browser-facing WS state shouldn't carry it.
- */
-function sanitizeState(s: SessionState | null): SessionState | null {
-  if (!s) return null
-  if (!('active_callback_token' in s)) return s
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { active_callback_token, ...rest } = s as SessionState & {
-    active_callback_token?: string
-  }
-  return rest as SessionState
-}
-
-/**
  * Upsert a partial snapshot for a session. Fields omitted from `patch`
  * preserve their prior cached values (patch-style merge, not replace).
  * Insert path fills nulls for omitted fields; `wsReadyState` defaults to
@@ -110,9 +110,6 @@ export function upsertSessionLiveState(
 ): void {
   const updatedAt = new Date().toISOString()
   const normalized: Partial<SessionLiveState> = { ...patch, updatedAt }
-  if ('state' in normalized) {
-    normalized.state = sanitizeState(normalized.state ?? null)
-  }
 
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -124,11 +121,9 @@ export function upsertSessionLiveState(
     } else {
       coll.insert({
         id: sessionId,
-        state: null,
         contextUsage: null,
         kataState: null,
         worktreeInfo: null,
-        sessionResult: null,
         wsReadyState: 3,
         ...normalized,
       } as SessionLiveState)

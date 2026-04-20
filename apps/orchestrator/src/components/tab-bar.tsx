@@ -35,11 +35,12 @@ import {
 } from '~/components/ui/sheet'
 import type { SessionRecord } from '~/db/session-record'
 import { StatusDot } from '~/features/agent-orch/session-utils'
+import { useDerivedStatus } from '~/hooks/use-derived-status'
 import { useIsMobile } from '~/hooks/use-mobile'
 import { useSessionLiveState } from '~/hooks/use-session-live-state'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { isDraftTabId, type TabEntry, useTabSync } from '~/hooks/use-tab-sync'
-import { deriveDisplayState } from '~/lib/display-state'
+import { deriveDisplayStateFromStatus } from '~/lib/display-state'
 import { cn } from '~/lib/utils'
 
 interface TabBarProps {
@@ -381,16 +382,26 @@ function ProjectTab({
   const isMobile = useIsMobile()
   const [menuOpen, setMenuOpen] = useState(false)
 
-  // Route tab status through `deriveDisplayState` so it agrees with the
-  // status bar + sidebar. Falls back to the (30s-stale) sessions row when
-  // no live state exists yet in this browser. Chain tabs have no single
-  // session, so we skip live-state entirely and never render a StatusDot.
+  // Route tab status through `deriveDisplayStateFromStatus` so it agrees
+  // with the status bar + sidebar. Falls back to the (30s-stale) sessions
+  // row when no live state exists yet in this browser. Chain tabs have no
+  // single session, so we skip live-state entirely and never render a
+  // StatusDot.
   const live = useSessionLiveState(isChain ? '' : sessionId)
-  const tabDisplay =
-    !isChain && live.state ? deriveDisplayState(live.state, live.wsReadyState ?? 3) : null
+  // Spec-31 P4b B6: open tabs are active-session callers (each has a live
+  // WS + messagesCollection via `useCodingAgent` on the matching route),
+  // so the tab pill derives status from messages. Chain tabs short-circuit
+  // on the empty sessionId and `isChain` skip below.
+  const derivedStatus = useDerivedStatus(isChain ? '' : sessionId)
+  // Spec #31 P5 B10: status for the tab pill is the message-derived status
+  // when available (active caller), otherwise the D1-mirrored sidebar
+  // status on the live-state row.
+  const tabDisplay = !isChain
+    ? deriveDisplayStateFromStatus(derivedStatus ?? live.status, live.wsReadyState ?? 3)
+    : null
   const tabStatus =
     tabDisplay && tabDisplay.status !== 'unknown' ? tabDisplay.status : (session?.status ?? 'idle')
-  const tabNumTurns = live.state?.num_turns ?? session?.numTurns ?? 0
+  const tabNumTurns = live.numTurns ?? session?.numTurns ?? 0
 
   useEffect(() => {
     if (isDragging) setMenuOpen(false)
