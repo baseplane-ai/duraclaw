@@ -6,9 +6,11 @@ import { evictOldMessages } from '~/db/messages-collection'
 import { installAriaHiddenPatch } from '~/lib/aria-hidden-patch'
 import { authClientReady } from '~/lib/auth-client'
 import { installNativeFetchInterceptor } from '~/lib/platform'
+import { installReactOffscreenPatch } from '~/lib/react-offscreen-patch'
 import { getRouter } from './router'
 
 installAriaHiddenPatch()
+installReactOffscreenPatch()
 
 async function bootstrap() {
   // Block React mount until OPFS persistence has resolved.
