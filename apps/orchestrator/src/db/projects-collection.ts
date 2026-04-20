@@ -1,50 +1,43 @@
 /**
- * Projects QueryCollection -- wraps GET /api/gateway/projects/all with TanStackDB.
+ * Projects SyncedCollection -- wraps GET /api/projects with TanStack DB
+ * and subscribes to `projects` delta frames pushed by UserSettingsDO.
  *
- * - Collection id: 'projects'
- * - Persisted to OPFS SQLite (schemaVersion 1)
- * - Refetch interval: 30s
- * - Stale time: 30s
- * - Keyed on project `name`
+ * Data flow (GH#32 phase p4):
+ *
+ *   agent-gateway → POST /api/gateway/projects/sync → D1 `projects`
+ *        ↓                                          ↓
+ *     cold-start                               user_presence fanout
+ *     GET /api/projects                  broadcastSyncedDelta per user
+ *        ↓                                          ↓
+ *     queryFn (rehydrate)              WS 'projects' frames → begin/write/commit
+ *
+ * Read-only from the user's perspective — no optimistic onInsert/onUpdate/
+ * onDelete handlers; authoritative writes happen gateway-side via the
+ * writeback reconcile.
  */
 
 import type { ProjectInfo } from '@duraclaw/shared-types'
-import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence'
-import { createCollection } from '@tanstack/db'
-import { queryCollectionOptions } from '@tanstack/query-db-collection'
 import { apiUrl } from '~/lib/platform'
-import { dbReady, queryClient } from './db-instance'
-
-const queryOpts = queryCollectionOptions({
-  id: 'projects',
-  queryKey: ['projects'] as const,
-  queryFn: async () => {
-    const resp = await fetch(apiUrl('/api/gateway/projects/all'))
-    if (!resp.ok) return []
-    return (await resp.json()) as ProjectInfo[]
-  },
-  queryClient,
-  getKey: (item: ProjectInfo) => item.name,
-  refetchInterval: 30_000,
-  staleTime: 30_000,
-})
+import { dbReady } from './db-instance'
+import { createSyncedCollection } from './synced-collection'
 
 const persistence = await dbReady
 
 function createProjectsCollection() {
-  if (persistence) {
-    const opts = persistedCollectionOptions({
-      ...queryOpts,
-      persistence,
-      schemaVersion: 1,
-    })
-    // TanStackDB beta: persistedCollectionOptions adds a schema type that
-    // conflicts with createCollection overloads. Runtime behavior is correct.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return createCollection(opts as any)
-  }
-
-  return createCollection(queryOpts)
+  return createSyncedCollection<ProjectInfo, string>({
+    id: 'projects',
+    queryKey: ['projects'] as const,
+    syncFrameType: 'projects',
+    queryFn: async () => {
+      const resp = await fetch(apiUrl('/api/projects'))
+      if (!resp.ok) return [] as ProjectInfo[]
+      const json = (await resp.json()) as { projects: ProjectInfo[] }
+      return json.projects
+    },
+    getKey: (item) => item.name,
+    persistence,
+    schemaVersion: 1,
+  })
 }
 
 export const projectsCollection = createProjectsCollection()

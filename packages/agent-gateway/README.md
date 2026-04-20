@@ -53,6 +53,9 @@ unlinked together with their `.log`.
 | `SESSIONS_DIR`               | `/run/duraclaw/sessions`       | Control-file directory; passed to spawned runner as env   |
 | `SESSION_RUNNER_BIN`         | auto-resolved                  | Absolute path override for the runner entry point         |
 | `DURACLAW_DEBUG_ENDPOINTS`   | *(unset)*                      | `1` enables `POST /debug/reap` for integration tests       |
+| `WORKER_PUBLIC_URL`          | *(unset = no push)*            | CF worker base URL; when set alongside `CC_GATEWAY_SECRET`, gateway pushes project manifest to `/api/gateway/projects/sync` on startup + every `PROJECT_SYNC_INTERVAL_MS` (GH#32 p4) |
+| `CC_GATEWAY_SECRET`          | *(unset = no push)*            | Bearer token used when pushing to `WORKER_PUBLIC_URL/api/gateway/projects/sync`; must match the worker's `CC_GATEWAY_SECRET` secret |
+| `PROJECT_SYNC_INTERVAL_MS`   | `30000`                        | Cadence of the worker push loop (ms)                      |
 
 ## Running
 

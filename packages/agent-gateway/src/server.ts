@@ -33,6 +33,20 @@ function decodeProjectName(raw: string): string | null {
 const PORT = Number(process.env.PORT ?? process.env.CC_GATEWAY_PORT ?? 9877)
 const startedAt = Date.now()
 
+// ── Worker push config (GH#32 phase p4) ────────────────────────────
+//
+// The gateway authoritatively pushes its project manifest to the worker
+// so the CF side can reconcile D1 and fan out synced-collection delta
+// frames to every active user. Cadence: immediately on startup and then
+// every PROJECT_SYNC_INTERVAL_MS (default 30s). Two env vars required:
+// WORKER_PUBLIC_URL (https base of the worker) and CC_GATEWAY_SECRET
+// (bearer matched by the sync handler). Missing either → push is a
+// no-op and the legacy GET /projects endpoint continues to serve as the
+// sole manifest source for operators/debug.
+const WORKER_PUBLIC_URL = process.env.WORKER_PUBLIC_URL ?? ''
+const CC_GATEWAY_SECRET = process.env.CC_GATEWAY_SECRET ?? ''
+const PROJECT_SYNC_INTERVAL_MS = Number(process.env.PROJECT_SYNC_INTERVAL_MS ?? 30_000)
+
 // ── Per-Connection Kata File Watchers ──────────────────────────────
 
 const kataWatchers = new Map<ServerWebSocket<WsData>, FSWatcher>()
@@ -387,6 +401,56 @@ discoverProjects({}).then((projects) => {
   }
 })
 
+// ── Worker project-sync push (GH#32 phase p4) ──────────────────────
+//
+// Runs one pass on startup (after reaper init below) and then on
+// PROJECT_SYNC_INTERVAL_MS. Fire-and-forget; logs on failure but never
+// blocks the gateway. Skipped entirely when either env var is missing so
+// unit-test runs and single-binary `bun run src/server.ts` invocations
+// don't spam the console.
+async function pushProjectsToWorker(): Promise<void> {
+  if (!WORKER_PUBLIC_URL || !CC_GATEWAY_SECRET) return
+  try {
+    const projects = await discoverProjects({})
+    const httpBase = WORKER_PUBLIC_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+    const url = new URL('/api/gateway/projects/sync', httpBase)
+    const resp = await fetch(url.toString(), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${CC_GATEWAY_SECRET}`,
+      },
+      body: JSON.stringify({ projects }),
+    })
+    if (!resp.ok) {
+      console.warn(
+        `[agent-gateway] project sync push returned ${resp.status} — continuing with local manifest only`,
+      )
+    }
+  } catch (err) {
+    console.warn(
+      '[agent-gateway] project sync push failed',
+      err instanceof Error ? err.message : err,
+    )
+  }
+}
+
+let projectSyncTimer: ReturnType<typeof setInterval> | null = null
+if (
+  WORKER_PUBLIC_URL &&
+  CC_GATEWAY_SECRET &&
+  process.env.NODE_ENV !== 'test' &&
+  process.env.VITEST !== 'true'
+) {
+  void pushProjectsToWorker()
+  projectSyncTimer = setInterval(() => {
+    void pushProjectsToWorker()
+  }, PROJECT_SYNC_INTERVAL_MS)
+  console.log(
+    `[agent-gateway] Project-sync push active → ${WORKER_PUBLIC_URL} (every ${PROJECT_SYNC_INTERVAL_MS}ms)`,
+  )
+}
+
 console.log(`[agent-gateway] Listening on http://127.0.0.1:${PORT}`)
 
 // Start the reaper (B6). Runs one pass immediately, then every 5 minutes.
@@ -413,6 +477,11 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     kataDebounceTimers.clear()
 
     stopReaper()
+
+    if (projectSyncTimer) {
+      clearInterval(projectSyncTimer)
+      projectSyncTimer = null
+    }
 
     server.stop()
     console.log('[agent-gateway] Server closed')

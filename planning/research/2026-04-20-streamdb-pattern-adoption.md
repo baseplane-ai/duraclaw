@@ -1,7 +1,7 @@
 # StreamDB Pattern Adoption — collection-level sync primitives
 
 **Date:** 2026-04-20
-**Status:** Research → documents root cause of the streaming regression and the wider architectural direction
+**Status:** Implemented — see `planning/specs/28-synced-collections-pattern.md` (GH#32). The forward-looking "collection-level sync primitives" recommendation landed as `createSyncedCollection` in `apps/orchestrator/src/db/synced-collection.ts`, driving `user_tabs`, `user_preferences`, `projects`, and `chains`. Y.Doc retired from `UserSettingsDO`; delta frames replace polling + invalidation-refetch.
 **Owner:** dev3
 
 ## Context

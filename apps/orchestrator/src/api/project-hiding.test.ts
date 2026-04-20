@@ -11,8 +11,8 @@ vi.mock('./auth-routes', async () => {
   return { authRoutes: new Hono() }
 })
 
-vi.mock('./notify', () => ({
-  notifyInvalidation: vi.fn().mockResolvedValue(undefined),
+vi.mock('~/lib/broadcast-synced-delta', () => ({
+  broadcastSyncedDelta: vi.fn().mockResolvedValue(undefined),
 }))
 
 vi.mock('drizzle-orm/d1', () => ({
@@ -51,23 +51,36 @@ function createMockEnv() {
 
 function makeApp(env: any) {
   const app = createApiApp()
+  const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() } as any
   return {
     async request(path: string, init?: RequestInit) {
       const url = `http://localhost${path}`
       const req = new Request(url, init)
-      return app.fetch(req, env)
+      return app.fetch(req, env, ctx)
     },
   }
 }
 
 /**
- * Build the queue of selects the route will issue:
+ * Build the queue of selects the /api/projects route will issue:
  *   1. getHiddenProjects → 1 select on user_preferences (returns [{hiddenProjects}])
- *   2. for each visible project → 1 select on agent_sessions (returns [])
+ *   2. 1 select on projects (D1-authoritative — GH#32 p4)
+ *   3. for each visible project → 1 select on agent_sessions (returns [])
  */
 function setupQueueForProjects(fakeDb: ReturnType<typeof makeFakeDb>, hidden: string[] | null) {
   const prefRow = hidden === null ? [] : [{ hiddenProjects: JSON.stringify(hidden) }]
   fakeDb.data.queue.push(prefRow)
+  // D1 `projects` table returns all live rows (the handler filters hidden
+  // via the preferences set after the query, not in SQL).
+  fakeDb.data.queue.push(
+    mockProjects.map((p) => ({
+      name: p.name,
+      displayName: null,
+      rootPath: p.path,
+      updatedAt: '2026-04-20T00:00:00.000Z',
+      deletedAt: null,
+    })),
+  )
   const visible = hidden ? mockProjects.filter((p) => !hidden.includes(p.name)) : mockProjects
   for (let i = 0; i < visible.length; i++) {
     fakeDb.data.queue.push([])
@@ -249,8 +262,9 @@ describe('project hiding', () => {
 
       await app.request('/api/projects')
 
-      // 1 select for user_preferences + 2 for the visible projects (alpha, gamma)
-      expect(fakeDb.db.select).toHaveBeenCalledTimes(3)
+      // 1 select for user_preferences + 1 for D1 projects + 2 for the
+      // visible projects' agent_sessions (alpha, gamma) = 4 total.
+      expect(fakeDb.db.select).toHaveBeenCalledTimes(4)
     })
   })
 })

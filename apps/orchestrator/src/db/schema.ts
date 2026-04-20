@@ -179,6 +179,7 @@ export const userTabs = sqliteTable(
     sessionId: text('session_id'),
     position: integer('position').notNull(),
     createdAt: text('created_at').notNull(),
+    deletedAt: text('deleted_at'),
   },
   (t) => ({
     userPosition: index('idx_user_tabs_user_position').on(t.userId, t.position),
@@ -218,6 +219,21 @@ export const auditLog = sqliteTable(
     byActionTime: index('idx_audit_action').on(t.action, t.createdAt),
   }),
 )
+
+export const userPresence = sqliteTable('user_presence', {
+  userId: text('user_id')
+    .primaryKey()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  firstConnectedAt: text('first_connected_at').notNull(),
+})
+
+export const projects = sqliteTable('projects', {
+  name: text('name').primaryKey(),
+  displayName: text('display_name'),
+  rootPath: text('root_path').notNull(),
+  updatedAt: text('updated_at').notNull(),
+  deletedAt: text('deleted_at'),
+})
 
 export const userPreferences = sqliteTable('user_preferences', {
   userId: text('user_id')

@@ -12,6 +12,8 @@ import { drizzle } from 'drizzle-orm/d1'
 import * as schema from '~/db/schema'
 import { agentSessions, worktreeReservations } from '~/db/schema'
 import { generateActionToken } from '~/lib/action-token'
+import { broadcastSyncedDelta } from '~/lib/broadcast-synced-delta'
+import { buildChainRow } from '~/lib/chains'
 import { runMigrations } from '~/lib/do-migrations'
 import { contentToParts, transcriptUserContentToParts } from '~/lib/message-parts'
 import { type PushPayload, sendPushNotification } from '~/lib/push'
@@ -866,6 +868,41 @@ export class SessionDO extends Agent<Env, SessionState> {
         console.error(`[SessionDO:${this.ctx.id}] failed to refresh reservation activity:`, err)
       }
     }
+
+    // GH#32 phase p5: broadcast an updated `chains` row for the affected
+    // issue so connected browsers see status / column / lastActivity
+    // updates without polling. Scoped to the session's owning user; a null
+    // return from buildChainRow means the chain has emptied — emit a delete
+    // so the client collection drops the row.
+    this.broadcastChainUpdate(kataState?.issueNumber ?? null)
+  }
+
+  /**
+   * Rebuild the ChainSummary for `issueNumber` and broadcast the delta op
+   * to the owning user's UserSettingsDO. Fire-and-forget via `waitUntil`
+   * so D1 write → broadcast latency doesn't stack on the caller.
+   */
+  private broadcastChainUpdate(issueNumber: number | null) {
+    if (issueNumber == null || !Number.isFinite(issueNumber)) return
+    const userId = this.state.userId
+    if (!userId) return
+
+    this.ctx.waitUntil(
+      (async () => {
+        try {
+          const row = await buildChainRow(this.env, this.d1, userId, issueNumber)
+          if (row) {
+            await broadcastSyncedDelta(this.env, userId, 'chains', [{ type: 'update', value: row }])
+          } else {
+            await broadcastSyncedDelta(this.env, userId, 'chains', [
+              { type: 'delete', key: String(issueNumber) },
+            ])
+          }
+        } catch (err) {
+          console.error(`[SessionDO:${this.ctx.id}] broadcastChainUpdate failed:`, err)
+        }
+      })(),
+    )
   }
 
   /**

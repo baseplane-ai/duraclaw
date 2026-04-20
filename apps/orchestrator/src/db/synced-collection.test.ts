@@ -1,0 +1,450 @@
+/**
+ * @vitest-environment jsdom
+ *
+ * Unit tests for createSyncedCollection (GH#32 p1).
+ *
+ * Strategy: mock @tanstack/db, @tanstack/query-db-collection,
+ * @tanstack/browser-db-sqlite-persistence, and ~/hooks/use-user-stream so
+ * we can drive the factory's sync-wrapped callback directly and observe
+ * the exact sequence of begin / write / commit calls plus the reconnect /
+ * queryFn re-invocation. This matches the deterministic signal the spec
+ * calls for in VP4 and across the p1 test_cases.
+ */
+
+import type { SyncedCollectionFrame } from '@duraclaw/shared-types'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+// ── Mocks ────────────────────────────────────────────────────────────────
+
+const mockCreateCollection = vi.fn().mockImplementation((opts) => ({
+  __opts: opts,
+  insert: vi.fn(),
+  update: vi.fn(),
+  delete: vi.fn(),
+  utils: { refetch: vi.fn() },
+}))
+
+const mockQueryCollectionOptions = vi.fn().mockImplementation((config) => ({
+  id: config.id,
+  __config: config,
+  sync: {
+    sync: vi.fn().mockImplementation((_params: unknown) => {
+      // Default "original sync" just fires markReady and returns no cleanup.
+      const p = _params as { markReady?: () => void }
+      p.markReady?.()
+      return undefined
+    }),
+  },
+}))
+
+const mockPersistedCollectionOptions = vi
+  .fn()
+  .mockImplementation((config) => ({ ...config, __wrappedByPersistence: true }))
+
+const mockInvalidateQueries = vi.fn()
+
+// Per-test storage for subscribeUserStream registrations so tests can push
+// frames and observe handler invocations.
+type FrameHandler = (frame: SyncedCollectionFrame<unknown>) => void
+type ReconnectHandler = () => void
+
+const frameHandlersByType = new Map<string, Set<FrameHandler>>()
+const reconnectHandlers = new Set<ReconnectHandler>()
+
+const mockSubscribeUserStream = vi.fn((frameType: string, handler: FrameHandler) => {
+  let set = frameHandlersByType.get(frameType)
+  if (!set) {
+    set = new Set()
+    frameHandlersByType.set(frameType, set)
+  }
+  set.add(handler)
+  return () => {
+    const current = frameHandlersByType.get(frameType)
+    current?.delete(handler)
+  }
+})
+
+const mockOnUserStreamReconnect = vi.fn((cb: ReconnectHandler) => {
+  reconnectHandlers.add(cb)
+  return () => {
+    reconnectHandlers.delete(cb)
+  }
+})
+
+vi.mock('@tanstack/db', () => ({
+  createCollection: mockCreateCollection,
+}))
+
+vi.mock('@tanstack/query-db-collection', () => ({
+  queryCollectionOptions: mockQueryCollectionOptions,
+}))
+
+vi.mock('@tanstack/browser-db-sqlite-persistence', () => ({
+  persistedCollectionOptions: mockPersistedCollectionOptions,
+}))
+
+vi.mock('~/hooks/use-user-stream', () => ({
+  subscribeUserStream: mockSubscribeUserStream,
+  onUserStreamReconnect: mockOnUserStreamReconnect,
+}))
+
+vi.mock('./db-instance', () => ({
+  queryClient: { invalidateQueries: mockInvalidateQueries },
+  dbReady: Promise.resolve(null),
+}))
+
+// ── Helpers ──────────────────────────────────────────────────────────────
+
+interface CapturedSync {
+  begin: ReturnType<typeof vi.fn>
+  write: ReturnType<typeof vi.fn>
+  commit: ReturnType<typeof vi.fn>
+  markReady: ReturnType<typeof vi.fn>
+  truncate: ReturnType<typeof vi.fn>
+  cleanup: (() => void) | void
+}
+
+/**
+ * Build a fresh sync-params stub, run the factory's wrapped sync fn, and
+ * return the captured begin/write/commit spies plus the cleanup fn.
+ */
+function driveSync(collection: { __opts: { sync: { sync: Function } } }): CapturedSync {
+  const begin = vi.fn()
+  const write = vi.fn()
+  const commit = vi.fn()
+  const markReady = vi.fn()
+  const truncate = vi.fn()
+
+  const cleanup = collection.__opts.sync.sync({
+    collection: {},
+    begin,
+    write,
+    commit,
+    markReady,
+    truncate,
+  }) as (() => void) | void
+
+  return { begin, write, commit, markReady, truncate, cleanup }
+}
+
+function emitFrame(collectionName: string, frame: SyncedCollectionFrame<unknown>) {
+  const handlers = frameHandlersByType.get(collectionName)
+  if (!handlers) return
+  for (const h of handlers) h(frame)
+}
+
+function triggerReconnect() {
+  for (const cb of reconnectHandlers) cb()
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────
+
+describe('createSyncedCollection', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    frameHandlersByType.clear()
+    reconnectHandlers.clear()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('factory-initial-load: runs queryFn via the wrapped sync and markReady fires', async () => {
+    const rows = [
+      { id: 'a', name: 'one' },
+      { id: 'b', name: 'two' },
+      { id: 'c', name: 'three' },
+    ]
+
+    // The mocked original sync invokes markReady synchronously — we assert
+    // that our wrapper preserves that path end-to-end.
+    const { createSyncedCollection } = await import('./synced-collection')
+
+    const queryFn = vi.fn().mockResolvedValue(rows)
+    const coll = createSyncedCollection<(typeof rows)[number], string>({
+      id: 'user_tabs',
+      getKey: (r) => r.id,
+      queryKey: ['user_tabs'] as const,
+      queryFn,
+      syncFrameType: 'user_tabs',
+    }) as unknown as { __opts: { sync: { sync: Function } } }
+
+    const captured = driveSync(coll)
+
+    // queryFn reference threaded into queryCollectionOptions
+    const qcoCall = mockQueryCollectionOptions.mock.calls.find(
+      (c) => (c[0] as { id: string }).id === 'user_tabs',
+    )
+    expect(qcoCall).toBeDefined()
+    expect((qcoCall![0] as { queryFn: typeof queryFn }).queryFn).toBe(queryFn)
+
+    // Initial-load path preserved: the original sync's markReady fires.
+    expect(captured.markReady).toHaveBeenCalled()
+  })
+
+  it('delta-frame-routing: only the matching syncFrameType handler receives ops', async () => {
+    const { createSyncedCollection } = await import('./synced-collection')
+
+    const tabs = createSyncedCollection<{ id: string }, string>({
+      id: 'user_tabs',
+      getKey: (r) => r.id,
+      queryKey: ['user_tabs'] as const,
+      queryFn: async () => [],
+      syncFrameType: 'user_tabs',
+    }) as unknown as { __opts: { sync: { sync: Function } } }
+
+    const prefs = createSyncedCollection<{ userId: string }, string>({
+      id: 'user_preferences',
+      getKey: (r) => r.userId,
+      queryKey: ['user_preferences'] as const,
+      queryFn: async () => [],
+      syncFrameType: 'user_preferences',
+    }) as unknown as { __opts: { sync: { sync: Function } } }
+
+    const tabsCap = driveSync(tabs)
+    const prefsCap = driveSync(prefs)
+
+    const row = { id: 't1', userId: 'u1' }
+    emitFrame('user_tabs', {
+      type: 'synced-collection-delta',
+      collection: 'user_tabs',
+      ops: [{ type: 'insert', value: row }],
+    })
+
+    // tabs saw begin / write(insert) / commit exactly once.
+    expect(tabsCap.begin).toHaveBeenCalledTimes(1)
+    expect(tabsCap.write).toHaveBeenCalledTimes(1)
+    expect(tabsCap.write).toHaveBeenCalledWith({ type: 'insert', value: row })
+    expect(tabsCap.commit).toHaveBeenCalledTimes(1)
+
+    // prefs was untouched.
+    expect(prefsCap.begin).not.toHaveBeenCalled()
+    expect(prefsCap.write).not.toHaveBeenCalled()
+    expect(prefsCap.commit).not.toHaveBeenCalled()
+  })
+
+  it('delete op writes {type:delete,key} shape (not value)', async () => {
+    const { createSyncedCollection } = await import('./synced-collection')
+
+    const coll = createSyncedCollection<{ id: string }, string>({
+      id: 'user_tabs',
+      getKey: (r) => r.id,
+      queryKey: ['user_tabs'] as const,
+      queryFn: async () => [],
+      syncFrameType: 'user_tabs',
+    }) as unknown as { __opts: { sync: { sync: Function } } }
+
+    const cap = driveSync(coll)
+
+    emitFrame('user_tabs', {
+      type: 'synced-collection-delta',
+      collection: 'user_tabs',
+      ops: [{ type: 'delete', key: 't1' }],
+    })
+
+    expect(cap.write).toHaveBeenCalledTimes(1)
+    const firstCall = cap.write.mock.calls[0][0] as {
+      type: string
+      key?: string
+    }
+    expect(firstCall.type).toBe('delete')
+    expect(firstCall.key).toBe('t1')
+  })
+
+  it('loopback-dedup: server-echo frame writes once per optimistic insert (2 total via sync)', async () => {
+    // Semantics per B6: `SyncConfig.write()` fires exactly twice — once for
+    // the optimistic apply (simulated here by driving write() via the caller
+    // pattern) and once for the echo-settle via the delta frame. Loopback
+    // de-duplication is TanStack DB's deep-equality responsibility; we only
+    // verify the factory does not introduce a THIRD write for a matching echo.
+    const { createSyncedCollection } = await import('./synced-collection')
+
+    const coll = createSyncedCollection<{ id: string; text: string }, string>({
+      id: 'user_tabs',
+      getKey: (r) => r.id,
+      queryKey: ['user_tabs'] as const,
+      queryFn: async () => [],
+      syncFrameType: 'user_tabs',
+    }) as unknown as { __opts: { sync: { sync: Function } } }
+
+    const cap = driveSync(coll)
+
+    // 1) Optimistic apply — caller writes directly.
+    cap.begin()
+    cap.write({ type: 'insert', value: { id: 't1', text: 'hi' } })
+    cap.commit()
+
+    // 2) Server echo arrives via the stream — factory applies it.
+    emitFrame('user_tabs', {
+      type: 'synced-collection-delta',
+      collection: 'user_tabs',
+      ops: [{ type: 'insert', value: { id: 't1', text: 'hi' } }],
+    })
+
+    expect(cap.write).toHaveBeenCalledTimes(2)
+  })
+
+  it('reconnect-post-response-lost: onUserStreamReconnect invalidates the query', async () => {
+    const { createSyncedCollection } = await import('./synced-collection')
+
+    const coll = createSyncedCollection<{ id: string }, string>({
+      id: 'user_tabs',
+      getKey: (r) => r.id,
+      queryKey: ['user_tabs'] as const,
+      queryFn: async () => [],
+      syncFrameType: 'user_tabs',
+    }) as unknown as { __opts: { sync: { sync: Function } } }
+
+    driveSync(coll)
+
+    triggerReconnect()
+
+    expect(mockInvalidateQueries).toHaveBeenCalledTimes(1)
+    expect(mockInvalidateQueries).toHaveBeenCalledWith({ queryKey: ['user_tabs'] })
+  })
+
+  it('cleanup unsubscribes frame + reconnect handlers and invokes original cleanup', async () => {
+    // Arrange: original sync returns a cleanup fn we can spy on.
+    const originalCleanup = vi.fn()
+    mockQueryCollectionOptions.mockImplementationOnce((config) => ({
+      id: config.id,
+      __config: config,
+      sync: {
+        sync: (_params: { markReady?: () => void }) => {
+          _params.markReady?.()
+          return originalCleanup
+        },
+      },
+    }))
+
+    const { createSyncedCollection } = await import('./synced-collection')
+
+    const coll = createSyncedCollection<{ id: string }, string>({
+      id: 'user_tabs',
+      getKey: (r) => r.id,
+      queryKey: ['user_tabs'] as const,
+      queryFn: async () => [],
+      syncFrameType: 'user_tabs',
+    }) as unknown as { __opts: { sync: { sync: Function } } }
+
+    const cap = driveSync(coll)
+    expect(frameHandlersByType.get('user_tabs')?.size).toBe(1)
+    expect(reconnectHandlers.size).toBe(1)
+
+    // Act: invoke the cleanup returned by the wrapped sync.
+    expect(typeof cap.cleanup).toBe('function')
+    ;(cap.cleanup as () => void)()
+
+    // Assert: handlers gone, original cleanup fired.
+    expect(frameHandlersByType.get('user_tabs')?.size ?? 0).toBe(0)
+    expect(reconnectHandlers.size).toBe(0)
+    expect(originalCleanup).toHaveBeenCalledTimes(1)
+  })
+
+  it('reconnect-post-never-reached: queryFn rejection is observable via queryInvalidate → caller refetch', async () => {
+    // The factory does not execute queryFn directly on reconnect — it
+    // invalidates the query and lets TanStack Query re-run queryFn with
+    // configured retry/timeout. This test verifies the invalidation path
+    // fires exactly once per reconnect and carries the right queryKey,
+    // which is the contract TanStack Query consumes. A rejecting queryFn
+    // would then surface via applyFailedResult / optimistic rollback —
+    // out of our wrap's responsibility.
+    const { createSyncedCollection } = await import('./synced-collection')
+
+    const queryFn = vi.fn().mockRejectedValue(new Error('network down'))
+    const coll = createSyncedCollection<{ id: string }, string>({
+      id: 'user_tabs',
+      getKey: (r) => r.id,
+      queryKey: ['user_tabs'] as const,
+      queryFn,
+      syncFrameType: 'user_tabs',
+    }) as unknown as { __opts: { sync: { sync: Function } } }
+
+    driveSync(coll)
+    triggerReconnect()
+
+    expect(mockInvalidateQueries).toHaveBeenCalledWith({ queryKey: ['user_tabs'] })
+    // queryFn is handed to queryCollectionOptions — the factory does NOT
+    // call it directly on reconnect. Verified by asserting our wrap never
+    // invokes the passed queryFn.
+    expect(queryFn).not.toHaveBeenCalled()
+  })
+
+  it('reconnect-delete-lost: factory re-invalidates; optimistic delete reappearance is TanStack DB rollback behavior (not factory)', async () => {
+    // Same shape as reconnect-post-never-reached — the factory's job is to
+    // hand the reconnect signal to TanStack Query via invalidateQueries.
+    // The row reappearing on failed-delete rollback is an upstream contract
+    // we smoke-test here by asserting we do invalidate (not short-circuit).
+    const { createSyncedCollection } = await import('./synced-collection')
+
+    const coll = createSyncedCollection<{ id: string }, string>({
+      id: 'user_tabs',
+      getKey: (r) => r.id,
+      queryKey: ['user_tabs'] as const,
+      queryFn: async () => [{ id: 't1' }],
+      syncFrameType: 'user_tabs',
+    }) as unknown as { __opts: { sync: { sync: Function } } }
+
+    driveSync(coll)
+    triggerReconnect()
+    triggerReconnect()
+
+    expect(mockInvalidateQueries).toHaveBeenCalledTimes(2)
+  })
+
+  it('applies persistenceWrap when persistence is provided, preserving our sync wrapper', async () => {
+    const { createSyncedCollection } = await import('./synced-collection')
+
+    const fakePersistence = { adapter: {} } as unknown as object
+
+    createSyncedCollection<{ id: string }, string>({
+      id: 'user_tabs',
+      getKey: (r) => r.id,
+      queryKey: ['user_tabs'] as const,
+      queryFn: async () => [],
+      syncFrameType: 'user_tabs',
+      // biome-ignore lint/suspicious/noExplicitAny: fake persistence handle
+      persistence: fakePersistence as any,
+      schemaVersion: 2,
+    })
+
+    expect(mockPersistedCollectionOptions).toHaveBeenCalledTimes(1)
+    const arg = mockPersistedCollectionOptions.mock.calls[0][0] as {
+      persistence: unknown
+      schemaVersion: number
+      sync: { sync: Function }
+    }
+    expect(arg.persistence).toBe(fakePersistence)
+    expect(arg.schemaVersion).toBe(2)
+    // Our wrapped sync is what persistedCollectionOptions sees.
+    expect(typeof arg.sync.sync).toBe('function')
+  })
+
+  it('configures queryCollectionOptions with staleTime: Infinity, refetchInterval: false, retry: 2, retryDelay: 500', async () => {
+    const { createSyncedCollection } = await import('./synced-collection')
+
+    createSyncedCollection<{ id: string }, string>({
+      id: 'user_tabs',
+      getKey: (r) => r.id,
+      queryKey: ['user_tabs'] as const,
+      queryFn: async () => [],
+      syncFrameType: 'user_tabs',
+    })
+
+    const call = mockQueryCollectionOptions.mock.calls.find(
+      (c) => (c[0] as { id: string }).id === 'user_tabs',
+    )
+    expect(call).toBeDefined()
+    const cfg = call![0] as {
+      staleTime: number
+      refetchInterval: unknown
+      retry: number
+      retryDelay: number
+    }
+    expect(cfg.staleTime).toBe(Number.POSITIVE_INFINITY)
+    expect(cfg.refetchInterval).toBe(false)
+    expect(cfg.retry).toBe(2)
+    expect(cfg.retryDelay).toBe(500)
+  })
+})
