@@ -54,6 +54,9 @@ importers:
       '@capacitor-community/sqlite':
         specifier: ^8.1.0
         version: 8.1.0(@capacitor/core@8.3.1)
+      '@capacitor/app':
+        specifier: ^8.0.1
+        version: 8.1.0(@capacitor/core@8.3.1)
       '@capacitor/core':
         specifier: ^8.3.1
         version: 8.3.1

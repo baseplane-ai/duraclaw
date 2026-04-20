@@ -26,7 +26,7 @@ export type DisplayState =
   | { status: 'archived'; label: 'Archived'; color: 'gray'; icon: 'archive'; isInteractive: false }
   | {
       status: 'disconnected'
-      label: 'Disconnected'
+      label: 'Reconnecting…'
       color: 'gray'
       icon: 'wifi-off'
       isInteractive: false
@@ -75,7 +75,7 @@ const ARCHIVED: DisplayState = {
 
 const DISCONNECTED: DisplayState = {
   status: 'disconnected',
-  label: 'Disconnected',
+  label: 'Reconnecting…',
   color: 'gray',
   icon: 'wifi-off',
   isInteractive: false,

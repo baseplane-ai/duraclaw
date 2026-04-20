@@ -1,5 +1,6 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { toast } from 'sonner'
 import { Button } from '~/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '~/components/ui/card'
 import { Input } from '~/components/ui/input'
@@ -14,6 +15,22 @@ function LoginPage() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
+
+  // B7: when redirectToLogin('expired') runs from a 401-handling fetch
+  // site it sets an `auth.redirect.reason` flag in sessionStorage; pick
+  // it up here, surface the message, and clear the key so a manual
+  // visit to /login isn't surprised by a stale toast.
+  useEffect(() => {
+    try {
+      const reason = sessionStorage.getItem('auth.redirect.reason')
+      if (reason) {
+        sessionStorage.removeItem('auth.redirect.reason')
+        toast(reason === 'expired' ? 'Session expired — please sign in again.' : 'Please sign in.')
+      }
+    } catch {
+      // sessionStorage may be unavailable (private mode, SSR) — silently skip
+    }
+  }, [])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
