@@ -2,19 +2,80 @@
 
 **Date:** 2026-04-20
 **Type:** Library/tech evaluation
-**Status:** Research complete — recommendation: **don't adopt wholesale; cherry-pick patterns from `@assistant-ui/react-opencode`**
+**Status:** **Revised 2026-04-20** — earlier "don't adopt wholesale" recommendation was based on the wrong integration surface. **Updated recommendation: prototype adoption via `useAISDKRuntime` behind a feature flag.** The original analysis (below the revision block) is retained for the historical record; its "streaming conflict" and "branching conflict" arguments no longer hold.
 
-## TL;DR
+---
+
+## Revision Notice
+
+The original TL;DR leaned on `useExternalStoreRuntime` — the lowest-level "bring your own state" adapter — and correctly noted that its docs show per-delta `setMessages` churn. From that I concluded the library fights our streaming and branching models. **That framing was wrong** for our specific stack.
+
+Two facts I missed:
+
+1. **Our message parts are already AI SDK-shaped.** `apps/orchestrator/src/agents/gateway-event-mapper.ts:1` imports `SessionMessagePart` from `agents/experimental/memory/session` — the Cloudflare Agents SDK's built-in memory module, which emits AI SDK-compatible `UIMessagePart` shapes (`{type:'text', state:'streaming'|'done'}`, `{type:'reasoning', …}`, `{type:'tool-<name>', toolCallId, toolName, input, state:'input-available'|'output-available'|'output-error'}`). `packages/ai-elements/src/components/tool.tsx:3` already imports `ToolUIPart` from `'ai'`, as do `conversation.tsx`, `message.tsx`, `confirmation.tsx`, `attachments.tsx`, etc. Duraclaw has been in AI SDK's UIMessage shape the entire time — the wire just wraps it in a Cloudflare Agents `{type:'messages', kind:'delta'|'snapshot'}` envelope.
+
+2. **assistant-ui has a first-class AI SDK adapter.** `@assistant-ui/react-ai-sdk/src/ui/use-chat/useAISDKRuntime.ts` accepts `chatHelpers: ReturnType<typeof useChat<UIMessage>>` from `@ai-sdk/react` and reads `chatHelpers.messages: UIMessage[]` + `chatHelpers.status`. It streams by **mutation-in-place on the last assistant message's parts**, which is what `useChat` does internally and what we already do via `gateway-event-mapper.partialAssistantToParts`. No per-delta array replacement. Branching is delegated to an external-history adapter (`useExternalHistory` + `ExportedMessageRepository.fromBranchableArray()`) — the library doesn't need to own branch state; we can keep server-authored snapshots.
+
+### Revised adoption path
+
+One shim file that adapts our existing collection + connection into a `useChat`-shaped object:
+
+```ts
+function useSessionAsChatHelpers(agentName: string, sessionId: string) {
+  const messages = useLiveQuery(/* messagesCollection for this session */)
+  const live = useSessionLiveState(sessionId)
+  return {
+    messages,                                              // already UIMessage[]
+    status: live.status === 'running' ? 'streaming' : 'ready',
+    sendMessage: (msg) => connection.sendMessage(msg),     // existing optimistic path
+    addToolResult: (r) => connection.call('resolveGate', [r]),
+    stop:       () => connection.call('interrupt'),
+    regenerate: () => connection.call('rewind', ...),
+    error: live.error,
+  }
+}
+
+const runtime = useAISDKRuntime(useSessionAsChatHelpers(agentName, sessionId))
+```
+
+Plus branch ownership stays where it is: DO-authored snapshots replace `messagesCollection` contents → `chatHelpers.messages` changes → library re-renders. Their `useExternalHistory` adapter gives us the hook if we want their branch-nav UI to talk to our RPCs.
+
+### Revised recommendation matrix
+
+| Option | Cost | Value | Verdict |
+|--------|------|-------|---------|
+| **A. Adopt via `useAISDKRuntime` behind a flag** (shim + keep ai-elements as custom renderers per-tool) | ~days — one shim, wire through, prove on one route | Polished composer, accessibility, devtools, voice primitive, tool-UI registry, HITL baked in | ✅ **Recommended prototype** |
+| **B. Port tool-UI primitives into ai-elements (original addendum plan)** | ~days — additive inside ai-elements | Per-tool registry, `argsText` streaming, clean status union, `addResult`/`resume`, `artifact`, `parentId` nesting | ✅ Parallel track — still valuable even if A wins, and a sensible fallback if A regresses |
+| **C. `useExternalStoreRuntime` path** (my original analysis) | High — per-delta array replacement, branching bridging | Same UI wins as A | ❌ Wrong adapter — skip |
+| **D. Don't adopt** | Zero | Nothing | 🤷 Default if prototype regresses |
+
+### What to actually do
+
+1. **Spike branch** — add `@assistant-ui/react` + `@assistant-ui/react-ai-sdk` (+ `ai` if needed at a newer version), write `useSessionAsChatHelpers`, mount a `<Thread>` in a `/chat-preview` route behind a feature flag. Measure: does streaming feel right? Do tool-UIs render? Does reconnect still work?
+2. **Compare** against our current `ChatThread.tsx` on the same session. If the prototype holds up, pick which primitives to keep (composer, viewport) and which to replace with our existing rich renderers (Artifact, Reasoning, Terminal, Confirmation).
+3. **Either way, land the tool-UI primitive upgrade (Option B).** It has standalone value — adds per-tool routing / `argsText` streaming / artifact slot to ai-elements — and provides the registry backbone that the assistant-ui path also needs.
+
+### Why the reversal
+
+The original "streaming/branching conflicts" argument conflated "docs for the lowest-level adapter" with "every adaptor path." Duraclaw already *uses* AI SDK's data model (via Cloudflare Agents' memory module); the AI SDK adapter was always the right surface to evaluate. Calling this out explicitly so the next reader doesn't have to rediscover it.
+
+---
+
+## Original Analysis (Superseded)
+
+The section below was the first pass. Its framing of streaming and branching as blockers is retained for context but **should not guide decisions** — see the Revision Notice above.
+
+## TL;DR (original)
 
 `assistant-ui` (github.com/assistant-ui/assistant-ui — MIT, 9.6k★, YC-backed, very active: pushed 2026-04-20, 1,344 tagged releases) is a high-quality React library of composable chat primitives. Its stack aligns well with ours (React 19, Tailwind, Radix, shadcn-style slot composition), and it ships a custom-backend adapter (`useExternalStoreRuntime`) that could front our `SessionDO` WS stream.
 
 However, adopting it whole-cloth would:
 
-1. **Fight our streaming model.** assistant-ui expects message objects to be *replaced per frame* via `setMessages`. We stream token-by-token by mutating `part.text` on a stable message row in a TanStack DB collection (`gateway-event-mapper.mergeFinalAssistantParts`, `use-coding-agent.ts:259–279`). Bridging requires materialising every delta as a fresh message array — wasteful and at odds with our IVM-driven reactive pipeline.
-2. **Fight our branching model.** assistant-ui treats branches as a client-side tree derived from `parentId` and `setMessages`. Our branches are **server-authoritative**: `SessionDO.getHistory(leafId)` produces snapshots; clients are read-only consumers (`branch-info-collection.ts`). We'd be wiring our snapshots into their tree and re-deriving sibling state we already have.
-3. **Duplicate `packages/ai-elements`.** We already run a 45-component bespoke library (Conversation, Message, Tool, PromptInput, Artifact, Reasoning, Confirmation, Suggestion, CodeBlock, ToolCallList) built on the same Radix + Tailwind + streamdown foundation that assistant-ui uses.
+1. **Fight our streaming model.** ~~assistant-ui expects message objects to be *replaced per frame* via `setMessages`.~~ **[Superseded: this only applies to `useExternalStoreRuntime`; `useAISDKRuntime` streams by in-place mutation matching our model.]** We stream token-by-token by mutating `part.text` on a stable message row in a TanStack DB collection (`gateway-event-mapper.mergeFinalAssistantParts`, `use-coding-agent.ts:259–279`). Bridging requires materialising every delta as a fresh message array — wasteful and at odds with our IVM-driven reactive pipeline.
+2. **Fight our branching model.** ~~assistant-ui treats branches as a client-side tree derived from `parentId` and `setMessages`.~~ **[Superseded: `useExternalHistory` delegates branch ownership to us.]** Our branches are **server-authoritative**: `SessionDO.getHistory(leafId)` produces snapshots; clients are read-only consumers (`branch-info-collection.ts`). We'd be wiring our snapshots into their tree and re-deriving sibling state we already have.
+3. **Duplicate `packages/ai-elements`.** We already run a 45-component bespoke library (Conversation, Message, Tool, PromptInput, Artifact, Reasoning, Confirmation, Suggestion, CodeBlock, ToolCallList) built on the same Radix + Tailwind + streamdown foundation that assistant-ui uses. **[Still true — cost/benefit trade-off, not an architectural veto.]**
 
-The **high-value part** is their `@assistant-ui/react-opencode` adapter (opencode is a Claude-Code-style agent tool) — studying its event→part mapping and tool-UI composition is likely more actionable than swapping libraries.
+The **high-value part** is their `@assistant-ui/react-opencode` adapter (opencode is a Claude-Code-style agent tool) — studying its event→part mapping and tool-UI composition is likely more actionable than swapping libraries. **[Still worth reading, but the AI SDK adapter is the primary integration surface.]**
 
 ## What assistant-ui Is
 
