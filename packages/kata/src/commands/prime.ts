@@ -1,8 +1,9 @@
 // kata prime - Output context injection block
+
+import { loadKataConfig } from '../config/kata-config.js'
 import { getCurrentSessionId, getStateFilePath, resolveTemplatePath } from '../session/lookup.js'
 import { readState, stateExists } from '../state/reader.js'
 import { readFullTemplateContent } from '../yaml/index.js'
-import { loadKataConfig } from '../config/kata-config.js'
 
 /**
  * Parse command line arguments for prime command
@@ -50,7 +51,9 @@ async function buildModeSelectionHelp(): Promise<string> {
 
   return `# MODE ENTRY IS MANDATORY
 
-**CRITICAL**: Before doing ANY work, you MUST enter a mode.
+**CRITICAL**: Before doing ANY work that modifies code, you MUST enter a mode.
+
+**EXCEPTION**: Simple lookups, questions, and searches do NOT require a mode. Answer directly. Examples: "what's the last issue created", "show me the test file for X", "how does Y work". Only enter a mode when the user wants to DO something (implement, fix, plan, debug, verify).
 
 ## Available Modes
 
@@ -64,15 +67,16 @@ ${modeTable}
 
 ## Classify User Intent
 
-| User Says | Intent | Mode |
-|-----------|--------|------|
-| "add X to CLI", "quick change", "small refactor" | SMALL TASK | \`task\` |
-| "implement issue #123", "build feature from spec" | SPEC WORK | \`implementation\` |
-| "bug: ...", "fix #456", "broken ..." | BUG FIX | \`bugfix\` |
-| "plan ...", "design ...", "spec ..." | PLANNING | \`planning\` |
-| "how does ...", "what is ...", "explain ..." | QUESTION | \`freeform\` |
-| "research ...", "comprehensive exploration" | RESEARCH | \`research\` |
-| "investigate ...", "why is ...", "debug ..." | DEBUG | \`debug\` |
+| User Says | Intent | Action |
+|-----------|--------|--------|
+| "what's the last ...", "show me ...", "list ..." | LOOKUP | **Answer directly — no mode needed** |
+| "how does ...", "what is ...", "explain ..." | QUESTION | **Answer directly — no mode needed** |
+| "add X to CLI", "quick change", "small refactor" | SMALL TASK | \`task\` mode |
+| "implement issue #123", "build feature from spec" | SPEC WORK | \`implementation\` mode |
+| "bug: ...", "fix #456", "broken ..." | BUG FIX | \`debug\` mode |
+| "plan ...", "design ...", "spec ..." | PLANNING | \`planning\` mode |
+| "research ...", "comprehensive exploration" | RESEARCH | \`research\` mode |
+| "investigate ...", "why is ...", "debug ..." | DEBUG | \`debug\` mode |
 
 ## Commands
 
@@ -84,7 +88,7 @@ kata status                             # Check current mode and phase
 kata can-exit                           # Check stop conditions
 \`\`\`
 
-**NEVER skip mode entry.** Work without a mode loses tracking, context, and guidance.`
+**NEVER skip mode entry for work that modifies code.** But simple lookups and questions can be answered directly.`
 }
 
 /**
@@ -211,7 +215,7 @@ export async function prime(args: string[]): Promise<void> {
       process.stdout.write(`${JSON.stringify(output)}\n`)
     } else {
       // Output as plain text
-      // biome-ignore lint/suspicious/noConsole: intentional CLI output
+
       console.log(contextBlock)
     }
   } catch {
@@ -227,7 +231,6 @@ export async function prime(args: string[]): Promise<void> {
       }
       process.stdout.write(`${JSON.stringify(output)}\n`)
     } else {
-      // biome-ignore lint/suspicious/noConsole: intentional CLI output
       console.log(modeHelp)
     }
   }

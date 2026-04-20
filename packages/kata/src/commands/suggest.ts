@@ -1,6 +1,7 @@
 // kata suggest - Detect mode from user message and output entry guidance
-import { loadKataConfig } from '../config/kata-config.js'
+
 import type { KataConfig, KataModeConfig } from '../config/kata-config.js'
+import { loadKataConfig } from '../config/kata-config.js'
 
 interface SuggestResult {
   mode: string | null
@@ -102,18 +103,21 @@ function detectSearchIntent(message: string): SearchIntent | null {
   const lowerMessage = message.toLowerCase()
 
   // Search patterns for issues
+  // Handle contractions: "what's" → "what" + optional "'s"/apostrophe before whitespace
   const issuePatterns = [
     /(?:find|search|list|show|get|recent)\s+(?:\w+\s+)?issues?/i,
     /issues?\s+(?:for|about|related to|with)/i,
-    /(?:what|which)\s+issues?\s+/i,
+    /(?:what|which)(?:'s|'s)?\s+(?:\w+\s+)*issues?\b/i,
+    /(?:last|latest|newest|recent)\s+issues?\s+(?:created|opened|filed)/i,
   ]
 
   // Search patterns for specs
   const specPatterns = [
     /(?:find|search|list|show|get|recent)\s+(?:\w+\s+)?specs?/i,
     /specs?\s+(?:for|about|related to|created for)/i,
-    /(?:what|which)\s+specs?\s+/i,
+    /(?:what|which)(?:'s|'s)?\s+(?:\w+\s+)*specs?\b/i,
     /spec\s+(?:created|written|exists?)/i,
+    /(?:last|latest|newest|recent)\s+specs?\s+(?:created|written)/i,
   ]
 
   // Search patterns for research docs
@@ -321,7 +325,6 @@ export async function suggest(args: string[]): Promise<void> {
   const message = args.join(' ')
 
   if (!message) {
-    // biome-ignore lint/suspicious/noConsole: intentional CLI output
     console.log(JSON.stringify({ mode: null, confidence: null, guidance: '', command: null }))
     return
   }
@@ -336,7 +339,7 @@ export async function suggest(args: string[]): Promise<void> {
       command: searchIntent.commands[0] || null,
       searchIntent,
     }
-    // biome-ignore lint/suspicious/noConsole: intentional CLI output
+
     console.log(JSON.stringify(result))
     return
   }
@@ -359,18 +362,17 @@ export async function suggest(args: string[]): Promise<void> {
       confidence: 'low',
       guidance: `# No Mode Detected
 
-**⚠️ Enter a mode before proceeding:**
+If the user is asking a simple question or lookup, answer directly — no mode needed.
+
+If the user wants to DO work (implement, fix, plan, debug, verify), enter a mode first:
 
 \`kata enter <mode>\`
 
 ## Available Modes
-${modeList}
-
-Pick the mode that matches the user's intent.`,
+${modeList}`,
       command: null,
     }
 
-    // biome-ignore lint/suspicious/noConsole: intentional CLI output
     console.log(JSON.stringify(result))
     return
   }
@@ -392,7 +394,7 @@ Redirecting to **${redirectConfig.name ?? modeConfig.redirect_to}** mode.
 \`kata enter ${modeConfig.redirect_to}\``,
         command: `kata enter ${modeConfig.redirect_to}`,
       }
-      // biome-ignore lint/suspicious/noConsole: intentional CLI output
+
       console.log(JSON.stringify(result))
       return
     }
@@ -408,6 +410,5 @@ Redirecting to **${redirectConfig.name ?? modeConfig.redirect_to}** mode.
     command,
   }
 
-  // biome-ignore lint/suspicious/noConsole: intentional CLI output
   console.log(JSON.stringify(result))
 }
