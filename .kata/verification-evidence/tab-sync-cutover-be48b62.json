@@ -1,0 +1,63 @@
+{
+  "commit": "be48b62",
+  "title": "feat(orchestrator): migrate tab-sync hook off Yjs onto userTabsCollection",
+  "verified_at": "2026-04-20T21:50:00Z",
+  "mode": "verify",
+  "environment": "local (scripts/verify/dev-up.sh, miniflare + Chrome via scripts/axi)",
+  "evidence": [
+    {
+      "step": "Apply D1 migration 0014_user_tabs_meta locally",
+      "command": "npx wrangler d1 migrations apply duraclaw-auth --local",
+      "result": "1 command executed successfully — 0014_user_tabs_meta.sql ✅",
+      "status": "pass"
+    },
+    {
+      "step": "POST /api/user-settings/tabs with meta field",
+      "payload": "{id:'test123', sessionId:'sess-x', position:0, meta:'{\"project\":\"baseplane\"}'}",
+      "result": "201 Created",
+      "status": "pass"
+    },
+    {
+      "step": "GET /api/user-settings/tabs echoes meta",
+      "result": "tabs[0].meta === '{\"project\":\"baseplane\"}'",
+      "status": "pass"
+    },
+    {
+      "step": "DELETE /api/user-settings/tabs/:id",
+      "result": "204 No Content",
+      "status": "pass"
+    },
+    {
+      "step": "Deep-link login (?session=X) → useTabSync.openTab → optimistic insert → server echo",
+      "result": "D1 row persisted {id:'8a91aaef', sessionId:'29fa1ca6...', meta:'{\"project\":\"baseplane\"}'} and TabBar renders 'tab 29fa1ca6' after reload",
+      "status": "pass"
+    },
+    {
+      "step": "Server-side insert → broadcastSyncedDelta → subscribeUserStream('user_tabs') → useLiveQuery reactively renders",
+      "method": "POST a second tab via fetch; observe TabBar add 'tab draft:se' without reload",
+      "result": "New tab visible within 2s; no reload required",
+      "status": "pass"
+    },
+    {
+      "step": "Server-side delete → delta frame → useLiveQuery removes row",
+      "method": "DELETE the second tab; observe TabBar remove it",
+      "result": "Tab disappears within 2s without reload",
+      "status": "pass"
+    },
+    {
+      "step": "No Yjs imports remain in use-tab-sync.ts",
+      "command": "grep yjs|y-partyserver|y-indexeddb|Y.Doc|Y.Map apps/orchestrator/src/hooks/use-tab-sync.ts",
+      "result": "only a comment string 'shared Y.Doc' remains — no imports, no runtime use",
+      "status": "pass"
+    }
+  ],
+  "scope_excluded": [
+    "use-session-collab.ts (draft collab) — separate migration",
+    "cursor-overlay.tsx — separate migration",
+    "yjs / y-partyserver / y-indexeddb deps stay in package.json — still used by the above"
+  ],
+  "followups": [
+    "Users upgrading in place lose any open-tab state one time (Yjs IndexedDB → D1 is not auto-migrated). Acceptable one-time transition; not worth building a migrator for ephemeral tab pointers.",
+    "OPFS persistence hit NoModificationAllowedError during the first verify run (stale sync handle held by prior Chrome session) — fell back to memory-only storage. Pre-existing axi/dev-stack flakiness, unrelated to this cutover."
+  ]
+}
