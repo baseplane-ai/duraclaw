@@ -25,8 +25,8 @@ This runs `apps/mobile/scripts/build-android.sh`, which:
 
 Output: `apps/mobile/android/app/build/outputs/apk/release/app-release-unsigned.apk`.
 
-Requires `JAVA_HOME` (JDK 17) and `ANDROID_HOME` (with `cmdline-tools/latest`,
-`platform-tools`, `platforms;android-34`, `build-tools;34.0.0`) on PATH.
+Requires `JAVA_HOME` (JDK 21) and `ANDROID_HOME` (with `cmdline-tools/latest`,
+`platform-tools`, `platforms;android-36`, `build-tools;36.0.0`) on PATH.
 
 ### Sign
 
