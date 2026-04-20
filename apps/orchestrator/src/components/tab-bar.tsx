@@ -34,7 +34,7 @@ import {
   SheetTitle,
 } from '~/components/ui/sheet'
 import type { SessionRecord } from '~/db/session-record'
-import { StatusDot } from '~/features/agent-orch/session-utils'
+import { getPreviewText, StatusDot } from '~/features/agent-orch/session-utils'
 import { useDerivedStatus } from '~/hooks/use-derived-status'
 import { useIsMobile } from '~/hooks/use-mobile'
 import { useSessionLiveState } from '~/hooks/use-session-live-state'
@@ -506,7 +506,7 @@ function ProjectTab({
               {session.project}
             </span>
             <span className="max-w-32 truncate leading-tight">
-              {session.title || session.project}
+              {session.title || getPreviewText(session) || session.project}
             </span>
           </div>
         </>
