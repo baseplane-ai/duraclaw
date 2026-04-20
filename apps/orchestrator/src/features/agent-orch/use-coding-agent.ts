@@ -27,18 +27,11 @@ import type {
   GateResponse,
   KataSessionState,
   SessionMessage,
-  SessionState,
   SpawnConfig,
 } from '~/lib/types'
 import { useAppLifecycle } from './use-app-lifecycle'
 
-export type {
-  ContentBlock,
-  ContextUsage,
-  GateResponse,
-  SessionState as CodingAgentState,
-  SpawnConfig,
-}
+export type { ContentBlock, ContextUsage, GateResponse, SpawnConfig }
 
 export interface GatewayEvent {
   type: string
@@ -46,9 +39,7 @@ export interface GatewayEvent {
 }
 
 export interface UseCodingAgentResult {
-  state: SessionState | null
   messages: SessionMessage[]
-  sessionResult: { total_cost_usd: number; duration_ms: number } | null
   kataState: KataSessionState | null
   contextUsage: ContextUsage | null
   wsReadyState: number
@@ -129,7 +120,11 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   const messagesCollection = useMemo(() => createMessagesCollection(agentName), [agentName])
 
   // Server-authoritative live state from the TanStack DB collection.
-  const { state, contextUsage, kataState, sessionResult } = useSessionLiveState(agentName)
+  // Spec #31 P5 B10: `state` / `sessionResult` narrowed off. Status / gate
+  // / result come from `useDerivedStatus` / `useDerivedGate` over
+  // `messagesCollection`; `contextUsage` / `kataState` remain on the
+  // live-state collection.
+  const { contextUsage, kataState } = useSessionLiveState(agentName)
 
   // Reset per-session transient state on agentName change (tab switch without
   // remount). Collection rows for other sessions are untouched.
@@ -354,7 +349,10 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     [agentName, applySnapshot, messagesCollection],
   )
 
-  const connection = useAgent<SessionState>({
+  // Spec #31 P5 B10: no DO-side setState broadcast anymore
+  // (shouldSendProtocolMessages returns false). The generic is unused for
+  // state sync but `useAgent` still requires one — pass `unknown`.
+  const connection = useAgent<unknown>({
     agent: 'session-agent',
     name: agentName,
     ...(wsBaseUrl() ? { host: wsBaseUrl() } : {}),
@@ -370,14 +368,9 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           queryDeps: [],
         }
       : {}),
-    onStateUpdate: () => {
-      // Spec-31 P4b: no-op. Status, gate, sessionResult and other live-state
-      // derivations for ACTIVE sessions now come from `useDerivedStatus` /
-      // `useDerivedGate` / `useMessagesCollection`, and the top-level
-      // summary fields (numTurns, totalCostUsd, model, …) are served from
-      // D1 REST to the non-active callers. This callback is removed
-      // entirely in P5 alongside `SessionState` deletion.
-    },
+    // Spec #31 P5 B9: SDK state broadcast suppressed via
+    // `shouldSendProtocolMessages() => false` on the DO. The `SessionState`
+    // shape is gone and `onStateUpdate` would never fire — omitted.
     onMessage: (message: MessageEvent) => {
       try {
         const parsed = JSON.parse(typeof message.data === 'string' ? message.data : '')
@@ -739,9 +732,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   )
 
   return {
-    state,
     messages,
-    sessionResult,
     kataState,
     contextUsage,
     wsReadyState,

@@ -141,7 +141,7 @@ export function ChainPage({ issueNumber }: ChainPageProps) {
   // field; surface the session summary as a lightweight live indicator
   // when nothing else is available. Full streaming transcript rendering
   // is deferred to a later unit that hooks into messagesCollection.
-  const liveText = activeLive.state?.summary ?? undefined
+  const liveText = activeLive.summary ?? undefined
 
   const title = chain?.issueTitle ?? chainSessions[0]?.title ?? undefined
   const workspace = knownProject ?? chainSessions[0]?.project ?? undefined

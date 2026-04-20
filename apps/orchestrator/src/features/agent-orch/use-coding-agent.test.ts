@@ -220,8 +220,9 @@ vi.mock('~/hooks/use-messages-collection', async () => {
 
 // useSessionLiveState + upsertSessionLiveState are the new ingress/egress for
 // server-authoritative state. Mock them together with a shared in-memory map
-// so onStateUpdate / onMessage writes round-trip back through the hook and
-// tests can assert on result.current.state / kataState / etc.
+// so onMessage writes round-trip back through the hook and tests can assert
+// on result.current.kataState / contextUsage / etc. (Spec #31 P5 B10:
+// `state` / `sessionResult` no longer exposed.)
 const liveStateStore = new Map<string, Record<string, unknown>>()
 const liveStateSubs = new Set<() => void>()
 const bumpLiveState = () => {
@@ -242,13 +243,12 @@ vi.mock('~/hooks/use-session-live-state', async () => {
       }, [])
       const row = sessionId ? liveStateStore.get(sessionId) : undefined
       return {
-        state: (row?.state as unknown) ?? null,
         contextUsage: (row?.contextUsage as unknown) ?? null,
         kataState: (row?.kataState as unknown) ?? null,
         worktreeInfo: (row?.worktreeInfo as unknown) ?? null,
-        sessionResult: (row?.sessionResult as unknown) ?? null,
         wsReadyState: (row?.wsReadyState as number | undefined) ?? null,
         isLive: row?.wsReadyState === 1,
+        status: (row?.status as unknown) ?? undefined,
       }
     },
   }
@@ -383,7 +383,8 @@ describe('useCodingAgent cache-first hydration', () => {
     expect(result.current.messages).toHaveLength(2)
     expect(result.current.messages[0].parts[0].text).toBe('Hello from cache')
     expect(result.current.messages[1].parts[0].toolName).toBe('bash')
-    expect(result.current.state).toBeNull()
+    // Spec #31 P5 B10: `state` is no longer surfaced by useCodingAgent.
+    expect(result.current.kataState).toBeNull()
   })
 
   test('loads cached messages eagerly on agentName change (session switch)', () => {
@@ -427,22 +428,22 @@ describe('useCodingAgent cache-first hydration', () => {
     expect(result.current.messages).toHaveLength(0)
   })
 
-  test('resets state when agentName changes', () => {
-    // Spec-31 P4b: onStateUpdate is a no-op; exercise state presence via a
-    // direct upsert into the mocked live-state store instead.
+  test('resets per-session kataState when agentName changes', () => {
+    // Spec #31 P5 B10: `state` / `sessionResult` are no longer on the hook
+    // return. Exercise per-session isolation via `kataState` instead, which
+    // is still surfaced through `useSessionLiveState`.
     const { result, rerender } = renderHook(({ name }: { name: string }) => useCodingAgent(name), {
       initialProps: { name: 'session-a' },
     })
 
     act(() => {
-      liveStateStore.set('session-a', { state: { status: 'running', num_turns: 5 } })
+      liveStateStore.set('session-a', { kataState: { currentMode: 'impl' } })
       bumpLiveState()
     })
 
-    expect(result.current.state).not.toBeNull()
+    expect(result.current.kataState).not.toBeNull()
     rerender({ name: 'session-b' })
-    expect(result.current.state).toBeNull()
-    expect(result.current.sessionResult).toBeNull()
+    expect(result.current.kataState).toBeNull()
   })
 
   test('cached messages sorted by createdAt', () => {

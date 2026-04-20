@@ -82,4 +82,34 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
       sql.exec(`INSERT OR IGNORE INTO session_meta (id, updated_at) VALUES (1, 0)`)
     },
   },
+  {
+    version: 7,
+    description: 'Expand session_meta with ex-SessionState fields (B10 #31)',
+    up: (sql) => {
+      const addCol = (col: string, ddl: string) => {
+        try {
+          sql.exec(`ALTER TABLE session_meta ADD COLUMN ${col} ${ddl}`)
+        } catch {
+          // column may already exist
+        }
+      }
+      addCol('status', "TEXT NOT NULL DEFAULT 'idle'")
+      addCol('session_id', 'TEXT')
+      addCol('project', "TEXT NOT NULL DEFAULT ''")
+      addCol('project_path', "TEXT NOT NULL DEFAULT ''")
+      addCol('model', 'TEXT')
+      addCol('prompt', "TEXT NOT NULL DEFAULT ''")
+      addCol('user_id', 'TEXT')
+      addCol('started_at', 'TEXT')
+      addCol('completed_at', 'TEXT')
+      addCol('num_turns', 'INTEGER NOT NULL DEFAULT 0')
+      addCol('total_cost_usd', 'REAL')
+      addCol('duration_ms', 'INTEGER')
+      addCol('gate_json', 'TEXT')
+      addCol('created_at', "TEXT NOT NULL DEFAULT ''")
+      addCol('error', 'TEXT')
+      addCol('summary', 'TEXT')
+      addCol('last_kata_mode', 'TEXT')
+    },
+  },
 ]

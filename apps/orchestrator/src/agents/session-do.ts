@@ -24,7 +24,7 @@ import type {
   GatewayCommand,
   GatewayEvent,
   KataSessionState,
-  SessionState,
+  SessionStatus,
   SpawnConfig,
 } from '~/lib/types'
 import { getSessionStatus, listSessions, parseEvent } from '~/lib/vps-client'
@@ -47,7 +47,45 @@ import {
 } from './session-do-helpers'
 import { SESSION_DO_MIGRATIONS } from './session-do-migrations'
 
-const DEFAULT_STATE: SessionState = {
+/**
+ * Internal meta shape — replaces the old public `SessionState` type (#31
+ * B10). Fields that are durable across DO rehydrate are persisted to the
+ * typed `session_meta` SQLite table (migration v7); transient fields
+ * (`updated_at`, `active_callback_token`) stay in the setState JSON blob.
+ *
+ * Nothing outside session-do.ts should reference this shape — clients now
+ * derive status / gate from messages and read summary / cost / turns from
+ * D1 via REST.
+ */
+export interface SessionMeta {
+  status: SessionStatus
+  session_id: string | null
+  project: string
+  project_path: string
+  model: string | null
+  prompt: string
+  userId: string | null
+  started_at: string | null
+  completed_at: string | null
+  num_turns: number
+  total_cost_usd: number | null
+  duration_ms: number | null
+  gate: {
+    id: string
+    type: 'permission_request' | 'ask_user'
+    detail: unknown
+  } | null
+  created_at: string
+  updated_at: string
+  result: string | null
+  error: string | null
+  summary: string | null
+  sdk_session_id: string | null
+  active_callback_token?: string
+  lastKataMode?: string
+}
+
+const DEFAULT_META: SessionMeta = {
   status: 'idle',
   session_id: null,
   project: '',
@@ -68,6 +106,31 @@ const DEFAULT_STATE: SessionState = {
   summary: null,
   sdk_session_id: null,
   active_callback_token: undefined,
+}
+
+// Map `SessionMeta` keys to their `session_meta` column names. Keys not in
+// this map are treated as non-persistent (e.g. `result`, `updated_at` —
+// `updated_at` is written explicitly below; `result` is legacy).
+const META_COLUMN_MAP: Partial<Record<keyof SessionMeta, string>> = {
+  status: 'status',
+  session_id: 'session_id',
+  project: 'project',
+  project_path: 'project_path',
+  model: 'model',
+  prompt: 'prompt',
+  userId: 'user_id',
+  started_at: 'started_at',
+  completed_at: 'completed_at',
+  num_turns: 'num_turns',
+  total_cost_usd: 'total_cost_usd',
+  duration_ms: 'duration_ms',
+  gate: 'gate_json',
+  created_at: 'created_at',
+  error: 'error',
+  summary: 'summary',
+  sdk_session_id: 'sdk_session_id',
+  active_callback_token: 'active_callback_token',
+  lastKataMode: 'last_kata_mode',
 }
 
 /**
@@ -102,8 +165,8 @@ function parseTurnOrdinal(id?: string): number | undefined {
 // config changes take effect on the next DO wake without a code change.
 // Default is 90s — see DEFAULT_STALE_THRESHOLD_MS in session-do-helpers.
 
-export class SessionDO extends Agent<Env, SessionState> {
-  initialState = DEFAULT_STATE
+export class SessionDO extends Agent<Env, SessionMeta> {
+  initialState = DEFAULT_META
   private session!: Session
   private turnCounter = 0
   private currentTurnMessageId: string | null = null
@@ -143,6 +206,11 @@ export class SessionDO extends Agent<Env, SessionState> {
       message_seq: number
     }>`SELECT message_seq FROM session_meta WHERE id = 1`
     this.messageSeq = metaRows[0]?.message_seq ?? 0
+
+    // Rehydrate ex-SessionState fields from `session_meta` (#31 B10). Merges
+    // into the existing state blob so we pick up newly-persisted columns
+    // while preserving any transient fields the setState JSON still holds.
+    this.hydrateMetaFromSql()
 
     this.session = Session.create(this)
 
@@ -345,10 +413,16 @@ export class SessionDO extends Agent<Env, SessionState> {
     }
   }
 
-  /** Suppress Agent SDK protocol messages (identity, state, MCP) for gateway connections. */
-  shouldSendProtocolMessages(_connection: Connection, ctx: ConnectionContext): boolean {
-    const url = new URL(ctx.request.url)
-    return url.searchParams.get('role') !== 'gateway'
+  /**
+   * Suppress all Agent SDK protocol messages (`cf_agent_state`, identity,
+   * MCP) for every connection (spec #31 B9). The messages channel is the
+   * sole live-state source — status/gate/result are derived client-side via
+   * `useDerivedStatus` / `useDerivedGate`; `contextUsage` / `kataState` are
+   * served via REST. Returning `false` here silences the legacy state
+   * broadcast that the new architecture doesn't consume.
+   */
+  shouldSendProtocolMessages(_connection: Connection, _ctx: ConnectionContext): boolean {
+    return false
   }
 
   onMessage(connection: Connection, data: string | ArrayBuffer) {
@@ -637,12 +711,88 @@ export class SessionDO extends Agent<Env, SessionState> {
 
   // ── Helpers ────────────────────────────────────────────────────
 
-  private updateState(partial: Partial<SessionState>) {
+  /**
+   * Patch-merge into the Agent's state blob and mirror the durable subset
+   * into `session_meta` (migration v7). Fields without a column mapping
+   * (e.g. `updated_at`, `result`) stay only in the in-memory JSON blob —
+   * clients no longer consume them and DO rehydrate pulls from SQLite.
+   */
+  private updateState(partial: Partial<SessionMeta>) {
     this.setState({
       ...this.state,
       ...partial,
       updated_at: new Date().toISOString(),
     })
+    this.persistMetaPatch(partial)
+  }
+
+  private persistMetaPatch(partial: Partial<SessionMeta>) {
+    const cols: string[] = []
+    const vals: unknown[] = []
+    for (const [key, value] of Object.entries(partial) as Array<
+      [keyof SessionMeta, SessionMeta[keyof SessionMeta]]
+    >) {
+      const col = META_COLUMN_MAP[key]
+      if (!col) continue
+      if (key === 'gate') {
+        cols.push(`${col} = ?`)
+        vals.push(value ? JSON.stringify(value) : null)
+      } else {
+        cols.push(`${col} = ?`)
+        vals.push(value ?? null)
+      }
+    }
+    if (cols.length === 0) return
+    cols.push('updated_at = ?')
+    vals.push(Date.now())
+    try {
+      this.ctx.storage.sql.exec(
+        `UPDATE session_meta SET ${cols.join(', ')} WHERE id = 1`,
+        ...(vals as (string | number | null)[]),
+      )
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] persistMetaPatch failed:`, err)
+    }
+  }
+
+  /**
+   * Rehydrate `this.state` from `session_meta` on onStart (#31 P5). Agent's
+   * initialState seed runs once on first wake; on subsequent rehydrates the
+   * setState JSON blob is lost if the DO was evicted without a setState
+   * call in the final turn — restoring from SQLite keeps `project`,
+   * `status`, `session_id`, etc. intact for the next caller.
+   */
+  private hydrateMetaFromSql() {
+    try {
+      const rows = this.sql<Record<string, unknown>>`SELECT * FROM session_meta WHERE id = 1`
+      const row = rows[0]
+      if (!row) return
+      const patch: Partial<SessionMeta> = {}
+      for (const [key, col] of Object.entries(META_COLUMN_MAP) as Array<
+        [keyof SessionMeta, string]
+      >) {
+        if (!(col in row)) continue
+        const raw = row[col]
+        if (raw === null || raw === undefined) continue
+        if (key === 'gate') {
+          try {
+            ;(patch as Record<string, unknown>)[key] =
+              typeof raw === 'string' ? JSON.parse(raw) : raw
+          } catch {
+            // Invalid gate JSON — skip.
+          }
+        } else {
+          ;(patch as Record<string, unknown>)[key] = raw
+        }
+      }
+      if (Object.keys(patch).length === 0) return
+      this.setState({
+        ...this.state,
+        ...patch,
+      })
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] hydrateMetaFromSql failed:`, err)
+    }
   }
 
   private broadcastToClients(data: string) {
@@ -1476,8 +1626,8 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     const now = new Date().toISOString()
     const id = this.ctx.id.toString()
 
-    this.setState({
-      ...DEFAULT_STATE,
+    const freshState: SessionMeta = {
+      ...DEFAULT_META,
       status: 'running',
       session_id: id,
       userId: this.state.userId,
@@ -1488,7 +1638,9 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       started_at: now,
       created_at: this.state.created_at || now,
       updated_at: now,
-    })
+    }
+    this.setState(freshState)
+    this.persistMetaPatch(freshState)
 
     // Persist initial prompt as a user message so it survives reload
     this.turnCounter++
@@ -1541,8 +1693,8 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     const now = new Date().toISOString()
     const id = this.ctx.id.toString()
 
-    this.setState({
-      ...DEFAULT_STATE,
+    const resumeState: SessionMeta = {
+      ...DEFAULT_META,
       status: 'running',
       session_id: id,
       userId: this.state.userId,
@@ -1554,7 +1706,9 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       created_at: this.state.created_at || now,
       updated_at: now,
       sdk_session_id: sdkSessionId,
-    })
+    }
+    this.setState(resumeState)
+    this.persistMetaPatch(resumeState)
 
     // Persist resume prompt as a user message
     this.turnCounter++

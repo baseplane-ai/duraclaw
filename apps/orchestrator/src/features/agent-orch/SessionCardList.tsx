@@ -11,7 +11,7 @@ import { useState } from 'react'
 import { Badge } from '~/components/ui/badge'
 import type { SessionRecord } from '~/db/session-record'
 import { useSessionLiveState } from '~/hooks/use-session-live-state'
-import { deriveDisplayState } from '~/lib/display-state'
+import { deriveDisplayStateFromStatus } from '~/lib/display-state'
 import { cn } from '~/lib/utils'
 import { useWorkspaceStore } from '~/stores/workspace'
 import { ActiveStrip } from './ActiveStrip'
@@ -88,9 +88,11 @@ function SwipeableCard({
   }
 
   const live = useSessionLiveState(session.id)
-  const numTurns = live.state?.num_turns ?? session.numTurns ?? 0
+  const numTurns = live.numTurns ?? session.numTurns ?? 0
   const isLive = live.isLive
-  const display = live.state ? deriveDisplayState(live.state, live.wsReadyState ?? 3) : null
+  const display = live.status
+    ? deriveDisplayStateFromStatus(live.status, live.wsReadyState ?? 3)
+    : null
   const status =
     display && display.status !== 'unknown' ? display.status : (session.status ?? 'idle')
   const displayName = session.title || getPreviewText(session) || session.id.slice(0, 8)
@@ -148,9 +150,11 @@ function SwipeableCard({
 
 function OlderSessionRow({ session, onClick }: { session: SessionRecord; onClick: () => void }) {
   const live = useSessionLiveState(session.id)
-  const numTurns = live.state?.num_turns ?? session.numTurns ?? 0
+  const numTurns = live.numTurns ?? session.numTurns ?? 0
   const isLive = live.isLive
-  const display = live.state ? deriveDisplayState(live.state, live.wsReadyState ?? 3) : null
+  const display = live.status
+    ? deriveDisplayStateFromStatus(live.status, live.wsReadyState ?? 3)
+    : null
   const status =
     display && display.status !== 'unknown' ? display.status : (session.status ?? 'idle')
   return (

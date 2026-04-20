@@ -1,32 +1,28 @@
 /**
  * Tests for the WS bridge in useCodingAgent.
  *
- * Spec-31 P4b B2: `onStateUpdate` is now a no-op — `SessionState` is no
- * longer the live render source; components derive status/gate from
- * messages via `useDerivedStatus` / `useDerivedGate`. The prop is still
- * registered with `useAgent` so the server push path stays wired until
- * P5 rips it out, but the client no longer writes SessionState into the
- * `sessionLiveStateCollection`.
- *
- * Previous tests in this file asserted that onStateUpdate mirrored
- * status / numTurns etc. into `upsertSessionLiveState` calls. Those
- * assertions are obsolete under P4b — the mirroring is gone. The tests
- * below lock in the new contract: onStateUpdate is registered but
- * performs no live-state writes.
+ * Spec-31 P5 B9/B10: `onStateUpdate` is no longer registered — the DO
+ * suppresses SDK protocol state frames via
+ * `shouldSendProtocolMessages() => false`. `SessionState` is deleted;
+ * components derive status/gate from messages via `useDerivedStatus` /
+ * `useDerivedGate`. These tests lock in the new contract: no
+ * `onStateUpdate` callback is passed to `useAgent`, and no SessionState
+ * patches are ever written into the live-state collection.
  *
  * @vitest-environment jsdom
  */
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
-// Capture the onStateUpdate callback so tests can invoke it directly
-let capturedOnStateUpdate: ((state: unknown) => void) | null = null
+// Capture the onStateUpdate option (if any) passed to useAgent.
+let capturedOnStateUpdate: ((state: unknown) => void) | null | undefined = null
 
 vi.mock('agents/react', () => ({
   useAgent: (_opts: { agent: string; name: string; onStateUpdate?: (s: unknown) => void }) => {
-    capturedOnStateUpdate = _opts.onStateUpdate ?? null
+    capturedOnStateUpdate = _opts.onStateUpdate
     return {
       call: vi.fn().mockResolvedValue([]),
+      readyState: 3,
     }
   },
 }))
@@ -53,23 +49,20 @@ vi.mock('~/hooks/use-messages-collection', () => ({
   useMessagesCollection: () => ({ messages: [], isLoading: false, isFetching: false }),
 }))
 
-// useSessionLiveState owns contextUsage/kataState/sessionResult. Stub
+// useSessionLiveState owns contextUsage/kataState/worktreeInfo. Stub
 // it so the hook doesn't subscribe to the real collection across tests.
 vi.mock('~/hooks/use-session-live-state', () => ({
   useSessionLiveState: () => ({
-    state: null,
     contextUsage: null,
     kataState: null,
     worktreeInfo: null,
-    sessionResult: null,
     wsReadyState: null,
     isLive: false,
   }),
 }))
 
-// upsertSessionLiveState is observed to prove onStateUpdate does NOT
-// write SessionState patches post-P4b. Other call sites (e.g. the
-// wsReadyState mirror effect) may still legitimately invoke it.
+// upsertSessionLiveState is observed to prove the hook never writes
+// SessionState-shaped patches into the collection (P5 B10).
 const mockUpsert = vi.fn()
 
 vi.mock('~/db/session-live-state-collection', () => ({
@@ -84,7 +77,7 @@ vi.mock('~/db/session-live-state-collection', () => ({
 }))
 
 // Import after mocks
-import { act, renderHook } from '@testing-library/react'
+import { renderHook } from '@testing-library/react'
 import { useCodingAgent } from '../use-coding-agent'
 
 describe('WS bridge in useCodingAgent', () => {
@@ -99,30 +92,22 @@ describe('WS bridge in useCodingAgent', () => {
     vi.restoreAllMocks()
   })
 
-  test('onStateUpdate is still registered on useAgent (prop preserved for P5)', () => {
+  test('onStateUpdate is NOT registered on useAgent (P5 B9)', () => {
+    // Spec #31 P5 B9: the DO suppresses SDK state broadcast; the client
+    // no longer supplies an `onStateUpdate` handler because the frame
+    // shape (`SessionState`) is deleted.
     renderHook(() => useCodingAgent('test-session'))
-    expect(capturedOnStateUpdate).toBeTruthy()
+    expect(capturedOnStateUpdate).toBeUndefined()
   })
 
-  test('onStateUpdate does not write SessionState into live-state collection (P4b)', () => {
+  test('useCodingAgent never writes SessionState-shaped patches into live-state collection (P5 B10)', () => {
     renderHook(() => useCodingAgent('test-session'))
-    const beforeStateWrites = mockUpsert.mock.calls.filter(
+    // wsReadyState mirror effect legitimately upserts, but no call should
+    // carry a `state` field (the field is gone from the narrowed
+    // SessionLiveState).
+    const stateWrites = mockUpsert.mock.calls.filter(
       (c) => (c[1] as { state?: unknown }).state !== undefined,
-    ).length
-
-    act(() => {
-      capturedOnStateUpdate!({ status: 'running', num_turns: 5 })
-    })
-    act(() => {
-      capturedOnStateUpdate!({ status: 'idle', num_turns: 10 })
-    })
-
-    const afterStateWrites = mockUpsert.mock.calls.filter(
-      (c) => (c[1] as { state?: unknown }).state !== undefined,
-    ).length
-
-    // Body is a no-op — invoking the handler must not add any `state`
-    // patch calls to `upsertSessionLiveState`.
-    expect(afterStateWrites).toBe(beforeStateWrites)
+    )
+    expect(stateWrites.length).toBe(0)
   })
 })

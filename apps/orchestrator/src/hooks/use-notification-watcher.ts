@@ -52,13 +52,14 @@ export function useNotificationWatcher(sessions: SessionInfo[]) {
     const prev = prevStatusRef.current
     const metaById = new Map(sessions.map((s) => [s.id, s] as const))
 
-    // Status source is the collection row's state.status when available, and
-    // falls back to the sessions prop's status so cards that haven't received
-    // a live update yet still participate in transition detection.
+    // Status source is the collection row's top-level `status` (D1-mirrored,
+    // spec #31 P5 B10) when available, and falls back to the sessions prop's
+    // status so cards that haven't received a live update yet still
+    // participate in transition detection.
     const statusById = new Map<string, string>()
     if (liveRows) {
       for (const r of liveRows as unknown as SessionLiveState[]) {
-        if (r.state?.status) statusById.set(r.id, r.state.status)
+        if (r.status) statusById.set(r.id, r.status)
       }
     }
     for (const s of sessions) {

@@ -230,9 +230,9 @@ describe('SESSION_DO_MIGRATIONS', () => {
   })
 
   describe('migration chain integrity', () => {
-    it('has sequential version numbers from 1 to 6', () => {
+    it('has sequential version numbers from 1 to 7', () => {
       const versions = SESSION_DO_MIGRATIONS.map((m) => m.version)
-      expect(versions).toEqual([1, 2, 3, 4, 5, 6])
+      expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7])
     })
 
     it('all migrations have descriptions', () => {
@@ -1773,5 +1773,169 @@ describe('getKataState (P3 B5)', () => {
       kvBlob: null,
     })
     expect(res.kataState).toBeNull()
+  })
+})
+
+// ── session_meta rehydrates across DO restart (#31 P5 B10) ──────
+//
+// `hydrateMetaFromSql()` runs in onStart. After the Agents SDK's
+// `setState` JSON is lost on eviction, the DO restores status / project
+// / session_id / etc. from the persisted `session_meta` row so the next
+// caller sees a consistent state. We can't construct SessionDO directly
+// (TC39 decorators block instantiation in tests) — we mirror the exact
+// hydrate contract against an in-memory row, which is the same approach
+// used above for `messageSeq persistence`.
+
+describe('session_meta persists across rehydrate (P5 B10)', () => {
+  /**
+   * The column map the DO uses in `hydrateMetaFromSql` — kept in sync
+   * with META_COLUMN_MAP in session-do.ts. If a field moves, this test
+   * and the production map move together.
+   */
+  const COLUMN_MAP: Record<string, string> = {
+    status: 'status',
+    session_id: 'session_id',
+    project: 'project',
+    project_path: 'project_path',
+    model: 'model',
+    prompt: 'prompt',
+    userId: 'user_id',
+    started_at: 'started_at',
+    completed_at: 'completed_at',
+    num_turns: 'num_turns',
+    total_cost_usd: 'total_cost_usd',
+    duration_ms: 'duration_ms',
+    gate: 'gate_json',
+    created_at: 'created_at',
+    error: 'error',
+    summary: 'summary',
+    sdk_session_id: 'sdk_session_id',
+    active_callback_token: 'active_callback_token',
+    lastKataMode: 'last_kata_mode',
+  }
+
+  /**
+   * Mirrors `hydrateMetaFromSql`: read the single `session_meta` row and
+   * apply any non-null columns back onto a fresh default meta. `gate` is
+   * the only JSON-encoded column.
+   */
+  function hydrateFromRow(
+    row: Record<string, unknown> | undefined,
+    defaults: Record<string, unknown>,
+  ): Record<string, unknown> {
+    if (!row) return { ...defaults }
+    const out = { ...defaults }
+    for (const [key, col] of Object.entries(COLUMN_MAP)) {
+      if (!(col in row)) continue
+      const raw = row[col]
+      if (raw === null || raw === undefined) continue
+      if (key === 'gate') {
+        try {
+          out[key] = typeof raw === 'string' ? JSON.parse(raw as string) : raw
+        } catch {
+          // invalid json — skip
+        }
+      } else {
+        out[key] = raw
+      }
+    }
+    return out
+  }
+
+  const DEFAULTS = {
+    status: 'idle',
+    session_id: null,
+    project: '',
+    project_path: '',
+    model: null,
+    prompt: '',
+    userId: null,
+    started_at: null,
+    completed_at: null,
+    num_turns: 0,
+    total_cost_usd: null,
+    duration_ms: null,
+    gate: null,
+    created_at: '',
+    error: null,
+    summary: null,
+    sdk_session_id: null,
+  }
+
+  it('restores status / project / session_id after a simulated DO eviction', () => {
+    // Persisted row after a running session — this is what SQLite holds
+    // after the DO ran a turn and setState has been lost.
+    const persisted = {
+      status: 'running',
+      session_id: 'sess-123',
+      project: 'duraclaw',
+      project_path: '/data/projects/duraclaw',
+      model: 'claude-opus-4-0',
+      prompt: 'help me',
+      user_id: 'u1',
+      num_turns: 3,
+      created_at: '2026-01-01T00:00:00Z',
+      sdk_session_id: 'sdk-abc',
+      gate_json: null,
+    }
+
+    const rehydrated = hydrateFromRow(persisted, DEFAULTS)
+
+    expect(rehydrated.status).toBe('running')
+    expect(rehydrated.session_id).toBe('sess-123')
+    expect(rehydrated.project).toBe('duraclaw')
+    expect(rehydrated.project_path).toBe('/data/projects/duraclaw')
+    expect(rehydrated.model).toBe('claude-opus-4-0')
+    expect(rehydrated.prompt).toBe('help me')
+    expect(rehydrated.userId).toBe('u1')
+    expect(rehydrated.num_turns).toBe(3)
+    expect(rehydrated.sdk_session_id).toBe('sdk-abc')
+    expect(rehydrated.gate).toBeNull()
+  })
+
+  it('deserialises a persisted gate JSON blob back into an object', () => {
+    const gate = {
+      id: 'tool-use-xyz',
+      type: 'permission_request',
+      detail: { tool: 'Write', path: '/tmp/foo' },
+    }
+    const persisted = {
+      status: 'waiting_gate',
+      session_id: 's1',
+      gate_json: JSON.stringify(gate),
+    }
+
+    const rehydrated = hydrateFromRow(persisted, DEFAULTS)
+
+    expect(rehydrated.status).toBe('waiting_gate')
+    expect(rehydrated.gate).toEqual(gate)
+  })
+
+  it('no-ops when the session_meta row is missing (cold-start, pre-migration data)', () => {
+    const rehydrated = hydrateFromRow(undefined, DEFAULTS)
+    // Entire default meta is preserved — hydrate should not poison fields.
+    expect(rehydrated).toEqual(DEFAULTS)
+  })
+
+  it('skips null columns so defaults survive (defensive)', () => {
+    const persisted = {
+      status: null,
+      project: 'only-this-field',
+      session_id: null,
+    }
+    const rehydrated = hydrateFromRow(persisted, DEFAULTS)
+    expect(rehydrated.status).toBe('idle') // default preserved
+    expect(rehydrated.project).toBe('only-this-field')
+    expect(rehydrated.session_id).toBeNull()
+  })
+
+  it('silently skips an unparseable gate_json instead of throwing', () => {
+    const persisted = {
+      status: 'running',
+      gate_json: '{this is not valid json',
+    }
+    const rehydrated = hydrateFromRow(persisted, DEFAULTS)
+    expect(rehydrated.status).toBe('running')
+    expect(rehydrated.gate).toBeNull() // fell back to default
   })
 })

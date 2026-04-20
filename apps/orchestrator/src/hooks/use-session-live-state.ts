@@ -17,25 +17,49 @@ import {
   type SessionLiveState,
   sessionLiveStateCollection,
 } from '~/db/session-live-state-collection'
-import type { KataSessionState, SessionState } from '~/lib/types'
+import type { KataSessionState, SessionStatus } from '~/lib/types'
 import type { ContextUsage, WorktreeInfo } from '~/stores/status-bar'
 
+/**
+ * Spec #31 P5 B10: narrowed hook return. `state` and `sessionResult` are
+ * no longer exposed — active-session callers use `useDerivedStatus` /
+ * `useDerivedGate` / message parts instead. Non-active sidebar callers
+ * keep reading `status` + summary fields (D1-mirrored) through this hook.
+ */
 export interface UseSessionLiveStateResult {
-  state: SessionState | null
   contextUsage: ContextUsage | null
   kataState: KataSessionState | null
   worktreeInfo: WorktreeInfo | null
-  sessionResult: { total_cost_usd: number; duration_ms: number } | null
   wsReadyState: number | null
   isLive: boolean
+  /** D1-mirrored session status for sidebar readers. */
+  status?: SessionStatus
+  // D1-mirrored summary fields (kept for sidebar / tab / status-bar readers).
+  project?: string
+  model?: string | null
+  prompt?: string
+  archived?: boolean
+  createdAt?: string
+  lastActivity?: string | null
+  numTurns?: number | null
+  totalCostUsd?: number | null
+  durationMs?: number | null
+  messageCount?: number | null
+  summary?: string
+  title?: string | null
+  tag?: string | null
+  origin?: string | null
+  agent?: string | null
+  sdkSessionId?: string | null
+  kataMode?: string | null
+  kataIssue?: number | null
+  kataPhase?: string | null
 }
 
 const EMPTY: UseSessionLiveStateResult = {
-  state: null,
   contextUsage: null,
   kataState: null,
   worktreeInfo: null,
-  sessionResult: null,
   wsReadyState: null,
   isLive: false,
 }
@@ -54,13 +78,31 @@ export function useSessionLiveState(
     const row = (data as unknown as SessionLiveState[]).find((r) => r.id === sessionId)
     if (!row) return EMPTY
     return {
-      state: row.state,
       contextUsage: row.contextUsage,
       kataState: row.kataState,
       worktreeInfo: row.worktreeInfo,
-      sessionResult: row.sessionResult,
       wsReadyState: row.wsReadyState,
       isLive: row.wsReadyState === 1,
+      status: row.status,
+      project: row.project,
+      model: row.model,
+      prompt: row.prompt,
+      archived: row.archived,
+      createdAt: row.createdAt,
+      lastActivity: row.lastActivity ?? null,
+      numTurns: row.numTurns ?? null,
+      totalCostUsd: row.totalCostUsd ?? null,
+      durationMs: row.durationMs ?? null,
+      messageCount: row.messageCount ?? null,
+      summary: row.summary,
+      title: row.title ?? null,
+      tag: row.tag ?? null,
+      origin: row.origin ?? null,
+      agent: row.agent ?? null,
+      sdkSessionId: row.sdkSessionId ?? null,
+      kataMode: row.kataMode ?? null,
+      kataIssue: row.kataIssue ?? null,
+      kataPhase: row.kataPhase ?? null,
     }
   }, [data, sessionId])
 }

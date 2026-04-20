@@ -17,7 +17,6 @@ import type {
   RewindResultEvent,
   SessionInitEvent,
   SessionSource,
-  SessionState,
   SessionStateChangedEvent,
   SessionStatus,
   SessionSummary,
@@ -28,6 +27,17 @@ import type {
   TaskProgressEvent,
   TaskStartedEvent,
 } from './index'
+
+describe('sessionstate-deleted (#31 P5)', () => {
+  test('SessionState is no longer exported', () => {
+    // Compile-time guard: if a future change re-adds `SessionState` to the
+    // shared-types barrel, this assertion forces the author to acknowledge
+    // the regression by updating the test body. The assertion itself is a
+    // runtime tautology; the real enforcement is the missing import above.
+    const sharedTypes = require('./index') as Record<string, unknown>
+    expect('SessionState' in sharedTypes).toBe(false)
+  })
+})
 
 describe('shared-types rename: worktree→project', () => {
   test('ProjectInfo has expected fields', () => {
@@ -78,31 +88,7 @@ describe('shared-types rename: worktree→project', () => {
     expect(event.project).toBe('dev1')
   })
 
-  test('SessionState uses project and project_path fields', () => {
-    const state: SessionState = {
-      id: '123',
-      userId: 'user-1',
-      project: 'dev1',
-      project_path: '/data/projects/dev1',
-      status: 'idle',
-      model: null,
-      prompt: 'test',
-      created_at: '',
-      updated_at: '',
-      duration_ms: null,
-      total_cost_usd: null,
-      result: null,
-      error: null,
-      num_turns: null,
-      sdk_session_id: null,
-      summary: null,
-      pending_question: null,
-      pending_permission: null,
-    }
-    expect(state.userId).toBe('user-1')
-    expect(state.project).toBe('dev1')
-    expect(state.project_path).toBe('/data/projects/dev1')
-  })
+  // `SessionState` deleted in #31 P5 — former field-level tests dropped.
 
   test('ExecuteCommand accepts optional org_id and user_id', () => {
     const cmd: ExecuteCommand = {
@@ -379,29 +365,7 @@ describe('shared-types: SDK summary fields', () => {
     expect(event.sdk_summary).toBeNull()
   })
 
-  test('SessionState includes summary field', () => {
-    const state: SessionState = {
-      id: '123',
-      userId: 'user-1',
-      project: 'dev1',
-      project_path: '/data/projects/dev1',
-      status: 'idle',
-      model: null,
-      prompt: 'test',
-      created_at: '',
-      updated_at: '',
-      duration_ms: null,
-      total_cost_usd: null,
-      result: null,
-      error: null,
-      num_turns: null,
-      sdk_session_id: null,
-      summary: 'Migrated database schema',
-      pending_question: null,
-      pending_permission: null,
-    }
-    expect(state.summary).toBe('Migrated database schema')
-  })
+  // `SessionState` deleted in #31 P5 — summary lives on SessionSummary instead.
 })
 
 describe('SessionStatus type', () => {

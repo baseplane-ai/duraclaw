@@ -34,18 +34,32 @@ Key invariants:
 
 ### Client data flow (session live state)
 
+**Spec #31 unified sync channel** — `messagesCollection` is the sole live
+source of per-session status and gate. The DO suppresses the Agents SDK's
+built-in state broadcast (`shouldSendProtocolMessages() => false`); the
+`SessionState` blob type is deleted. Hooks `useDerivedStatus(sessionId)`
+and `useDerivedGate(sessionId)` fold over `messagesCollection` to surface
+the active status / pending gate for any consumer. The DO persists its
+own typed `SessionMeta` in a `session_meta` SQLite table (migration v6+v7)
+and restores it on rehydrate via `hydrateMetaFromSql()` — no more reliance
+on the Agents SDK `setState` JSON blob surviving eviction.
+
 The browser has three render sources for per-session state, all TanStack DB
 collections (OPFS-persisted, reactive via `useLiveQuery`):
 
-1. `sessionLiveStateCollection` — per-session live state (status, gate,
-   context usage, kata state, session metadata). WS handlers in
-   `use-coding-agent.ts` write `SessionState` / `gateway_event` payloads
-   via `upsertSessionLiveState`; components read via
-   `useSessionLiveState(sessionId)`.
+1. `sessionLiveStateCollection` — per-session summary (`project`, `model`,
+   `numTurns`, `totalCostUsd`, `durationMs`, `contextUsage`, `kataState`,
+   `worktreeInfo`, `wsReadyState`, and a top-level `status` mirror for
+   non-active callers like the sidebar). The `state: SessionState` blob
+   and `sessionResult` column are gone. Summary fields are D1-mirrored by
+   `useSessionsCollection`; active sessions get `contextUsage` / `kataState`
+   from `gateway_event` WS handlers in `use-coding-agent.ts`. Components
+   read via `useSessionLiveState(sessionId)`.
 2. `messagesCollection` — per-session message history, one collection per
    agentName (memoised by `createMessagesCollection`). Query-backed with a
    REST fallback (`GET /api/sessions/:id/messages`) for cold-start and
-   reconnect-with-stale-cache; WS is the live push channel.
+   reconnect-with-stale-cache; WS is the live push channel. This is also
+   the authoritative source for derived status / gate (see above).
 3. `branchInfoCollection` — per-session branch siblings for rewind /
    resubmit / navigate. Populated by DO-pushed snapshots alongside
    messages; the `useBranchInfo` hook drives the branch arrows in the UI.
@@ -74,9 +88,13 @@ client-side history mutation, no per-tab divergence.
 deep-equality — a single row that updates in place, no delete+insert
 churn and no client-side sort hints.
 
-Display derivation goes through `deriveDisplayState(state, wsReadyState)`
-in `apps/orchestrator/src/lib/display-state.ts` so StatusBar, sidebar
-cards, and the tab bar all agree on label / color / icon.
+Display derivation goes through
+`deriveDisplayStateFromStatus(status, wsReadyState)` in
+`apps/orchestrator/src/lib/display-state.ts` so StatusBar, sidebar cards,
+and the tab bar all agree on label / color / icon. `status` is typically
+`useDerivedStatus(sessionId) ?? live.status` at the call site, which lets
+active sessions track message-derived status while idle / background
+sessions fall back to the D1-mirrored top-level field.
 
 ## Monorepo Structure
 
@@ -88,7 +106,7 @@ packages/
   agent-gateway/         # VPS control plane (Bun HTTP server, systemd)
   session-runner/        # Per-session SDK owner (spawned by gateway)
   shared-transport/      # BufferedChannel + DialBackClient (runner → DO WS)
-  shared-types/          # GatewayCommand / GatewayEvent / SessionState types
+  shared-types/          # GatewayCommand / GatewayEvent / SessionSummary types
   ai-elements/           # Shared UI component library
   kata/                  # Workflow management CLI
 planning/

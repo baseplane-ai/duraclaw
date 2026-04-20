@@ -73,16 +73,15 @@ vi.mock('~/hooks/use-notification-watcher', () => ({
 import { useSessionsCollection } from './use-sessions-collection'
 
 function makeLiveStateRow(overrides: Record<string, unknown> = {}) {
+  // Spec-31 P5 B10: narrowed SessionLiveState row — no `state` /
+  // `sessionResult` columns. Top-level fields mirror the D1 summary.
   return {
     id: 's1',
-    state: null,
     contextUsage: null,
     kataState: null,
     worktreeInfo: null,
-    sessionResult: null,
     wsReadyState: 3,
     updatedAt: '2026-01-01T00:00:00Z',
-    // Top-level SessionSummary fields (schema v2)
     userId: null,
     project: 'proj',
     model: null,

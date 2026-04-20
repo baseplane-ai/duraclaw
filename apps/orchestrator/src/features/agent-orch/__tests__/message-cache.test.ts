@@ -50,11 +50,9 @@ vi.mock('~/db/session-live-state-collection', () => ({
 
 vi.mock('~/hooks/use-session-live-state', () => ({
   useSessionLiveState: () => ({
-    state: null,
     contextUsage: null,
     kataState: null,
     worktreeInfo: null,
-    sessionResult: null,
     wsReadyState: null,
     isLive: false,
   }),
@@ -349,10 +347,8 @@ describe('message cache-first hydration', () => {
 
     const { result } = renderHook(() => useCodingAgent('test-session'))
 
-    // Trigger first state sync
-    act(() => {
-      capturedOnStateUpdate!({ status: 'idle' })
-    })
+    // Spec #31 P5 B9: messages load reactively via useMessagesCollection;
+    // no initial-state-sync trigger is needed.
 
     // Messages should be populated from cache
     expect(result.current.messages).toHaveLength(2)
@@ -386,10 +382,6 @@ describe('message cache-first hydration', () => {
 
     const { result } = renderHook(() => useCodingAgent('test-session'))
 
-    act(() => {
-      capturedOnStateUpdate!({ status: 'idle' })
-    })
-
     expect(result.current.messages).toHaveLength(1)
     expect(result.current.messages[0].id).toBe('msg-1')
   })
@@ -420,10 +412,6 @@ describe('message cache-first hydration', () => {
 
     const { result } = renderHook(() => useCodingAgent('test-session'))
 
-    act(() => {
-      capturedOnStateUpdate!({ status: 'idle' })
-    })
-
     expect(result.current.messages[0].id).toBe('early')
     expect(result.current.messages[1].id).toBe('late')
   })
@@ -441,10 +429,6 @@ describe('message cache-first hydration', () => {
     ])
 
     const { result } = renderHook(() => useCodingAgent('test-session'))
-
-    act(() => {
-      capturedOnStateUpdate!({ status: 'idle' })
-    })
 
     // Now send a delta frame with the same id -- should upsert in place
     act(() => {
@@ -477,14 +461,11 @@ describe('message cache-first hydration', () => {
       configurable: true,
     })
 
+    // Spec #31 P5 B9: no onStateUpdate sync — rendering the hook exercises
+    // the iteration path; the collection mock is expected to swallow errors
+    // gracefully. The original assertion (doesn't throw) is satisfied by a
+    // clean render since no exception bubbles out of renderHook.
     const { result } = renderHook(() => useCodingAgent('test-session'))
-
-    // Should not throw
-    expect(() => {
-      act(() => {
-        capturedOnStateUpdate!({ status: 'idle' })
-      })
-    }).not.toThrow()
 
     // Messages should be empty since cache failed
     expect(result.current.messages).toEqual([])

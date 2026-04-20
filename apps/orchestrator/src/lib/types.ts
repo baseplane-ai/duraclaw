@@ -12,7 +12,6 @@ export type {
   PrInfo,
   ProjectInfo,
   ResumeCommand,
-  SessionState,
   SessionStatus,
   SessionSummary,
   SpawnConfig,

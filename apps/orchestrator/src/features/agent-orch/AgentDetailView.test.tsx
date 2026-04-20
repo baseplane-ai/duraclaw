@@ -47,30 +47,11 @@ vi.mock('./ConversationDownload', () => ({
 }))
 
 function makeAgent(overrides: Partial<UseCodingAgentResult> = {}): UseCodingAgentResult {
+  // Spec-31 P5 B10: UseCodingAgentResult narrowed — no `state` /
+  // `sessionResult`. Status / gate derive from messages; summary fields
+  // come from the D1-mirrored SessionLiveState row.
   return {
-    state: {
-      status: 'running',
-      session_id: 'test-session',
-      project: 'test',
-      project_path: '/tmp/test',
-      model: 'claude-opus-4-0',
-      prompt: 'hello',
-      userId: 'u1',
-      started_at: '2026-01-01T00:00:00Z',
-      completed_at: null,
-      num_turns: 0,
-      total_cost_usd: null,
-      duration_ms: null,
-      gate: null,
-      created_at: '2026-01-01T00:00:00Z',
-      updated_at: '2026-01-01T00:00:00Z',
-      result: null,
-      error: null,
-      summary: null,
-      sdk_session_id: null,
-    },
     messages: [],
-    sessionResult: null,
     kataState: null,
     contextUsage: null,
     wsReadyState: 1,
@@ -117,18 +98,19 @@ describe('AgentDetailView', () => {
   })
 
   it('renders MessageInput when status is running', () => {
-    const base = makeAgent()
-    const agent = makeAgent({ state: { ...base.state, status: 'running' } as typeof base.state })
+    // Spec-31 P5 B10: status is now derived from messages via
+    // `useDerivedStatus`, not read off `agent.state`. MessageInput is
+    // always rendered at the bottom of AgentDetailView regardless.
+    const agent = makeAgent()
     render(<AgentDetailView name="test" agent={agent} />)
 
     expect(screen.getByTestId('message-input')).toBeTruthy()
   })
 
   it('renders MessageInput when status is idle with error (previously failed)', () => {
-    const base = makeAgent()
-    const agent = makeAgent({
-      state: { ...base.state, status: 'idle', error: 'some error' } as typeof base.state,
-    })
+    // Spec-31 P5 B10: error is no longer on the hook result; MessageInput
+    // visibility no longer depends on it.
+    const agent = makeAgent()
     render(<AgentDetailView name="test" agent={agent} />)
 
     expect(screen.getByTestId('message-input')).toBeTruthy()
@@ -174,8 +156,11 @@ describe('AgentDetailView', () => {
   })
 
   it('renders ConversationDownload with messages and sessionId', () => {
+    // Spec-31 P5 B10: ConversationDownload receives `live.sdkSessionId ??
+    // sessionId ?? 'unknown'`. With no live-state row seeded, the fallback
+    // is the `name` prop passed to AgentDetailView.
     const agent = makeAgent()
-    render(<AgentDetailView name="test" agent={agent} />)
+    render(<AgentDetailView name="test-session" agent={agent} />)
 
     const download = screen.getByTestId('conversation-download')
     expect(download).toBeTruthy()

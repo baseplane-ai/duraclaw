@@ -3,14 +3,15 @@
  *
  * Consumed by StatusBar, SessionListItem / SessionCardList (sidebar), and
  * the tab bar so every surface agrees on the label / color / icon /
- * interactivity for a given `SessionState.status` + WS `readyState` pair.
+ * interactivity for a given `SessionStatus` + WS `readyState` pair.
  *
- * Before this module each surface hand-rolled its own `switch (status)`;
- * callers now pass `(state, wsReadyState)` and render from the returned
- * discriminated union.
+ * Spec #31 P5: the `SessionState` blob is gone. Callers now pass the
+ * session's status directly — active callers derive it from messages via
+ * `useDerivedStatus`; sidebar callers read the D1-mirrored `status` on
+ * `SessionLiveState`.
  */
 
-import type { SessionState } from '~/lib/types'
+import type { SessionStatus } from '~/lib/types'
 
 export type DisplayState =
   | { status: 'running'; label: 'Running'; color: 'green'; icon: 'spinner'; isInteractive: true }
@@ -90,31 +91,35 @@ const UNKNOWN: DisplayState = {
 }
 
 /**
- * Derive the UI display state for a session given its latest `SessionState`
- * and the current WS `readyState`.
+ * Derive the UI display state for a session given its status and the
+ * current WS `readyState`.
  *
- * - `state === null` → `unknown` (never connected in this browser).
+ * - `status === undefined` → `unknown` (never connected / no D1 mirror in
+ *   this browser).
  * - `wsReadyState !== 1` (WebSocket.OPEN) → `disconnected`.
- * - Otherwise the `state.status` value is mapped to the matching variant;
- *   anything unexpected falls back to `unknown`.
+ * - Otherwise `status` is mapped to the matching variant; anything
+ *   unexpected falls back to `unknown`.
  */
-export function deriveDisplayState(state: SessionState | null, wsReadyState: number): DisplayState {
-  if (state === null) return UNKNOWN
+export function deriveDisplayStateFromStatus(
+  status: SessionStatus | undefined,
+  wsReadyState: number,
+): DisplayState {
+  if (status === undefined) return UNKNOWN
   if (wsReadyState !== 1) return DISCONNECTED
 
   // Widen to string so forward-compatible statuses ('error', 'archived')
   // can be matched today even though the narrow `SessionStatus` union
   // doesn't currently include them.
-  const status = state.status as string
-  switch (status) {
+  const s = status as string
+  switch (s) {
     case 'running':
       return RUNNING
     case 'idle':
       return IDLE
     case 'waiting_gate':
       return WAITING_GATE
-    // `SessionState` also carries legacy `waiting_input` / `waiting_permission`
-    // variants — treat them as gate-style "needs attention" for display.
+    // Legacy `waiting_input` / `waiting_permission` variants — treat them
+    // as gate-style "needs attention" for display.
     case 'waiting_input':
     case 'waiting_permission':
       return WAITING_GATE

@@ -43,7 +43,7 @@ import {
 import { Skeleton } from '~/components/ui/skeleton'
 import type { DerivedGatePayload } from '~/hooks/use-derived-gate'
 import { getImagePartDataUrl } from '~/lib/message-parts'
-import type { GateResponse, SessionMessage, SessionMessagePart, SessionState } from '~/lib/types'
+import type { GateResponse, SessionMessage, SessionMessagePart } from '~/lib/types'
 import { GateResolver } from './GateResolver'
 
 function getToolName(part: SessionMessagePart): string {
@@ -331,7 +331,6 @@ interface ChatThreadProps {
    * mount `useCodingAgent` pass `null`.
    */
   derivedGate: DerivedGatePayload | null
-  state: SessionState | null
   isConnecting?: boolean
   onResolveGate: (gateId: string, response: GateResponse) => Promise<unknown>
   readOnly?: boolean
@@ -519,7 +518,6 @@ function ScrollOnUserSend({ messages }: { messages: SessionMessage[] }) {
 export function ChatThread({
   messages,
   derivedGate,
-  state: _state,
   isConnecting,
   onResolveGate,
   readOnly,

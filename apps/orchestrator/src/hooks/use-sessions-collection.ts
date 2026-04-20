@@ -47,22 +47,25 @@ export interface UseSessionsCollectionOptions {
   includeArchived?: boolean
 }
 
-/** Project a live-state row into the SessionSummary-shaped SessionRecord readers expect. */
+/**
+ * Project a live-state row into the SessionSummary-shaped SessionRecord
+ * readers expect. Spec #31 P5 B10: the `state` SessionState blob is gone;
+ * all summary fields come from the D1-mirrored top-level columns.
+ */
 function rowToSessionRecord(row: SessionLiveState): SessionRecord {
-  const state = row.state
   return {
     id: row.id,
     userId: row.userId ?? null,
-    project: row.project ?? state?.project ?? '',
-    status: state?.status ?? row.status ?? 'idle',
-    model: row.model ?? state?.model ?? null,
-    createdAt: row.createdAt ?? state?.created_at ?? row.updatedAt,
+    project: row.project ?? '',
+    status: row.status ?? 'idle',
+    model: row.model ?? null,
+    createdAt: row.createdAt ?? row.updatedAt,
     updatedAt: row.updatedAt,
     lastActivity: row.lastActivity ?? null,
-    durationMs: state?.duration_ms ?? row.durationMs ?? null,
-    totalCostUsd: state?.total_cost_usd ?? row.totalCostUsd ?? null,
-    numTurns: state?.num_turns ?? row.numTurns ?? 0,
-    prompt: row.prompt ?? state?.prompt,
+    durationMs: row.durationMs ?? null,
+    totalCostUsd: row.totalCostUsd ?? null,
+    numTurns: row.numTurns ?? 0,
+    prompt: row.prompt,
     summary: row.summary,
     title: row.title ?? null,
     tag: row.tag ?? null,
@@ -70,7 +73,7 @@ function rowToSessionRecord(row: SessionLiveState): SessionRecord {
     origin: row.origin ?? null,
     agent: row.agent ?? null,
     messageCount: row.messageCount ?? null,
-    sdkSessionId: row.sdkSessionId ?? state?.sdk_session_id ?? null,
+    sdkSessionId: row.sdkSessionId ?? null,
     kataMode: row.kataMode ?? null,
     kataIssue: row.kataIssue ?? null,
     kataPhase: row.kataPhase ?? null,
