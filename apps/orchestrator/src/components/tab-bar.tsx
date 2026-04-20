@@ -148,8 +148,16 @@ export function TabBar({
   // ── Drag-to-reorder ──────────────────────────────────────────────
   const [activeDragId, setActiveDragId] = useState<string | null>(null)
 
+  // Activation: hold for 180ms before a drag starts. A short tap (no hold)
+  // resolves as a plain click → no transform translate, no snap-back, no
+  // accidental drop on the neighbour tab. Tolerance lets the user wiggle
+  // up to 8px during the hold without cancelling the drag (touch/trackpad
+  // jitter). The previous `distance: 5` constraint was too eager — any
+  // sub-frame pointer drift on tap activated drag, the tab visually
+  // translated and snapped back, and small overshoots dropped on adjacent
+  // tabs and triggered onReorder.
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(PointerSensor, { activationConstraint: { delay: 180, tolerance: 8 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   )
 
