@@ -272,6 +272,50 @@ describe('useMessagesCollection', () => {
     expect(result.current.messages.map((m) => m.id)).toEqual(['echoed', 'optimistic'])
   })
 
+  it('REST-loaded user+assistant turns interleave correctly without seq (msg-N fallback)', () => {
+    // Regression: when all rows lack seq (REST-loaded), the secondary sort
+    // must parse the message id itself (msg-N → turnOrdinal=N) so assistant
+    // rows sort alongside their user turn, not after all user rows.
+    mockLiveQueryData = [
+      makeMessage({
+        id: 'usr-2',
+        sessionId: 'session-abc',
+        role: 'user',
+        canonical_turn_id: 'usr-2',
+        createdAt: '2026-01-01T00:00:00Z',
+      }),
+      makeMessage({
+        id: 'msg-2',
+        sessionId: 'session-abc',
+        role: 'assistant',
+        createdAt: '2026-01-01T00:00:01Z',
+      }),
+      makeMessage({
+        id: 'usr-3',
+        sessionId: 'session-abc',
+        role: 'user',
+        canonical_turn_id: 'usr-3',
+        createdAt: '2026-01-01T00:00:02Z',
+      }),
+      makeMessage({
+        id: 'msg-3',
+        sessionId: 'session-abc',
+        role: 'assistant',
+        createdAt: '2026-01-01T00:00:03Z',
+      }),
+    ]
+
+    const { result } = renderHook(() => useMessagesCollection('session-abc'))
+
+    // Expected: usr-2, msg-2, usr-3, msg-3 (interleaved turns, not grouped by role)
+    expect(result.current.messages.map((m) => m.id)).toEqual([
+      'usr-2',
+      'msg-2',
+      'usr-3',
+      'msg-3',
+    ])
+  })
+
   it('optimistic user rows (usr-client-<uuid>) without canonical_turn_id interleave by createdAt', () => {
     mockLiveQueryData = [
       makeMessage({

@@ -18,8 +18,11 @@
  *      That gives optimistic rows the "briefly appears below not-yet-
  *      echoed rows, then snaps into place on echo" behaviour from spec.
  *   2. Secondary: `canonical_turn_id` parsed as `usr-N` (the SessionDO's
- *      strictly-monotonic `turnCounter`). Populated server-side on user
- *      rows only; assistant/tool rows fall through.
+ *      strictly-monotonic `turnCounter`), falling back to the message `id`
+ *      itself (`usr-N`, `msg-N`, `err-N`). This ensures assistant rows
+ *      (`msg-N`) sort alongside their user turn (`usr-N`) even when `seq`
+ *      is absent (REST-loaded messages). Rows without any parseable
+ *      ordinal fall through.
  *   3. Tertiary: `createdAt` — tie-breaker for rows with the same seq and
  *      no / equal turnOrdinal (snapshot rows all share their frame's
  *      version, so they tie on seq and fall through to turnOrdinal /
@@ -34,7 +37,7 @@ import { type CachedMessage, createMessagesCollection } from '~/db/messages-coll
 
 function parseTurnOrdinal(id?: string): number | undefined {
   if (!id) return undefined
-  const m = /^usr-(\d+)$/.exec(id)
+  const m = /^(?:usr|msg|err)-(\d+)$/.exec(id)
   return m ? Number.parseInt(m[1], 10) : undefined
 }
 
@@ -53,7 +56,10 @@ function createdAtMs(row: CachedMessage): number {
  */
 function sortKey(row: CachedMessage): [number, number, number] {
   const seq = row.seq ?? Number.POSITIVE_INFINITY
-  const ord = parseTurnOrdinal(row.canonical_turn_id) ?? Number.POSITIVE_INFINITY
+  const ord =
+    parseTurnOrdinal(row.canonical_turn_id) ??
+    parseTurnOrdinal(row.id) ??
+    Number.POSITIVE_INFINITY
   return [seq, ord, createdAtMs(row)]
 }
 
