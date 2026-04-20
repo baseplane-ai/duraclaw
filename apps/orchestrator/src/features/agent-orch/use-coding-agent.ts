@@ -214,7 +214,12 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
 
       if (frame.payload.kind === 'snapshot') {
         applySnapshot(frame.payload.messages)
-        map.set(agentName, Math.max(lastSeq, frame.payload.version))
+        // Reset lastSeq to the snapshot's version unconditionally. The old
+        // `Math.max(lastSeq, version)` prevented the client from accepting a
+        // lower version after a DO rehydrate (messageSeq resets to 0 in-memory
+        // — issue #25). That caused every subsequent delta with seq <= lastSeq
+        // to be silently dropped as stale, breaking streaming entirely.
+        map.set(agentName, frame.payload.version)
         // B7: DO pushes branchInfo alongside snapshot payloads on reconnect,
         // rewind, resubmit, and branch-navigate. Upsert each row into the
         // per-session branchInfoCollection; the `useBranchInfo` hook reads
