@@ -15,7 +15,15 @@ import { createCapacitorSQLitePersistence } from '@tanstack/capacitor-db-sqlite-
 
 export async function createCapacitorPersistence() {
   const sqlite = new SQLiteConnection(CapacitorSQLite)
-  const database = await sqlite.createConnection('duraclaw', false, 'no-encryption', 1, false)
+
+  // If a connection from a prior app lifecycle still exists (hot-reload,
+  // -r reinstall, or Android process reuse), retrieve it instead of
+  // creating a duplicate — createConnection throws "already exists".
+  const exists = await sqlite.isConnection('duraclaw', false)
+  const database = exists.result
+    ? await sqlite.retrieveConnection('duraclaw', false)
+    : await sqlite.createConnection('duraclaw', false, 'no-encryption', 1, false)
+
   await database.open()
   return createCapacitorSQLitePersistence({ database })
 }
