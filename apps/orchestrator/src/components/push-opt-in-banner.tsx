@@ -20,10 +20,15 @@ export function PushOptInBanner() {
       toast.success('Notifications enabled')
       localStorage.setItem('push-prompt-dismissed', 'true')
       setDismissed(true)
-    } else if (Notification.permission === 'denied') {
-      toast.error('Notifications blocked — enable in browser settings')
-      localStorage.setItem('push-prompt-dismissed', 'true')
-      setDismissed(true)
+    } else {
+      // Only dismiss if permission was actually denied (not a transient failure)
+      const webDenied = typeof Notification !== 'undefined' && Notification.permission === 'denied'
+      if (webDenied) {
+        toast.error('Notifications blocked — enable in browser settings')
+        localStorage.setItem('push-prompt-dismissed', 'true')
+        setDismissed(true)
+      }
+      // Otherwise keep banner visible for retry (transient network/auth failure)
     }
   }
 

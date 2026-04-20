@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const listeners = new Map<string, (arg: unknown) => unknown>()
 
 const mockRequestPermissions = vi.fn()
+const mockCheckPermissions = vi.fn()
 const mockRegister = vi.fn()
 const mockAddListener = vi.fn(async (event: string, cb: (arg: unknown) => unknown) => {
   listeners.set(event, cb)
@@ -17,6 +18,7 @@ const mockAddListener = vi.fn(async (event: string, cb: (arg: unknown) => unknow
 vi.mock('@capacitor/push-notifications', () => ({
   PushNotifications: {
     requestPermissions: () => mockRequestPermissions(),
+    checkPermissions: () => mockCheckPermissions(),
     register: () => mockRegister(),
     addListener: (event: string, cb: (arg: unknown) => unknown) => mockAddListener(event, cb),
   },
@@ -28,6 +30,7 @@ describe('usePushSubscriptionNative', () => {
   beforeEach(() => {
     listeners.clear()
     mockRequestPermissions.mockReset()
+    mockCheckPermissions.mockReset().mockResolvedValue({ receive: 'prompt' })
     mockRegister.mockReset()
     mockAddListener.mockClear()
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 201 }))
@@ -45,6 +48,32 @@ describe('usePushSubscriptionNative', () => {
 
     expect(mockAddListener).toHaveBeenCalledWith('registration', expect.any(Function))
     expect(mockAddListener).toHaveBeenCalledWith('registrationError', expect.any(Function))
+  })
+
+  it('auto-registers when permission is already granted', async () => {
+    mockCheckPermissions.mockResolvedValue({ receive: 'granted' })
+    mockRegister.mockResolvedValue(undefined)
+
+    const { result } = renderHook(() => usePushSubscriptionNative())
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(mockCheckPermissions).toHaveBeenCalled()
+    expect(mockRegister).toHaveBeenCalled()
+    expect(result.current.permission).toBe('granted')
+  })
+
+  it('does not auto-register when permission is prompt', async () => {
+    mockCheckPermissions.mockResolvedValue({ receive: 'prompt' })
+
+    renderHook(() => usePushSubscriptionNative())
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(mockCheckPermissions).toHaveBeenCalled()
+    expect(mockRegister).not.toHaveBeenCalled()
   })
 
   it('subscribe() requests permissions then registers when granted', async () => {
@@ -104,6 +133,24 @@ describe('usePushSubscriptionNative', () => {
       body: JSON.stringify({ token: 'fcm-token-from-fcm', platform: 'android' }),
     })
     expect(result.current.isSubscribed).toBe(true)
+  })
+
+  it('registration listener retries on server error', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(null, { status: 401 }))
+      .mockResolvedValueOnce(new Response(null, { status: 201 }))
+
+    renderHook(() => usePushSubscriptionNative())
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    const regCb = listeners.get('registration')
+    await act(async () => {
+      await regCb?.({ value: 'retry-token' })
+    })
+
+    expect(fetch).toHaveBeenCalledTimes(2)
   })
 
   it('registrationError listener flips isSubscribed false', async () => {
