@@ -7,6 +7,12 @@ const mockOpen = vi.fn()
 vi.mock('@capacitor-community/sqlite', () => ({
   CapacitorSQLite: {},
   SQLiteConnection: class {
+    isConnection = vi.fn().mockResolvedValue({ result: false })
+    retrieveConnection = vi.fn().mockResolvedValue({
+      open: mockOpen,
+      execute: mockExecute,
+      query: mockQuery,
+    })
     createConnection = vi.fn().mockResolvedValue({
       open: mockOpen,
       execute: mockExecute,
