@@ -74,11 +74,19 @@ tag = "v4"
 tag = "v5"
 deleted_classes = ["ProjectRegistry"]
 
-# D1 database for auth
+# D1 database for auth.
+#
+# IMPORTANT: `c5b4d822` is the ID on the Ben@baseplane.ai account
+# (87bd3030), which is where the infra pipeline deploys. The other ID
+# that keeps reappearing in history (`7f7a3c5e-...`) lives on the
+# Team@getelevra.com account (c5f1240e) — a local `wrangler d1
+# migrations apply --remote` from that account's auth context will
+# "correct" this value to the wrong one and break the next deploy.
+# See commits 60ad996 (fix) and 0c1e011 (accidental revert via #33).
 [[d1_databases]]
 binding = "AUTH_DB"
 database_name = "duraclaw-auth"
-database_id = "7f7a3c5e-0609-4527-904e-740ca140538d"
+database_id = "c5b4d822-9bc6-467f-9ad6-7ee779b82e0c"
 
 [vars]
 VAPID_SUBJECT = "mailto:push@codevibesmatter.com"
