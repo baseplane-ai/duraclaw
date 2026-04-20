@@ -1,5 +1,6 @@
 import { routePartykitRequest } from 'partyserver'
-import { SessionCollabDO } from './agents/session-collab-do'
+import { SessionCollabDOv2 } from './agents/session-collab-do'
+import { SessionCollabDO } from './agents/session-collab-do-legacy'
 import { SessionDO } from './agents/session-do'
 import { UserSettingsDO } from './agents/user-settings-do'
 import { createApiApp } from './api'
@@ -163,7 +164,7 @@ export default {
   scheduled,
 }
 
-export { SessionCollabDO, SessionDO, UserSettingsDO }
+export { SessionCollabDO, SessionCollabDOv2, SessionDO, UserSettingsDO }
 
 // Stub: wrangler needs this class exported for the v5 deleted_classes
 // migration to apply. Once the migration has run on the infra pipeline's

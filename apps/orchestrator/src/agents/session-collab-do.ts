@@ -9,7 +9,7 @@ import * as Y from 'yjs'
  * as a single BLOB snapshot in SQLite; onSave is debounced so rapid edits
  * coalesce into one write, with a hard cap to bound staleness.
  */
-export class SessionCollabDO extends YServer {
+export class SessionCollabDOv2 extends YServer {
   static options = { hibernate: true }
 
   // onSave debounce: wait 2s after last edit, max 10s, 5s timeout.

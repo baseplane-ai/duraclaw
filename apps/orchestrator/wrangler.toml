@@ -32,6 +32,12 @@ class_name = "UserSettingsDO"
 
 [[durable_objects.bindings]]
 name = "SESSION_COLLAB"
+class_name = "SessionCollabDOv2"
+
+# Keep old binding alive to avoid implicit delete-class (CF error 10061).
+# SessionCollabDO is orphaned — no code references this binding.
+[[durable_objects.bindings]]
+name = "SESSION_COLLAB_LEGACY"
 class_name = "SessionCollabDO"
 
 # DO migrations — collapsed for fresh deploy on baseplane-ai account.
@@ -47,9 +53,12 @@ new_sqlite_classes = ["SessionDO", "ProjectRegistry"]
 tag = "v2"
 new_sqlite_classes = ["UserSettingsDO"]
 
+# SessionCollabDO was deployed as non-sqlite DO (cannot migrate). Replaced
+# with SessionCollabDOv2 (fresh sqlite-backed class, same binding name).
+# Old SessionCollabDO instances orphaned (legacy binding, harmless).
 [[migrations]]
 tag = "v3"
-new_sqlite_classes = ["SessionCollabDO"]
+new_sqlite_classes = ["SessionCollabDOv2"]
 
 # Issue #7 p3: UserSettingsDO is now a stateless PartyServer fanout.
 # The class no longer touches its SQLite — storage from the v2
