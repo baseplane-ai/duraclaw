@@ -7,7 +7,7 @@
  * continue to consume the SessionSummary-shaped projection unchanged.
  */
 
-import type { SessionSummary } from '@duraclaw/shared-types'
+import type { SessionSummary, SyncedCollectionFrame } from '@duraclaw/shared-types'
 import { createTransaction } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
 import { useCallback, useEffect, useMemo, useRef } from 'react'
@@ -19,6 +19,7 @@ import {
 } from '~/db/session-live-state-collection'
 import type { SessionRecord } from '~/db/session-record'
 import { useNotificationWatcher } from '~/hooks/use-notification-watcher'
+import { onUserStreamReconnect, subscribeUserStream } from '~/hooks/use-user-stream'
 import { apiUrl } from '~/lib/platform'
 
 export type { SessionRecord }
@@ -226,6 +227,38 @@ export function useSessionsCollection(
       void backfillFromRest()
     }
   }, [isLoading, data, backfillFromRest])
+
+  // Subscribe to `sessions` delta frames from the user-stream WS so
+  // sessions created/updated in other clients (or by the DO) appear in
+  // this client's list without a full page reload.
+  useEffect(() => {
+    const unsubFrame = subscribeUserStream('sessions', (frame: SyncedCollectionFrame<unknown>) => {
+      for (const op of frame.ops) {
+        if (op.type === 'insert' || op.type === 'update') {
+          seedSessionLiveStateFromSummary(op.value as SessionSummary)
+        } else if (op.type === 'delete') {
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const coll = sessionLiveStateCollection as any
+            if (coll.has?.(op.key)) coll.delete(op.key)
+          } catch {
+            // collection may not be ready
+          }
+        }
+      }
+    })
+
+    // On WS reconnect, refetch the full session list to close any gaps
+    // that occurred while disconnected.
+    const unsubReconnect = onUserStreamReconnect(() => {
+      void backfillFromRest()
+    })
+
+    return () => {
+      unsubFrame()
+      unsubReconnect()
+    }
+  }, [backfillFromRest])
 
   const refresh = backfillFromRest
 

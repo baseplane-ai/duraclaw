@@ -1053,6 +1053,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
         .update(agentSessions)
         .set({ status: this.state.status, updatedAt, lastActivity: updatedAt })
         .where(eq(agentSessions.id, sessionId))
+      this.broadcastSessionUpdate(sessionId)
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to sync status to D1:`, err)
     }
@@ -1072,6 +1073,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
           lastActivity: updatedAt,
         })
         .where(eq(agentSessions.id, sessionId))
+      this.broadcastSessionUpdate(sessionId)
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to sync result to D1:`, err)
     }
@@ -1124,6 +1126,9 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       }
     }
 
+    const sessionId = this.state.session_id ?? this.ctx.id.toString()
+    this.broadcastSessionUpdate(sessionId)
+
     // GH#32 phase p5: broadcast an updated `chains` row for the affected
     // issue so connected browsers see status / column / lastActivity
     // updates without polling. Scoped to the session's owning user; a null
@@ -1155,6 +1160,35 @@ export class SessionDO extends Agent<Env, SessionMeta> {
           }
         } catch (err) {
           console.error(`[SessionDO:${this.ctx.id}] broadcastChainUpdate failed:`, err)
+        }
+      })(),
+    )
+  }
+
+  /**
+   * Fetch the current full session row from D1 and broadcast an `update` op
+   * to the owning user's UserSettingsDO so all connected browsers see the
+   * change. Fire-and-forget via `waitUntil`.
+   */
+  private broadcastSessionUpdate(sessionId: string) {
+    const userId = this.state.userId
+    if (!userId) return
+
+    this.ctx.waitUntil(
+      (async () => {
+        try {
+          const rows = await this.d1
+            .select()
+            .from(agentSessions)
+            .where(eq(agentSessions.id, sessionId))
+            .limit(1)
+          if (rows.length > 0) {
+            await broadcastSyncedDelta(this.env, userId, 'sessions', [
+              { type: 'update', value: rows[0] },
+            ])
+          }
+        } catch (err) {
+          console.error(`[SessionDO:${this.ctx.id}] broadcastSessionUpdate failed:`, err)
         }
       })(),
     )
