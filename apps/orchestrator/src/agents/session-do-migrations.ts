@@ -66,4 +66,20 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
       )`)
     },
   },
+  {
+    version: 6,
+    description: 'Add typed session_meta table for per-session server state (B1)',
+    up: (sql) => {
+      sql.exec(`CREATE TABLE IF NOT EXISTS session_meta (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        message_seq INTEGER NOT NULL DEFAULT 0,
+        sdk_session_id TEXT,
+        active_callback_token TEXT,
+        context_usage_json TEXT,
+        context_usage_cached_at INTEGER,
+        updated_at INTEGER NOT NULL DEFAULT 0
+      )`)
+      sql.exec(`INSERT OR IGNORE INTO session_meta (id, updated_at) VALUES (1, 0)`)
+    },
+  },
 ]

@@ -110,13 +110,22 @@ export class SessionDO extends Agent<Env, SessionState> {
   private cachedGatewayConnId: string | null = null
   /** Timestamp of the last gateway event received on the WS connection. */
   private lastGatewayActivity = 0
-  /** Per-session monotonic sequence for MessagesFrame broadcasts (B1). Not persisted — resets to 0 on DO cold start; snapshots re-establish client watermark. */
+  /** Per-session monotonic sequence for MessagesFrame broadcasts (B1). Persisted in typed `session_meta.message_seq`; survives DO rehydrate. */
   private messageSeq = 0
 
   // ── Lifecycle ──────────────────────────────────────────────────
 
   async onStart() {
     runMigrations(this.ctx.storage.sql, SESSION_DO_MIGRATIONS)
+
+    // Rehydrate per-session monotonic seq from typed session_meta (B1). The
+    // v6 migration INSERT OR IGNOREs row id=1 so the `?? 0` is belt-and-
+    // suspenders. Must run before any code path that can broadcastMessages.
+    const metaRows = this.sql<{
+      message_seq: number
+    }>`SELECT message_seq FROM session_meta WHERE id = 1`
+    this.messageSeq = metaRows[0]?.message_seq ?? 0
+
     this.session = Session.create(this)
 
     // Trigger Session's lazy table initialization (creates assistant_config etc.)
@@ -659,7 +668,11 @@ export class SessionDO extends Agent<Env, SessionState> {
    * shared seq counter").
    */
   private broadcastMessages(payload: MessagesPayload, opts: { targetClientId?: string } = {}) {
-    if (!opts.targetClientId) this.messageSeq += 1
+    if (!opts.targetClientId) {
+      this.messageSeq += 1
+      this
+        .sql`UPDATE session_meta SET message_seq = ${this.messageSeq}, updated_at = ${Date.now()} WHERE id = 1`
+    }
     const frame: MessagesFrame = {
       type: 'messages',
       sessionId: this.name,

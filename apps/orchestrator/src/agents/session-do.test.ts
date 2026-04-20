@@ -138,10 +138,101 @@ describe('SESSION_DO_MIGRATIONS', () => {
     })
   })
 
+  describe('migration v6: session_meta table', () => {
+    it('exists as version 6', () => {
+      const v6 = SESSION_DO_MIGRATIONS.find((m) => m.version === 6)
+      expect(v6).toBeDefined()
+      expect(v6!.description).toContain('session_meta')
+    })
+
+    it('creates the session_meta table with the expected columns', () => {
+      const v6 = SESSION_DO_MIGRATIONS.find((m) => m.version === 6)!
+      const executed: string[] = []
+      const fakeSql = {
+        exec(query: string) {
+          executed.push(query)
+          return { toArray: () => [] }
+        },
+      }
+
+      v6.up(fakeSql as any)
+
+      const createStmt = executed.find(
+        (q) => q.includes('CREATE TABLE') && q.includes('session_meta'),
+      )
+      expect(createStmt).toBeTruthy()
+      expect(createStmt).toContain('id INTEGER PRIMARY KEY CHECK (id = 1)')
+      expect(createStmt).toContain('message_seq INTEGER NOT NULL DEFAULT 0')
+      expect(createStmt).toContain('sdk_session_id TEXT')
+      expect(createStmt).toContain('active_callback_token TEXT')
+      expect(createStmt).toContain('context_usage_json TEXT')
+      expect(createStmt).toContain('context_usage_cached_at INTEGER')
+      expect(createStmt).toContain('updated_at INTEGER NOT NULL DEFAULT 0')
+    })
+
+    it('seeds the singleton row via INSERT OR IGNORE', () => {
+      const v6 = SESSION_DO_MIGRATIONS.find((m) => m.version === 6)!
+      const executed: string[] = []
+      const fakeSql = {
+        exec(query: string) {
+          executed.push(query)
+          return { toArray: () => [] }
+        },
+      }
+
+      v6.up(fakeSql as any)
+
+      const insertStmt = executed.find(
+        (q) => q.includes('INSERT OR IGNORE') && q.includes('session_meta'),
+      )
+      expect(insertStmt).toBeTruthy()
+      expect(insertStmt).toContain('(1, 0)')
+    })
+
+    it('runs end-to-end against an in-memory SQLite-like harness', () => {
+      // Simulate a minimal DO sql.exec that records DDL + row state so we can
+      // assert the table exists and the singleton row is in place after v6.
+      const tables = new Set<string>()
+      const sessionMetaRows: Array<{ id: number; message_seq: number; updated_at: number }> = []
+      const fakeSql = {
+        exec(query: string, ..._bindings: unknown[]) {
+          if (/CREATE TABLE IF NOT EXISTS session_meta/.test(query)) {
+            tables.add('session_meta')
+            return { toArray: () => [] }
+          }
+          if (/INSERT OR IGNORE INTO session_meta/.test(query)) {
+            if (!sessionMetaRows.find((r) => r.id === 1)) {
+              sessionMetaRows.push({ id: 1, message_seq: 0, updated_at: 0 })
+            }
+            return { toArray: () => [] }
+          }
+          if (/SELECT name FROM sqlite_master/.test(query)) {
+            return {
+              toArray: () =>
+                Array.from(tables).map((name) => ({ name })) as Array<{ name: string }>,
+            }
+          }
+          return { toArray: () => [] }
+        },
+      }
+
+      const v6 = SESSION_DO_MIGRATIONS.find((m) => m.version === 6)!
+      v6.up(fakeSql as any)
+
+      const rows = (
+        fakeSql.exec(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='session_meta'",
+        ) as { toArray: () => Array<{ name: string }> }
+      ).toArray()
+      expect(rows).toEqual([{ name: 'session_meta' }])
+      expect(sessionMetaRows).toEqual([{ id: 1, message_seq: 0, updated_at: 0 }])
+    })
+  })
+
   describe('migration chain integrity', () => {
-    it('has sequential version numbers from 1 to 5', () => {
+    it('has sequential version numbers from 1 to 6', () => {
       const versions = SESSION_DO_MIGRATIONS.map((m) => m.version)
-      expect(versions).toEqual([1, 2, 3, 4, 5])
+      expect(versions).toEqual([1, 2, 3, 4, 5, 6])
     })
 
     it('all migrations have descriptions', () => {
@@ -1111,6 +1202,119 @@ describe('SessionDO watchdog env threshold', () => {
   it('does not trigger recovery while a gateway conn is still present', () => {
     const env = { STALE_THRESHOLD_MS: '60000' }
     expect(wouldRecover(env, 120_000, true)).toBe(false)
+  })
+})
+
+// ── messageSeq persistence via session_meta (B1) ───────────────
+//
+// Mirrors the exact onStart read + broadcastMessages write the DO uses.
+// We can't construct SessionDO directly (TC39 decorators), so we stand up
+// the same two statements against an in-memory session_meta row.
+
+function createSessionMetaSql() {
+  const row = { message_seq: 0, updated_at: 0 }
+  const writes: Array<{ message_seq: number; updated_at: number }> = []
+  function fakeSql<T>(strings: TemplateStringsArray, ...values: unknown[]): T[] {
+    const query = strings.join('?').trim()
+    if (query.startsWith('SELECT message_seq FROM session_meta')) {
+      return [{ message_seq: row.message_seq }] as T[]
+    }
+    if (query.startsWith('UPDATE session_meta SET message_seq =')) {
+      row.message_seq = values[0] as number
+      row.updated_at = values[1] as number
+      writes.push({ message_seq: row.message_seq, updated_at: row.updated_at })
+      return [] as T[]
+    }
+    return [] as T[]
+  }
+  return { sql: fakeSql, row, writes }
+}
+
+describe('messageSeq persistence (session_meta B1)', () => {
+  /**
+   * Simulates SessionDO.broadcastMessages' seq+persist contract exactly:
+   *   if (!opts.targetClientId) {
+   *     this.messageSeq += 1
+   *     this.sql`UPDATE session_meta SET message_seq = ${n}, updated_at = ${t} WHERE id = 1`
+   *   }
+   */
+  function makeBroadcaster(sql: ReturnType<typeof createSessionMetaSql>['sql'], seed: number) {
+    let messageSeq = seed
+    return {
+      broadcast(opts: { targetClientId?: string } = {}): number {
+        if (!opts.targetClientId) {
+          messageSeq += 1
+          sql`UPDATE session_meta SET message_seq = ${messageSeq}, updated_at = ${Date.now()} WHERE id = 1`
+        }
+        return messageSeq
+      },
+      getSeq: () => messageSeq,
+    }
+  }
+
+  it('persists messageSeq on every broadcast', () => {
+    const { sql, row, writes } = createSessionMetaSql()
+    const b = makeBroadcaster(sql, 0)
+
+    expect(b.broadcast()).toBe(1)
+    expect(b.broadcast()).toBe(2)
+    expect(b.broadcast()).toBe(3)
+
+    expect(row.message_seq).toBe(3)
+    expect(writes.map((w) => w.message_seq)).toEqual([1, 2, 3])
+  })
+
+  it('rehydrates messageSeq across a DO restart', () => {
+    const { sql, row } = createSessionMetaSql()
+
+    // First instance: 5 broadcasts.
+    const b1 = makeBroadcaster(sql, 0)
+    for (let i = 0; i < 5; i++) b1.broadcast()
+    expect(row.message_seq).toBe(5)
+
+    // Simulate onStart on a fresh DO instance — re-read persisted seq.
+    const metaRows = sql<{
+      message_seq: number
+    }>`SELECT message_seq FROM session_meta WHERE id = 1`
+    const rehydrated = metaRows[0]?.message_seq ?? 0
+    expect(rehydrated).toBe(5)
+
+    // Sixth broadcast on the new instance should be seq=6.
+    const b2 = makeBroadcaster(sql, rehydrated)
+    expect(b2.broadcast()).toBe(6)
+    expect(row.message_seq).toBe(6)
+  })
+
+  it('targeted broadcasts do NOT increment or persist seq', () => {
+    const { sql, row, writes } = createSessionMetaSql()
+    const b = makeBroadcaster(sql, 0)
+
+    b.broadcast() // seq=1
+    expect(row.message_seq).toBe(1)
+
+    // Targeted sends echo current seq — must not advance shared counter.
+    expect(b.broadcast({ targetClientId: 'client-A' })).toBe(1)
+    expect(b.broadcast({ targetClientId: 'client-B' })).toBe(1)
+
+    expect(row.message_seq).toBe(1)
+    expect(writes).toHaveLength(1)
+  })
+
+  it('onStart falls back to 0 when the session_meta row is missing (defensive)', () => {
+    // The v6 migration INSERT OR IGNOREs the row, but belt-and-suspenders:
+    // the DO uses `?? 0`. Simulate an empty table.
+    function emptySql<T>(strings: TemplateStringsArray): T[] {
+      const query = strings.join('').trim()
+      if (query.startsWith('SELECT message_seq FROM session_meta')) {
+        return [] as T[]
+      }
+      return [] as T[]
+    }
+    const metaRows = emptySql<{
+      message_seq: number
+    }>`SELECT message_seq FROM session_meta WHERE id = 1`
+    const seed = metaRows[0]?.message_seq ?? 0
+    expect(seed).toBe(0)
   })
 })
 
