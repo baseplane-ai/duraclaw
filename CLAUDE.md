@@ -275,6 +275,97 @@ Port ranges (all non-overlapping):
 - **Toolchain pins** — JDK 21, Android SDK platform 36, build-tools 36.0.0. See `apps/mobile/README.md` for full prerequisites, FCM provisioning, dev-keystore generation, and source map.
 - **Spec**: `planning/specs/26-capacitor-android-mobile-shell.md`. GitHub: issue #26, PR #29.
 
+#### OTA auto-update (Capgo web bundle + self-hosted APK fallback)
+
+Two update channels so we don't have to reinstall the APK for every JS
+change:
+
+1. **Web-bundle OTA via `@capgo/capacitor-updater`** — covers 95% of
+   releases. `initMobileUpdater()` in
+   `apps/orchestrator/src/lib/mobile-updater.ts` is called from
+   `entry-client.tsx` on every native launch. It:
+   - calls `CapacitorUpdater.notifyAppReady()` so Capgo doesn't
+     auto-rollback the current bundle;
+   - POSTs `{platform, version_name: VITE_APP_VERSION}` to
+     `/api/mobile/updates/manifest`;
+   - if the Worker reports a newer version, `download()`s the zip and
+     `set()`s it — the WebView reloads into the new bundle on next
+     mount.
+
+2. **Native-APK fallback** — fires only when native-layer code changes
+   (Capacitor / plugin bump). `checkNativeApkUpdate()` polls
+   `GET /api/mobile/apk/latest`, compares to `App.getInfo().version`,
+   and on mismatch `window.confirm()`s the user. On accept, navigates
+   the WebView to the APK URL; Android's download manager + the
+   `REQUEST_INSTALL_PACKAGES` permission hand off to the package
+   installer. Once-per-version dedupe via `localStorage` key
+   `duraclaw.apk-prompt.dismissed-version`.
+
+**Version source** — `VITE_APP_VERSION` is stamped into the bundle by
+`apps/mobile/scripts/build-android.sh` as `git rev-parse --short HEAD`
+(override via `APP_VERSION=…`). The same script, after `cap sync` (so
+the zip doesn't double-bundle into the APK), emits:
+
+- `apps/orchestrator/dist/client/mobile/bundle-<sha>.zip` — the OTA
+  payload, zipped from a tmpdir staging copy of `dist/client` with the
+  `/mobile/` subdir excluded (avoids self-nesting).
+- `apps/orchestrator/dist/client/mobile/version.json` —
+  `{version, path}` read by the Worker's `/api/mobile/updates/manifest`
+  route via `env.ASSETS.fetch('/mobile/version.json')`.
+
+The APK-fallback counterpart (`/mobile/apk-version.json` +
+`/mobile/duraclaw-<ver>.apk`) is **not** automated yet — you drop the
+signed APK + a matching `apk-version.json` into `dist/client/mobile/`
+before the Worker deploy when you actually need a native bump. Route
+returns `{message: "No APK available"}` when the file is absent.
+
+**Both manifest routes are public** (registered BEFORE `authMiddleware`
+in `apps/orchestrator/src/api/index.ts`) so an expired-session user can
+still update to the current build.
+
+#### Sideloading to the Pixel over wireless ADB (Tailscale)
+
+The dev Pixel (`46211FDAQ00534`) is reachable from the VPS via Tailscale
+at `100.113.109.57`. Pairing record is persisted under `~/.android/`
+(`adbkey`, `adb_known_hosts.pb`) — **re-pairing is almost never needed**,
+only the `connect` port changes.
+
+Toolchain on this VPS:
+
+- `adb` binary: `/home/ubuntu/Android/sdk/platform-tools/adb`
+  (not on `$PATH` by default — `export PATH="/home/ubuntu/Android/sdk/platform-tools:$PATH"`)
+- adb server is typically already running on `:5037` from a prior session
+- Package id: `com.baseplane.duraclaw`
+
+Standard install flow:
+
+```bash
+export PATH="/home/ubuntu/Android/sdk/platform-tools:$PATH"
+adb connect 100.113.109.57:<PORT>     # PORT rotates each WiFi-debug toggle — ask the user
+adb devices                            # confirm <IP>:<PORT>   device
+adb -s 100.113.109.57:<PORT> install -r \
+  apps/mobile/android/app/build/outputs/apk/release/app-release-signed.apk
+adb -s 100.113.109.57:<PORT> shell monkey -p com.baseplane.duraclaw \
+  -c android.intent.category.LAUNCHER 1
+```
+
+Gotchas:
+
+- **Port rotation**: Android cycles the Wireless-debugging port every
+  toggle and on idle-drop. If `adb connect` says `Connection refused`,
+  the pairing is still good — ask the user to open
+  **Settings → System → Developer options → Wireless debugging** and
+  read the current `IP address & Port`. No re-pair needed.
+- **mDNS is not forwarded across Tailscale**, so `adb mdns services`
+  won't discover the phone from the VPS — always `connect` by explicit
+  `IP:PORT`.
+- **`INSTALL_FAILED_UPDATE_INCOMPATIBLE`** means the signing key differs
+  from an installed build — `adb uninstall com.baseplane.duraclaw` then
+  retry. Debug-signed and release-signed APKs collide this way.
+- **Project `grep` alias** on this box is `rg` and rejects `-E`; use
+  `/usr/bin/grep -E` when parsing `dumpsys package` / `pm list packages`
+  output.
+
 ### packages/agent-gateway (VPS control plane)
 
 - **Not the SDK host anymore** — that moved to `session-runner`. Gateway just spawns detached runners and exposes HTTP endpoints for the DO.
