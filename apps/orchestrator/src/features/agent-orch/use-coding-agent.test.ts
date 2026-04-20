@@ -1284,4 +1284,100 @@ describe('branch tracking (P4)', () => {
     expect(row.siblings).toEqual(['usr-1', 'usr-3'])
     expect(row.activeId).toBe('usr-1')
   })
+
+  // P2 B2: deltas can piggyback branchInfo — user-turn mutations that add a
+  // sibling ship the updated BranchInfoRow on the same frame as the message
+  // upsert. Mirrors the snapshot path, applied inline on the delta handler.
+  test('delta payload branchInfo.upsert lands in the branch-info collection', () => {
+    renderHook(() => useCodingAgent('test-session'))
+    msgSeq = 0
+
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage({
+          type: 'messages',
+          sessionId: 'test-session',
+          seq: 1,
+          payload: {
+            kind: 'delta',
+            upsert: [{ id: 'usr-2', role: 'user', parts: [{ type: 'text', text: 'v2' }] }],
+            branchInfo: {
+              upsert: [
+                {
+                  parentMsgId: 'msg-0',
+                  sessionId: 'test-session',
+                  siblings: ['usr-1', 'usr-2'],
+                  activeId: 'usr-2',
+                  updatedAt: '2026-04-20T00:00:00Z',
+                },
+              ],
+            },
+          },
+        }),
+      )
+    })
+
+    expect(branchInfoStore.has('msg-0')).toBe(true)
+    const row = branchInfoStore.get('msg-0')!
+    expect(row.siblings).toEqual(['usr-1', 'usr-2'])
+    expect(row.activeId).toBe('usr-2')
+  })
+
+  test('delta payload branchInfo.upsert updates existing row', () => {
+    renderHook(() => useCodingAgent('test-session'))
+    msgSeq = 0
+
+    // Seed an existing row.
+    branchInfoStore.set('msg-0', {
+      parentMsgId: 'msg-0',
+      sessionId: 'test-session',
+      siblings: ['usr-1'],
+      activeId: 'usr-1',
+      updatedAt: '2026-04-19T00:00:00Z',
+    })
+
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage({
+          type: 'messages',
+          sessionId: 'test-session',
+          seq: 1,
+          payload: {
+            kind: 'delta',
+            upsert: [{ id: 'usr-3', role: 'user', parts: [{ type: 'text', text: 'v3' }] }],
+            branchInfo: {
+              upsert: [
+                {
+                  parentMsgId: 'msg-0',
+                  sessionId: 'test-session',
+                  siblings: ['usr-1', 'usr-3'],
+                  activeId: 'usr-3',
+                  updatedAt: '2026-04-20T00:00:00Z',
+                },
+              ],
+            },
+          },
+        }),
+      )
+    })
+
+    const row = branchInfoStore.get('msg-0')!
+    expect(row.siblings).toEqual(['usr-1', 'usr-3'])
+    expect(row.activeId).toBe('usr-3')
+  })
+
+  test('delta without branchInfo does not touch branch-info collection', () => {
+    renderHook(() => useCodingAgent('test-session'))
+    msgSeq = 0
+
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage(
+          deltaFrame([{ id: 'usr-1', role: 'user', parts: [{ type: 'text', text: 'hi' }] }]),
+        ),
+      )
+    })
+
+    expect(branchInfoStore.size).toBe(0)
+  })
 })

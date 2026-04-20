@@ -661,6 +661,33 @@ export class SessionDO extends Agent<Env, SessionState> {
   }
 
   /**
+   * Compute a single BranchInfoRow for the parent of `msg` if that parent now
+   * has >1 siblings. Returns `undefined` if no parent or no siblings. Used by
+   * sendMessage / forkWithHistory to piggyback branch-info onto the user-turn
+   * delta (P2 B2).
+   */
+  private computeBranchInfoForUserTurn(msg: SessionMessage): BranchInfoRow | undefined {
+    try {
+      const history = this.session.getHistory()
+      const idx = history.findIndex((m) => m.id === msg.id)
+      if (idx <= 0) return undefined
+      const parentId = history[idx - 1].id
+      const branches = this.session.getBranches(parentId)
+      const siblings = branches.filter((m) => m.role === 'user').map((m) => m.id)
+      if (siblings.length <= 1) return undefined
+      return {
+        parentMsgId: parentId,
+        sessionId: this.name,
+        siblings,
+        activeId: msg.id,
+        updatedAt: new Date().toISOString(),
+      }
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
    * Broadcast a MessagesFrame (B1) with monotonic seq. If `targetClientId` is
    * provided, sends only to that connection and does NOT increment `messageSeq`
    * — targeted sends echo current seq so non-recipients' lastSeq stream stays
@@ -1751,7 +1778,14 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     try {
       await this.session.appendMessage(userMsg)
       this.persistTurnState()
-      this.broadcastMessage(userMsg)
+      // P2 B2: piggyback affected parent's sibling list onto the same delta
+      // (instead of separately broadcasting a snapshot).
+      const branchInfoRow = this.computeBranchInfoForUserTurn(userMsg)
+      this.broadcastMessages({
+        kind: 'delta',
+        upsert: [userMsg as unknown as WireSessionMessage],
+        ...(branchInfoRow ? { branchInfo: { upsert: [branchInfoRow] } } : {}),
+      })
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to persist user message:`, err)
     }
@@ -1848,7 +1882,13 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     try {
       await this.session.appendMessage(userMsg)
       this.persistTurnState()
-      this.broadcastMessage(userMsg)
+      // P2 B2: piggyback affected parent's sibling list onto the same delta.
+      const branchInfoRow = this.computeBranchInfoForUserTurn(userMsg)
+      this.broadcastMessages({
+        kind: 'delta',
+        upsert: [userMsg as unknown as WireSessionMessage],
+        ...(branchInfoRow ? { branchInfo: { upsert: [branchInfoRow] } } : {}),
+      })
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] forkWithHistory: persist user msg failed:`, err)
     }

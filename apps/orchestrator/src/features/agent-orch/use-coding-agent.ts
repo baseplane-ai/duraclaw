@@ -207,7 +207,12 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         sessionId: string
         seq: number
         payload:
-          | { kind: 'delta'; upsert?: SessionMessage[]; remove?: string[] }
+          | {
+              kind: 'delta'
+              upsert?: SessionMessage[]
+              remove?: string[]
+              branchInfo?: { upsert?: BranchInfoRow[]; remove?: string[] }
+            }
           | {
               kind: 'snapshot'
               version: number
@@ -275,6 +280,46 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           })
         } catch {
           // swallow — next frame will reconcile
+        }
+        // P2 B2: deltas can piggyback branchInfo when a user-turn mutation
+        // changes a parent's sibling list. Apply upserts/removes into the
+        // per-session branchInfoCollection — same pattern as snapshot payloads.
+        const deltaBranchInfo = (
+          frame.payload as {
+            branchInfo?: { upsert?: BranchInfoRow[]; remove?: string[] }
+          }
+        ).branchInfo
+        if (deltaBranchInfo) {
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const biColl = createBranchInfoCollection(agentName) as any
+            if (deltaBranchInfo.upsert && deltaBranchInfo.upsert.length > 0) {
+              for (const row of deltaBranchInfo.upsert) {
+                try {
+                  if (biColl.has?.(row.parentMsgId)) {
+                    biColl.update(row.parentMsgId, (draft: BranchInfoRow) => {
+                      Object.assign(draft, row)
+                    })
+                  } else {
+                    biColl.insert(row)
+                  }
+                } catch {
+                  // ignore — next snapshot retries
+                }
+              }
+            }
+            if (deltaBranchInfo.remove && deltaBranchInfo.remove.length > 0) {
+              for (const id of deltaBranchInfo.remove) {
+                try {
+                  biColl.delete?.(id)
+                } catch {
+                  // ignore — next snapshot retries
+                }
+              }
+            }
+          } catch {
+            // collection may not be ready; next snapshot retries
+          }
         }
         map.set(agentName, frame.seq)
         return
@@ -347,7 +392,12 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
               sessionId: string
               seq: number
               payload:
-                | { kind: 'delta'; upsert?: SessionMessage[]; remove?: string[] }
+                | {
+                    kind: 'delta'
+                    upsert?: SessionMessage[]
+                    remove?: string[]
+                    branchInfo?: { upsert?: BranchInfoRow[]; remove?: string[] }
+                  }
                 | {
                     kind: 'snapshot'
                     version: number

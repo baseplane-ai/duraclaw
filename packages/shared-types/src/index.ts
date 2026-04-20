@@ -666,6 +666,20 @@ export interface DeltaPayload {
    * feature (e.g. "delete attachment") adds a producer.
    */
   remove?: string[]
+  /**
+   * P2 B2: DO piggybacks affected parents' sibling lists onto the same delta
+   * frame that carries the user-turn upsert (after sendMessage / forkWithHistory
+   * mutations that add a sibling). Snapshot payloads already carry
+   * `BranchInfoRow[]` — this brings deltas to parity.
+   *
+   * `remove` is reserved for future producers (message deletion reducing
+   * siblings). No current DO call site populates it — the field exists so the
+   * client handler is correct-by-construction.
+   */
+  branchInfo?: {
+    upsert?: BranchInfoRow[]
+    remove?: string[]
+  }
 }
 
 export interface BranchInfoRow {
