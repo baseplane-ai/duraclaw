@@ -43,6 +43,17 @@ export interface CachedMessage {
    * as optimistic rows (id=`usr-client-<uuid>`) reconcile with server echoes.
    */
   canonical_turn_id?: string
+  /**
+   * Wire seq from the `MessagesFrame` that applied this row (spec-31 P4a,
+   * B8). Stamped at apply time in `use-coding-agent.ts` — delta rows inherit
+   * `frame.seq`; snapshot rows inherit `frame.payload.version`. Absent on
+   * optimistic rows (pre-echo) and on old cached rows from schemaVersion <= 4
+   * (those load as `undefined` after OPFS migration). Drives the primary
+   * sort key in `use-messages-collection.ts` — rows with `seq === undefined`
+   * sort last so optimistic rows briefly appear below not-yet-echoed rows
+   * and snap into place on echo.
+   */
+  seq?: number
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -106,7 +117,7 @@ export function createMessagesCollection(agentName: string): MessagesCollection 
     const opts = persistedCollectionOptions({
       ...queryOpts,
       persistence,
-      schemaVersion: 4,
+      schemaVersion: 5,
     })
     // TanStackDB beta: persistedCollectionOptions adds a schema type that
     // conflicts with createCollection overloads. Runtime behavior is correct.

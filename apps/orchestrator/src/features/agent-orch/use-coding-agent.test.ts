@@ -1381,3 +1381,75 @@ describe('branch tracking (P4)', () => {
     expect(branchInfoStore.size).toBe(0)
   })
 })
+
+// ── spec-31 P4a B8: wire seq stamping on message rows ──────────────────
+
+describe('seq stamping (P4a B8)', () => {
+  beforeEach(() => {
+    cachedMessagesStore.clear()
+    liveStateStore.clear()
+    collectionSubs.clear()
+    liveStateSubs.clear()
+    capturedUseAgentConfig = null
+    msgSeq = 0
+    vi.clearAllMocks()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  test('delta-stamps-seq: applied delta rows carry frame.seq', () => {
+    renderHook(() => useCodingAgent('test-session'))
+
+    // 6 no-op deltas to push msgSeq up; then seq=7 delta.
+    for (let i = 0; i < 6; i++) {
+      act(() => {
+        capturedUseAgentConfig?.onMessage?.(
+          makeWsMessage(
+            deltaFrame([
+              { id: `pad-${i}`, role: 'assistant', parts: [{ type: 'text', text: 'x' }] },
+            ]),
+          ),
+        )
+      })
+    }
+
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage(
+          deltaFrame([
+            { id: 'stamped-7', role: 'assistant', parts: [{ type: 'text', text: 'hi' }] },
+          ]),
+        ),
+      )
+    })
+
+    const row = cachedMessagesStore.get('stamped-7') as CachedMessage & { seq?: number }
+    expect(row).toBeDefined()
+    expect(row.seq).toBe(7)
+  })
+
+  test('snapshot-stamps-version: snapshot rows all carry payload.version', () => {
+    renderHook(() => useCodingAgent('test-session'))
+
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage(
+          snapshotFrame(
+            [
+              { id: 's-1', role: 'user', parts: [{ type: 'text', text: 'u' }] },
+              { id: 's-2', role: 'assistant', parts: [{ type: 'text', text: 'a' }] },
+            ],
+            { version: 3 },
+          ),
+        ),
+      )
+    })
+
+    const r1 = cachedMessagesStore.get('s-1') as CachedMessage & { seq?: number }
+    const r2 = cachedMessagesStore.get('s-2') as CachedMessage & { seq?: number }
+    expect(r1.seq).toBe(3)
+    expect(r2.seq).toBe(3)
+  })
+})

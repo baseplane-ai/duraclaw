@@ -95,14 +95,25 @@ function toSessionMessage(row: CachedMessage): SessionMessage {
   } as SessionMessage
 }
 
-/** Stamp a SessionMessage with its sessionId for the collection row. */
-function toRow(msg: SessionMessage, sessionId: string): CachedMessage & Record<string, unknown> {
+/**
+ * Stamp a SessionMessage with its sessionId (and optionally wire seq) for
+ * the collection row. Spec-31 P4a B8: delta handlers pass `frame.seq`;
+ * snapshot handlers pass `frame.payload.version`. Optimistic and cold-start
+ * rows omit seq — those rows sort last within their group by tuple
+ * `[seq ?? Infinity, turnOrdinal ?? Infinity, createdAt]`.
+ */
+function toRow(
+  msg: SessionMessage,
+  sessionId: string,
+  seq?: number,
+): CachedMessage & Record<string, unknown> {
   return {
     id: msg.id,
     sessionId,
     role: msg.role,
     parts: msg.parts,
     createdAt: msg.createdAt,
+    ...(seq !== undefined ? { seq } : {}),
   } as CachedMessage & Record<string, unknown>
 }
 
@@ -147,10 +158,10 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
    * from. See planning/research/2026-04-20-streamdb-pattern-adoption.md.
    */
   const bulkUpsert = useCallback(
-    (msgs: SessionMessage[]) => {
+    (msgs: SessionMessage[], seq?: number) => {
       try {
         messagesCollection.utils.writeBatch(() => {
-          for (const m of msgs) messagesCollection.utils.writeUpsert(toRow(m, agentName))
+          for (const m of msgs) messagesCollection.utils.writeUpsert(toRow(m, agentName, seq))
         })
       } catch {
         // Rare mutation-API contention; next event will retry.
@@ -159,9 +170,15 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     [agentName, messagesCollection],
   )
 
-  /** Snapshot reconcile: delete rows for this session not in `messages`, then upsert. */
+  /**
+   * Snapshot reconcile: delete rows for this session not in `messages`, then
+   * upsert. Spec-31 P4a B8: every row gets stamped with `seq` (the
+   * snapshot's `payload.version`). Rows within the snapshot tie on seq and
+   * fall through to the `turnOrdinal → createdAt` secondary — correct,
+   * since the snapshot's history was already ordered at emit time.
+   */
   const applySnapshot = useCallback(
-    (messages: SessionMessage[]) => {
+    (messages: SessionMessage[], seq?: number) => {
       const newIds = new Set(messages.map((m) => m.id))
       const staleIds: string[] = []
       try {
@@ -177,7 +194,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           messagesCollection.utils.writeDelete(id)
         } catch {}
       }
-      bulkUpsert(messages)
+      bulkUpsert(messages, seq)
     },
     [bulkUpsert, messagesCollection, agentName],
   )
@@ -224,7 +241,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       const lastSeq = map.get(agentName) ?? 0
 
       if (frame.payload.kind === 'snapshot') {
-        applySnapshot(frame.payload.messages)
+        applySnapshot(frame.payload.messages, frame.payload.version)
         // Reset lastSeq to the snapshot's version unconditionally. The old
         // `Math.max(lastSeq, version)` prevented the client from accepting a
         // lower version after a DO rehydrate (messageSeq resets to 0 in-memory
@@ -270,7 +287,9 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         try {
           messagesCollection.utils.writeBatch(() => {
             for (const m of upsertList) {
-              messagesCollection.utils.writeUpsert(toRow(m, agentName))
+              // Spec-31 P4a B8: stamp delta rows with `frame.seq` so the
+              // messages-collection sort orders by wire arrival order.
+              messagesCollection.utils.writeUpsert(toRow(m, agentName, frame.seq))
             }
             if (removeList.length > 0) {
               messagesCollection.utils.writeDelete(removeList)

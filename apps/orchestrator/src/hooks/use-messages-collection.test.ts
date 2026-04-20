@@ -202,6 +202,76 @@ describe('useMessagesCollection', () => {
     ])
   })
 
+  // ── spec-31 P4a B8: seq-based primary sort ──────────────────────────
+
+  it('sort-by-seq-primary: two rows with different seq, lower-seq sorts first', () => {
+    mockLiveQueryData = [
+      makeMessage({
+        id: 'later-seq',
+        sessionId: 'session-abc',
+        seq: 10,
+        createdAt: '2026-01-01T00:00:00Z',
+      }),
+      makeMessage({
+        id: 'earlier-seq',
+        sessionId: 'session-abc',
+        seq: 5,
+        createdAt: '2026-01-05T00:00:00Z',
+      }),
+    ]
+
+    const { result } = renderHook(() => useMessagesCollection('session-abc'))
+
+    expect(result.current.messages.map((m) => m.id)).toEqual(['earlier-seq', 'later-seq'])
+  })
+
+  it('sort-by-turn-ordinal-fallback: rows with same seq fall through to turnOrdinal', () => {
+    mockLiveQueryData = [
+      makeMessage({
+        id: 'usr-2',
+        sessionId: 'session-abc',
+        seq: 7,
+        canonical_turn_id: 'usr-2',
+        createdAt: '2026-01-01T00:00:00Z',
+      }),
+      makeMessage({
+        id: 'usr-1',
+        sessionId: 'session-abc',
+        seq: 7,
+        canonical_turn_id: 'usr-1',
+        createdAt: '2026-01-05T00:00:00Z',
+      }),
+    ]
+
+    const { result } = renderHook(() => useMessagesCollection('session-abc'))
+
+    expect(result.current.messages.map((m) => m.id)).toEqual(['usr-1', 'usr-2'])
+  })
+
+  it('optimistic-no-seq-sorts-last: row with seq undefined sorts after a row with seq=5', () => {
+    mockLiveQueryData = [
+      makeMessage({
+        id: 'optimistic',
+        sessionId: 'session-abc',
+        canonical_turn_id: 'usr-1',
+        createdAt: '2026-01-01T00:00:00Z',
+        // No `seq`
+      }),
+      makeMessage({
+        id: 'echoed',
+        sessionId: 'session-abc',
+        seq: 5,
+        canonical_turn_id: 'usr-1',
+        createdAt: '2026-01-05T00:00:00Z',
+      }),
+    ]
+
+    const { result } = renderHook(() => useMessagesCollection('session-abc'))
+
+    // Stamped row first, optimistic-no-seq last (seq=undefined → Infinity).
+    expect(result.current.messages.map((m) => m.id)).toEqual(['echoed', 'optimistic'])
+  })
+
   it('optimistic user rows (usr-client-<uuid>) without canonical_turn_id interleave by createdAt', () => {
     mockLiveQueryData = [
       makeMessage({
