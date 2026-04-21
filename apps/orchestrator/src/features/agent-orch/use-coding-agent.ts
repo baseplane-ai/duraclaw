@@ -572,42 +572,58 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   )
 
   /**
-   * GH#14 P3: optimistic user-row inserts use `createTransaction` with
-   * server-accepts-client-ID reconciliation. The DO accepts the
-   * `client_message_id` as the primary id, so echoes reconcile via
-   * TanStack DB deep-equality — a single insert followed by the server
-   * echo updating the same row in place, no delete+reinsert churn.
+   * GH#14 P3 + 2026-04-20 send-flash fix: optimistic user-row inserts bypass
+   * TanStack DB's optimistic overlay entirely and write directly into the
+   * synced layer via `utils.writeUpsert`. The server echo arrives as a
+   * regular delta frame and `writeUpsert`s the same id in place — no
+   * transaction state machine to fight.
+   *
+   * Why bypass the optimistic overlay: the overlay's "redundant sync" fast
+   * path requires `deepEquals(optimisticRow, syncedRow)` to pass, and it
+   * doesn't — the server echo has `seq` (stamped from `frame.seq`), a
+   * server-regenerated `createdAt`, and `canonical_turn_id`. When the
+   * RPC reply's microtask runs before the broadcast-delta WS event is
+   * dispatched, `recomputeOptimisticState` finds no pending synced tx for
+   * the client id, evicts the optimistic row as stale, and the row
+   * briefly disappears until the delta lands. Writing direct to syncedData
+   * sidesteps the race entirely.
+   *
+   * Rollback on RPC error: `writeDelete` the optimistic id. If the tab
+   * reconnects mid-flight and the server never saw the send, the next
+   * snapshot reconciles away the ghost row either way.
    */
   const sendMessage = useCallback(
     async (content: string | ContentBlock[], opts?: { submitId?: string }) => {
       const clientMessageId = newClientMessageId()
-      const optimisticRow: CachedMessage & Record<string, unknown> = {
+      const optimisticRow: CachedMessage = {
         id: clientMessageId,
         sessionId: agentName,
         role: 'user',
         parts: contentToParts(content),
         createdAt: new Date(),
       }
-      const tx = createTransaction<CachedMessage & Record<string, unknown>>({
-        mutationFn: async () => {
-          const result = (await connection.call('sendMessage', [
-            content,
-            { ...opts, client_message_id: clientMessageId },
-          ])) as { ok: boolean; error?: string; recoverable?: string }
-          if (!result.ok) {
-            throw new Error(result.error ?? 'sendMessage failed')
-          }
-          return result
-        },
-      })
-      tx.mutate(() => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(messagesCollection as any).insert(optimisticRow)
-      })
       try {
-        await tx.isPersisted.promise
+        messagesCollection.utils.writeUpsert(optimisticRow)
+      } catch {
+        // writeUpsert is best-effort; if it throws, fall through to the RPC.
+      }
+      try {
+        const result = (await connection.call('sendMessage', [
+          content,
+          { ...opts, client_message_id: clientMessageId },
+        ])) as { ok: boolean; error?: string; recoverable?: string }
+        if (!result.ok) {
+          throw new Error(result.error ?? 'sendMessage failed')
+        }
         return { ok: true }
       } catch (err) {
+        // Roll back the optimistic row so a failed send doesn't linger.
+        try {
+          messagesCollection.utils.writeDelete(clientMessageId)
+        } catch {
+          // If the echo already landed and upgraded the row, writeDelete
+          // may no-op; the next snapshot reconciles.
+        }
         return { ok: false, error: err instanceof Error ? err.message : String(err) }
       }
     },

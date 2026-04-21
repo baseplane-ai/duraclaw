@@ -1697,13 +1697,15 @@ export function createApiApp() {
       return c.json({ error: 'Session not found' }, response.status === 403 ? 403 : 404)
     }
 
-    // SessionDO /messages already returns `{messages: SessionMessage[]}`; pass
-    // through verbatim. Previously we re-wrapped the whole body as `{messages}`,
-    // producing `{messages: {messages: [...]}}` which broke the client
-    // queryFn's `json.messages.map(...)` → empty collection → existing sessions
-    // rendered blank on cold start / OPFS rehydrate (post GH#14).
-    const body = (await response.json()) as { messages: unknown }
-    return c.json({ messages: body.messages })
+    // SessionDO /messages returns `{messages: SessionMessage[], version: number}`.
+    // Pass both through — `version` is the DO's current `messageSeq`, which the
+    // client queryFn stamps onto each REST-loaded row as `seq` so the rows
+    // sort alongside WS-delivered rows (instead of falling into the
+    // `seq=Infinity` bucket that causes the initial-load ordering flash).
+    // Verbatim passthrough: we used to re-wrap the body as `{messages}`,
+    // producing `{messages: {messages: [...]}}` which broke `json.messages.map`.
+    const body = (await response.json()) as { messages: unknown; version?: unknown }
+    return c.json({ messages: body.messages, version: body.version })
   })
 
   // P3 B4: REST endpoint for context usage. Scaffolding only — consumer

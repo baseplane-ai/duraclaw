@@ -298,9 +298,22 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     // merged in from the runner transcript.
     if (request.method === 'GET' && url.pathname === '/messages') {
       try {
-        return new Response(JSON.stringify({ messages: this.session.getHistory() }), {
-          headers: { 'Content-Type': 'application/json' },
-        })
+        // Include the current `messageSeq` alongside history so the client
+        // queryFn can stamp each REST-loaded row with a `seq` equal to the
+        // latest version. Without this, REST rows land with `seq=undefined`
+        // and the query-db-collection diff reconcile clobbers any seq values
+        // the on-connect WS snapshot already wrote (causing the initial-load
+        // "user messages grouped together" flash — rows fall back to the
+        // `[Infinity, turnOrdinal, createdAt]` sort branch).
+        return new Response(
+          JSON.stringify({
+            messages: this.session.getHistory(),
+            version: this.messageSeq,
+          }),
+          {
+            headers: { 'Content-Type': 'application/json' },
+          },
+        )
       } catch (err) {
         return new Response(
           JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),

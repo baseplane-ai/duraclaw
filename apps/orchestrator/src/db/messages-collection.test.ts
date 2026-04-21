@@ -215,6 +215,70 @@ describe('createMessagesCollection retry behavior', () => {
     expect(rows[0].id).toBe('m1')
     expect(rows[0].sessionId).toBe('fetch-agent')
   })
+
+  it('queryFn stamps each row with seq=version from the REST body (regression: initial-load flash)', async () => {
+    // Fix for "user messages grouped together on initial load":
+    // query-db-collection's diff reconcile runs `write('update', newItem)`
+    // for every key matching an existing row. If REST returns rows without
+    // `seq`, any seq-stamped rows the WS snapshot had already written get
+    // clobbered. Passing `version` through and stamping each row keeps the
+    // sort contract stable.
+    vi.resetModules()
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        version: 42,
+        messages: [
+          { id: 'usr-1', role: 'user', parts: [{ type: 'text', text: 'hi' }] },
+          { id: 'msg-2', role: 'assistant', parts: [{ type: 'text', text: 'ok' }] },
+        ],
+      }),
+    })
+    // @ts-expect-error — jsdom doesn't ship fetch; assign a minimal stub.
+    globalThis.fetch = mockFetch
+
+    const mod = await import('./messages-collection')
+    mod.createMessagesCollection('seq-stamp-agent')
+
+    const call = mockQueryCollectionOptions.mock.calls.find(
+      (c) => (c[0] as { id: string }).id === 'messages:seq-stamp-agent',
+    )
+    const config = call![0] as {
+      queryFn: (ctx: { signal: AbortSignal }) => Promise<unknown[]>
+    }
+    const rows = (await config.queryFn({
+      signal: new AbortController().signal,
+    })) as Array<{ id: string; seq?: number }>
+    expect(rows).toHaveLength(2)
+    expect(rows[0].seq).toBe(42)
+    expect(rows[1].seq).toBe(42)
+  })
+
+  it('queryFn omits seq when the REST body has no version (backcompat)', async () => {
+    vi.resetModules()
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        messages: [{ id: 'm1', role: 'user', parts: [{ type: 'text', text: 'hi' }] }],
+      }),
+    })
+    // @ts-expect-error — jsdom doesn't ship fetch; assign a minimal stub.
+    globalThis.fetch = mockFetch
+
+    const mod = await import('./messages-collection')
+    mod.createMessagesCollection('no-version-agent')
+
+    const call = mockQueryCollectionOptions.mock.calls.find(
+      (c) => (c[0] as { id: string }).id === 'messages:no-version-agent',
+    )
+    const config = call![0] as {
+      queryFn: (ctx: { signal: AbortSignal }) => Promise<unknown[]>
+    }
+    const rows = (await config.queryFn({
+      signal: new AbortController().signal,
+    })) as Array<{ id: string; seq?: number }>
+    expect(rows[0].seq).toBeUndefined()
+  })
 })
 
 describe('evictOldMessages', () => {

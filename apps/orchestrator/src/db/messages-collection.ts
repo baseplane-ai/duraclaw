@@ -65,7 +65,7 @@ const persistence = await dbReady
 const collectionsByAgent = new Map<string, MessagesCollection>()
 
 /** Map a server SessionMessage → cached row stamped with the session key. */
-function toCachedMessage(msg: SessionMessage, sessionId: string): CachedMessage {
+function toCachedMessage(msg: SessionMessage, sessionId: string, seq?: number): CachedMessage {
   const canonical = (msg as { canonical_turn_id?: string }).canonical_turn_id
   return {
     id: msg.id,
@@ -74,6 +74,7 @@ function toCachedMessage(msg: SessionMessage, sessionId: string): CachedMessage 
     parts: msg.parts,
     createdAt: msg.createdAt,
     ...(canonical ? { canonical_turn_id: canonical } : {}),
+    ...(seq !== undefined ? { seq } : {}),
   }
 }
 
@@ -100,8 +101,13 @@ export function createMessagesCollection(agentName: string): MessagesCollection 
         // Surface to query so retry/retryDelay kicks in; collection stays empty.
         throw new Error(`getMessages failed: ${resp.status}`)
       }
-      const json = (await resp.json()) as { messages: SessionMessage[] }
-      return (json.messages ?? []).map((m) => toCachedMessage(m, agentName))
+      // `version` is the DO's current `messageSeq` at fetch time. Stamp every
+      // REST-loaded row with it so query-db-collection's diff reconcile
+      // doesn't clobber the `seq` values that the on-connect WS snapshot has
+      // already written (resolved the initial-load "user messages grouped
+      // together" flash — see messages-collection `seq` jsdoc).
+      const json = (await resp.json()) as { messages: SessionMessage[]; version?: number }
+      return (json.messages ?? []).map((m) => toCachedMessage(m, agentName, json.version))
     },
     queryClient,
     getKey: (item: CachedMessage) => item.id,
