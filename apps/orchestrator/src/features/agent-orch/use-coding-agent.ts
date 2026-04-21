@@ -36,6 +36,7 @@ import type {
   SessionMessage,
   SpawnConfig,
 } from '~/lib/types'
+import { attachWsDebug, wsHardFailEnabled } from '~/lib/ws-debug'
 import { useAppLifecycle } from './use-app-lifecycle'
 
 export type { ContentBlock, ContextUsage, GateResponse, SpawnConfig }
@@ -233,6 +234,10 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     agent: 'session-agent',
     name: agentName,
     ...(wsBaseUrl() ? { host: wsBaseUrl() } : {}),
+    // Debug: `localStorage['duraclaw.debug.wsHardFail']='1'` + reload freezes
+    // the socket on its first close instead of looping through partysocket's
+    // infinite auto-reconnect (see ~/lib/ws-debug.ts).
+    ...(wsHardFailEnabled() ? { maxRetries: 0 } : {}),
     // Capacitor WS can't send cookies cross-origin; pass bearer token as
     // query param so the Worker can inject it as an Authorization header.
     ...(isNative()
@@ -333,12 +338,14 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     connection.addEventListener('open', sync)
     connection.addEventListener('close', sync)
     connection.addEventListener('error', sync)
+    const detachDebug = attachWsDebug(`session:${agentName}`, connection)
     return () => {
       connection.removeEventListener('open', sync)
       connection.removeEventListener('close', sync)
       connection.removeEventListener('error', sync)
+      detachDebug()
     }
-  }, [connection])
+  }, [connection, agentName])
 
   // Spec #38 P1.1: fire `dispatchSessionReconnect(agentName)` on the
   // transition !OPEN → OPEN when we've already seen at least one prior

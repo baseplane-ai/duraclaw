@@ -29,6 +29,7 @@ import PartySocket from 'partysocket'
 import { useEffect, useState } from 'react'
 import { logDelta } from '~/lib/delta-log'
 import { wsBaseUrl } from '~/lib/platform'
+import { attachWsDebug, wsHardFailEnabled } from '~/lib/ws-debug'
 
 type FrameHandler = (frame: SyncedCollectionFrame<unknown>) => void
 type ReconnectHandler = () => void
@@ -79,7 +80,13 @@ function openSocket(userId: string) {
     host,
     party: 'user-settings',
     room: userId,
+    // Debug: `localStorage['duraclaw.debug.wsHardFail']='1'` + reload freezes
+    // the socket on its first close instead of looping through partysocket's
+    // infinite auto-reconnect (see ~/lib/ws-debug.ts).
+    ...(wsHardFailEnabled() ? { maxRetries: 0 } : {}),
   })
+
+  attachWsDebug('user-stream', ws)
 
   ws.addEventListener('open', () => {
     // Treat as reconnect if either (a) this same socket has opened before
