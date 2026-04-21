@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { chunkOps } from '~/lib/chunk-frame'
 import { getSessionStatus } from '~/lib/vps-client'
 import {
   buildGatewayCallbackUrl,
@@ -6,6 +7,7 @@ import {
   claimSubmitId,
   constantTimeEquals,
   DEFAULT_STALE_THRESHOLD_MS,
+  deriveSnapshotOps,
   findPendingGatePart,
   getGatewayConnectionId,
   loadTurnState,
@@ -230,9 +232,9 @@ describe('SESSION_DO_MIGRATIONS', () => {
   })
 
   describe('migration chain integrity', () => {
-    it('has sequential version numbers from 1 to 7', () => {
+    it('has sequential version numbers from 1 to 9', () => {
       const versions = SESSION_DO_MIGRATIONS.map((m) => m.version)
-      expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7])
+      expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
     })
 
     it('all migrations have descriptions', () => {
@@ -1955,5 +1957,1042 @@ describe('session_meta persists across rehydrate (P5 B10)', () => {
     const rehydrated = hydrateFromRow(persisted, DEFAULTS)
     expect(rehydrated.status).toBe('running')
     expect(rehydrated.gate).toBeNull() // fell back to default
+  })
+})
+
+// ── GH#38 P1.2: SyncedCollectionFrame emit + cursor REST + POST ingest ──
+//
+// SessionDO can't be instantiated in vitest (TC39 decorators). These tests
+// mirror the broadcastMessages / fetch-handler / sendMessage-duplicate logic
+// against in-memory state, in the same style as earlier sections of this
+// file (see `session_meta persists across rehydrate`).
+
+import type { SyncedCollectionOp } from '@duraclaw/shared-types'
+
+describe('broadcastMessages → SyncedCollectionFrame (GH#38 P1.2)', () => {
+  type WireRow = { id: string; role: string; parts: unknown[]; createdAt?: unknown }
+
+  /**
+   * Mirror of the production `broadcastMessages` method (at
+   * session-do.ts `private broadcastMessages(...)`). Pulled out so we can
+   * test the frame shape without instantiating the DO.
+   */
+  function broadcastMessages(
+    ctx: {
+      sessionId: string
+      messageSeq: number
+      broadcast: (data: string) => void
+      target: (clientId: string, data: string) => void
+    },
+    rowsOrOps: WireRow[] | { ops: SyncedCollectionOp<WireRow>[] },
+    opts: { targetClientId?: string } = {},
+  ): void {
+    const ops: SyncedCollectionOp<WireRow>[] = Array.isArray(rowsOrOps)
+      ? rowsOrOps.map((r) => ({ type: 'insert' as const, value: r }))
+      : rowsOrOps.ops
+    if (ops.length === 0) return
+
+    if (!opts.targetClientId) {
+      ctx.messageSeq += 1
+    }
+    const frame = {
+      type: 'synced-collection-delta' as const,
+      collection: `messages:${ctx.sessionId}`,
+      ops,
+      messageSeq: ctx.messageSeq,
+    }
+    const data = JSON.stringify(frame)
+    if (opts.targetClientId) {
+      ctx.target(opts.targetClientId, data)
+    } else {
+      ctx.broadcast(data)
+    }
+  }
+
+  function createHarness(sessionId = 'sess-abc') {
+    const broadcasts: string[] = []
+    const targeted: Array<{ clientId: string; data: string }> = []
+    const ctx = {
+      sessionId,
+      messageSeq: 0,
+      broadcast: (data: string) => broadcasts.push(data),
+      target: (clientId: string, data: string) => targeted.push({ clientId, data }),
+    }
+    return { ctx, broadcasts, targeted }
+  }
+
+  it('emits a SyncedCollectionFrame with messageSeq envelope for row array', () => {
+    const { ctx, broadcasts } = createHarness('sess-abc')
+    const row: WireRow = {
+      id: 'usr-1',
+      role: 'user',
+      parts: [{ type: 'text', text: 'hi' }],
+      createdAt: '2026-04-21T00:00:00.000Z',
+    }
+    broadcastMessages(ctx, [row])
+    expect(broadcasts).toHaveLength(1)
+    const parsed = JSON.parse(broadcasts[0])
+    expect(parsed).toEqual({
+      type: 'synced-collection-delta',
+      collection: 'messages:sess-abc',
+      ops: [{ type: 'insert', value: row }],
+      messageSeq: 1,
+    })
+  })
+
+  it('accepts a pre-built ops array with delete + insert in order', () => {
+    const { ctx, broadcasts } = createHarness('sess-xyz')
+    const row: WireRow = { id: 'usr-2', role: 'user', parts: [] }
+    broadcastMessages(ctx, {
+      ops: [
+        { type: 'delete', key: 'stale-1' },
+        { type: 'insert', value: row },
+      ],
+    })
+    const parsed = JSON.parse(broadcasts[0])
+    expect(parsed.collection).toBe('messages:sess-xyz')
+    expect(parsed.ops).toEqual([
+      { type: 'delete', key: 'stale-1' },
+      { type: 'insert', value: row },
+    ])
+    expect(parsed.messageSeq).toBe(1)
+  })
+
+  it('early-returns on empty ops without incrementing messageSeq or emitting', () => {
+    const { ctx, broadcasts } = createHarness()
+    broadcastMessages(ctx, [])
+    broadcastMessages(ctx, { ops: [] })
+    expect(broadcasts).toHaveLength(0)
+    expect(ctx.messageSeq).toBe(0)
+  })
+
+  it('targeted send does NOT advance messageSeq (echoes current value)', () => {
+    const { ctx, targeted, broadcasts } = createHarness('sess-t')
+    ctx.messageSeq = 5
+    const row: WireRow = { id: 'usr-5', role: 'user', parts: [] }
+    broadcastMessages(ctx, [row], { targetClientId: 'conn-1' })
+    expect(broadcasts).toHaveLength(0)
+    expect(targeted).toHaveLength(1)
+    expect(targeted[0].clientId).toBe('conn-1')
+    const parsed = JSON.parse(targeted[0].data)
+    expect(parsed.messageSeq).toBe(5) // unchanged
+    expect(ctx.messageSeq).toBe(5)
+  })
+
+  it('non-targeted send advances messageSeq monotonically', () => {
+    const { ctx, broadcasts } = createHarness()
+    const row: WireRow = { id: 'm', role: 'user', parts: [] }
+    broadcastMessages(ctx, [row])
+    broadcastMessages(ctx, [{ ...row, id: 'm2' }])
+    broadcastMessages(ctx, [{ ...row, id: 'm3' }])
+    expect(broadcasts).toHaveLength(3)
+    const seqs = broadcasts.map((d) => JSON.parse(d).messageSeq)
+    expect(seqs).toEqual([1, 2, 3])
+  })
+
+  it('row array → each entry becomes an insert op', () => {
+    const { ctx, broadcasts } = createHarness()
+    const rows: WireRow[] = [
+      { id: 'a', role: 'user', parts: [] },
+      { id: 'b', role: 'assistant', parts: [] },
+      { id: 'c', role: 'user', parts: [] },
+    ]
+    broadcastMessages(ctx, rows)
+    const parsed = JSON.parse(broadcasts[0])
+    expect(parsed.ops).toEqual([
+      { type: 'insert', value: rows[0] },
+      { type: 'insert', value: rows[1] },
+      { type: 'insert', value: rows[2] },
+    ])
+  })
+})
+
+describe('/messages cursor REST handler (GH#38 P1.2)', () => {
+  type Row = {
+    id: string
+    session_id: string
+    content: string
+    created_at: string
+  }
+
+  /**
+   * Mirror of the production `/messages` GET handler body. Accepts a
+   * query-string-parsed cursor + an in-memory rows table + a
+   * getHistory() stub, and returns the same Response-body shape.
+   */
+  async function runMessagesHandler(
+    url: URL,
+    sessionId: string,
+    deps: {
+      rows: Row[]
+      getHistory: () => unknown[]
+    },
+  ): Promise<{ status: number; body: any }> {
+    const sinceCreatedAt = url.searchParams.get('sinceCreatedAt')
+    const sinceId = url.searchParams.get('sinceId')
+    const hasCA = sinceCreatedAt !== null
+    const hasId = sinceId !== null
+    if (hasCA !== hasId) {
+      return {
+        status: 400,
+        body: { error: 'sinceCreatedAt and sinceId must be provided together' },
+      }
+    }
+    if (hasCA && hasId) {
+      if (Number.isNaN(new Date(sinceCreatedAt as string).getTime())) {
+        return { status: 400, body: { error: 'invalid sinceCreatedAt ISO 8601 string' } }
+      }
+      const filtered = deps.rows
+        .filter((r) => r.session_id === sessionId)
+        .filter((r) => {
+          if (r.created_at > (sinceCreatedAt as string)) return true
+          if (r.created_at === sinceCreatedAt && r.id > (sinceId as string)) return true
+          return false
+        })
+        .sort((a, b) => {
+          if (a.created_at !== b.created_at) return a.created_at < b.created_at ? -1 : 1
+          return a.id < b.id ? -1 : 1
+        })
+        .slice(0, 500)
+      const messages: unknown[] = []
+      for (const r of filtered) {
+        try {
+          messages.push(JSON.parse(r.content))
+        } catch {
+          /* skip */
+        }
+      }
+      return { status: 200, body: { messages } }
+    }
+    return { status: 200, body: { messages: deps.getHistory() } }
+  }
+
+  function makeRow(id: string, createdAt: string, sessionId = 'sess-x'): Row {
+    return {
+      id,
+      session_id: sessionId,
+      created_at: createdAt,
+      content: JSON.stringify({ id, role: 'user', parts: [{ type: 'text', text: id }] }),
+    }
+  }
+
+  it('returns full getHistory() when no cursor params (cold load)', async () => {
+    const history = [{ id: 'h1' }, { id: 'h2' }]
+    const res = await runMessagesHandler(new URL('https://x/messages'), 'sess-x', {
+      rows: [makeRow('a', '2026-04-01T00:00:00Z')],
+      getHistory: () => history,
+    })
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ messages: history })
+  })
+
+  it('returns rows strictly after (created_at, id), sorted ASC, capped 500', async () => {
+    const rows: Row[] = []
+    // 700 rows at unique timestamps so cursor-at-100 leaves 599 matches,
+    // which the 500-cap will trim to exactly the 500 rows at indexes 101..600.
+    for (let i = 0; i < 700; i++) {
+      const t = new Date(2026, 3, 1, 0, 0, i).toISOString()
+      rows.push(makeRow(`msg-${i.toString().padStart(4, '0')}`, t))
+    }
+    const cursorRow = rows[100]
+    const url = new URL('https://x/messages')
+    url.searchParams.set('sinceCreatedAt', cursorRow.created_at)
+    url.searchParams.set('sinceId', cursorRow.id)
+    const res = await runMessagesHandler(url, 'sess-x', {
+      rows,
+      getHistory: () => {
+        throw new Error('should not be called')
+      },
+    })
+    expect(res.status).toBe(200)
+    expect(res.body.messages).toHaveLength(500)
+    // Strictly after the cursor row (index 100) → first returned is index 101
+    expect(res.body.messages[0].id).toBe('msg-0101')
+    expect(res.body.messages[499].id).toBe('msg-0600')
+  })
+
+  it('tie-break on identical created_at uses id ASC', async () => {
+    const sameTs = '2026-04-21T00:00:00.000Z'
+    const rows: Row[] = [makeRow('aaa', sameTs), makeRow('bbb', sameTs), makeRow('ccc', sameTs)]
+    const url = new URL('https://x/messages')
+    url.searchParams.set('sinceCreatedAt', sameTs)
+    url.searchParams.set('sinceId', 'aaa')
+    const res = await runMessagesHandler(url, 'sess-x', {
+      rows,
+      getHistory: () => [],
+    })
+    expect(res.status).toBe(200)
+    expect(res.body.messages.map((m: any) => m.id)).toEqual(['bbb', 'ccc'])
+  })
+
+  it('returns 400 when only sinceCreatedAt supplied', async () => {
+    const url = new URL('https://x/messages')
+    url.searchParams.set('sinceCreatedAt', '2026-04-21T00:00:00.000Z')
+    const res = await runMessagesHandler(url, 'sess-x', { rows: [], getHistory: () => [] })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/together/)
+  })
+
+  it('returns 400 when only sinceId supplied', async () => {
+    const url = new URL('https://x/messages')
+    url.searchParams.set('sinceId', 'usr-1')
+    const res = await runMessagesHandler(url, 'sess-x', { rows: [], getHistory: () => [] })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/together/)
+  })
+
+  it('returns 400 when sinceCreatedAt is not a valid ISO 8601 string', async () => {
+    const url = new URL('https://x/messages')
+    url.searchParams.set('sinceCreatedAt', 'not-a-date')
+    url.searchParams.set('sinceId', 'usr-1')
+    const res = await runMessagesHandler(url, 'sess-x', { rows: [], getHistory: () => [] })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/invalid/)
+  })
+
+  it('response body has NO `version` field', async () => {
+    const res = await runMessagesHandler(new URL('https://x/messages'), 'sess-x', {
+      rows: [],
+      getHistory: () => [],
+    })
+    expect(Object.keys(res.body)).toEqual(['messages'])
+    expect('version' in res.body).toBe(false)
+  })
+})
+
+describe('POST /messages ingest (GH#38 P1.2)', () => {
+  /**
+   * Mirror of the DO's internal POST /messages handler + sendMessage's
+   * duplicate-id precheck. Accepts a body and a pretend "already persisted"
+   * id set; returns the same status/body shape.
+   */
+  function postMessagesHandler(
+    body: Record<string, unknown>,
+    state: { existingIds: Set<string>; persistedRows: Array<Record<string, unknown>> },
+    headers: Record<string, string> = {},
+  ): { status: number; body: any } {
+    // Mirror of the production body-size gate: reject Content-Length > 64 KiB
+    // with 413 before parsing. Protects the DO from a malicious multi-GB POST.
+    const cl = headers['content-length']
+    if (cl !== undefined) {
+      const bytes = Number(cl)
+      if (Number.isFinite(bytes) && bytes > 64 * 1024) {
+        return { status: 413, body: { error: 'payload too large' } }
+      }
+    }
+    if (typeof body.content !== 'string' || body.content.length === 0) {
+      return { status: 400, body: { error: 'content must be a non-empty string' } }
+    }
+    if (typeof body.clientId !== 'string' || !/^usr-client-[a-z0-9-]+$/.test(body.clientId)) {
+      return { status: 400, body: { error: 'clientId must match /^usr-client-[a-z0-9-]+$/' } }
+    }
+    if (
+      typeof body.createdAt !== 'string' ||
+      Number.isNaN(new Date(body.createdAt as string).getTime())
+    ) {
+      return { status: 400, body: { error: 'createdAt must be a valid ISO 8601 string' } }
+    }
+    // Duplicate precheck (mirrors sendMessage's check against assistant_messages)
+    if (state.existingIds.has(body.clientId as string)) {
+      return { status: 409, body: { id: body.clientId } }
+    }
+    // Persist with verbatim createdAt
+    state.persistedRows.push({
+      id: body.clientId,
+      role: 'user',
+      parts: [{ type: 'text', text: body.content }],
+      createdAt: body.createdAt,
+    })
+    state.existingIds.add(body.clientId as string)
+    return { status: 200, body: { id: body.clientId } }
+  }
+
+  function newState() {
+    return { existingIds: new Set<string>(), persistedRows: [] as Array<Record<string, unknown>> }
+  }
+
+  it('valid body creates row with verbatim id + createdAt, returns 200', () => {
+    const state = newState()
+    const res = postMessagesHandler(
+      {
+        content: 'hello',
+        clientId: 'usr-client-abc-123',
+        createdAt: '2026-04-21T00:00:00.000Z',
+      },
+      state,
+    )
+    expect(res).toEqual({ status: 200, body: { id: 'usr-client-abc-123' } })
+    expect(state.persistedRows).toHaveLength(1)
+    expect(state.persistedRows[0].id).toBe('usr-client-abc-123')
+    expect(state.persistedRows[0].createdAt).toBe('2026-04-21T00:00:00.000Z')
+  })
+
+  it('duplicate clientId returns 409 {id}; original row unchanged', () => {
+    const state = newState()
+    postMessagesHandler(
+      { content: 'first', clientId: 'usr-client-dup', createdAt: '2026-04-21T00:00:00.000Z' },
+      state,
+    )
+    const before = { ...state.persistedRows[0] }
+    const res = postMessagesHandler(
+      {
+        content: 'second-retry',
+        clientId: 'usr-client-dup',
+        createdAt: '2026-04-21T00:00:05.000Z', // different ts on retry
+      },
+      state,
+    )
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ id: 'usr-client-dup' })
+    expect(state.persistedRows).toHaveLength(1) // not re-inserted
+    expect(state.persistedRows[0]).toEqual(before) // createdAt unchanged
+  })
+
+  it('missing content → 400', () => {
+    const res = postMessagesHandler(
+      { clientId: 'usr-client-x', createdAt: '2026-04-21T00:00:00.000Z' },
+      newState(),
+    )
+    expect(res.status).toBe(400)
+  })
+
+  it('empty-string content → 400', () => {
+    const res = postMessagesHandler(
+      { content: '', clientId: 'usr-client-x', createdAt: '2026-04-21T00:00:00.000Z' },
+      newState(),
+    )
+    expect(res.status).toBe(400)
+  })
+
+  it('missing clientId → 400', () => {
+    const res = postMessagesHandler(
+      { content: 'hi', createdAt: '2026-04-21T00:00:00.000Z' },
+      newState(),
+    )
+    expect(res.status).toBe(400)
+  })
+
+  it('clientId not matching regex → 400', () => {
+    const res = postMessagesHandler(
+      {
+        content: 'hi',
+        clientId: 'wrong-prefix-abc',
+        createdAt: '2026-04-21T00:00:00.000Z',
+      },
+      newState(),
+    )
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/clientId/)
+  })
+
+  it('clientId with uppercase letters → 400 (regex rejects)', () => {
+    const res = postMessagesHandler(
+      {
+        content: 'hi',
+        clientId: 'usr-client-ABC',
+        createdAt: '2026-04-21T00:00:00.000Z',
+      },
+      newState(),
+    )
+    expect(res.status).toBe(400)
+  })
+
+  it('missing createdAt → 400', () => {
+    const res = postMessagesHandler({ content: 'hi', clientId: 'usr-client-x' }, newState())
+    expect(res.status).toBe(400)
+  })
+
+  it('invalid ISO createdAt → 400', () => {
+    const res = postMessagesHandler(
+      { content: 'hi', clientId: 'usr-client-x', createdAt: 'not-a-date' },
+      newState(),
+    )
+    expect(res.status).toBe(400)
+  })
+
+  it('rejects body > 64 KiB with 413', () => {
+    const res = postMessagesHandler(
+      {
+        content: 'hi',
+        clientId: 'usr-client-abc',
+        createdAt: '2026-04-21T00:00:00.000Z',
+      },
+      newState(),
+      { 'content-length': String(64 * 1024 + 1) },
+    )
+    expect(res.status).toBe(413)
+    expect(res.body).toEqual({ error: 'payload too large' })
+  })
+
+  it('accepts body exactly at 64 KiB ceiling', () => {
+    const res = postMessagesHandler(
+      {
+        content: 'hi',
+        clientId: 'usr-client-edge',
+        createdAt: '2026-04-21T00:00:00.000Z',
+      },
+      newState(),
+      { 'content-length': String(64 * 1024) },
+    )
+    expect(res.status).toBe(200)
+  })
+
+  it('valid clientId variants: uuid-style + short hash both accepted', () => {
+    const state = newState()
+    const a = postMessagesHandler(
+      {
+        content: 'x',
+        clientId: 'usr-client-550e8400-e29b-41d4-a716-446655440000',
+        createdAt: '2026-04-21T00:00:00.000Z',
+      },
+      state,
+    )
+    const b = postMessagesHandler(
+      {
+        content: 'y',
+        clientId: 'usr-client-abc',
+        createdAt: '2026-04-21T00:00:01.000Z',
+      },
+      state,
+    )
+    expect(a.status).toBe(200)
+    expect(b.status).toBe(200)
+  })
+})
+
+// ── GH#38 P1.4: snapshot emitters on SyncedCollectionFrame wire ──
+//
+// `deriveSnapshotOps` is the pure core reused by all five snapshot
+// emitters (rewind / resubmit / getBranchHistory / requestSnapshot /
+// onConnect replay). Each integration test simulates the per-RPC
+// oldLeaf/newLeaf derivation the DO performs via Session.getHistory()
+// and asserts op order, counts, and chunking.
+
+describe('deriveSnapshotOps (GH#38 P1.4 pure helper)', () => {
+  type Row = { id: string; role: string; parts: unknown[]; createdAt?: string }
+  const r = (id: string, role = 'user'): Row => ({ id, role, parts: [] })
+
+  it('empty old + non-empty new → only insert ops, no deletes', () => {
+    const newLeaf = [r('a'), r('b'), r('c')]
+    const { staleIds, ops } = deriveSnapshotOps({ oldLeaf: [], newLeaf })
+    expect(staleIds).toEqual([])
+    expect(ops).toEqual([
+      { type: 'insert', value: newLeaf[0] },
+      { type: 'insert', value: newLeaf[1] },
+      { type: 'insert', value: newLeaf[2] },
+    ])
+  })
+
+  it('non-empty old + empty new → only delete ops', () => {
+    const oldLeaf = [r('a'), r('b')]
+    const { staleIds, ops } = deriveSnapshotOps({ oldLeaf, newLeaf: [] })
+    expect(staleIds).toEqual(['a', 'b'])
+    expect(ops).toEqual([
+      { type: 'delete', key: 'a' },
+      { type: 'delete', key: 'b' },
+    ])
+  })
+
+  it('delete ops precede insert ops in the output array', () => {
+    const oldLeaf = [r('x'), r('y')]
+    const newLeaf = [r('y'), r('z')] // y shared, x stale, z fresh
+    const { staleIds, ops } = deriveSnapshotOps({ oldLeaf, newLeaf })
+    expect(staleIds).toEqual(['x'])
+    expect(ops[0]).toEqual({ type: 'delete', key: 'x' })
+    // All subsequent ops are inserts
+    for (let i = 1; i < ops.length; i++) expect(ops[i].type).toBe('insert')
+  })
+
+  it('newLeaf is authoritative-full (shared-prefix rows re-emitted as inserts)', () => {
+    const oldLeaf = [r('a'), r('b'), r('c')]
+    const newLeaf = [r('a'), r('b'), r('d')] // c stale, d fresh, a/b shared
+    const { staleIds, ops } = deriveSnapshotOps({ oldLeaf, newLeaf })
+    expect(staleIds).toEqual(['c'])
+    expect(ops).toHaveLength(1 + newLeaf.length) // 1 delete + 3 inserts
+    expect(ops.filter((o) => o.type === 'insert')).toHaveLength(3)
+  })
+
+  it('identical old + new → empty stale, inserts-only (upsert-dedup contract)', () => {
+    const leaf = [r('a'), r('b')]
+    const { staleIds, ops } = deriveSnapshotOps({ oldLeaf: leaf, newLeaf: leaf })
+    expect(staleIds).toEqual([])
+    expect(ops).toHaveLength(2)
+    expect(ops.every((o) => o.type === 'insert')).toBe(true)
+  })
+})
+
+describe('snapshot emitters → new-wire integration (GH#38 P1.4)', () => {
+  type Row = { id: string; role: string; parts: unknown[]; createdAt?: string }
+
+  /**
+   * Harness mirroring SessionDO's broadcastMessages() + chunkOps flow for
+   * the 5 snapshot emitters. Does NOT instantiate SessionDO (TC39
+   * decorators block it); instead reproduces the exact sequence:
+   *   1. derive (staleIds, ops) via `deriveSnapshotOps`
+   *   2. split via `chunkOps`
+   *   3. invoke a spy `broadcastMessages({ops: chunk}, opts?)`
+   */
+  function emitSnapshot(
+    oldLeaf: Row[],
+    newLeaf: Row[],
+    spy: (
+      arg: { ops: Array<{ type: 'insert'; value: Row } | { type: 'delete'; key: string }> },
+      opts?: { targetClientId?: string },
+    ) => void,
+    opts?: { targetClientId?: string; maxBytes?: number },
+  ): void {
+    const { ops } = deriveSnapshotOps<Row>({ oldLeaf, newLeaf })
+    for (const chunk of chunkOps(ops, opts?.maxBytes)) {
+      spy(
+        { ops: chunk },
+        opts?.targetClientId ? { targetClientId: opts.targetClientId } : undefined,
+      )
+    }
+  }
+
+  function makeSpy() {
+    const calls: Array<{
+      ops: Array<{ type: 'insert'; value: Row } | { type: 'delete'; key: string }>
+      opts?: { targetClientId?: string }
+    }> = []
+    const spy = (
+      arg: { ops: Array<{ type: 'insert'; value: Row } | { type: 'delete'; key: string }> },
+      opts?: { targetClientId?: string },
+    ) => {
+      calls.push({ ops: arg.ops, opts })
+    }
+    return { spy, calls }
+  }
+
+  const mkRow = (id: string, role: 'user' | 'assistant' = 'user'): Row => ({
+    id,
+    role,
+    parts: [],
+    createdAt: '2026-04-21T00:00:00.000Z',
+  })
+
+  it('rewind: stale = branch-only ids beyond the rewind point; fresh = trimmed history', () => {
+    // Default leaf: [usr-1, ast-1, usr-2, ast-2]. Rewind to usr-1.
+    const history = [
+      mkRow('usr-1'),
+      mkRow('ast-1', 'assistant'),
+      mkRow('usr-2'),
+      mkRow('ast-2', 'assistant'),
+    ]
+    const idx = history.findIndex((m) => m.id === 'usr-1')
+    const trimmed = idx >= 0 ? history.slice(0, idx + 1) : history
+    const { spy, calls } = makeSpy()
+    emitSnapshot(history, trimmed, spy)
+
+    expect(calls).toHaveLength(1)
+    const ops = calls[0].ops
+    // Deletes for ast-1, usr-2, ast-2; one insert for usr-1.
+    expect(ops.filter((o) => o.type === 'delete').map((o) => o.type === 'delete' && o.key)).toEqual(
+      ['ast-1', 'usr-2', 'ast-2'],
+    )
+    expect(ops.filter((o) => o.type === 'insert')).toHaveLength(1)
+    // Deletes precede insert
+    expect(ops[0].type).toBe('delete')
+    expect(ops[ops.length - 1].type).toBe('insert')
+  })
+
+  it('resubmit: stale = [originalMessageId] since branches share a prefix', () => {
+    // Old leaf path ends at usr-2 (original). New leaf path ends at usr-3 (new sibling).
+    // Shared prefix: usr-1, ast-1. Divergence at parent ast-1.
+    const oldLeaf = [mkRow('usr-1'), mkRow('ast-1', 'assistant'), mkRow('usr-2')]
+    const newLeaf = [mkRow('usr-1'), mkRow('ast-1', 'assistant'), mkRow('usr-3')]
+    const { spy, calls } = makeSpy()
+    emitSnapshot(oldLeaf, newLeaf, spy)
+
+    expect(calls).toHaveLength(1)
+    const ops = calls[0].ops
+    // staleIds should be exactly ['usr-2']
+    const deletes = ops.filter((o): o is { type: 'delete'; key: string } => o.type === 'delete')
+    expect(deletes.map((o) => o.key)).toEqual(['usr-2'])
+    // fresh includes all three newLeaf rows as inserts
+    const inserts = ops.filter((o): o is { type: 'insert'; value: Row } => o.type === 'insert')
+    expect(inserts.map((o) => o.value.id)).toEqual(['usr-1', 'ast-1', 'usr-3'])
+  })
+
+  it('branch-navigate: stale = current-branch-only ids, fresh = target branch history', () => {
+    // Default leaf: [usr-1, ast-1, usr-2-A]. Target branch: [usr-1, ast-1, usr-2-B, ast-2-B].
+    const currentLeaf = [mkRow('usr-1'), mkRow('ast-1', 'assistant'), mkRow('usr-2-A')]
+    const targetLeaf = [
+      mkRow('usr-1'),
+      mkRow('ast-1', 'assistant'),
+      mkRow('usr-2-B'),
+      mkRow('ast-2-B', 'assistant'),
+    ]
+    const { spy, calls } = makeSpy()
+    emitSnapshot(currentLeaf, targetLeaf, spy)
+
+    const ops = calls[0].ops
+    const deletes = ops.filter((o): o is { type: 'delete'; key: string } => o.type === 'delete')
+    expect(deletes.map((o) => o.key)).toEqual(['usr-2-A'])
+    const inserts = ops.filter((o): o is { type: 'insert'; value: Row } => o.type === 'insert')
+    expect(inserts.map((o) => o.value.id)).toEqual(['usr-1', 'ast-1', 'usr-2-B', 'ast-2-B'])
+  })
+
+  it('requestSnapshot: staleIds = [], fresh = full history', () => {
+    const history = [mkRow('a'), mkRow('b'), mkRow('c', 'assistant')]
+    const { spy, calls } = makeSpy()
+    emitSnapshot([], history, spy)
+
+    const ops = calls[0].ops
+    expect(ops.filter((o) => o.type === 'delete')).toHaveLength(0)
+    expect(ops.filter((o) => o.type === 'insert')).toHaveLength(history.length)
+  })
+
+  it('onConnect reconnect replay: staleIds = [], targeted to connection.id', () => {
+    const history = [mkRow('a'), mkRow('b')]
+    const { spy, calls } = makeSpy()
+    emitSnapshot([], history, spy, { targetClientId: 'conn-1' })
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0].opts?.targetClientId).toBe('conn-1')
+    const ops = calls[0].ops
+    expect(ops.filter((o) => o.type === 'delete')).toHaveLength(0)
+    expect(ops.filter((o) => o.type === 'insert')).toHaveLength(2)
+  })
+
+  it('empty new leaf on the reconnect path emits nothing on the new wire (legacy carries history-fetched signal)', () => {
+    const { spy, calls } = makeSpy()
+    emitSnapshot([], [], spy, { targetClientId: 'conn-1' })
+    expect(calls).toHaveLength(0)
+  })
+
+  it('chunking: large history splits into multiple frames, each under the byte cap', () => {
+    // Build a big history — use a small maxBytes so we get multiple chunks
+    // deterministically without needing >200 KiB of real data.
+    const big: Row[] = []
+    for (let i = 0; i < 30; i++) {
+      big.push({
+        id: `row-${i}`,
+        role: 'user',
+        parts: [{ type: 'text', text: 'x'.repeat(100) }] as unknown[],
+        createdAt: '2026-04-21T00:00:00.000Z',
+      })
+    }
+    const { spy, calls } = makeSpy()
+    // maxBytes = 1 KiB forces several chunks
+    emitSnapshot([], big, spy, { maxBytes: 1024 })
+
+    // More than one call → chunked
+    expect(calls.length).toBeGreaterThan(1)
+
+    // Every chunk well under the cap (each op's JSON < 1 KiB individually)
+    for (const call of calls) {
+      expect(JSON.stringify(call.ops).length).toBeLessThanOrEqual(1024 + 256)
+    }
+
+    // Union of all chunks' ops = full op list (no rows lost or duplicated)
+    const allIds = calls
+      .flatMap((c) => c.ops)
+      .filter((o): o is { type: 'insert'; value: Row } => o.type === 'insert')
+      .map((o) => o.value.id)
+    expect(allIds).toEqual(big.map((r) => r.id))
+  })
+
+  it('emitted frame shape matches SyncedCollectionFrame wire contract', () => {
+    // Wrap the spy into a broadcastMessages-alike that stringifies to assert
+    // the frame envelope shape mirrors what SessionDO.broadcastMessages emits.
+    const sessionId = 'sess-p14'
+    const emitted: string[] = []
+    let messageSeq = 0
+    const broadcast = (arg: {
+      ops: Array<{ type: 'insert'; value: Row } | { type: 'delete'; key: string }>
+    }) => {
+      messageSeq += 1
+      const frame = {
+        type: 'synced-collection-delta' as const,
+        collection: `messages:${sessionId}`,
+        ops: arg.ops,
+        messageSeq,
+      }
+      emitted.push(JSON.stringify(frame))
+    }
+    const history = [mkRow('a'), mkRow('b')]
+    emitSnapshot([], history, broadcast)
+
+    expect(emitted).toHaveLength(1)
+    const parsed = JSON.parse(emitted[0])
+    expect(parsed.type).toBe('synced-collection-delta')
+    expect(parsed.collection).toBe('messages:sess-p14')
+    expect(parsed.messageSeq).toBe(1)
+    expect(parsed.ops).toHaveLength(2)
+    expect(parsed.ops[0]).toEqual({ type: 'insert', value: history[0] })
+    expect(parsed.ops[1]).toEqual({ type: 'insert', value: history[1] })
+  })
+
+  it('chunked emits advance messageSeq once per chunk (envelope per-frame)', () => {
+    const rows: Row[] = []
+    for (let i = 0; i < 10; i++) {
+      rows.push({
+        id: `r-${i}`,
+        role: 'user',
+        parts: [{ type: 'text', text: 'p'.repeat(80) }] as unknown[],
+        createdAt: '2026-04-21T00:00:00.000Z',
+      })
+    }
+    let messageSeq = 0
+    const seqs: number[] = []
+    const broadcast = (arg: {
+      ops: Array<{ type: 'insert'; value: Row } | { type: 'delete'; key: string }>
+    }) => {
+      messageSeq += 1
+      seqs.push(messageSeq)
+      void arg
+    }
+    emitSnapshot([], rows, broadcast, { maxBytes: 512 })
+    // Monotonic, contiguous
+    expect(seqs.length).toBeGreaterThan(1)
+    for (let i = 1; i < seqs.length; i++) {
+      expect(seqs[i]).toBe(seqs[i - 1] + 1)
+    }
+  })
+})
+
+// ── GH#38 P1.5: broadcastBranchInfo frame shape + B10 atomic dual-emit ──
+
+describe('broadcastBranchInfo → SyncedCollectionFrame (GH#38 P1.5)', () => {
+  type BIRow = {
+    parentMsgId: string
+    sessionId: string
+    siblings: string[]
+    activeId: string
+    updatedAt: string
+  }
+
+  /**
+   * Mirror of the production `broadcastBranchInfo` method. Same contract
+   * as `broadcastMessages`: insert-ops only, targeted sends don't advance
+   * messageSeq, empty rows + untargeted → no-op.
+   */
+  function broadcastBranchInfo(
+    ctx: {
+      sessionId: string
+      messageSeq: number
+      broadcast: (data: string) => void
+      target: (clientId: string, data: string) => void
+    },
+    rows: BIRow[],
+    opts: { targetClientId?: string } = {},
+  ): void {
+    if (rows.length === 0 && !opts.targetClientId) return
+    if (!opts.targetClientId) {
+      ctx.messageSeq += 1
+    }
+    const ops = rows.map((value) => ({ type: 'insert' as const, value }))
+    const frame = {
+      type: 'synced-collection-delta' as const,
+      collection: `branchInfo:${ctx.sessionId}`,
+      ops,
+      messageSeq: ctx.messageSeq,
+    }
+    const data = JSON.stringify(frame)
+    if (opts.targetClientId) ctx.target(opts.targetClientId, data)
+    else ctx.broadcast(data)
+  }
+
+  function createHarness(sessionId = 'sess-bi') {
+    const broadcasts: string[] = []
+    const targeted: Array<{ clientId: string; data: string }> = []
+    const ctx = {
+      sessionId,
+      messageSeq: 0,
+      broadcast: (data: string) => broadcasts.push(data),
+      target: (clientId: string, data: string) => targeted.push({ clientId, data }),
+    }
+    return { ctx, broadcasts, targeted }
+  }
+
+  const mkRow = (id: string, opts: Partial<BIRow> = {}): BIRow => ({
+    parentMsgId: id,
+    sessionId: 'sess-bi',
+    siblings: [id, `${id}-b`],
+    activeId: id,
+    updatedAt: '2026-04-21T00:00:00.000Z',
+    ...opts,
+  })
+
+  it('emits a SyncedCollectionFrame on the branchInfo:<sessionId> wire', () => {
+    const { ctx, broadcasts } = createHarness('sess-bi-a')
+    broadcastBranchInfo(ctx, [mkRow('msg-0')])
+    expect(broadcasts).toHaveLength(1)
+    const parsed = JSON.parse(broadcasts[0])
+    expect(parsed.type).toBe('synced-collection-delta')
+    expect(parsed.collection).toBe('branchInfo:sess-bi-a')
+    expect(parsed.ops).toHaveLength(1)
+    expect(parsed.ops[0]).toEqual({ type: 'insert', value: mkRow('msg-0') })
+    expect(parsed.messageSeq).toBe(1)
+  })
+
+  it('row array → insert ops in order (TanStack DB key-dedupes to upsert)', () => {
+    const { ctx, broadcasts } = createHarness()
+    broadcastBranchInfo(ctx, [mkRow('a'), mkRow('b'), mkRow('c')])
+    const parsed = JSON.parse(broadcasts[0])
+    expect(parsed.ops.map((o: { value: BIRow }) => o.value.parentMsgId)).toEqual(['a', 'b', 'c'])
+    expect(parsed.ops.every((o: { type: string }) => o.type === 'insert')).toBe(true)
+  })
+
+  it('empty rows with no targetClientId is a no-op (no broadcast, no seq bump)', () => {
+    const { ctx, broadcasts, targeted } = createHarness()
+    broadcastBranchInfo(ctx, [])
+    expect(broadcasts).toHaveLength(0)
+    expect(targeted).toHaveLength(0)
+    expect(ctx.messageSeq).toBe(0)
+  })
+
+  it('empty rows WITH targetClientId still emits (so recipient gets an explicit "no branches" signal)', () => {
+    const { ctx, broadcasts, targeted } = createHarness()
+    broadcastBranchInfo(ctx, [], { targetClientId: 'conn-1' })
+    expect(broadcasts).toHaveLength(0)
+    expect(targeted).toHaveLength(1)
+    const parsed = JSON.parse(targeted[0].data)
+    expect(parsed.ops).toEqual([])
+    // targeted does not advance messageSeq
+    expect(ctx.messageSeq).toBe(0)
+  })
+
+  it('targeted send echoes current messageSeq without advancing it', () => {
+    const { ctx, targeted } = createHarness()
+    ctx.messageSeq = 7
+    broadcastBranchInfo(ctx, [mkRow('r')], { targetClientId: 'conn-42' })
+    expect(targeted).toHaveLength(1)
+    expect(targeted[0].clientId).toBe('conn-42')
+    const parsed = JSON.parse(targeted[0].data)
+    expect(parsed.messageSeq).toBe(7)
+    expect(ctx.messageSeq).toBe(7)
+  })
+
+  it('non-targeted send advances messageSeq monotonically', () => {
+    const { ctx, broadcasts } = createHarness()
+    broadcastBranchInfo(ctx, [mkRow('x')])
+    broadcastBranchInfo(ctx, [mkRow('y')])
+    broadcastBranchInfo(ctx, [mkRow('z')])
+    const seqs = broadcasts.map((d) => JSON.parse(d).messageSeq)
+    expect(seqs).toEqual([1, 2, 3])
+  })
+})
+
+describe('B10 atomic dual-emit — messages + branchInfo in same DO turn (GH#38 P1.5)', () => {
+  /**
+   * Invariants we assert here:
+   *   1. For every snapshot-emitting path (rewind / resubmit / branch-nav /
+   *      requestSnapshot / onConnect-reconnect-replay), `broadcastMessages`
+   *      is called and immediately followed by `broadcastBranchInfo` in the
+   *      same synchronous call. No awaits, no setTimeout, no microtask
+   *      shenanigans — React 18 auto-batching relies on both deltas landing
+   *      in the same JS tick so the two collections update in a single
+   *      render commit.
+   *   2. For sibling-creating user turns (resubmit / branch-creating
+   *      sendMessage) the messages upsert is immediately followed by the
+   *      branchInfo upsert for the affected parent row.
+   */
+  function makeEmitter() {
+    const calls: Array<{ wire: 'messages' | 'branchInfo'; ops: unknown[] }> = []
+    return {
+      calls,
+      broadcastMessages: (arg: { ops: unknown[] }) => {
+        calls.push({ wire: 'messages', ops: arg.ops })
+      },
+      broadcastBranchInfo: (rows: unknown[]) => {
+        calls.push({ wire: 'branchInfo', ops: rows })
+      },
+    }
+  }
+
+  /**
+   * Harness mirroring the production contract at each snapshot site:
+   *   for chunk in chunkOps(ops): broadcastMessages({ops: chunk})
+   *   broadcastBranchInfo(computeBranchInfo(leaf))
+   * We only care about ORDERING — that messages fires then branchInfo on
+   * the same tick — so we don't bother with the deriveSnapshotOps /
+   * computeBranchInfo bodies (those are covered by their own tests).
+   */
+  function emitSnapshotPair(
+    msgOps: unknown[],
+    biRows: unknown[],
+    e: ReturnType<typeof makeEmitter>,
+  ): void {
+    e.broadcastMessages({ ops: msgOps })
+    e.broadcastBranchInfo(biRows)
+  }
+
+  it('rewind path: messages then branchInfo in synchronous order', () => {
+    const e = makeEmitter()
+    emitSnapshotPair(
+      [
+        { type: 'delete', key: 'stale' },
+        { type: 'insert', value: { id: 'usr-1' } },
+      ],
+      [{ parentMsgId: 'msg-0' }],
+      e,
+    )
+    expect(e.calls.map((c) => c.wire)).toEqual(['messages', 'branchInfo'])
+  })
+
+  it('resubmit path: single tick, messages first then branchInfo', () => {
+    const e = makeEmitter()
+    emitSnapshotPair(
+      [
+        { type: 'delete', key: 'usr-2' },
+        { type: 'insert', value: { id: 'usr-3' } },
+      ],
+      [{ parentMsgId: 'ast-1' }],
+      e,
+    )
+    expect(e.calls).toHaveLength(2)
+    expect(e.calls[0].wire).toBe('messages')
+    expect(e.calls[1].wire).toBe('branchInfo')
+  })
+
+  it('branch-navigate path: messages first then branchInfo', () => {
+    const e = makeEmitter()
+    emitSnapshotPair(
+      [
+        { type: 'delete', key: 'usr-2-A' },
+        { type: 'insert', value: { id: 'usr-2-B' } },
+      ],
+      [{ parentMsgId: 'ast-1' }],
+      e,
+    )
+    expect(e.calls.map((c) => c.wire)).toEqual(['messages', 'branchInfo'])
+  })
+
+  it('onConnect replay: messages then branchInfo targeted to the same connection', () => {
+    const e = makeEmitter()
+    emitSnapshotPair(
+      [
+        { type: 'insert', value: { id: 'a' } },
+        { type: 'insert', value: { id: 'b' } },
+      ],
+      [{ parentMsgId: 'msg-0' }],
+      e,
+    )
+    expect(e.calls.map((c) => c.wire)).toEqual(['messages', 'branchInfo'])
+  })
+
+  it('user-turn ingest: userMsg upsert then branchInfo for sibling parent', () => {
+    const e = makeEmitter()
+    // Production call: broadcastMessages([userMsg]) then
+    // broadcastBranchInfo([computeBranchInfoForUserTurn(userMsg)]) when the
+    // new turn creates a sibling. No-op branch when the turn is linear.
+    e.broadcastMessages({ ops: [{ type: 'insert', value: { id: 'usr-5', role: 'user' } }] })
+    e.broadcastBranchInfo([{ parentMsgId: 'ast-3' }])
+    expect(e.calls).toHaveLength(2)
+    expect(e.calls[0].wire).toBe('messages')
+    expect(e.calls[1].wire).toBe('branchInfo')
+  })
+
+  it('chunked messages emits all chunks BEFORE the single branchInfo frame', () => {
+    const e = makeEmitter()
+    // Simulate 3 chunks followed by one branchInfo — every snapshot site
+    // loops chunks first, then fires the single branchInfo broadcast.
+    e.broadcastMessages({ ops: [{ type: 'insert', value: { id: 'a' } }] })
+    e.broadcastMessages({ ops: [{ type: 'insert', value: { id: 'b' } }] })
+    e.broadcastMessages({ ops: [{ type: 'insert', value: { id: 'c' } }] })
+    e.broadcastBranchInfo([{ parentMsgId: 'msg-0' }])
+    expect(e.calls.map((c) => c.wire)).toEqual(['messages', 'messages', 'messages', 'branchInfo'])
   })
 })

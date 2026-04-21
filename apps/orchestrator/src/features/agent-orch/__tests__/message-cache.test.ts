@@ -181,18 +181,25 @@ function makeWsMessage(data: unknown): MessageEvent {
   return { data: JSON.stringify(data) } as MessageEvent
 }
 
+// GH#38 P1.5: `deltaFrame` / `msgSeq` helpers retired along with the
+// unified `{type:'messages'}` wire protocol. The `msgSeq = 0` resets in
+// `beforeEach` below are intentionally kept as trivial no-ops so the
+// test-file structure stays uniform with sibling specs — but there's
+// nothing left to reset.
 let msgSeq = 0
-function deltaFrame(upsert: Array<Record<string, unknown>>, sessionId = 'test-session') {
-  msgSeq += 1
-  return {
-    type: 'messages',
-    sessionId,
-    seq: msgSeq,
-    payload: { kind: 'delta', upsert },
-  }
-}
+void msgSeq
 
-describe('message cache-behind writes (SessionMessage format)', () => {
+// GH#38 P1.5: cache-behind writes moved into the `createSyncedCollection`
+// factory's internal `write({type:'insert', value})` path on
+// `synced-collection-delta` receipt. The hook no longer upserts into the
+// collection on WS frames — that path is tested in
+// `apps/orchestrator/src/db/synced-collection.test.ts`. The tests that
+// used to live here (delta-frame → mockInsert) are therefore retired
+// together with the unified `{type:'messages'}` wire protocol they
+// exercised. The legacy gateway_event non-message-events guard stays
+// below because the hook still handles those frames directly.
+
+describe('gateway_event non-message events (hook-side, not cache)', () => {
   beforeEach(() => {
     capturedOnStateUpdate = null
     capturedOnMessage = null
@@ -205,64 +212,6 @@ describe('message cache-behind writes (SessionMessage format)', () => {
   afterEach(() => {
     vi.useRealTimers()
     vi.restoreAllMocks()
-  })
-
-  test('single delta frame triggers cache-behind write', () => {
-    renderHook(() => useCodingAgent('test-session'))
-
-    act(() => {
-      capturedOnMessage!(
-        makeWsMessage(
-          deltaFrame([
-            {
-              id: 'msg-1',
-              role: 'assistant',
-              parts: [{ type: 'text', text: 'Hello world' }],
-              createdAt: '2026-04-13T12:00:00Z',
-            },
-          ]),
-        ),
-      )
-    })
-
-    expect(mockInsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'msg-1',
-        sessionId: 'test-session',
-        role: 'assistant',
-        parts: [{ type: 'text', text: 'Hello world' }],
-      }),
-    )
-  })
-
-  test('bulk messages replay triggers cache-behind writes for all messages', () => {
-    renderHook(() => useCodingAgent('test-session'))
-
-    act(() => {
-      capturedOnMessage!(
-        makeWsMessage({
-          type: 'messages',
-          messages: [
-            {
-              id: 'msg-1',
-              role: 'user',
-              parts: [{ type: 'text', text: 'Hello' }],
-            },
-            {
-              id: 'msg-2',
-              role: 'assistant',
-              parts: [{ type: 'text', text: 'Hi there' }],
-            },
-          ],
-        }),
-      )
-    })
-
-    expect(mockInsert).toHaveBeenCalledTimes(2)
-    expect(mockInsert).toHaveBeenCalledWith(expect.objectContaining({ id: 'msg-1', role: 'user' }))
-    expect(mockInsert).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'msg-2', role: 'assistant' }),
-    )
   })
 
   test('legacy gateway_event non-message events do NOT trigger cache writes', () => {
@@ -281,31 +230,6 @@ describe('message cache-behind writes (SessionMessage format)', () => {
     })
 
     expect(mockInsert).not.toHaveBeenCalled()
-  })
-
-  test('duplicate insert errors are silently ignored', () => {
-    mockInsert.mockImplementation(() => {
-      throw new Error('DuplicateKeyError')
-    })
-
-    renderHook(() => useCodingAgent('test-session'))
-
-    // Should not throw
-    expect(() => {
-      act(() => {
-        capturedOnMessage!(
-          makeWsMessage(
-            deltaFrame([
-              {
-                id: 'dup-msg',
-                role: 'assistant',
-                parts: [{ type: 'text', text: 'duplicate' }],
-              },
-            ]),
-          ),
-        )
-      })
-    }).not.toThrow()
   })
 })
 
@@ -419,7 +343,10 @@ describe('message cache-first hydration', () => {
     expect(result.current.messages[1].id).toBe('late')
   })
 
-  test('populates knownEventUuids from cached messages for dedup', () => {
+  test('renders cached rows by id with no duplicate insertion on re-mount', () => {
+    // GH#38 P1.5: the hook no longer upserts on WS frames. The synced-collection
+    // factory owns cache-behind writes; this test just verifies cached rows are
+    // the single source of truth for the rendered list, keyed by id.
     mockCollectionEntries.push([
       'cached-evt',
       {
@@ -432,26 +359,9 @@ describe('message cache-first hydration', () => {
     ])
 
     const { result } = renderHook(() => useCodingAgent('test-session'))
-
-    // Now send a delta frame with the same id -- should upsert in place
-    act(() => {
-      capturedOnMessage!(
-        makeWsMessage(
-          deltaFrame([
-            {
-              id: 'cached-evt',
-              role: 'assistant',
-              parts: [{ type: 'text', text: 'updated' }],
-            },
-          ]),
-        ),
-      )
-    })
-
-    // Should still only have one message (upserted)
     const assistantMsgs = result.current.messages.filter((m) => m.role === 'assistant')
     expect(assistantMsgs).toHaveLength(1)
-    expect(assistantMsgs[0].parts[0].text).toBe('updated')
+    expect(assistantMsgs[0].parts[0].text).toBe('cached')
   })
 
   test('handles collection iteration error gracefully', () => {

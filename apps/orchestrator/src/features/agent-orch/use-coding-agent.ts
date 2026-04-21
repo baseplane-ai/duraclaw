@@ -12,6 +12,7 @@
  * `sessionLocalCollection`.
  */
 
+import type { SyncedCollectionFrame } from '@duraclaw/shared-types'
 import { createTransaction } from '@tanstack/db'
 import { useAgent } from 'agents/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -26,6 +27,7 @@ import { logDelta } from '~/lib/delta-log'
 import { parseJsonField } from '~/lib/json'
 import { contentToParts } from '~/lib/message-parts'
 import { isNative, wsBaseUrl } from '~/lib/platform'
+// `BranchInfoRow` still used by navigateBranch's branchInfoCollection read.
 import type {
   ContentBlock,
   ContextUsage,
@@ -99,34 +101,104 @@ function toSessionMessage(row: CachedMessage): SessionMessage {
   } as SessionMessage
 }
 
+// ── Session-stream primitives (Spec #38 P1.1) ───────────────────────────
+//
+// Per-session analogue of `subscribeUserStream` / `onUserStreamReconnect`
+// keyed by `sessionId` (the SessionDO's `this.name`, aka the agent name
+// used by `useAgent({name: sessionId})`). Handlers are kept outside React
+// so collection factories that run at module load can register without
+// waiting for the hook to mount. Frame dispatch is driven by the existing
+// `useAgent` onMessage handler below; reconnect dispatch rides the
+// wsReadyState effect. Mirrors `apps/orchestrator/src/hooks/use-user-stream.ts`
+// L174-200 pattern.
+
+type SessionFrameHandler = (frame: SyncedCollectionFrame<unknown>) => void
+type SessionReconnectHandler = () => void
+
+const sessionFrameHandlers = new Map<string, Set<SessionFrameHandler>>()
+const sessionReconnectHandlers = new Map<string, Set<SessionReconnectHandler>>()
+
 /**
- * Stamp a SessionMessage with its sessionId (and optionally wire seq) for
- * the collection row. Spec-31 P4a B8: delta handlers pass `frame.seq`;
- * snapshot handlers pass `frame.payload.version`. Optimistic and cold-start
- * rows omit seq — those rows sort last within their group by tuple
- * `[seq ?? Infinity, turnOrdinal ?? Infinity, createdAt]`.
+ * Subscribe to every SyncedCollectionFrame delivered on `sessionId`'s WS.
+ * Does NOT pre-filter by `frame.collection` — consumers (messagesCollection,
+ * branchInfoCollection) filter internally. Frames on OTHER sessions' WS do
+ * not fire this handler. Returns an unsubscribe fn.
  */
-function toRow(
-  msg: SessionMessage,
+export function subscribeSessionStream(
   sessionId: string,
-  seq?: number,
-): CachedMessage & Record<string, unknown> {
-  return {
-    id: msg.id,
-    sessionId,
-    role: msg.role,
-    parts: msg.parts,
-    createdAt: msg.createdAt,
-    ...(seq !== undefined ? { seq } : {}),
-  } as CachedMessage & Record<string, unknown>
+  handler: SessionFrameHandler,
+): () => void {
+  let set = sessionFrameHandlers.get(sessionId)
+  if (!set) {
+    set = new Set()
+    sessionFrameHandlers.set(sessionId, set)
+  }
+  set.add(handler)
+  return () => {
+    const cur = sessionFrameHandlers.get(sessionId)
+    if (!cur) return
+    cur.delete(handler)
+    if (cur.size === 0) sessionFrameHandlers.delete(sessionId)
+  }
+}
+
+/**
+ * Register a callback that fires after `sessionId`'s WS reconnects following
+ * a disconnect (not on initial connect). Returns an unsubscribe fn.
+ */
+export function onSessionStreamReconnect(
+  sessionId: string,
+  handler: SessionReconnectHandler,
+): () => void {
+  let set = sessionReconnectHandlers.get(sessionId)
+  if (!set) {
+    set = new Set()
+    sessionReconnectHandlers.set(sessionId, set)
+  }
+  set.add(handler)
+  return () => {
+    const cur = sessionReconnectHandlers.get(sessionId)
+    if (!cur) return
+    cur.delete(handler)
+    if (cur.size === 0) sessionReconnectHandlers.delete(sessionId)
+  }
+}
+
+// Internal dispatch helpers (not exported). Called by the useCodingAgent
+// hook's onMessage / reconnect-detection plumbing wired below.
+function dispatchSessionFrame(sessionId: string, frame: SyncedCollectionFrame<unknown>): void {
+  const set = sessionFrameHandlers.get(sessionId)
+  if (!set || set.size === 0) return
+  for (const h of set) {
+    try {
+      h(frame)
+    } catch (err) {
+      console.warn('[session-stream] frame handler threw', err)
+    }
+  }
+}
+
+function dispatchSessionReconnect(sessionId: string): void {
+  const set = sessionReconnectHandlers.get(sessionId)
+  if (!set || set.size === 0) return
+  for (const h of set) {
+    try {
+      h()
+    } catch (err) {
+      console.warn('[session-stream] reconnect handler threw', err)
+    }
+  }
+}
+
+/** Test-only reset — clears session-stream registries between tests. */
+export function __resetSessionStreamForTests(): void {
+  sessionFrameHandlers.clear()
+  sessionReconnectHandlers.clear()
 }
 
 /** Connect to a SessionDO instance by name; returns live state, messages, and RPC helpers. */
 export function useCodingAgent(agentName: string): UseCodingAgentResult {
   const prevAgentNameRef = useRef(agentName)
-  // Per-session watermark for MessagesFrame `seq` (B1/B3). Keyed by agentName
-  // so concurrent session tabs each keep their own highest-applied seq.
-  const lastSeqRef = useRef<Map<string, number>>(new Map())
 
   // Per-agentName collection (memoised inside createMessagesCollection, so the
   // same factory call returns the same instance on re-render).
@@ -143,7 +215,6 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   // Reset per-session transient state on agentName change (tab switch without
   // remount). Collection rows for other sessions are untouched.
   if (prevAgentNameRef.current !== agentName) {
-    lastSeqRef.current.delete(prevAgentNameRef.current)
     prevAgentNameRef.current = agentName
     // branch-info collection is per-agentName (factory memoises); switching
     // sessions auto-swaps the backing collection via `createBranchInfoCollection`.
@@ -154,265 +225,6 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   // `isConnecting` derivation below.
   const { messages: cachedMessages, isFetching } = useMessagesCollection(agentName)
   const messages: SessionMessage[] = cachedMessages.map(toSessionMessage)
-
-  /**
-   * Bulk-upsert SessionMessages into the collection via the sync-write API.
-   *
-   * `collection.insert/update/delete` create *optimistic* mutations on a
-   * separate state layer — those are for user-initiated writes that round-trip
-   * through `onInsert/onUpdate/onDelete` handlers. WS-pushed writes ARE the
-   * server's authoritative state; they must go through `utils.writeUpsert`
-   * (and `writeDelete` / `writeBatch`) which writes directly to the
-   * collection's synced data store — the layer IVM / `useLiveQuery` reads
-   * from. See planning/research/2026-04-20-streamdb-pattern-adoption.md.
-   */
-  const bulkUpsert = useCallback(
-    (msgs: SessionMessage[], seq?: number) => {
-      try {
-        messagesCollection.utils.writeBatch(() => {
-          for (const m of msgs) messagesCollection.utils.writeUpsert(toRow(m, agentName, seq))
-        })
-      } catch {
-        // Rare mutation-API contention; next event will retry.
-      }
-    },
-    [agentName, messagesCollection],
-  )
-
-  /**
-   * Snapshot reconcile: delete rows for this session not in `messages`, then
-   * upsert. Spec-31 P4a B8: every row gets stamped with `seq` (the
-   * snapshot's `payload.version`). Rows within the snapshot tie on seq and
-   * fall through to the `turnOrdinal → createdAt` secondary — correct,
-   * since the snapshot's history was already ordered at emit time.
-   */
-  const applySnapshot = useCallback(
-    (messages: SessionMessage[], seq?: number) => {
-      const newIds = new Set(messages.map((m) => m.id))
-      const staleIds: string[] = []
-      try {
-        for (const [id, row] of messagesCollection as Iterable<[string, CachedMessage]>) {
-          if (row.sessionId === agentName && !newIds.has(id)) staleIds.push(id)
-        }
-      } catch {}
-      // writeDelete throws if the key isn't in syncedData (e.g., an optimistic-
-      // only row from an in-flight user transaction). Skip those — the owning
-      // transaction will settle and the next delta will reconcile.
-      for (const id of staleIds) {
-        try {
-          messagesCollection.utils.writeDelete(id)
-        } catch {}
-      }
-      bulkUpsert(messages, seq)
-    },
-    [bulkUpsert, messagesCollection, agentName],
-  )
-
-  /**
-   * Apply a `{type:'messages', seq, payload}` frame from the DO (B1/B3).
-   *
-   * Rules:
-   *   - `snapshot`: always apply regardless of seq, and bump the watermark to
-   *     `max(lastSeq, payload.version)` so subsequent in-flight deltas that
-   *     predated the snapshot (seq <= version) are dropped as stale.
-   *   - `delta` with seq === lastSeq + 1: contiguous, apply upserts + removes
-   *     and advance watermark.
-   *   - `delta` with seq > lastSeq + 1: gap — invoke `onGap` (caller requests
-   *     a snapshot). Do NOT apply and do NOT advance seq.
-   *   - `delta` with seq <= lastSeq: stale/duplicate — drop.
-   *
-   * The `onGap` callback is supplied by `onMessage` because `connection` is
-   * created below this hook; passing it in keeps this callback's deps stable.
-   */
-  const handleMessagesFrame = useCallback(
-    (
-      frame: {
-        type: 'messages'
-        sessionId: string
-        seq: number
-        payload:
-          | {
-              kind: 'delta'
-              upsert?: SessionMessage[]
-              remove?: string[]
-              branchInfo?: { upsert?: BranchInfoRow[]; remove?: string[] }
-            }
-          | {
-              kind: 'snapshot'
-              version: number
-              messages: SessionMessage[]
-              reason: string
-            }
-      },
-      onGap: () => void,
-    ) => {
-      const map = lastSeqRef.current
-      const lastSeq = map.get(agentName) ?? 0
-
-      if (frame.payload.kind === 'snapshot') {
-        applySnapshot(frame.payload.messages, frame.payload.version)
-        // Reset lastSeq to the snapshot's version unconditionally. The old
-        // `Math.max(lastSeq, version)` prevented the client from accepting a
-        // lower version after a DO rehydrate (messageSeq resets to 0 in-memory
-        // — issue #25). That caused every subsequent delta with seq <= lastSeq
-        // to be silently dropped as stale, breaking streaming entirely.
-        map.set(agentName, frame.payload.version)
-        // B7: DO pushes branchInfo alongside snapshot payloads on reconnect,
-        // rewind, resubmit, and branch-navigate. Snapshot is authoritative —
-        // reconcile the full view rather than upsert-only. Two regressions
-        // we're closing (DB-cbb1-0420):
-        //   (a) old code left OPFS rows stranded when a branch was trimmed
-        //       away — snapshot only upserted, never deleted stale keys, so
-        //       ghost sibling counts / stale arrows persisted across tab
-        //       reloads even when the DO's authoritative view had no
-        //       branches at all.
-        //   (b) `biColl.has?.()` returns undefined on any collection whose
-        //       `.has` isn't wired up in the persistence adapter, falling
-        //       through to `.insert()` → duplicate-key throw → swallowed by
-        //       the outer catch. Updates to existing rows silently dropped.
-        // Fix: always reconcile (even when incoming is empty), and prefer
-        // update-first-insert-fallback so duplicate-key never masks the
-        // update path.
-        const branchInfo = (frame.payload as { branchInfo?: BranchInfoRow[] }).branchInfo ?? []
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const biColl = createBranchInfoCollection(agentName) as any
-          const incomingKeys = new Set(branchInfo.map((r) => r.parentMsgId))
-          // Diff-and-delete: rows the collection currently holds that the
-          // authoritative snapshot no longer references. The per-agentName
-          // factory memoises one collection per session, so every row in
-          // `biColl` belongs to this session — no cross-session filtering
-          // needed.
-          const staleKeys: string[] = []
-          try {
-            for (const [key] of biColl as Iterable<[string, BranchInfoRow]>) {
-              if (!incomingKeys.has(key)) staleKeys.push(key)
-            }
-          } catch {
-            // iterable not ready; skip deletion pass — upserts still run
-          }
-          for (const key of staleKeys) {
-            try {
-              biColl.delete?.(key)
-            } catch {
-              // ignore — next snapshot retries
-            }
-          }
-          // Upsert incoming rows. Try update first (throws if absent) and
-          // fall back to insert on throw. This avoids the `.has?.()`
-          // undefined-optional-chain hole.
-          for (const row of branchInfo) {
-            try {
-              biColl.update(row.parentMsgId, (draft: BranchInfoRow) => {
-                Object.assign(draft, row)
-              })
-            } catch {
-              try {
-                biColl.insert(row)
-              } catch {
-                // ignore — next snapshot retries
-              }
-            }
-          }
-        } catch {
-          // collection may not be ready; next snapshot retries
-        }
-        return
-      }
-
-      // kind === 'delta'
-      if (frame.seq === lastSeq + 1) {
-        const upsertList = frame.payload.upsert ?? []
-        const removeList = frame.payload.remove ?? []
-        // GH#14 P3: user echoes reconcile via id match alone. The DO accepts
-        // the client-proposed `client_message_id` as the primary id, so
-        // TanStack DB deep-equality retires the optimistic row silently.
-        try {
-          messagesCollection.utils.writeBatch(() => {
-            for (const m of upsertList) {
-              // Spec-31 P4a B8: stamp delta rows with `frame.seq` so the
-              // messages-collection sort orders by wire arrival order.
-              messagesCollection.utils.writeUpsert(toRow(m, agentName, frame.seq))
-            }
-            if (removeList.length > 0) {
-              messagesCollection.utils.writeDelete(removeList)
-            }
-          })
-        } catch {
-          // swallow — next frame will reconcile
-        }
-        // P2 B2: deltas can piggyback branchInfo when a user-turn mutation
-        // changes a parent's sibling list. Apply upserts/removes into the
-        // per-session branchInfoCollection — same pattern as snapshot payloads.
-        const deltaBranchInfo = (
-          frame.payload as {
-            branchInfo?: { upsert?: BranchInfoRow[]; remove?: string[] }
-          }
-        ).branchInfo
-        if (deltaBranchInfo) {
-          try {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const biColl = createBranchInfoCollection(agentName) as any
-            if (deltaBranchInfo.upsert && deltaBranchInfo.upsert.length > 0) {
-              // Update-first-insert-fallback for the same reason as the
-              // snapshot path: `biColl.has?.()` can return undefined on the
-              // real persisted collection, and the old `has ? update :
-              // insert` shape silently dropped updates to existing rows
-              // when the guard mis-fired.
-              for (const row of deltaBranchInfo.upsert) {
-                try {
-                  biColl.update(row.parentMsgId, (draft: BranchInfoRow) => {
-                    Object.assign(draft, row)
-                  })
-                } catch {
-                  try {
-                    biColl.insert(row)
-                  } catch {
-                    // ignore — next snapshot retries
-                  }
-                }
-              }
-            }
-            if (deltaBranchInfo.remove && deltaBranchInfo.remove.length > 0) {
-              for (const id of deltaBranchInfo.remove) {
-                try {
-                  biColl.delete?.(id)
-                } catch {
-                  // ignore — next snapshot retries
-                }
-              }
-            }
-          } catch {
-            // collection may not be ready; next snapshot retries
-          }
-        }
-        map.set(agentName, frame.seq)
-        return
-      }
-
-      if (frame.seq > lastSeq + 1) {
-        // True gap — request snapshot; do NOT apply delta or advance seq.
-        onGap()
-        return
-      }
-
-      // frame.seq < lastSeq — backwards seq. Most commonly a DO rehydrate
-      // after eviction: `messageSeq` persists to `session_meta` only every
-      // Nth increment, so on reboot it comes back lower than our watermark
-      // and every new delta looks "stale". Pre-fix this branch dropped
-      // silently — the UI went dead until a full page reload reset
-      // `lastSeqRef` and the next delta re-triggered the gap path.
-      // Fix: treat backwards seq as a resync trigger. `onGap()` requests a
-      // snapshot; the snapshot handler resets `lastSeq` unconditionally
-      // (see the `applySnapshot` branch above) so subsequent deltas flow.
-      // Exact duplicates (frame.seq === lastSeq) still drop silently.
-      if (frame.seq < lastSeq) {
-        onGap()
-      }
-      return
-    },
-    [agentName, applySnapshot, messagesCollection],
-  )
 
   // Spec #31 P5 B10: no DO-side setState broadcast anymore
   // (shouldSendProtocolMessages returns false). The generic is unused for
@@ -445,8 +257,8 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         // `duraclaw.debug.deltaLog` is set to `'1'`.
         if (parsed && typeof parsed === 'object') {
           const kind =
-            parsed.type === 'messages' && parsed.payload?.kind
-              ? `messages:${parsed.payload.kind}`
+            parsed.type === 'synced-collection-delta' && typeof parsed.collection === 'string'
+              ? `synced-collection-delta:${parsed.collection.split(':')[0]}`
               : parsed.type === 'gateway_event' && parsed.event?.type
                 ? `gateway_event:${parsed.event.type}`
                 : (parsed.type ?? 'unknown')
@@ -457,46 +269,15 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           })
         }
 
-        // Unified {type:'messages'} frame (B1/B3). Supports the new
-        // `{seq, payload}` shape with gap detection, and (for deploy
-        // rollover safety) still tolerates the legacy `{messages}` shape
-        // in case an old DO build emits it during the window.
-        if (parsed.type === 'messages') {
-          if (
-            typeof parsed.seq === 'number' &&
-            parsed.payload &&
-            typeof parsed.payload.kind === 'string'
-          ) {
-            const frame = parsed as {
-              type: 'messages'
-              sessionId: string
-              seq: number
-              payload:
-                | {
-                    kind: 'delta'
-                    upsert?: SessionMessage[]
-                    remove?: string[]
-                    branchInfo?: { upsert?: BranchInfoRow[]; remove?: string[] }
-                  }
-                | {
-                    kind: 'snapshot'
-                    version: number
-                    messages: SessionMessage[]
-                    reason: string
-                  }
-            }
-            handleMessagesFrame(frame, () => {
-              connection.call('requestSnapshot', []).catch(() => {
-                // Non-critical; reconnect path will eventually resync.
-              })
-            })
-            return
-          }
-          // Legacy shape: {type:'messages', messages: SessionMessage[]}
-          if (Array.isArray((parsed as { messages?: unknown }).messages)) {
-            applySnapshot((parsed as { messages: SessionMessage[] }).messages)
-            return
-          }
+        // Spec #38 P1.1: dispatch SyncedCollectionFrame to per-session
+        // handlers (messagesCollection / branchInfoCollection subscribers).
+        // The unified `{type:'messages', seq, payload}` wire protocol and
+        // its legacy `{type:'messages', messages}` shape are both retired
+        // in P1.5 — the DO now emits only `synced-collection-delta` frames
+        // for messages and branchInfo (via `broadcastMessages` /
+        // `broadcastBranchInfo`).
+        if (parsed && parsed.type === 'synced-collection-delta') {
+          dispatchSessionFrame(agentName, parsed as SyncedCollectionFrame<unknown>)
           return
         }
 
@@ -558,6 +339,33 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       connection.removeEventListener('error', sync)
     }
   }, [connection])
+
+  // Spec #38 P1.1: fire `dispatchSessionReconnect(agentName)` on the
+  // transition !OPEN → OPEN when we've already seen at least one prior
+  // OPEN. Mirrors use-user-stream.ts `hasOpenedOnce` / `hadPriorSocket`
+  // semantics so synced-collection subscribers can re-invalidate after a
+  // dropped+resumed WS (but not on the initial connect). Reset when
+  // `agentName` changes (tab switch without remount) so the fresh
+  // session's initial open doesn't look like a reconnect.
+  const hasOpenedOnceRef = useRef(false)
+  const prevReadyStateRef = useRef<number>(readyState)
+  const reconnectAgentNameRef = useRef(agentName)
+  if (reconnectAgentNameRef.current !== agentName) {
+    reconnectAgentNameRef.current = agentName
+    hasOpenedOnceRef.current = false
+    prevReadyStateRef.current = readyState
+  }
+  useEffect(() => {
+    const prev = prevReadyStateRef.current
+    const OPEN = 1
+    if (readyState === OPEN && prev !== OPEN) {
+      if (hasOpenedOnceRef.current) {
+        dispatchSessionReconnect(agentName)
+      }
+      hasOpenedOnceRef.current = true
+    }
+    prevReadyStateRef.current = readyState
+  }, [agentName, readyState])
 
   // Mirror WS readyState into the local-only sessionLocalCollection
   // (Spec #37 B11). Insert on first observation, update on subsequent
@@ -642,8 +450,9 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
 
   const rewind = useCallback(
     async (turnIndex: number) => {
-      // DO broadcasts a reason='rewind' snapshot (B2) that reconciles via
-      // the normal handleMessagesFrame path — no client-side replace.
+      // DO broadcasts a pair of synced-collection deltas (messages +
+      // branchInfo) in the same DO turn. The messages / branchInfo
+      // collection subscriptions converge the view; no client-side replace.
       return (await connection.call('rewind', [turnIndex])) as {
         ok: boolean
         error?: string
@@ -654,11 +463,10 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
 
   const resubmitMessage = useCallback(
     async (messageId: string, content: string) => {
-      // The DO's `resubmitMessage` path emits a reason='resubmit' snapshot
-      // (B2) carrying both the new leaf's history AND the parent's fresh
-      // branchInfo row (B7). The snapshot handler in `handleMessagesFrame`
-      // reconciles both collections server-side — the client only fires the
-      // RPC and awaits the pushed snapshot frame.
+      // The DO's `resubmitMessage` path emits sibling synced-collection
+      // deltas on the messages and branchInfo wires in the same DO turn
+      // (GH#38 P1.5). The collection subscriptions reconcile both views
+      // server-side — the client only fires the RPC and awaits the frames.
       return (await connection.call('resubmitMessage', [messageId, content])) as {
         ok: boolean
         leafId?: string
@@ -704,43 +512,60 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   )
 
   /**
-   * GH#14 P3 + 2026-04-20 send-flash fix: optimistic user-row inserts bypass
-   * TanStack DB's optimistic overlay entirely and write directly into the
-   * synced layer via `utils.writeUpsert`. The server echo arrives as a
-   * regular delta frame and `writeUpsert`s the same id in place — no
-   * transaction state machine to fight.
+   * Send a user turn.
    *
-   * Why bypass the optimistic overlay: the overlay's "redundant sync" fast
-   * path requires `deepEquals(optimisticRow, syncedRow)` to pass, and it
-   * doesn't — the server echo has `seq` (stamped from `frame.seq`), a
-   * server-regenerated `createdAt`, and `canonical_turn_id`. When the
-   * RPC reply's microtask runs before the broadcast-delta WS event is
-   * dispatched, `recomputeOptimisticState` finds no pending synced tx for
-   * the client id, evicts the optimistic row as stale, and the row
-   * briefly disappears until the delta lands. Writing direct to syncedData
-   * sidesteps the race entirely.
+   * GH#38 P1.3 string path — `messagesCollection.insert(optimisticRow)`
+   * goes through the synced-collection factory's `onInsert` handler which
+   * POSTs `/api/sessions/:id/messages` with `{content, clientId, createdAt}`.
+   * Server adopts `clientId` as the row's primary id and `createdAt`
+   * verbatim so the WS echo reconciles in place via TanStack DB's
+   * `deepEquals` (B7/B14) — no manual writeUpsert/writeDelete. If the
+   * factory's onInsert throws, TanStack DB rolls back the optimistic row
+   * automatically.
    *
-   * Rollback on RPC error: `writeDelete` the optimistic id. If the tab
-   * reconnects mid-flight and the server never saw the send, the next
-   * snapshot reconciles away the ghost row either way.
+   * Image / ContentBlock[] sends stay on the legacy `connection.call
+   * ('sendMessage')` RPC path — the factory's onInsert only handles
+   * plain-text content (spec #38 non-goal: migrating image ingest).
    */
   const sendMessage = useCallback(
     async (content: string | ContentBlock[], opts?: { submitId?: string }) => {
       const clientMessageId = newClientMessageId()
-      // Stamp optimistic row with the current watermark seq so it sorts
-      // in-place (alongside already-applied messages) rather than at
-      // Infinity. Preserved from spec #31 because message ordering still
-      // matters for `useDerivedGate` (retained per spec #37 B14). The
-      // server echo delta overwrites with the canonical seq via
-      // writeUpsert.
-      const currentSeq = lastSeqRef.current.get(agentName) ?? 0
+
+      // String path — route through messagesCollection.insert so the
+      // factory's onInsert owns the REST POST. Loopback reconciliation via
+      // deepEquals keeps the optimistic row stable across the echo.
+      if (typeof content === 'string') {
+        const optimisticRow: CachedMessage = {
+          id: clientMessageId,
+          sessionId: agentName,
+          role: 'user',
+          parts: contentToParts(content),
+          // ISO string (not Date) keeps optimistic row shape byte-identical
+          // with the server echo — POST carries the same string forward
+          // and the server adopts it verbatim.
+          createdAt: new Date().toISOString(),
+        }
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const tx = (messagesCollection as any).insert(optimisticRow)
+          await tx.isPersisted.promise
+          return { ok: true }
+        } catch (err) {
+          // TanStack DB rolls back the optimistic row automatically when
+          // the mutationFn (factory onInsert) throws.
+          return { ok: false, error: err instanceof Error ? err.message : String(err) }
+        }
+      }
+
+      // ContentBlock[] (image) path — keep the legacy RPC-based optimistic
+      // write. Factory onInsert doesn't handle image content; spec defers
+      // migration.
       const optimisticRow: CachedMessage = {
         id: clientMessageId,
         sessionId: agentName,
         role: 'user',
         parts: contentToParts(content),
         createdAt: new Date(),
-        seq: currentSeq + 1,
       }
       try {
         messagesCollection.utils.writeUpsert(optimisticRow)
@@ -788,11 +613,6 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       if (doc) doc.transact(clear)
       else clear()
 
-      const submitId =
-        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-          ? crypto.randomUUID()
-          : `sub-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
-
       // Dev-only VP2 hook: simulate send failure e2e without mocking the WS.
       const viteEnv = (import.meta as unknown as { env?: { DEV?: boolean } }).env
       const mockFailure =
@@ -811,25 +631,19 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         sessionId: agentName,
         role: 'user',
         parts: contentToParts(text),
-        createdAt: new Date(),
+        // ISO string (not Date) — server adopts verbatim, deepEquals
+        // reconciles in place on echo.
+        createdAt: new Date().toISOString(),
       }
-      const tx = createTransaction<CachedMessage & Record<string, unknown>>({
-        mutationFn: async () => {
-          const result = (await connection.call('sendMessage', [
-            text,
-            { submitId, client_message_id: clientMessageId },
-          ])) as { ok: boolean; error?: string }
-          if (!result.ok) {
-            throw new Error(result.error ?? 'sendMessage failed')
-          }
-          return result
-        },
-      })
-      tx.mutate(() => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(messagesCollection as any).insert(optimisticRow)
-      })
+      // GH#38 P1.3: route through the factory's onInsert (which POSTs
+      // /api/sessions/:id/messages with {content, clientId, createdAt}).
+      // TanStack DB's collection.insert returns a Transaction; awaiting
+      // `isPersisted.promise` waits for the mutationFn to settle. On
+      // throw, the optimistic row rolls back automatically and we
+      // restore the Y.Text draft.
       try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const tx = (messagesCollection as any).insert(optimisticRow)
         await tx.isPersisted.promise
         return { ok: true, sent: true }
       } catch (err) {
@@ -841,7 +655,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         }
       }
     },
-    [agentName, connection, messagesCollection],
+    [agentName, messagesCollection],
   )
 
   const forkWithHistory = useCallback(
@@ -861,7 +675,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           // `usr-N` id). The optimistic row stays keyed on
           // `usr-client-<uuid>`; the server echo arrives with a different id
           // but the snapshot emitted by forkWithHistory reconciles via
-          // handleMessagesFrame and still converges the collection.
+          // the messagesCollection synced-delta path and still converges.
           // Documented as a deviation in GH#14 P3.
           const result = (await connection.call('forkWithHistory', [content])) as {
             ok: boolean

@@ -637,54 +637,12 @@ export interface SessionMessage {
   canonical_turn_id?: string
 }
 
-export interface DeltaPayload {
-  kind: 'delta'
-  upsert?: SessionMessage[]
-  /**
-   * Reserved. No current DO call site populates `remove`; the field exists
-   * so the client-side handler can be correct-by-construction when a future
-   * feature (e.g. "delete attachment") adds a producer.
-   */
-  remove?: string[]
-  /**
-   * P2 B2: DO piggybacks affected parents' sibling lists onto the same delta
-   * frame that carries the user-turn upsert (after sendMessage / forkWithHistory
-   * mutations that add a sibling). Snapshot payloads already carry
-   * `BranchInfoRow[]` — this brings deltas to parity.
-   *
-   * `remove` is reserved for future producers (message deletion reducing
-   * siblings). No current DO call site populates it — the field exists so the
-   * client handler is correct-by-construction.
-   */
-  branchInfo?: {
-    upsert?: BranchInfoRow[]
-    remove?: string[]
-  }
-}
-
 export interface BranchInfoRow {
   parentMsgId: string
   sessionId: string
   siblings: string[]
   activeId: string
   updatedAt: string
-}
-
-export interface SnapshotPayload {
-  kind: 'snapshot'
-  version: number // equals SessionDO's current messageSeq at broadcast time
-  messages: SessionMessage[]
-  reason: 'reconnect' | 'rewind' | 'resubmit' | 'branch-navigate'
-  branchInfo?: BranchInfoRow[]
-}
-
-export type MessagesPayload = DeltaPayload | SnapshotPayload
-
-export interface MessagesFrame {
-  type: 'messages'
-  sessionId: string
-  seq: number // per-session monotonic, assigned by SessionDO at broadcast
-  payload: MessagesPayload
 }
 
 // ── User Preferences ────────────────────────────────────────────────
@@ -733,6 +691,14 @@ export interface SessionContext {
 // compile time. No `seq` — reconnect triggers a full-fetch resync via
 // the factory's queryFn, and hot incremental delivery assumes the WS
 // is authoritative while connected.
+//
+// `collection` is a free-form string used to route frames to consumer
+// handlers. The project convention is `<scope>` for user-scoped
+// collections (e.g. `'user_tabs'`, `'user_preferences'`, `'projects'`,
+// `'chains'`, `'agent_sessions'`) and `'<scope>:<sessionId>'` for
+// session-scoped collections (e.g. `'messages:<sessionId>'`,
+// `'branchInfo:<sessionId>'`). The convention is enforced only by
+// callers and subscribers; there is no runtime check.
 
 export type SyncedCollectionOp<TRow = unknown> =
   | { type: 'insert'; value: TRow }
@@ -743,4 +709,12 @@ export interface SyncedCollectionFrame<TRow = unknown> {
   type: 'synced-collection-delta'
   collection: string
   ops: Array<SyncedCollectionOp<TRow>>
+  /**
+   * Optional per-stream monotonic counter stamped by the server;
+   * observability only, clients MUST NOT gate on it. Introduced by
+   * `broadcastMessages` in SessionDO (GH#38 P1.2) so operators can
+   * correlate frames across server logs without surfacing a reconcile
+   * knob to the client. Legacy user-scoped callers do not populate it.
+   */
+  messageSeq?: number
 }

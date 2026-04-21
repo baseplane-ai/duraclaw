@@ -118,4 +118,36 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
       addCol('last_kata_mode', 'TEXT')
     },
   },
+  {
+    version: 8,
+    description:
+      'No-op: messages `seq` column drop stub (column never existed — v4 renamed the messages table to _deprecated_messages; SDK Session owns assistant_messages which has no seq column). Kept for audit trail of the GH#38 migration.',
+    up: (_sql) => {
+      // Intentional no-op. See description.
+    },
+  },
+  {
+    version: 9,
+    description:
+      'Add composite index on assistant_messages(session_id, created_at, id) to back the GET /messages keyset-pagination cursor query. Safe to create against the SDK-owned table via CREATE INDEX IF NOT EXISTS — will not conflict with SDK-managed schema.',
+    up: (sql) => {
+      try {
+        sql.exec(
+          `CREATE INDEX IF NOT EXISTS idx_assistant_messages_session_created_id
+            ON assistant_messages (session_id, created_at, id)`,
+        )
+      } catch (e: unknown) {
+        // The table is created lazily by the SDK Session class on first use.
+        // If it doesn't exist yet in this DO (no SDK activity ever), skip —
+        // a fresh DO will create the index on first cursor query via the
+        // SDK's schema initialisation path is unaffected; this migration
+        // is a best-effort perf optimisation, not a correctness gate.
+        const msg = e instanceof Error ? e.message : String(e)
+        if (!msg.toLowerCase().includes('no such table')) {
+          console.warn('[migration v9] unexpected error creating index', e)
+          throw e
+        }
+      }
+    },
+  },
 ]

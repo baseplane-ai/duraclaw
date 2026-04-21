@@ -20,7 +20,13 @@
   },
   "prod_d1_migrations_applied": {
     "note": "Pre-existing drift resolved inline: ran `wrangler d1 migrations apply duraclaw-auth --remote` from /tmp with CLOUDFLARE_API_TOKEN/ACCOUNT_ID unset so wrangler fell back to OAuth (Ben@baseplane.ai 87bd3030). Account 7f7a3c5e (Team@getelevra) in .env was the wrong one.",
-    "migrations_applied": ["0009_worktree_reservations", "0010_fcm_subscriptions", "0011_user_presence", "0012_user_tabs_soft_delete", "0013_projects"],
+    "migrations_applied": [
+      "0009_worktree_reservations",
+      "0010_fcm_subscriptions",
+      "0011_user_presence",
+      "0012_user_tabs_soft_delete",
+      "0013_projects"
+    ],
     "ownership": "These are PR #32/#33 migrations; unrelated to spec #31 code but blocked the behavioral VP because the Project dropdown depends on the `projects` table."
   },
   "auth_middleware_fix": {

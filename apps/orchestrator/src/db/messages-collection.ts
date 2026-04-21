@@ -1,35 +1,46 @@
 /**
- * Messages QueryCollection factory -- per-agentName collections backed by
- * `GET /api/sessions/:id/messages` and persisted to OPFS SQLite.
+ * Messages collection factory — per-sessionId collections backed by the
+ * cursor REST endpoint `GET /api/sessions/:id/messages?sinceCreatedAt=&sinceId=`
+ * and persisted to OPFS SQLite.
  *
- * - Collection id: `messages:<agentName>` (one collection per SessionDO tab)
- * - Persisted to OPFS SQLite (schemaVersion 4). Rows sort by
- *   `canonical_turn_id` on user turns, `createdAt` otherwise — see
- *   `use-messages-collection.ts` for the sort contract.
- * - syncMode: 'on-demand' — queryFn only fires on explicit fetch / first
- *   subscriber. WS snapshots are the push channel; the query is the pull
- *   channel for cold-start and reconnect-with-stale-cache.
- * - refetchInterval: undefined — WS owns live updates, no polling
- * - staleTime: Infinity — snapshots from the DO keep the collection fresh
- * - retry: 1, retryDelay: 500 — matches the old setTimeout(500) ladder
+ * Built on `createSyncedCollection` (GH#38 P1.3) so WS-pushed
+ * `{type:'synced-collection-delta', collection:'messages:<sessionId>'}`
+ * frames drive begin/write/commit on the synced layer, and
+ * `onSessionStreamReconnect` re-invalidates the queryKey on WS
+ * drop+resume — the factory handles both paths.
  *
- * The factory memoises per-agentName so repeat calls with the same key
+ * - Collection id / wire collection: `messages:<sessionId>` (one collection
+ *   per SessionDO tab).
+ * - Persisted to OPFS SQLite. `schemaVersion: 6` (bumped from 5) so pre-
+ *   migration cache rows stamped with the dead `seq` field are dropped on
+ *   first load after deploy (B12).
+ * - Cursor contract: queryFn derives `(max createdAt, max id)` from the
+ *   current collection state and forwards as `sinceCreatedAt=&sinceId=`.
+ *   Cold-start / empty collection omits both params (server returns full
+ *   history; asymmetric cursors 400).
+ * - Optimistic user turns: `onInsert` POSTs `/api/sessions/:id/messages`
+ *   with `{content, clientId, createdAt}`. The server adopts the client
+ *   `clientId` as the row's primary id and the client `createdAt`
+ *   verbatim so loopback deepEquals reconciles the echo in-place (B7/B14).
+ *   The factory handler only forwards plain-text user turns; image/
+ *   ContentBlock sends stay on the legacy `connection.call('sendMessage')`
+ *   RPC path in `use-coding-agent.ts`.
+ *
+ * The factory memoises per-sessionId so repeat calls with the same key
  * return the same Collection instance. `evictOldMessages` iterates every
  * cached collection.
- *
- * NOTE: top-level await `dbReady` so the persisted branch is taken whenever
- * OPFS is available (B-CLIENT-1 — was reading the stale `let persistence`
- * export and silently falling back to in-memory).
  */
 
-import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence'
-import { createCollection } from '@tanstack/db'
-import { queryCollectionOptions } from '@tanstack/query-db-collection'
+import {
+  onSessionStreamReconnect,
+  subscribeSessionStream,
+} from '~/features/agent-orch/use-coding-agent'
 import { apiUrl } from '~/lib/platform'
 import type { SessionMessage, SessionMessagePart } from '~/lib/types'
-import { dbReady, queryClient } from './db-instance'
+import { dbReady } from './db-instance'
+import { createSyncedCollection } from './synced-collection'
 
-/** Message stored in the local cache with session context */
+/** Message stored in the local cache with session context. */
 export interface CachedMessage {
   id: string
   sessionId: string
@@ -43,17 +54,6 @@ export interface CachedMessage {
    * as optimistic rows (id=`usr-client-<uuid>`) reconcile with server echoes.
    */
   canonical_turn_id?: string
-  /**
-   * Wire seq from the `MessagesFrame` that applied this row (spec-31 P4a,
-   * B8). Stamped at apply time in `use-coding-agent.ts` — delta rows inherit
-   * `frame.seq`; snapshot rows inherit `frame.payload.version`. Absent on
-   * optimistic rows (pre-echo) and on old cached rows from schemaVersion <= 4
-   * (those load as `undefined` after OPFS migration). Drives the primary
-   * sort key in `use-messages-collection.ts` — rows with `seq === undefined`
-   * sort last so optimistic rows briefly appear below not-yet-echoed rows
-   * and snap into place on echo.
-   */
-  seq?: number
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -61,11 +61,11 @@ type MessagesCollection = any
 
 const persistence = await dbReady
 
-/** Memoise per-agentName so useMemo(() => createMessagesCollection(id)) is stable. */
-const collectionsByAgent = new Map<string, MessagesCollection>()
+/** Memoise per-sessionId so useMemo(() => createMessagesCollection(id)) is stable. */
+const collectionsBySession = new Map<string, MessagesCollection>()
 
 /** Map a server SessionMessage → cached row stamped with the session key. */
-function toCachedMessage(msg: SessionMessage, sessionId: string, seq?: number): CachedMessage {
+function toCachedMessage(msg: SessionMessage, sessionId: string): CachedMessage {
   const canonical = (msg as { canonical_turn_id?: string }).canonical_turn_id
   return {
     id: msg.id,
@@ -74,74 +74,115 @@ function toCachedMessage(msg: SessionMessage, sessionId: string, seq?: number): 
     parts: msg.parts,
     createdAt: msg.createdAt,
     ...(canonical ? { canonical_turn_id: canonical } : {}),
-    ...(seq !== undefined ? { seq } : {}),
   }
 }
 
 /**
- * Get-or-create a messages collection for the given agentName.
+ * Get-or-create a messages collection for the given `sessionId`.
  *
- * The collection reads from `GET /api/sessions/:id/messages` on cold-start
- * (no cached row) and reconnects-with-stale-cache. The `{type:'messages'}`
- * on-connect snapshot from the DO is a latency optimisation that writes
- * directly into the collection, so the queryFn is only the fallback path.
+ * Reads from `GET /api/sessions/:id/messages` on cold-start (empty
+ * collection → no cursor params → full history) and on reconnect
+ * (derives `sinceCreatedAt`+`sinceId` cursor from the max row). WS
+ * delta frames drive live updates through the synced factory's
+ * `begin/write/commit` path.
  */
-export function createMessagesCollection(agentName: string): MessagesCollection {
-  const cached = collectionsByAgent.get(agentName)
+export function createMessagesCollection(sessionId: string): MessagesCollection {
+  const cached = collectionsBySession.get(sessionId)
   if (cached) return cached
 
-  const queryOpts = queryCollectionOptions({
-    id: `messages:${agentName}`,
-    queryKey: ['messages', agentName] as const,
-    queryFn: async ({ signal }) => {
-      const resp = await fetch(apiUrl(`/api/sessions/${encodeURIComponent(agentName)}/messages`), {
-        signal,
-      })
+  const collection = createSyncedCollection<CachedMessage, string>({
+    id: `messages:${sessionId}`,
+    collection: `messages:${sessionId}`,
+    queryKey: ['messages', sessionId] as const,
+    getKey: (row) => row.id,
+    subscribe: (handler) => subscribeSessionStream(sessionId, handler),
+    onReconnect: (handler) => onSessionStreamReconnect(sessionId, handler),
+    queryFn: async () => {
+      // Cursor from the CURRENT collection's max (createdAt, id). On cold
+      // start the collection is empty → no cursor → full history. After
+      // reconnect the cursor skips rows the client already has.
+      const currentColl = collectionsBySession.get(sessionId)
+      let maxCreatedAt: string | null = null
+      let maxId: string | null = null
+      if (currentColl) {
+        try {
+          for (const [, row] of currentColl as Iterable<[string, CachedMessage]>) {
+            const iso =
+              typeof row.createdAt === 'string'
+                ? row.createdAt
+                : row.createdAt instanceof Date
+                  ? row.createdAt.toISOString()
+                  : undefined
+            if (!iso) continue
+            if (
+              !maxCreatedAt ||
+              iso > maxCreatedAt ||
+              (iso === maxCreatedAt && (maxId === null || row.id > maxId))
+            ) {
+              maxCreatedAt = iso
+              maxId = row.id
+            }
+          }
+        } catch {
+          // Collection may not be ready yet; cold-load without cursor.
+        }
+      }
+      const qs =
+        maxCreatedAt && maxId
+          ? `?sinceCreatedAt=${encodeURIComponent(maxCreatedAt)}&sinceId=${encodeURIComponent(maxId)}`
+          : ''
+      const resp = await fetch(
+        apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/messages${qs}`),
+      )
       if (!resp.ok) {
-        // Surface to query so retry/retryDelay kicks in; collection stays empty.
         throw new Error(`getMessages failed: ${resp.status}`)
       }
-      // `version` is the DO's current `messageSeq` at fetch time. Stamp every
-      // REST-loaded row with it so query-db-collection's diff reconcile
-      // doesn't clobber the `seq` values that the on-connect WS snapshot has
-      // already written (resolved the initial-load "user messages grouped
-      // together" flash — see messages-collection `seq` jsdoc).
-      const json = (await resp.json()) as { messages: SessionMessage[]; version?: number }
-      return (json.messages ?? []).map((m) => toCachedMessage(m, agentName, json.version))
+      const body = (await resp.json()) as { messages: SessionMessage[] }
+      return (body.messages ?? []).map((m) => toCachedMessage(m, sessionId))
     },
-    queryClient,
-    getKey: (item: CachedMessage) => item.id,
-    syncMode: 'eager',
-    refetchInterval: undefined,
-    staleTime: Number.POSITIVE_INFINITY,
-    retry: 1,
-    retryDelay: 500,
+    onInsert: async ({ transaction }) => {
+      // The factory's onInsert only handles string-content user turns
+      // forwarded from `messagesCollection.insert(...)` in
+      // `use-coding-agent.ts` → `sendMessage` / `submitDraft`. Image /
+      // ContentBlock sends stay on the legacy RPC path and never reach
+      // this handler. We extract the flat text from the first text part
+      // (the pre-computed parts-from-content transform is symmetric with
+      // the server's — see B7/B14).
+      const row = transaction.mutations[0].modified as CachedMessage & { content?: string }
+      const textPart = row.parts.find((p) => p.type === 'text') as
+        | { type: 'text'; text: string }
+        | undefined
+      const content = row.content ?? textPart?.text ?? ''
+      const createdAt =
+        typeof row.createdAt === 'string'
+          ? row.createdAt
+          : row.createdAt instanceof Date
+            ? row.createdAt.toISOString()
+            : new Date().toISOString()
+      const resp = await fetch(apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/messages`), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ content, clientId: row.id, createdAt }),
+      })
+      // 409 = server already has this clientId (idempotent retry). The
+      // canonical row is already in D1 and the echo will reconcile.
+      if (resp.status === 409) return
+      if (!resp.ok) throw new Error(`sendMessage REST ${resp.status}`)
+    },
+    persistence: persistence ?? null,
+    // B12: bump from 5 → 6 so pre-migration OPFS caches carrying the dead
+    // `seq` field are dropped on first load after deploy.
+    schemaVersion: 6,
   })
 
-  let collection: MessagesCollection
-  if (persistence) {
-    const opts = persistedCollectionOptions({
-      ...queryOpts,
-      persistence,
-      schemaVersion: 5,
-    })
-    // TanStackDB beta: persistedCollectionOptions adds a schema type that
-    // conflicts with createCollection overloads. Runtime behavior is correct.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    collection = createCollection(opts as any)
-  } else {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    collection = createCollection(queryOpts as any)
-  }
-
-  collectionsByAgent.set(agentName, collection)
+  collectionsBySession.set(sessionId, collection)
   return collection
 }
 
 /**
  * DEPRECATED — legacy singleton stub for any caller that hasn't migrated to
  * the factory yet. Forwards to `createMessagesCollection('__legacy__')`.
- * New code should call `createMessagesCollection(agentName)` directly.
+ * New code should call `createMessagesCollection(sessionId)` directly.
  */
 export const messagesCollection = createMessagesCollection('__legacy__')
 
@@ -151,7 +192,7 @@ export function evictOldMessages() {
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
   const cutoff = thirtyDaysAgo.toISOString()
 
-  for (const collection of collectionsByAgent.values()) {
+  for (const collection of collectionsBySession.values()) {
     try {
       const staleKeys: string[] = []
       for (const [key, msg] of collection as Iterable<[string, CachedMessage]>) {

@@ -1806,10 +1806,19 @@ export function createApiApp() {
       )
     }
 
+    // GH#38 P1.2: cursor-REST forwarding. Both `sinceCreatedAt` and
+    // `sinceId` must be supplied together (or both omitted for cold load).
+    // The DO is the sole validator; we just pass the params through.
+    const doUrl = new URL('https://session/messages')
+    const sinceCreatedAt = c.req.query('sinceCreatedAt')
+    const sinceId = c.req.query('sinceId')
+    if (sinceCreatedAt !== undefined) doUrl.searchParams.set('sinceCreatedAt', sinceCreatedAt)
+    if (sinceId !== undefined) doUrl.searchParams.set('sinceId', sinceId)
+
     const doId = getSessionDoId(c.env, ownership.session.id)
     const sessionDO = c.env.SESSION_AGENT.get(doId)
     const response = await sessionDO.fetch(
-      new Request('https://session/messages', {
+      new Request(doUrl.toString(), {
         headers: {
           'x-partykit-room': ownership.session.id,
           'x-user-id': userId,
@@ -1818,18 +1827,85 @@ export function createApiApp() {
     )
 
     if (!response.ok) {
-      return c.json({ error: 'Session not found' }, response.status === 403 ? 403 : 404)
+      // Propagate the DO's status + body verbatim so 400s from cursor
+      // validation surface to the client as 400, not collapsed into 404.
+      const text = await response.text()
+      try {
+        const parsed = JSON.parse(text)
+        return c.json(parsed, response.status as 400 | 403 | 404 | 500)
+      } catch {
+        return c.json({ error: text || 'Session not found' }, response.status === 403 ? 403 : 404)
+      }
     }
 
-    // SessionDO /messages returns `{messages: SessionMessage[], version: number}`.
-    // Pass both through — `version` is the DO's current `messageSeq`, which the
-    // client queryFn stamps onto each REST-loaded row as `seq` so the rows
-    // sort alongside WS-delivered rows (instead of falling into the
-    // `seq=Infinity` bucket that causes the initial-load ordering flash).
-    // Verbatim passthrough: we used to re-wrap the body as `{messages}`,
-    // producing `{messages: {messages: [...]}}` which broke `json.messages.map`.
-    const body = (await response.json()) as { messages: unknown; version?: unknown }
-    return c.json({ messages: body.messages, version: body.version })
+    // GH#38 P1.2: response body drops the legacy `version` field. The
+    // `messageSeq` envelope now rides on the WS frame only; REST is just
+    // a cold-load / reconnect-catchup channel.
+    const body = (await response.json()) as { messages: unknown }
+    return c.json({ messages: body.messages })
+  })
+
+  // GH#38 P1.2: optimistic user-turn ingest. The client's
+  // `messagesCollection` onInsert mutationFn (P1.3) POSTs here with the
+  // row it just optimistically wrote; the DO reuses `clientId` as the
+  // persisted row id so the server echo reconciles via TanStack DB
+  // deepEquals (no delete+insert churn on loopback).
+  app.post('/api/sessions/:id/messages', async (c) => {
+    const userId = c.get('userId')
+    const ownership = await getOwnedSession(c.env, c.req.param('id'), userId)
+    if (!ownership.ok) {
+      return c.json(
+        { error: ownership.status === 404 ? 'Session not found' : 'Forbidden' },
+        ownership.status,
+      )
+    }
+
+    let rawBody: unknown
+    try {
+      rawBody = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid JSON body' }, 400)
+    }
+    const body = rawBody as {
+      content?: unknown
+      clientId?: unknown
+      createdAt?: unknown
+    }
+    if (typeof body.content !== 'string' || body.content.length === 0) {
+      return c.json({ error: 'content must be a non-empty string' }, 400)
+    }
+    if (typeof body.clientId !== 'string' || !/^usr-client-[a-z0-9-]+$/.test(body.clientId)) {
+      return c.json({ error: 'clientId must match /^usr-client-[a-z0-9-]+$/' }, 400)
+    }
+    if (typeof body.createdAt !== 'string' || Number.isNaN(new Date(body.createdAt).getTime())) {
+      return c.json({ error: 'createdAt must be a valid ISO 8601 string' }, 400)
+    }
+
+    const doId = getSessionDoId(c.env, ownership.session.id)
+    const sessionDO = c.env.SESSION_AGENT.get(doId)
+    const response = await sessionDO.fetch(
+      new Request('https://session/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-partykit-room': ownership.session.id,
+          'x-user-id': userId,
+        },
+        body: JSON.stringify({
+          content: body.content,
+          clientId: body.clientId,
+          createdAt: body.createdAt,
+        }),
+      }),
+    )
+
+    const text = await response.text()
+    try {
+      const parsed = JSON.parse(text) as Record<string, unknown>
+      return c.json(parsed, response.status as 200 | 400 | 403 | 404 | 409 | 500)
+    } catch {
+      return c.json({ error: text || 'send failed' }, response.status as 400 | 500)
+    }
   })
 
   // P3 B4: REST endpoint for context usage. Scaffolding only — consumer

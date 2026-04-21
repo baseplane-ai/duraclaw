@@ -1,41 +1,58 @@
 /**
  * @vitest-environment jsdom
+ *
+ * GH#38 P1.5: branch-info-collection migrated onto `createSyncedCollection`.
+ * Tests verify the factory (a) delegates to the synced factory with the
+ * right `collection` routing name, `queryKey`, `getKey`, (b) memoises per
+ * sessionId, and (c) pipes synced-collection deltas on
+ * `branchInfo:<sessionId>` through to the internal begin/write/commit
+ * sync callback.
  */
+
+import type { SyncedCollectionFrame } from '@duraclaw/shared-types'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-// Mock TanStackDB modules
-const mockCollection = {
-  insert: vi.fn(),
-  update: vi.fn(),
-  has: vi.fn(),
-  utils: {},
+type SyncedCollectionConfig = {
+  id: string
+  collection: string
+  queryKey: readonly unknown[]
+  getKey: (row: { parentMsgId: string }) => string
+  subscribe: (handler: (frame: SyncedCollectionFrame<unknown>) => void) => () => void
+  onReconnect: (handler: () => void) => () => void
+  queryFn: () => Promise<unknown[]>
+  persistence?: unknown
+  schemaVersion?: number
 }
 
-const mockCreateCollection = vi.fn().mockReturnValue(mockCollection)
-const mockLocalOnlyCollectionOptions = vi.fn().mockImplementation((config) => ({
-  ...config,
-  _type: 'localOnlyCollectionOptions',
-}))
-const mockPersistedCollectionOptions = vi.fn().mockImplementation((config) => ({
-  ...config,
-  _type: 'persistedCollectionOptions',
-}))
+let capturedConfigs: SyncedCollectionConfig[] = []
 
-vi.mock('@tanstack/db', () => ({
-  createCollection: mockCreateCollection,
-  localOnlyCollectionOptions: mockLocalOnlyCollectionOptions,
-}))
-
-vi.mock('@tanstack/browser-db-sqlite-persistence', () => ({
-  persistedCollectionOptions: mockPersistedCollectionOptions,
+// Mock the synced-collection factory so we can inspect configs without
+// running the real TanStack DB plumbing.
+vi.mock('./synced-collection', () => ({
+  createSyncedCollection: vi.fn((config: SyncedCollectionConfig) => {
+    capturedConfigs.push(config)
+    return { __mock: true, config }
+  }),
 }))
 
 vi.mock('./db-instance', () => ({
   dbReady: Promise.resolve(null),
+  queryClient: { invalidateQueries: vi.fn() },
 }))
 
-describe('branch-info-collection', () => {
+// use-coding-agent exposes the session-stream primitives the factory
+// wires into its subscribe / onReconnect hooks. Mock to avoid loading
+// the full hook module (which pulls in React / agents/react).
+const mockSubscribe = vi.fn(() => () => {})
+const mockOnReconnect = vi.fn(() => () => {})
+vi.mock('~/features/agent-orch/use-coding-agent', () => ({
+  subscribeSessionStream: mockSubscribe,
+  onSessionStreamReconnect: mockOnReconnect,
+}))
+
+describe('branch-info-collection — GH#38 P1.5 synced-collection factory', () => {
   beforeEach(() => {
+    capturedConfigs = []
     vi.clearAllMocks()
   })
 
@@ -46,78 +63,75 @@ describe('branch-info-collection', () => {
   it('exports createBranchInfoCollection factory', async () => {
     vi.resetModules()
     const mod = await import('./branch-info-collection')
-    expect(mod.createBranchInfoCollection).toBeDefined()
     expect(typeof mod.createBranchInfoCollection).toBe('function')
   })
 
-  it('configures localOnlyCollectionOptions with per-agentName id and getKey on parentMsgId', async () => {
+  it('delegates to createSyncedCollection with per-session id/collection/queryKey', async () => {
     vi.resetModules()
     const mod = await import('./branch-info-collection')
+    mod.createBranchInfoCollection('sess-a')
 
-    mod.createBranchInfoCollection('agent-a')
-
-    expect(mockLocalOnlyCollectionOptions).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'branch_info:agent-a' }),
-    )
-
-    const call = mockLocalOnlyCollectionOptions.mock.calls.find(
-      (c) => (c[0] as { id: string }).id === 'branch_info:agent-a',
-    )
-    expect(call).toBeDefined()
-    const config = call![0] as { getKey: (row: { parentMsgId: string }) => string }
-    expect(config.getKey({ parentMsgId: 'usr-1' })).toBe('usr-1')
+    expect(capturedConfigs).toHaveLength(1)
+    const cfg = capturedConfigs[0]
+    expect(cfg.id).toBe('branch_info:sess-a')
+    expect(cfg.collection).toBe('branchInfo:sess-a')
+    expect(cfg.queryKey).toEqual(['branchInfo', 'sess-a'])
+    expect(cfg.schemaVersion).toBe(2)
   })
 
-  it('creates collection without persistence when dbReady resolves to null', async () => {
+  it('keys rows on parentMsgId', async () => {
     vi.resetModules()
     const mod = await import('./branch-info-collection')
-    mod.createBranchInfoCollection('agent-unpersisted')
-
-    expect(mockCreateCollection).toHaveBeenCalled()
-    expect(mockPersistedCollectionOptions).not.toHaveBeenCalled()
+    mod.createBranchInfoCollection('sess-b')
+    const cfg = capturedConfigs[0]
+    expect(cfg.getKey({ parentMsgId: 'usr-7' })).toBe('usr-7')
   })
 
-  it('wraps with persistedCollectionOptions (schemaVersion 1) when persistence is available', async () => {
+  it('queryFn resolves to an empty array (DO-pushed, no REST)', async () => {
     vi.resetModules()
-
-    vi.doMock('./db-instance', () => ({
-      dbReady: Promise.resolve({ adapter: {}, coordinator: {} }),
-    }))
-
     const mod = await import('./branch-info-collection')
-    mod.createBranchInfoCollection('agent-persisted')
-
-    expect(mockPersistedCollectionOptions).toHaveBeenCalledWith(
-      expect.objectContaining({
-        schemaVersion: 1,
-        persistence: expect.objectContaining({ adapter: {} }),
-      }),
-    )
+    mod.createBranchInfoCollection('sess-q')
+    const cfg = capturedConfigs[0]
+    const rows = await cfg.queryFn()
+    expect(rows).toEqual([])
   })
 
-  it('memoises collections by agentName', async () => {
+  it('wires subscribe + onReconnect through the session-stream primitives', async () => {
+    vi.resetModules()
+    const mod = await import('./branch-info-collection')
+    mod.createBranchInfoCollection('sess-s')
+    const cfg = capturedConfigs[0]
+
+    const frameHandler = vi.fn()
+    cfg.subscribe(frameHandler)
+    expect(mockSubscribe).toHaveBeenCalledWith('sess-s', frameHandler)
+
+    const reconnectHandler = vi.fn()
+    cfg.onReconnect(reconnectHandler)
+    expect(mockOnReconnect).toHaveBeenCalledWith('sess-s', reconnectHandler)
+  })
+
+  it('memoises collections by sessionId', async () => {
     vi.resetModules()
     const mod = await import('./branch-info-collection')
 
-    const a1 = mod.createBranchInfoCollection('agentA')
-    const a2 = mod.createBranchInfoCollection('agentA')
-    const b = mod.createBranchInfoCollection('agentB')
+    const a1 = mod.createBranchInfoCollection('sess-memo')
+    const a2 = mod.createBranchInfoCollection('sess-memo')
+    const b = mod.createBranchInfoCollection('sess-other')
 
     expect(a1).toBe(a2)
-    expect(a1).toBe(b) // same mock reference, but distinct ids were configured
-    const distinctIds = new Set(
-      mockLocalOnlyCollectionOptions.mock.calls.map((c) => (c[0] as { id: string }).id),
-    )
-    expect(distinctIds.has('branch_info:agentA')).toBe(true)
-    expect(distinctIds.has('branch_info:agentB')).toBe(true)
+    expect(a1).not.toBe(b)
+    expect(capturedConfigs).toHaveLength(2)
+    expect(capturedConfigs[0].id).toBe('branch_info:sess-memo')
+    expect(capturedConfigs[1].id).toBe('branch_info:sess-other')
   })
 
-  it('exports BranchInfoRow interface shape', async () => {
+  it('re-exports BranchInfoRow type', async () => {
     vi.resetModules()
     const mod = await import('./branch-info-collection')
-    const row: mod.BranchInfoRow = {
+    const row: typeof mod extends { BranchInfoRow: infer R } ? R : never = {
       parentMsgId: 'msg-0',
-      sessionId: 'session-abc',
+      sessionId: 'sess-t',
       siblings: ['usr-1', 'usr-3'],
       activeId: 'usr-1',
       updatedAt: '2026-04-19T00:00:00Z',
