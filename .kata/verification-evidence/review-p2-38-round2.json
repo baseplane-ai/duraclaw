@@ -1,0 +1,8 @@
+{
+  "provider": "claude",
+  "prompt": "code-review",
+  "score": 79,
+  "passed": true,
+  "createdAt": "2026-04-21T16:48:55.984Z",
+  "reviewPath": "/data/projects/duraclaw-dev2/.kata/verification-evidence/review-p2-38-round2.md"
+}

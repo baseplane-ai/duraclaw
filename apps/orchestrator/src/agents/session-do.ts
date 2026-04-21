@@ -332,9 +332,16 @@ export class SessionDO extends Agent<Env, SessionMeta> {
           // migration v9 (CREATE INDEX IF NOT EXISTS on the SDK-owned
           // assistant_messages table) so the `(session_id, created_at, id)`
           // predicate + ORDER BY is index-seek, not a table-scan.
+          //
+          // NOTE: The SDK's `Session.create(this)` (no `.forSession(id)` call)
+          // leaves its internal `sessionId` as the empty string, so
+          // `AgentSessionProvider` writes every row with `session_id = ''`.
+          // Each DO has its own isolated SQLite, so scoping by the DO name
+          // is redundant anyway — we match on the literal `''` the SDK
+          // actually stores. Querying by `this.name` returned zero rows.
           const rows = this.sql<{ content: string }>`
             SELECT content FROM assistant_messages
-            WHERE session_id = ${this.name}
+            WHERE session_id = ''
               AND (
                 (created_at > ${sinceCreatedAt as string})
                 OR (created_at = ${sinceCreatedAt as string} AND id > ${sinceId as string})
@@ -2396,9 +2403,13 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     const candidateId = opts?.client_message_id ?? `usr-${this.turnCounter + 1}`
     if (opts?.client_message_id) {
       try {
+        // Same SDK-owned `assistant_messages` table the Session class writes
+        // to. `session_id` is always the literal empty string in our setup
+        // because `Session.create(this)` is called without `.forSession(id)`
+        // — see comment in the GET /messages handler for the full rationale.
         const existing = this.sql<{ id: string }>`
           SELECT id FROM assistant_messages
-          WHERE id = ${candidateId} AND session_id = ${this.name}
+          WHERE id = ${candidateId} AND session_id = ''
           LIMIT 1
         `
         if ([...existing].length > 0) {
