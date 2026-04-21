@@ -96,6 +96,40 @@ describe('QuickPromptInput', () => {
     expect(onSubmit).not.toHaveBeenCalled()
   })
 
+  it('chatStyle drops the heading + pickers but still submits with the preselected project', async () => {
+    const onSubmit = vi.fn()
+    render(
+      <QuickPromptInput
+        onSubmit={onSubmit}
+        projects={mockProjects}
+        initialProject="baseplane"
+        chatStyle
+      />,
+    )
+
+    expect(screen.queryByText('What should the agent do?')).toBeNull()
+    expect(screen.queryByRole('combobox')).toBeNull()
+
+    const textarea = screen.getByPlaceholderText(
+      'Describe the task, paste or attach an image...',
+    ) as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: 'go' } })
+    const submitButton = textarea.form?.querySelector(
+      'button[type="submit"]',
+    ) as HTMLButtonElement | null
+    if (!submitButton) throw new Error('submit button not found')
+    fireEvent.click(submitButton)
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(onSubmit).toHaveBeenCalledTimes(1)
+    expect(onSubmit.mock.calls[0][0]).toMatchObject({
+      project: 'baseplane',
+      model: 'claude-opus-4-6',
+      prompt: 'go',
+    })
+  })
+
   it('prefills the selected project when initialProject is provided', async () => {
     const onSubmit = vi.fn()
     render(

@@ -354,6 +354,9 @@ function AgentOrchContent() {
                   : quickPromptHint?.project
               }
               initialNewTab={quickPromptHint?.newTab}
+              chatStyle={Boolean(
+                activeSessionId && isDraftTabId(activeSessionId) && tabProjects[activeSessionId],
+              )}
             />
           )}
         </div>

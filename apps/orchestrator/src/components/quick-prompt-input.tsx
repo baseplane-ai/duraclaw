@@ -63,6 +63,14 @@ export interface QuickPromptInputProps {
   initialProject?: string
   /** Optional pre-set newTab checkbox state (applies only if selected project has an existing tab). */
   initialNewTab?: boolean
+  /**
+   * Render as a "blank chat": drop the centered heading + project/model
+   * pickers + new-tab checkbox and pin the composer to the bottom of the
+   * pane. Used when entering from a tab context-menu action (the project is
+   * already known from the tab) so the UI matches a just-opened chat rather
+   * than the root landing page.
+   */
+  chatStyle?: boolean
 }
 
 function extractRepoName(repoOrigin: string): string {
@@ -78,6 +86,7 @@ export function QuickPromptInput({
   projectsLoading,
   initialProject,
   initialNewTab,
+  chatStyle,
 }: QuickPromptInputProps) {
   const { preferences } = useUserDefaults()
 
@@ -199,6 +208,75 @@ export function QuickPromptInput({
     setImageError(null)
   }
 
+  const composer = (
+    <PromptInput
+      onPaste={handlePaste}
+      onSubmit={handleSubmit}
+      className="rounded-lg border bg-background shadow-sm"
+    >
+      {images.length > 0 && (
+        <div className="flex gap-2 px-3 pt-2">
+          {images.map((img, i) => (
+            <div
+              key={img.thumbnail.slice(-20)}
+              className="group relative"
+              data-testid="image-preview-chip"
+            >
+              <img
+                src={img.thumbnail}
+                alt="Preview"
+                className="size-12 rounded border object-cover"
+              />
+              <button
+                type="button"
+                onClick={() => removeImage(i)}
+                aria-label="Remove image"
+                className="absolute -right-1 -top-1 rounded-full bg-destructive p-0.5 text-destructive-foreground opacity-0 transition-opacity group-hover:opacity-100"
+              >
+                <XIcon className="size-3" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      {imageError && <p className="px-3 pt-1 text-xs text-destructive">{imageError}</p>}
+      <PromptInputBody>
+        <PromptInputTextarea
+          placeholder="Describe the task, paste or attach an image..."
+          autoFocus
+        />
+      </PromptInputBody>
+      <PromptInputFooter>
+        <label
+          className="inline-flex size-7 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          aria-label="Attach image"
+        >
+          <input
+            type="file"
+            accept="image/*"
+            className="sr-only"
+            onChange={(e) => {
+              const file = e.target.files?.[0]
+              if (file) processFile(file)
+              e.target.value = ''
+            }}
+          />
+          <ImageIcon className="size-4" />
+        </label>
+        <PromptInputSubmit disabled={!selectedProject} />
+      </PromptInputFooter>
+    </PromptInput>
+  )
+
+  if (chatStyle) {
+    return (
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div className="flex-1" />
+        <div className="px-3 pb-3">{composer}</div>
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-col items-center justify-center gap-4 h-full px-4">
       <h2 className="text-2xl font-semibold tracking-tight">What should the agent do?</h2>
@@ -247,65 +325,7 @@ export function QuickPromptInput({
           </SelectContent>
         </Select>
       </div>
-      <div className="w-full max-w-lg">
-        <PromptInput
-          onPaste={handlePaste}
-          onSubmit={handleSubmit}
-          className="rounded-lg border bg-background shadow-sm"
-        >
-          {images.length > 0 && (
-            <div className="flex gap-2 px-3 pt-2">
-              {images.map((img, i) => (
-                <div
-                  key={img.thumbnail.slice(-20)}
-                  className="group relative"
-                  data-testid="image-preview-chip"
-                >
-                  <img
-                    src={img.thumbnail}
-                    alt="Preview"
-                    className="size-12 rounded border object-cover"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => removeImage(i)}
-                    aria-label="Remove image"
-                    className="absolute -right-1 -top-1 rounded-full bg-destructive p-0.5 text-destructive-foreground opacity-0 transition-opacity group-hover:opacity-100"
-                  >
-                    <XIcon className="size-3" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-          {imageError && <p className="px-3 pt-1 text-xs text-destructive">{imageError}</p>}
-          <PromptInputBody>
-            <PromptInputTextarea
-              placeholder="Describe the task, paste or attach an image..."
-              autoFocus
-            />
-          </PromptInputBody>
-          <PromptInputFooter>
-            <label
-              className="inline-flex size-7 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-              aria-label="Attach image"
-            >
-              <input
-                type="file"
-                accept="image/*"
-                className="sr-only"
-                onChange={(e) => {
-                  const file = e.target.files?.[0]
-                  if (file) processFile(file)
-                  e.target.value = ''
-                }}
-              />
-              <ImageIcon className="size-4" />
-            </label>
-            <PromptInputSubmit disabled={!selectedProject} />
-          </PromptInputFooter>
-        </PromptInput>
-      </div>
+      <div className="w-full max-w-lg">{composer}</div>
       {existingTab && (
         <div className="flex items-center gap-2">
           <Checkbox
