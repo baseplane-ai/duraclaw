@@ -54,7 +54,6 @@ export interface SessionLiveState {
   numTurns?: number | null
   totalCostUsd?: number | null
   durationMs?: number | null
-  messageCount?: number | null
   summary?: string
   title?: string | null
   tag?: string | null
@@ -173,7 +172,6 @@ export function seedSessionLiveStateFromSummary(summary: SessionSummary): void {
     numTurns: summary.numTurns ?? null,
     totalCostUsd: summary.totalCostUsd ?? null,
     durationMs: summary.durationMs ?? null,
-    messageCount: summary.messageCount ?? null,
     summary: summary.summary,
     title: summary.title ?? null,
     tag: summary.tag ?? null,

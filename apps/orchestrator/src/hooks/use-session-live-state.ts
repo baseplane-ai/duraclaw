@@ -44,7 +44,6 @@ export interface UseSessionLiveStateResult {
   numTurns?: number | null
   totalCostUsd?: number | null
   durationMs?: number | null
-  messageCount?: number | null
   summary?: string
   title?: string | null
   tag?: string | null
@@ -93,7 +92,6 @@ export function useSessionLiveState(
       numTurns: row.numTurns ?? null,
       totalCostUsd: row.totalCostUsd ?? null,
       durationMs: row.durationMs ?? null,
-      messageCount: row.messageCount ?? null,
       summary: row.summary,
       title: row.title ?? null,
       tag: row.tag ?? null,

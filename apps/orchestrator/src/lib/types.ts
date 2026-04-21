@@ -107,7 +107,11 @@ export interface AgentSessionRow {
   archived: boolean
   durationMs: number | null
   totalCostUsd: number | null
-  messageCount: number | null
+  error: string | null
+  errorCode: string | null
+  kataStateJson: string | null
+  contextUsageJson: string | null
+  worktreeInfoJson: string | null
   kataMode: string | null
   kataIssue: number | null
   kataPhase: string | null

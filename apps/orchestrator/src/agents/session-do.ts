@@ -3196,10 +3196,11 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         this.session.appendMessage(errorMsg)
         this.broadcastMessage(errorMsg)
 
-        // Transition to idle (not failed) — session remains interactive.
-        // Terminal for the current runner: clear active_callback_token.
+        // Transition to 'error' (spec #37 B4) — session surfaces the failure; user
+        // can still resubmit to recover. Clears active_callback_token so the
+        // current runner is terminal.
         this.updateState({
-          status: 'idle',
+          status: 'error',
           error: event.error,
           active_callback_token: undefined,
         })

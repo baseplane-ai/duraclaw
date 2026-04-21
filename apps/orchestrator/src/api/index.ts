@@ -1609,7 +1609,6 @@ export function createApiApp() {
       archived: false,
       durationMs: null as number | null,
       totalCostUsd: null as number | null,
-      messageCount: null as number | null,
       kataMode: null as string | null,
       kataIssue: typeof body.kataIssue === 'number' ? body.kataIssue : (null as number | null),
       kataPhase: null as string | null,

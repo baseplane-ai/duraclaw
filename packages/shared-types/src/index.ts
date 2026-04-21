@@ -547,6 +547,7 @@ export type SessionStatus =
   | 'waiting_input'
   | 'waiting_permission'
   | 'waiting_gate'
+  | 'error'
 
 // SessionState deleted (#31 P5 / B10). Status / gate / result are now derived
 // client-side from `messagesCollection`; context usage and kata state go over
@@ -592,11 +593,16 @@ export interface SessionSummary {
   archived?: boolean
   origin?: string | null
   agent?: string | null
-  messageCount?: number | null
   sdkSessionId?: string | null
   kataMode?: string | null
   kataIssue?: number | null
   kataPhase?: string | null
+  // Spec #37 P1a-1: per-session live state mirrored from DO.
+  error?: string | null
+  errorCode?: string | null
+  kataStateJson?: string | null
+  contextUsageJson?: string | null
+  worktreeInfoJson?: string | null
 }
 
 // ── Stored Message (for SQLite persistence) ─────────────────────────

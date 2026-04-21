@@ -73,7 +73,6 @@ function rowToSessionRecord(row: SessionLiveState): SessionRecord {
     archived: !!row.archived,
     origin: row.origin ?? null,
     agent: row.agent ?? null,
-    messageCount: row.messageCount ?? null,
     sdkSessionId: row.sdkSessionId ?? null,
     kataMode: row.kataMode ?? null,
     kataIssue: row.kataIssue ?? null,

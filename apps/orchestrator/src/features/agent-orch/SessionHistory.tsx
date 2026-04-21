@@ -307,7 +307,7 @@ export function SessionHistory() {
                   <TableCell>{formatDate(session.createdAt)}</TableCell>
                   <TableCell>{formatDuration(session.durationMs)}</TableCell>
                   <TableCell>{formatCost(session.totalCostUsd)}</TableCell>
-                  <TableCell>{session.numTurns ?? session.messageCount ?? '-'}</TableCell>
+                  <TableCell>{session.numTurns ?? '-'}</TableCell>
                   <TableCell>
                     {session.sdkSessionId &&
                       session.agent === 'claude' &&
