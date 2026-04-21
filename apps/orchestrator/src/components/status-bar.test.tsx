@@ -91,16 +91,16 @@ describe('StatusBar', () => {
     expect(screen.getByTitle('Connected')).toBeDefined()
   })
 
-  it('shows WS dot with "Connecting..." title when wsReadyState is 0', () => {
+  it('shows WS dot with "Reconnecting…" title when wsReadyState is 0', () => {
     upsertSessionLiveState(TEST_ID, { wsReadyState: 0, status: 'idle' })
     render(<StatusBar sessionId={TEST_ID} />)
-    expect(screen.getByTitle('Connecting...')).toBeDefined()
+    expect(screen.getByTitle('Reconnecting…')).toBeDefined()
   })
 
-  it('shows WS dot with "Disconnected" title when wsReadyState is 3', () => {
+  it('shows WS dot with "Reconnecting…" title when wsReadyState is 3', () => {
     upsertSessionLiveState(TEST_ID, { wsReadyState: 3, status: 'idle' })
     render(<StatusBar sessionId={TEST_ID} />)
-    expect(screen.getByTitle('Disconnected')).toBeDefined()
+    expect(screen.getByTitle('Reconnecting…')).toBeDefined()
   })
 
   it('shows cost and duration from top-level SessionLiveState fields', () => {

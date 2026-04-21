@@ -23,13 +23,19 @@ function formatDuration(ms: number): string {
 }
 
 function WsDot({ readyState }: { readyState: number }) {
+  // Any non-OPEN state (CONNECTING/CLOSING/CLOSED) is surfaced as yellow —
+  // partysocket auto-reconnects, so a CLOSED state is transient and
+  // functionally the same as CONNECTING from the user's perspective. The
+  // dot is the only signal the UI shows for connection health; the status
+  // label stays anchored to the session's actual status (running / idle /
+  // waiting_gate), not the WS state.
   return (
     <span
       className={cn(
         'size-2 rounded-full',
-        readyState === 1 ? 'bg-green-500' : readyState === 0 ? 'bg-yellow-500' : 'bg-red-500',
+        readyState === 1 ? 'bg-green-500' : 'bg-yellow-500',
       )}
-      title={readyState === 1 ? 'Connected' : readyState === 0 ? 'Connecting...' : 'Disconnected'}
+      title={readyState === 1 ? 'Connected' : 'Reconnecting…'}
     />
   )
 }
@@ -232,7 +238,12 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
 
   if (!sessionId) return null
   const readyState = live.wsReadyState ?? 3
-  const display = deriveDisplayStateFromStatus(derivedStatus, readyState)
+  // Force `wsReadyState=1` when deriving the display label so it stays
+  // anchored to the session's actual status (Running / Idle / Needs
+  // Attention) regardless of WS health. Connection health is communicated
+  // by `WsDot`'s color — the label shouldn't flicker to "Reconnecting…"
+  // every time partysocket hiccups.
+  const display = deriveDisplayStateFromStatus(derivedStatus, 1)
   const status = derivedStatus
   const project = live.project ?? ''
   const model = live.model ?? null
