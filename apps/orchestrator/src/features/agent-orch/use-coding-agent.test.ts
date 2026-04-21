@@ -1150,9 +1150,10 @@ describe('legacy gateway_event handling', () => {
   // via syncResultToD1 + broadcastSessionRow). The prior
   // `processes result events` test is therefore intentionally absent.
 
-  // Spec #37 P2b B16: the `session_summary` frame handler is retired — the
-  // DO now broadcasts per-turn state changes as `agent_sessions` synced
-  // deltas and the sessionsCollection converges automatically. The prior
+  // Spec #37 P2b B16: the legacy per-turn summary frame handler is
+  // retired — the DO now broadcasts per-turn state changes as
+  // `agent_sessions` synced deltas and the sessionsCollection converges
+  // automatically. The prior
   // regression guard for the turn-counter refresh is therefore intentionally
   // absent.
 

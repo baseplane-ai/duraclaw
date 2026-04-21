@@ -3119,10 +3119,10 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           this.syncStatusToD1(_now)
           this.syncResultToD1(_now)
         }
-        // Spec #37 B9: the `session_summary` WS frame is retired — numTurns /
-        // totalCostUsd / durationMs now reach the client via the
-        // `agent_sessions` synced-collection delta emitted by syncResultToD1 →
-        // broadcastSessionRow above.
+        // Spec #37 B9: the legacy per-turn summary WS frame is retired —
+        // numTurns / totalCostUsd / durationMs now reach the client via the
+        // `agent_sessions` synced-collection delta emitted by syncResultToD1
+        // → broadcastSessionRow above.
         // Discovered-session fan-out is now owned by the cron in
         // src/api/scheduled.ts (#7 p6); SessionDO no longer mirrors here.
         if (!event.is_error) {

@@ -482,10 +482,11 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           return
         }
 
-        // Spec #37 P2b B16: `session_summary` WS frame is retired. The DO
-        // now broadcasts per-turn state changes as `agent_sessions` synced
-        // deltas (numTurns, totalCostUsd, durationMs, status), which the
-        // sessionsCollection applies automatically. No client-side write here.
+        // Spec #37 P2b B16: the legacy per-turn summary frame handler is
+        // retired. The DO now broadcasts per-turn state changes as
+        // `agent_sessions` synced deltas (numTurns, totalCostUsd,
+        // durationMs, status), which the sessionsCollection applies
+        // automatically. No client-side write here.
 
         // Legacy gateway_event format (non-message events only)
         if (parsed.type === 'gateway_event' && parsed.event) {
