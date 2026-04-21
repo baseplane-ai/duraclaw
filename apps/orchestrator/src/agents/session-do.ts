@@ -1114,7 +1114,50 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     }
   }
 
-  private async syncKataToD1(kataState: KataSessionState | null, updatedAt: string) {
+  /**
+   * Consolidated status + error write: one UPDATE, one broadcast. Preserves
+   * `syncStatusToD1`'s `shouldClearError` semantics — when `errorMsg` is null
+   * and the new status is `running` / `idle`, clears `error` + `errorCode`.
+   * When `errorMsg` is non-null, sets error + errorCode as provided regardless
+   * of status.
+   */
+  private async syncStatusAndErrorToD1(
+    status: SessionStatus,
+    errorMsg: string | null,
+    errorCode: string | null,
+    updatedAt: string,
+  ) {
+    try {
+      const sessionId = this.state.session_id ?? this.ctx.id.toString()
+      const shouldClearError = errorMsg == null && (status === 'running' || status === 'idle')
+      const errorFields =
+        errorMsg != null
+          ? { error: errorMsg, errorCode }
+          : shouldClearError
+            ? { error: null, errorCode: null }
+            : {}
+      await this.d1
+        .update(agentSessions)
+        .set({
+          status,
+          updatedAt,
+          lastActivity: updatedAt,
+          ...errorFields,
+        })
+        .where(eq(agentSessions.id, sessionId))
+      await broadcastSessionRow(this.env, this.ctx, sessionId, 'update')
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Failed to sync status+error to D1:`, err)
+    }
+  }
+
+  /**
+   * Consolidated kata write: one UPDATE for all kata columns
+   * (kataMode, kataIssue, kataPhase, kataStateJson) + one broadcast.
+   * Also refreshes the worktree reservation activity and broadcasts the
+   * chain row, mirroring `syncKataToD1`'s side effects.
+   */
+  private async syncKataAllToD1(kataState: KataSessionState | null, updatedAt: string) {
     try {
       const sessionId = this.state.session_id ?? this.ctx.id.toString()
       await this.d1
@@ -1123,17 +1166,17 @@ export class SessionDO extends Agent<Env, SessionMeta> {
           kataMode: kataState?.currentMode ?? null,
           kataIssue: kataState?.issueNumber ?? null,
           kataPhase: kataState?.currentPhase ?? null,
+          kataStateJson: kataState ? JSON.stringify(kataState) : null,
           updatedAt,
         })
         .where(eq(agentSessions.id, sessionId))
       await broadcastSessionRow(this.env, this.ctx, sessionId, 'update')
     } catch (err) {
-      console.error(`[SessionDO:${this.ctx.id}] Failed to sync kata to D1:`, err)
+      console.error(`[SessionDO:${this.ctx.id}] Failed to sync kata (all) to D1:`, err)
     }
 
-    // Chain UX B11: refresh the worktree reservation's last_activity_at on
-    // every kata_state event so stale gating (7-day inactivity) tracks real
-    // session usage. Also clears a previously-set `stale` flag.
+    // Mirror `syncKataToD1` side effects: refresh worktree reservation
+    // last_activity_at (clears stale flag) and broadcast updated chains row.
     if (kataState?.issueNumber != null && this.state.project) {
       try {
         await this.d1
@@ -1150,38 +1193,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       }
     }
 
-    // GH#32 phase p5: broadcast an updated `chains` row for the affected
-    // issue so connected browsers see status / column / lastActivity
-    // updates without polling. Scoped to the session's owning user; a null
-    // return from buildChainRow means the chain has emptied — emit a delete
-    // so the client collection drops the row.
     this.broadcastChainUpdate(kataState?.issueNumber ?? null)
-  }
-
-  private async syncErrorToD1(error: string | null, errorCode: string | null, updatedAt: string) {
-    try {
-      const sessionId = this.state.session_id ?? this.ctx.id.toString()
-      await this.d1
-        .update(agentSessions)
-        .set({ error, errorCode, updatedAt })
-        .where(eq(agentSessions.id, sessionId))
-      await broadcastSessionRow(this.env, this.ctx, sessionId, 'update')
-    } catch (err) {
-      console.error(`[SessionDO:${this.ctx.id}] Failed to sync error to D1:`, err)
-    }
-  }
-
-  private async syncKataStateJsonToD1(kataStateJson: string | null, updatedAt: string) {
-    try {
-      const sessionId = this.state.session_id ?? this.ctx.id.toString()
-      await this.d1
-        .update(agentSessions)
-        .set({ kataStateJson, updatedAt })
-        .where(eq(agentSessions.id, sessionId))
-      await broadcastSessionRow(this.env, this.ctx, sessionId, 'update')
-    } catch (err) {
-      console.error(`[SessionDO:${this.ctx.id}] Failed to sync kata_state_json to D1:`, err)
-    }
   }
 
   // Spec #37 P1b: defined but not yet wired — there is no callsite in this
@@ -3195,11 +3207,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         }
         {
           const _now = new Date().toISOString()
-          this.syncKataToD1(event.kata_state, _now)
-          this.syncKataStateJsonToD1(
-            event.kata_state ? JSON.stringify(event.kata_state) : null,
-            _now,
-          )
+          this.syncKataAllToD1(event.kata_state, _now)
         }
 
         // Chain UX P4: detect mode transitions on chain-linked sessions and
@@ -3269,8 +3277,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         })
         {
           const _now = new Date().toISOString()
-          this.syncStatusToD1(_now)
-          this.syncErrorToD1(event.error ?? null, null, _now)
+          this.syncStatusAndErrorToD1('error', event.error ?? null, null, _now)
         }
         this.dispatchPush(
           {
