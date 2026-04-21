@@ -2593,5 +2593,44 @@ export function createApiApp() {
     return c.json({ ok: true })
   })
 
+  // GET /api/deploys/state — admin-only proxy to the agent-gateway's
+  // /deploy/state, which in turn reads baseplane-infra's `.deploy-state.json`.
+  // Mirrors the data that `pnpm tui` renders on the VPS.
+  app.get('/api/deploys/state', async (c) => {
+    const userId = c.get('userId')
+    const userRow = await c.env.AUTH_DB.prepare('SELECT role FROM users WHERE id = ?')
+      .bind(userId)
+      .first<{ role: string | null }>()
+    if (userRow?.role !== 'admin') {
+      return c.json({ error: 'Forbidden' }, 403)
+    }
+
+    if (!c.env.CC_GATEWAY_URL) {
+      return c.json({ error: 'Gateway not configured' }, 503)
+    }
+
+    const httpBase = c.env.CC_GATEWAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+    const gatewayUrl = new URL('/deploy/state', httpBase)
+    const headers: Record<string, string> = {}
+    if (c.env.CC_GATEWAY_SECRET) {
+      headers.Authorization = `Bearer ${c.env.CC_GATEWAY_SECRET}`
+    }
+
+    try {
+      const resp = await fetch(gatewayUrl.toString(), {
+        headers,
+        signal: AbortSignal.timeout(5000),
+      })
+      const body = await resp.text()
+      return new Response(body, {
+        status: resp.status,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      return c.json({ error: `Gateway unreachable: ${message}` }, 502)
+    }
+  })
+
   return app
 }

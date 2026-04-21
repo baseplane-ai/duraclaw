@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as AuthenticatedAdminUsersRouteImport } from './routes/_authenticated/admin.users'
 import { Route as AuthenticatedBoardRouteImport } from './routes/_authenticated/board'
 import { Route as AuthenticatedChainIssueNumberRouteImport } from './routes/_authenticated/chain.$issueNumber'
+import { Route as AuthenticatedDeploysRouteImport } from './routes/_authenticated/deploys'
 import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/index'
 import { Route as AuthenticatedRouteRouteImport } from './routes/_authenticated/route'
 import { Route as AuthenticatedSessionIdRouteImport } from './routes/_authenticated/session.$id'
@@ -43,6 +44,11 @@ const AuthenticatedBoardRoute = AuthenticatedBoardRouteImport.update({
   path: '/board',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
+const AuthenticatedDeploysRoute = AuthenticatedDeploysRouteImport.update({
+  id: '/deploys',
+  path: '/deploys',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
 const AuthenticatedSettingsRoute = AuthenticatedSettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
@@ -68,6 +74,7 @@ export interface FileRoutesByFullPath {
   '/login': typeof LoginRoute
   '/maintenance': typeof MaintenanceRoute
   '/board': typeof AuthenticatedBoardRoute
+  '/deploys': typeof AuthenticatedDeploysRoute
   '/settings': typeof AuthenticatedSettingsRoute
   '/admin/users': typeof AuthenticatedAdminUsersRoute
   '/session/$id': typeof AuthenticatedSessionIdRoute
@@ -77,6 +84,7 @@ export interface FileRoutesByTo {
   '/login': typeof LoginRoute
   '/maintenance': typeof MaintenanceRoute
   '/board': typeof AuthenticatedBoardRoute
+  '/deploys': typeof AuthenticatedDeploysRoute
   '/settings': typeof AuthenticatedSettingsRoute
   '/': typeof AuthenticatedIndexRoute
   '/admin/users': typeof AuthenticatedAdminUsersRoute
@@ -89,6 +97,7 @@ export interface FileRoutesById {
   '/login': typeof LoginRoute
   '/maintenance': typeof MaintenanceRoute
   '/_authenticated/board': typeof AuthenticatedBoardRoute
+  '/_authenticated/deploys': typeof AuthenticatedDeploysRoute
   '/_authenticated/settings': typeof AuthenticatedSettingsRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
   '/_authenticated/admin/users': typeof AuthenticatedAdminUsersRoute
@@ -102,6 +111,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/maintenance'
     | '/board'
+    | '/deploys'
     | '/settings'
     | '/admin/users'
     | '/session/$id'
@@ -111,6 +121,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/maintenance'
     | '/board'
+    | '/deploys'
     | '/settings'
     | '/'
     | '/admin/users'
@@ -122,6 +133,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/maintenance'
     | '/_authenticated/board'
+    | '/_authenticated/deploys'
     | '/_authenticated/settings'
     | '/_authenticated/'
     | '/_authenticated/admin/users'
@@ -172,6 +184,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedBoardRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/deploys': {
+      id: '/_authenticated/deploys'
+      path: '/deploys'
+      fullPath: '/deploys'
+      preLoaderRoute: typeof AuthenticatedDeploysRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/_authenticated/settings': {
       id: '/_authenticated/settings'
       path: '/settings'
@@ -205,6 +224,7 @@ declare module '@tanstack/react-router' {
 
 interface AuthenticatedRouteRouteChildren {
   AuthenticatedBoardRoute: typeof AuthenticatedBoardRoute
+  AuthenticatedDeploysRoute: typeof AuthenticatedDeploysRoute
   AuthenticatedSettingsRoute: typeof AuthenticatedSettingsRoute
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
   AuthenticatedAdminUsersRoute: typeof AuthenticatedAdminUsersRoute
@@ -214,6 +234,7 @@ interface AuthenticatedRouteRouteChildren {
 
 const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedBoardRoute: AuthenticatedBoardRoute,
+  AuthenticatedDeploysRoute: AuthenticatedDeploysRoute,
   AuthenticatedSettingsRoute: AuthenticatedSettingsRoute,
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
   AuthenticatedAdminUsersRoute: AuthenticatedAdminUsersRoute,

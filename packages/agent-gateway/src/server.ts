@@ -2,6 +2,7 @@ import { type FSWatcher, watch } from 'node:fs'
 import nodePath from 'node:path'
 import type { ServerWebSocket } from 'bun'
 import { verifyToken } from './auth.js'
+import { handleDeployState } from './deploy-state.js'
 import { handleFileContents, handleFileTree, handleGitStatus } from './files.js'
 import {
   handleKillSession,
@@ -95,6 +96,12 @@ const server = Bun.serve<WsData>({
         logStatusUnauthorized(statusUnauthMatch[1])
       }
       return json(401, { ok: false, error: 'unauthorized' })
+    }
+
+    // GET /deploy/state — read the infra deploy-state.json. Used by the
+    // orchestrator's admin /deploys tab to mirror the baseplane-infra TUI.
+    if (req.method === 'GET' && path === '/deploy/state') {
+      return handleDeployState()
     }
 
     // GET /sessions — list all known sessions (B5b)
