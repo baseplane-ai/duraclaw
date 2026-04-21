@@ -80,12 +80,16 @@ function AgentOrchContent() {
   }, [searchSessionId, openTab, setActive, sessions, openTabs])
 
   // Cold-start: page loaded at "/" with no ?session, but localStorage
-  // has a remembered active tab — restore it in the URL (one-shot).
+  // has a remembered active tab — restore it in the URL (one-shot on
+  // mount). The ref flips unconditionally on first run so a later
+  // in-app nav to "/" (e.g. sidebar "New session") isn't bounced back
+  // to the remembered session.
   const coldStartedRef = useRef(false)
   useEffect(() => {
-    if (coldStartedRef.current || searchSessionId) return
+    if (coldStartedRef.current) return
+    coldStartedRef.current = true
+    if (searchSessionId) return
     if (activeSessionId) {
-      coldStartedRef.current = true
       navigate({ to: '/', search: { session: activeSessionId }, replace: true })
     }
   }, [activeSessionId, navigate, searchSessionId])
