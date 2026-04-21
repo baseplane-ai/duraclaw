@@ -22,6 +22,7 @@ import { type CachedMessage, createMessagesCollection } from '~/db/messages-coll
 import { sessionLocalCollection } from '~/db/session-local-collection'
 import { useMessagesCollection } from '~/hooks/use-messages-collection'
 import { useSession } from '~/hooks/use-sessions-collection'
+import { logDelta } from '~/lib/delta-log'
 import { parseJsonField } from '~/lib/json'
 import { contentToParts } from '~/lib/message-parts'
 import { isNative, wsBaseUrl } from '~/lib/platform'
@@ -438,6 +439,23 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     onMessage: (message: MessageEvent) => {
       try {
         const parsed = JSON.parse(typeof message.data === 'string' ? message.data : '')
+
+        // Issue #40 Step 0: one line per arriving frame so we can quantify
+        // background-streaming continuity. No-op unless localStorage flag
+        // `duraclaw.debug.deltaLog` is set to `'1'`.
+        if (parsed && typeof parsed === 'object') {
+          const kind =
+            parsed.type === 'messages' && parsed.payload?.kind
+              ? `messages:${parsed.payload.kind}`
+              : parsed.type === 'gateway_event' && parsed.event?.type
+                ? `gateway_event:${parsed.event.type}`
+                : (parsed.type ?? 'unknown')
+          logDelta('session', {
+            agent: agentName,
+            kind,
+            seq: typeof parsed.seq === 'number' ? parsed.seq : undefined,
+          })
+        }
 
         // Unified {type:'messages'} frame (B1/B3). Supports the new
         // `{seq, payload}` shape with gap detection, and (for deploy
