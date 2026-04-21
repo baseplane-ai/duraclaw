@@ -27,6 +27,9 @@
 import type { SyncedCollectionFrame } from '@duraclaw/shared-types'
 import PartySocket from 'partysocket'
 import { useEffect, useState } from 'react'
+import { createPartySocketAdapter } from '~/lib/connection-manager/adapters/partysocket-adapter'
+import { connectionRegistry } from '~/lib/connection-manager/registry'
+import type { ManagedConnection } from '~/lib/connection-manager/types'
 import { logDelta } from '~/lib/delta-log'
 import { wsBaseUrl } from '~/lib/platform'
 import { attachWsDebug, wsHardFailEnabled } from '~/lib/ws-debug'
@@ -47,6 +50,8 @@ const reconnectHandlers = new Set<ReconnectHandler>()
 const statusListeners = new Set<Listener>()
 
 let socket: PartySocket | null = null
+let userStreamAdapter: ManagedConnection | null = null
+let userStreamUnregister: (() => void) | null = null
 let currentUserId: string | null = null
 let status: ConnectionStatus = 'closed'
 // Tracks whether we've seen at least one `open` so subsequent `open` events
@@ -146,11 +151,26 @@ function openSocket(userId: string) {
   })
 
   socket = ws
+  // GH#42: register with the connection-manager registry so the global
+  // manager can coordinate reconnect on foreground/online events. This
+  // runs outside any React lifecycle because the user-stream singleton
+  // is module-level — register/unregister piggy-backs on open/close.
+  userStreamAdapter = createPartySocketAdapter(ws, 'user-stream')
+  userStreamUnregister = connectionRegistry.register(userStreamAdapter)
 }
 
 function closeSocket() {
   if (!socket) return
   intentionalClose = true
+  if (userStreamUnregister) {
+    try {
+      userStreamUnregister()
+    } catch {
+      // ignore
+    }
+    userStreamUnregister = null
+    userStreamAdapter = null
+  }
   try {
     socket.close()
   } catch {
