@@ -74,6 +74,14 @@ interface MessageInputProps {
    */
   onInterrupt?: () => void
   /**
+   * Force-stop escalation — SIGTERMs the runner via gateway HTTP even
+   * when the dial-back WS is dead. The composer exposes this by relabeling
+   * the interrupt button to "Force stop" after a 5s stuck-interrupt window
+   * (see ComposerActions). Users never reach forceStop directly on the
+   * first click.
+   */
+  onForceStop?: (reason?: string) => void
+  /**
    * Optional tab id — kept for parity with the previous per-tab draft
    * API. Drafts now live in the shared Y.Text on SessionCollabDO, so this
    * key only scopes the local `PromptInputProvider` (no DO round-trip).
@@ -90,6 +98,7 @@ export function MessageInput({
   disabled,
   status,
   onInterrupt,
+  onForceStop,
   draftKey,
 }: MessageInputProps) {
   const [images, setImages] = useState<ImagePreview[]>([])
@@ -294,6 +303,7 @@ export function MessageInput({
             disabled={textareaDisabled}
             status={status}
             onInterrupt={onInterrupt}
+            onForceStop={onForceStop}
           />
         </PromptInputFooter>
       </PromptInput>
@@ -309,25 +319,53 @@ interface ComposerActionsProps {
   disabled: boolean
   status?: SessionStatus
   onInterrupt?: () => void
+  onForceStop?: (reason?: string) => void
 }
+
+/**
+ * Window (ms) after the user's first interrupt click before the button
+ * relabels to "Force stop". 5s is long enough that a normal
+ * `interrupt` → `result` round trip completes (including a slow tool
+ * unwind), short enough that a genuinely wedged session doesn't feel
+ * unrescuable. Exported for testability.
+ */
+export const FORCE_STOP_RELABEL_MS = 5_000
 
 /**
  * Renders the combined send/interrupt button inside the prompt input
  * footer. Must live inside <PromptInputProvider> so it can read the
  * current draft text from the controller.
  *
- * Button swap rules:
- *  - text in draft                  → send button (works even while
- *                                     running, so steering messages still
- *                                     submit)
- *  - no text + session running      → animated interrupt button (red
- *                                     pulsing square — cancels the
- *                                     current turn; session stays alive)
- *  - no text + session idle         → disabled send button
+ * Button states:
+ *  - text in draft                       → send button (works even while
+ *                                          running, so steering messages
+ *                                          still submit)
+ *  - no text + idle                      → disabled send button
+ *  - no text + running (pre-interrupt)   → animated interrupt button (red
+ *                                          pulsing square, cooperative
+ *                                          cancel — session stays alive)
+ *  - no text + running + interrupted for
+ *    > FORCE_STOP_RELABEL_MS              → "Force stop" variant (solid,
+ *                                          non-pulsing, tooltip explains
+ *                                          the escalation). Click fires
+ *                                          onForceStop — SIGTERMs the
+ *                                          runner via gateway HTTP.
+ *
+ * The escalation timer resets when status leaves the busy set (the
+ * session successfully interrupted), so a normal interrupt never exposes
+ * the force-stop button.
  */
-function ComposerActions({ ytext, disabled, status, onInterrupt }: ComposerActionsProps) {
+function ComposerActions({
+  ytext,
+  disabled,
+  status,
+  onInterrupt,
+  onForceStop,
+}: ComposerActionsProps) {
   const controller = usePromptInputController()
   const [yLen, setYLen] = useState<number>(ytext ? ytext.length : 0)
+  const [interruptSentAt, setInterruptSentAt] = useState<number | null>(null)
+  const [, setTick] = useState(0)
 
   useEffect(() => {
     if (!ytext) return
@@ -337,25 +375,74 @@ function ComposerActions({ ytext, disabled, status, onInterrupt }: ComposerActio
     return () => ytext.unobserve(update)
   }, [ytext])
 
+  const isRunning = status === 'running' || status === 'waiting_gate'
+
+  // Status left the busy set → clear the interrupt timer so the next
+  // busy spin starts from zero.
+  useEffect(() => {
+    if (!isRunning && interruptSentAt !== null) {
+      setInterruptSentAt(null)
+    }
+  }, [isRunning, interruptSentAt])
+
+  // While an interrupt is pending, tick once at the relabel threshold so
+  // the button visibly flips without waiting for another unrelated
+  // render. Single timer, cleaned up on unmount / state change.
+  useEffect(() => {
+    if (interruptSentAt === null) return
+    const elapsed = Date.now() - interruptSentAt
+    const remaining = FORCE_STOP_RELABEL_MS - elapsed
+    if (remaining <= 0) return
+    const t = setTimeout(() => setTick((n) => n + 1), remaining)
+    return () => clearTimeout(t)
+  }, [interruptSentAt])
+
   const controllerText = controller.textInput.value
   const hasText = ytext ? yLen > 0 : controllerText.trim().length > 0
-
-  const isRunning = status === 'running' || status === 'waiting_gate'
   const showInterrupt = isRunning && !hasText && Boolean(onInterrupt)
+
+  const showForceStop =
+    showInterrupt &&
+    interruptSentAt !== null &&
+    Date.now() - interruptSentAt >= FORCE_STOP_RELABEL_MS &&
+    Boolean(onForceStop)
 
   // The submit button stays interactive when it's acting as the
   // interrupt button even if the composer is "disabled" (waiting_gate) —
   // users should always be able to cut off a runaway turn.
   const submitDisabled = disabled && !showInterrupt && !hasText
 
+  const handleStop = () => {
+    if (showForceStop && onForceStop) {
+      onForceStop('user force-stop from composer')
+      setInterruptSentAt(null)
+      return
+    }
+    if (onInterrupt) {
+      onInterrupt()
+      setInterruptSentAt(Date.now())
+    }
+  }
+
   return (
     <PromptInputSubmit
       disabled={submitDisabled}
       status={showInterrupt ? 'streaming' : undefined}
-      onStop={showInterrupt && onInterrupt ? onInterrupt : undefined}
+      onStop={showInterrupt ? handleStop : undefined}
+      title={
+        showForceStop
+          ? 'Force stop — the interrupt didn\u2019t land. This SIGTERMs the runner process.'
+          : showInterrupt
+            ? 'Interrupt current turn'
+            : undefined
+      }
+      data-force-stop={showForceStop ? 'true' : undefined}
       className={cn(
         showInterrupt &&
+          !showForceStop &&
           'bg-red-500/90 text-white hover:bg-red-500 animate-pulse shadow-[0_0_0_0_rgba(239,68,68,0.6)]',
+        showForceStop &&
+          'bg-red-700 text-white hover:bg-red-800 ring-2 ring-red-300 ring-offset-1 shadow-lg',
       )}
     >
       {showInterrupt ? <SquareIcon className="size-4 fill-current" /> : undefined}

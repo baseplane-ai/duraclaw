@@ -47,6 +47,14 @@ export interface UseCodingAgentResult {
   spawn: (config: SpawnConfig) => Promise<unknown>
   stop: (reason?: string) => Promise<unknown>
   abort: (reason?: string) => Promise<unknown>
+  /**
+   * Force-terminate a wedged session. Triggers the DO's `forceStop` RPC
+   * which (a) transitions state → idle, (b) best-effort sends `abort` over
+   * the WS, and (c) POSTs `/sessions/:id/kill` on the gateway to SIGTERM
+   * the runner process by PID. The gateway HTTP leg rescues the
+   * WS-dead-but-runner-alive case that the in-band abort can't reach.
+   */
+  forceStop: (reason?: string) => Promise<unknown>
   interrupt: () => Promise<unknown>
   getContextUsage: () => Promise<unknown>
   resolveGate: (gateId: string, response: GateResponse) => Promise<unknown>
@@ -479,6 +487,10 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   )
   const stop = useCallback((reason?: string) => connection.call('stop', [reason]), [connection])
   const abort = useCallback((reason?: string) => connection.call('abort', [reason]), [connection])
+  const forceStop = useCallback(
+    (reason?: string) => connection.call('forceStop', [reason]),
+    [connection],
+  )
   const interrupt = useCallback(() => connection.call('interrupt', []), [connection])
   const getContextUsage = useCallback(() => connection.call('getContextUsage', []), [connection])
   const resolveGate = useCallback(
@@ -740,6 +752,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     spawn,
     stop,
     abort,
+    forceStop,
     interrupt,
     getContextUsage,
     resolveGate,

@@ -3,10 +3,12 @@ import os from 'node:os'
 import nodePath from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  handleKillSession,
   handleListSessions,
   handleStartSession,
   handleStatus,
   isValidGatewayCommand,
+  type KillFn,
   logStatusUnauthorized,
   type SpawnFn,
 } from './handlers.js'
@@ -473,5 +475,180 @@ describe('GET /sessions/:id/status', () => {
     logStatusUnauthorized('SID-X', logger)
     expect(warn).toHaveBeenCalledTimes(1)
     expect(warn.mock.calls[0][0]).toBe('[gateway] status unauthorized sessionId=SID-X')
+  })
+})
+
+// ────────────────────────────────────────────────────────────────────
+// POST /sessions/:id/kill — user-triggered force stop
+// ────────────────────────────────────────────────────────────────────
+
+describe('POST /sessions/:id/kill', () => {
+  /**
+   * Force a `setTimeout(..., N)` callback to run synchronously by driving
+   * fake timers past the grace window. We only need the escalation timer
+   * for the SIGKILL-after-grace case.
+   */
+  function mkKillSpy(): { fn: KillFn; calls: { pid: number; sig: string }[] } {
+    const calls: { pid: number; sig: string }[] = []
+    const fn: KillFn = (pid, sig) => {
+      calls.push({ pid, sig })
+      return true
+    }
+    return { fn, calls }
+  }
+
+  it('404 when neither pid nor exit file exists', async () => {
+    const resp = await handleKillSession('missing', { sessionsDir: tmpDir })
+    expect(resp.status).toBe(404)
+    expect(await resp.json()).toEqual({ ok: false, error: 'session not found' })
+  })
+
+  it('200 SIGTERM delivered on live pid', async () => {
+    await fs.writeFile(
+      nodePath.join(tmpDir, 'LIVE.pid'),
+      JSON.stringify({ pid: 4242, sessionId: 'LIVE', started_at: 1 }),
+    )
+    const kill = mkKillSpy()
+    const isAlive: LivenessCheck = (pid) => pid === 4242
+
+    const resp = await handleKillSession('LIVE', {
+      sessionsDir: tmpDir,
+      isAlive,
+      kill: kill.fn,
+      sigkillGraceMs: 10_000,
+    })
+
+    expect(resp.status).toBe(200)
+    const body = (await resp.json()) as Record<string, unknown>
+    expect(body.ok).toBe(true)
+    expect(body.signalled).toBe('SIGTERM')
+    expect(body.pid).toBe(4242)
+    expect(kill.calls).toEqual([{ pid: 4242, sig: 'SIGTERM' }])
+  })
+
+  it('escalates to SIGKILL after the grace window when still alive', async () => {
+    vi.useFakeTimers()
+    try {
+      await fs.writeFile(
+        nodePath.join(tmpDir, 'WEDGED.pid'),
+        JSON.stringify({ pid: 5555, sessionId: 'WEDGED', started_at: 1 }),
+      )
+      const kill = mkKillSpy()
+      // The test pid never dies — always alive, so the watchdog escalates.
+      const isAlive: LivenessCheck = () => true
+
+      const resp = await handleKillSession('WEDGED', {
+        sessionsDir: tmpDir,
+        isAlive,
+        kill: kill.fn,
+        sigkillGraceMs: 3_000,
+      })
+
+      expect(resp.status).toBe(200)
+      expect(kill.calls).toEqual([{ pid: 5555, sig: 'SIGTERM' }])
+
+      // Drive the unref'd escalation timer.
+      await vi.advanceTimersByTimeAsync(3_000)
+      expect(kill.calls).toEqual([
+        { pid: 5555, sig: 'SIGTERM' },
+        { pid: 5555, sig: 'SIGKILL' },
+      ])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not escalate to SIGKILL when the pid dies during the grace window', async () => {
+    vi.useFakeTimers()
+    try {
+      await fs.writeFile(
+        nodePath.join(tmpDir, 'DYING.pid'),
+        JSON.stringify({ pid: 6666, sessionId: 'DYING', started_at: 1 }),
+      )
+      const kill = mkKillSpy()
+      // Alive at kill time, dead by grace window.
+      let alive = true
+      const isAlive: LivenessCheck = () => alive
+
+      await handleKillSession('DYING', {
+        sessionsDir: tmpDir,
+        isAlive,
+        kill: kill.fn,
+        sigkillGraceMs: 3_000,
+      })
+      expect(kill.calls).toEqual([{ pid: 6666, sig: 'SIGTERM' }])
+
+      alive = false
+      await vi.advanceTimersByTimeAsync(3_000)
+      // Watchdog saw it dead — no escalation signal.
+      expect(kill.calls).toEqual([{ pid: 6666, sig: 'SIGTERM' }])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('200 already_terminal when exit file is present', async () => {
+    await fs.writeFile(
+      nodePath.join(tmpDir, 'DONE.exit'),
+      JSON.stringify({ state: 'completed', exit_code: 0, duration_ms: 1 }),
+    )
+    const kill = mkKillSpy()
+
+    const resp = await handleKillSession('DONE', {
+      sessionsDir: tmpDir,
+      kill: kill.fn,
+    })
+
+    expect(resp.status).toBe(200)
+    const body = (await resp.json()) as Record<string, unknown>
+    expect(body.ok).toBe(true)
+    expect(body.already_terminal).toBe(true)
+    expect(body.state).toBe('completed')
+    // No signal sent — nothing to kill.
+    expect(kill.calls).toEqual([])
+  })
+
+  it('200 already_terminal (crashed) on dead pid without exit file', async () => {
+    await fs.writeFile(
+      nodePath.join(tmpDir, 'CRASHED.pid'),
+      JSON.stringify({ pid: 9999, sessionId: 'CRASHED', started_at: 1 }),
+    )
+    const kill = mkKillSpy()
+    const isAlive: LivenessCheck = () => false
+
+    const resp = await handleKillSession('CRASHED', {
+      sessionsDir: tmpDir,
+      isAlive,
+      kill: kill.fn,
+    })
+
+    expect(resp.status).toBe(200)
+    const body = (await resp.json()) as Record<string, unknown>
+    expect(body.already_terminal).toBe(true)
+    expect(body.state).toBe('crashed')
+    expect(kill.calls).toEqual([])
+  })
+
+  it('emits structured log lines on SIGTERM', async () => {
+    await fs.writeFile(
+      nodePath.join(tmpDir, 'LOG-KILL.pid'),
+      JSON.stringify({ pid: 1111, sessionId: 'LOG-KILL', started_at: 1 }),
+    )
+    const info = vi.fn()
+    const logger = { info, warn: vi.fn(), error: vi.fn() }
+
+    await handleKillSession('LOG-KILL', {
+      sessionsDir: tmpDir,
+      isAlive: (pid) => pid === 1111,
+      kill: () => true,
+      logger,
+      sigkillGraceMs: 10_000,
+    })
+
+    expect(info).toHaveBeenCalled()
+    const msg = info.mock.calls[0][0] as string
+    expect(msg).toContain('[gateway] kill sessionId=LOG-KILL')
+    expect(msg).toContain('pid=1111')
+    expect(msg).toContain('signal=SIGTERM')
   })
 })
