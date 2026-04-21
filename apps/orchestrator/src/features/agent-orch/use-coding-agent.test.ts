@@ -170,14 +170,26 @@ vi.mock('~/db/branch-info-collection', () => {
   const coll = {
     has: (key: string) => branchInfoStore.has(key),
     insert: vi.fn((row: { parentMsgId: string }) => {
+      // DB-cbb1-0420: Match real TanStack DB Collection.insert semantics —
+      // throw on duplicate key so the update-first-insert-fallback path is
+      // exercised. Pre-fix tests relied on the mock silently overwriting,
+      // which masked the real persisted-collection behavior.
+      if (branchInfoStore.has(row.parentMsgId)) {
+        throw new Error(`duplicate key: ${row.parentMsgId}`)
+      }
       branchInfoStore.set(row.parentMsgId, row as never)
     }),
     update: vi.fn((key: string, patcher: (draft: Record<string, unknown>) => void) => {
+      // DB-cbb1-0420: Throw on missing key so the fallback path falls
+      // through to insert — mirrors TanStack DB Collection.update semantics.
       const existing = branchInfoStore.get(key)
-      if (!existing) return
+      if (!existing) throw new Error(`not found: ${key}`)
       const draft = { ...existing }
       patcher(draft as unknown as Record<string, unknown>)
       branchInfoStore.set(key, draft as never)
+    }),
+    delete: vi.fn((key: string) => {
+      branchInfoStore.delete(key)
     }),
     [Symbol.iterator]: () => {
       const entries: Array<[string, unknown]> = []
@@ -1351,6 +1363,147 @@ describe('branch tracking (P4)', () => {
     const row = branchInfoStore.get('msg-0')!
     expect(row.siblings).toEqual(['usr-1', 'usr-3'])
     expect(row.activeId).toBe('usr-3')
+  })
+
+  // DB-cbb1-0420 H1: snapshot is authoritative — rows no longer referenced
+  // by the incoming branchInfo array must be deleted from the collection.
+  // Before this fix, the snapshot path upserted only, so OPFS-persisted
+  // rows from trimmed-away branches lingered and the UI showed ghost
+  // arrows after rewind.
+  test('snapshot reconciles stale branch-info rows (delete not in incoming)', () => {
+    renderHook(() => useCodingAgent('test-session'))
+
+    // Seed two rows; the snapshot will only mention one of them.
+    branchInfoStore.set('msg-0', {
+      parentMsgId: 'msg-0',
+      sessionId: 'test-session',
+      siblings: ['usr-1', 'usr-2'],
+      activeId: 'usr-1',
+      updatedAt: '2026-04-19T00:00:00Z',
+    })
+    branchInfoStore.set('msg-9', {
+      parentMsgId: 'msg-9',
+      sessionId: 'test-session',
+      siblings: ['usr-9', 'usr-10'],
+      activeId: 'usr-9',
+      updatedAt: '2026-04-19T00:00:00Z',
+    })
+
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage({
+          type: 'messages',
+          sessionId: 'test-session',
+          seq: 1,
+          payload: {
+            kind: 'snapshot',
+            version: 1,
+            reason: 'rewind',
+            messages: [{ id: 'usr-1', role: 'user', parts: [{ type: 'text', text: 'v1' }] }],
+            branchInfo: [
+              {
+                parentMsgId: 'msg-0',
+                sessionId: 'test-session',
+                siblings: ['usr-1', 'usr-3'],
+                activeId: 'usr-3',
+                updatedAt: '2026-04-20T00:00:00Z',
+              },
+            ],
+          },
+        }),
+      )
+    })
+
+    // `msg-9` is stale (not in the incoming snapshot) — must be deleted.
+    expect(branchInfoStore.has('msg-9')).toBe(false)
+    // `msg-0` is incoming — must be updated in place.
+    const row = branchInfoStore.get('msg-0')!
+    expect(row.siblings).toEqual(['usr-1', 'usr-3'])
+    expect(row.activeId).toBe('usr-3')
+  })
+
+  // DB-cbb1-0420 H1 (continued): an empty incoming branchInfo array means
+  // "no branches anywhere" — still must wipe stale rows. Pre-fix the
+  // `branchInfo.length > 0` gate meant an empty snapshot was a no-op and
+  // ghost rows survived.
+  test('snapshot with empty branchInfo wipes stale rows', () => {
+    renderHook(() => useCodingAgent('test-session'))
+
+    branchInfoStore.set('msg-0', {
+      parentMsgId: 'msg-0',
+      sessionId: 'test-session',
+      siblings: ['usr-1', 'usr-2'],
+      activeId: 'usr-1',
+      updatedAt: '2026-04-19T00:00:00Z',
+    })
+
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage({
+          type: 'messages',
+          sessionId: 'test-session',
+          seq: 1,
+          payload: {
+            kind: 'snapshot',
+            version: 1,
+            reason: 'rewind',
+            messages: [{ id: 'usr-1', role: 'user', parts: [{ type: 'text', text: 'v1' }] }],
+            branchInfo: [],
+          },
+        }),
+      )
+    })
+
+    expect(branchInfoStore.size).toBe(0)
+  })
+
+  // DB-cbb1-0420 H2: update-first-insert-fallback — when a row already
+  // exists, the fix path takes the update branch (no duplicate-key throw
+  // from the mock's insert). Before this fix, `has?.()` could return
+  // undefined on the real persisted collection and the code would hit
+  // `.insert()` → throw → swallowed, silently dropping updates.
+  test('snapshot upsert takes update path when row exists (no duplicate-key throw)', () => {
+    renderHook(() => useCodingAgent('test-session'))
+
+    branchInfoStore.set('msg-0', {
+      parentMsgId: 'msg-0',
+      sessionId: 'test-session',
+      siblings: ['usr-1'],
+      activeId: 'usr-1',
+      updatedAt: '2026-04-19T00:00:00Z',
+    })
+
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage({
+          type: 'messages',
+          sessionId: 'test-session',
+          seq: 1,
+          payload: {
+            kind: 'snapshot',
+            version: 1,
+            reason: 'reconnect',
+            messages: [{ id: 'usr-1', role: 'user', parts: [{ type: 'text', text: 'v1' }] }],
+            branchInfo: [
+              {
+                parentMsgId: 'msg-0',
+                sessionId: 'test-session',
+                siblings: ['usr-1', 'usr-3', 'usr-5'],
+                activeId: 'usr-5',
+                updatedAt: '2026-04-21T00:00:00Z',
+              },
+            ],
+          },
+        }),
+      )
+    })
+
+    // If the fallback was broken the mock insert would have thrown and
+    // the update would never have applied.
+    const row = branchInfoStore.get('msg-0')!
+    expect(row.siblings).toEqual(['usr-1', 'usr-3', 'usr-5'])
+    expect(row.activeId).toBe('usr-5')
+    expect(row.updatedAt).toBe('2026-04-21T00:00:00Z')
   })
 
   test('delta without branchInfo does not touch branch-info collection', () => {

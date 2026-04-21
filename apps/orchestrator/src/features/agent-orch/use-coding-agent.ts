@@ -252,30 +252,64 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         // to be silently dropped as stale, breaking streaming entirely.
         map.set(agentName, frame.payload.version)
         // B7: DO pushes branchInfo alongside snapshot payloads on reconnect,
-        // rewind, resubmit, and branch-navigate. Upsert each row into the
-        // per-session branchInfoCollection; the `useBranchInfo` hook reads
-        // reactively.
-        const branchInfo = (frame.payload as { branchInfo?: BranchInfoRow[] }).branchInfo
-        if (branchInfo && branchInfo.length > 0) {
+        // rewind, resubmit, and branch-navigate. Snapshot is authoritative —
+        // reconcile the full view rather than upsert-only. Two regressions
+        // we're closing (DB-cbb1-0420):
+        //   (a) old code left OPFS rows stranded when a branch was trimmed
+        //       away — snapshot only upserted, never deleted stale keys, so
+        //       ghost sibling counts / stale arrows persisted across tab
+        //       reloads even when the DO's authoritative view had no
+        //       branches at all.
+        //   (b) `biColl.has?.()` returns undefined on any collection whose
+        //       `.has` isn't wired up in the persistence adapter, falling
+        //       through to `.insert()` → duplicate-key throw → swallowed by
+        //       the outer catch. Updates to existing rows silently dropped.
+        // Fix: always reconcile (even when incoming is empty), and prefer
+        // update-first-insert-fallback so duplicate-key never masks the
+        // update path.
+        const branchInfo = (frame.payload as { branchInfo?: BranchInfoRow[] }).branchInfo ?? []
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const biColl = createBranchInfoCollection(agentName) as any
+          const incomingKeys = new Set(branchInfo.map((r) => r.parentMsgId))
+          // Diff-and-delete: rows the collection currently holds that the
+          // authoritative snapshot no longer references. The per-agentName
+          // factory memoises one collection per session, so every row in
+          // `biColl` belongs to this session — no cross-session filtering
+          // needed.
+          const staleKeys: string[] = []
           try {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const biColl = createBranchInfoCollection(agentName) as any
-            for (const row of branchInfo) {
+            for (const [key] of biColl as Iterable<[string, BranchInfoRow]>) {
+              if (!incomingKeys.has(key)) staleKeys.push(key)
+            }
+          } catch {
+            // iterable not ready; skip deletion pass — upserts still run
+          }
+          for (const key of staleKeys) {
+            try {
+              biColl.delete?.(key)
+            } catch {
+              // ignore — next snapshot retries
+            }
+          }
+          // Upsert incoming rows. Try update first (throws if absent) and
+          // fall back to insert on throw. This avoids the `.has?.()`
+          // undefined-optional-chain hole.
+          for (const row of branchInfo) {
+            try {
+              biColl.update(row.parentMsgId, (draft: BranchInfoRow) => {
+                Object.assign(draft, row)
+              })
+            } catch {
               try {
-                if (biColl.has?.(row.parentMsgId)) {
-                  biColl.update(row.parentMsgId, (draft: BranchInfoRow) => {
-                    Object.assign(draft, row)
-                  })
-                } else {
-                  biColl.insert(row)
-                }
+                biColl.insert(row)
               } catch {
                 // ignore — next snapshot retries
               }
             }
-          } catch {
-            // collection may not be ready; next snapshot retries
           }
+        } catch {
+          // collection may not be ready; next snapshot retries
         }
         return
       }
@@ -314,17 +348,22 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const biColl = createBranchInfoCollection(agentName) as any
             if (deltaBranchInfo.upsert && deltaBranchInfo.upsert.length > 0) {
+              // Update-first-insert-fallback for the same reason as the
+              // snapshot path: `biColl.has?.()` can return undefined on the
+              // real persisted collection, and the old `has ? update :
+              // insert` shape silently dropped updates to existing rows
+              // when the guard mis-fired.
               for (const row of deltaBranchInfo.upsert) {
                 try {
-                  if (biColl.has?.(row.parentMsgId)) {
-                    biColl.update(row.parentMsgId, (draft: BranchInfoRow) => {
-                      Object.assign(draft, row)
-                    })
-                  } else {
-                    biColl.insert(row)
-                  }
+                  biColl.update(row.parentMsgId, (draft: BranchInfoRow) => {
+                    Object.assign(draft, row)
+                  })
                 } catch {
-                  // ignore — next snapshot retries
+                  try {
+                    biColl.insert(row)
+                  } catch {
+                    // ignore — next snapshot retries
+                  }
                 }
               }
             }
