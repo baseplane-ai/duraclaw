@@ -79,6 +79,23 @@ export function createSyncedCollection<TRow extends object, TKey extends string 
   const onReconnect =
     config.onReconnect ?? ((handler: () => void) => onUserStreamReconnect(handler))
 
+  // queryCollectionOptions auto-calls `refetch()` after onInsert/onUpdate/
+  // onDelete unless the handler returns `{refetch: false}`. That re-runs
+  // `queryFn` and `applySuccessfulResult` deletes every previously-owned row
+  // not present in the returned array — fatal for a cursor-based queryFn
+  // (e.g. messages-collection's `sinceCreatedAt`/`sinceId` cursor), where
+  // the just-inserted optimistic row advances the cursor past itself and
+  // the refetch response is empty. Force `{refetch: false}` so the WS delta
+  // stays the sole live-update channel; `queryFn` fires only on cold-start
+  // + reconnect invalidate (the documented contract).
+  const noRefetch = <T>(fn?: (ctx: T) => Promise<unknown>) =>
+    fn
+      ? async (ctx: T) => {
+          const result = ((await fn(ctx)) ?? {}) as Record<string, unknown>
+          return { ...result, refetch: false }
+        }
+      : undefined
+
   const baseOpts = queryCollectionOptions({
     id: config.id,
     queryKey: config.queryKey,
@@ -89,9 +106,9 @@ export function createSyncedCollection<TRow extends object, TKey extends string 
     refetchInterval: false,
     retry: 2,
     retryDelay: 500,
-    onInsert: config.onInsert,
-    onUpdate: config.onUpdate,
-    onDelete: config.onDelete,
+    onInsert: noRefetch(config.onInsert),
+    onUpdate: noRefetch(config.onUpdate),
+    onDelete: noRefetch(config.onDelete),
   } as any) as any
 
   // Wrap sync BEFORE persistence-wrapping. `persistedCollectionOptions` may

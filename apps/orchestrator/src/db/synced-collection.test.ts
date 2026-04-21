@@ -702,4 +702,72 @@ describe('createSyncedCollection — injection params (GH#38 P1.1)', () => {
       } as unknown as Parameters<typeof createSyncedCollection>[0]),
     ).toThrow(/collection or syncFrameType required/)
   })
+
+  // Regression: queryCollectionOptions auto-calls refetch() after
+  // onInsert/onUpdate/onDelete unless the handler returns {refetch:false}.
+  // For cursor-based queryFns (messages-collection) that refetch wipes the
+  // collection — the just-inserted optimistic row advances the cursor past
+  // itself and the refetch response is empty, so applySuccessfulResult
+  // deletes every previously-owned row. createSyncedCollection must wrap
+  // these handlers so `{refetch: false}` is always forwarded.
+  it('wraps onInsert/onUpdate/onDelete to return {refetch: false} (suppresses post-mutation refetch)', async () => {
+    const { createSyncedCollection } = await import('./synced-collection')
+
+    const userInsert = vi.fn(async () => undefined)
+    const userUpdate = vi.fn(async () => ({ some: 'extra' }))
+    const userDelete = vi.fn(async () => undefined)
+
+    createSyncedCollection<{ id: string }, string>({
+      id: 'refetch-guard',
+      getKey: (r) => r.id,
+      queryKey: ['refetch-guard'] as const,
+      queryFn: async () => [],
+      syncFrameType: 'refetch-guard',
+      onInsert: userInsert,
+      onUpdate: userUpdate,
+      onDelete: userDelete,
+    })
+
+    const call = mockQueryCollectionOptions.mock.calls.find(
+      (c) => (c[0] as { id: string }).id === 'refetch-guard',
+    )
+    const cfg = call![0] as {
+      onInsert: (ctx: unknown) => Promise<Record<string, unknown>>
+      onUpdate: (ctx: unknown) => Promise<Record<string, unknown>>
+      onDelete: (ctx: unknown) => Promise<Record<string, unknown>>
+    }
+
+    const insertResult = await cfg.onInsert({ transaction: {} })
+    expect(userInsert).toHaveBeenCalledTimes(1)
+    expect(insertResult.refetch).toBe(false)
+
+    const updateResult = await cfg.onUpdate({ transaction: {} })
+    expect(userUpdate).toHaveBeenCalledTimes(1)
+    expect(updateResult.refetch).toBe(false)
+    expect(updateResult.some).toBe('extra')
+
+    const deleteResult = await cfg.onDelete({ transaction: {} })
+    expect(userDelete).toHaveBeenCalledTimes(1)
+    expect(deleteResult.refetch).toBe(false)
+  })
+
+  it('omits handler when user did not provide one (no spurious noRefetch wrapping)', async () => {
+    const { createSyncedCollection } = await import('./synced-collection')
+
+    createSyncedCollection<{ id: string }, string>({
+      id: 'no-handlers',
+      getKey: (r) => r.id,
+      queryKey: ['no-handlers'] as const,
+      queryFn: async () => [],
+      syncFrameType: 'no-handlers',
+    })
+
+    const call = mockQueryCollectionOptions.mock.calls.find(
+      (c) => (c[0] as { id: string }).id === 'no-handlers',
+    )
+    const cfg = call![0] as { onInsert?: unknown; onUpdate?: unknown; onDelete?: unknown }
+    expect(cfg.onInsert).toBeUndefined()
+    expect(cfg.onUpdate).toBeUndefined()
+    expect(cfg.onDelete).toBeUndefined()
+  })
 })
