@@ -16,12 +16,20 @@ describe('PWA shell foundation', () => {
       )
     })
 
-    it('includes favicon link', () => {
-      expect(html).toContain('<link rel="icon" href="/icons/icon-192.png" />')
+    it('includes favicon.ico link', () => {
+      expect(html).toContain('<link rel="icon" href="/favicon.ico" sizes="any" />')
+    })
+
+    it('includes 192x192 PNG icon link', () => {
+      expect(html).toContain(
+        '<link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />',
+      )
     })
 
     it('includes apple-touch-icon link', () => {
-      expect(html).toContain('<link rel="apple-touch-icon" href="/icons/icon-192.png" />')
+      expect(html).toContain(
+        '<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />',
+      )
     })
 
     it('does not include manual manifest link (vite-plugin-pwa injects it)', () => {
