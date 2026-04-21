@@ -1,7 +1,6 @@
 /**
- * Messages collection factory — per-sessionId collections backed by the
- * cursor REST endpoint `GET /api/sessions/:id/messages?sinceCreatedAt=&sinceId=`
- * and persisted to OPFS SQLite.
+ * Messages collection factory — per-sessionId collections backed by
+ * `GET /api/sessions/:id/messages` and persisted to OPFS SQLite.
  *
  * Built on `createSyncedCollection` (GH#38 P1.3) so WS-pushed
  * `{type:'synced-collection-delta', collection:'messages:<sessionId>'}`
@@ -14,17 +13,24 @@
  * - Persisted to OPFS SQLite. `schemaVersion: 6` (bumped from 5) so pre-
  *   migration cache rows stamped with the dead `seq` field are dropped on
  *   first load after deploy (B12).
- * - Cursor contract: queryFn derives `(max createdAt, max id)` from the
- *   current collection state and forwards as `sinceCreatedAt=&sinceId=`.
- *   Cold-start / empty collection omits both params (server returns full
- *   history; asymmetric cursors 400).
+ * - queryFn contract: returns the FULL history for the session. Per TanStack
+ *   DB docs the queryFn result is treated as complete state — any
+ *   previously-owned row missing from the response is deleted by
+ *   `applySuccessfulResult`. A cursor-based partial response therefore
+ *   wipes the rest of the transcript, so we always return the full list
+ *   here. The framework's `syncMode: 'on-demand'` + `parseLoadSubsetOptions`
+ *   is the supported path for incremental loading; we don't need it yet.
  * - Optimistic user turns: `onInsert` POSTs `/api/sessions/:id/messages`
  *   with `{content, clientId, createdAt}`. The server adopts the client
  *   `clientId` as the row's primary id and the client `createdAt`
  *   verbatim so loopback deepEquals reconciles the echo in-place (B7/B14).
  *   The factory handler only forwards plain-text user turns; image/
  *   ContentBlock sends stay on the legacy `connection.call('sendMessage')`
- *   RPC path in `use-coding-agent.ts`.
+ *   RPC path in `use-coding-agent.ts`. createSyncedCollection forces
+ *   `{refetch: false}` on every handler — WS delta frames are the sole
+ *   live-update channel, so the framework's post-mutation auto-refetch is
+ *   redundant and in combination with a cursor-based queryFn was the
+ *   "entire message chain disappears on send" failure mode.
  *
  * The factory memoises per-sessionId so repeat calls with the same key
  * return the same Collection instance. `evictOldMessages` iterates every
@@ -98,42 +104,12 @@ export function createMessagesCollection(sessionId: string): MessagesCollection 
     subscribe: (handler) => subscribeSessionStream(sessionId, handler),
     onReconnect: (handler) => onSessionStreamReconnect(sessionId, handler),
     queryFn: async () => {
-      // Cursor from the CURRENT collection's max (createdAt, id). On cold
-      // start the collection is empty → no cursor → full history. After
-      // reconnect the cursor skips rows the client already has.
-      const currentColl = collectionsBySession.get(sessionId)
-      let maxCreatedAt: string | null = null
-      let maxId: string | null = null
-      if (currentColl) {
-        try {
-          for (const [, row] of currentColl as Iterable<[string, CachedMessage]>) {
-            const iso =
-              typeof row.createdAt === 'string'
-                ? row.createdAt
-                : row.createdAt instanceof Date
-                  ? row.createdAt.toISOString()
-                  : undefined
-            if (!iso) continue
-            if (
-              !maxCreatedAt ||
-              iso > maxCreatedAt ||
-              (iso === maxCreatedAt && (maxId === null || row.id > maxId))
-            ) {
-              maxCreatedAt = iso
-              maxId = row.id
-            }
-          }
-        } catch {
-          // Collection may not be ready yet; cold-load without cursor.
-        }
-      }
-      const qs =
-        maxCreatedAt && maxId
-          ? `?sinceCreatedAt=${encodeURIComponent(maxCreatedAt)}&sinceId=${encodeURIComponent(maxId)}`
-          : ''
-      const resp = await fetch(
-        apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/messages${qs}`),
-      )
+      // Full-history fetch. Per TanStack DB docs the queryFn result IS the
+      // authoritative snapshot — a partial response would cause
+      // `applySuccessfulResult` to delete every previously-owned row not in
+      // the response. Return the complete list and let WS delta frames
+      // handle incremental live updates.
+      const resp = await fetch(apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/messages`))
       if (!resp.ok) {
         throw new Error(`getMessages failed: ${resp.status}`)
       }

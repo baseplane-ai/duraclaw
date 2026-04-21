@@ -5,7 +5,7 @@
  *
  * Strategy: mock `createSyncedCollection` so we observe the exact options
  * the factory is given — subscribe / onReconnect registrars, queryFn with
- * cursor contract, onInsert mutationFn, schemaVersion. Also tests that a
+ * queryFn full-snapshot contract, onInsert mutationFn, schemaVersion. Also tests that a
  * delta frame routed through the injected subscribe ends up as a row in
  * the collection via a fake `createSyncedCollection` that wires
  * begin/write/commit through a local Map.
@@ -150,7 +150,7 @@ describe('messages-collection factory (GH#38 P1.3)', () => {
     expect(ids.has('messages:sess-b')).toBe(true)
   })
 
-  it('queryFn cold-start (empty collection) issues REST without cursor params', async () => {
+  it('queryFn fetches full history (no cursor — queryFn is authoritative snapshot)', async () => {
     vi.resetModules()
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
