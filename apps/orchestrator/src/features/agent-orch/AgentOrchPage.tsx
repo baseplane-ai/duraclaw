@@ -83,20 +83,24 @@ function AgentOrchContent() {
     // re-runs when `sessions` changes and picks it up then.
   }, [searchSessionId, openTab, setActive, sessions, openTabs])
 
-  // Cold-start: page loaded at "/" with no ?session, but localStorage
-  // has a remembered active tab — restore it in the URL (one-shot on
-  // mount). The ref flips unconditionally on first run so a later
-  // in-app nav to "/" (e.g. sidebar "New session") isn't bounced back
-  // to the remembered session.
+  // Cold-start: page loaded at "/" with no ?session — restore the last
+  // active tab from localStorage, or fall back to the first open tab.
+  // One-shot on mount so a later in-app nav to "/" (e.g. sidebar "New
+  // session") isn't bounced back.
   const coldStartedRef = useRef(false)
   useEffect(() => {
     if (coldStartedRef.current) return
-    coldStartedRef.current = true
-    if (searchSessionId) return
-    if (activeSessionId) {
-      navigate({ to: '/', search: { session: activeSessionId }, replace: true })
+    if (searchSessionId) {
+      coldStartedRef.current = true
+      return
     }
-  }, [activeSessionId, navigate, searchSessionId])
+    const target = activeSessionId ?? openTabs[0]
+    if (target) {
+      coldStartedRef.current = true
+      setActive(target)
+      navigate({ to: '/', search: { session: target }, replace: true })
+    }
+  }, [activeSessionId, openTabs, setActive, navigate, searchSessionId])
 
   const [spawnConfig, setSpawnConfig] = useState<SpawnConfig | null>(null)
   const [quickPromptHint, setQuickPromptHint] = useState<{
