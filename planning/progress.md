@@ -1,6 +1,6 @@
 # Duraclaw v2 — Progress Tracker
 
-> Updated 2026-04-19. GH#16 Chain UX epic shipped (chain tabs, kanban board with project filter, mode-enter reset, worktree checkout). GH#18 kata_state emission fix. GH#12 TanStack DB unification. Kanban board mobile layout fix. Issue #27 VPS session discovery shipped prior.
+> Updated 2026-04-21. GH#37 session live-state collapse shipped (PR #39) — single `agent_sessions` synced-collection row replaces `sessionLiveStateCollection`, `useDerivedStatus` retired. GH#16 Chain UX epic shipped (chain tabs, kanban board with project filter, mode-enter reset, worktree checkout). GH#18 kata_state emission fix. GH#12 TanStack DB unification. Kanban board mobile layout fix. Issue #27 VPS session discovery shipped prior.
 
 **Status key:** `not-started` | `spec` | `in-progress` | `done`
 
