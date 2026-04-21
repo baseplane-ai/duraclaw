@@ -1064,9 +1064,16 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   private async syncStatusToD1(updatedAt: string) {
     try {
       const sessionId = this.state.session_id ?? this.ctx.id.toString()
+      const newStatus = this.state.status
+      const shouldClearError = newStatus === 'running' || newStatus === 'idle'
       await this.d1
         .update(agentSessions)
-        .set({ status: this.state.status, updatedAt, lastActivity: updatedAt })
+        .set({
+          status: newStatus,
+          updatedAt,
+          lastActivity: updatedAt,
+          ...(shouldClearError ? { error: null, errorCode: null } : {}),
+        })
         .where(eq(agentSessions.id, sessionId))
       await broadcastSessionRow(this.env, this.ctx, sessionId, 'update')
     } catch (err) {
