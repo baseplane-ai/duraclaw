@@ -477,6 +477,25 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           return
         }
 
+        // Per-turn summary push from SessionDO (see `broadcastSessionSummary`).
+        // Spec #31 removed the SessionState-broadcast path that used to feed
+        // these counters; until spec #35 lands a synced collection on
+        // `agent_sessions`, this narrow frame keeps the StatusBar counters
+        // (numTurns / totalCostUsd / durationMs) live during an active session.
+        if (parsed.type === 'session_summary' && parsed.summary) {
+          const s = parsed.summary as {
+            numTurns?: number | null
+            totalCostUsd?: number | null
+            durationMs?: number | null
+          }
+          upsertSessionLiveState(agentName, {
+            numTurns: s.numTurns ?? null,
+            totalCostUsd: s.totalCostUsd ?? null,
+            durationMs: s.durationMs ?? null,
+          })
+          return
+        }
+
         // Legacy gateway_event format (non-message events only)
         if (parsed.type === 'gateway_event' && parsed.event) {
           const event = parsed.event as GatewayEvent & { uuid?: string; content?: unknown[] }

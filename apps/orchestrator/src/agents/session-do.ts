@@ -834,6 +834,35 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     this.broadcastToClients(JSON.stringify({ type: 'gateway_event', event }))
   }
 
+  /**
+   * Push per-turn summary counters to connected clients.
+   *
+   * Background: spec #31 deleted the SessionState WS broadcast
+   * (`shouldSendProtocolMessages() => false`) and removed the client's
+   * `result` gateway_event handler on the assumption that
+   * numTurns / totalCostUsd / durationMs would land via the REST fallback.
+   * In practice `backfillFromRest` only fires on mount / WS reconnect /
+   * window focus, so during a live session the StatusBar's "X turns"
+   * counter sat at 0 forever. Push a typed `session_summary` frame on
+   * every in-DO counter mutation (`assistant` and `result` events) so the
+   * client can upsert `sessionLiveStateCollection` without waiting for a
+   * REST round-trip. Retired once spec #35 lands an `agent_sessions`
+   * synced collection that drives these fields from D1 deltas.
+   */
+  private broadcastSessionSummary() {
+    this.broadcastToClients(
+      JSON.stringify({
+        type: 'session_summary',
+        sessionId: this.state.session_id ?? this.ctx.id.toString(),
+        summary: {
+          numTurns: this.state.num_turns,
+          totalCostUsd: this.state.total_cost_usd ?? null,
+          durationMs: this.state.duration_ms ?? null,
+        },
+      }),
+    )
+  }
+
   private broadcastMessage(message: SessionMessage) {
     // Unified {type:'messages'} delta frame (B1). The legacy per-message
     // `{type:'message'}` emit was retired in P1 sub-phase 1b now that the
@@ -2827,6 +2856,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           this.broadcastToClients(JSON.stringify({ type: 'raw_event', event }))
         }
         this.updateState({ num_turns: this.state.num_turns + 1 })
+        this.broadcastSessionSummary()
         break
       }
 
@@ -3040,6 +3070,10 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           this.syncStatusToD1(_now)
           this.syncResultToD1(_now)
         }
+        // Push the final aggregated counters so clients update immediately
+        // at turn-complete without waiting for the next REST backfill. See
+        // `broadcastSessionSummary` preamble for the full rationale.
+        this.broadcastSessionSummary()
         // Discovered-session fan-out is now owned by the cron in
         // src/api/scheduled.ts (#7 p6); SessionDO no longer mirrors here.
         if (!event.is_error) {

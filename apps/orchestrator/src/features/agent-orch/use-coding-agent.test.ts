@@ -1137,6 +1137,33 @@ describe('legacy gateway_event handling', () => {
   // running → idle transition is driven by `useDerivedStatus`. The prior
   // `processes result events` test is therefore intentionally absent.
 
+  // Regression guard for DB-1056-0420: spec #31 accidentally orphaned the
+  // StatusBar's turn counter by killing the SessionState broadcast and the
+  // `result` gateway_event handler without a replacement live push. The
+  // SessionDO now emits a typed `session_summary` frame on every num_turns
+  // change; this test locks in that the client upserts those counters into
+  // sessionLiveStateCollection so the StatusBar refreshes without waiting
+  // for the REST backfill on mount / focus / reconnect.
+  test('processes session_summary frames and upserts turn counters', () => {
+    renderHook(() => useCodingAgent('test-session'))
+
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage({
+          type: 'session_summary',
+          sessionId: 'test-session',
+          summary: { numTurns: 4, totalCostUsd: 0.0123, durationMs: 8765 },
+        }),
+      )
+    })
+
+    expect(liveStateStore.get('test-session')).toMatchObject({
+      numTurns: 4,
+      totalCostUsd: 0.0123,
+      durationMs: 8765,
+    })
+  })
+
   test('does NOT create messages from assistant gateway_events (stripped)', () => {
     const { result } = renderHook(() => useCodingAgent('test-session'))
 
