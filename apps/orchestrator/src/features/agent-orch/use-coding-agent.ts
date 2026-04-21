@@ -702,12 +702,20 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   const sendMessage = useCallback(
     async (content: string | ContentBlock[], opts?: { submitId?: string }) => {
       const clientMessageId = newClientMessageId()
+      // Stamp optimistic row with the current watermark seq so it sorts
+      // in-place (alongside already-applied messages) rather than at
+      // Infinity. Without this, the row briefly sorts LAST (after the
+      // assistant's final message) and `useDerivedStatus` reads
+      // `last.role === 'user'` → stuck on 'running'. The server echo
+      // delta will overwrite with the canonical seq via writeUpsert.
+      const currentSeq = lastSeqRef.current.get(agentName) ?? 0
       const optimisticRow: CachedMessage = {
         id: clientMessageId,
         sessionId: agentName,
         role: 'user',
         parts: contentToParts(content),
         createdAt: new Date(),
+        seq: currentSeq + 1,
       }
       try {
         messagesCollection.utils.writeUpsert(optimisticRow)
