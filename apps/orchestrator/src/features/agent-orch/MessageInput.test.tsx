@@ -4,7 +4,7 @@
  * MessageInput tests — verifies compound PromptInput structure with PromptInputBody.
  */
 
-import { cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 // Shared mock text state the controller hook reads from. Tests can
@@ -32,12 +32,22 @@ vi.mock('@duraclaw/ai-elements', () => ({
   PromptInputProvider: ({ children }: Record<string, unknown>) => (
     <div data-testid="prompt-input-provider">{children as React.ReactNode}</div>
   ),
-  PromptInputSubmit: ({ disabled, status, onStop, children }: Record<string, unknown>) => (
+  PromptInputSubmit: ({
+    disabled,
+    status,
+    onStop,
+    children,
+    title,
+    className,
+    ...rest
+  }: Record<string, unknown>) => (
     <button
       type="submit"
       data-testid="prompt-input-submit"
       data-status={(status as string) ?? ''}
       data-has-onstop={onStop ? 'true' : 'false'}
+      data-classname={className as string}
+      title={title as string}
       aria-label={status === 'streaming' ? 'Stop' : 'Submit'}
       disabled={disabled as boolean}
       onClick={(e) => {
@@ -46,6 +56,9 @@ vi.mock('@duraclaw/ai-elements', () => ({
           ;(onStop as () => void)()
         }
       }}
+      // Forward any extra data-* props so tests can assert on
+      // data-force-stop / etc.
+      {...(rest as Record<string, unknown>)}
     >
       {children as React.ReactNode}
     </button>
@@ -188,5 +201,112 @@ describe('MessageInput combined send/interrupt button', () => {
     // Interrupt must remain clickable even though `disabled` is true for
     // the composer — users should always be able to halt a runaway turn.
     expect(submit.hasAttribute('disabled')).toBe(false)
+  })
+})
+
+describe('MessageInput force-stop escalation (state-driven relabel)', () => {
+  /**
+   * The composer relabels the interrupt button to "Force stop" when a
+   * previously fired `interrupt` hasn't settled within the relabel window
+   * (see FORCE_STOP_RELABEL_MS in MessageInput.tsx, default 5s). Tests
+   * drive a fake timer past the threshold so we don't sleep.
+   */
+  it('does NOT show force-stop on first click — only interrupt fires', () => {
+    const onInterrupt = vi.fn()
+    const onForceStop = vi.fn()
+    render(
+      <MessageInput
+        onSend={vi.fn()}
+        status="running"
+        onInterrupt={onInterrupt}
+        onForceStop={onForceStop}
+      />,
+    )
+    const submit = screen.getByTestId('prompt-input-submit')
+    expect(submit.getAttribute('data-force-stop')).toBeNull()
+
+    submit.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    expect(onInterrupt).toHaveBeenCalledTimes(1)
+    expect(onForceStop).not.toHaveBeenCalled()
+  })
+
+  it('relabels to force-stop after the window elapses while status stays busy', () => {
+    vi.useFakeTimers()
+    try {
+      const onInterrupt = vi.fn()
+      const onForceStop = vi.fn()
+      render(
+        <MessageInput
+          onSend={vi.fn()}
+          status="running"
+          onInterrupt={onInterrupt}
+          onForceStop={onForceStop}
+        />,
+      )
+      const submit = screen.getByTestId('prompt-input-submit')
+
+      // First click sends the interrupt.
+      act(() => {
+        submit.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+      })
+      expect(onInterrupt).toHaveBeenCalledTimes(1)
+      expect(submit.getAttribute('data-force-stop')).toBeNull()
+
+      // Drive the relabel timer past the threshold.
+      act(() => {
+        vi.advanceTimersByTime(5_001)
+      })
+
+      // Now the button should carry the force-stop affordance.
+      expect(submit.getAttribute('data-force-stop')).toBe('true')
+      expect(submit.getAttribute('title')).toMatch(/Force stop/i)
+
+      // Second click fires onForceStop, not onInterrupt again.
+      act(() => {
+        submit.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+      })
+      expect(onForceStop).toHaveBeenCalledTimes(1)
+      expect(onInterrupt).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('clears the relabel timer when status leaves the busy set (normal interrupt path)', () => {
+    vi.useFakeTimers()
+    try {
+      const onInterrupt = vi.fn()
+      const onForceStop = vi.fn()
+      const { rerender } = render(
+        <MessageInput
+          onSend={vi.fn()}
+          status="running"
+          onInterrupt={onInterrupt}
+          onForceStop={onForceStop}
+        />,
+      )
+      const submit = screen.getByTestId('prompt-input-submit')
+
+      act(() => {
+        submit.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+      })
+      // Status flips back to idle before the window closes.
+      rerender(
+        <MessageInput
+          onSend={vi.fn()}
+          status="idle"
+          onInterrupt={onInterrupt}
+          onForceStop={onForceStop}
+        />,
+      )
+      act(() => {
+        vi.advanceTimersByTime(10_000)
+      })
+
+      // No force-stop affordance — session successfully interrupted.
+      expect(submit.getAttribute('data-force-stop')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

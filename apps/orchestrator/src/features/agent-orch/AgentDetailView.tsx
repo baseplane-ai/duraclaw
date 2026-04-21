@@ -31,6 +31,7 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
     isConnecting,
     stop,
     interrupt,
+    forceStop,
     resolveGate,
     sendMessage,
     submitDraft,
@@ -166,6 +167,7 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
         disabled={status === 'waiting_gate'}
         status={derivedStatus ?? live.status}
         onInterrupt={interrupt}
+        onForceStop={forceStop}
         draftKey={draftKey}
       />
     </div>

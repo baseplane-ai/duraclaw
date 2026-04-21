@@ -164,6 +164,63 @@ export const spec = {
         },
       },
     },
+    '/sessions/{id}/kill': {
+      post: {
+        operationId: 'killSession',
+        summary: 'Force-terminate a running session by PID',
+        description:
+          'User-triggered force stop. Reads the session\'s .pid file, SIGTERMs the runner, and schedules a SIGKILL escalation watchdog. Rescues the "dial-back WS dead but runner alive" case that the in-band `abort` command cannot reach.',
+        parameters: [
+          {
+            name: 'id',
+            in: 'path',
+            required: true,
+            schema: { type: 'string', format: 'uuid' },
+          },
+        ],
+        responses: {
+          '200': {
+            description:
+              'SIGTERM delivered (or session already terminal — body carries `already_terminal: true`).',
+            content: {
+              'application/json': {
+                schema: {
+                  oneOf: [
+                    {
+                      type: 'object',
+                      properties: {
+                        ok: { type: 'boolean', example: true },
+                        signalled: { type: 'string', example: 'SIGTERM' },
+                        pid: { type: 'integer' },
+                        sigkill_grace_ms: { type: 'integer' },
+                      },
+                      required: ['ok', 'signalled', 'pid', 'sigkill_grace_ms'],
+                    },
+                    {
+                      type: 'object',
+                      properties: {
+                        ok: { type: 'boolean', example: true },
+                        already_terminal: { type: 'boolean', example: true },
+                        state: {
+                          type: 'string',
+                          enum: ['completed', 'failed', 'aborted', 'crashed'],
+                        },
+                      },
+                      required: ['ok', 'already_terminal', 'state'],
+                    },
+                  ],
+                },
+              },
+            },
+          },
+          '401': { $ref: '#/components/responses/Unauthorized' },
+          '404': {
+            description: 'Session id has neither .pid nor .exit on disk.',
+          },
+          '500': { description: 'Invalid or unreadable pid file.' },
+        },
+      },
+    },
     '/projects': {
       get: {
         operationId: 'listProjects',

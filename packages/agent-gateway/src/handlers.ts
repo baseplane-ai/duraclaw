@@ -272,3 +272,142 @@ export async function handleListSessions(
   const sessions = await listSessions(sessionsDir, isAlive)
   return json(200, { ok: true, sessions })
 }
+
+// ── POST /sessions/:id/kill ─────────────────────────────────────────
+
+/**
+ * Process-kill API surface (injectable for tests).
+ *
+ * `kill(pid, sig)` returns `true` iff the signal was delivered. The
+ * default implementation wraps `process.kill` and swallows ESRCH (the
+ * pid died between our liveness check and the signal), returning
+ * `false` for both ESRCH and any other error.
+ */
+export type KillFn = (pid: number, signal: 'SIGTERM' | 'SIGKILL') => boolean
+
+export const defaultKill: KillFn = (pid, signal) => {
+  try {
+    process.kill(pid, signal)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export interface KillHandlerOpts {
+  sessionsDir?: string
+  isAlive?: LivenessCheck
+  kill?: KillFn
+  logger?: GatewayLogger
+  /**
+   * Grace window (ms) between SIGTERM and SIGKILL escalation. Matches the
+   * reaper's default (10s in prod, overridable in tests).
+   */
+  sigkillGraceMs?: number
+  /** Injectable clock for tests. */
+  now?: () => number
+}
+
+/** Default grace — short enough that a wedged runner doesn't feel "stuck"
+ *  for long from the user's perspective, long enough to give SIGTERM +
+ *  the 2s runner watchdog a chance to exit cleanly. */
+const DEFAULT_FORCE_KILL_GRACE_MS = 5_000
+
+/**
+ * Force-terminate a session by its on-disk `.pid`.
+ *
+ * Semantics:
+ *  - `.exit` already present → 200 `{ ok: true, already_terminal: true,
+ *    state: <terminal> }`. Caller treats as no-op success.
+ *  - `.pid` present AND live → SIGTERM + schedule SIGKILL watchdog
+ *    (fires at `sigkillGraceMs` iff still alive). Responds 200 with
+ *    `{ ok: true, signalled: 'SIGTERM', pid }` immediately; does NOT
+ *    wait for the watchdog.
+ *  - `.pid` present AND already dead → 200 `{ ok: true,
+ *    already_terminal: true, state: 'crashed' }`.
+ *  - Neither file present → 404 `{ ok: false, error: 'session not found' }`.
+ *
+ * Unlike the reaper's internal SIGTERM path, this is user-triggered, so
+ * the SIGKILL watchdog is self-contained — we don't dedupe against an
+ * existing `awaitingKill` map because the typical caller pattern is a
+ * single "force stop" click.
+ */
+export async function handleKillSession(
+  sessionId: string,
+  opts: KillHandlerOpts = {},
+): Promise<Response> {
+  const sessionsDir = opts.sessionsDir ?? getSessionsDir()
+  const isAlive = opts.isAlive ?? defaultLivenessCheck
+  const kill = opts.kill ?? defaultKill
+  const logger = opts.logger ?? console
+  const graceMs = opts.sigkillGraceMs ?? DEFAULT_FORCE_KILL_GRACE_MS
+  const now = opts.now ?? (() => performance.now())
+
+  const start = now()
+  const res = await resolveSessionState(sessionsDir, sessionId, isAlive)
+
+  if (!res.found) {
+    const durationMs = Math.round(now() - start)
+    logger.info(
+      `[gateway] kill sessionId=${sessionId} state=null duration_ms=${durationMs} found=false`,
+    )
+    return json(404, { ok: false, error: 'session not found' })
+  }
+
+  if (res.state.state !== 'running') {
+    const durationMs = Math.round(now() - start)
+    logger.info(
+      `[gateway] kill sessionId=${sessionId} already_terminal=${res.state.state} duration_ms=${durationMs}`,
+    )
+    return json(200, {
+      ok: true,
+      already_terminal: true,
+      state: res.state.state,
+    })
+  }
+
+  // Running — read the pid out of the same .pid file resolveSessionState
+  // just consulted. We re-read rather than threading the pid through the
+  // resolve result so the existing return shape stays unchanged.
+  const pidPath = nodePath.join(sessionsDir, `${sessionId}.pid`)
+  let pidBody: { pid?: unknown } | null = null
+  try {
+    pidBody = JSON.parse(await fs.readFile(pidPath, 'utf8')) as { pid?: unknown }
+  } catch {
+    // Raced with reaper or runner cleanup — treat as gone.
+    const durationMs = Math.round(now() - start)
+    logger.info(`[gateway] kill sessionId=${sessionId} pid_vanished duration_ms=${durationMs}`)
+    return json(404, { ok: false, error: 'session pid vanished' })
+  }
+  const pid = typeof pidBody?.pid === 'number' ? pidBody.pid : null
+  if (pid === null || !Number.isFinite(pid) || pid <= 0) {
+    return json(500, { ok: false, error: 'invalid pid file' })
+  }
+
+  const sigtermed = kill(pid, 'SIGTERM')
+  const durationMs = Math.round(now() - start)
+  logger.info(
+    `[gateway] kill sessionId=${sessionId} pid=${pid} signal=SIGTERM delivered=${sigtermed} duration_ms=${durationMs}`,
+  )
+
+  // Escalation watchdog — fires once, unref'd so it doesn't hold the
+  // event loop open during gateway shutdown.
+  const timer = setTimeout(() => {
+    if (isAlive(pid)) {
+      const escalated = kill(pid, 'SIGKILL')
+      logger.info(
+        `[gateway] kill sigkill_escalation sessionId=${sessionId} pid=${pid} delivered=${escalated}`,
+      )
+    }
+  }, graceMs)
+  if (typeof (timer as { unref?: () => void }).unref === 'function') {
+    ;(timer as { unref: () => void }).unref()
+  }
+
+  return json(200, {
+    ok: true,
+    signalled: 'SIGTERM',
+    pid,
+    sigkill_grace_ms: graceMs,
+  })
+}

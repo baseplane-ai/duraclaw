@@ -29,7 +29,7 @@ import type {
   SessionStatus,
   SpawnConfig,
 } from '~/lib/types'
-import { getSessionStatus, listSessions, parseEvent } from '~/lib/vps-client'
+import { getSessionStatus, killSession, listSessions, parseEvent } from '~/lib/vps-client'
 import {
   applyToolResult,
   assistantContentToParts,
@@ -1853,6 +1853,79 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     this.syncStatusToD1(new Date().toISOString())
     console.log(`[SessionDO:${this.ctx.id}] abort: ${reason ?? 'user request'}`)
     return { ok: true }
+  }
+
+  /**
+   * Force-stop a wedged session. This is the escalation lever exposed to
+   * the UI when a previous `interrupt` / `stop` hasn't settled — typically
+   * because the dial-back WS is dead (runner still alive on the VPS, but
+   * the in-band `abort` command never reaches it).
+   *
+   * Transition-wise this matches `abort`: we flip status → idle
+   * unilaterally and drop the callback token. The delta vs `abort` is the
+   * out-of-band HTTP call to `POST /sessions/:id/kill` on the gateway,
+   * which SIGTERMs the runner by PID straight from its `.pid` file. Even
+   * if the WS command is lost in flight, the process goes away.
+   *
+   * Returns a classified outcome so the caller can surface failures
+   * (timeout / gateway unreachable / pid not found). The DO has already
+   * locally recovered regardless — `forceStop` never leaves the DO in a
+   * weird state.
+   */
+  @callable()
+  async forceStop(reason?: string): Promise<{
+    ok: boolean
+    error?: string
+    kill:
+      | { kind: 'skipped'; reason: 'no_gateway_url' | 'no_session_id' }
+      | { kind: 'signalled'; pid: number; sigkill_grace_ms: number }
+      | { kind: 'already_terminal'; state: string }
+      | { kind: 'not_found' }
+      | { kind: 'unreachable'; reason: string }
+  }> {
+    if (this.state.status !== 'running' && this.state.status !== 'waiting_gate') {
+      return {
+        ok: false,
+        error: `Cannot force-stop: status is '${this.state.status}'`,
+        kill: { kind: 'skipped', reason: 'no_session_id' },
+      }
+    }
+
+    const sessionId = this.state.session_id
+    this.updateState({
+      status: 'idle',
+      gate: null,
+      error: null,
+      active_callback_token: undefined,
+    })
+
+    // Best-effort in-band abort — harmless if the WS is dead.
+    if (sessionId) {
+      this.sendToGateway({ type: 'abort', session_id: sessionId })
+    }
+    this.syncStatusToD1(new Date().toISOString())
+
+    // Out-of-band SIGTERM via gateway HTTP. This is the slice that
+    // actually rescues the stuck-runner case.
+    const gatewayUrl = this.env.CC_GATEWAY_URL
+    let killResult:
+      | { kind: 'skipped'; reason: 'no_gateway_url' | 'no_session_id' }
+      | { kind: 'signalled'; pid: number; sigkill_grace_ms: number }
+      | { kind: 'already_terminal'; state: string }
+      | { kind: 'not_found' }
+      | { kind: 'unreachable'; reason: string }
+    if (!gatewayUrl) {
+      killResult = { kind: 'skipped', reason: 'no_gateway_url' }
+    } else if (!sessionId) {
+      killResult = { kind: 'skipped', reason: 'no_session_id' }
+    } else {
+      killResult = await killSession(gatewayUrl, this.env.CC_GATEWAY_SECRET, sessionId, 5_000)
+    }
+
+    console.log(
+      `[SessionDO:${this.ctx.id}] forceStop: ${reason ?? 'user request'} kill=${killResult.kind}`,
+    )
+    return { ok: true, kill: killResult }
   }
 
   @callable()

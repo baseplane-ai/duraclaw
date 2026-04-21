@@ -4,6 +4,7 @@ import type { ServerWebSocket } from 'bun'
 import { verifyToken } from './auth.js'
 import { handleFileContents, handleFileTree, handleGitStatus } from './files.js'
 import {
+  handleKillSession,
   handleListSessions,
   handleStartSession,
   handleStatus,
@@ -106,6 +107,15 @@ const server = Bun.serve<WsData>({
     if (req.method === 'GET' && statusMatch) {
       const [, id] = statusMatch
       return handleStatus(id)
+    }
+
+    // POST /sessions/:id/kill — user-triggered force stop. SIGTERMs the
+    // runner, schedules SIGKILL watchdog. Rescues the "WS dead, runner
+    // alive" case that `abort` (which rides the dial-back WS) can't.
+    const killMatch = path.match(/^\/sessions\/([^/]+)\/kill$/)
+    if (req.method === 'POST' && killMatch) {
+      const [, id] = killMatch
+      return handleKillSession(id, { logger: console })
     }
 
     // POST /sessions/start — spawn detached session-runner (B4)
