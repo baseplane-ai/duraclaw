@@ -562,15 +562,23 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     }
   }, [agentName, readyState])
 
-  // Capacitor only: hydrate missed messages on foreground. The WS itself
-  // is left alone — partysocket auto-reconnects if Android killed it while
-  // backgrounded. No-op on web.
+  // Capacitor only: on foreground / network-change, force both the
+  // per-session WS and the singleton user-stream WS to reconnect (defeats
+  // zombie sockets — see use-app-lifecycle.ts for the rationale), then
+  // hydrate missed messages. No-op on web.
   useAppLifecycle({
     hydrate: useCallback(() => {
       connection.call('getMessages', []).catch(() => {
         // Best-effort hydrate; messages collection still falls back to
         // its queryFn for cold-start / stale-cache.
       })
+    }, [connection]),
+    reconnect: useCallback(() => {
+      try {
+        connection.reconnect()
+      } catch {
+        // ignore — socket may already be tearing down
+      }
     }, [connection]),
   })
 
