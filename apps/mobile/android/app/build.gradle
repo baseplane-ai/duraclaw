@@ -1,5 +1,23 @@
 apply plugin: 'com.android.application'
 
+String resolveAppVersion() {
+    // Prefer APP_VERSION env (set by build-android.sh / infra pipeline);
+    // fall back to `git rev-parse --short HEAD` in the repo so local
+    // Gradle invocations still stamp a meaningful SHA; final fallback is
+    // "1.0" for tooling that runs outside a git checkout.
+    String envVal = System.getenv("APP_VERSION")
+    if (envVal != null && !envVal.isEmpty()) return envVal
+    try {
+        def proc = ["git", "rev-parse", "--short", "HEAD"].execute(null, rootDir.parentFile.parentFile)
+        proc.waitFor()
+        if (proc.exitValue() == 0) {
+            String sha = proc.text.trim()
+            if (!sha.isEmpty()) return sha
+        }
+    } catch (Exception ignored) { }
+    return "1.0"
+}
+
 android {
     namespace = "com.baseplane.duraclaw"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -8,7 +26,11 @@ android {
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
-        versionName "1.0"
+        // Stamp the git short-SHA as versionName so @capacitor/app's
+        // App.getInfo().version matches apk/version.json on the server.
+        // Without this the client's APK-update prompt fires on every launch
+        // because "1.0" never equals the SHA returned by the manifest.
+        versionName resolveAppVersion()
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
