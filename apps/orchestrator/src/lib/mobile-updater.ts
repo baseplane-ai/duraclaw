@@ -71,6 +71,7 @@ export async function initMobileUpdater(): Promise<void> {
   }
 
   const currentVersion = import.meta.env.VITE_APP_VERSION ?? '0.0.0'
+  console.log('[updater] init — active bundle version', currentVersion)
   try {
     await checkWebBundleUpdate(currentVersion)
   } catch (err) {
