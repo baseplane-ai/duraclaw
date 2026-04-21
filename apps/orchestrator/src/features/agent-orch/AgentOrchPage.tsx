@@ -6,6 +6,8 @@
  * inside the hook, so callers just pass `project` when opening tabs.
  */
 
+import type { SessionSummary } from '@duraclaw/shared-types'
+import { createTransaction } from '@tanstack/db'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Header } from '~/components/layout/header'
@@ -14,6 +16,7 @@ import { PushOptInBanner } from '~/components/push-opt-in-banner'
 import { PwaInstallBanner } from '~/components/pwa-install-banner'
 import { QuickPromptInput } from '~/components/quick-prompt-input'
 import { TabBar } from '~/components/tab-bar'
+import { sessionsCollection } from '~/db/sessions-collection'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { useSwipeTabs } from '~/hooks/use-swipe-tabs'
 import { getTabSyncSnapshot, isDraftTabId, newDraftTabId, useTabSync } from '~/hooks/use-tab-sync'
@@ -139,6 +142,41 @@ function AgentOrchContent() {
 
         const data = (await resp.json()) as { session_id: string }
         const sessionId = data.session_id
+
+        // Optimistic insert into sessionsCollection so the tab title and
+        // status bar populate immediately after navigate. Without this,
+        // both surfaces render blank until the server's
+        // broadcastSessionRow('insert') WS delta arrives, which races
+        // the first render of the new tab (and loses on slow networks
+        // or cold DO dispatch). Field shape mirrors the baseRow the
+        // server writes in POST /api/sessions (status: 'running',
+        // agent defaulted to 'claude'); the server echo reconciles via
+        // TanStack DB deep-equals. Transaction has a no-op mutationFn
+        // because the POST has already succeeded — we just need the
+        // optimistic-layer overlay until the synced-layer frame lands.
+        const now = new Date().toISOString()
+        const optimisticRow: SessionSummary = {
+          id: sessionId,
+          userId: null,
+          project: config.project,
+          status: 'running',
+          model: config.model ?? null,
+          prompt: typeof config.prompt === 'string' ? config.prompt : JSON.stringify(config.prompt),
+          agent: config.agent ?? 'claude',
+          createdAt: now,
+          updatedAt: now,
+          lastActivity: now,
+          archived: false,
+        }
+        const tx = createTransaction({ mutationFn: async () => {} })
+        tx.mutate(() => {
+          ;(
+            sessionsCollection as unknown as {
+              insert: (row: SessionSummary) => void
+            }
+          ).insert(optimisticRow)
+        })
+        await tx.isPersisted.promise
 
         setSpawnConfig({
           project: config.project,
