@@ -294,7 +294,17 @@ const mockCall = vi.fn().mockResolvedValue([])
 vi.mock('agents/react', () => ({
   useAgent: (config: typeof capturedUseAgentConfig) => {
     capturedUseAgentConfig = config
-    return { call: mockCall }
+    return {
+      call: mockCall,
+      readyState: 3,
+      // use-coding-agent subscribes to open/close/error on the PartySocket
+      // instance to mirror readyState through React state (Spec #31: our
+      // SessionDO suppresses protocol messages, so useAgent's internal
+      // setState never fires on open and `connection.readyState` stays
+      // React-invisible without this event-driven mirror).
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }
   },
 }))
 

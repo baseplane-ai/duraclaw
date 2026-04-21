@@ -12,7 +12,7 @@
 
 import { createTransaction } from '@tanstack/db'
 import { useAgent } from 'agents/react'
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type * as Y from 'yjs'
 import { type BranchInfoRow, createBranchInfoCollection } from '~/db/branch-info-collection'
 import { type CachedMessage, createMessagesCollection } from '~/db/messages-collection'
@@ -515,10 +515,34 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   })
 
   // Mirror WS readyState into the live-state collection so components can
-  // detect disconnect (B10). Observes every transition including reconnects.
+  // detect disconnect (B10). `useAgent` returns the raw PartySocket instance
+  // whose `readyState` is a mutable property — NOT React state. React only
+  // re-renders when useAgent's internal setState fires (CF_AGENT_IDENTITY /
+  // CF_AGENT_STATE receipt), but our SessionDO suppresses those protocol
+  // messages via `shouldSendProtocolMessages() => false` (Spec #31 P5 B9).
+  // Result: after the WS actually opens we never re-render, so the effect
+  // dep stays on its initial pre-open value and StatusBar renders
+  // "Reconnecting…" forever. Subscribe to the native open/close/error
+  // events and mirror readyState through React state so every transition
+  // propagates.
+  const [readyState, setReadyState] = useState(() => connection.readyState)
   useEffect(() => {
-    upsertSessionLiveState(agentName, { wsReadyState: connection.readyState })
-  }, [agentName, connection.readyState])
+    const sync = () => setReadyState(connection.readyState)
+    // Run once in case the socket advanced between render and effect mount.
+    sync()
+    connection.addEventListener('open', sync)
+    connection.addEventListener('close', sync)
+    connection.addEventListener('error', sync)
+    return () => {
+      connection.removeEventListener('open', sync)
+      connection.removeEventListener('close', sync)
+      connection.removeEventListener('error', sync)
+    }
+  }, [connection])
+
+  useEffect(() => {
+    upsertSessionLiveState(agentName, { wsReadyState: readyState })
+  }, [agentName, readyState])
 
   // Capacitor only: hydrate missed messages on foreground. The WS itself
   // is left alone — partysocket auto-reconnects if Android killed it while
@@ -567,8 +591,9 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
 
   // Return the live WS readyState rather than a state-presence proxy: once
   // `state` arrives and the socket later closes we want consumers to see the
-  // real transition (0 connecting, 1 open, 2 closing, 3 closed).
-  const wsReadyState = connection.readyState
+  // real transition (0 connecting, 1 open, 2 closing, 3 closed). Reads the
+  // state mirror above so downstream consumers re-render on open/close.
+  const wsReadyState = readyState
   const isConnecting = isFetching || wsReadyState !== 1
 
   const rewind = useCallback(

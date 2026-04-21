@@ -30,7 +30,14 @@ vi.mock('agents/react', () => ({
   }) => {
     capturedOnStateUpdate = opts.onStateUpdate ?? null
     capturedOnMessage = opts.onMessage ?? null
-    return { call: mockCall }
+    return {
+      call: mockCall,
+      readyState: 3,
+      // use-coding-agent subscribes to open/close/error on the PartySocket
+      // instance to mirror readyState through React state.
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }
   },
 }))
 

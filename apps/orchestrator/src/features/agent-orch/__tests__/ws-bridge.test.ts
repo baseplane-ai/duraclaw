@@ -23,6 +23,11 @@ vi.mock('agents/react', () => ({
     return {
       call: vi.fn().mockResolvedValue([]),
       readyState: 3,
+      // `use-coding-agent` subscribes to native open/close/error events on
+      // the PartySocket instance to mirror readyState through React state
+      // (see commit explaining shouldSendProtocolMessages=false silence).
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
     }
   },
 }))
