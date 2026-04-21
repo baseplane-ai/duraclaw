@@ -1,13 +1,13 @@
 /**
  * Tests for the WS bridge in useCodingAgent.
  *
- * Spec-31 P5 B9/B10: `onStateUpdate` is no longer registered — the DO
- * suppresses SDK protocol state frames via
- * `shouldSendProtocolMessages() => false`. `SessionState` is deleted;
- * components derive status/gate from messages via `useDerivedStatus` /
- * `useDerivedGate`. These tests lock in the new contract: no
- * `onStateUpdate` callback is passed to `useAgent`, and no SessionState
- * patches are ever written into the live-state collection.
+ * Spec-31 P5 B9/B10 (bootstrap) + spec #37 (state collapse): `onStateUpdate`
+ * is no longer registered — the DO suppresses SDK protocol state frames
+ * via `shouldSendProtocolMessages() => false`. Components now read status
+ * from the D1-mirrored `agent_sessions` row via `useSession`, and gate
+ * from messages via `useDerivedGate`. These tests lock in the new
+ * contract: no `onStateUpdate` callback is passed to `useAgent`, and
+ * sessionLocalCollection only holds `{id, wsReadyState}`.
  *
  * @vitest-environment jsdom
  */
@@ -54,31 +54,29 @@ vi.mock('~/hooks/use-messages-collection', () => ({
   useMessagesCollection: () => ({ messages: [], isLoading: false, isFetching: false }),
 }))
 
-// useSessionLiveState owns contextUsage/kataState/worktreeInfo. Stub
-// it so the hook doesn't subscribe to the real collection across tests.
-vi.mock('~/hooks/use-session-live-state', () => ({
-  useSessionLiveState: () => ({
-    contextUsage: null,
-    kataState: null,
-    worktreeInfo: null,
-    wsReadyState: null,
-    isLive: false,
-  }),
+// Spec #37 P2b: `useSession` reads sessionsCollection; stub it to undefined
+// so `parseJsonField(session?.kataStateJson ?? null)` returns null cleanly.
+vi.mock('~/hooks/use-sessions-collection', () => ({
+  useSession: () => undefined,
 }))
 
-// upsertSessionLiveState is observed to prove the hook never writes
-// SessionState-shaped patches into the collection (P5 B10).
-const mockUpsert = vi.fn()
+// sessionLocalCollection tracks only { id, wsReadyState }. Observe
+// insert/update so the test can assert that no SessionState-shaped
+// patches ever flow through (the only column is wsReadyState now).
+const mockLocalInsert = vi.fn()
+const mockLocalUpdate = vi.fn()
 
-vi.mock('~/db/session-live-state-collection', () => ({
-  sessionLiveStateCollection: {
-    [Symbol.iterator]: () => [][Symbol.iterator](),
-    has: () => false,
-    insert: vi.fn(),
-    update: vi.fn(),
+vi.mock('~/db/session-local-collection', () => ({
+  sessionLocalCollection: {
+    insert: (...args: unknown[]) => mockLocalInsert(...args),
+    update: (...args: unknown[]) => mockLocalUpdate(...args),
     delete: vi.fn(),
   },
-  upsertSessionLiveState: (...args: unknown[]) => mockUpsert(...args),
+}))
+
+vi.mock('~/db/db-instance', () => ({
+  dbReady: Promise.resolve(null),
+  queryClient: { invalidateQueries: vi.fn() },
 }))
 
 // Import after mocks
@@ -105,14 +103,25 @@ describe('WS bridge in useCodingAgent', () => {
     expect(capturedOnStateUpdate).toBeUndefined()
   })
 
-  test('useCodingAgent never writes SessionState-shaped patches into live-state collection (P5 B10)', () => {
+  test('useCodingAgent writes only { wsReadyState } into sessionLocalCollection (Spec #37 B11)', () => {
     renderHook(() => useCodingAgent('test-session'))
-    // wsReadyState mirror effect legitimately upserts, but no call should
-    // carry a `state` field (the field is gone from the narrowed
-    // SessionLiveState).
-    const stateWrites = mockUpsert.mock.calls.filter(
-      (c) => (c[1] as { state?: unknown }).state !== undefined,
-    )
-    expect(stateWrites.length).toBe(0)
+    // wsReadyState mirror effect is the only write path into the local
+    // collection. Any insert payload must contain exactly `id` +
+    // `wsReadyState`; any update patcher must only touch `wsReadyState`.
+    for (const call of mockLocalInsert.mock.calls) {
+      const row = call[0] as Record<string, unknown>
+      const keys = Object.keys(row).sort()
+      expect(keys).toEqual(['id', 'wsReadyState'])
+    }
+    // Update patchers receive a draft they mutate in-place; ensure no
+    // unexpected keys get added (simulate by calling the patcher against
+    // a wsReadyState-only draft and asserting no extra keys appear).
+    for (const call of mockLocalUpdate.mock.calls) {
+      const patcher = call[1] as (draft: { wsReadyState: number }) => void
+      const draft: Record<string, unknown> = { wsReadyState: 3 }
+      patcher(draft as { wsReadyState: number })
+      const keys = Object.keys(draft).sort()
+      expect(keys).toEqual(['wsReadyState'])
+    }
   })
 })

@@ -230,54 +230,62 @@ vi.mock('~/hooks/use-messages-collection', async () => {
   }
 })
 
-// useSessionLiveState + upsertSessionLiveState are the new ingress/egress for
-// server-authoritative state. Mock them together with a shared in-memory map
-// so onMessage writes round-trip back through the hook and tests can assert
-// on result.current.kataState / contextUsage / etc. (Spec #31 P5 B10:
-// `state` / `sessionResult` no longer exposed.)
-const liveStateStore = new Map<string, Record<string, unknown>>()
-const liveStateSubs = new Set<() => void>()
-const bumpLiveState = () => {
-  for (const cb of liveStateSubs) cb()
+// Spec #37 P2b: session-authoritative state comes from `useSession()` over
+// `sessionsCollection`. Back the mock with an in-memory store so tests can
+// seed rows and assert that JSON-column writes round-trip through
+// `parseJsonField`. `sessionLocalCollection` tracks only `wsReadyState`.
+const sessionsStore = new Map<string, Record<string, unknown>>()
+const sessionsSubs = new Set<() => void>()
+const bumpSessions = () => {
+  for (const cb of sessionsSubs) cb()
 }
 
-vi.mock('~/hooks/use-session-live-state', async () => {
+const sessionLocalStore = new Map<string, { id: string; wsReadyState: number }>()
+
+const { mockInvalidateQueries } = vi.hoisted(() => ({
+  mockInvalidateQueries: vi.fn(),
+}))
+
+vi.mock('~/db/db-instance', () => ({
+  dbReady: Promise.resolve(null),
+  queryClient: { invalidateQueries: mockInvalidateQueries },
+}))
+
+vi.mock('~/hooks/use-sessions-collection', async () => {
   const React = await import('react')
   return {
-    useSessionLiveState: (sessionId: string | null | undefined) => {
+    useSession: (sessionId: string | null | undefined) => {
       const [, setV] = React.useState(0)
       React.useEffect(() => {
         const cb = () => setV((v: number) => v + 1)
-        liveStateSubs.add(cb)
+        sessionsSubs.add(cb)
         return () => {
-          liveStateSubs.delete(cb)
+          sessionsSubs.delete(cb)
         }
       }, [])
-      const row = sessionId ? liveStateStore.get(sessionId) : undefined
-      return {
-        contextUsage: (row?.contextUsage as unknown) ?? null,
-        kataState: (row?.kataState as unknown) ?? null,
-        worktreeInfo: (row?.worktreeInfo as unknown) ?? null,
-        wsReadyState: (row?.wsReadyState as number | undefined) ?? null,
-        isLive: row?.wsReadyState === 1,
-        status: (row?.status as unknown) ?? undefined,
-      }
+      return sessionId ? sessionsStore.get(sessionId) : undefined
     },
   }
 })
 
-vi.mock('~/db/session-live-state-collection', () => ({
-  sessionLiveStateCollection: {
-    [Symbol.iterator]: () => [][Symbol.iterator](),
-    has: () => false,
-    insert: vi.fn(),
-    update: vi.fn(),
-    delete: vi.fn(),
-  },
-  upsertSessionLiveState: (sessionId: string, patch: Record<string, unknown>) => {
-    const existing = liveStateStore.get(sessionId) ?? {}
-    liveStateStore.set(sessionId, { ...existing, ...patch })
-    bumpLiveState()
+vi.mock('~/db/session-local-collection', () => ({
+  sessionLocalCollection: {
+    insert: vi.fn((row: { id: string; wsReadyState: number }) => {
+      if (sessionLocalStore.has(row.id)) {
+        throw new Error(`duplicate key: ${row.id}`)
+      }
+      sessionLocalStore.set(row.id, row)
+    }),
+    update: vi.fn((key: string, patcher: (draft: { wsReadyState: number }) => void) => {
+      const existing = sessionLocalStore.get(key)
+      if (!existing) throw new Error(`not found: ${key}`)
+      const draft = { ...existing }
+      patcher(draft)
+      sessionLocalStore.set(key, draft)
+    }),
+    delete: vi.fn((key: string) => {
+      sessionLocalStore.delete(key)
+    }),
   },
 }))
 
@@ -375,9 +383,9 @@ function snapshotFrame(
 describe('useCodingAgent cache-first hydration', () => {
   beforeEach(() => {
     cachedMessagesStore.clear()
-    liveStateStore.clear()
+    sessionsStore.clear()
     collectionSubs.clear()
-    liveStateSubs.clear()
+    sessionsSubs.clear()
     capturedUseAgentConfig = null
     vi.clearAllMocks()
   })
@@ -451,16 +459,19 @@ describe('useCodingAgent cache-first hydration', () => {
   })
 
   test('resets per-session kataState when agentName changes', () => {
-    // Spec #31 P5 B10: `state` / `sessionResult` are no longer on the hook
-    // return. Exercise per-session isolation via `kataState` instead, which
-    // is still surfaced through `useSessionLiveState`.
+    // Spec #37 P2b: kataState is derived from `session.kataStateJson` via
+    // `parseJsonField`. Per-session isolation is still verified by swapping
+    // the agentName and asserting the new session's row drives the value.
     const { result, rerender } = renderHook(({ name }: { name: string }) => useCodingAgent(name), {
       initialProps: { name: 'session-a' },
     })
 
     act(() => {
-      liveStateStore.set('session-a', { kataState: { currentMode: 'impl' } })
-      bumpLiveState()
+      sessionsStore.set('session-a', {
+        id: 'session-a',
+        kataStateJson: JSON.stringify({ currentMode: 'impl' }),
+      })
+      bumpSessions()
     })
 
     expect(result.current.kataState).not.toBeNull()
@@ -494,9 +505,9 @@ describe('useCodingAgent cache-first hydration', () => {
 describe('type: "messages" delta wire format (unified)', () => {
   beforeEach(() => {
     cachedMessagesStore.clear()
-    liveStateStore.clear()
+    sessionsStore.clear()
     collectionSubs.clear()
-    liveStateSubs.clear()
+    sessionsSubs.clear()
     capturedUseAgentConfig = null
     msgSeq = 0
     vi.clearAllMocks()
@@ -700,9 +711,9 @@ describe('type: "messages" delta wire format (unified)', () => {
 describe('type: "messages" snapshot wire format (bulk replay)', () => {
   beforeEach(() => {
     cachedMessagesStore.clear()
-    liveStateStore.clear()
+    sessionsStore.clear()
     collectionSubs.clear()
-    liveStateSubs.clear()
+    sessionsSubs.clear()
     capturedUseAgentConfig = null
     msgSeq = 0
     vi.clearAllMocks()
@@ -828,9 +839,9 @@ describe('type: "messages" snapshot wire format (bulk replay)', () => {
 describe('MessagesFrame gap detection (P1 B3)', () => {
   beforeEach(() => {
     cachedMessagesStore.clear()
-    liveStateStore.clear()
+    sessionsStore.clear()
     collectionSubs.clear()
-    liveStateSubs.clear()
+    sessionsSubs.clear()
     capturedUseAgentConfig = null
     msgSeq = 0
     vi.clearAllMocks()
@@ -982,9 +993,9 @@ describe('MessagesFrame gap detection (P1 B3)', () => {
 describe('sendMessage (SessionMessage format)', () => {
   beforeEach(() => {
     cachedMessagesStore.clear()
-    liveStateStore.clear()
+    sessionsStore.clear()
     collectionSubs.clear()
-    liveStateSubs.clear()
+    sessionsSubs.clear()
     capturedUseAgentConfig = null
     vi.clearAllMocks()
   })
@@ -1049,9 +1060,9 @@ describe('sendMessage (SessionMessage format)', () => {
 describe('injectQaPair (SessionMessage format)', () => {
   beforeEach(() => {
     cachedMessagesStore.clear()
-    liveStateStore.clear()
+    sessionsStore.clear()
     collectionSubs.clear()
-    liveStateSubs.clear()
+    sessionsSubs.clear()
     capturedUseAgentConfig = null
     vi.clearAllMocks()
   })
@@ -1078,9 +1089,9 @@ describe('injectQaPair (SessionMessage format)', () => {
 describe('legacy gateway_event handling', () => {
   beforeEach(() => {
     cachedMessagesStore.clear()
-    liveStateStore.clear()
+    sessionsStore.clear()
     collectionSubs.clear()
-    liveStateSubs.clear()
+    sessionsSubs.clear()
     capturedUseAgentConfig = null
     vi.clearAllMocks()
   })
@@ -1089,8 +1100,13 @@ describe('legacy gateway_event handling', () => {
     vi.restoreAllMocks()
   })
 
-  test('processes kata_state events', () => {
-    const { result } = renderHook(() => useCodingAgent('test-session'))
+  test('kata_state events invalidate the sessions query', () => {
+    // Spec #37 P2b B16: kata_state is now server-persisted into
+    // `agent_sessions.kata_state_json` and broadcast via the synced-collection
+    // delta. The client no longer writes it anywhere directly — it just
+    // invalidates the queryKey so `queryFn` refetches if/when the cold-start
+    // path is in play.
+    renderHook(() => useCodingAgent('test-session'))
 
     act(() => {
       capturedUseAgentConfig?.onMessage?.(
@@ -1104,11 +1120,14 @@ describe('legacy gateway_event handling', () => {
       )
     })
 
-    expect(result.current.kataState).toEqual({ mode: 'implementation', phase: 'p1' })
+    expect(mockInvalidateQueries).toHaveBeenCalledWith({ queryKey: ['sessions'] })
   })
 
-  test('processes context_usage events', () => {
-    const { result } = renderHook(() => useCodingAgent('test-session'))
+  test('context_usage events invalidate the sessions query', () => {
+    // Spec #37 P2b B16: context_usage is server-persisted on agent_sessions
+    // (context_usage_json) and reaches the client via the synced delta.
+    // The gateway_event handler is just an invalidate-pass-through.
+    renderHook(() => useCodingAgent('test-session'))
 
     act(() => {
       capturedUseAgentConfig?.onMessage?.(
@@ -1122,47 +1141,20 @@ describe('legacy gateway_event handling', () => {
       )
     })
 
-    expect(result.current.contextUsage).toEqual({
-      totalTokens: 5000,
-      maxTokens: 200000,
-      percentage: 2.5,
-      model: undefined,
-      isAutoCompactEnabled: undefined,
-      autoCompactThreshold: undefined,
-    })
+    expect(mockInvalidateQueries).toHaveBeenCalledWith({ queryKey: ['sessions'] })
   })
 
-  // Spec-31 P4b B3: `result` gateway_event client handler removed; cost
-  // and duration are served via D1 REST for non-active callers, and the
-  // running → idle transition is driven by `useDerivedStatus`. The prior
+  // Spec #37: `result` gateway_event client handler removed; cost /
+  // duration / numTurns and the running → idle transition are all
+  // served by the `agent_sessions` synced-collection delta (DO writes
+  // via syncResultToD1 + broadcastSessionRow). The prior
   // `processes result events` test is therefore intentionally absent.
 
-  // Regression guard for DB-1056-0420: spec #31 accidentally orphaned the
-  // StatusBar's turn counter by killing the SessionState broadcast and the
-  // `result` gateway_event handler without a replacement live push. The
-  // SessionDO now emits a typed `session_summary` frame on every num_turns
-  // change; this test locks in that the client upserts those counters into
-  // sessionLiveStateCollection so the StatusBar refreshes without waiting
-  // for the REST backfill on mount / focus / reconnect.
-  test('processes session_summary frames and upserts turn counters', () => {
-    renderHook(() => useCodingAgent('test-session'))
-
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'session_summary',
-          sessionId: 'test-session',
-          summary: { numTurns: 4, totalCostUsd: 0.0123, durationMs: 8765 },
-        }),
-      )
-    })
-
-    expect(liveStateStore.get('test-session')).toMatchObject({
-      numTurns: 4,
-      totalCostUsd: 0.0123,
-      durationMs: 8765,
-    })
-  })
+  // Spec #37 P2b B16: the `session_summary` frame handler is retired — the
+  // DO now broadcasts per-turn state changes as `agent_sessions` synced
+  // deltas and the sessionsCollection converges automatically. The prior
+  // regression guard for the turn-counter refresh is therefore intentionally
+  // absent.
 
   test('does NOT create messages from assistant gateway_events (stripped)', () => {
     const { result } = renderHook(() => useCodingAgent('test-session'))
@@ -1249,9 +1241,9 @@ describe('legacy gateway_event handling', () => {
 describe('branch tracking (P4)', () => {
   beforeEach(() => {
     cachedMessagesStore.clear()
-    liveStateStore.clear()
+    sessionsStore.clear()
     collectionSubs.clear()
-    liveStateSubs.clear()
+    sessionsSubs.clear()
     capturedUseAgentConfig = null
     vi.clearAllMocks()
     branchInfoStore.clear()
@@ -1613,9 +1605,9 @@ describe('branch tracking (P4)', () => {
 describe('seq stamping (P4a B8)', () => {
   beforeEach(() => {
     cachedMessagesStore.clear()
-    liveStateStore.clear()
+    sessionsStore.clear()
     collectionSubs.clear()
-    liveStateSubs.clear()
+    sessionsSubs.clear()
     capturedUseAgentConfig = null
     msgSeq = 0
     vi.clearAllMocks()

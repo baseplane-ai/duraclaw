@@ -9,8 +9,9 @@ import { useDrag } from '@use-gesture/react'
 import { ArchiveIcon, ChevronDownIcon, ChevronRightIcon } from 'lucide-react'
 import { useState } from 'react'
 import { Badge } from '~/components/ui/badge'
+import { useSessionLocalState } from '~/db/session-local-collection'
 import type { SessionRecord } from '~/db/session-record'
-import { useSessionLiveState } from '~/hooks/use-session-live-state'
+import { useSession } from '~/hooks/use-sessions-collection'
 import { deriveDisplayStateFromStatus } from '~/lib/display-state'
 import { cn } from '~/lib/utils'
 import { useWorkspaceStore } from '~/stores/workspace'
@@ -87,14 +88,13 @@ function SwipeableCard({
     setRevealed(false)
   }
 
-  const live = useSessionLiveState(session.id)
-  const numTurns = live.numTurns ?? session.numTurns ?? 0
-  const isLive = live.isLive
-  const display = live.status
-    ? deriveDisplayStateFromStatus(live.status, live.wsReadyState ?? 3)
-    : null
-  const status =
-    display && display.status !== 'unknown' ? display.status : (session.status ?? 'idle')
+  const liveSession = useSession(session.id)
+  const local = useSessionLocalState(session.id)
+  const numTurns = liveSession?.numTurns ?? session.numTurns ?? 0
+  const isLive = local?.wsReadyState === 1
+  const rawStatus = liveSession?.status ?? session.status ?? 'idle'
+  const display = deriveDisplayStateFromStatus(rawStatus, local?.wsReadyState ?? 3)
+  const status = display.status !== 'unknown' ? display.status : rawStatus
   const displayName = session.title || getPreviewText(session) || session.id.slice(0, 8)
 
   return (
@@ -149,14 +149,13 @@ function SwipeableCard({
 }
 
 function OlderSessionRow({ session, onClick }: { session: SessionRecord; onClick: () => void }) {
-  const live = useSessionLiveState(session.id)
-  const numTurns = live.numTurns ?? session.numTurns ?? 0
-  const isLive = live.isLive
-  const display = live.status
-    ? deriveDisplayStateFromStatus(live.status, live.wsReadyState ?? 3)
-    : null
-  const status =
-    display && display.status !== 'unknown' ? display.status : (session.status ?? 'idle')
+  const liveSession = useSession(session.id)
+  const local = useSessionLocalState(session.id)
+  const numTurns = liveSession?.numTurns ?? session.numTurns ?? 0
+  const isLive = local?.wsReadyState === 1
+  const rawStatus = liveSession?.status ?? session.status ?? 'idle'
+  const display = deriveDisplayStateFromStatus(rawStatus, local?.wsReadyState ?? 3)
+  const status = display.status !== 'unknown' ? display.status : rawStatus
   return (
     <button
       type="button"

@@ -41,28 +41,24 @@ vi.mock('agents/react', () => ({
   },
 }))
 
-// Stub the live-state collection so upsertSessionLiveState from the onStateUpdate
-// path doesn't reach OPFS in tests. message-cache.test does not assert on
-// live-state writes — this mock is a no-op to satisfy the import.
-vi.mock('~/db/session-live-state-collection', () => ({
-  sessionLiveStateCollection: {
-    [Symbol.iterator]: () => [][Symbol.iterator](),
-    has: () => false,
+// Spec #37 P2b: stub the new ingress hooks + local collection + queryClient
+// so the hook renders without touching OPFS / the real collections. This
+// test does not assert on session-state writes.
+vi.mock('~/hooks/use-sessions-collection', () => ({
+  useSession: () => undefined,
+}))
+
+vi.mock('~/db/session-local-collection', () => ({
+  sessionLocalCollection: {
     insert: vi.fn(),
     update: vi.fn(),
     delete: vi.fn(),
   },
-  upsertSessionLiveState: vi.fn(),
 }))
 
-vi.mock('~/hooks/use-session-live-state', () => ({
-  useSessionLiveState: () => ({
-    contextUsage: null,
-    kataState: null,
-    worktreeInfo: null,
-    wsReadyState: null,
-    isLive: false,
-  }),
+vi.mock('~/db/db-instance', () => ({
+  dbReady: Promise.resolve(null),
+  queryClient: { invalidateQueries: vi.fn() },
 }))
 
 // ── Messages collection mock ──────────────────────────────────────

@@ -7,11 +7,8 @@ import { useCallback, useEffect, useMemo } from 'react'
 import { StatusBar } from '~/components/status-bar'
 import { type BranchInfoRow, createBranchInfoCollection } from '~/db/branch-info-collection'
 import { projectsCollection } from '~/db/projects-collection'
-import { upsertSessionLiveState } from '~/db/session-live-state-collection'
 import { useDerivedGate } from '~/hooks/use-derived-gate'
-import { useDerivedStatus } from '~/hooks/use-derived-status'
-import { useSessionLiveState } from '~/hooks/use-session-live-state'
-import type { ProjectInfo } from '~/lib/types'
+import { useSession } from '~/hooks/use-sessions-collection'
 import { useStatusBarStore } from '~/stores/status-bar'
 import { ChatThread } from './ChatThread'
 import { ConversationDownload } from './ConversationDownload'
@@ -40,11 +37,9 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
     navigateBranch,
   } = agent
 
-  // Spec #31 P5 B10: status / project / model / sdkSessionId come from the
-  // D1-mirrored SessionLiveState row + message-derived status. Replaces
-  // the pre-P5 reads off the (now-deleted) SessionState blob.
-  const live = useSessionLiveState(sessionId)
-  const derivedStatus = useDerivedStatus(sessionId)
+  // Spec #37 P2b: read the D1-mirrored session row for status / project /
+  // model / sdkSessionId. DO is authoritative — no client-side writes.
+  const session = useSession(sessionId)
 
   // GH#14 B7: derive a Map<parentMsgId, {current,total,siblings}> from the
   // per-session `branchInfoCollection` (DO-authored). ChatThread accepts the
@@ -85,35 +80,13 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
     return () => statusBarClear()
   }, [statusBarClear])
 
-  // Keep worktree info in the live-state collection. projectsCollection is
-  // a query-backed collection with a 30s refetch interval — replaces the
-  // old manual poll that used to live here.
-  const projectName = live.project
+  // Spec #37 P2b / B7: DO is authoritative for worktreeInfo. The
+  // `projectsCollection` live query is kept so existing `matchedProject`
+  // dependants (if any are added later) stay wired without a client-side
+  // upsert path. The DO pushes worktreeInfoJson through sessionsCollection
+  // delta frames.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data: projectsData } = useLiveQuery((q) => q.from({ p: projectsCollection as any }))
-
-  const matchedProject = useMemo<ProjectInfo | null>(() => {
-    if (!projectName || !projectsData) return null
-    return (projectsData as unknown as ProjectInfo[]).find((p) => p.name === projectName) ?? null
-  }, [projectsData, projectName])
-
-  useEffect(() => {
-    if (!projectName) {
-      upsertSessionLiveState(sessionId, { worktreeInfo: null })
-      return
-    }
-    if (!matchedProject) return
-    upsertSessionLiveState(sessionId, {
-      worktreeInfo: {
-        name: matchedProject.name,
-        branch: matchedProject.branch,
-        dirty: matchedProject.dirty,
-        ahead: matchedProject.ahead ?? 0,
-        behind: matchedProject.behind ?? 0,
-        pr: matchedProject.pr ?? null,
-      },
-    })
-  }, [sessionId, projectName, matchedProject])
+  useLiveQuery((q) => q.from({ p: projectsCollection as any }))
 
   const handleSendSuggestion = useCallback(
     (text: string) => {
@@ -122,7 +95,7 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
     [sendMessage],
   )
 
-  const status = derivedStatus ?? live.status ?? 'idle'
+  const status = session?.status ?? 'idle'
 
   // Spec-31 P4b: compute the message-derived gate once here, pass to
   // ChatThread. Replaces the pre-P4b `(gate, status)` dual signal sourced
@@ -143,7 +116,7 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
       <div className="flex items-center justify-end px-4 py-1">
         <ConversationDownload
           messages={messages}
-          sessionId={live.sdkSessionId ?? sessionId ?? 'unknown'}
+          sessionId={session?.sdkSessionId ?? sessionId ?? 'unknown'}
         />
       </div>
 
@@ -165,7 +138,7 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
         submitDraft={submitDraft}
         sessionId={sessionId}
         disabled={status === 'waiting_gate'}
-        status={derivedStatus ?? live.status}
+        status={session?.status}
         onInterrupt={interrupt}
         onForceStop={forceStop}
         draftKey={draftKey}

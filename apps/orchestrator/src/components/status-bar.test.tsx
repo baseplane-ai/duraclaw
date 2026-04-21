@@ -1,49 +1,50 @@
 /**
  * @vitest-environment jsdom
+ *
+ * StatusBar derives `status` from `useSession(sessionId)` (sessionsCollection
+ * row) and `wsReadyState` from `useSessionLocalState(sessionId)`. Tests mock
+ * both hooks directly; no collection writes required.
  */
+
+import type { SessionSummary } from '@duraclaw/shared-types'
 import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import {
-  sessionLiveStateCollection,
-  upsertSessionLiveState,
-} from '~/db/session-live-state-collection'
-import type { SessionStatus } from '~/lib/types'
 
-// Spec-31 P5 B10: StatusBar derives `status` from messages via
-// `useDerivedStatus`; summary fields (project / model / numTurns /
-// totalCostUsd / durationMs) come from the D1-mirrored top-level
-// SessionLiveState row. The old `state: SessionState` blob is gone.
-let derivedStatusValue: SessionStatus = 'idle'
-function setDerivedStatus(s: SessionStatus) {
-  derivedStatusValue = s
-}
-vi.mock('~/hooks/use-derived-status', () => ({
-  useDerivedStatus: () => derivedStatusValue,
+let sessionRow: Partial<SessionSummary> | undefined
+let localRow: { id: string; wsReadyState: number } | undefined
+
+vi.mock('~/hooks/use-sessions-collection', () => ({
+  useSession: () => sessionRow,
+}))
+
+vi.mock('~/db/session-local-collection', () => ({
+  useSessionLocalState: () => localRow,
 }))
 
 import { StatusBar } from './status-bar'
 
 const TEST_ID = 'test-session'
 
-function clearRow() {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const coll = sessionLiveStateCollection as any
-    if (coll.has?.(TEST_ID)) coll.delete(TEST_ID)
-  } catch {
-    // ignore
-  }
+function setSession(overrides: Partial<SessionSummary> = {}) {
+  sessionRow = {
+    id: TEST_ID,
+    status: 'idle',
+    ...overrides,
+  } as Partial<SessionSummary>
+}
+
+function setLocal(wsReadyState: number) {
+  localRow = { id: TEST_ID, wsReadyState }
 }
 
 describe('StatusBar', () => {
   beforeEach(() => {
-    clearRow()
-    setDerivedStatus('idle')
+    sessionRow = undefined
+    localRow = undefined
   })
 
   afterEach(() => {
     cleanup()
-    clearRow()
   })
 
   it('renders nothing when sessionId is null', () => {
@@ -52,20 +53,16 @@ describe('StatusBar', () => {
   })
 
   it('shows session data when collection has row', () => {
-    setDerivedStatus('running')
-    upsertSessionLiveState(TEST_ID, {
+    setSession({
       project: 'duraclaw',
       model: 'opus-4',
       numTurns: 12,
-      wsReadyState: 1,
       status: 'running',
     })
+    setLocal(1)
 
     render(<StatusBar sessionId={TEST_ID} />)
 
-    // Label routes through `deriveDisplayStateFromStatus`, so the user-
-    // facing string is the canonical display-label ('Running'), not the
-    // raw server status token ('running').
     expect(screen.getByText('Running')).toBeDefined()
     expect(screen.getByText('duraclaw')).toBeDefined()
     expect(screen.getByText('opus-4')).toBeDefined()
@@ -73,12 +70,7 @@ describe('StatusBar', () => {
   })
 
   it('shows "--" for missing project and model', () => {
-    upsertSessionLiveState(TEST_ID, {
-      project: '',
-      model: null,
-      status: 'idle',
-    })
-
+    setSession({ project: '', model: null, status: 'idle' })
     render(<StatusBar sessionId={TEST_ID} />)
 
     const dashes = screen.getAllByText('--')
@@ -86,25 +78,28 @@ describe('StatusBar', () => {
   })
 
   it('shows WS dot with "Connected" title when wsReadyState is 1', () => {
-    upsertSessionLiveState(TEST_ID, { wsReadyState: 1, status: 'idle' })
+    setSession({ status: 'idle' })
+    setLocal(1)
     render(<StatusBar sessionId={TEST_ID} />)
     expect(screen.getByTitle('Connected')).toBeDefined()
   })
 
   it('shows WS dot with "Reconnecting…" title when wsReadyState is 0', () => {
-    upsertSessionLiveState(TEST_ID, { wsReadyState: 0, status: 'idle' })
+    setSession({ status: 'idle' })
+    setLocal(0)
     render(<StatusBar sessionId={TEST_ID} />)
     expect(screen.getByTitle('Reconnecting…')).toBeDefined()
   })
 
   it('shows WS dot with "Reconnecting…" title when wsReadyState is 3', () => {
-    upsertSessionLiveState(TEST_ID, { wsReadyState: 3, status: 'idle' })
+    setSession({ status: 'idle' })
+    setLocal(3)
     render(<StatusBar sessionId={TEST_ID} />)
     expect(screen.getByTitle('Reconnecting…')).toBeDefined()
   })
 
-  it('shows cost and duration from top-level SessionLiveState fields', () => {
-    upsertSessionLiveState(TEST_ID, {
+  it('shows cost and duration from top-level SessionSummary fields', () => {
+    setSession({
       totalCostUsd: 0.1234,
       durationMs: 5000,
       status: 'idle',
@@ -114,9 +109,13 @@ describe('StatusBar', () => {
     expect(screen.getByText('5s')).toBeDefined()
   })
 
-  it('shows context usage bar when contextUsage is provided', () => {
-    upsertSessionLiveState(TEST_ID, {
-      contextUsage: { totalTokens: 50000, maxTokens: 200000, percentage: 25 },
+  it('shows context usage bar when contextUsage is provided via JSON column', () => {
+    setSession({
+      contextUsageJson: JSON.stringify({
+        totalTokens: 50000,
+        maxTokens: 200000,
+        percentage: 25,
+      }),
       status: 'idle',
     })
     render(<StatusBar sessionId={TEST_ID} />)
@@ -125,8 +124,8 @@ describe('StatusBar', () => {
   })
 
   it('does not show context bar when maxTokens is 0', () => {
-    upsertSessionLiveState(TEST_ID, {
-      contextUsage: { totalTokens: 0, maxTokens: 0, percentage: 0 },
+    setSession({
+      contextUsageJson: JSON.stringify({ totalTokens: 0, maxTokens: 0, percentage: 0 }),
       status: 'idle',
     })
     render(<StatusBar sessionId={TEST_ID} />)
@@ -134,16 +133,14 @@ describe('StatusBar', () => {
   })
 
   it('does not render stop or interrupt buttons (moved to composer footer)', () => {
-    setDerivedStatus('running')
-    upsertSessionLiveState(TEST_ID, { status: 'running' })
+    setSession({ status: 'running' })
     render(<StatusBar sessionId={TEST_ID} />)
     expect(screen.queryByLabelText('Stop session')).toBeNull()
     expect(screen.queryByLabelText('Interrupt session')).toBeNull()
   })
 
   it('applies blue background classes when running', () => {
-    setDerivedStatus('running')
-    upsertSessionLiveState(TEST_ID, { status: 'running' })
+    setSession({ status: 'running' })
     render(<StatusBar sessionId={TEST_ID} />)
     const bar = screen.getByTestId('status-bar')
     expect(bar.className).toContain('bg-info/20')
@@ -151,8 +148,7 @@ describe('StatusBar', () => {
   })
 
   it('applies warning background classes when waiting_gate', () => {
-    setDerivedStatus('waiting_gate')
-    upsertSessionLiveState(TEST_ID, { status: 'waiting_gate' })
+    setSession({ status: 'waiting_gate' })
     render(<StatusBar sessionId={TEST_ID} />)
     const bar = screen.getByTestId('status-bar')
     expect(bar.className).toContain('bg-warning/20')
@@ -160,22 +156,21 @@ describe('StatusBar', () => {
   })
 
   it('applies default background when idle', () => {
-    upsertSessionLiveState(TEST_ID, { status: 'idle' })
+    setSession({ status: 'idle' })
     render(<StatusBar sessionId={TEST_ID} />)
     const bar = screen.getByTestId('status-bar')
     expect(bar.className).toContain('bg-background')
   })
 
   it('applies warning background for waiting_input', () => {
-    setDerivedStatus('waiting_input')
-    upsertSessionLiveState(TEST_ID, { status: 'waiting_input' })
+    setSession({ status: 'waiting_input' })
     render(<StatusBar sessionId={TEST_ID} />)
     const bar = screen.getByTestId('status-bar')
     expect(bar.className).toContain('bg-warning/20')
   })
 
   it('has correct height', () => {
-    upsertSessionLiveState(TEST_ID, { status: 'idle' })
+    setSession({ status: 'idle' })
     render(<StatusBar sessionId={TEST_ID} />)
     const bar = screen.getByTestId('status-bar')
     expect(bar.className).toContain('py-1')

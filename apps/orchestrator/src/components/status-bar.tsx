@@ -1,15 +1,16 @@
 /**
  * StatusBar — VS Code-style fixed-bottom status bar showing session state.
- * Reads the active session's live state via `useSessionLiveState` (thin
- * wrapper over `sessionLiveStateCollection`'s useLiveQuery). `sessionId` is
- * a prop from the parent route; when null, the bar renders nothing.
+ * Reads the active session's D1-mirrored row via `useSession` and the
+ * transient WS readyState via `useSessionLocalState`. `sessionId` is a prop
+ * from the parent route; when null, the bar renders nothing.
  */
 
 import { GitBranchIcon } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { useDerivedStatus } from '~/hooks/use-derived-status'
-import { useSessionLiveState } from '~/hooks/use-session-live-state'
+import { useSessionLocalState } from '~/db/session-local-collection'
+import { useSession } from '~/hooks/use-sessions-collection'
 import { deriveDisplayStateFromStatus } from '~/lib/display-state'
+import { parseJsonField } from '~/lib/json'
 import type { KataSessionState, PrInfo, SessionStatus } from '~/lib/types'
 import { cn } from '~/lib/utils'
 import type { ContextUsage, WorktreeInfo } from '~/stores/status-bar'
@@ -31,10 +32,7 @@ function WsDot({ readyState }: { readyState: number }) {
   // waiting_gate), not the WS state.
   return (
     <span
-      className={cn(
-        'size-2 rounded-full',
-        readyState === 1 ? 'bg-green-500' : 'bg-yellow-500',
-      )}
+      className={cn('size-2 rounded-full', readyState === 1 ? 'bg-green-500' : 'bg-yellow-500')}
       title={readyState === 1 ? 'Connected' : 'Reconnecting…'}
     />
   )
@@ -229,27 +227,29 @@ function KataStatusItem({ kataState }: { kataState: KataSessionState }) {
 }
 
 export function StatusBar({ sessionId }: { sessionId: string | null }) {
-  const live = useSessionLiveState(sessionId)
-  // Spec-31 P5: status is derived client-side from messages; summary
-  // columns (project / model / numTurns / totalCostUsd / durationMs)
-  // come from the D1-mirrored SessionLiveState fields seeded by
-  // SessionSummary, not the (now-deleted) full SessionState blob.
-  const derivedStatus = useDerivedStatus(sessionId ?? '')
+  // Spec #37 P2b: read the D1-mirrored row through `useSession` and the
+  // transient WS readyState through `useSessionLocalState`. Status is the
+  // `status` column (DO-authoritative via messagesCollection fold).
+  const session = useSession(sessionId)
+  const local = useSessionLocalState(sessionId)
 
   if (!sessionId) return null
-  const readyState = live.wsReadyState ?? 3
+  const readyState = local?.wsReadyState ?? 3
+  const status: SessionStatus = session?.status ?? 'idle'
   // Force `wsReadyState=1` when deriving the display label so it stays
   // anchored to the session's actual status (Running / Idle / Needs
   // Attention) regardless of WS health. Connection health is communicated
   // by `WsDot`'s color — the label shouldn't flicker to "Reconnecting…"
   // every time partysocket hiccups.
-  const display = deriveDisplayStateFromStatus(derivedStatus, 1)
-  const status = derivedStatus
-  const project = live.project ?? ''
-  const model = live.model ?? null
-  const numTurns = live.numTurns ?? 0
-  const totalCostUsd = live.totalCostUsd ?? null
-  const durationMs = live.durationMs ?? null
+  const display = deriveDisplayStateFromStatus(status, 1)
+  const project = session?.project ?? ''
+  const model = session?.model ?? null
+  const numTurns = session?.numTurns ?? 0
+  const totalCostUsd = session?.totalCostUsd ?? null
+  const durationMs = session?.durationMs ?? null
+  const contextUsage = parseJsonField<ContextUsage>(session?.contextUsageJson ?? null)
+  const kataState = parseJsonField<KataSessionState>(session?.kataStateJson ?? null)
+  const worktreeInfo = parseJsonField<WorktreeInfo>(session?.worktreeInfoJson ?? null)
 
   return (
     <div
@@ -270,7 +270,7 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
         <span className="text-foreground">{display.label}</span>
         <span className="truncate text-muted-foreground">{project || '--'}</span>
       </div>
-      {live.worktreeInfo && <WorktreeStatusItem info={live.worktreeInfo} />}
+      {worktreeInfo && <WorktreeStatusItem info={worktreeInfo} />}
       <span className="truncate text-muted-foreground">{model || '--'}</span>
 
       {/* Row 2 (wraps on mobile): turns + cost + ctx + kata + timer + actions */}
@@ -278,12 +278,12 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
       {totalCostUsd != null && (
         <span className="text-muted-foreground">${totalCostUsd.toFixed(4)}</span>
       )}
-      {live.contextUsage && <ContextBar contextUsage={live.contextUsage} />}
-      {live.kataState && <KataStatusItem kataState={live.kataState} />}
+      {contextUsage && <ContextBar contextUsage={contextUsage} />}
+      {kataState && <KataStatusItem kataState={kataState} />}
 
       {/* Right-aligned timer — action buttons moved to the composer footer */}
       <div className="ml-auto flex shrink-0 items-center gap-2">
-        <ElapsedTimer status={status} startedAt={live.lastActivity ?? null} />
+        <ElapsedTimer status={status} startedAt={session?.lastActivity ?? null} />
         {durationMs != null && (
           <span className="text-muted-foreground">{formatDuration(durationMs)}</span>
         )}

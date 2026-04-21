@@ -28,8 +28,9 @@ import {
   DropdownMenuTrigger,
 } from '~/components/ui/dropdown-menu'
 import { Input } from '~/components/ui/input'
+import { useSessionLocalState } from '~/db/session-local-collection'
 import type { SessionRecord } from '~/db/session-record'
-import { useSessionLiveState } from '~/hooks/use-session-live-state'
+import { useSession } from '~/hooks/use-sessions-collection'
 import { deriveDisplayStateFromStatus } from '~/lib/display-state'
 import { cn } from '~/lib/utils'
 import { formatCost, formatTimeAgo, getPreviewText, StatusDot } from './session-utils'
@@ -53,21 +54,18 @@ export function SessionListItem({
   onTag,
   onFork,
 }: SessionListItemProps) {
-  // Prefer real-time state from the live-state collection; fall back to the
-  // sessions collection's (30s-stale) `status` when this tab hasn't observed
-  // the session on WS yet.
-  const live = useSessionLiveState(session.id)
-  const numTurns = live.numTurns ?? session.numTurns ?? 0
-  const isLive = live.isLive
+  // Spec #37 P2b: read the D1-mirrored row via `useSession`; wsReadyState
+  // from the transient local row. Falls back to the `session` prop (also
+  // sessionsCollection-backed) for callers that pass a prefetched record.
+  const liveSession = useSession(session.id)
+  const local = useSessionLocalState(session.id)
+  const numTurns = liveSession?.numTurns ?? session.numTurns ?? 0
+  const isLive = local?.wsReadyState === 1
   // Route status display through `deriveDisplayStateFromStatus` so this surface
-  // agrees with the status bar + tab bar. When no live row exists yet, fall
-  // back to the sessions-collection `status` directly (StatusDot's own switch
-  // handles the legacy strings).
-  const display = live.status
-    ? deriveDisplayStateFromStatus(live.status, live.wsReadyState ?? 3)
-    : null
-  const status =
-    display && display.status !== 'unknown' ? display.status : (session.status ?? 'idle')
+  // agrees with the status bar + tab bar.
+  const rawStatus = liveSession?.status ?? session.status ?? 'idle'
+  const display = deriveDisplayStateFromStatus(rawStatus, local?.wsReadyState ?? 3)
+  const status = display.status !== 'unknown' ? display.status : rawStatus
   const [menuOpen, setMenuOpen] = useState(false)
   const [renameOpen, setRenameOpen] = useState(false)
   const [tagOpen, setTagOpen] = useState(false)

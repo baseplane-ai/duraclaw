@@ -439,11 +439,12 @@ export class SessionDO extends Agent<Env, SessionMeta> {
 
   /**
    * Suppress all Agent SDK protocol messages (`cf_agent_state`, identity,
-   * MCP) for every connection (spec #31 B9). The messages channel is the
-   * sole live-state source — status/gate/result are derived client-side via
-   * `useDerivedStatus` / `useDerivedGate`; `contextUsage` / `kataState` are
-   * served via REST. Returning `false` here silences the legacy state
-   * broadcast that the new architecture doesn't consume.
+   * MCP) for every connection (spec #31 B9). Status / result flow through
+   * the D1-mirrored `agent_sessions` row (spec #37), gate derives from
+   * messages via `useDerivedGate` (spec #37 B14), and contextUsage /
+   * kataState ride the `agent_sessions` synced-collection delta. Returning
+   * `false` here silences the legacy state broadcast that no current
+   * client consumes.
    */
   shouldSendProtocolMessages(_connection: Connection, _ctx: ConnectionContext): boolean {
     return false

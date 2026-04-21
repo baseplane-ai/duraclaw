@@ -33,12 +33,11 @@ import {
   SheetHeader,
   SheetTitle,
 } from '~/components/ui/sheet'
+import { useSessionLocalState } from '~/db/session-local-collection'
 import type { SessionRecord } from '~/db/session-record'
 import { getPreviewText, StatusDot } from '~/features/agent-orch/session-utils'
-import { useDerivedStatus } from '~/hooks/use-derived-status'
 import { useIsMobile } from '~/hooks/use-mobile'
-import { useSessionLiveState } from '~/hooks/use-session-live-state'
-import { useSessionsCollection } from '~/hooks/use-sessions-collection'
+import { useSession, useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { isDraftTabId, type TabEntry, useTabSync } from '~/hooks/use-tab-sync'
 import { deriveDisplayStateFromStatus } from '~/lib/display-state'
 import { cn } from '~/lib/utils'
@@ -391,25 +390,18 @@ function ProjectTab({
   const [menuOpen, setMenuOpen] = useState(false)
 
   // Route tab status through `deriveDisplayStateFromStatus` so it agrees
-  // with the status bar + sidebar. Falls back to the (30s-stale) sessions
-  // row when no live state exists yet in this browser. Chain tabs have no
-  // single session, so we skip live-state entirely and never render a
-  // StatusDot.
-  const live = useSessionLiveState(isChain ? '' : sessionId)
-  // Spec-31 P4b B6: open tabs are active-session callers (each has a live
-  // WS + messagesCollection via `useCodingAgent` on the matching route),
-  // so the tab pill derives status from messages. Chain tabs short-circuit
-  // on the empty sessionId and `isChain` skip below.
-  const derivedStatus = useDerivedStatus(isChain ? '' : sessionId)
-  // Spec #31 P5 B10: status for the tab pill is the message-derived status
-  // when available (active caller), otherwise the D1-mirrored sidebar
-  // status on the live-state row.
+  // with the status bar + sidebar. Chain tabs have no single session, so
+  // we skip the session lookup entirely and never render a StatusDot.
+  // Spec #37 P2b: status / numTurns come from the D1-mirrored
+  // sessionsCollection row; wsReadyState from the transient local row.
+  const liveSession = useSession(isChain ? null : sessionId)
+  const liveLocal = useSessionLocalState(isChain ? null : sessionId)
   const tabDisplay = !isChain
-    ? deriveDisplayStateFromStatus(derivedStatus ?? live.status, live.wsReadyState ?? 3)
+    ? deriveDisplayStateFromStatus(liveSession?.status, liveLocal?.wsReadyState ?? 3)
     : null
   const tabStatus =
     tabDisplay && tabDisplay.status !== 'unknown' ? tabDisplay.status : (session?.status ?? 'idle')
-  const tabNumTurns = live.numTurns ?? session?.numTurns ?? 0
+  const tabNumTurns = liveSession?.numTurns ?? session?.numTurns ?? 0
 
   useEffect(() => {
     if (isDragging) setMenuOpen(false)

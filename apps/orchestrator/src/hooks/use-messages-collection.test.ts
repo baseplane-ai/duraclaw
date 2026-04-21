@@ -308,12 +308,7 @@ describe('useMessagesCollection', () => {
     const { result } = renderHook(() => useMessagesCollection('session-abc'))
 
     // Expected: usr-2, msg-2, usr-3, msg-3 (interleaved turns, not grouped by role)
-    expect(result.current.messages.map((m) => m.id)).toEqual([
-      'usr-2',
-      'msg-2',
-      'usr-3',
-      'msg-3',
-    ])
+    expect(result.current.messages.map((m) => m.id)).toEqual(['usr-2', 'msg-2', 'usr-3', 'msg-3'])
   })
 
   it('optimistic user rows (usr-client-<uuid>) without canonical_turn_id interleave by createdAt', () => {
