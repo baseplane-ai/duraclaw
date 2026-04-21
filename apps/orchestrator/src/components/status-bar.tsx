@@ -249,10 +249,14 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
       data-testid="status-bar"
       data-display-status={display.status}
     >
-      {/* Row 1: status + project + branch + model */}
+      {/* Row 1: status + project + branch + model.
+          `display.label` routes through `deriveDisplayStateFromStatus`, so
+          it flips to 'Reconnecting…' whenever `readyState !== 1` — keeping
+          the label in sync with the red/yellow/green dot instead of
+          showing the stale server status (e.g. 'idle') next to a red dot. */}
       <div className="flex min-w-0 items-center gap-2">
         <WsDot readyState={readyState} />
-        <span className="text-foreground">{status}</span>
+        <span className="text-foreground">{display.label}</span>
         <span className="truncate text-muted-foreground">{project || '--'}</span>
       </div>
       {live.worktreeInfo && <WorktreeStatusItem info={live.worktreeInfo} />}

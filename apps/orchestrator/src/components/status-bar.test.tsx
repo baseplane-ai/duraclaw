@@ -63,7 +63,10 @@ describe('StatusBar', () => {
 
     render(<StatusBar sessionId={TEST_ID} />)
 
-    expect(screen.getByText('running')).toBeDefined()
+    // Label routes through `deriveDisplayStateFromStatus`, so the user-
+    // facing string is the canonical display-label ('Running'), not the
+    // raw server status token ('running').
+    expect(screen.getByText('Running')).toBeDefined()
     expect(screen.getByText('duraclaw')).toBeDefined()
     expect(screen.getByText('opus-4')).toBeDefined()
     expect(screen.getByText('12 turns')).toBeDefined()
