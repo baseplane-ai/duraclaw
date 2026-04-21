@@ -133,4 +133,39 @@ describe('useDerivedStatus', () => {
     const { result } = renderHook(() => useDerivedStatus('sess'))
     expect(result.current).toBe('idle')
   })
+
+  // The canonical mid-turn wedge: the assistant has emitted a tool_use and
+  // the SDK is waiting for tool_result from the runner. Pre-fix this read
+  // as 'idle' (only the tail part was inspected and `input-available !==
+  // 'streaming'`), so the stop button disappeared while the tool was still
+  // running. Every tool_use with a slow-to-return result exposed this.
+  it('derived-status-running-tool-pending: assistant ending on a tool-* part in input-available returns running', () => {
+    mockMessages = [
+      makeMsg({
+        id: 'a1',
+        role: 'assistant',
+        parts: [
+          { type: 'text', text: "I'll run that", state: 'done' },
+          { type: 'tool-bash', toolCallId: 't-1', state: 'input-available' },
+        ],
+      }),
+    ]
+    const { result } = renderHook(() => useDerivedStatus('sess'))
+    expect(result.current).toBe('running')
+  })
+
+  it('derived-status-running-mid-parts-streaming: streaming part in the middle (not tail) still returns running', () => {
+    mockMessages = [
+      makeMsg({
+        id: 'a1',
+        role: 'assistant',
+        parts: [
+          { type: 'text', text: 'partial', state: 'streaming' },
+          { type: 'tool-bash', toolCallId: 't-1', state: 'output-available' },
+        ],
+      }),
+    ]
+    const { result } = renderHook(() => useDerivedStatus('sess'))
+    expect(result.current).toBe('running')
+  })
 })

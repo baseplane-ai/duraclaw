@@ -9,8 +9,14 @@
  * Rules (first match wins):
  *   1. Any `tool-permission` or `tool-ask_user` part with
  *      state==='approval-requested' → 'waiting_gate'
- *   2. Last message is an assistant with a trailing part in state 'streaming'
- *      → 'running'
+ *   2. Last message is an assistant with ANY part in an active state —
+ *      'streaming' (text/reasoning deltas still arriving) or
+ *      'input-available' (tool_use emitted, waiting for tool_result from
+ *      the runner) — → 'running'. The pre-fix version only looked at the
+ *      tail part's `state === 'streaming'`, so a finalized assistant that
+ *      ended on a `tool-*` part in `input-available` (the canonical
+ *      mid-turn wedge: SDK waiting on a long-running tool) read as idle
+ *      and the stop button disappeared exactly when users wanted it.
  *   3. Last message is user (no server echo yet) → 'running'
  *   4. Otherwise → 'idle'
  *
@@ -46,8 +52,15 @@ export function useDerivedStatus(sessionId: string): SessionStatus {
     const last = tail[tail.length - 1] as CachedMessage
     if (last.role === 'assistant') {
       const parts = (last.parts as SessionMessagePart[] | undefined) ?? []
-      const lastPart = parts[parts.length - 1] as { state?: string } | undefined
-      if (lastPart?.state === 'streaming') return 'running'
+      // Any active-state part (streaming deltas OR a tool waiting on its
+      // result) means the runner still has work in flight. Check all parts,
+      // not just the tail — a finalized assistant commonly looks like
+      // `[text(done), tool(input-available)]` while the SDK is blocked on
+      // the tool_result round-trip.
+      for (const part of parts) {
+        const state = (part as { state?: string }).state
+        if (state === 'streaming' || state === 'input-available') return 'running'
+      }
       return 'idle'
     }
     if (last.role === 'user') return 'running'
