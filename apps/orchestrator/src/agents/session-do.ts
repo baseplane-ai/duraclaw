@@ -256,6 +256,17 @@ export class SessionDO extends Agent<Env, SessionMeta> {
 
     // Populate gateway connection ID cache (in case we're waking from hibernation)
     this.cachedGatewayConnId = getGatewayConnectionId(this.sql.bind(this))
+
+    // Belt-and-suspenders D1 reconciliation. Any prior code path that was
+    // supposed to flush `state.status` to `agent_sessions` but silently
+    // dropped the write (eviction race, failed UPDATE, transient D1 error)
+    // leaves D1 diverged from the DO's in-memory truth. Re-emit on every
+    // rehydrate so clients observe the DO's last-known status the next
+    // time this DO is loaded — the synced-collection delta pushes the
+    // corrected row to the user's UserSettingsDO. Fire-and-forget; a
+    // failure here is survivable because the next real state transition
+    // will retry.
+    void this.syncStatusToD1(new Date().toISOString())
   }
 
   /**
