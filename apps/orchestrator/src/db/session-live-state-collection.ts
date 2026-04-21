@@ -114,19 +114,32 @@ export function upsertSessionLiveState(
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const coll = sessionLiveStateCollection as any
-    if (coll.has?.(sessionId)) {
+    // DB-cbb1-0420: use update-first-insert-fallback to avoid the
+    // `coll.has?.()` undefined-optional-chain bug. On persisted
+    // collections `.has` may not be wired through the persistence
+    // adapter, returning undefined and always falling through to
+    // `.insert()` — which throws duplicate-key on the second call for
+    // the same sessionId. The outer catch swallowed the throw, meaning
+    // every upsert after the first insert was silently dropped: no
+    // worktreeInfo, no wsReadyState updates, no contextUsage updates.
+    try {
       coll.update(sessionId, (draft: SessionLiveState) => {
         Object.assign(draft, normalized)
       })
-    } else {
-      coll.insert({
-        id: sessionId,
-        contextUsage: null,
-        kataState: null,
-        worktreeInfo: null,
-        wsReadyState: 3,
-        ...normalized,
-      } as SessionLiveState)
+    } catch {
+      // Update threw (row doesn't exist yet) — insert fresh.
+      try {
+        coll.insert({
+          id: sessionId,
+          contextUsage: null,
+          kataState: null,
+          worktreeInfo: null,
+          wsReadyState: 3,
+          ...normalized,
+        } as SessionLiveState)
+      } catch {
+        // Both failed — collection may not be ready; swallow.
+      }
     }
   } catch {
     // collection may not be ready; swallow
@@ -134,15 +147,22 @@ export function upsertSessionLiveState(
 }
 
 /**
- * Offline-hydrate entry point: upsert a row from a `SessionSummary` with
- * `wsReadyState: 3` (closed). Used by SessionHistory / SessionListItem to
- * populate rows for sessions that were never opened in this browser
- * session, so the collection remains the single source of truth for
- * session-list readers.
+ * Offline-hydrate entry point: upsert a row from a `SessionSummary`. Used
+ * by SessionHistory / SessionListItem / `backfillFromRest` to populate
+ * rows for sessions that were never opened in this browser session, so
+ * the collection remains the single source of truth for session-list
+ * readers.
+ *
+ * Does NOT include `wsReadyState` in the patch: on insert, the upsert
+ * defaults it to `3` (closed); on update, omitting it preserves the live
+ * value written by `useCodingAgent`'s readyState mirror. Including it
+ * previously clobbered the active session's OPEN state back to CLOSED on
+ * every `backfillFromRest` call (triggered on mount + window focus +
+ * reconnect), leaving the StatusBar's WS dot stuck red even while the
+ * socket was fine.
  */
 export function seedSessionLiveStateFromSummary(summary: SessionSummary): void {
   upsertSessionLiveState(summary.id, {
-    wsReadyState: 3,
     project: summary.project,
     model: summary.model,
     prompt: summary.prompt,
