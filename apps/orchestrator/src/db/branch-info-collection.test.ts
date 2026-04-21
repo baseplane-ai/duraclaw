@@ -1,38 +1,70 @@
 /**
  * @vitest-environment jsdom
  *
- * GH#38 P1.5: branch-info-collection migrated onto `createSyncedCollection`.
- * Tests verify the factory (a) delegates to the synced factory with the
- * right `collection` routing name, `queryKey`, `getKey`, (b) memoises per
- * sessionId, and (c) pipes synced-collection deltas on
- * `branchInfo:<sessionId>` through to the internal begin/write/commit
- * sync callback.
+ * GH#47 sibling refactor: branch-info-collection migrated onto the
+ * SyncConfig-direct pattern. Tests verify the factory (a) builds a raw
+ * `CollectionConfig` with the right id / getKey, (b) memoises per
+ * sessionId, (c) routes `branchInfo:<sessionId>` delta frames through
+ * begin/write/commit, (d) calls markReady eagerly.
  */
 
-import type { SyncedCollectionFrame } from '@duraclaw/shared-types'
+import type { CollectionConfig } from '@tanstack/db'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-type SyncedCollectionConfig = {
-  id: string
-  collection: string
-  queryKey: readonly unknown[]
-  getKey: (row: { parentMsgId: string }) => string
-  subscribe: (handler: (frame: SyncedCollectionFrame<unknown>) => void) => () => void
-  onReconnect: (handler: () => void) => () => void
-  queryFn: () => Promise<unknown[]>
-  persistence?: unknown
-  schemaVersion?: number
+interface FakeSyncParams {
+  begin: () => void
+  write: (msg: { type: string; key?: string; value?: unknown }) => void
+  commit: () => void
+  markReady: () => void
+  collection: { has: (key: string) => boolean }
 }
 
-let capturedConfigs: SyncedCollectionConfig[] = []
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const capturedConfigs: any[] = []
 
-// Mock the synced-collection factory so we can inspect configs without
-// running the real TanStack DB plumbing.
-vi.mock('./synced-collection', () => ({
-  createSyncedCollection: vi.fn((config: SyncedCollectionConfig) => {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function makeFakeCollection(config: any) {
+  const store = new Map<string, unknown>()
+  const markReady = vi.fn()
+
+  const fakeParams: FakeSyncParams = {
+    begin: () => {},
+    write: (msg) => {
+      if (msg.type === 'delete') {
+        store.delete(msg.key as string)
+      } else {
+        const row = msg.value as { parentMsgId: string }
+        store.set(row.parentMsgId, row)
+      }
+    },
+    commit: () => {},
+    markReady,
+    collection: { has: (key: string) => store.has(key) },
+  }
+  const cleanup = config.sync.sync(fakeParams)
+
+  return {
+    store,
+    markReady,
+    cleanup,
+    [Symbol.iterator]: () => store.entries(),
+    __config: config,
+  }
+}
+
+vi.mock('@tanstack/db', () => ({
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  createCollection: vi.fn((config: any) => {
     capturedConfigs.push(config)
-    return { __mock: true, config }
+    return makeFakeCollection(config)
   }),
+}))
+
+vi.mock('@tanstack/browser-db-sqlite-persistence', () => ({
+  persistedCollectionOptions: vi.fn(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (opts: any) => opts,
+  ),
 }))
 
 vi.mock('./db-instance', () => ({
@@ -40,19 +72,38 @@ vi.mock('./db-instance', () => ({
   queryClient: { invalidateQueries: vi.fn() },
 }))
 
-// use-coding-agent exposes the session-stream primitives the factory
-// wires into its subscribe / onReconnect hooks. Mock to avoid loading
-// the full hook module (which pulls in React / agents/react).
-const mockSubscribe = vi.fn(() => () => {})
-const mockOnReconnect = vi.fn(() => () => {})
+const frameHandlers = new Map<
+  string,
+  Set<(frame: { type: 'synced-collection-delta'; collection: string; ops: unknown[] }) => void>
+>()
+const reconnectHandlers = new Map<string, Set<() => void>>()
+
 vi.mock('~/features/agent-orch/use-coding-agent', () => ({
-  subscribeSessionStream: mockSubscribe,
-  onSessionStreamReconnect: mockOnReconnect,
+  subscribeSessionStream: vi.fn((sessionId: string, handler: never) => {
+    let set = frameHandlers.get(sessionId)
+    if (!set) {
+      set = new Set()
+      frameHandlers.set(sessionId, set)
+    }
+    set.add(handler)
+    return () => set?.delete(handler)
+  }),
+  onSessionStreamReconnect: vi.fn((sessionId: string, handler: () => void) => {
+    let set = reconnectHandlers.get(sessionId)
+    if (!set) {
+      set = new Set()
+      reconnectHandlers.set(sessionId, set)
+    }
+    set.add(handler)
+    return () => set?.delete(handler)
+  }),
 }))
 
-describe('branch-info-collection — GH#38 P1.5 synced-collection factory', () => {
+describe('branch-info-collection (GH#47 — WS-only SyncConfig path)', () => {
   beforeEach(() => {
-    capturedConfigs = []
+    capturedConfigs.length = 0
+    frameHandlers.clear()
+    reconnectHandlers.clear()
     vi.clearAllMocks()
   })
 
@@ -60,55 +111,195 @@ describe('branch-info-collection — GH#38 P1.5 synced-collection factory', () =
     vi.restoreAllMocks()
   })
 
-  it('exports createBranchInfoCollection factory', async () => {
+  it('exports createBranchInfoCollection factory + branchInfoCollectionOptions', async () => {
     vi.resetModules()
     const mod = await import('./branch-info-collection')
     expect(typeof mod.createBranchInfoCollection).toBe('function')
+    expect(typeof mod.branchInfoCollectionOptions).toBe('function')
   })
 
-  it('delegates to createSyncedCollection with per-session id/collection/queryKey', async () => {
+  it('builds CollectionConfig with per-session id, getKey, and sync.sync fn', async () => {
     vi.resetModules()
     const mod = await import('./branch-info-collection')
     mod.createBranchInfoCollection('sess-a')
 
     expect(capturedConfigs).toHaveLength(1)
-    const cfg = capturedConfigs[0]
+    const cfg = capturedConfigs[0] as CollectionConfig<{ parentMsgId: string }>
     expect(cfg.id).toBe('branch_info:sess-a')
-    expect(cfg.collection).toBe('branchInfo:sess-a')
-    expect(cfg.queryKey).toEqual(['branchInfo', 'sess-a'])
-    expect(cfg.schemaVersion).toBe(2)
+    expect(cfg.getKey({ parentMsgId: 'usr-7' } as { parentMsgId: string })).toBe('usr-7')
+    expect(typeof cfg.sync.sync).toBe('function')
   })
 
-  it('keys rows on parentMsgId', async () => {
+  it('does NOT set queryFn / queryKey — DO onConnect replay is the cold-load channel', async () => {
     vi.resetModules()
     const mod = await import('./branch-info-collection')
-    mod.createBranchInfoCollection('sess-b')
+    mod.createBranchInfoCollection('no-query-sess')
+
     const cfg = capturedConfigs[0]
-    expect(cfg.getKey({ parentMsgId: 'usr-7' })).toBe('usr-7')
+    expect('queryFn' in cfg).toBe(false)
+    expect('queryKey' in cfg).toBe(false)
   })
 
-  it('queryFn resolves to an empty array (DO-pushed, no REST)', async () => {
+  it('sync.sync subscribes to the per-session stream and calls markReady eagerly', async () => {
     vi.resetModules()
     const mod = await import('./branch-info-collection')
-    mod.createBranchInfoCollection('sess-q')
-    const cfg = capturedConfigs[0]
-    const rows = await cfg.queryFn()
-    expect(rows).toEqual([])
+    const coll = mod.createBranchInfoCollection('ready-sess') as {
+      markReady: ReturnType<typeof vi.fn>
+    }
+
+    expect(frameHandlers.get('ready-sess')?.size).toBe(1)
+    expect(reconnectHandlers.get('ready-sess')?.size).toBe(1)
+    expect(coll.markReady).toHaveBeenCalledTimes(1)
   })
 
-  it('wires subscribe + onReconnect through the session-stream primitives', async () => {
+  it('routes an insert delta frame on branchInfo:<sessionId> through begin/write/commit', async () => {
     vi.resetModules()
     const mod = await import('./branch-info-collection')
-    mod.createBranchInfoCollection('sess-s')
-    const cfg = capturedConfigs[0]
+    const coll = mod.createBranchInfoCollection('sync-sess') as {
+      store: Map<string, { parentMsgId: string; activeId: string }>
+    }
 
-    const frameHandler = vi.fn()
-    cfg.subscribe(frameHandler)
-    expect(mockSubscribe).toHaveBeenCalledWith('sess-s', frameHandler)
+    for (const h of frameHandlers.get('sync-sess')!) {
+      h({
+        type: 'synced-collection-delta',
+        collection: 'branchInfo:sync-sess',
+        ops: [
+          {
+            type: 'insert',
+            value: {
+              parentMsgId: 'msg-0',
+              sessionId: 'sync-sess',
+              siblings: ['usr-1', 'usr-3'],
+              activeId: 'usr-1',
+              updatedAt: '2026-04-21T00:00:00Z',
+            },
+          },
+        ],
+      })
+    }
 
-    const reconnectHandler = vi.fn()
-    cfg.onReconnect(reconnectHandler)
-    expect(mockOnReconnect).toHaveBeenCalledWith('sess-s', reconnectHandler)
+    expect(coll.store.has('msg-0')).toBe(true)
+    expect(coll.store.get('msg-0')!.activeId).toBe('usr-1')
+  })
+
+  it('converts insert→update when parentMsgId is already present (reconnect idempotence)', async () => {
+    vi.resetModules()
+    const mod = await import('./branch-info-collection')
+    const coll = mod.createBranchInfoCollection('idem-sess') as {
+      store: Map<string, { parentMsgId: string; activeId: string }>
+    }
+    const handlers = frameHandlers.get('idem-sess')!
+
+    for (const h of handlers) {
+      h({
+        type: 'synced-collection-delta',
+        collection: 'branchInfo:idem-sess',
+        ops: [
+          {
+            type: 'insert',
+            value: {
+              parentMsgId: 'msg-0',
+              sessionId: 'idem-sess',
+              siblings: ['usr-1'],
+              activeId: 'usr-1',
+              updatedAt: '2026-04-21T00:00:00Z',
+            },
+          },
+        ],
+      })
+    }
+    expect(coll.store.get('msg-0')!.activeId).toBe('usr-1')
+
+    // Re-emit with a different activeId — should not throw, should overwrite.
+    for (const h of handlers) {
+      h({
+        type: 'synced-collection-delta',
+        collection: 'branchInfo:idem-sess',
+        ops: [
+          {
+            type: 'insert',
+            value: {
+              parentMsgId: 'msg-0',
+              sessionId: 'idem-sess',
+              siblings: ['usr-1', 'usr-5'],
+              activeId: 'usr-5',
+              updatedAt: '2026-04-21T00:01:00Z',
+            },
+          },
+        ],
+      })
+    }
+    expect(coll.store.get('msg-0')!.activeId).toBe('usr-5')
+  })
+
+  it('applies delete ops — row is removed from store', async () => {
+    vi.resetModules()
+    const mod = await import('./branch-info-collection')
+    const coll = mod.createBranchInfoCollection('del-sess') as {
+      store: Map<string, unknown>
+    }
+
+    for (const h of frameHandlers.get('del-sess')!) {
+      h({
+        type: 'synced-collection-delta',
+        collection: 'branchInfo:del-sess',
+        ops: [
+          {
+            type: 'insert',
+            value: {
+              parentMsgId: 'msg-0',
+              sessionId: 'del-sess',
+              siblings: ['usr-1'],
+              activeId: 'usr-1',
+              updatedAt: '2026-04-21T00:00:00Z',
+            },
+          },
+        ],
+      })
+      h({
+        type: 'synced-collection-delta',
+        collection: 'branchInfo:del-sess',
+        ops: [{ type: 'delete', key: 'msg-0' }],
+      })
+    }
+    expect(coll.store.has('msg-0')).toBe(false)
+  })
+
+  it('ignores frames whose collection targets a different session or a messages channel', async () => {
+    vi.resetModules()
+    const mod = await import('./branch-info-collection')
+    const coll = mod.createBranchInfoCollection('iso-sess') as {
+      store: Map<string, unknown>
+    }
+
+    for (const h of frameHandlers.get('iso-sess')!) {
+      h({
+        type: 'synced-collection-delta',
+        collection: 'branchInfo:other-sess',
+        ops: [{ type: 'insert', value: { parentMsgId: 'noise', sessionId: 'other-sess' } }],
+      })
+      // Messages-channel frame on the same session must also be ignored.
+      h({
+        type: 'synced-collection-delta',
+        collection: 'messages:iso-sess',
+        ops: [{ type: 'insert', value: { parentMsgId: 'wrong-channel' } }],
+      })
+    }
+    expect(coll.store.has('noise')).toBe(false)
+    expect(coll.store.has('wrong-channel')).toBe(false)
+  })
+
+  it('cleanup unsubscribes both frame + reconnect handlers', async () => {
+    vi.resetModules()
+    const mod = await import('./branch-info-collection')
+    const coll = mod.createBranchInfoCollection('unsub-sess') as { cleanup: () => void }
+    expect(frameHandlers.get('unsub-sess')?.size).toBe(1)
+    expect(reconnectHandlers.get('unsub-sess')?.size).toBe(1)
+
+    coll.cleanup()
+
+    expect(frameHandlers.get('unsub-sess')?.size ?? 0).toBe(0)
+    expect(reconnectHandlers.get('unsub-sess')?.size ?? 0).toBe(0)
   })
 
   it('memoises collections by sessionId', async () => {
@@ -129,7 +320,7 @@ describe('branch-info-collection — GH#38 P1.5 synced-collection factory', () =
   it('re-exports BranchInfoRow type', async () => {
     vi.resetModules()
     const mod = await import('./branch-info-collection')
-    const row: typeof mod extends { BranchInfoRow: infer R } ? R : never = {
+    const row: mod.BranchInfoRow = {
       parentMsgId: 'msg-0',
       sessionId: 'sess-t',
       siblings: ['usr-1', 'usr-3'],
