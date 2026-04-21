@@ -132,14 +132,43 @@ export class UserSettingsDO extends DurableObject<Env> {
     return new Response(null, { status: 204 })
   }
 
-  async webSocketClose(ws: WebSocket, _code: number, _reason: string, _wasClean: boolean) {
-    this.sockets.delete(ws)
-    await this.maybeClearPresence()
+  async webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean) {
+    try {
+      console.log(
+        `[user-settings-do] WS closed: code=${code} reason=${reason} wasClean=${wasClean} userId=${this.userId ?? '?'}`,
+      )
+      this.sockets.delete(ws)
+      await this.maybeClearPresence()
+    } catch (err) {
+      this.logError('webSocketClose', err, { code, reason })
+      throw err
+    }
   }
 
-  async webSocketError(ws: WebSocket, _error: unknown) {
-    this.sockets.delete(ws)
-    await this.maybeClearPresence()
+  async webSocketError(ws: WebSocket, error: unknown) {
+    try {
+      this.logError('webSocketError.received', error, { userId: this.userId ?? '?' })
+      this.sockets.delete(ws)
+      await this.maybeClearPresence()
+    } catch (err) {
+      this.logError('webSocketError', err)
+      throw err
+    }
+  }
+
+  private logError(site: string, err: unknown, extra?: Record<string, unknown>): void {
+    const prefix = `[user-settings-do] ERROR@${site}`
+    const extraStr = extra
+      ? ' ' +
+        Object.entries(extra)
+          .map(([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`)
+          .join(' ')
+      : ''
+    if (err instanceof Error) {
+      console.error(`${prefix}${extraStr} ${err.name}: ${err.message}`, err.stack ?? err)
+    } else {
+      console.error(`${prefix}${extraStr}`, err)
+    }
   }
 
   private async maybeClearPresence() {

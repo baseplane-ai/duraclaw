@@ -498,6 +498,15 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   }
 
   onConnect(connection: Connection, ctx: ConnectionContext) {
+    try {
+      return this.onConnectInner(connection, ctx)
+    } catch (err) {
+      this.logError('onConnect', err, { connId: connection.id })
+      throw err
+    }
+  }
+
+  private onConnectInner(connection: Connection, ctx: ConnectionContext) {
     const url = new URL(ctx.request.url)
     const role = url.searchParams.get('role')
 
@@ -584,49 +593,88 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   }
 
   onMessage(connection: Connection, data: string | ArrayBuffer) {
-    // Check if this is from the gateway connection
-    const gwConnId = this.getGatewayConnectionId()
-    if (gwConnId && connection.id === gwConnId) {
-      // Gateway message: parse and route to handleGatewayEvent
-      this.lastGatewayActivity = Date.now()
-      try {
-        const raw = typeof data === 'string' ? data : new TextDecoder().decode(data)
-        const event = parseEvent(raw)
-        this.handleGatewayEvent(event)
-      } catch (err) {
-        console.error(`[SessionDO:${this.ctx.id}] Failed to parse gateway message:`, err)
+    try {
+      // Check if this is from the gateway connection
+      const gwConnId = this.getGatewayConnectionId()
+      if (gwConnId && connection.id === gwConnId) {
+        // Gateway message: parse and route to handleGatewayEvent
+        this.lastGatewayActivity = Date.now()
+        try {
+          const raw = typeof data === 'string' ? data : new TextDecoder().decode(data)
+          const event = parseEvent(raw)
+          this.handleGatewayEvent(event)
+        } catch (err) {
+          this.logError('onMessage.handleGatewayEvent', err)
+        }
+        return
       }
-      return
-    }
 
-    // Browser message: delegate to Agent base class for @callable RPC dispatch
-    super.onMessage(connection, data)
+      // Browser message: delegate to Agent base class for @callable RPC dispatch
+      super.onMessage(connection, data)
+    } catch (err) {
+      this.logError('onMessage', err, { connId: connection.id })
+      throw err
+    }
   }
 
   onClose(connection: Connection, code: number, reason: string, _wasClean: boolean) {
-    const gwConnId = this.getGatewayConnectionId()
-    if (gwConnId && connection.id === gwConnId) {
-      console.log(`[SessionDO:${this.ctx.id}] Gateway WS closed: code=${code} reason=${reason}`)
-      // Clear the persisted gateway connection ID
-      this.cachedGatewayConnId = null
-      try {
-        this.sql`DELETE FROM kv WHERE key = 'gateway_conn_id'`
-      } catch {
-        /* ignore */
+    try {
+      const gwConnId = this.getGatewayConnectionId()
+      if (gwConnId && connection.id === gwConnId) {
+        console.log(`[SessionDO:${this.ctx.id}] Gateway WS closed: code=${code} reason=${reason}`)
+        // Clear the persisted gateway connection ID
+        this.cachedGatewayConnId = null
+        try {
+          this.sql`DELETE FROM kv WHERE key = 'gateway_conn_id'`
+        } catch (err) {
+          this.logError('onClose.deleteKv', err)
+        }
+
+        // If session was active, the connection dropped unexpectedly. Ask the
+        // gateway for the runner's live state before running the local recovery
+        // path — if the runner is still alive, its DialBackClient will reconnect
+        // and we should wait rather than finalizing the DO prematurely.
+        if (this.state.status === 'running' || this.state.status === 'waiting_gate') {
+          this.maybeRecoverAfterGatewayDrop().catch((err) => {
+            this.logError('maybeRecoverAfterGatewayDrop', err)
+          })
+        }
       }
 
-      // If session was active, the connection dropped unexpectedly. Ask the
-      // gateway for the runner's live state before running the local recovery
-      // path — if the runner is still alive, its DialBackClient will reconnect
-      // and we should wait rather than finalizing the DO prematurely.
-      if (this.state.status === 'running' || this.state.status === 'waiting_gate') {
-        this.maybeRecoverAfterGatewayDrop().catch((err) => {
-          console.error(`[SessionDO:${this.ctx.id}] maybeRecoverAfterGatewayDrop failed:`, err)
-        })
-      }
+      super.onClose(connection, code, reason, _wasClean)
+    } catch (err) {
+      this.logError('onClose', err, { connId: connection.id, code, reason })
+      throw err
     }
+  }
 
-    super.onClose(connection, code, reason, _wasClean)
+  onError(connection: Connection | unknown, error?: unknown): void {
+    // Agents base class invokes either (conn, err) or (err) depending on
+    // context. Normalise both.
+    const actualError = error !== undefined ? error : connection
+    const conn = error !== undefined ? (connection as Connection) : undefined
+    this.logError('onError', actualError, conn ? { connId: conn.id } : undefined)
+  }
+
+  /**
+   * Unified error logger with full stack trace. Hibernated-DO wakes wrap
+   * handler invocations such that unhandled throws surface only as an
+   * `Unknown Event - Exception Thrown` tag in wrangler tail — the stack
+   * never reaches logs. Explicitly logging here rescues that signal.
+   */
+  private logError(site: string, err: unknown, extra?: Record<string, unknown>): void {
+    const prefix = `[SessionDO:${this.ctx.id}] ERROR@${site}`
+    const extraStr = extra
+      ? ' ' +
+        Object.entries(extra)
+          .map(([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`)
+          .join(' ')
+      : ''
+    if (err instanceof Error) {
+      console.error(`${prefix}${extraStr} ${err.name}: ${err.message}`, err.stack ?? err)
+    } else {
+      console.error(`${prefix}${extraStr}`, err)
+    }
   }
 
   /**
