@@ -108,7 +108,25 @@ const mockDelete = vi.fn((keys: string | string[]) => {
 
 // Finalise the collection handle with mutation wrappers. Done after
 // mockInsert/Update/Delete are defined so they're captured by reference.
-mockCollection.insert = (...args: unknown[]) => mockInsert(...(args as [CachedMessage]))
+// GH#38 P1.3: collection.insert returns a Transaction-like handle with
+// `isPersisted.promise` so `await tx.isPersisted.promise` in sendMessage /
+// submitDraft can settle. Tests that need to simulate a mutationFn throw
+// can call `mockCollection.__rejectNextInsert(err)` before the insert.
+let nextInsertRejection: Error | null = null
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+;(mockCollection as any).__rejectNextInsert = (err: Error) => {
+  nextInsertRejection = err
+}
+mockCollection.insert = (...args: unknown[]) => {
+  mockInsert(...(args as [CachedMessage]))
+  const rejection = nextInsertRejection
+  nextInsertRejection = null
+  return {
+    isPersisted: {
+      promise: rejection ? Promise.reject(rejection) : Promise.resolve(),
+    },
+  }
+}
 mockCollection.update = (...args: unknown[]) =>
   mockUpdate(...(args as [string, (d: CachedMessage) => void]))
 mockCollection.delete = (...args: unknown[]) => mockDelete(...(args as [string | string[]]))
@@ -338,46 +356,6 @@ function makeWsMessage(data: unknown): MessageEvent {
   return new MessageEvent('message', { data: JSON.stringify(data) })
 }
 
-// ── MessagesFrame helpers (P1/1b — unified shape) ────────────────────
-
-/**
- * Per-test seq counter for building unified `{type:'messages'}` delta
- * frames. Tests that expect a contiguous delta stream should reset this
- * in `beforeEach` via `msgSeq = 0`.
- */
-let msgSeq = 0
-
-function deltaFrame(
-  upsert: Array<Record<string, unknown>>,
-  opts: { remove?: string[]; sessionId?: string } = {},
-) {
-  msgSeq += 1
-  return {
-    type: 'messages',
-    sessionId: opts.sessionId ?? 'test-session',
-    seq: msgSeq,
-    payload: { kind: 'delta', upsert, ...(opts.remove ? { remove: opts.remove } : {}) },
-  }
-}
-
-function snapshotFrame(
-  messages: Array<Record<string, unknown>>,
-  opts: { version?: number; sessionId?: string; reason?: string } = {},
-) {
-  const version = opts.version ?? msgSeq
-  return {
-    type: 'messages',
-    sessionId: opts.sessionId ?? 'test-session',
-    seq: version,
-    payload: {
-      kind: 'snapshot',
-      version,
-      messages,
-      reason: opts.reason ?? 'reconnect',
-    },
-  }
-}
-
 // ── Tests ────────────────────────────────────────────────────────────
 
 describe('useCodingAgent cache-first hydration', () => {
@@ -502,494 +480,6 @@ describe('useCodingAgent cache-first hydration', () => {
   })
 })
 
-describe('type: "messages" delta wire format (unified)', () => {
-  beforeEach(() => {
-    cachedMessagesStore.clear()
-    sessionsStore.clear()
-    collectionSubs.clear()
-    sessionsSubs.clear()
-    capturedUseAgentConfig = null
-    msgSeq = 0
-    vi.clearAllMocks()
-  })
-
-  afterEach(() => {
-    vi.restoreAllMocks()
-  })
-
-  test('appends a new assistant message', () => {
-    const { result } = renderHook(() => useCodingAgent('test-session'))
-
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage(
-          deltaFrame([
-            {
-              id: 'asst-1',
-              role: 'assistant',
-              parts: [{ type: 'text', text: 'Hello!' }],
-            },
-          ]),
-        ),
-      )
-    })
-
-    expect(result.current.messages).toHaveLength(1)
-    expect(result.current.messages[0].id).toBe('asst-1')
-    expect(result.current.messages[0].role).toBe('assistant')
-    expect(result.current.messages[0].parts[0].text).toBe('Hello!')
-  })
-
-  test('upserts an existing assistant message by id (streaming update)', () => {
-    const { result } = renderHook(() => useCodingAgent('test-session'))
-
-    // First message
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage(
-          deltaFrame([
-            {
-              id: 'asst-1',
-              role: 'assistant',
-              parts: [{ type: 'text', text: 'Hel', state: 'streaming' }],
-            },
-          ]),
-        ),
-      )
-    })
-
-    expect(result.current.messages).toHaveLength(1)
-    expect(result.current.messages[0].parts[0].text).toBe('Hel')
-    expect(result.current.messages[0].parts[0].state).toBe('streaming')
-
-    // Update same message
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage(
-          deltaFrame([
-            {
-              id: 'asst-1',
-              role: 'assistant',
-              parts: [{ type: 'text', text: 'Hello world!', state: 'done' }],
-            },
-          ]),
-        ),
-      )
-    })
-
-    expect(result.current.messages).toHaveLength(1)
-    expect(result.current.messages[0].parts[0].text).toBe('Hello world!')
-    expect(result.current.messages[0].parts[0].state).toBe('done')
-  })
-
-  test('inserts optimistic user row with usr-client-<uuid> id (GH#14 P3)', () => {
-    const { result } = renderHook(() => useCodingAgent('test-session'))
-
-    mockCall.mockResolvedValueOnce({ ok: true })
-
-    // Send a message (creates optimistic insert via createTransaction)
-    act(() => {
-      result.current.sendMessage('Hello agent')
-    })
-
-    // The optimistic row is keyed on a client-minted id. The server echo
-    // will arrive carrying the SAME id (DO accepts client_message_id), so
-    // reconciliation is by id match — no delete+insert churn.
-    expect(result.current.messages).toHaveLength(1)
-    expect(result.current.messages[0].id).toMatch(/^usr-client-/)
-    expect(result.current.messages[0].parts[0].text).toBe('Hello agent')
-
-    // Verify the RPC carried the client_message_id so the DO can use it as
-    // the primary id when it persists and echoes the user turn.
-    const sendCall = mockCall.mock.calls.find((c) => c[0] === 'sendMessage')
-    expect(sendCall).toBeDefined()
-    const opts = sendCall?.[1][1] as { client_message_id?: string } | undefined
-    expect(opts?.client_message_id).toMatch(/^usr-client-/)
-  })
-
-  test('on rapid double-send, server echoes reconcile only by client_message_id match (GH#14 P3)', async () => {
-    const { result } = renderHook(() => useCodingAgent('test-session'))
-
-    mockCall.mockResolvedValue({ ok: true })
-
-    // Send A, then B. Each createTransaction mints a unique
-    // `usr-client-<uuid>` id; no clearOldest-on-echo race.
-    act(() => {
-      result.current.sendMessage('A')
-    })
-    act(() => {
-      result.current.sendMessage('B')
-    })
-
-    expect(result.current.messages).toHaveLength(2)
-    const optimisticA = result.current.messages[0].id
-    const optimisticB = result.current.messages[1].id
-    expect(optimisticA).toMatch(/^usr-client-/)
-    expect(optimisticB).toMatch(/^usr-client-/)
-    expect(optimisticA).not.toBe(optimisticB)
-
-    // Server echoes A carrying A's client id back — upsert is idempotent
-    // by id so only A's row updates. B's optimistic row is untouched.
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage(
-          deltaFrame([
-            {
-              id: optimisticA,
-              role: 'user',
-              parts: [{ type: 'text', text: 'A' }],
-              canonical_turn_id: 'usr-1',
-            },
-          ]),
-        ),
-      )
-    })
-
-    expect(result.current.messages).toHaveLength(2)
-    const ids = result.current.messages.map((m) => m.id)
-    expect(ids).toContain(optimisticA)
-    expect(ids).toContain(optimisticB)
-  })
-
-  test('appends multiple messages in sequence', () => {
-    const { result } = renderHook(() => useCodingAgent('test-session'))
-
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage(
-          deltaFrame([{ id: 'usr-1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] }]),
-        ),
-      )
-    })
-
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage(
-          deltaFrame([
-            {
-              id: 'asst-1',
-              role: 'assistant',
-              parts: [{ type: 'text', text: 'Hello!' }],
-            },
-          ]),
-        ),
-      )
-    })
-
-    expect(result.current.messages).toHaveLength(2)
-    expect(result.current.messages[0].role).toBe('user')
-    expect(result.current.messages[1].role).toBe('assistant')
-  })
-
-  test('writes to cache on each delta frame', () => {
-    renderHook(() => useCodingAgent('test-session'))
-
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage(
-          deltaFrame([
-            {
-              id: 'msg-cache-1',
-              role: 'assistant',
-              parts: [{ type: 'text', text: 'cached' }],
-              createdAt: '2026-04-14T00:00:00Z',
-            },
-          ]),
-        ),
-      )
-    })
-
-    // Check that cacheMessage was called (insert on messagesCollection)
-    expect(cachedMessagesStore.has('msg-cache-1')).toBe(true)
-    const cached = cachedMessagesStore.get('msg-cache-1')!
-    expect(cached.sessionId).toBe('test-session')
-    expect(cached.role).toBe('assistant')
-    expect(cached.parts[0].text).toBe('cached')
-  })
-})
-
-describe('type: "messages" snapshot wire format (bulk replay)', () => {
-  beforeEach(() => {
-    cachedMessagesStore.clear()
-    sessionsStore.clear()
-    collectionSubs.clear()
-    sessionsSubs.clear()
-    capturedUseAgentConfig = null
-    msgSeq = 0
-    vi.clearAllMocks()
-  })
-
-  afterEach(() => {
-    vi.restoreAllMocks()
-  })
-
-  test('replaces all messages with snapshot frame', () => {
-    const { result } = renderHook(() => useCodingAgent('test-session'))
-
-    // Add a message first via delta
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage(
-          deltaFrame([{ id: 'old-1', role: 'user', parts: [{ type: 'text', text: 'old' }] }]),
-        ),
-      )
-    })
-    expect(result.current.messages).toHaveLength(1)
-
-    // Snapshot replaces everything
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage(
-          snapshotFrame(
-            [
-              { id: 'replay-1', role: 'user', parts: [{ type: 'text', text: 'replayed user' }] },
-              {
-                id: 'replay-2',
-                role: 'assistant',
-                parts: [{ type: 'text', text: 'replayed assistant' }],
-              },
-            ],
-            { version: 10 },
-          ),
-        ),
-      )
-    })
-
-    expect(result.current.messages).toHaveLength(2)
-    expect(result.current.messages[0].id).toBe('replay-1')
-    expect(result.current.messages[1].id).toBe('replay-2')
-  })
-
-  test('caches all snapshotted messages', () => {
-    renderHook(() => useCodingAgent('test-session'))
-
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage(
-          snapshotFrame(
-            [
-              { id: 'r-1', role: 'user', parts: [{ type: 'text', text: 'u' }] },
-              { id: 'r-2', role: 'assistant', parts: [{ type: 'text', text: 'a' }] },
-            ],
-            { version: 5 },
-          ),
-        ),
-      )
-    })
-
-    expect(cachedMessagesStore.has('r-1')).toBe(true)
-    expect(cachedMessagesStore.has('r-2')).toBe(true)
-  })
-
-  test('delta after snapshot bumps watermark correctly (seq max)', () => {
-    const { result } = renderHook(() => useCodingAgent('test-session'))
-
-    // Snapshot advances watermark to version=3
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage(
-          snapshotFrame([{ id: 'r-1', role: 'user', parts: [{ type: 'text', text: 'hi' }] }], {
-            version: 3,
-          }),
-        ),
-      )
-    })
-    msgSeq = 3
-
-    // A delta with seq=4 is contiguous and should apply.
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage(
-          deltaFrame([
-            {
-              id: 'asst-new',
-              role: 'assistant',
-              parts: [{ type: 'text', text: 'hello' }],
-            },
-          ]),
-        ),
-      )
-    })
-
-    expect(result.current.messages).toHaveLength(2)
-    expect(result.current.messages[1].id).toBe('asst-new')
-  })
-
-  test('legacy {type:"messages", messages} shape still hydrates (deploy rollover)', () => {
-    const { result } = renderHook(() => useCodingAgent('test-session'))
-
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'messages',
-          messages: [
-            { id: 'legacy-1', role: 'user', parts: [{ type: 'text', text: 'u' }] },
-            { id: 'legacy-2', role: 'assistant', parts: [{ type: 'text', text: 'a' }] },
-          ],
-        }),
-      )
-    })
-
-    expect(result.current.messages).toHaveLength(2)
-    expect(cachedMessagesStore.has('legacy-1')).toBe(true)
-    expect(cachedMessagesStore.has('legacy-2')).toBe(true)
-  })
-})
-
-describe('MessagesFrame gap detection (P1 B3)', () => {
-  beforeEach(() => {
-    cachedMessagesStore.clear()
-    sessionsStore.clear()
-    collectionSubs.clear()
-    sessionsSubs.clear()
-    capturedUseAgentConfig = null
-    msgSeq = 0
-    vi.clearAllMocks()
-  })
-
-  afterEach(() => {
-    vi.restoreAllMocks()
-  })
-
-  test('out-of-order delta triggers requestSnapshot RPC and does NOT apply', () => {
-    mockCall.mockResolvedValue(undefined)
-    const { result } = renderHook(() => useCodingAgent('test-session'))
-
-    // Apply seq=1 normally
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage(
-          deltaFrame([{ id: 'm-1', role: 'user', parts: [{ type: 'text', text: 'a' }] }]),
-        ),
-      )
-    })
-    expect(result.current.messages).toHaveLength(1)
-
-    // Skip seq=2, deliver seq=3 (gap) — should be dropped and requestSnapshot called.
-    msgSeq = 2 // account for the "missing" delta
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage(
-          deltaFrame([{ id: 'm-3', role: 'assistant', parts: [{ type: 'text', text: 'c' }] }]),
-        ),
-      )
-    })
-
-    expect(result.current.messages).toHaveLength(1) // m-3 not applied
-    expect(mockCall).toHaveBeenCalledWith('requestSnapshot', [])
-  })
-
-  test('duplicate delta (seq === lastSeq) is dropped silently without RPC', () => {
-    mockCall.mockResolvedValue(undefined)
-    const { result } = renderHook(() => useCodingAgent('test-session'))
-
-    // Snapshot bumps watermark to 10
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage(
-          snapshotFrame([{ id: 's-1', role: 'user', parts: [{ type: 'text', text: 'snap' }] }], {
-            version: 10,
-          }),
-        ),
-      )
-    })
-
-    // Exact duplicate (seq === lastSeq) — drop silently, no resync.
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'messages',
-          sessionId: 'test-session',
-          seq: 10,
-          payload: {
-            kind: 'delta',
-            upsert: [{ id: 'dup-1', role: 'assistant', parts: [{ type: 'text', text: 'x' }] }],
-          },
-        }),
-      )
-    })
-
-    expect(result.current.messages).toHaveLength(1)
-    expect(result.current.messages[0].id).toBe('s-1')
-    expect(mockCall).not.toHaveBeenCalledWith('requestSnapshot', [])
-  })
-
-  // DB-fdb1-0420: After a DO eviction + rehydrate, `messageSeq` comes back
-  // from `session_meta` at the last persisted-Nth value — which is almost
-  // always behind the client's `lastSeqRef` watermark. The first delta after
-  // rehydrate therefore arrives with `frame.seq < lastSeq`. Pre-fix this hit
-  // the silent-drop branch and the UI went dead until a full page reload.
-  // Fix: backwards seq triggers `requestSnapshot` so the client resyncs.
-  test('backwards seq (seq < lastSeq) triggers requestSnapshot — DO rehydrate resync', () => {
-    mockCall.mockResolvedValue(undefined)
-    const { result } = renderHook(() => useCodingAgent('test-session'))
-
-    // Snapshot bumps watermark to 10 (simulates client's accumulated state
-    // before the DO was evicted).
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage(
-          snapshotFrame([{ id: 's-1', role: 'user', parts: [{ type: 'text', text: 'snap' }] }], {
-            version: 10,
-          }),
-        ),
-      )
-    })
-
-    // DO rehydrates with `messageSeq` persisted at 3; next delta is seq=4.
-    // Pre-fix: silently dropped. Post-fix: triggers requestSnapshot.
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'messages',
-          sessionId: 'test-session',
-          seq: 4,
-          payload: {
-            kind: 'delta',
-            upsert: [
-              { id: 'post-reboot-1', role: 'assistant', parts: [{ type: 'text', text: 'y' }] },
-            ],
-          },
-        }),
-      )
-    })
-
-    // Delta itself is not applied (snapshot is the authoritative catch-up).
-    expect(result.current.messages).toHaveLength(1)
-    expect(result.current.messages[0].id).toBe('s-1')
-    // But we MUST have requested a snapshot — this is the fix.
-    expect(mockCall).toHaveBeenCalledWith('requestSnapshot', [])
-  })
-
-  test('delta remove list deletes rows', () => {
-    const { result } = renderHook(() => useCodingAgent('test-session'))
-
-    // Seed two messages via a snapshot
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage(
-          snapshotFrame(
-            [
-              { id: 'keep-1', role: 'user', parts: [{ type: 'text', text: 'keep' }] },
-              { id: 'drop-1', role: 'assistant', parts: [{ type: 'text', text: 'drop' }] },
-            ],
-            { version: 2 },
-          ),
-        ),
-      )
-    })
-    msgSeq = 2
-
-    // Delta with remove only
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(makeWsMessage(deltaFrame([], { remove: ['drop-1'] })))
-    })
-
-    expect(result.current.messages).toHaveLength(1)
-    expect(result.current.messages[0].id).toBe('keep-1')
-  })
-})
-
 describe('sendMessage (SessionMessage format)', () => {
   beforeEach(() => {
     cachedMessagesStore.clear()
@@ -1021,10 +511,14 @@ describe('sendMessage (SessionMessage format)', () => {
     expect(msg.createdAt).toBeInstanceOf(Date)
   })
 
-  test('rollback-on-rpc-failure: sendMessage returns {ok:false} when RPC rejects (GH#14 P3 B5)', async () => {
+  test('rollback-on-rpc-failure: sendMessage returns {ok:false} when mutationFn throws (GH#38 P1.3)', async () => {
     const { result } = renderHook(() => useCodingAgent('test-session'))
 
-    mockCall.mockResolvedValueOnce({ ok: false, error: 'session not running' })
+    // GH#38 P1.3: string path routes through messagesCollection.insert →
+    // factory onInsert. Simulate the mutationFn throwing by rejecting the
+    // insert's isPersisted promise.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(mockCollection as any).__rejectNextInsert(new Error('session not running'))
 
     let sendResult: { ok: boolean; error?: string } | undefined
     await act(async () => {
@@ -1034,11 +528,8 @@ describe('sendMessage (SessionMessage format)', () => {
       }
     })
 
-    // createTransaction rejects its isPersisted promise when the mutationFn
-    // throws; sendMessage surfaces that as {ok:false,error}. The optimistic
-    // row reconciles via the collection's transaction-aware reactive state
-    // (in production TanStack DB wires touchCollection() into the backing
-    // collection; here we assert the public contract).
+    // When the mutationFn throws, TanStack DB rejects isPersisted and rolls
+    // back the optimistic row. sendMessage surfaces that as {ok:false,error}.
     expect(sendResult?.ok).toBe(false)
     expect(sendResult?.error).toContain('session not running')
   })
@@ -1239,7 +730,16 @@ describe('legacy gateway_event handling', () => {
   })
 })
 
-describe('branch tracking (P4)', () => {
+describe('branch tracking (RPC fire-and-forget — GH#38 P1.5)', () => {
+  // GH#38 P1.5: branchInfo now rides a standalone
+  // `{type:'synced-collection-delta', collection:'branchInfo:<id>'}` frame
+  // dispatched by the session-stream primitives — the hook no longer
+  // pokes `createBranchInfoCollection().insert(...)` on receipt, and the
+  // unified `{type:'messages'}` wire (with its embedded branchInfo)
+  // is retired. What we still test: (a) the RPC facade forwards
+  // correctly, (b) navigateBranch resolves the target sibling via the
+  // branch-info collection mock and fires getBranchHistory.
+
   beforeEach(() => {
     cachedMessagesStore.clear()
     sessionsStore.clear()
@@ -1247,6 +747,8 @@ describe('branch tracking (P4)', () => {
     sessionsSubs.clear()
     capturedUseAgentConfig = null
     vi.clearAllMocks()
+    mockCall.mockReset()
+    mockCall.mockResolvedValue([])
     branchInfoStore.clear()
   })
 
@@ -1254,9 +756,8 @@ describe('branch tracking (P4)', () => {
     vi.restoreAllMocks()
   })
 
-  test('resubmitMessage forwards RPC call — DO-authored snapshot converges the view', async () => {
+  test('resubmitMessage forwards RPC — DO pushes converging synced deltas', async () => {
     const { result } = renderHook(() => useCodingAgent('test-session'))
-
     mockCall.mockResolvedValueOnce({ ok: true, leafId: 'usr-5' })
 
     await act(async () => {
@@ -1266,14 +767,12 @@ describe('branch tracking (P4)', () => {
     })
 
     expect(mockCall).toHaveBeenCalledWith('resubmitMessage', ['usr-1', 'edited'])
-    // P4: no side-channel getMessages RPC — the DO pushes the new view
-    // via its own snapshot frame.
+    // No side-channel getMessages RPC — DO-pushed frames converge the view.
     expect(mockCall).not.toHaveBeenCalledWith('getMessages', expect.anything())
   })
 
   test('resubmitMessage surfaces DO failure result', async () => {
     const { result } = renderHook(() => useCodingAgent('test-session'))
-
     mockCall.mockResolvedValueOnce({ ok: false, error: 'Original message not found' })
 
     await act(async () => {
@@ -1290,30 +789,15 @@ describe('branch tracking (P4)', () => {
       await result.current.navigateBranch('usr-1', 'next')
     })
 
-    // No RPC call — row missing.
     expect(mockCall).not.toHaveBeenCalledWith('getBranchHistory', expect.anything())
   })
 
   test('navigateBranch calls getBranchHistory with the target sibling id', async () => {
-    // Seed the branch-info collection via a snapshot frame carrying
-    // branchInfo (this is the DO → client B7 path).
     const { result } = renderHook(() => useCodingAgent('test-session'))
-
     mockCall.mockResolvedValue({ ok: true })
 
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage(
-          snapshotFrame([{ id: 'usr-1', role: 'user', parts: [{ type: 'text', text: 'v1' }] }], {
-            version: 1,
-            reason: 'reconnect',
-          }),
-        ),
-      )
-    })
-
-    // Manually inject the branchInfo row into the mock collection — the
-    // snapshot path upserts via createBranchInfoCollection().insert.
+    // Seed the branch-info store directly — the synced-collection factory
+    // would populate this path via its internal `write({type:'insert', value})`.
     branchInfoStore.set('msg-0', {
       parentMsgId: 'msg-0',
       sessionId: 'test-session',
@@ -1327,348 +811,5 @@ describe('branch tracking (P4)', () => {
     })
 
     expect(mockCall).toHaveBeenCalledWith('getBranchHistory', ['usr-3'])
-  })
-
-  test('snapshot payload branchInfo rows land in the branch-info collection', () => {
-    renderHook(() => useCodingAgent('test-session'))
-
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'messages',
-          sessionId: 'test-session',
-          seq: 1,
-          payload: {
-            kind: 'snapshot',
-            version: 1,
-            reason: 'reconnect',
-            messages: [{ id: 'usr-1', role: 'user', parts: [{ type: 'text', text: 'v1' }] }],
-            branchInfo: [
-              {
-                parentMsgId: 'msg-0',
-                sessionId: 'test-session',
-                siblings: ['usr-1', 'usr-3'],
-                activeId: 'usr-1',
-                updatedAt: '2026-04-19T00:00:00Z',
-              },
-            ],
-          },
-        }),
-      )
-    })
-
-    expect(branchInfoStore.has('msg-0')).toBe(true)
-    const row = branchInfoStore.get('msg-0')!
-    expect(row.siblings).toEqual(['usr-1', 'usr-3'])
-    expect(row.activeId).toBe('usr-1')
-  })
-
-  // P2 B2: deltas can piggyback branchInfo — user-turn mutations that add a
-  // sibling ship the updated BranchInfoRow on the same frame as the message
-  // upsert. Mirrors the snapshot path, applied inline on the delta handler.
-  test('delta payload branchInfo.upsert lands in the branch-info collection', () => {
-    renderHook(() => useCodingAgent('test-session'))
-    msgSeq = 0
-
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'messages',
-          sessionId: 'test-session',
-          seq: 1,
-          payload: {
-            kind: 'delta',
-            upsert: [{ id: 'usr-2', role: 'user', parts: [{ type: 'text', text: 'v2' }] }],
-            branchInfo: {
-              upsert: [
-                {
-                  parentMsgId: 'msg-0',
-                  sessionId: 'test-session',
-                  siblings: ['usr-1', 'usr-2'],
-                  activeId: 'usr-2',
-                  updatedAt: '2026-04-20T00:00:00Z',
-                },
-              ],
-            },
-          },
-        }),
-      )
-    })
-
-    expect(branchInfoStore.has('msg-0')).toBe(true)
-    const row = branchInfoStore.get('msg-0')!
-    expect(row.siblings).toEqual(['usr-1', 'usr-2'])
-    expect(row.activeId).toBe('usr-2')
-  })
-
-  test('delta payload branchInfo.upsert updates existing row', () => {
-    renderHook(() => useCodingAgent('test-session'))
-    msgSeq = 0
-
-    // Seed an existing row.
-    branchInfoStore.set('msg-0', {
-      parentMsgId: 'msg-0',
-      sessionId: 'test-session',
-      siblings: ['usr-1'],
-      activeId: 'usr-1',
-      updatedAt: '2026-04-19T00:00:00Z',
-    })
-
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'messages',
-          sessionId: 'test-session',
-          seq: 1,
-          payload: {
-            kind: 'delta',
-            upsert: [{ id: 'usr-3', role: 'user', parts: [{ type: 'text', text: 'v3' }] }],
-            branchInfo: {
-              upsert: [
-                {
-                  parentMsgId: 'msg-0',
-                  sessionId: 'test-session',
-                  siblings: ['usr-1', 'usr-3'],
-                  activeId: 'usr-3',
-                  updatedAt: '2026-04-20T00:00:00Z',
-                },
-              ],
-            },
-          },
-        }),
-      )
-    })
-
-    const row = branchInfoStore.get('msg-0')!
-    expect(row.siblings).toEqual(['usr-1', 'usr-3'])
-    expect(row.activeId).toBe('usr-3')
-  })
-
-  // DB-cbb1-0420 H1: snapshot is authoritative — rows no longer referenced
-  // by the incoming branchInfo array must be deleted from the collection.
-  // Before this fix, the snapshot path upserted only, so OPFS-persisted
-  // rows from trimmed-away branches lingered and the UI showed ghost
-  // arrows after rewind.
-  test('snapshot reconciles stale branch-info rows (delete not in incoming)', () => {
-    renderHook(() => useCodingAgent('test-session'))
-
-    // Seed two rows; the snapshot will only mention one of them.
-    branchInfoStore.set('msg-0', {
-      parentMsgId: 'msg-0',
-      sessionId: 'test-session',
-      siblings: ['usr-1', 'usr-2'],
-      activeId: 'usr-1',
-      updatedAt: '2026-04-19T00:00:00Z',
-    })
-    branchInfoStore.set('msg-9', {
-      parentMsgId: 'msg-9',
-      sessionId: 'test-session',
-      siblings: ['usr-9', 'usr-10'],
-      activeId: 'usr-9',
-      updatedAt: '2026-04-19T00:00:00Z',
-    })
-
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'messages',
-          sessionId: 'test-session',
-          seq: 1,
-          payload: {
-            kind: 'snapshot',
-            version: 1,
-            reason: 'rewind',
-            messages: [{ id: 'usr-1', role: 'user', parts: [{ type: 'text', text: 'v1' }] }],
-            branchInfo: [
-              {
-                parentMsgId: 'msg-0',
-                sessionId: 'test-session',
-                siblings: ['usr-1', 'usr-3'],
-                activeId: 'usr-3',
-                updatedAt: '2026-04-20T00:00:00Z',
-              },
-            ],
-          },
-        }),
-      )
-    })
-
-    // `msg-9` is stale (not in the incoming snapshot) — must be deleted.
-    expect(branchInfoStore.has('msg-9')).toBe(false)
-    // `msg-0` is incoming — must be updated in place.
-    const row = branchInfoStore.get('msg-0')!
-    expect(row.siblings).toEqual(['usr-1', 'usr-3'])
-    expect(row.activeId).toBe('usr-3')
-  })
-
-  // DB-cbb1-0420 H1 (continued): an empty incoming branchInfo array means
-  // "no branches anywhere" — still must wipe stale rows. Pre-fix the
-  // `branchInfo.length > 0` gate meant an empty snapshot was a no-op and
-  // ghost rows survived.
-  test('snapshot with empty branchInfo wipes stale rows', () => {
-    renderHook(() => useCodingAgent('test-session'))
-
-    branchInfoStore.set('msg-0', {
-      parentMsgId: 'msg-0',
-      sessionId: 'test-session',
-      siblings: ['usr-1', 'usr-2'],
-      activeId: 'usr-1',
-      updatedAt: '2026-04-19T00:00:00Z',
-    })
-
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'messages',
-          sessionId: 'test-session',
-          seq: 1,
-          payload: {
-            kind: 'snapshot',
-            version: 1,
-            reason: 'rewind',
-            messages: [{ id: 'usr-1', role: 'user', parts: [{ type: 'text', text: 'v1' }] }],
-            branchInfo: [],
-          },
-        }),
-      )
-    })
-
-    expect(branchInfoStore.size).toBe(0)
-  })
-
-  // DB-cbb1-0420 H2: update-first-insert-fallback — when a row already
-  // exists, the fix path takes the update branch (no duplicate-key throw
-  // from the mock's insert). Before this fix, `has?.()` could return
-  // undefined on the real persisted collection and the code would hit
-  // `.insert()` → throw → swallowed, silently dropping updates.
-  test('snapshot upsert takes update path when row exists (no duplicate-key throw)', () => {
-    renderHook(() => useCodingAgent('test-session'))
-
-    branchInfoStore.set('msg-0', {
-      parentMsgId: 'msg-0',
-      sessionId: 'test-session',
-      siblings: ['usr-1'],
-      activeId: 'usr-1',
-      updatedAt: '2026-04-19T00:00:00Z',
-    })
-
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'messages',
-          sessionId: 'test-session',
-          seq: 1,
-          payload: {
-            kind: 'snapshot',
-            version: 1,
-            reason: 'reconnect',
-            messages: [{ id: 'usr-1', role: 'user', parts: [{ type: 'text', text: 'v1' }] }],
-            branchInfo: [
-              {
-                parentMsgId: 'msg-0',
-                sessionId: 'test-session',
-                siblings: ['usr-1', 'usr-3', 'usr-5'],
-                activeId: 'usr-5',
-                updatedAt: '2026-04-21T00:00:00Z',
-              },
-            ],
-          },
-        }),
-      )
-    })
-
-    // If the fallback was broken the mock insert would have thrown and
-    // the update would never have applied.
-    const row = branchInfoStore.get('msg-0')!
-    expect(row.siblings).toEqual(['usr-1', 'usr-3', 'usr-5'])
-    expect(row.activeId).toBe('usr-5')
-    expect(row.updatedAt).toBe('2026-04-21T00:00:00Z')
-  })
-
-  test('delta without branchInfo does not touch branch-info collection', () => {
-    renderHook(() => useCodingAgent('test-session'))
-    msgSeq = 0
-
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage(
-          deltaFrame([{ id: 'usr-1', role: 'user', parts: [{ type: 'text', text: 'hi' }] }]),
-        ),
-      )
-    })
-
-    expect(branchInfoStore.size).toBe(0)
-  })
-})
-
-// ── spec-31 P4a B8: wire seq stamping on message rows ──────────────────
-
-describe('seq stamping (P4a B8)', () => {
-  beforeEach(() => {
-    cachedMessagesStore.clear()
-    sessionsStore.clear()
-    collectionSubs.clear()
-    sessionsSubs.clear()
-    capturedUseAgentConfig = null
-    msgSeq = 0
-    vi.clearAllMocks()
-  })
-
-  afterEach(() => {
-    vi.restoreAllMocks()
-  })
-
-  test('delta-stamps-seq: applied delta rows carry frame.seq', () => {
-    renderHook(() => useCodingAgent('test-session'))
-
-    // 6 no-op deltas to push msgSeq up; then seq=7 delta.
-    for (let i = 0; i < 6; i++) {
-      act(() => {
-        capturedUseAgentConfig?.onMessage?.(
-          makeWsMessage(
-            deltaFrame([
-              { id: `pad-${i}`, role: 'assistant', parts: [{ type: 'text', text: 'x' }] },
-            ]),
-          ),
-        )
-      })
-    }
-
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage(
-          deltaFrame([
-            { id: 'stamped-7', role: 'assistant', parts: [{ type: 'text', text: 'hi' }] },
-          ]),
-        ),
-      )
-    })
-
-    const row = cachedMessagesStore.get('stamped-7') as CachedMessage & { seq?: number }
-    expect(row).toBeDefined()
-    expect(row.seq).toBe(7)
-  })
-
-  test('snapshot-stamps-version: snapshot rows all carry payload.version', () => {
-    renderHook(() => useCodingAgent('test-session'))
-
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage(
-          snapshotFrame(
-            [
-              { id: 's-1', role: 'user', parts: [{ type: 'text', text: 'u' }] },
-              { id: 's-2', role: 'assistant', parts: [{ type: 'text', text: 'a' }] },
-            ],
-            { version: 3 },
-          ),
-        ),
-      )
-    })
-
-    const r1 = cachedMessagesStore.get('s-1') as CachedMessage & { seq?: number }
-    const r2 = cachedMessagesStore.get('s-2') as CachedMessage & { seq?: number }
-    expect(r1.seq).toBe(3)
-    expect(r2.seq).toBe(3)
   })
 })

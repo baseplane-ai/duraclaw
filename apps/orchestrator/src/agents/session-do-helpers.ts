@@ -1,6 +1,41 @@
 import { timingSafeEqual } from 'node:crypto'
 
+import type { SyncedCollectionOp } from '@duraclaw/shared-types'
 import type { SessionMessage } from 'agents/experimental/memory/session'
+
+/**
+ * Pure op-derivation helper for snapshot emitters (GH#38 P1.4).
+ *
+ * Given the "old view" history (what the client is currently displaying)
+ * and the "new view" history (the authoritative history after the
+ * mutation), returns a SyncedCollectionOp array containing:
+ *   - `delete` ops for every id present in `oldLeaf` but NOT in `newLeaf`
+ *     (the branch-only rows the client must discard)
+ *   - `insert` ops for every row in `newLeaf` (authoritative-full; TanStack
+ *     DB's key-based upsert dedupes the shared-prefix rows at apply time).
+ *
+ * Delete ops are emitted first, insert ops second — the wire contract in
+ * B9 requires this ordering so the client drops stale rows before upserts
+ * can re-introduce an id that happens to collide.
+ *
+ * Extracted from session-do.ts so unit tests can import without triggering
+ * the TC39 decorator parse barrier that blocks direct SessionDO import.
+ */
+export function deriveSnapshotOps<TRow extends { id: string }>(input: {
+  oldLeaf: readonly TRow[]
+  newLeaf: readonly TRow[]
+}): {
+  staleIds: string[]
+  ops: SyncedCollectionOp<TRow>[]
+} {
+  const newIds = new Set(input.newLeaf.map((m) => m.id))
+  const staleIds = input.oldLeaf.filter((m) => !newIds.has(m.id)).map((m) => m.id)
+  const ops: SyncedCollectionOp<TRow>[] = [
+    ...staleIds.map((id) => ({ type: 'delete' as const, key: id })),
+    ...input.newLeaf.map((value) => ({ type: 'insert' as const, value })),
+  ]
+  return { staleIds, ops }
+}
 
 /** Minimal tagged-template SQL interface used by extracted helper functions. */
 export type SqlFn = <T>(

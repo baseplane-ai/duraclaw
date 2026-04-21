@@ -118,4 +118,12 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
       addCol('last_kata_mode', 'TEXT')
     },
   },
+  {
+    version: 8,
+    description:
+      'No-op: messages `seq` column drop stub (column never existed — v4 renamed the messages table to _deprecated_messages; SDK Session owns assistant_messages which has no seq column). Kept for audit trail of the GH#38 migration.',
+    up: (_sql) => {
+      // Intentional no-op. See description.
+    },
+  },
 ]

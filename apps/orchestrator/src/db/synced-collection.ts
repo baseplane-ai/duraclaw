@@ -36,8 +36,26 @@ export interface SyncedCollectionConfig<TRow extends object, TKey extends string
   queryKey: readonly unknown[]
   /** Initial cold-start fetch. Called once on sync() start + on reconnect. */
   queryFn: () => Promise<TRow[]>
-  /** Wire-protocol discriminator — matches `collection` on incoming frames. */
-  syncFrameType: string
+  /**
+   * Wire filter — frames whose `collection` field matches this string drive
+   * begin/write/commit. Canonical name; preferred over `syncFrameType`.
+   * If both are set, `collection` wins.
+   */
+  collection?: string
+  /** Back-compat alias for `collection`. Kept so existing callers don't churn. */
+  syncFrameType?: string
+  /**
+   * How this collection receives SyncedCollectionFrame frames. Handler fires
+   * for EVERY frame delivered on this stream — consumer must filter by
+   * `frame.collection` itself (the factory wires this filter internally
+   * below). Defaults to the user-scoped stream.
+   */
+  subscribe?: (handler: (frame: SyncedCollectionFrame<unknown>) => void) => () => void
+  /**
+   * Fires after a dropped+resumed WS (not on initial connect). Defaults to
+   * the user-scoped stream.
+   */
+  onReconnect?: (handler: () => void) => () => void
   onInsert?: (ctx: { transaction: Transaction<TRow> }) => Promise<unknown>
   onUpdate?: (ctx: { transaction: Transaction<TRow> }) => Promise<unknown>
   onDelete?: (ctx: { transaction: Transaction<TRow> }) => Promise<unknown>
@@ -49,6 +67,18 @@ export interface SyncedCollectionConfig<TRow extends object, TKey extends string
 export function createSyncedCollection<TRow extends object, TKey extends string | number>(
   config: SyncedCollectionConfig<TRow, TKey>,
 ) {
+  const effectiveCollection = config.collection ?? config.syncFrameType
+  if (!effectiveCollection) {
+    throw new Error('createSyncedCollection: collection or syncFrameType required')
+  }
+
+  const subscribe =
+    config.subscribe ??
+    ((handler: (frame: SyncedCollectionFrame<unknown>) => void) =>
+      subscribeUserStream(effectiveCollection, handler))
+  const onReconnect =
+    config.onReconnect ?? ((handler: () => void) => onUserStreamReconnect(handler))
+
   const baseOpts = queryCollectionOptions({
     id: config.id,
     queryKey: config.queryKey,
@@ -71,28 +101,26 @@ export function createSyncedCollection<TRow extends object, TKey extends string 
   baseOpts.sync.sync = (params: any) => {
     const queryCleanupRaw = originalSync?.(params)
 
-    const unsubFrame = subscribeUserStream(
-      config.syncFrameType,
-      (frame: SyncedCollectionFrame<unknown>) => {
-        params.begin()
-        for (const op of frame.ops) {
-          if (op.type === 'delete') {
-            params.write({
-              type: 'delete',
-              key: op.key,
-              // `value` is required by the ChangeMessageOrDeleteKeyMessage
-              // union at the type level; the runtime ignores it on delete.
-              value: undefined as never,
-            })
-          } else {
-            params.write({ type: op.type, value: op.value })
-          }
+    const unsubFrame = subscribe((frame: SyncedCollectionFrame<unknown>) => {
+      if (frame.collection !== effectiveCollection) return
+      params.begin()
+      for (const op of frame.ops) {
+        if (op.type === 'delete') {
+          params.write({
+            type: 'delete',
+            key: op.key,
+            // `value` is required by the ChangeMessageOrDeleteKeyMessage
+            // union at the type level; the runtime ignores it on delete.
+            value: undefined as never,
+          })
+        } else {
+          params.write({ type: op.type, value: op.value })
         }
-        params.commit()
-      },
-    )
+      }
+      params.commit()
+    })
 
-    const unsubReconnect = onUserStreamReconnect(() => {
+    const unsubReconnect = onReconnect(() => {
       void queryClient.invalidateQueries({ queryKey: config.queryKey as readonly unknown[] })
     })
 

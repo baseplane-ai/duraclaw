@@ -3,32 +3,25 @@
  *
  * Returns messages for the given `sessionId`, sorted into stable turn order.
  * The collection is produced by `createMessagesCollection(sessionId)` and
- * memoised per agentName — no sessionId filter needed because the collection
+ * memoised per sessionId — no sessionId filter needed because the collection
  * is already scoped.
  *
- * Sort contract — 3-level tuple `[seq, turnOrdinal, createdAt]`, all
- * ascending, lower values first (spec-31 P4a B8):
+ * Sort contract — 2-level tuple `[turnOrdinal, createdAt]`, both ascending,
+ * lower values first (GH#38 P1.3 — seq was dropped in B6):
  *
- *   1. Primary: wire `seq` stamped at apply time in `use-coding-agent.ts`
- *      (`frame.seq` for deltas, `frame.payload.version` for snapshots).
- *      Rows without a seq (optimistic `usr-client-<uuid>` rows pre-echo,
- *      cold-start rows from the REST queryFn, and pre-P4a cached rows
- *      loaded after the schemaVersion 5 migration) fall back to
- *      `Number.POSITIVE_INFINITY` — i.e. sort AFTER every stamped row.
- *      That gives optimistic rows the "briefly appears below not-yet-
- *      echoed rows, then snaps into place on echo" behaviour from spec.
- *   2. Secondary: `canonical_turn_id` parsed as `usr-N` (the SessionDO's
+ *   1. Primary: `canonical_turn_id` parsed as `usr-N` (the SessionDO's
  *      strictly-monotonic `turnCounter`), falling back to the message `id`
  *      itself (`usr-N`, `msg-N`, `err-N`). This ensures assistant rows
- *      (`msg-N`) sort alongside their user turn (`usr-N`) even when `seq`
- *      is absent (REST-loaded messages). Rows without any parseable
- *      ordinal fall through.
- *   3. Tertiary: `createdAt` — tie-breaker for rows with the same seq and
- *      no / equal turnOrdinal (snapshot rows all share their frame's
- *      version, so they tie on seq and fall through to turnOrdinal /
- *      createdAt, which is their already-ordered-at-emit-time).
+ *      (`msg-N`) sort alongside their user turn (`usr-N`). Rows without any
+ *      parseable ordinal (e.g. optimistic `usr-client-<uuid>` pre-echo)
+ *      fall through to `Number.POSITIVE_INFINITY` — they briefly sort last
+ *      (below every echoed row) and snap into place once the server echo
+ *      arrives with the canonical `usr-N` id.
+ *   2. Tertiary: `createdAt` — tie-breaker for rows with the same
+ *      turnOrdinal (cold-start REST-loaded rows share ordinal with their
+ *      server-side siblings and naturally fall through to createdAt).
  *
- * See GH#14 for the canonical-id history and spec 31 for the seq layer.
+ * See GH#14 for the canonical-id history and GH#38 for the seq removal.
  */
 
 import { useLiveQuery } from '@tanstack/react-db'
@@ -49,16 +42,15 @@ function createdAtMs(row: CachedMessage): number {
 }
 
 /**
- * Returns `[seq, turnOrdinal, createdAt]`. Lower values sort first. Rows
- * missing `seq` sort after every stamped row (by `Number.POSITIVE_INFINITY`)
- * — that covers optimistic rows, cold-start queryFn rows, and pre-P4a
- * cached rows.
+ * Returns `[turnOrdinal, createdAt]`. Lower values sort first. Rows without
+ * any parseable ordinal (`usr-client-<uuid>` optimistic rows pre-echo) fall
+ * back to `Number.POSITIVE_INFINITY` — they briefly sort last, then snap
+ * into place when the server echo reconciles with the canonical `usr-N`.
  */
-function sortKey(row: CachedMessage): [number, number, number] {
-  const seq = row.seq ?? Number.POSITIVE_INFINITY
+function sortKey(row: CachedMessage): [number, number] {
   const ord =
     parseTurnOrdinal(row.canonical_turn_id) ?? parseTurnOrdinal(row.id) ?? Number.POSITIVE_INFINITY
-  return [seq, ord, createdAtMs(row)]
+  return [ord, createdAtMs(row)]
 }
 
 export function useMessagesCollection(sessionId: string) {
@@ -73,9 +65,8 @@ export function useMessagesCollection(sessionId: string) {
   const messages = useMemo(() => {
     if (!data) return []
     return (data as unknown as CachedMessage[]).slice().sort((a, b) => {
-      const [aS, aO, aC] = sortKey(a)
-      const [bS, bO, bC] = sortKey(b)
-      if (aS !== bS) return aS - bS
+      const [aO, aC] = sortKey(a)
+      const [bO, bC] = sortKey(b)
       if (aO !== bO) return aO - bO
       return aC - bC
     })

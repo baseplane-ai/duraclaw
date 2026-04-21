@@ -448,3 +448,199 @@ describe('createSyncedCollection', () => {
     expect(cfg.retryDelay).toBe(500)
   })
 })
+
+// ── Injection-param tests (GH#38 P1.1) ───────────────────────────────────
+//
+// The factory now accepts `subscribe` / `onReconnect` callbacks so callers
+// can wire it onto non-user-stream transports (per-session WS for
+// messagesCollection). Defaults keep the existing user-stream behavior.
+// Tests below exercise:
+//   (a) injected `subscribe` receives EVERY frame (no pre-filter) and the
+//       factory's internal `frame.collection === opts.collection` filter
+//       drops non-matching frames before begin/write/commit
+//   (b) injected `onReconnect` fires queryClient.invalidateQueries
+//   (c) custom `collection` string wins over `syncFrameType` for the filter
+
+describe('createSyncedCollection — injection params (GH#38 P1.1)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    frameHandlersByType.clear()
+    reconnectHandlers.clear()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('injected-subscribe: factory filters by `collection` and drops non-matching frames', async () => {
+    const { createSyncedCollection } = await import('./synced-collection')
+
+    // Custom subscribe — simulates the per-session WS primitive which
+    // forwards EVERY frame without pre-filtering.
+    let capturedHandler: FrameHandler | null = null
+    const customSubscribe = vi.fn((h: FrameHandler) => {
+      capturedHandler = h
+      return () => {
+        capturedHandler = null
+      }
+    })
+
+    const coll = createSyncedCollection<{ id: string; v: number }, string>({
+      id: 'messages:abc',
+      getKey: (r) => r.id,
+      queryKey: ['messages', 'abc'] as const,
+      queryFn: async () => [],
+      collection: 'messages:abc',
+      subscribe: customSubscribe,
+    }) as unknown as { __opts: { sync: { sync: Function } } }
+
+    const { begin, write, commit } = driveSync(coll)
+
+    // Custom subscribe should have been registered; user-stream fallback
+    // should NOT have been touched.
+    expect(customSubscribe).toHaveBeenCalledTimes(1)
+    expect(mockSubscribeUserStream).not.toHaveBeenCalled()
+    expect(capturedHandler).toBeTypeOf('function')
+
+    // Matching frame → begin/write/commit.
+    capturedHandler!({
+      type: 'synced-collection-delta',
+      collection: 'messages:abc',
+      ops: [{ type: 'insert', value: { id: 'm1', v: 1 } }],
+    })
+    expect(begin).toHaveBeenCalledTimes(1)
+    expect(write).toHaveBeenCalledTimes(1)
+    expect(write).toHaveBeenCalledWith({ type: 'insert', value: { id: 'm1', v: 1 } })
+    expect(commit).toHaveBeenCalledTimes(1)
+
+    // Non-matching frame (branchInfo delivered over the same session WS) is
+    // dropped by the factory's internal filter — no begin/write/commit.
+    capturedHandler!({
+      type: 'synced-collection-delta',
+      collection: 'branchInfo:abc',
+      ops: [{ type: 'insert', value: { id: 'b1', v: 2 } }],
+    })
+    expect(begin).toHaveBeenCalledTimes(1) // unchanged
+    expect(commit).toHaveBeenCalledTimes(1) // unchanged
+
+    // Frame for a different session's messages is also dropped.
+    capturedHandler!({
+      type: 'synced-collection-delta',
+      collection: 'messages:xyz',
+      ops: [{ type: 'insert', value: { id: 'm2', v: 3 } }],
+    })
+    expect(begin).toHaveBeenCalledTimes(1) // still unchanged
+  })
+
+  it('injected-onReconnect: fires invalidateQueries on reconnect, replacing the user-stream default', async () => {
+    const { createSyncedCollection } = await import('./synced-collection')
+
+    let capturedReconnect: ReconnectHandler | null = null
+    const customOnReconnect = vi.fn((cb: ReconnectHandler) => {
+      capturedReconnect = cb
+      return () => {
+        capturedReconnect = null
+      }
+    })
+
+    const coll = createSyncedCollection<{ id: string }, string>({
+      id: 'messages:abc',
+      getKey: (r) => r.id,
+      queryKey: ['messages', 'abc'] as const,
+      queryFn: async () => [],
+      collection: 'messages:abc',
+      subscribe: vi.fn(() => () => {}),
+      onReconnect: customOnReconnect,
+    }) as unknown as { __opts: { sync: { sync: Function } } }
+
+    driveSync(coll)
+
+    // Default user-stream reconnect path must NOT be used when onReconnect
+    // is injected.
+    expect(mockOnUserStreamReconnect).not.toHaveBeenCalled()
+    expect(customOnReconnect).toHaveBeenCalledTimes(1)
+
+    expect(mockInvalidateQueries).not.toHaveBeenCalled()
+    capturedReconnect!()
+    expect(mockInvalidateQueries).toHaveBeenCalledTimes(1)
+    expect(mockInvalidateQueries).toHaveBeenCalledWith({
+      queryKey: ['messages', 'abc'],
+    })
+  })
+
+  it('collection-wins-over-syncFrameType: when both set, `collection` is used as the filter key', async () => {
+    const { createSyncedCollection } = await import('./synced-collection')
+
+    let capturedHandler: FrameHandler | null = null
+    const customSubscribe = vi.fn((h: FrameHandler) => {
+      capturedHandler = h
+      return () => {
+        capturedHandler = null
+      }
+    })
+
+    const coll = createSyncedCollection<{ id: string }, string>({
+      id: 'messages:abc',
+      getKey: (r) => r.id,
+      queryKey: ['messages', 'abc'] as const,
+      queryFn: async () => [],
+      collection: 'messages:abc',
+      syncFrameType: 'legacy_ignored',
+      subscribe: customSubscribe,
+    }) as unknown as { __opts: { sync: { sync: Function } } }
+
+    const { begin, commit } = driveSync(coll)
+
+    // Frame matching `collection` → applied.
+    capturedHandler!({
+      type: 'synced-collection-delta',
+      collection: 'messages:abc',
+      ops: [{ type: 'insert', value: { id: 'm1' } }],
+    })
+    expect(begin).toHaveBeenCalledTimes(1)
+    expect(commit).toHaveBeenCalledTimes(1)
+
+    // Frame matching the legacy syncFrameType → dropped (collection wins).
+    capturedHandler!({
+      type: 'synced-collection-delta',
+      collection: 'legacy_ignored',
+      ops: [{ type: 'insert', value: { id: 'm2' } }],
+    })
+    expect(begin).toHaveBeenCalledTimes(1)
+    expect(commit).toHaveBeenCalledTimes(1)
+  })
+
+  it('default-subscribe: without injection, falls back to user-stream with effectiveCollection', async () => {
+    const { createSyncedCollection } = await import('./synced-collection')
+
+    const coll = createSyncedCollection<{ id: string }, string>({
+      id: 'projects',
+      getKey: (r) => r.id,
+      queryKey: ['projects'] as const,
+      queryFn: async () => [],
+      syncFrameType: 'projects',
+    }) as unknown as { __opts: { sync: { sync: Function } } }
+
+    driveSync(coll)
+
+    // Default path: user-stream bindings used with the effective collection
+    // name (derived from syncFrameType in the absence of `collection`).
+    expect(mockSubscribeUserStream).toHaveBeenCalledTimes(1)
+    expect(mockSubscribeUserStream).toHaveBeenCalledWith('projects', expect.any(Function))
+    expect(mockOnUserStreamReconnect).toHaveBeenCalledTimes(1)
+  })
+
+  it('throws when neither `collection` nor `syncFrameType` is provided', async () => {
+    const { createSyncedCollection } = await import('./synced-collection')
+
+    expect(() =>
+      createSyncedCollection<{ id: string }, string>({
+        id: 'bad',
+        getKey: (r) => r.id,
+        queryKey: ['bad'] as const,
+        queryFn: async () => [],
+        // Neither `collection` nor `syncFrameType` — must throw.
+      } as unknown as Parameters<typeof createSyncedCollection>[0]),
+    ).toThrow(/collection or syncFrameType required/)
+  })
+})

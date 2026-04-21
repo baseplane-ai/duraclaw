@@ -1,7 +1,7 @@
 import type {
   BranchInfoRow,
-  MessagesFrame,
-  MessagesPayload,
+  SyncedCollectionFrame,
+  SyncedCollectionOp,
   SessionMessage as WireSessionMessage,
 } from '@duraclaw/shared-types'
 import { Agent, type Connection, type ConnectionContext, callable } from 'agents'
@@ -15,6 +15,7 @@ import { generateActionToken } from '~/lib/action-token'
 import { broadcastSessionRow } from '~/lib/broadcast-session'
 import { broadcastSyncedDelta } from '~/lib/broadcast-synced-delta'
 import { buildChainRow } from '~/lib/chains'
+import { chunkOps } from '~/lib/chunk-frame'
 import { runMigrations } from '~/lib/do-migrations'
 import { contentToParts, transcriptUserContentToParts } from '~/lib/message-parts'
 import { type PushPayload, sendPushNotification } from '~/lib/push'
@@ -43,6 +44,7 @@ import {
   buildGatewayStartUrl,
   claimSubmitId,
   constantTimeEquals,
+  deriveSnapshotOps,
   findPendingGatePart,
   getGatewayConnectionId,
   loadTurnState,
@@ -297,24 +299,122 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     // (e.g. verifying whether a `tool-ask_user` gate part was ever appended).
     // No gateway hydration: we want exactly what's in local history, nothing
     // merged in from the runner transcript.
+    //
+    // GH#38 P1.2: Cursor-REST contract — if both `sinceCreatedAt` (ISO 8601)
+    // and `sinceId` are present, return rows strictly after `(created_at, id)`
+    // sorted ASC capped at 500. Asymmetric cursor (only one supplied) is 400.
+    // No cursor: full history via `Session.getHistory()` (cold-load path).
+    // Response body drops the legacy `version` field — `messageSeq` now rides
+    // on the WS frame envelope, not the REST payload.
     if (request.method === 'GET' && url.pathname === '/messages') {
       try {
-        // Include the current `messageSeq` alongside history so the client
-        // queryFn can stamp each REST-loaded row with a `seq` equal to the
-        // latest version. Without this, REST rows land with `seq=undefined`
-        // and the query-db-collection diff reconcile clobbers any seq values
-        // the on-connect WS snapshot already wrote (causing the initial-load
-        // "user messages grouped together" flash — rows fall back to the
-        // `[Infinity, turnOrdinal, createdAt]` sort branch).
-        return new Response(
-          JSON.stringify({
-            messages: this.session.getHistory(),
-            version: this.messageSeq,
-          }),
-          {
+        const sinceCreatedAt = url.searchParams.get('sinceCreatedAt')
+        const sinceId = url.searchParams.get('sinceId')
+        const hasCA = sinceCreatedAt !== null
+        const hasId = sinceId !== null
+        if (hasCA !== hasId) {
+          return new Response(
+            JSON.stringify({
+              error: 'sinceCreatedAt and sinceId must be provided together',
+            }),
+            { status: 400, headers: { 'Content-Type': 'application/json' } },
+          )
+        }
+        if (hasCA && hasId) {
+          if (Number.isNaN(new Date(sinceCreatedAt as string).getTime())) {
+            return new Response(
+              JSON.stringify({ error: 'invalid sinceCreatedAt ISO 8601 string' }),
+              { status: 400, headers: { 'Content-Type': 'application/json' } },
+            )
+          }
+          const rows = this.sql<{ content: string }>`
+            SELECT content FROM assistant_messages
+            WHERE session_id = ${this.name}
+              AND (
+                (created_at > ${sinceCreatedAt as string})
+                OR (created_at = ${sinceCreatedAt as string} AND id > ${sinceId as string})
+              )
+            ORDER BY created_at ASC, id ASC
+            LIMIT 500
+          `
+          const messages: unknown[] = []
+          for (const row of rows) {
+            try {
+              messages.push(JSON.parse(row.content))
+            } catch {
+              // Skip unparseable rows — defensive; Session writes valid JSON.
+            }
+          }
+          return new Response(JSON.stringify({ messages }), {
             headers: { 'Content-Type': 'application/json' },
-          },
+          })
+        }
+        return new Response(JSON.stringify({ messages: this.session.getHistory() }), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      } catch (err) {
+        return new Response(
+          JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } },
         )
+      }
+    }
+
+    // GH#38 P1.2: optimistic user-turn ingest via HTTP (used by the
+    // `messagesCollection` onInsert mutationFn in P1.3). Body shape:
+    // `{content, clientId, createdAt}` — all required. The DO delegates
+    // to `sendMessage()` with `client_message_id = clientId` so duplicate
+    // retries short-circuit server-side.
+    if (request.method === 'POST' && url.pathname === '/messages') {
+      try {
+        const body = (await request.json()) as {
+          content?: unknown
+          clientId?: unknown
+          createdAt?: unknown
+        }
+        if (typeof body.content !== 'string' || body.content.length === 0) {
+          return new Response(JSON.stringify({ error: 'content must be a non-empty string' }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        }
+        if (typeof body.clientId !== 'string' || !/^usr-client-[a-z0-9-]+$/.test(body.clientId)) {
+          return new Response(
+            JSON.stringify({ error: 'clientId must match /^usr-client-[a-z0-9-]+$/' }),
+            { status: 400, headers: { 'Content-Type': 'application/json' } },
+          )
+        }
+        if (
+          typeof body.createdAt !== 'string' ||
+          Number.isNaN(new Date(body.createdAt).getTime())
+        ) {
+          return new Response(
+            JSON.stringify({ error: 'createdAt must be a valid ISO 8601 string' }),
+            { status: 400, headers: { 'Content-Type': 'application/json' } },
+          )
+        }
+        const result = await this.sendMessage(body.content, {
+          client_message_id: body.clientId,
+          createdAt: body.createdAt,
+        })
+        if (!result.ok) {
+          // Validation inside sendMessage (e.g. invalid createdAt is
+          // caught above, but "status cannot send" returns ok:false).
+          return new Response(JSON.stringify({ error: result.error ?? 'send failed' }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        }
+        if (result.duplicate) {
+          return new Response(JSON.stringify({ id: body.clientId }), {
+            status: 409,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        }
+        return new Response(JSON.stringify({ id: body.clientId }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
       } catch (err) {
         return new Response(
           JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
@@ -392,34 +492,30 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     // hydration as the source of truth.
     try {
       const messages = this.session.getHistory()
-      // Targeted reconnect snapshot (B1 + B2 single-client scope). The
-      // legacy `{type:'messages', messages}` emit was retired in P1
-      // sub-phase 1b; the unified frame carries the reconnect payload.
-      // B7: include branchInfo for every user turn with siblings so the
-      // client's branch-info collection hydrates on first paint.
-      this.broadcastMessages(
-        {
-          kind: 'snapshot',
-          version: this.messageSeq,
-          messages: messages as unknown as WireSessionMessage[],
-          reason: 'reconnect',
-          branchInfo: this.computeBranchInfo(messages),
-        },
-        { targetClientId: connection.id },
-      )
+      // GH#38 P1.4: emit SyncedCollectionFrame on the new messages wire so
+      // the messagesCollection converges for this cold browser connection.
+      // `staleIds` is empty — no known prior client state on a fresh connect.
+      const { ops } = deriveSnapshotOps<WireSessionMessage>({
+        oldLeaf: [],
+        newLeaf: messages as unknown as WireSessionMessage[],
+      })
+      for (const chunk of chunkOps(ops)) {
+        this.broadcastMessages({ ops: chunk }, { targetClientId: connection.id })
+      }
+      // GH#38 P1.5: emit branchInfo as a sibling SyncedCollectionFrame on
+      // the same DO turn as the messages frame(s). B10 atomicity: React 18
+      // auto-batches the sibling deltas into a single commit.
+      this.broadcastBranchInfo(this.computeBranchInfo(messages), {
+        targetClientId: connection.id,
+      })
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to replay history:`, err)
-      // Explicit empty-history snapshot so the client isn't left without a
-      // "history fetched" signal on the error path.
-      this.broadcastMessages(
-        {
-          kind: 'snapshot',
-          version: this.messageSeq,
-          messages: [],
-          reason: 'reconnect',
-        },
-        { targetClientId: connection.id },
-      )
+      // Error path: broadcastMessages no-ops on empty ops and
+      // broadcastBranchInfo no-ops on empty rows without a targetClientId.
+      // We still call broadcastBranchInfo targeted so the recipient sees
+      // an explicit "no branches" signal (though in practice this path
+      // hits when getHistory itself threw — the client stays on whatever
+      // cached state it had).
     }
 
     // Re-emit gate if session is waiting
@@ -837,10 +933,9 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   }
 
   private broadcastMessage(message: SessionMessage) {
-    // Unified {type:'messages'} delta frame (B1). The legacy per-message
-    // `{type:'message'}` emit was retired in P1 sub-phase 1b now that the
-    // client dispatches exclusively on the unified shape.
-    this.broadcastMessages({ kind: 'delta', upsert: [message as unknown as WireSessionMessage] })
+    // SyncedCollectionFrame delta (GH#38 P1.2) — single-row upsert. TanStack
+    // DB key-dedupes so insert-on-existing-id updates the row in place.
+    this.broadcastMessages([message as unknown as WireSessionMessage])
   }
 
   /**
@@ -914,13 +1009,28 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   }
 
   /**
-   * Broadcast a MessagesFrame (B1) with monotonic seq. If `targetClientId` is
-   * provided, sends only to that connection and does NOT increment `messageSeq`
-   * — targeted sends echo current seq so non-recipients' lastSeq stream stays
-   * aligned (see spec B2 API Layer → "Targeted snapshots MUST NOT advance the
-   * shared seq counter").
+   * Broadcast a messages `SyncedCollectionFrame` (GH#38 P1.2). Every row
+   * becomes one `{type:'insert', value: SessionMessage}` op — TanStack DB's
+   * key-based upsert dedupes so insert-on-existing-id updates in place, no
+   * need to discriminate insert-vs-update at emit time.
+   *
+   * For rewind / resubmit / branch-navigate (P1.4), callers pass a
+   * pre-built ops array via `{ ops }` so delete ops can be emitted
+   * alongside inserts in the same frame.
+   *
+   * `targetClientId` keeps its pre-existing semantics: targeted sends do
+   * NOT advance `messageSeq` (the envelope counter echoes the current
+   * value) so non-recipients stay aligned with the shared stream.
    */
-  private broadcastMessages(payload: MessagesPayload, opts: { targetClientId?: string } = {}) {
+  private broadcastMessages(
+    rowsOrOps: WireSessionMessage[] | { ops: SyncedCollectionOp<WireSessionMessage>[] },
+    opts: { targetClientId?: string } = {},
+  ): void {
+    const ops: SyncedCollectionOp<WireSessionMessage>[] = Array.isArray(rowsOrOps)
+      ? rowsOrOps.map((r) => ({ type: 'insert' as const, value: r }))
+      : rowsOrOps.ops
+    if (ops.length === 0) return
+
     if (!opts.targetClientId) {
       this.messageSeq += 1
       // Persist only every Nth increment — per-frame SQL writes during streaming
@@ -932,11 +1042,52 @@ export class SessionDO extends Agent<Env, SessionMeta> {
           .sql`UPDATE session_meta SET message_seq = ${this.messageSeq}, updated_at = ${Date.now()} WHERE id = 1`
       }
     }
-    const frame: MessagesFrame = {
-      type: 'messages',
-      sessionId: this.name,
-      seq: this.messageSeq,
-      payload,
+    const frame: SyncedCollectionFrame<WireSessionMessage> = {
+      type: 'synced-collection-delta',
+      collection: `messages:${this.name}`,
+      ops,
+      messageSeq: this.messageSeq,
+    }
+    const data = JSON.stringify(frame)
+    if (opts.targetClientId) {
+      this.sendToClient(opts.targetClientId, data)
+    } else {
+      this.broadcastToClients(data)
+    }
+  }
+
+  /**
+   * Broadcast a branchInfo `SyncedCollectionFrame` (GH#38 P1.5 / B15).
+   * Emitted as a sibling frame alongside the messages frame on the same
+   * DO turn — React 18 auto-batching delivers both deltas in a single
+   * commit (B10 atomicity).
+   *
+   * Callers pass the full authoritative branchInfo list for the current
+   * history view (typically `this.computeBranchInfo(history)`). Rows
+   * collapse to `{type:'insert', value}` ops; TanStack DB key-dedupes on
+   * `parentMsgId` so insert-on-existing-id updates in place.
+   *
+   * Targeted sends (onConnect replay) do NOT advance `messageSeq`; the
+   * envelope echoes the current value so non-recipients stay aligned.
+   */
+  private broadcastBranchInfo(rows: BranchInfoRow[], opts: { targetClientId?: string } = {}): void {
+    if (rows.length === 0 && !opts.targetClientId) return
+    if (!opts.targetClientId) {
+      this.messageSeq += 1
+      if (this.messageSeq % MESSAGE_SEQ_PERSIST_EVERY === 0) {
+        this
+          .sql`UPDATE session_meta SET message_seq = ${this.messageSeq}, updated_at = ${Date.now()} WHERE id = 1`
+      }
+    }
+    const ops: SyncedCollectionOp<BranchInfoRow>[] = rows.map((value) => ({
+      type: 'insert' as const,
+      value,
+    }))
+    const frame: SyncedCollectionFrame<BranchInfoRow> = {
+      type: 'synced-collection-delta',
+      collection: `branchInfo:${this.name}`,
+      ops,
+      messageSeq: this.messageSeq,
     }
     const data = JSON.stringify(frame)
     if (opts.targetClientId) {
@@ -2127,8 +2278,14 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
   @callable()
   async sendMessage(
     content: string | ContentBlock[],
-    opts?: { submitId?: string; client_message_id?: string },
-  ): Promise<{ ok: boolean; error?: string; recoverable?: 'forkWithHistory' }> {
+    opts?: { submitId?: string; client_message_id?: string; createdAt?: string },
+  ): Promise<{
+    ok: boolean
+    error?: string
+    recoverable?: 'forkWithHistory'
+    duplicate?: boolean
+    id?: string
+  }> {
     // Idempotency: if a submitId was supplied and we've already accepted it,
     // treat this as a duplicate of that prior call and no-op. Rows older than
     // 60s are pruned on each insert to cap table growth.
@@ -2143,6 +2300,16 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       }
       if (claim.duplicate) {
         return { ok: true }
+      }
+    }
+
+    // GH#38 P1.2: validate optional `createdAt` (ISO 8601). When supplied,
+    // the server adopts it verbatim as the row's createdAt so optimistic
+    // loopback reconciliation via TanStack DB deepEquals sees identical
+    // rows. Invalid ISO → 400-ish error from the RPC.
+    if (opts?.createdAt !== undefined) {
+      if (typeof opts.createdAt !== 'string' || Number.isNaN(new Date(opts.createdAt).getTime())) {
+        return { ok: false, error: 'invalid createdAt' }
       }
     }
 
@@ -2203,6 +2370,31 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       }
     }
 
+    // GH#38 P1.2: duplicate-clientId idempotency. If a client retries the
+    // POST after a network hiccup (same `clientId` → same `userMsgId`),
+    // the row may already be persisted. Check first and short-circuit —
+    // do NOT overwrite, re-broadcast, or re-invoke the SDK.
+    const candidateId = opts?.client_message_id ?? `usr-${this.turnCounter + 1}`
+    if (opts?.client_message_id) {
+      try {
+        const existing = this.sql<{ id: string }>`
+          SELECT id FROM assistant_messages
+          WHERE id = ${candidateId} AND session_id = ${this.name}
+          LIMIT 1
+        `
+        if ([...existing].length > 0) {
+          return { ok: true, duplicate: true, id: candidateId }
+        }
+      } catch (err) {
+        // Defensive: if the lookup fails (table absent pre-first-append),
+        // fall through and let appendMessage proceed normally.
+        console.warn(
+          `[SessionDO:${this.ctx.id}] sendMessage: duplicate-id precheck failed (proceeding):`,
+          err,
+        )
+      }
+    }
+
     // Persist user message (only after orphan preflight so we don't have to
     // roll it back on the auto-fork branch — forkWithHistory appends itself).
     this.turnCounter++
@@ -2212,20 +2404,20 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       id: userMsgId,
       role: 'user',
       parts: contentToParts(content),
-      createdAt: new Date(),
+      createdAt: opts?.createdAt ? new Date(opts.createdAt) : new Date(),
       canonical_turn_id: canonicalTurnId,
     }
     try {
       await this.session.appendMessage(userMsg)
       this.persistTurnState()
-      // P2 B2: piggyback affected parent's sibling list onto the same delta
-      // (instead of separately broadcasting a snapshot).
-      const branchInfoRow = this.computeBranchInfoForUserTurn(userMsg)
-      this.broadcastMessages({
-        kind: 'delta',
-        upsert: [userMsg as unknown as WireSessionMessage],
-        ...(branchInfoRow ? { branchInfo: { upsert: [branchInfoRow] } } : {}),
-      })
+      // GH#38 P1.5 / B10: emit messages + branchInfo siblings back-to-back
+      // on the same DO turn. broadcastBranchInfo no-ops when the new turn
+      // didn't introduce a sibling (most sendMessage calls extend the leaf).
+      this.broadcastMessages([userMsg as unknown as WireSessionMessage])
+      const siblingRow = this.computeBranchInfoForUserTurn(userMsg)
+      if (siblingRow) {
+        this.broadcastBranchInfo([siblingRow])
+      }
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to persist user message:`, err)
     }
@@ -2251,7 +2443,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       })
     }
 
-    return { ok: true }
+    return { ok: true, id: userMsgId }
   }
 
   /**
@@ -2322,13 +2514,12 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     try {
       await this.session.appendMessage(userMsg)
       this.persistTurnState()
-      // P2 B2: piggyback affected parent's sibling list onto the same delta.
-      const branchInfoRow = this.computeBranchInfoForUserTurn(userMsg)
-      this.broadcastMessages({
-        kind: 'delta',
-        upsert: [userMsg as unknown as WireSessionMessage],
-        ...(branchInfoRow ? { branchInfo: { upsert: [branchInfoRow] } } : {}),
-      })
+      // GH#38 P1.5 / B10: emit messages + branchInfo siblings back-to-back.
+      this.broadcastMessages([userMsg as unknown as WireSessionMessage])
+      const siblingRow = this.computeBranchInfoForUserTurn(userMsg)
+      if (siblingRow) {
+        this.broadcastBranchInfo([siblingRow])
+      }
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] forkWithHistory: persist user msg failed:`, err)
     }
@@ -2574,17 +2765,18 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       const history = this.session.getHistory()
       const idx = history.findIndex((m) => m.id === messageId)
       const trimmed = idx >= 0 ? history.slice(0, idx + 1) : history
-      this.broadcastMessages({
-        kind: 'snapshot',
-        version: this.messageSeq,
-        messages: trimmed as unknown as WireSessionMessage[],
-        reason: 'rewind',
-        // B7: rewind may change sibling lists if it removes branches.
-        // Compute fresh rows for the trimmed view; client upserts override
-        // stale rows (the remove-on-empty case isn't supported, but rewind
-        // typically trims rather than deletes branches).
-        branchInfo: this.computeBranchInfo(trimmed),
+      // GH#38 P1.4: emit SyncedCollectionFrame on the new messages wire.
+      // staleIds = rows present in current default leaf but NOT in trimmed.
+      const { ops } = deriveSnapshotOps<WireSessionMessage>({
+        oldLeaf: history as unknown as WireSessionMessage[],
+        newLeaf: trimmed as unknown as WireSessionMessage[],
       })
+      for (const chunk of chunkOps(ops)) {
+        this.broadcastMessages({ ops: chunk })
+      }
+      // GH#38 P1.5 / B15: emit sibling branchInfo frame on the same DO
+      // turn. B10: React 18 auto-batches both deltas into a single commit.
+      this.broadcastBranchInfo(this.computeBranchInfo(trimmed))
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to broadcast rewind snapshot:`, err)
     }
@@ -2686,16 +2878,21 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       // DO-authored snapshot (B2): broadcast the branch view so all clients
       // realign onto the new leaf. getHistory(leafId) returns the path ending
       // at newUserMsg.id.
+      const oldLeafHistory = this.session.getHistory(originalMessageId)
       const resubmitHistory = this.session.getHistory(newUserMsg.id)
-      this.broadcastMessages({
-        kind: 'snapshot',
-        version: this.messageSeq,
-        messages: resubmitHistory as unknown as WireSessionMessage[],
-        reason: 'resubmit',
-        // B7: the affected parent now has a new sibling — compute fresh
-        // branchInfo for the resubmitted branch's history.
-        branchInfo: this.computeBranchInfo(resubmitHistory),
+      // GH#38 P1.4: emit SyncedCollectionFrame on the new messages wire.
+      // staleIds = rows on the oldLeaf path (ending at originalMessageId)
+      // but NOT on the newLeaf path — typically [originalMessageId] since
+      // the sibling branches share a prefix up to `parentId`.
+      const { ops } = deriveSnapshotOps<WireSessionMessage>({
+        oldLeaf: oldLeafHistory as unknown as WireSessionMessage[],
+        newLeaf: resubmitHistory as unknown as WireSessionMessage[],
       })
+      for (const chunk of chunkOps(ops)) {
+        this.broadcastMessages({ ops: chunk })
+      }
+      // GH#38 P1.5 / B15: emit sibling branchInfo frame on the same DO turn.
+      this.broadcastBranchInfo(this.computeBranchInfo(resubmitHistory))
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to create branch:`, err)
       return { ok: false, error: 'Failed to create branch' }
@@ -2728,15 +2925,18 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // connections. Harmless over-delivery — matches B1 correctness and the
     // client's per-session `lastSeq` watermark still drops stale frames.
     const messages = this.session.getHistory(leafId) ?? history
-    this.broadcastMessages({
-      kind: 'snapshot',
-      version: this.messageSeq,
-      messages: messages as unknown as WireSessionMessage[],
-      reason: 'branch-navigate',
-      // B7: target branch's sibling map so the recipient's UI updates in
-      // lockstep with the history swap.
-      branchInfo: this.computeBranchInfo(messages),
+    // GH#38 P1.4: emit SyncedCollectionFrame on the new messages wire.
+    // staleIds = rows on the current default leaf but NOT on the target
+    // branch's leaf. `history` here is the default-leaf view (from above).
+    const { ops } = deriveSnapshotOps<WireSessionMessage>({
+      oldLeaf: history as unknown as WireSessionMessage[],
+      newLeaf: messages as unknown as WireSessionMessage[],
     })
+    for (const chunk of chunkOps(ops)) {
+      this.broadcastMessages({ ops: chunk })
+    }
+    // GH#38 P1.5 / B15: emit sibling branchInfo frame on the same DO turn.
+    this.broadcastBranchInfo(this.computeBranchInfo(messages))
     return { ok: true }
   }
 
@@ -2748,14 +2948,18 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // once `@callable` surfaces the caller connection id. Broadcast to all
     // clients for now — harmless over-delivery in multi-client sessions
     // (the client's per-session `lastSeq` watermark drops stale frames).
-    this.broadcastMessages({
-      kind: 'snapshot',
-      version: this.messageSeq,
-      messages: messages as unknown as WireSessionMessage[],
-      reason: 'reconnect',
-      // B7: hydrate branch-info collection alongside the history.
-      branchInfo: this.computeBranchInfo(messages),
+    // GH#38 P1.4: emit SyncedCollectionFrame on the new messages wire.
+    // staleIds = [] — a client-requested resync has no known prior state
+    // from the server's perspective; fresh is the full history.
+    const { ops } = deriveSnapshotOps<WireSessionMessage>({
+      oldLeaf: [],
+      newLeaf: messages as unknown as WireSessionMessage[],
     })
+    for (const chunk of chunkOps(ops)) {
+      this.broadcastMessages({ ops: chunk })
+    }
+    // GH#38 P1.5 / B15: emit sibling branchInfo frame on the same DO turn.
+    this.broadcastBranchInfo(this.computeBranchInfo(messages))
     return { ok: true }
   }
 

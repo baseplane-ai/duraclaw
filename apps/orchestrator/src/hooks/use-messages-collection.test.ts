@@ -202,42 +202,19 @@ describe('useMessagesCollection', () => {
     ])
   })
 
-  // ── spec-31 P4a B8: seq-based primary sort ──────────────────────────
+  // ── GH#38 P1.3 B6: 2-tuple sort `[turnOrdinal, createdAt]` (seq dropped) ──
 
-  it('sort-by-seq-primary: two rows with different seq, lower-seq sorts first', () => {
-    mockLiveQueryData = [
-      makeMessage({
-        id: 'later-seq',
-        sessionId: 'session-abc',
-        seq: 10,
-        createdAt: '2026-01-01T00:00:00Z',
-      }),
-      makeMessage({
-        id: 'earlier-seq',
-        sessionId: 'session-abc',
-        seq: 5,
-        createdAt: '2026-01-05T00:00:00Z',
-      }),
-    ]
-
-    const { result } = renderHook(() => useMessagesCollection('session-abc'))
-
-    expect(result.current.messages.map((m) => m.id)).toEqual(['earlier-seq', 'later-seq'])
-  })
-
-  it('sort-by-turn-ordinal-fallback: rows with same seq fall through to turnOrdinal', () => {
+  it('sort-by-turn-ordinal-primary: lower turnOrdinal sorts first regardless of createdAt', () => {
     mockLiveQueryData = [
       makeMessage({
         id: 'usr-2',
         sessionId: 'session-abc',
-        seq: 7,
         canonical_turn_id: 'usr-2',
         createdAt: '2026-01-01T00:00:00Z',
       }),
       makeMessage({
         id: 'usr-1',
         sessionId: 'session-abc',
-        seq: 7,
         canonical_turn_id: 'usr-1',
         createdAt: '2026-01-05T00:00:00Z',
       }),
@@ -248,19 +225,17 @@ describe('useMessagesCollection', () => {
     expect(result.current.messages.map((m) => m.id)).toEqual(['usr-1', 'usr-2'])
   })
 
-  it('optimistic-no-seq-sorts-last: row with seq undefined sorts after a row with seq=5', () => {
+  it('optimistic-no-ordinal-sorts-last: usr-client-<uuid> pre-echo sorts after canonical rows', () => {
     mockLiveQueryData = [
       makeMessage({
-        id: 'optimistic',
+        id: 'usr-client-abc',
         sessionId: 'session-abc',
-        canonical_turn_id: 'usr-1',
         createdAt: '2026-01-01T00:00:00Z',
-        // No `seq`
+        // No `canonical_turn_id` and id is not parseable as `usr-N`
       }),
       makeMessage({
-        id: 'echoed',
+        id: 'usr-1',
         sessionId: 'session-abc',
-        seq: 5,
         canonical_turn_id: 'usr-1',
         createdAt: '2026-01-05T00:00:00Z',
       }),
@@ -268,11 +243,11 @@ describe('useMessagesCollection', () => {
 
     const { result } = renderHook(() => useMessagesCollection('session-abc'))
 
-    // Stamped row first, optimistic-no-seq last (seq=undefined → Infinity).
-    expect(result.current.messages.map((m) => m.id)).toEqual(['echoed', 'optimistic'])
+    // Canonical row first, optimistic no-ordinal (Infinity) sorts last.
+    expect(result.current.messages.map((m) => m.id)).toEqual(['usr-1', 'usr-client-abc'])
   })
 
-  it('REST-loaded user+assistant turns interleave correctly without seq (msg-N fallback)', () => {
+  it('REST-loaded user+assistant turns interleave correctly via msg-N id fallback', () => {
     // Regression: when all rows lack seq (REST-loaded), the secondary sort
     // must parse the message id itself (msg-N → turnOrdinal=N) so assistant
     // rows sort alongside their user turn, not after all user rows.
