@@ -31,7 +31,7 @@ export const sessionsCollection = createSyncedCollection<SessionSummary, string>
   },
   getKey: (row) => row.id,
   persistence,
-  schemaVersion: 1,
+  schemaVersion: 2, // spec #37: widened SessionSummary row shape
 
   onInsert: async ({ transaction }) => {
     for (const m of transaction.mutations) {
