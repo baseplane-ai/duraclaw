@@ -50,6 +50,15 @@ let status: ConnectionStatus = 'closed'
 // Tracks whether we've seen at least one `open` so subsequent `open` events
 // count as reconnects rather than the initial connect.
 let hasOpenedOnce = false
+// Set by closeSocket() so the `close` listener doesn't flip status back to
+// 'connecting' during a deliberate teardown. Cleared inside closeSocket
+// after the close lands.
+let intentionalClose = false
+// Survives across socket swaps (identity change, logout→login). When a
+// fresh socket opens and this is true, treat the open as a reconnect so
+// synced-collection handlers re-invalidate their queries and back-fill
+// any deltas missed during the close→open gap.
+let hadPriorSocket = false
 
 function setStatus(next: ConnectionStatus) {
   if (status === next) return
@@ -72,8 +81,13 @@ function openSocket(userId: string) {
   })
 
   ws.addEventListener('open', () => {
-    const wasReconnect = hasOpenedOnce
+    // Treat as reconnect if either (a) this same socket has opened before
+    // (partysocket internal auto-reconnect) or (b) a prior socket instance
+    // existed and was torn down (identity swap — fresh socket, stale
+    // subscribers need re-invalidate).
+    const wasReconnect = hasOpenedOnce || hadPriorSocket
     hasOpenedOnce = true
+    hadPriorSocket = true
     setStatus('open')
     if (wasReconnect) {
       for (const cb of reconnectHandlers) {
@@ -87,6 +101,10 @@ function openSocket(userId: string) {
   })
 
   ws.addEventListener('close', () => {
+    // On an intentional close (identity change / logout) stay at 'closed';
+    // the caller already set it. Only report 'connecting' for abnormal
+    // closes, where partysocket will auto-reconnect.
+    if (intentionalClose) return
     setStatus('connecting')
   })
 
@@ -117,6 +135,7 @@ function openSocket(userId: string) {
 
 function closeSocket() {
   if (!socket) return
+  intentionalClose = true
   try {
     socket.close()
   } catch {
@@ -125,6 +144,7 @@ function closeSocket() {
   socket = null
   hasOpenedOnce = false
   setStatus('closed')
+  intentionalClose = false
 }
 
 // ── Public non-React API ────────────────────────────────────────────────
@@ -204,6 +224,8 @@ export function __resetUserStreamForTests(): void {
   currentUserId = null
   status = 'closed'
   hasOpenedOnce = false
+  hadPriorSocket = false
+  intentionalClose = false
 }
 
 // ── React hook ──────────────────────────────────────────────────────────
