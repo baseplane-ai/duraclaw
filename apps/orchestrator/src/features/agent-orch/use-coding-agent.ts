@@ -390,7 +390,19 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         return
       }
 
-      // frame.seq <= lastSeq — stale/duplicate; drop silently.
+      // frame.seq < lastSeq — backwards seq. Most commonly a DO rehydrate
+      // after eviction: `messageSeq` persists to `session_meta` only every
+      // Nth increment, so on reboot it comes back lower than our watermark
+      // and every new delta looks "stale". Pre-fix this branch dropped
+      // silently — the UI went dead until a full page reload reset
+      // `lastSeqRef` and the next delta re-triggered the gap path.
+      // Fix: treat backwards seq as a resync trigger. `onGap()` requests a
+      // snapshot; the snapshot handler resets `lastSeq` unconditionally
+      // (see the `applySnapshot` branch above) so subsequent deltas flow.
+      // Exact duplicates (frame.seq === lastSeq) still drop silently.
+      if (frame.seq < lastSeq) {
+        onGap()
+      }
       return
     },
     [agentName, applySnapshot, messagesCollection],

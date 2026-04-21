@@ -858,7 +858,8 @@ describe('MessagesFrame gap detection (P1 B3)', () => {
     expect(mockCall).toHaveBeenCalledWith('requestSnapshot', [])
   })
 
-  test('stale delta (seq <= lastSeq) is dropped silently', () => {
+  test('duplicate delta (seq === lastSeq) is dropped silently without RPC', () => {
+    mockCall.mockResolvedValue(undefined)
     const { result } = renderHook(() => useCodingAgent('test-session'))
 
     // Snapshot bumps watermark to 10
@@ -872,16 +873,16 @@ describe('MessagesFrame gap detection (P1 B3)', () => {
       )
     })
 
-    // A stale in-flight delta with seq=5 arrives after the snapshot. Must be dropped.
+    // Exact duplicate (seq === lastSeq) — drop silently, no resync.
     act(() => {
       capturedUseAgentConfig?.onMessage?.(
         makeWsMessage({
           type: 'messages',
           sessionId: 'test-session',
-          seq: 5,
+          seq: 10,
           payload: {
             kind: 'delta',
-            upsert: [{ id: 'stale-1', role: 'assistant', parts: [{ type: 'text', text: 'x' }] }],
+            upsert: [{ id: 'dup-1', role: 'assistant', parts: [{ type: 'text', text: 'x' }] }],
           },
         }),
       )
@@ -889,6 +890,54 @@ describe('MessagesFrame gap detection (P1 B3)', () => {
 
     expect(result.current.messages).toHaveLength(1)
     expect(result.current.messages[0].id).toBe('s-1')
+    expect(mockCall).not.toHaveBeenCalledWith('requestSnapshot', [])
+  })
+
+  // DB-fdb1-0420: After a DO eviction + rehydrate, `messageSeq` comes back
+  // from `session_meta` at the last persisted-Nth value — which is almost
+  // always behind the client's `lastSeqRef` watermark. The first delta after
+  // rehydrate therefore arrives with `frame.seq < lastSeq`. Pre-fix this hit
+  // the silent-drop branch and the UI went dead until a full page reload.
+  // Fix: backwards seq triggers `requestSnapshot` so the client resyncs.
+  test('backwards seq (seq < lastSeq) triggers requestSnapshot — DO rehydrate resync', () => {
+    mockCall.mockResolvedValue(undefined)
+    const { result } = renderHook(() => useCodingAgent('test-session'))
+
+    // Snapshot bumps watermark to 10 (simulates client's accumulated state
+    // before the DO was evicted).
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage(
+          snapshotFrame([{ id: 's-1', role: 'user', parts: [{ type: 'text', text: 'snap' }] }], {
+            version: 10,
+          }),
+        ),
+      )
+    })
+
+    // DO rehydrates with `messageSeq` persisted at 3; next delta is seq=4.
+    // Pre-fix: silently dropped. Post-fix: triggers requestSnapshot.
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage({
+          type: 'messages',
+          sessionId: 'test-session',
+          seq: 4,
+          payload: {
+            kind: 'delta',
+            upsert: [
+              { id: 'post-reboot-1', role: 'assistant', parts: [{ type: 'text', text: 'y' }] },
+            ],
+          },
+        }),
+      )
+    })
+
+    // Delta itself is not applied (snapshot is the authoritative catch-up).
+    expect(result.current.messages).toHaveLength(1)
+    expect(result.current.messages[0].id).toBe('s-1')
+    // But we MUST have requested a snapshot — this is the fix.
+    expect(mockCall).toHaveBeenCalledWith('requestSnapshot', [])
   })
 
   test('delta remove list deletes rows', () => {
