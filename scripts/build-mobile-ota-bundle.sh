@@ -7,7 +7,11 @@
 #   apps/orchestrator/dist/client/mobile/version.json   { version, key }
 #
 # R2 upload is handled by the infra deploy pipeline (baseplane-infra),
-# not this script. This script only produces the local artifacts.
+# not this script. This script only produces the local artifacts. The
+# Worker's `POST /api/mobile/updates/manifest` route reads from R2 and
+# hands Capgo a same-origin URL that streams the bundle through
+# `GET /api/mobile/assets/*`. Without the infra upload step the OTA
+# channel is dead.
 #
 # Callers:
 #   1. apps/mobile/scripts/build-android.sh — so a fresh APK install's
@@ -50,6 +54,8 @@ rm -rf "$STAGE_DIR/mobile"
 python3 -c "import shutil, sys; shutil.make_archive(sys.argv[1], 'zip', sys.argv[2])" \
   "$BUNDLE_ZIP_BASE" "$STAGE_DIR"
 
+# version.json uses `key` (R2 object key) — the Worker route reads this
+# field to construct the same-origin passthrough URL.
 VERSION_JSON="$MOBILE_OUT/version.json"
 cat > "$VERSION_JSON" <<EOF
 {"version":"$APP_VERSION","key":"ota/bundle-$APP_VERSION.zip"}

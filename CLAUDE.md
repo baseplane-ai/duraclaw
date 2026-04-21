@@ -308,7 +308,8 @@ double-bundle into the APK) the same script runs
 `scripts/build-mobile-ota-bundle.sh`, which stages a copy of
 `dist/client` with `/mobile/` excluded, zips it, writes a local copy at
 `apps/orchestrator/dist/client/mobile/bundle-<sha>.zip` for inspection,
-then uploads to the `duraclaw-mobile` R2 bucket:
+and writes `version.json` (`{version, key}`) alongside. The infra
+deploy pipeline then uploads both to the `duraclaw-mobile` R2 bucket:
 
 - `ota/bundle-<sha>.zip` — the Capgo-consumable web-bundle payload.
 - `ota/version.json` — `{version, key}` read by the Worker's
@@ -320,16 +321,14 @@ The manifest route returns
 Worker URL that streams the R2 object back through
 `GET /api/mobile/assets/*` (no R2 public-domain / pre-signed URLs).
 
-Local builds without `CLOUDFLARE_API_TOKEN` skip the R2 upload with a
-warning — the zip is still written locally so you can poke at it. The
-infra deploy pipeline runs the script with creds set so every `main`
-push re-uploads both the zip and the `ota/version.json` pointer. Infra
-misconfig (missing token) is the "OTA channel is dead" failure mode.
+Local builds skip the R2 upload (infra handles that). The
+zip is still written locally so you can poke at it. Infra
+misconfig (missing upload step) is the "OTA channel is dead" failure mode.
 
-**APK-fallback counterpart** — `scripts/publish-mobile-apk.sh` uploads
-a signed release APK to `apk/duraclaw-<version>.apk` and writes
-`apk/version.json` (`{version, key}`) alongside. The
-`GET /api/mobile/apk/latest` route reads the same R2 manifest. This
+**APK-fallback counterpart** — the infra pipeline uploads a signed
+release APK to `apk/duraclaw-<version>.apk` and writes
+`apk/version.json` (`{version, key}`) alongside in the same R2 bucket.
+The `GET /api/mobile/apk/latest` route reads the R2 manifest. This
 step is **only** wired for native-layer bumps (Capacitor / plugin
 bump); it is NOT run on every OTA release. Route returns
 `{message: "No APK available"}` when `apk/version.json` is absent from
@@ -463,11 +462,9 @@ bundle the APK shipped with.
 export APP_VERSION=$(git rev-parse --short HEAD)
 VITE_APP_VERSION="$APP_VERSION" \
   pnpm --filter @duraclaw/orchestrator build
-# Needs CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID in the env so the
-# wrangler r2 object put calls inside the script authenticate against
-# the baseplane-ai account. Skipping = OTA channel silently dead.
-CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=87bd3030… \
-  bash scripts/build-mobile-ota-bundle.sh
+bash scripts/build-mobile-ota-bundle.sh   # emits zip + version.json locally
+# Infra pipeline uploads the zip + version.json to R2 (duraclaw-mobile bucket)
+# and then deploys the Worker. Without the upload step the OTA channel is dead.
 wrangler deploy --cwd apps/orchestrator
 ```
 
