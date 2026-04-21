@@ -482,10 +482,27 @@ worktree so parallel agents don't clobber each other's browser state.
 Same interface as `chrome-devtools-axi`, handles SPAs, JS rendering, and
 interaction.
 
-**Test user credentials:**
+**Test user credentials (local dev):**
 - Email: `agent.verify+duraclaw@example.com`
 - Password: `duraclaw-test-password`
 - Name: `agent-verify`
+
+**Test user credentials (prod, https://dura.baseplane.ai):**
+Three admin test users (`agent.verify+prod@`, `+prod-a@`, `+prod-b@`) are
+seeded in prod. Passwords are NOT in this file — they live in
+`.env.test-users.prod` at the root of each worktree (mode 600, gitignored
+via the `.env.test-users*` pattern). If the file is missing from a fresh
+clone, copy it from a peer worktree (e.g.
+`/data/projects/duraclaw/.env.test-users.prod`).
+
+Re-seed procedure (endpoint is token-locked): `BOOTSTRAP_TOKEN` is kept
+set as a Worker secret in prod, so `POST /api/bootstrap` with
+`Authorization: Bearer $BOOTSTRAP_TOKEN` and `{email,password,name}` works
+directly — no secret-put round-trip. Bootstrap always promotes seeded
+users to `admin`. If `signUpEmail` 500s mid-flow, a partial user row can
+land in D1 with an unrecoverable password; purge from `users` /
+`accounts` / `sessions` / `user_preferences` / `user_tabs` /
+`user_presence` (FK column is `user_id`, snake_case) before retry.
 
 **Common workflow:**
 ```bash
