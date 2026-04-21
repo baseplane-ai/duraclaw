@@ -114,7 +114,24 @@ export function createSyncedCollection<TRow extends object, TKey extends string 
             value: undefined as never,
           })
         } else {
-          params.write({ type: op.type, value: op.value })
+          // TanStack DB's sync layer auto-converts `insert` → `update`
+          // only when `deepEquals(existingValue, newValue)` is true; on
+          // mismatch it throws `DuplicateKeySyncError`, which aborts the
+          // rest of the frame (leaving later ops in the same batch
+          // unapplied). Our wire protocol is upsert-by-key — streaming
+          // `partial_assistant` turns keep re-emitting the same row id
+          // with growing text, and `onConnect` re-sends persisted rows
+          // that the OPFS cache already has with slightly different
+          // values. Convert to `update` whenever the key is already in
+          // the collection so writes stay idempotent.
+          const key = config.getKey(op.value as TRow)
+          const hasFn = params.collection?.has
+          const alreadyPresent =
+            op.type === 'insert' &&
+            typeof hasFn === 'function' &&
+            hasFn.call(params.collection, key)
+          const writeType = alreadyPresent ? 'update' : op.type
+          params.write({ type: writeType, value: op.value })
         }
       }
       params.commit()

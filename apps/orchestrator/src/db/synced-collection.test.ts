@@ -252,6 +252,65 @@ describe('createSyncedCollection', () => {
     expect(firstCall.key).toBe('t1')
   })
 
+  it('insert-upsert: converts insert→update when collection.has(key) is true (GH#41 streaming regression)', async () => {
+    // Regression: TanStack DB's sync layer throws DuplicateKeySyncError on
+    // `write({type:'insert'})` when the key is already present and the new
+    // value !== deepEquals the existing. Streaming partial_assistant turns
+    // re-emit the same row id with growing text — every delta after the
+    // first would throw, aborting the frame and silently freezing the UI.
+    // Repro: session.getHistory() snapshot on onConnect re-inserts rows the
+    // OPFS-persisted cache already carries; the first collision kills the
+    // snapshot, and subsequent partial_assistant deltas deepEquals-mismatch
+    // and also throw. Fix: factory auto-converts insert→update when
+    // collection.has(key) is true so writes stay idempotent.
+    const { createSyncedCollection } = await import('./synced-collection')
+
+    const coll = createSyncedCollection<{ id: string; text: string }, string>({
+      id: 'user_tabs',
+      getKey: (r) => r.id,
+      queryKey: ['user_tabs'] as const,
+      queryFn: async () => [],
+      syncFrameType: 'user_tabs',
+    }) as unknown as { __opts: { sync: { sync: Function } } }
+
+    const begin = vi.fn()
+    const write = vi.fn()
+    const commit = vi.fn()
+    const markReady = vi.fn()
+    const truncate = vi.fn()
+
+    // Stub a collection whose has() reports t1 as already synced.
+    coll.__opts.sync.sync({
+      collection: { has: (k: string) => k === 't1' },
+      begin,
+      write,
+      commit,
+      markReady,
+      truncate,
+    })
+
+    // New row (t2) arrives as insert — should stay insert.
+    // Updated row (t1) arrives as insert — should be rewritten to update.
+    emitFrame('user_tabs', {
+      type: 'synced-collection-delta',
+      collection: 'user_tabs',
+      ops: [
+        { type: 'insert', value: { id: 't1', text: 'growing…' } },
+        { type: 'insert', value: { id: 't2', text: 'net-new' } },
+      ],
+    })
+
+    expect(write).toHaveBeenCalledTimes(2)
+    expect(write).toHaveBeenNthCalledWith(1, {
+      type: 'update',
+      value: { id: 't1', text: 'growing…' },
+    })
+    expect(write).toHaveBeenNthCalledWith(2, {
+      type: 'insert',
+      value: { id: 't2', text: 'net-new' },
+    })
+  })
+
   it('loopback-dedup: server-echo frame writes once per optimistic insert (2 total via sync)', async () => {
     // Semantics per B6: `SyncConfig.write()` fires exactly twice — once for
     // the optimistic apply (simulated here by driving write() via the caller
