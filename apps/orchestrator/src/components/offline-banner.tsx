@@ -1,28 +1,35 @@
 import { useEffect, useState } from 'react'
+import { useConnectionStatus } from '~/lib/connection-manager/useConnectionStatus'
 
+const SHOW_DEBOUNCE_MS = 1000
+
+/**
+ * GH#42 — OfflineBanner driven by the unified `useConnectionStatus`
+ * signal from the connection-manager registry (replaces the prior
+ * `navigator.onLine` poll). Debounces the SHOW transition by 1 s so a
+ * sub-second reconnect blip never flashes the banner; hides
+ * immediately on recovery.
+ */
 export function OfflineBanner() {
-  const [isOffline, setIsOffline] = useState(false)
+  const { isOnline } = useConnectionStatus()
+  const [visible, setVisible] = useState(false)
 
   useEffect(() => {
-    const goOffline = () => setIsOffline(true)
-    const goOnline = () => setIsOffline(false)
-
-    // Check initial state
-    setIsOffline(!navigator.onLine)
-
-    window.addEventListener('offline', goOffline)
-    window.addEventListener('online', goOnline)
-    return () => {
-      window.removeEventListener('offline', goOffline)
-      window.removeEventListener('online', goOnline)
+    if (isOnline) {
+      setVisible(false)
+      return
     }
-  }, [])
+    const timer = setTimeout(() => {
+      setVisible(true)
+    }, SHOW_DEBOUNCE_MS)
+    return () => clearTimeout(timer)
+  }, [isOnline])
 
-  if (!isOffline) return null
+  if (!visible) return null
 
   return (
     <div className="fixed top-0 left-0 right-0 z-[100] flex items-center justify-center gap-2 bg-warning px-4 py-2 text-sm font-medium text-warning-foreground">
-      <span>You are offline</span>
+      <span>Reconnecting…</span>
       <button
         type="button"
         onClick={() => window.location.reload()}

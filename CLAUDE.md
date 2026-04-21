@@ -96,6 +96,30 @@ and the tab bar all agree on label / color / icon. `status` is typically
 active sessions track message-derived status while idle / background
 sessions fall back to the D1-mirrored top-level field.
 
+### Client connection manager (GH#42)
+
+`apps/orchestrator/src/lib/connection-manager/` holds a cross-cutting
+coordinator for every client-owned WS (`agent:<agentName>` PartySocket,
+`user-stream` PartySocket, `collab:<sessionId>` y-partyserver provider).
+Substrate-agnostic `ManagedConnection` adapters (`adapters/partysocket-adapter.ts`
++ `adapters/yprovider-adapter.ts`) plug into a module-level
+`connectionRegistry`. A singleton `connectionManager` (started once from
+`routes/__root.tsx`) subscribes to `lifecycleEventSource` — Capacitor
+`App.appStateChange` + `Network.networkStatusChange` behind `isNative()`,
+plus browser `visibilitychange` / `online` / `offline` — and on every
+`foreground` or `online` event iterates the registry and schedules a
+`conn.reconnect()` with a per-conn random stagger ∈ [0, 500) ms for any
+conn whose `lastSeenTs` is >5 s stale. `useConnectionStatus()` folds
+`readyState` across every registered conn into a unified `isOnline` signal
+that drives the `OfflineBanner` (with a 1 s show-debounce). Replaces the
+prior `use-app-lifecycle.ts` hook — foreground → `hydrate()` is now
+triggered by the agent adapter's post-reconnect `open` event inside
+`use-coding-agent.ts` (gated by `hasConnectedOnce` to skip the initial
+connect). `@capacitor/app` / `@capacitor/network` are dynamically
+imported behind `isNative()` so the web bundle excludes them. In DEV,
+`window.__connectionRegistry` + `window.__connectionManager` (with a
+`lastReconnectLog` ring buffer) are exposed for `scripts/axi eval`.
+
 ### Synced collections (user-scoped reactive data)
 
 `createSyncedCollection` at `apps/orchestrator/src/db/synced-collection.ts`

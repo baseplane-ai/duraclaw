@@ -23,6 +23,8 @@ import { type CachedMessage, createMessagesCollection } from '~/db/messages-coll
 import { sessionLocalCollection } from '~/db/session-local-collection'
 import { useMessagesCollection } from '~/hooks/use-messages-collection'
 import { useSession } from '~/hooks/use-sessions-collection'
+import { createPartySocketAdapter } from '~/lib/connection-manager/adapters/partysocket-adapter'
+import { useManagedConnection } from '~/lib/connection-manager/hooks'
 import { logDelta } from '~/lib/delta-log'
 import { parseJsonField } from '~/lib/json'
 import { contentToParts } from '~/lib/message-parts'
@@ -37,7 +39,6 @@ import type {
   SpawnConfig,
 } from '~/lib/types'
 import { attachWsDebug, wsHardFailEnabled } from '~/lib/ws-debug'
-import { useAppLifecycle } from './use-app-lifecycle'
 
 export type { ContentBlock, ContextUsage, GateResponse, SpawnConfig }
 
@@ -395,25 +396,46 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     }
   }, [agentName, readyState])
 
-  // Capacitor only: on foreground / network-change, force both the
-  // per-session WS and the singleton user-stream WS to reconnect (defeats
-  // zombie sockets — see use-app-lifecycle.ts for the rationale), then
-  // hydrate missed messages. No-op on web.
-  useAppLifecycle({
-    hydrate: useCallback(() => {
-      connection.call('getMessages', []).catch(() => {
-        // Best-effort hydrate; messages collection still falls back to
-        // its queryFn for cold-start / stale-cache.
-      })
-    }, [connection]),
-    reconnect: useCallback(() => {
-      try {
-        connection.reconnect()
-      } catch {
-        // ignore — socket may already be tearing down
+  // GH#42: Register this session's PartySocket with the ConnectionManager
+  // registry so the global manager (installed in __root.tsx) coordinates
+  // reconnect across every client-owned WS on foreground/online events.
+  // The adapter reference is stable across renders for a given
+  // (connection, agentName) pair — the underlying socket is what
+  // `useAgent` returns, which it keeps stable across reconnects, so the
+  // adapter is only rebuilt on a genuine socket swap (session change).
+  const agentAdapter = useMemo(
+    () => createPartySocketAdapter(connection, `agent:${agentName}`),
+    [connection, agentName],
+  )
+  useManagedConnection(agentAdapter, `agent:${agentName}`)
+
+  // Replace the old useAppLifecycle foreground→hydrate() path. The
+  // manager now owns the reconnect trigger (foreground / network
+  // regain); what this hook has to do is replay missed messages when
+  // the socket comes back up. The adapter's `open` event fires on
+  // every (re)connect; the `hasConnectedOnce` ref gates out the
+  // initial mount-time open so we only hydrate on subsequent opens
+  // (true reconnects). Reset when `agentName` changes so the fresh
+  // session's initial open doesn't count as a reconnect.
+  const hydrateHasConnectedOnceRef = useRef(false)
+  const hydrateAgentNameRef = useRef(agentName)
+  if (hydrateAgentNameRef.current !== agentName) {
+    hydrateAgentNameRef.current = agentName
+    hydrateHasConnectedOnceRef.current = false
+  }
+  useEffect(() => {
+    const onOpen = () => {
+      if (hydrateHasConnectedOnceRef.current) {
+        connection.call('getMessages', []).catch(() => {
+          // Best-effort hydrate; messagesCollection still falls back
+          // to its queryFn for cold-start / stale-cache.
+        })
       }
-    }, [connection]),
-  })
+      hydrateHasConnectedOnceRef.current = true
+    }
+    agentAdapter.addEventListener('open', onOpen)
+    return () => agentAdapter.removeEventListener('open', onOpen)
+  }, [agentAdapter, connection])
 
   const spawn = useCallback(
     (config: SpawnConfig) => connection.call('spawn', [config]),

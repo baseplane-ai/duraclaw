@@ -5,6 +5,7 @@ import { Toaster } from '~/components/ui/sonner'
 import { ThemeProvider } from '~/context/theme-provider'
 import { setUserStreamIdentity } from '~/hooks/use-user-stream'
 import { useSession } from '~/lib/auth-client'
+import { connectionManager } from '~/lib/connection-manager/manager'
 import '~/styles.css'
 
 export const Route = createRootRoute({
@@ -35,6 +36,17 @@ function RootComponent() {
   useEffect(() => {
     setUserStreamIdentity(userId)
   }, [userId])
+
+  // GH#42: start the ConnectionManager once at app-shell mount. It
+  // subscribes to lifecycleEventSource (visibility / online / offline
+  // on web; Capacitor App + Network on native) and fires staggered
+  // reconnects across every registered WS on `foreground` / `online`.
+  // The old `useAppLifecycle` hook is gone; per-session hydrate now
+  // rides on the agent adapter's `open` event inside use-coding-agent.
+  useEffect(() => {
+    connectionManager.start()
+    return () => connectionManager.stop()
+  }, [])
 
   useEffect(() => {
     if (isPending) return

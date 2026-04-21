@@ -20,6 +20,8 @@ import useYProvider from 'y-partyserver/react'
 import type { Awareness } from 'y-protocols/awareness'
 import * as Y from 'yjs'
 import { useSession } from '~/lib/auth-client'
+import { createYProviderAdapter } from '~/lib/connection-manager/adapters/yprovider-adapter'
+import { useManagedConnection } from '~/lib/connection-manager/hooks'
 import { partyHost } from '~/lib/platform'
 import { colorForUserId } from '~/lib/presence-colors'
 
@@ -83,6 +85,18 @@ export function useSessionCollab(opts: { sessionId: string }): UseSessionCollabR
     party: 'session-collab',
     doc,
   })
+
+  // GH#42: register this Yjs provider with the connection-manager
+  // registry so the global manager coordinates reconnect on foreground
+  // / online events alongside the agent + user-stream PartySockets.
+  // The adapter is memoed on (provider, sessionId) so its identity
+  // only changes on a genuine session swap; useManagedConnection
+  // re-registers at that point.
+  const collabAdapter = useMemo(
+    () => (provider ? createYProviderAdapter(provider, `collab:${sessionId}`) : null),
+    [provider, sessionId],
+  )
+  useManagedConnection(collabAdapter, `collab:${sessionId}`)
 
   const [status, setStatus] = useState<SessionCollabStatus>('connecting')
 
