@@ -1,6 +1,5 @@
 import { createRootRoute, Outlet, useLocation, useNavigate } from '@tanstack/react-router'
 import { useEffect } from 'react'
-import { OfflineBanner } from '~/components/offline-banner'
 import { Toaster } from '~/components/ui/sonner'
 import { ThemeProvider } from '~/context/theme-provider'
 import { setUserStreamIdentity } from '~/hooks/use-user-stream'
@@ -72,7 +71,6 @@ function RootComponent() {
 
   return (
     <ThemeProvider>
-      <OfflineBanner />
       <Outlet />
       <Toaster duration={5000} />
     </ThemeProvider>

@@ -87,9 +87,7 @@ export function useConnectionStatus(): ConnectionStatus {
   }, [])
 
   const connections = snap.map((c) => ({ id: c.id, readyState: c.readyState }))
-  // Empty registry → vacuously online. The OfflineBanner debounces the
-  // visible → online transition by 1s so pre-registration renders never
-  // flash the banner.
+  // Empty registry → vacuously online.
   const isOnline = snap.every((c) => c.readyState === WebSocket.OPEN)
 
   return { isOnline, connections }
