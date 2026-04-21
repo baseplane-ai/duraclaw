@@ -23,9 +23,9 @@ interface InvalidatableCollection {
   utils: { refetch: () => Promise<unknown> }
 }
 
-// agent_sessions invalidations retired in GH#14 P5 — sessionLiveStateCollection
-// is localOnly and populated via WS onStateUpdate + SessionHistory REST hydrate;
-// no server-side refetch needed. user_tabs is Yjs-synced via UserSettingsDO Y.Doc.
+// agent_sessions invalidations flow through the sessionsCollection's own
+// SyncConfig (synced-collection factory) — no entry here. user_tabs is
+// Yjs-synced via UserSettingsDO Y.Doc.
 const COLLECTIONS_BY_NAME: Record<string, InvalidatableCollection> = {
   user_preferences: userPreferencesCollection as unknown as InvalidatableCollection,
 }

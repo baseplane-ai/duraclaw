@@ -98,9 +98,9 @@ describe('AgentDetailView', () => {
   })
 
   it('renders MessageInput when status is running', () => {
-    // Spec-31 P5 B10: status is now derived from messages via
-    // `useDerivedStatus`, not read off `agent.state`. MessageInput is
-    // always rendered at the bottom of AgentDetailView regardless.
+    // Spec #37: status comes from the D1-mirrored `agent_sessions` row
+    // (via `useSession`), not `agent.state`. MessageInput is always
+    // rendered at the bottom of AgentDetailView regardless.
     const agent = makeAgent()
     render(<AgentDetailView name="test" agent={agent} />)
 

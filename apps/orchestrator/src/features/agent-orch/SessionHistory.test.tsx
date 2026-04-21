@@ -26,14 +26,7 @@ vi.mock('~/hooks/use-sessions-collection', () => ({
     createSession: vi.fn(),
     updateSession: vi.fn(),
     archiveSession: vi.fn(),
-    refresh: vi.fn(),
   }),
-}))
-
-// Stub the live-state collection module so the REST hydrate doesn't touch
-// OPFS or run the real seed helper in tests.
-vi.mock('~/db/session-live-state-collection', () => ({
-  seedSessionLiveStateFromSummary: vi.fn(),
 }))
 
 // Must import after mocks

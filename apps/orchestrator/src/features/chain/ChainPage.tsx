@@ -17,8 +17,7 @@ import { Button } from '~/components/ui/button'
 import { chainsCollection } from '~/db/chains-collection'
 import { projectsCollection } from '~/db/projects-collection'
 import { chainProject, spawnChainSession } from '~/features/kanban/advance-chain'
-import { useSessionLiveState } from '~/hooks/use-session-live-state'
-import { useSessionsCollection } from '~/hooks/use-sessions-collection'
+import { useSession, useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { useTabSync } from '~/hooks/use-tab-sync'
 import type { ChainSummary, ProjectInfo } from '~/lib/types'
 import { ChainHeader } from './ChainHeader'
@@ -79,7 +78,7 @@ export function ChainPage({ issueNumber }: ChainPageProps) {
     return candidates[candidates.length - 1]
   }, [chainSessions])
 
-  const activeLive = useSessionLiveState(activeSession?.id ?? null)
+  const activeLive = useSession(activeSession?.id ?? null)
 
   // Project selection for the "Start research" empty-state CTA. Default
   // to the chain's known project (from chainsCollection) if available.
@@ -137,11 +136,11 @@ export function ChainPage({ issueNumber }: ChainPageProps) {
       </>
     )
   }
-  // SessionLiveState currently doesn't carry a partial-assistant text
+  // SessionSummary currently doesn't carry a partial-assistant text
   // field; surface the session summary as a lightweight live indicator
   // when nothing else is available. Full streaming transcript rendering
   // is deferred to a later unit that hooks into messagesCollection.
-  const liveText = activeLive.summary ?? undefined
+  const liveText = activeLive?.summary ?? undefined
 
   const title = chain?.issueTitle ?? chainSessions[0]?.title ?? undefined
   const workspace = knownProject ?? chainSessions[0]?.project ?? undefined

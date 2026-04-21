@@ -5,10 +5,11 @@
  * the tab bar so every surface agrees on the label / color / icon /
  * interactivity for a given `SessionStatus` + WS `readyState` pair.
  *
- * Spec #31 P5: the `SessionState` blob is gone. Callers now pass the
- * session's status directly — active callers derive it from messages via
- * `useDerivedStatus`; sidebar callers read the D1-mirrored `status` on
- * `SessionLiveState`.
+ * Spec #37: every caller reads `status` directly from the `agent_sessions`
+ * synced-collection row (via `useSession(sessionId)`) and pairs it with
+ * `wsReadyState` from `sessionLocalCollection` (via `useSessionLocalState`).
+ * The prior message-derived status path (spec #31) was retired because
+ * D1-mirrored status eliminates the ordering-quirk bug class.
  */
 
 import type { SessionStatus } from '~/lib/types'

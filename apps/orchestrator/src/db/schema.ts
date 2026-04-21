@@ -13,9 +13,8 @@
 //                        + cell), components/status-bar.tsx (display).
 //   • total_cost_usd   — same write path (updateSessionResult), read by
 //                        SessionHistory.tsx, SessionListItem.tsx, status-bar.tsx.
-//   • message_count    — written by ProjectRegistry.syncDiscoveredSessions
-//                        (gateway → registry), read by SessionHistory.tsx
-//                        (`session.num_turns ?? session.message_count`).
+//   • message_count    — SUPERSEDED by `num_turns` in spec #37 (P1a-1);
+//                        column dropped from D1 in migration 0016.
 //   • kata_mode        — written by SessionDO.syncKataToRegistry, read by
 //                        features/agent-orch/SessionCardList.tsx (badge).
 //   • kata_issue       — same write path, read by SessionCardList.tsx.
@@ -24,7 +23,7 @@
 // Dropped (no live consumer found):
 //   • (none — every populated column has at least one client read path).
 //
-// Net: 17 baseline + 6 extras = 23 columns, matching the current DO DDL minus
+// Net: 17 baseline + 5 extras = 22 columns, matching the current DO DDL minus
 // dead-on-arrival fields. The spec's "13 extra columns" prose was a worst-case
 // estimate; the actual ProjectRegistry DDL only had 6 extras over the baseline.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -150,10 +149,17 @@ export const agentSessions = sqliteTable(
     // Audit-retained extensions (see header comment for justification):
     durationMs: integer('duration_ms'),
     totalCostUsd: real('total_cost_usd'),
-    messageCount: integer('message_count'),
     kataMode: text('kata_mode'),
     kataIssue: integer('kata_issue'),
     kataPhase: text('kata_phase'),
+    // Spec #37 P1a-1: per-session live state mirrored from DO-owned state
+    // onto the D1 row so non-active callers (sidebar, history) render
+    // uniformly without a DO roundtrip.
+    error: text('error'),
+    errorCode: text('error_code'),
+    kataStateJson: text('kata_state_json'),
+    contextUsageJson: text('context_usage_json'),
+    worktreeInfoJson: text('worktree_info_json'),
   },
   (t) => ({
     sdkIdUnique: uniqueIndex('idx_agent_sessions_sdk_id')

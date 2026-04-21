@@ -2,12 +2,14 @@
  * Hook for connecting to a SessionDO via the agents/react useAgent hook.
  *
  * Render source for the message list is `messagesCollection` (OPFS-persisted)
- * via `useMessagesCollection`; server-authoritative live state (status,
- * context usage, kata, session result) is read from `sessionLiveStateCollection`
- * via `useSessionLiveState`. Per-turn branch info is a reactive read from
+ * via `useMessagesCollection`. Server-authoritative per-session state
+ * (status, numTurns, cost, duration, context usage, kata state, worktreeInfo)
+ * is read from `sessionsCollection` via `useSession(agentName)` — the synced
+ * collection hydrates from D1 and stays live via `agent_sessions` WS delta
+ * frames (Spec #37 P2a). Per-turn branch info is a reactive read from
  * `branchInfoCollection` via `useBranchInfo` — DO-pushed on snapshot
- * payloads (B7). WS handlers below write into those collections on state /
- * gateway-event / messages-frame delivery.
+ * payloads (B7). WS-transient `wsReadyState` lives in the local-only
+ * `sessionLocalCollection`.
  */
 
 import { createTransaction } from '@tanstack/db'
@@ -15,10 +17,12 @@ import { useAgent } from 'agents/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type * as Y from 'yjs'
 import { type BranchInfoRow, createBranchInfoCollection } from '~/db/branch-info-collection'
+import { queryClient } from '~/db/db-instance'
 import { type CachedMessage, createMessagesCollection } from '~/db/messages-collection'
-import { upsertSessionLiveState } from '~/db/session-live-state-collection'
+import { sessionLocalCollection } from '~/db/session-local-collection'
 import { useMessagesCollection } from '~/hooks/use-messages-collection'
-import { useSessionLiveState } from '~/hooks/use-session-live-state'
+import { useSession } from '~/hooks/use-sessions-collection'
+import { parseJsonField } from '~/lib/json'
 import { contentToParts } from '~/lib/message-parts'
 import { isNative, wsBaseUrl } from '~/lib/platform'
 import type {
@@ -127,12 +131,13 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   // same factory call returns the same instance on re-render).
   const messagesCollection = useMemo(() => createMessagesCollection(agentName), [agentName])
 
-  // Server-authoritative live state from the TanStack DB collection.
-  // Spec #31 P5 B10: `state` / `sessionResult` narrowed off. Status / gate
-  // / result come from `useDerivedStatus` / `useDerivedGate` over
-  // `messagesCollection`; `contextUsage` / `kataState` remain on the
-  // live-state collection.
-  const { contextUsage, kataState } = useSessionLiveState(agentName)
+  // Server-authoritative per-session state from `sessionsCollection` (synced
+  // collection, DO-backed via `agent_sessions` WS delta frames + D1 REST
+  // seed). `contextUsageJson` / `kataStateJson` are TEXT columns in D1; we
+  // parse them at read time. Spec #37 P2b B16.
+  const session = useSession(agentName)
+  const contextUsage = parseJsonField<ContextUsage>(session?.contextUsageJson ?? null)
+  const kataState = parseJsonField<KataSessionState>(session?.kataStateJson ?? null)
 
   // Reset per-session transient state on agentName change (tab switch without
   // remount). Collection rows for other sessions are untouched.
@@ -477,55 +482,32 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           return
         }
 
-        // Per-turn summary push from SessionDO (see `broadcastSessionSummary`).
-        // Spec #31 removed the SessionState-broadcast path that used to feed
-        // these counters; until spec #35 lands a synced collection on
-        // `agent_sessions`, this narrow frame keeps the StatusBar counters
-        // (numTurns / totalCostUsd / durationMs) live during an active session.
-        if (parsed.type === 'session_summary' && parsed.summary) {
-          const s = parsed.summary as {
-            numTurns?: number | null
-            totalCostUsd?: number | null
-            durationMs?: number | null
-          }
-          upsertSessionLiveState(agentName, {
-            numTurns: s.numTurns ?? null,
-            totalCostUsd: s.totalCostUsd ?? null,
-            durationMs: s.durationMs ?? null,
-          })
-          return
-        }
+        // Spec #37 P2b B16: the legacy per-turn summary frame handler is
+        // retired. The DO now broadcasts per-turn state changes as
+        // `agent_sessions` synced deltas (numTurns, totalCostUsd,
+        // durationMs, status), which the sessionsCollection applies
+        // automatically. No client-side write here.
 
         // Legacy gateway_event format (non-message events only)
         if (parsed.type === 'gateway_event' && parsed.event) {
           const event = parsed.event as GatewayEvent & { uuid?: string; content?: unknown[] }
 
-          // Capture kata session state
-          if (event.type === 'kata_state') {
-            const kataState = (event as unknown as { kata_state: KataSessionState }).kata_state
-            upsertSessionLiveState(agentName, { kataState })
+          // Spec #37 P2b B16: kata_state / context_usage no longer write to
+          // a client collection. The DO persists both into its
+          // `agent_sessions` row (as JSON-serialised TEXT columns) and
+          // broadcasts a synced delta; sessionsCollection converges.
+          // Invalidate the query key so an active queryFn cold-start path
+          // refetches the latest TEXT columns — hot path is already
+          // synced-delta driven.
+          if (event.type === 'kata_state' || event.type === 'context_usage') {
+            void queryClient.invalidateQueries({ queryKey: ['sessions'] })
           }
 
-          // Capture context usage from get-context-usage response
-          if (event.type === 'context_usage') {
-            const usage = (event as unknown as { usage: Record<string, unknown> }).usage
-            const contextUsage: ContextUsage = {
-              totalTokens: (usage.totalTokens as number) ?? 0,
-              maxTokens: (usage.maxTokens as number) ?? 0,
-              percentage: (usage.percentage as number) ?? 0,
-              model: usage.model as string | undefined,
-              isAutoCompactEnabled: usage.isAutoCompactEnabled as boolean | undefined,
-              autoCompactThreshold: usage.autoCompactThreshold as number | undefined,
-            }
-            upsertSessionLiveState(agentName, { contextUsage })
-          }
-
-          // Spec-31 P4b B3: `result` gateway_event handler removed — the
-          // running → idle transition is now driven by `useDerivedStatus`
-          // reading the final persisted message, and cost/duration are
-          // surfaced via the D1 REST endpoint for non-active callers.
-          // `sessionResult` stops being written here; `sessionLiveStateCollection`
-          // narrowing to drop the field happens in P5.
+          // Spec #37 B13: `result` gateway_event handler removed — the
+          // running → idle transition is now driven by the D1-mirrored
+          // `agent_sessions.status` synced-collection delta (written by
+          // the DO's syncStatusToD1 + broadcastSessionRow). Cost /
+          // duration / numTurns flow on the same row.
         }
       } catch {
         // Ignore non-JSON messages (state sync handled by onStateUpdate)
@@ -559,8 +541,25 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     }
   }, [connection])
 
+  // Mirror WS readyState into the local-only sessionLocalCollection
+  // (Spec #37 B11). Insert on first observation, update on subsequent
+  // transitions. On agentName change the effect cleanup leaves the prior
+  // row untouched (tab switches preserve per-session state until unmount).
   useEffect(() => {
-    upsertSessionLiveState(agentName, { wsReadyState: readyState })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const coll = sessionLocalCollection as any
+    try {
+      // Prefer update; insert on duplicate-key throw (safe both ways).
+      try {
+        coll.update(agentName, (draft: { wsReadyState: number }) => {
+          draft.wsReadyState = readyState
+        })
+      } catch {
+        coll.insert({ id: agentName, wsReadyState: readyState })
+      }
+    } catch {
+      // collection not ready; next readyState change will retry
+    }
   }, [agentName, readyState])
 
   // Capacitor only: hydrate missed messages on foreground. The WS itself
@@ -704,10 +703,10 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       const clientMessageId = newClientMessageId()
       // Stamp optimistic row with the current watermark seq so it sorts
       // in-place (alongside already-applied messages) rather than at
-      // Infinity. Without this, the row briefly sorts LAST (after the
-      // assistant's final message) and `useDerivedStatus` reads
-      // `last.role === 'user'` → stuck on 'running'. The server echo
-      // delta will overwrite with the canonical seq via writeUpsert.
+      // Infinity. Preserved from spec #31 because message ordering still
+      // matters for `useDerivedGate` (retained per spec #37 B14). The
+      // server echo delta overwrites with the canonical seq via
+      // writeUpsert.
       const currentSeq = lastSeqRef.current.get(agentName) ?? 0
       const optimisticRow: CachedMessage = {
         id: clientMessageId,

@@ -8,7 +8,7 @@
  * for the B5 preamble flow; call sites don't change.
  *
  * No collection mutations here — the new session will appear in
- * sessionLiveStateCollection via its normal seeding / refresh flow.
+ * sessionsCollection via its normal WS delta / REST query flow.
  * The caller is expected to toast success and navigate.
  */
 

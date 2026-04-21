@@ -12,6 +12,7 @@ import { drizzle } from 'drizzle-orm/d1'
 import * as schema from '~/db/schema'
 import { agentSessions, worktreeReservations } from '~/db/schema'
 import { generateActionToken } from '~/lib/action-token'
+import { broadcastSessionRow } from '~/lib/broadcast-session'
 import { broadcastSyncedDelta } from '~/lib/broadcast-synced-delta'
 import { buildChainRow } from '~/lib/chains'
 import { runMigrations } from '~/lib/do-migrations'
@@ -438,11 +439,12 @@ export class SessionDO extends Agent<Env, SessionMeta> {
 
   /**
    * Suppress all Agent SDK protocol messages (`cf_agent_state`, identity,
-   * MCP) for every connection (spec #31 B9). The messages channel is the
-   * sole live-state source — status/gate/result are derived client-side via
-   * `useDerivedStatus` / `useDerivedGate`; `contextUsage` / `kataState` are
-   * served via REST. Returning `false` here silences the legacy state
-   * broadcast that the new architecture doesn't consume.
+   * MCP) for every connection (spec #31 B9). Status / result flow through
+   * the D1-mirrored `agent_sessions` row (spec #37), gate derives from
+   * messages via `useDerivedGate` (spec #37 B14), and contextUsage /
+   * kataState ride the `agent_sessions` synced-collection delta. Returning
+   * `false` here silences the legacy state broadcast that no current
+   * client consumes.
    */
   shouldSendProtocolMessages(_connection: Connection, _ctx: ConnectionContext): boolean {
     return false
@@ -834,35 +836,6 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     this.broadcastToClients(JSON.stringify({ type: 'gateway_event', event }))
   }
 
-  /**
-   * Push per-turn summary counters to connected clients.
-   *
-   * Background: spec #31 deleted the SessionState WS broadcast
-   * (`shouldSendProtocolMessages() => false`) and removed the client's
-   * `result` gateway_event handler on the assumption that
-   * numTurns / totalCostUsd / durationMs would land via the REST fallback.
-   * In practice `backfillFromRest` only fires on mount / WS reconnect /
-   * window focus, so during a live session the StatusBar's "X turns"
-   * counter sat at 0 forever. Push a typed `session_summary` frame on
-   * every in-DO counter mutation (`assistant` and `result` events) so the
-   * client can upsert `sessionLiveStateCollection` without waiting for a
-   * REST round-trip. Retired once spec #35 lands an `agent_sessions`
-   * synced collection that drives these fields from D1 deltas.
-   */
-  private broadcastSessionSummary() {
-    this.broadcastToClients(
-      JSON.stringify({
-        type: 'session_summary',
-        sessionId: this.state.session_id ?? this.ctx.id.toString(),
-        summary: {
-          numTurns: this.state.num_turns,
-          totalCostUsd: this.state.total_cost_usd ?? null,
-          durationMs: this.state.duration_ms ?? null,
-        },
-      }),
-    )
-  }
-
   private broadcastMessage(message: SessionMessage) {
     // Unified {type:'messages'} delta frame (B1). The legacy per-message
     // `{type:'message'}` emit was retired in P1 sub-phase 1b now that the
@@ -1091,10 +1064,18 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   private async syncStatusToD1(updatedAt: string) {
     try {
       const sessionId = this.state.session_id ?? this.ctx.id.toString()
+      const newStatus = this.state.status
+      const shouldClearError = newStatus === 'running' || newStatus === 'idle'
       await this.d1
         .update(agentSessions)
-        .set({ status: this.state.status, updatedAt, lastActivity: updatedAt })
+        .set({
+          status: newStatus,
+          updatedAt,
+          lastActivity: updatedAt,
+          ...(shouldClearError ? { error: null, errorCode: null } : {}),
+        })
         .where(eq(agentSessions.id, sessionId))
+      await broadcastSessionRow(this.env, this.ctx, sessionId, 'update')
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to sync status to D1:`, err)
     }
@@ -1114,6 +1095,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
           lastActivity: updatedAt,
         })
         .where(eq(agentSessions.id, sessionId))
+      await broadcastSessionRow(this.env, this.ctx, sessionId, 'update')
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to sync result to D1:`, err)
     }
@@ -1126,12 +1108,56 @@ export class SessionDO extends Agent<Env, SessionMeta> {
         .update(agentSessions)
         .set({ sdkSessionId, updatedAt })
         .where(eq(agentSessions.id, sessionId))
+      await broadcastSessionRow(this.env, this.ctx, sessionId, 'update')
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to sync sdk_session_id to D1:`, err)
     }
   }
 
-  private async syncKataToD1(kataState: KataSessionState | null, updatedAt: string) {
+  /**
+   * Consolidated status + error write: one UPDATE, one broadcast. Preserves
+   * `syncStatusToD1`'s `shouldClearError` semantics — when `errorMsg` is null
+   * and the new status is `running` / `idle`, clears `error` + `errorCode`.
+   * When `errorMsg` is non-null, sets error + errorCode as provided regardless
+   * of status.
+   */
+  private async syncStatusAndErrorToD1(
+    status: SessionStatus,
+    errorMsg: string | null,
+    errorCode: string | null,
+    updatedAt: string,
+  ) {
+    try {
+      const sessionId = this.state.session_id ?? this.ctx.id.toString()
+      const shouldClearError = errorMsg == null && (status === 'running' || status === 'idle')
+      const errorFields =
+        errorMsg != null
+          ? { error: errorMsg, errorCode }
+          : shouldClearError
+            ? { error: null, errorCode: null }
+            : {}
+      await this.d1
+        .update(agentSessions)
+        .set({
+          status,
+          updatedAt,
+          lastActivity: updatedAt,
+          ...errorFields,
+        })
+        .where(eq(agentSessions.id, sessionId))
+      await broadcastSessionRow(this.env, this.ctx, sessionId, 'update')
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Failed to sync status+error to D1:`, err)
+    }
+  }
+
+  /**
+   * Consolidated kata write: one UPDATE for all kata columns
+   * (kataMode, kataIssue, kataPhase, kataStateJson) + one broadcast.
+   * Also refreshes the worktree reservation activity and broadcasts the
+   * chain row, mirroring `syncKataToD1`'s side effects.
+   */
+  private async syncKataAllToD1(kataState: KataSessionState | null, updatedAt: string) {
     try {
       const sessionId = this.state.session_id ?? this.ctx.id.toString()
       await this.d1
@@ -1140,16 +1166,17 @@ export class SessionDO extends Agent<Env, SessionMeta> {
           kataMode: kataState?.currentMode ?? null,
           kataIssue: kataState?.issueNumber ?? null,
           kataPhase: kataState?.currentPhase ?? null,
+          kataStateJson: kataState ? JSON.stringify(kataState) : null,
           updatedAt,
         })
         .where(eq(agentSessions.id, sessionId))
+      await broadcastSessionRow(this.env, this.ctx, sessionId, 'update')
     } catch (err) {
-      console.error(`[SessionDO:${this.ctx.id}] Failed to sync kata to D1:`, err)
+      console.error(`[SessionDO:${this.ctx.id}] Failed to sync kata (all) to D1:`, err)
     }
 
-    // Chain UX B11: refresh the worktree reservation's last_activity_at on
-    // every kata_state event so stale gating (7-day inactivity) tracks real
-    // session usage. Also clears a previously-set `stale` flag.
+    // Mirror `syncKataToD1` side effects: refresh worktree reservation
+    // last_activity_at (clears stale flag) and broadcast updated chains row.
     if (kataState?.issueNumber != null && this.state.project) {
       try {
         await this.d1
@@ -1166,12 +1193,54 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       }
     }
 
-    // GH#32 phase p5: broadcast an updated `chains` row for the affected
-    // issue so connected browsers see status / column / lastActivity
-    // updates without polling. Scoped to the session's owning user; a null
-    // return from buildChainRow means the chain has emptied — emit a delete
-    // so the client collection drops the row.
     this.broadcastChainUpdate(kataState?.issueNumber ?? null)
+  }
+
+  // Spec #37 P1b: defined but not yet wired — there is no callsite in this
+  // DO that builds a WorktreeInfo JSON object today. Leaving this in place
+  // so the follow-up (worktree-info resolution) can attach without a new
+  // helper. Do not remove.
+  // biome-ignore lint/correctness/noUnusedPrivateClassMembers: intentional, see above
+  private async syncWorktreeInfoToD1(worktreeInfoJson: string | null, updatedAt: string) {
+    try {
+      const sessionId = this.state.session_id ?? this.ctx.id.toString()
+      await this.d1
+        .update(agentSessions)
+        .set({ worktreeInfoJson, updatedAt })
+        .where(eq(agentSessions.id, sessionId))
+      await broadcastSessionRow(this.env, this.ctx, sessionId, 'update')
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Failed to sync worktree_info_json to D1:`, err)
+    }
+  }
+
+  // 5s trailing-edge debounce for context_usage D1 writes — matches the
+  // session_meta.context_usage_cached_at TTL. See spec #37 B5.
+  private contextUsageDebounceTimer: ReturnType<typeof setTimeout> | null = null
+  private pendingContextUsageJson: string | null = null
+
+  private syncContextUsageToD1(json: string) {
+    this.pendingContextUsageJson = json
+    if (this.contextUsageDebounceTimer) return
+    this.contextUsageDebounceTimer = setTimeout(() => {
+      this.contextUsageDebounceTimer = null
+      const pending = this.pendingContextUsageJson
+      this.pendingContextUsageJson = null
+      if (pending == null) return
+      void (async () => {
+        try {
+          const sessionId = this.state.session_id ?? this.ctx.id.toString()
+          const updatedAt = new Date().toISOString()
+          await this.d1
+            .update(agentSessions)
+            .set({ contextUsageJson: pending, updatedAt })
+            .where(eq(agentSessions.id, sessionId))
+          await broadcastSessionRow(this.env, this.ctx, sessionId, 'update')
+        } catch (err) {
+          console.error(`[SessionDO:${this.ctx.id}] Failed to sync context_usage to D1:`, err)
+        }
+      })()
+    }, 5000)
   }
 
   /**
@@ -2856,7 +2925,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           this.broadcastToClients(JSON.stringify({ type: 'raw_event', event }))
         }
         this.updateState({ num_turns: this.state.num_turns + 1 })
-        this.broadcastSessionSummary()
         break
       }
 
@@ -3070,10 +3138,10 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           this.syncStatusToD1(_now)
           this.syncResultToD1(_now)
         }
-        // Push the final aggregated counters so clients update immediately
-        // at turn-complete without waiting for the next REST backfill. See
-        // `broadcastSessionSummary` preamble for the full rationale.
-        this.broadcastSessionSummary()
+        // Spec #37 B9: the legacy per-turn summary WS frame is retired —
+        // numTurns / totalCostUsd / durationMs now reach the client via the
+        // `agent_sessions` synced-collection delta emitted by syncResultToD1
+        // → broadcastSessionRow above.
         // Discovered-session fan-out is now owned by the cron in
         // src/api/scheduled.ts (#7 p6); SessionDO no longer mirrors here.
         if (!event.is_error) {
@@ -3137,7 +3205,10 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         } catch (err) {
           console.error(`[SessionDO:${this.ctx.id}] Failed to persist kata state:`, err)
         }
-        this.syncKataToD1(event.kata_state, new Date().toISOString())
+        {
+          const _now = new Date().toISOString()
+          this.syncKataAllToD1(event.kata_state, _now)
+        }
 
         // Chain UX P4: detect mode transitions on chain-linked sessions and
         // reset the runner so each mode gets a fresh SDK session context.
@@ -3196,14 +3267,18 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         this.session.appendMessage(errorMsg)
         this.broadcastMessage(errorMsg)
 
-        // Transition to idle (not failed) — session remains interactive.
-        // Terminal for the current runner: clear active_callback_token.
+        // Transition to 'error' (spec #37 B4) — session surfaces the failure; user
+        // can still resubmit to recover. Clears active_callback_token so the
+        // current runner is terminal.
         this.updateState({
-          status: 'idle',
+          status: 'error',
           error: event.error,
           active_callback_token: undefined,
         })
-        this.syncStatusToD1(new Date().toISOString())
+        {
+          const _now = new Date().toISOString()
+          this.syncStatusAndErrorToD1('error', event.error ?? null, null, _now)
+        }
         this.dispatchPush(
           {
             title: this.state.project || 'Duraclaw',
@@ -3258,6 +3333,9 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         } catch (err) {
           console.error(`[SessionDO:${this.ctx.id}] Failed to persist context_usage cache:`, err)
         }
+        // Spec #37 B5: mirror context_usage onto the D1 session row with a 5s
+        // trailing-edge debounce so sidebar / history cards track live usage.
+        this.syncContextUsageToD1(JSON.stringify(parsed))
         // Retained WS broadcast — consumer migration is a separate issue.
         this.broadcastGatewayEvent(event)
         break

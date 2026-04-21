@@ -57,9 +57,7 @@ function createdAtMs(row: CachedMessage): number {
 function sortKey(row: CachedMessage): [number, number, number] {
   const seq = row.seq ?? Number.POSITIVE_INFINITY
   const ord =
-    parseTurnOrdinal(row.canonical_turn_id) ??
-    parseTurnOrdinal(row.id) ??
-    Number.POSITIVE_INFINITY
+    parseTurnOrdinal(row.canonical_turn_id) ?? parseTurnOrdinal(row.id) ?? Number.POSITIVE_INFINITY
   return [seq, ord, createdAtMs(row)]
 }
 
