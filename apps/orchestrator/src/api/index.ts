@@ -14,6 +14,7 @@ import {
 } from '~/db/schema'
 import { validateActionToken } from '~/lib/action-token'
 import { createAuth } from '~/lib/auth'
+import { broadcastSessionRow } from '~/lib/broadcast-session'
 import { broadcastSyncedDelta } from '~/lib/broadcast-synced-delta'
 import { buildChainRowFromContext, type ChainBuildContext } from '~/lib/chains'
 import { chunkOps } from '~/lib/chunk-frame'
@@ -1637,6 +1638,8 @@ export function createApiApp() {
       await db.insert(agentSessions).values(baseRow)
     }
 
+    await broadcastSessionRow(c.env, c.executionCtx, sessionId, 'insert')
+
     return c.json({ session_id: sessionId }, 201)
   })
 
@@ -1799,6 +1802,8 @@ export function createApiApp() {
       return c.json({ error: 'Session not found' }, 404)
     }
 
+    await broadcastSessionRow(c.env, c.executionCtx, sessionId, 'update')
+
     return c.json({ session: updated[0] as AgentSessionRow })
   })
 
@@ -1892,6 +1897,9 @@ export function createApiApp() {
     }
 
     const result = (await response.json()) as { session_id: string }
+
+    await broadcastSessionRow(c.env, c.executionCtx, result.session_id, 'insert')
+
     return c.json({ session_id: result.session_id })
   })
 
