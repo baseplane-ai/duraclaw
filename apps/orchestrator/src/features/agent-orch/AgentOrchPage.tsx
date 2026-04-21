@@ -47,7 +47,6 @@ function AgentOrchContent() {
     openTabs,
     activeSessionId,
     tabProjects,
-    hydrated,
     openTab,
     closeTab,
     replaceTab,
@@ -313,18 +312,16 @@ function AgentOrchContent() {
       <Main fixed fluid className="p-0" {...swipeProps}>
         <PwaInstallBanner />
         <PushOptInBanner />
-        {hydrated && (
-          <TabBar
-            openTabs={openTabs}
-            activeSessionId={activeSessionId}
-            tabProjects={tabProjects}
-            onSelectSession={handleSelectSession}
-            onCloseTab={handleCloseTab}
-            onReorder={reorder}
-            onNewSessionInTab={handleNewSessionInTab}
-            onNewTabForProject={handleNewTabForProject}
-          />
-        )}
+        <TabBar
+          openTabs={openTabs}
+          activeSessionId={activeSessionId}
+          tabProjects={tabProjects}
+          onSelectSession={handleSelectSession}
+          onCloseTab={handleCloseTab}
+          onReorder={reorder}
+          onNewSessionInTab={handleNewSessionInTab}
+          onNewTabForProject={handleNewTabForProject}
+        />
         <div
           className={
             swipeDir === 'left'

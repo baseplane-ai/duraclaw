@@ -137,8 +137,6 @@ export interface UseTabSyncResult {
   setActive: (sessionId: string | null) => void
   /** Find an existing chain tab for an issue. Returns its sessionId or null. */
   findTabByIssue: (issueNumber: number) => string | null
-  /** True once the collection has loaded its initial data. */
-  hydrated: boolean
   /** Reorder: move the tab at fromIndex to toIndex. */
   reorder: (fromIndex: number, toIndex: number) => void
   /** User-stream WS status, mapped to the legacy shape for existing callers. */
@@ -307,7 +305,7 @@ export function useTabSync(): UseTabSyncResult {
   // generics don't perfectly match the NonSingleResult overload; see
   // use-sessions-collection.ts for the same pattern.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, isLoading } = useLiveQuery(userTabsCollection as any)
+  const { data } = useLiveQuery(userTabsCollection as any)
 
   const rows = useMemo(() => projectRows((data as UserTabRow[]) ?? []), [data])
 
@@ -573,7 +571,6 @@ export function useTabSync(): UseTabSyncResult {
     activeSessionId,
     tabProjects,
     tabEntries,
-    hydrated: !isLoading,
     openTab,
     closeTab,
     replaceTab,
