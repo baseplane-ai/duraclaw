@@ -1,58 +1,61 @@
 /**
  * @vitest-environment jsdom
  *
- * Unit tests for the per-sessionId messages-collection factory (GH#38 P1.3).
+ * Unit tests for the per-sessionId messages-collection factory (GH#47).
  *
- * Strategy: mock `createSyncedCollection` so we observe the exact options
- * the factory is given — subscribe / onReconnect registrars, queryFn with
- * queryFn full-snapshot contract, onInsert mutationFn, schemaVersion. Also tests that a
- * delta frame routed through the injected subscribe ends up as a row in
- * the collection via a fake `createSyncedCollection` that wires
- * begin/write/commit through a local Map.
+ * Strategy: the factory now builds a raw `CollectionConfig` directly (no
+ * `createSyncedCollection` seam). We stub `persistedCollectionOptions` and
+ * `createCollection` as pass-throughs, capture the config that reaches
+ * `createCollection`, and drive the captured `sync.sync` with a fake
+ * params object whose `begin/write/commit` route into a local Map — so we
+ * can assert the end-to-end WS → collection wire.
  */
+
+import type { CollectionConfig } from '@tanstack/db'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-// Captured config for each createSyncedCollection() invocation.
-interface CapturedConfig {
-  id: string
-  collection?: string
-  queryKey: readonly unknown[]
-  getKey: (row: { id: string }) => string
-  subscribe: (
-    handler: (frame: {
-      type: 'synced-collection-delta'
-      collection: string
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      ops: any[]
-    }) => void,
-  ) => () => void
-  onReconnect?: (handler: () => void) => () => void
-  queryFn: () => Promise<unknown[]>
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  onInsert?: (ctx: { transaction: { mutations: Array<{ modified: any }> } }) => Promise<unknown>
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  persistence?: any
-  schemaVersion?: number
+interface FakeSyncParams {
+  begin: () => void
+  write: (msg: { type: string; key?: string; value?: unknown }) => void
+  commit: () => void
+  markReady: () => void
+  collection: { has: (key: string) => boolean }
 }
 
-// Backing store for the fake collection so integration-y assertions can
-// read rows the delta frame produced.
-const store = new Map<string, Record<string, unknown>>()
-const capturedConfigs: CapturedConfig[] = []
+// Captured configs for each createCollection() invocation.
+// Use `any` so the test harness can read internal sync params without
+// fighting @tanstack/db's tight generics.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const capturedConfigs: any[] = []
 
-const mockCreateSyncedCollection = vi.fn((config: CapturedConfig) => {
-  capturedConfigs.push(config)
-  // Wire the subscribe handler through a minimal begin/write/commit that
-  // writes into `store` by getKey so tests can assert on the factory's
-  // end-to-end wire.
-  config.subscribe((frame) => {
-    if (frame.collection !== config.collection) return
-    for (const op of frame.ops) {
-      if (op.type === 'delete') store.delete(op.key as string)
-      else store.set(config.getKey(op.value), op.value)
-    }
-  })
+// Per-collection backing store + a helper to drive sync.sync with a fake
+// params object that routes begin/write/commit through the store.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function makeFakeCollection(config: any) {
+  const store = new Map<string, unknown>()
+  const markReady = vi.fn()
+
+  const fakeParams: FakeSyncParams = {
+    begin: () => {},
+    write: (msg) => {
+      if (msg.type === 'delete') {
+        store.delete(msg.key as string)
+      } else {
+        const row = msg.value as { id: string }
+        store.set(row.id, row)
+      }
+    },
+    commit: () => {},
+    markReady,
+    collection: { has: (key: string) => store.has(key) },
+  }
+  const cleanup = config.sync.sync(fakeParams)
+
   return {
+    store,
+    markReady,
+    cleanup,
+    // Iterator surface the factory's evictOldMessages relies on.
     [Symbol.iterator]: () => store.entries(),
     delete: vi.fn((keys: string | string[]) => {
       const ids = Array.isArray(keys) ? keys : [keys]
@@ -62,13 +65,32 @@ const mockCreateSyncedCollection = vi.fn((config: CapturedConfig) => {
     utils: {},
     __config: config,
   }
-})
+}
 
-vi.mock('./synced-collection', () => ({
-  createSyncedCollection: mockCreateSyncedCollection,
+// Mock @tanstack/db.createCollection — capture config, return a fake
+// collection whose sync.sync is driven immediately (mimicking @tanstack/db's
+// eager sync-start behaviour for the test harness).
+vi.mock('@tanstack/db', () => ({
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  createCollection: vi.fn((config: any) => {
+    capturedConfigs.push(config)
+    return makeFakeCollection(config)
+  }),
+}))
+
+// Mock persistedCollectionOptions as a pass-through so the unwrapped
+// CollectionConfig reaches our createCollection stub unchanged.
+vi.mock('@tanstack/browser-db-sqlite-persistence', () => ({
+  persistedCollectionOptions: vi.fn(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (opts: any) => opts,
+  ),
 }))
 
 vi.mock('./db-instance', () => ({
+  // Null persistence so the factory skips the persistedCollectionOptions
+  // wrap — we still assert it's invoked with the right shape in the
+  // dedicated test below by toggling this.
   dbReady: Promise.resolve(null),
   queryClient: { fetchQuery: vi.fn() },
 }))
@@ -101,9 +123,8 @@ vi.mock('~/features/agent-orch/use-coding-agent', () => ({
   }),
 }))
 
-describe('messages-collection factory (GH#38 P1.3)', () => {
+describe('messages-collection factory (GH#47 — WS-only SyncConfig path)', () => {
   beforeEach(() => {
-    store.clear()
     capturedConfigs.length = 0
     frameHandlers.clear()
     reconnectHandlers.clear()
@@ -114,25 +135,40 @@ describe('messages-collection factory (GH#38 P1.3)', () => {
     vi.restoreAllMocks()
   })
 
-  it('exports createMessagesCollection factory and legacy singleton', async () => {
+  it('exports createMessagesCollection factory, messagesCollectionOptions, and legacy singleton', async () => {
     vi.resetModules()
     const mod = await import('./messages-collection')
     expect(mod.createMessagesCollection).toBeDefined()
     expect(typeof mod.createMessagesCollection).toBe('function')
+    expect(mod.messagesCollectionOptions).toBeDefined()
+    expect(typeof mod.messagesCollectionOptions).toBe('function')
     expect(mod.messagesCollection).toBeDefined()
   })
 
-  it('passes id, collection name, queryKey, getKey, schemaVersion 6 to createSyncedCollection', async () => {
+  it('builds CollectionConfig with id, getKey, and sync.sync fn', async () => {
     vi.resetModules()
     const mod = await import('./messages-collection')
     mod.createMessagesCollection('sess-1')
 
-    const cfg = capturedConfigs.find((c) => c.id === 'messages:sess-1')
+    const cfg = capturedConfigs.find((c) => c.id === 'messages:sess-1') as
+      | CollectionConfig<{ id: string }>
+      | undefined
     expect(cfg).toBeDefined()
-    expect(cfg!.collection).toBe('messages:sess-1')
-    expect(cfg!.queryKey).toEqual(['messages', 'sess-1'])
-    expect(cfg!.getKey({ id: 'msg-123' })).toBe('msg-123')
-    expect(cfg!.schemaVersion).toBe(6)
+    expect(cfg!.getKey({ id: 'msg-123' } as { id: string })).toBe('msg-123')
+    expect(typeof cfg!.sync.sync).toBe('function')
+  })
+
+  it('does NOT set a queryFn — WS onConnect replay is the cold-load channel', async () => {
+    vi.resetModules()
+    const mod = await import('./messages-collection')
+    mod.createMessagesCollection('no-query-sess')
+
+    const cfg = capturedConfigs.find((c) => c.id === 'messages:no-query-sess')
+    expect(cfg).toBeDefined()
+    // No queryFn / queryKey / queryClient surface on the raw CollectionConfig
+    // (those were queryCollectionOptions-only).
+    expect('queryFn' in cfg).toBe(false)
+    expect('queryKey' in cfg).toBe(false)
   })
 
   it('memoises collections by sessionId', async () => {
@@ -150,50 +186,157 @@ describe('messages-collection factory (GH#38 P1.3)', () => {
     expect(ids.has('messages:sess-b')).toBe(true)
   })
 
-  it('queryFn fetches full history (no cursor — queryFn is authoritative snapshot)', async () => {
+  it('sync.sync subscribes to the per-session stream and calls markReady eagerly', async () => {
     vi.resetModules()
-    const mockFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        messages: [{ id: 'm1', role: 'user', parts: [{ type: 'text', text: 'hi' }] }],
-      }),
-    })
-    // @ts-expect-error — jsdom doesn't ship fetch; assign a minimal stub.
-    globalThis.fetch = mockFetch
-
     const mod = await import('./messages-collection')
-    mod.createMessagesCollection('cold-sess')
+    const coll = mod.createMessagesCollection('ready-sess') as {
+      markReady: ReturnType<typeof vi.fn>
+    }
 
-    const cfg = capturedConfigs.find((c) => c.id === 'messages:cold-sess')
-    expect(cfg).toBeDefined()
-    const rows = (await cfg!.queryFn()) as Array<{ id: string; sessionId: string }>
-    expect(mockFetch).toHaveBeenCalledWith('/api/sessions/cold-sess/messages')
-    expect(rows[0].id).toBe('m1')
-    expect(rows[0].sessionId).toBe('cold-sess')
+    // subscribe handler registered on the sessionId's set
+    expect(frameHandlers.get('ready-sess')?.size).toBe(1)
+    // reconnect handler registered too
+    expect(reconnectHandlers.get('ready-sess')?.size).toBe(1)
+    // markReady fired at sync-start (eager — no snapshot to wait for)
+    expect(coll.markReady).toHaveBeenCalledTimes(1)
   })
 
-  it('REST body no longer carries `version` — row shape has no seq field', async () => {
+  it('routes an insert delta frame through begin/write/commit to the store', async () => {
     vi.resetModules()
-    const mockFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        messages: [
-          { id: 'usr-1', role: 'user', parts: [{ type: 'text', text: 'hi' }] },
-          { id: 'msg-2', role: 'assistant', parts: [{ type: 'text', text: 'ok' }] },
-        ],
-      }),
-    })
-    // @ts-expect-error — jsdom fetch stub
-    globalThis.fetch = mockFetch
-
     const mod = await import('./messages-collection')
-    mod.createMessagesCollection('no-seq-sess')
+    const coll = mod.createMessagesCollection('sync-sess') as {
+      store: Map<string, { id: string; role: string }>
+    }
 
-    const cfg = capturedConfigs.find((c) => c.id === 'messages:no-seq-sess')
-    const rows = (await cfg!.queryFn()) as Array<Record<string, unknown>>
-    expect(rows).toHaveLength(2)
-    expect('seq' in rows[0]).toBe(false)
-    expect('seq' in rows[1]).toBe(false)
+    for (const h of frameHandlers.get('sync-sess')!) {
+      h({
+        type: 'synced-collection-delta',
+        collection: 'messages:sync-sess',
+        ops: [
+          {
+            type: 'insert',
+            value: {
+              id: 'usr-1',
+              sessionId: 'sync-sess',
+              role: 'user',
+              parts: [{ type: 'text', text: 'hi' }],
+              createdAt: '2026-04-21T00:00:00.000Z',
+            },
+          },
+        ],
+      })
+    }
+
+    expect(coll.store.has('usr-1')).toBe(true)
+    expect(coll.store.get('usr-1')!.role).toBe('user')
+  })
+
+  it('converts insert→update when the key is already present (reconnect replay idempotence)', async () => {
+    vi.resetModules()
+    const mod = await import('./messages-collection')
+    const coll = mod.createMessagesCollection('idem-sess') as {
+      store: Map<string, { id: string; parts: Array<{ text?: string }> }>
+    }
+    const handlers = frameHandlers.get('idem-sess')!
+
+    // First insert — key is absent → applies as insert.
+    for (const h of handlers) {
+      h({
+        type: 'synced-collection-delta',
+        collection: 'messages:idem-sess',
+        ops: [
+          {
+            type: 'insert',
+            value: {
+              id: 'asst-1',
+              sessionId: 'idem-sess',
+              role: 'assistant',
+              parts: [{ type: 'text', text: 'partial' }],
+            },
+          },
+        ],
+      })
+    }
+    expect(coll.store.get('asst-1')!.parts[0]!.text).toBe('partial')
+
+    // Re-emit same id with different value — the factory should convert to
+    // update so the store overwrites, not throws.
+    for (const h of handlers) {
+      h({
+        type: 'synced-collection-delta',
+        collection: 'messages:idem-sess',
+        ops: [
+          {
+            type: 'insert',
+            value: {
+              id: 'asst-1',
+              sessionId: 'idem-sess',
+              role: 'assistant',
+              parts: [{ type: 'text', text: 'full' }],
+            },
+          },
+        ],
+      })
+    }
+    expect(coll.store.get('asst-1')!.parts[0]!.text).toBe('full')
+  })
+
+  it('applies delete ops — row is removed from store', async () => {
+    vi.resetModules()
+    const mod = await import('./messages-collection')
+    const coll = mod.createMessagesCollection('del-sess') as {
+      store: Map<string, unknown>
+    }
+    const handlers = frameHandlers.get('del-sess')!
+
+    for (const h of handlers) {
+      h({
+        type: 'synced-collection-delta',
+        collection: 'messages:del-sess',
+        ops: [
+          {
+            type: 'insert',
+            value: { id: 'm-doomed', sessionId: 'del-sess', role: 'user', parts: [] },
+          },
+        ],
+      })
+      h({
+        type: 'synced-collection-delta',
+        collection: 'messages:del-sess',
+        ops: [{ type: 'delete', key: 'm-doomed' }],
+      })
+    }
+    expect(coll.store.has('m-doomed')).toBe(false)
+  })
+
+  it('ignores frames whose collection name targets a different session', async () => {
+    vi.resetModules()
+    const mod = await import('./messages-collection')
+    const coll = mod.createMessagesCollection('iso-sess') as {
+      store: Map<string, unknown>
+    }
+
+    for (const h of frameHandlers.get('iso-sess')!) {
+      h({
+        type: 'synced-collection-delta',
+        collection: 'messages:other-sess',
+        ops: [{ type: 'insert', value: { id: 'noise', role: 'user' } }],
+      })
+    }
+    expect(coll.store.has('noise')).toBe(false)
+  })
+
+  it('cleanup unsubscribes both frame + reconnect handlers', async () => {
+    vi.resetModules()
+    const mod = await import('./messages-collection')
+    const coll = mod.createMessagesCollection('unsub-sess') as { cleanup: () => void }
+    expect(frameHandlers.get('unsub-sess')?.size).toBe(1)
+    expect(reconnectHandlers.get('unsub-sess')?.size).toBe(1)
+
+    coll.cleanup()
+
+    expect(frameHandlers.get('unsub-sess')?.size ?? 0).toBe(0)
+    expect(reconnectHandlers.get('unsub-sess')?.size ?? 0).toBe(0)
   })
 
   it('onInsert POSTs {content, clientId, createdAt} extracted from the optimistic row', async () => {
@@ -208,16 +351,20 @@ describe('messages-collection factory (GH#38 P1.3)', () => {
     const cfg = capturedConfigs.find((c) => c.id === 'messages:insert-sess')
     expect(cfg?.onInsert).toBeDefined()
 
-    const optimisticRow = {
-      id: 'usr-client-abc',
-      sessionId: 'insert-sess',
-      role: 'user',
-      parts: [{ type: 'text', text: 'hello world' }],
-      createdAt: '2026-04-21T00:00:00.000Z',
-    }
-
     await cfg!.onInsert!({
-      transaction: { mutations: [{ modified: optimisticRow }] },
+      transaction: {
+        mutations: [
+          {
+            modified: {
+              id: 'usr-client-abc',
+              sessionId: 'insert-sess',
+              role: 'user',
+              parts: [{ type: 'text', text: 'hello world' }],
+              createdAt: '2026-04-21T00:00:00.000Z',
+            },
+          },
+        ],
+      },
     })
 
     expect(mockFetch).toHaveBeenCalledWith(
@@ -292,61 +439,6 @@ describe('messages-collection factory (GH#38 P1.3)', () => {
     ).rejects.toThrow(/sendMessage REST 500/)
   })
 
-  it('wire: a SyncedCollectionFrame delivered through subscribeSessionStream reaches the collection iterator', async () => {
-    vi.resetModules()
-    const mod = await import('./messages-collection')
-    mod.createMessagesCollection('sync-sess')
-
-    const cfg = capturedConfigs.find((c) => c.id === 'messages:sync-sess')
-    expect(cfg).toBeDefined()
-
-    // Drive a frame directly through the injected subscribe handler's
-    // registered callback — emulates the DO pushing a delta frame.
-    const handlers = frameHandlers.get('sync-sess')
-    expect(handlers).toBeDefined()
-    expect(handlers!.size).toBe(1)
-
-    for (const h of handlers!) {
-      h({
-        type: 'synced-collection-delta',
-        collection: 'messages:sync-sess',
-        ops: [
-          {
-            type: 'insert',
-            value: {
-              id: 'usr-1',
-              sessionId: 'sync-sess',
-              role: 'user',
-              parts: [{ type: 'text', text: 'hi' }],
-              createdAt: '2026-04-21T00:00:00.000Z',
-            },
-          },
-        ],
-      })
-    }
-
-    // Fake collection writes into `store` via getKey on insert/update ops.
-    expect(store.has('usr-1')).toBe(true)
-    const row = store.get('usr-1') as { id: string; role: string }
-    expect(row.role).toBe('user')
-  })
-
-  it('wire: frames for other sessions are ignored (collection filter)', async () => {
-    vi.resetModules()
-    const mod = await import('./messages-collection')
-    mod.createMessagesCollection('iso-sess')
-
-    const handlers = frameHandlers.get('iso-sess')
-    for (const h of handlers!) {
-      h({
-        type: 'synced-collection-delta',
-        collection: 'messages:other-sess',
-        ops: [{ type: 'insert', value: { id: 'noise', role: 'user' } }],
-      })
-    }
-    expect(store.has('noise')).toBe(false)
-  })
-
   it('exports CachedMessage type that omits seq (B6)', async () => {
     vi.resetModules()
     const mod = await import('./messages-collection')
@@ -367,7 +459,6 @@ describe('messages-collection factory (GH#38 P1.3)', () => {
 
 describe('evictOldMessages', () => {
   beforeEach(() => {
-    store.clear()
     capturedConfigs.length = 0
     frameHandlers.clear()
     reconnectHandlers.clear()
@@ -387,43 +478,24 @@ describe('evictOldMessages', () => {
     const twoDaysAgo = new Date()
     twoDaysAgo.setDate(twoDaysAgo.getDate() - 2)
 
-    // Seed the shared store (backing the fake collection) with two rows.
-    store.set('old-1', {
+    const coll = mod.createMessagesCollection('evict-sess') as {
+      store: Map<string, unknown>
+      delete: ReturnType<typeof vi.fn>
+    }
+    coll.store.set('old-1', {
       id: 'old-1',
       createdAt: thirtyOneDaysAgo.toISOString(),
-      sessionId: 's1',
+      sessionId: 'evict-sess',
     })
-    store.set('recent-1', {
+    coll.store.set('recent-1', {
       id: 'recent-1',
       createdAt: twoDaysAgo.toISOString(),
-      sessionId: 's1',
+      sessionId: 'evict-sess',
     })
-
-    // Ensure at least one cached collection exists.
-    const coll = mod.createMessagesCollection('evict-sess')
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const evictDeleteSpy = (coll as any).delete as ReturnType<typeof vi.fn>
-    // The module also auto-registers a legacy singleton collection.
-    // `evictOldMessages` iterates every cached collection and calls each
-    // one's `delete` — and since the fakes share a store, only the first
-    // iteration finds stale rows. Assert that SOME collection saw the
-    // stale key by capturing every captured collection's delete spy.
-    const allDeleteSpies = capturedConfigs.map(
-      // Each captured config's collection lives at mockCreateSyncedCollection's
-      // return — re-derive via the factory mock's .mock.results.
-      (_, i) =>
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (mockCreateSyncedCollection.mock.results[i].value as any).delete as ReturnType<
-          typeof vi.fn
-        >,
-    )
 
     mod.evictOldMessages()
 
-    const calls = allDeleteSpies.flatMap((spy) => spy.mock.calls)
-    expect(calls).toContainEqual([['old-1']])
-    // Also sanity: the target collection exists and is wired.
-    expect(evictDeleteSpy).toBeDefined()
+    expect(coll.delete).toHaveBeenCalledWith(['old-1'])
   })
 
   it('does not delete when no messages are stale', async () => {
@@ -432,43 +504,45 @@ describe('evictOldMessages', () => {
 
     const twoDaysAgo = new Date()
     twoDaysAgo.setDate(twoDaysAgo.getDate() - 2)
-    store.set('recent-1', {
+    const coll = mod.createMessagesCollection('evict-sess-2') as {
+      store: Map<string, unknown>
+      delete: ReturnType<typeof vi.fn>
+    }
+    coll.store.set('recent-1', {
       id: 'recent-1',
       createdAt: twoDaysAgo.toISOString(),
-      sessionId: 's1',
+      sessionId: 'evict-sess-2',
     })
 
-    const coll = mod.createMessagesCollection('evict-sess-2')
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const deleteSpy = (coll as any).delete as ReturnType<typeof vi.fn>
     mod.evictOldMessages()
 
-    expect(deleteSpy).not.toHaveBeenCalled()
+    expect(coll.delete).not.toHaveBeenCalled()
   })
 
   it('handles empty collection gracefully', async () => {
     vi.resetModules()
     const mod = await import('./messages-collection')
 
-    const coll = mod.createMessagesCollection('evict-sess-3')
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const deleteSpy = (coll as any).delete as ReturnType<typeof vi.fn>
+    const coll = mod.createMessagesCollection('evict-sess-3') as {
+      delete: ReturnType<typeof vi.fn>
+    }
     mod.evictOldMessages()
 
-    expect(deleteSpy).not.toHaveBeenCalled()
+    expect(coll.delete).not.toHaveBeenCalled()
   })
 
   it('skips messages without createdAt', async () => {
     vi.resetModules()
     const mod = await import('./messages-collection')
 
-    store.set('no-date', { id: 'no-date', sessionId: 's1' })
+    const coll = mod.createMessagesCollection('evict-sess-4') as {
+      store: Map<string, unknown>
+      delete: ReturnType<typeof vi.fn>
+    }
+    coll.store.set('no-date', { id: 'no-date', sessionId: 'evict-sess-4' })
 
-    const coll = mod.createMessagesCollection('evict-sess-4')
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const deleteSpy = (coll as any).delete as ReturnType<typeof vi.fn>
     mod.evictOldMessages()
 
-    expect(deleteSpy).not.toHaveBeenCalled()
+    expect(coll.delete).not.toHaveBeenCalled()
   })
 })

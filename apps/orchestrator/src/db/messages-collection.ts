@@ -1,50 +1,51 @@
 /**
- * Messages collection factory — per-sessionId collections backed by
- * `GET /api/sessions/:id/messages` and persisted to OPFS SQLite.
+ * Messages collection factory — per-sessionId collections driven by the
+ * session WS (GH#47).
  *
- * Built on `createSyncedCollection` (GH#38 P1.3) so WS-pushed
- * `{type:'synced-collection-delta', collection:'messages:<sessionId>'}`
- * frames drive begin/write/commit on the synced layer, and
- * `onSessionStreamReconnect` re-invalidates the queryKey on WS
- * drop+resume — the factory handles both paths.
+ * Historically built on `@tanstack/query-db-collection`'s
+ * `queryCollectionOptions`, which treats `queryFn` as an authoritative
+ * snapshot — fundamentally incompatible with cursor-based incremental
+ * fetching, and redundant with the DO's onConnect replay. This module now
+ * follows the TanStack DB "collection-options-creator" pattern: build a
+ * `CollectionConfig` directly whose `sync.sync` subscribes to the
+ * per-session WS stream and applies `synced-collection-delta` frames
+ * through `begin / write / commit`.
  *
- * - Collection id / wire collection: `messages:<sessionId>` (one collection
- *   per SessionDO tab).
- * - Persisted to OPFS SQLite. `schemaVersion: 6` (bumped from 5) so pre-
- *   migration cache rows stamped with the dead `seq` field are dropped on
- *   first load after deploy (B12).
- * - queryFn contract: returns the FULL history for the session. Per TanStack
- *   DB docs the queryFn result is treated as complete state — any
- *   previously-owned row missing from the response is deleted by
- *   `applySuccessfulResult`. A cursor-based partial response therefore
- *   wipes the rest of the transcript, so we always return the full list
- *   here. The framework's `syncMode: 'on-demand'` + `parseLoadSubsetOptions`
- *   is the supported path for incremental loading; we don't need it yet.
+ * - Cold load: `SessionDO.onConnect` replays `session.getHistory()` as a
+ *   `{type:'insert'}` burst on the new client connection — no REST
+ *   round-trip. The persisted OPFS cache (via `persistedCollectionOptions`)
+ *   is the authoritative pre-WS view.
+ * - Reconnect: free resume. WS reopens → DO re-emits history; TanStack
+ *   DB's insert→update auto-conversion (61e8b57) keeps idempotent.
  * - Optimistic user turns: `onInsert` POSTs `/api/sessions/:id/messages`
- *   with `{content, clientId, createdAt}`. The server adopts the client
- *   `clientId` as the row's primary id and the client `createdAt`
- *   verbatim so loopback deepEquals reconciles the echo in-place (B7/B14).
- *   The factory handler only forwards plain-text user turns; image/
- *   ContentBlock sends stay on the legacy `connection.call('sendMessage')`
- *   RPC path in `use-coding-agent.ts`. createSyncedCollection forces
- *   `{refetch: false}` on every handler — WS delta frames are the sole
- *   live-update channel, so the framework's post-mutation auto-refetch is
- *   redundant and in combination with a cursor-based queryFn was the
- *   "entire message chain disappears on send" failure mode.
+ *   with `{content, clientId, createdAt}` — unchanged. The server adopts
+ *   the `clientId` as the row's primary id so the WS echo reconciles in
+ *   place via TanStack DB deepEquals.
+ * - `markReady()` fires eagerly at sync-start: there is no snapshot to
+ *   wait for, and the WS onConnect burst (if any) is delivered shortly
+ *   after. Empty-history sessions are ready immediately rather than
+ *   hanging on a frame that never arrives.
  *
- * The factory memoises per-sessionId so repeat calls with the same key
- * return the same Collection instance. `evictOldMessages` iterates every
- * cached collection.
+ * Memoised per-sessionId so repeat `createMessagesCollection(id)` calls
+ * return a stable Collection instance (required for `useLiveQuery`
+ * identity stability). `evictOldMessages` iterates every cached
+ * collection.
+ *
+ * Schema version stays at 6 — the row shape on the wire is unchanged
+ * from the pre-migration collection.
  */
 
+import type { SyncedCollectionFrame } from '@duraclaw/shared-types'
+import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence'
+import type { CollectionConfig, SyncConfig } from '@tanstack/db'
+import { createCollection } from '@tanstack/db'
 import {
   onSessionStreamReconnect,
   subscribeSessionStream,
 } from '~/features/agent-orch/use-coding-agent'
 import { apiUrl } from '~/lib/platform'
-import type { SessionMessage, SessionMessagePart } from '~/lib/types'
+import type { SessionMessagePart } from '~/lib/types'
 import { dbReady } from './db-instance'
-import { createSyncedCollection } from './synced-collection'
 
 /** Message stored in the local cache with session context. */
 export interface CachedMessage {
@@ -70,60 +71,73 @@ const persistence = await dbReady
 /** Memoise per-sessionId so useMemo(() => createMessagesCollection(id)) is stable. */
 const collectionsBySession = new Map<string, MessagesCollection>()
 
-/** Map a server SessionMessage → cached row stamped with the session key. */
-function toCachedMessage(msg: SessionMessage, sessionId: string): CachedMessage {
-  const canonical = (msg as { canonical_turn_id?: string }).canonical_turn_id
-  return {
-    id: msg.id,
-    sessionId,
-    role: msg.role,
-    parts: msg.parts,
-    createdAt: msg.createdAt,
-    ...(canonical ? { canonical_turn_id: canonical } : {}),
-  }
-}
-
 /**
- * Get-or-create a messages collection for the given `sessionId`.
- *
- * Reads from `GET /api/sessions/:id/messages` on cold-start (empty
- * collection → no cursor params → full history) and on reconnect
- * (derives `sinceCreatedAt`+`sinceId` cursor from the max row). WS
- * delta frames drive live updates through the synced factory's
- * `begin/write/commit` path.
+ * Build the raw `CollectionConfig` for a messages collection keyed on
+ * `sessionId`. Exposed as a separate fn for testing — the factory below
+ * composes this with `persistedCollectionOptions` + `createCollection`.
  */
-export function createMessagesCollection(sessionId: string): MessagesCollection {
-  const cached = collectionsBySession.get(sessionId)
-  if (cached) return cached
+export function messagesCollectionOptions(sessionId: string): CollectionConfig<CachedMessage> {
+  const collectionName = `messages:${sessionId}`
 
-  const collection = createSyncedCollection<CachedMessage, string>({
-    id: `messages:${sessionId}`,
-    collection: `messages:${sessionId}`,
-    queryKey: ['messages', sessionId] as const,
+  const sync: SyncConfig<CachedMessage>['sync'] = (params) => {
+    const { begin, write, commit, markReady, collection } = params
+
+    const unsubFrame = subscribeSessionStream(
+      sessionId,
+      (frame: SyncedCollectionFrame<unknown>) => {
+        if (frame.collection !== collectionName) return
+        begin()
+        for (const op of frame.ops) {
+          if (op.type === 'delete') {
+            // `value` is required at the type level; runtime ignores it on delete.
+            write({ type: 'delete', key: op.key, value: undefined as never })
+            continue
+          }
+          // TanStack DB's sync layer auto-converts `insert` → `update` when
+          // `deepEquals(existingValue, newValue)` holds; on mismatch it
+          // throws DuplicateKeySyncError and aborts the rest of the frame.
+          // Our wire protocol is upsert-by-key — streaming `partial_assistant`
+          // turns re-emit the same row with growing text, and `onConnect`
+          // re-sends persisted rows the OPFS cache already has with slightly
+          // different values. Convert to `update` whenever the key is already
+          // in the collection so writes stay idempotent.
+          const row = op.value as CachedMessage
+          const hasFn = collection?.has as ((key: string) => boolean) | undefined
+          const alreadyPresent =
+            op.type === 'insert' && typeof hasFn === 'function' && hasFn.call(collection, row.id)
+          write({ type: alreadyPresent ? 'update' : op.type, value: row })
+        }
+        commit()
+      },
+    )
+
+    // Reconnect is a no-op: the DO's onConnect replays `getHistory()` as a
+    // fresh insert burst on every new WS connection. The insert→update
+    // auto-conversion above absorbs the overlap.
+    const unsubReconnect = onSessionStreamReconnect(sessionId, () => {})
+
+    // No initial snapshot to wait for — WS delta frames (cold onConnect burst
+    // + live deltas) are the sole sync channel. Mark ready eagerly so
+    // consumers (useLiveQuery, optimistic mutations) aren't gated on WS
+    // state, and empty-history sessions don't hang on a frame that never
+    // arrives.
+    markReady()
+
+    return () => {
+      unsubFrame()
+      unsubReconnect()
+    }
+  }
+
+  return {
+    id: collectionName,
     getKey: (row) => row.id,
-    subscribe: (handler) => subscribeSessionStream(sessionId, handler),
-    onReconnect: (handler) => onSessionStreamReconnect(sessionId, handler),
-    queryFn: async () => {
-      // Full-history fetch. Per TanStack DB docs the queryFn result IS the
-      // authoritative snapshot — a partial response would cause
-      // `applySuccessfulResult` to delete every previously-owned row not in
-      // the response. Return the complete list and let WS delta frames
-      // handle incremental live updates.
-      const resp = await fetch(apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/messages`))
-      if (!resp.ok) {
-        throw new Error(`getMessages failed: ${resp.status}`)
-      }
-      const body = (await resp.json()) as { messages: SessionMessage[] }
-      return (body.messages ?? []).map((m) => toCachedMessage(m, sessionId))
-    },
+    sync: { sync },
     onInsert: async ({ transaction }) => {
-      // The factory's onInsert only handles string-content user turns
-      // forwarded from `messagesCollection.insert(...)` in
-      // `use-coding-agent.ts` → `sendMessage` / `submitDraft`. Image /
-      // ContentBlock sends stay on the legacy RPC path and never reach
-      // this handler. We extract the flat text from the first text part
-      // (the pre-computed parts-from-content transform is symmetric with
-      // the server's — see B7/B14).
+      // Only string-content user turns forwarded from `messagesCollection.insert(...)`
+      // in `use-coding-agent.ts` → `sendMessage` / `submitDraft` reach this
+      // handler. Image / ContentBlock sends stay on the legacy RPC path
+      // (`connection.call('sendMessage')`) and bypass this mutation channel.
       const row = transaction.mutations[0].modified as CachedMessage & { content?: string }
       const textPart = row.parts.find((p) => p.type === 'text') as
         | { type: 'text'; text: string }
@@ -145,12 +159,31 @@ export function createMessagesCollection(sessionId: string): MessagesCollection 
       if (resp.status === 409) return
       if (!resp.ok) throw new Error(`sendMessage REST ${resp.status}`)
     },
-    persistence: persistence ?? null,
-    // B12: bump from 5 → 6 so pre-migration OPFS caches carrying the dead
-    // `seq` field are dropped on first load after deploy.
-    schemaVersion: 6,
-  })
+  }
+}
 
+/**
+ * Get-or-create a messages collection for the given `sessionId`.
+ *
+ * WS-driven sync: no REST `queryFn`. Cold load is served from the OPFS
+ * persisted cache; the DO's onConnect replay populates a fresh collection
+ * on first WS attach.
+ */
+export function createMessagesCollection(sessionId: string): MessagesCollection {
+  const cached = collectionsBySession.get(sessionId)
+  if (cached) return cached
+
+  const options = messagesCollectionOptions(sessionId)
+  const wrapped = persistence
+    ? persistedCollectionOptions({
+        ...options,
+        persistence,
+        schemaVersion: 6,
+      })
+    : options
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const collection = createCollection(wrapped as any)
   collectionsBySession.set(sessionId, collection)
   return collection
 }
