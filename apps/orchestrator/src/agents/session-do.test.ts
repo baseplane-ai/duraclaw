@@ -232,9 +232,9 @@ describe('SESSION_DO_MIGRATIONS', () => {
   })
 
   describe('migration chain integrity', () => {
-    it('has sequential version numbers from 1 to 8', () => {
+    it('has sequential version numbers from 1 to 9', () => {
       const versions = SESSION_DO_MIGRATIONS.map((m) => m.version)
-      expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8])
+      expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
     })
 
     it('all migrations have descriptions', () => {
@@ -2269,7 +2269,17 @@ describe('POST /messages ingest (GH#38 P1.2)', () => {
   function postMessagesHandler(
     body: Record<string, unknown>,
     state: { existingIds: Set<string>; persistedRows: Array<Record<string, unknown>> },
+    headers: Record<string, string> = {},
   ): { status: number; body: any } {
+    // Mirror of the production body-size gate: reject Content-Length > 64 KiB
+    // with 413 before parsing. Protects the DO from a malicious multi-GB POST.
+    const cl = headers['content-length']
+    if (cl !== undefined) {
+      const bytes = Number(cl)
+      if (Number.isFinite(bytes) && bytes > 64 * 1024) {
+        return { status: 413, body: { error: 'payload too large' } }
+      }
+    }
     if (typeof body.content !== 'string' || body.content.length === 0) {
       return { status: 400, body: { error: 'content must be a non-empty string' } }
     }
@@ -2398,6 +2408,33 @@ describe('POST /messages ingest (GH#38 P1.2)', () => {
       newState(),
     )
     expect(res.status).toBe(400)
+  })
+
+  it('rejects body > 64 KiB with 413', () => {
+    const res = postMessagesHandler(
+      {
+        content: 'hi',
+        clientId: 'usr-client-abc',
+        createdAt: '2026-04-21T00:00:00.000Z',
+      },
+      newState(),
+      { 'content-length': String(64 * 1024 + 1) },
+    )
+    expect(res.status).toBe(413)
+    expect(res.body).toEqual({ error: 'payload too large' })
+  })
+
+  it('accepts body exactly at 64 KiB ceiling', () => {
+    const res = postMessagesHandler(
+      {
+        content: 'hi',
+        clientId: 'usr-client-edge',
+        createdAt: '2026-04-21T00:00:00.000Z',
+      },
+      newState(),
+      { 'content-length': String(64 * 1024) },
+    )
+    expect(res.status).toBe(200)
   })
 
   it('valid clientId variants: uuid-style + short hash both accepted', () => {

@@ -327,6 +327,11 @@ export class SessionDO extends Agent<Env, SessionMeta> {
               { status: 400, headers: { 'Content-Type': 'application/json' } },
             )
           }
+          // Keyset-paginated cursor query. Uses the composite index
+          // idx_assistant_messages_session_created_id created by session-do
+          // migration v9 (CREATE INDEX IF NOT EXISTS on the SDK-owned
+          // assistant_messages table) so the `(session_id, created_at, id)`
+          // predicate + ORDER BY is index-seek, not a table-scan.
           const rows = this.sql<{ content: string }>`
             SELECT content FROM assistant_messages
             WHERE session_id = ${this.name}
@@ -367,6 +372,20 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     // retries short-circuit server-side.
     if (request.method === 'POST' && url.pathname === '/messages') {
       try {
+        // Gate body size before parsing — a malicious client could POST a
+        // multi-GB body that the DO must fully parse before any validation
+        // fires. 64 KiB is ample for message content; long-form pastes
+        // should use attachments, not the POST body.
+        const cl = request.headers.get('content-length')
+        if (cl !== null) {
+          const bytes = Number(cl)
+          if (Number.isFinite(bytes) && bytes > 64 * 1024) {
+            return new Response(JSON.stringify({ error: 'payload too large' }), {
+              status: 413,
+              headers: { 'Content-Type': 'application/json' },
+            })
+          }
+        }
         const body = (await request.json()) as {
           content?: unknown
           clientId?: unknown
