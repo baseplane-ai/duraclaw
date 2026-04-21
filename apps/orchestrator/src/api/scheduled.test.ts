@@ -138,4 +138,70 @@ describe('scheduled cron handler', () => {
     // Update (not insert) is called for each session with sdk_session_id
     expect(fakeDb.db.update).toHaveBeenCalledTimes(2)
   })
+
+  // Regression: dormant/terminal snapshots arrive with `last_activity_ts: null`.
+  // The cron must NOT overwrite the column with `now` in that case — doing so
+  // bulk-bumps every matching row to the tick time and scrambles sidebar
+  // ordering by last_activity. See:
+  //   - root cause: apps/orchestrator/src/api/scheduled.ts:112 (pre-fix)
+  //   - symptom: prod showed 28+ old sessions all stamped at the same
+  //     tick, pushing genuinely-recent sessions down the list.
+  it('omits lastActivity from the UPDATE when gateway reports null', async () => {
+    // Capture the payload passed to `.set(...)` on each update chain.
+    const setPayloads: Record<string, unknown>[] = []
+    const originalUpdate = fakeDb.db.update
+    fakeDb.db.update = vi.fn((...updateArgs: unknown[]) => {
+      const chain = originalUpdate(...updateArgs)
+      return new Proxy(chain, {
+        get(target, prop) {
+          if (prop === 'set') {
+            return (payload: Record<string, unknown>) => {
+              setPayloads.push(payload)
+              return (target as any).set(payload)
+            }
+          }
+          return (target as any)[prop]
+        },
+      })
+    }) as typeof originalUpdate
+
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          ok: true,
+          sessions: [
+            {
+              session_id: 'gw-live',
+              state: 'running',
+              sdk_session_id: 'sdk-live',
+              last_activity_ts: 1700000000000,
+              last_event_seq: 42,
+              cost: { input_tokens: 1, output_tokens: 2, usd: 0.01 },
+              model: 'claude',
+              turn_count: 1,
+            },
+            {
+              session_id: 'gw-dormant',
+              state: 'completed',
+              sdk_session_id: 'sdk-dormant',
+              last_activity_ts: null,
+              last_event_seq: 0,
+              cost: { input_tokens: 0, output_tokens: 0, usd: 0 },
+              model: null,
+              turn_count: 0,
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    )
+    await scheduled(dummyEvent, makeEnv(), dummyCtx)
+    expect(setPayloads).toHaveLength(2)
+    // Live snapshot → ISO timestamp written.
+    expect(setPayloads[0]).toMatchObject({
+      lastActivity: new Date(1700000000000).toISOString(),
+    })
+    // Dormant snapshot → lastActivity omitted (undefined, so drizzle skips the column).
+    expect(setPayloads[1].lastActivity).toBeUndefined()
+  })
 })

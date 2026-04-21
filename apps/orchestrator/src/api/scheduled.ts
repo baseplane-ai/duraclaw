@@ -109,7 +109,15 @@ export async function scheduled(
     for (const s of snapshots) {
       if (!s.sdk_session_id) continue
       try {
-        const lastActivity = s.last_activity_ts ? new Date(s.last_activity_ts).toISOString() : now
+        // Only write `last_activity` when the gateway reports a real
+        // timestamp. A null `last_activity_ts` means the runner's meta.json
+        // never recorded activity (e.g. a dormant / terminal session whose
+        // snapshot is thin); falling back to `now` would bump every such
+        // row to the cron tick time, scrambling sidebar ordering and
+        // pushing old sessions above genuinely recent ones.
+        const lastActivity = s.last_activity_ts
+          ? new Date(s.last_activity_ts).toISOString()
+          : undefined
 
         await tx
           .update(agentSessions)
@@ -117,7 +125,7 @@ export async function scheduled(
             status: mapStatus(s.state),
             model: s.model ?? undefined,
             updatedAt: now,
-            lastActivity: lastActivity,
+            lastActivity,
             numTurns: s.turn_count || undefined,
             totalCostUsd: s.cost.usd || undefined,
           })
