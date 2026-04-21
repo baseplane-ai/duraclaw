@@ -7,6 +7,7 @@ priority: medium
 github_issue: 38
 created: 2026-04-21
 updated: 2026-04-21
+rebased_against: "PR #39 (commit 898598d) — R1 status collapse"
 phases:
   - id: p1
     name: "Factory abstraction + wire shape"
@@ -25,6 +26,7 @@ phases:
     tasks:
       - "Rewrite SessionDO.broadcastMessages (apps/orchestrator/src/agents/session-do.ts — grep for the method name; line offsets drift, around L950 at time of writing) to emit `SyncedCollectionFrame` with `collection: 'messages:<sessionId>'`, `ops: [{type:'insert'|'update', value: SessionMessage}]` and envelope `messageSeq`"
       - "Extend SessionDO internal `/messages` fetch handler to accept `sinceCreatedAt` and `sinceId` query params; query SQLite with `WHERE (created_at > ?) OR (created_at = ? AND id > ?) ORDER BY created_at ASC, id ASC LIMIT 500`. Cold-load (no cursor) returns full history without a LIMIT clause — preserves existing behavior; long sessions already load the whole history today"
+      - "Analyze the cursor query's plan on a seeded session (≥500 rows) via `EXPLAIN QUERY PLAN`; if the composite `WHERE / ORDER BY` triggers a full table scan, add a `(created_at, id)` composite index to the `messages` table in SessionDO's SQLite migration v8. If the existing `created_at` index suffices (plan uses index), note the decision inline in B4's Data Layer section and skip the migration change"
       - "Update the `/api/sessions/:id/messages` GET route in apps/orchestrator/src/api/index.ts L1675-1709 to forward `sinceCreatedAt` + `sinceId` query params and drop the `version` field from the response body"
       - "Extend SessionDO's message-ingest RPC (the path called by POST `/api/sessions/:id/messages`) to require `{content, clientId, createdAt}`. `clientId` MUST match `/^usr-client-[a-z0-9-]+$/` (400 otherwise). `createdAt` MUST be a valid ISO 8601 string (400 otherwise); server adopts the client-supplied `createdAt` verbatim as the row's `createdAt` so loopback reconciliation sees identical rows. Use `clientId` as the row's primary `id`. Reject 409 on duplicate clientId. Missing either field is a 400"
       - "Add the POST `/api/sessions/:id/messages` route if not already present in apps/orchestrator/src/api/index.ts; forward to SessionDO's ingest RPC. Response: `{id: string}` echoing the effective row id"
@@ -42,9 +44,9 @@ phases:
     name: "Client: rewrite messagesCollection on new factory + reconnect"
     tasks:
       - "Rewrite apps/orchestrator/src/db/messages-collection.ts to call `createSyncedCollection({id, collection: 'messages:<sessionId>', subscribe: (h) => subscribeSessionStream(sessionId, h), onReconnect: (h) => onSessionStreamReconnect(sessionId, h), queryFn, onInsert})`"
-      - "queryFn computes cursor from `collection.state` (max `created_at` with `id` tie-break) and calls `GET /api/sessions/:id/messages?sinceCreatedAt=&sinceId=`; on cold start both params are empty"
+      - "queryFn computes cursor from `collection.state` (max `created_at` with `id` tie-break) and calls `GET /api/sessions/:id/messages?sinceCreatedAt=&sinceId=`; on cold start both params are **omitted entirely** from the query string (not passed as empty strings — empty-string values would trip B4's 400 validation for asymmetric-cursor requests)"
       - "Keep the existing per-sessionId memoisation map. **P3 is the canonical owner of the seq-stamping removal** — delete the `seq: version` stamping at messages-collection.ts L104-108 (client-side augmentation of REST rows) and the `row.seq ?? Number.POSITIVE_INFINITY` read at use-messages-collection.ts L58. P5 re-verifies via grep but does NOT re-touch these lines"
-      - "Rewrite the current message-send action (in apps/orchestrator/src/features/agent-orch/use-coding-agent.ts — search for the existing POST flow to /api/sessions/:id/messages or the `sendMessage` export) to call `messagesCollection(sessionId).insert({id: 'usr-client-' + crypto.randomUUID(), role:'user', content, createdAt: new Date().toISOString()})` instead of invoking fetch directly; the factory's onInsert mutationFn now owns the network call"
+      - "Rewrite the current message-send action (in apps/orchestrator/src/features/agent-orch/use-coding-agent.ts — search for the existing POST flow to /api/sessions/:id/messages or the `sendMessage` export) to call `messagesCollection(sessionId).insert({id: 'usr-client-' + crypto.randomUUID(), role:'user', content, parts: [{type:'text', text: content}], createdAt: new Date().toISOString()})` instead of invoking fetch directly. The `parts` field is pre-computed on the optimistic row so deepEquals reconciles byte-identically with the server echo (B7/B14) — do NOT omit it. The factory's onInsert mutationFn then owns the network call"
       - "Ensure the subscribe callback routed into createSyncedCollection handles `{type:'delete', key}` ops by calling `params.write({type:'delete', key, value: undefined as never})` — this is what makes B11 (delete-op contract) functional and is required for B9 rewind-as-delete+insert semantics"
       - "Implement optimistic user turn via `onInsert` mutationFn: POST /api/sessions/:id/messages with `{content, clientId}`; server echo reconciles via deep-equal"
       - "Reconnect wiring: `onReconnect` handler (injected into factory) calls `queryClient.invalidateQueries({queryKey: ['messages', sessionId]})`; this is handled by the factory's existing reconnect plumbing once `onReconnect` is parameterised in P1"
@@ -65,6 +67,7 @@ phases:
       - "Rewind from leaf A to ancestor X: client collection ends up with exactly the messages on X's linear history; no rows from A's branch remain"
       - "Resubmit at message M: client collection replaces the post-M tail with the new branch's tail"
       - "Frame > 256 KiB: chunked into multiple SyncedCollectionFrames; client applies them in order and converges correctly"
+      - "NOTE: B10 (messages + branchInfo single-render atomicity) is NOT tested here — branchInfo emit doesn't exist until P5. B10's RTL test lives in P5's test_cases"
   - id: p5
     name: "Cleanup + migration"
     tasks:
@@ -78,7 +81,8 @@ phases:
     test_cases:
       - "Project builds and typechecks clean after MessagesFrame and seq field are removed"
       - "Fresh install (cleared OPFS) and upgrade install (with dead `seq` in cache) both arrive at functional state on first load"
-      - "useDerivedStatus(sessionId) and useDerivedGate(sessionId) still compute correct values from messagesCollection post-migration"
+      - "useDerivedGate(sessionId) still computes correct pending-gate value from messagesCollection post-migration (useDerivedStatus was deleted in PR #39 — status now reads from sessionsCollection, which is orthogonal to this migration)"
+      - "useSession(sessionId).status (the post-#39 D1-mirrored status, driven by broadcastSessionRow) is unaffected by the messages wire migration; StatusBar, sidebar, tab bar still agree"
       - "branchInfoCollection continues to drive the branch arrows UI with no regressions; branch navigation across siblings works end-to-end"
       - "Grep for `row.seq`, `msg.seq`, `message.seq` in apps/orchestrator/src returns zero hits outside of test fixtures for pre-migration wire-format tests that are themselves deleted or rewritten"
       - "B10 atomicity: DO unit test asserts `this.broadcast` is called twice synchronously in the same tick (messages frame then branchInfo frame) with no microtask yield between; RTL integration test asserts that the user message bubble and branch chevron become visible in the same React commit"
@@ -86,6 +90,8 @@ phases:
 ---
 
 # Migrate messagesCollection onto createSyncedCollection
+
+> **Rebase note (2026-04-21):** This spec was approved on 2026-04-21 at 91/100 against pre-#39 `main`. PR #39 (spec #37, R1 status collapse) landed at commit `898598d` later the same day, deleting `useDerivedStatus`, `sessionLiveStateCollection`, and `useSessionLiveState`, and introducing `sessionsCollection` / `sessionLocalCollection` / `broadcastSessionRow`. The rebase touched three sites — V7 (verification plan), the R1/R2 Non-Goals bullets, and the P5 status-assertion test case — and introduced **zero** changes to the wire protocol, phase structure, behavior IDs, or implementation hints. The messages-collection migration and the sessions-collection migration ride on **independent broadcast channels** (session-scoped WS vs user-scoped WS via `broadcastSessionRow`) and do not intersect at the wire layer. Search for `PR #39` in this doc to locate all rebase touchpoints.
 
 ## Overview
 
@@ -211,7 +217,7 @@ Migration v8 on SessionDO SQLite: `ALTER TABLE messages DROP COLUMN seq` if colu
 
 **Core:**
 - **ID:** optimistic-user-turn-client
-- **Trigger:** User submits a message; `messagesCollection.insert({id: 'usr-client-<uuid>', role: 'user', content, createdAt})` is called with the client-stamped `createdAt` (ISO string from `new Date().toISOString()`)
+- **Trigger:** User submits a message; `messagesCollection.insert({id: 'usr-client-<uuid>', role: 'user', content, parts: [{type: 'text', text: content}], createdAt})` is called with the client-stamped `createdAt` (ISO string from `new Date().toISOString()`). The `parts` field MUST be pre-computed on the optimistic row to match the server's `content → parts` transform (see B14) so TanStack DB's `deepEquals` reconciles the echo with update-in-place rather than delete+insert. Inheriting the same transform keeps the optimistic shape and the canonical shape byte-identical — which is what preserves DOM node identity across the echo
 - **Expected:**
   - Row appears immediately in the UI (optimistic layer)
   - mutationFn POSTs `/api/sessions/:id/messages` with `{content, clientId: 'usr-client-<uuid>', createdAt: <client-iso>}` — client-stamped `createdAt` is included so the server can adopt it verbatim (B14)
@@ -245,6 +251,7 @@ Migration v8 on SessionDO SQLite: `ALTER TABLE messages DROP COLUMN seq` if colu
   - All three body fields required. Missing any one returns 400.
   - `clientId` MUST match `/^usr-client-[a-z0-9-]+$/` (400 otherwise)
   - `createdAt` MUST be a valid ISO 8601 string parseable by `new Date()` (400 otherwise)
+  - `content` MUST be a non-empty string; additional content rules (max length, sanitization) inherit from the existing SessionDO ingest path (do not re-implement — call the same validation helper the current `sendMessage` RPC uses). 400 if content fails validation
   - If `clientId` is not already present in the session's message log, SessionDO creates a row with `id === clientId`, `createdAt === body.createdAt` (server adopts client timestamp verbatim — this is what makes B7's loopback reconciliation work), and `parts` derived from `content` via the existing user-message `content → parts` transform already used by SessionDO's ingest path (single-element text part array). The WS echo carries this exact row shape so `deepEquals` against the optimistic row succeeds only if the client's optimistic row ALSO pre-computes `parts` matching this transform — or if the collection's deep-equal reconciliation is keyed on `id + createdAt` with update-in-place tolerance for `parts` divergence. Spec decision: client's optimistic insert writes the same `parts` shape the server will produce (single text part), keeping reconciliation strictly deep-equal
   - If `clientId` is already present in the log (retry scenario), return 409 with `{id: clientId}` — treated as idempotent-success by the client; DO does NOT overwrite the existing row
   - Echo the effective row id in the response body: `{id: string}`
@@ -286,7 +293,7 @@ Reuses B4's cursor-based GET endpoint.
 - **ID:** snapshot-as-ops
 - **Trigger:** Server-authored navigation event (rewind, resubmit, branch-navigate, or reconnect-requested full resync)
 - **Expected:** Server emits one `SyncedCollectionFrame` containing `delete` ops for every stale row id followed by `insert` ops for every new-branch row; no `kind:'snapshot'` discriminator on the wire. Client applies in order; React 18 auto-batches the re-render
-- **Verify:** Integration — rewind from leaf A to ancestor X; the frame's op list contains `delete` for each of A's branch-only message ids and `insert` for any new rows the client didn't have; final state matches `getHistory(X)` on the server
+- **Verify:** Integration — rewind from leaf A to ancestor X; the frame's op list contains `delete` for each of A's branch-only message ids and `insert` ops for the full post-rewind history (`getHistory(X)` — including shared-prefix rows the client already has; TanStack DB's key-based upsert dedupes these at apply time, so the wire is authoritative-full, not diff-minimal). Final state matches `getHistory(X)` on the server. **DO-side test asserts op count = `|stale|` deletes + `|fresh|` inserts**, not a minimised diff
 - **Source:** apps/orchestrator/src/agents/session-do.ts (rewrite rewind/resubmit/getBranchHistory/requestSnapshot RPCs)
 
 #### Data Layer
@@ -382,9 +389,9 @@ P2 and P5 are the heaviest phases (6–8 tasks each) because they straddle the s
 Explicit exclusions from this PR (pulled from P1 interview):
 
 - **Branching collapse (fork-to-new-session).** The 2026-04-16 state-management audit (L47, L288, L300) commits to "append-only linear log; rewind = new Duraclaw session with copied prefix + D1 metadata link." This PR does NOT implement that collapse. `branchInfoCollection`, `computeBranchInfo`, `session.getBranches`, and rewind-as-branch semantics stay as today. Fork-based rewind is a separate future issue.
-- **R1 status collapse (GH#37).** `useDerivedStatus` and `useDerivedGate` continue to fold over `messagesCollection`; no change to status derivation in this PR.
-- **R2 sessionLiveStateCollection retirement.** Not touched.
-- **R3 D1-mirror result/error/gate.** Not touched.
+- **R1 status collapse (GH#37).** Landed in PR #39 (commit `898598d`). `useDerivedStatus` is **deleted**; status now comes from `sessionsCollection` via the D1-mirrored `agent_sessions.status` column (driven by `broadcastSessionRow`). `useDerivedGate` is retained — it still folds over `messagesCollection` for the pending-gate field. This PR changes **the wire protocol feeding `messagesCollection`** and nothing about status derivation; `useDerivedGate`'s input surface is unchanged (same row shape, minus the `seq` field which is unused by gate derivation).
+- **R2 sessionLiveStateCollection retirement.** Already landed in PR #39 — `sessionLiveStateCollection` and `useSessionLiveState` are gone, replaced by `sessionsCollection` + `sessionLocalCollection` and the `useSession(id)` / `useSessionLocalState(id)` selectors. This PR does not touch either.
+- **R3 D1-mirror result/error/gate.** Partially landed in PR #39 (migration 0016 added `error`, `error_code`, `kata_state_json`, `context_usage_json`, `worktree_info_json` to `agent_sessions`). Not touched further here.
 - **Unifying the two DOs.** SessionDO and UserSettingsDO remain separate; live broadcast stays on the DO that owns the data.
 - **Client-side cross-collection transactions.** `createTransaction` is client-optimistic-only in TanStack DB; no primitive exists for cross-collection sync atomicity. B10 explicitly uses DO batch-emit + React 18 auto-batching instead.
 - **Server-side message deletion / tombstones.** The wire supports it (B11); no server code emits it.
@@ -460,11 +467,14 @@ Create a branch (rewind + send different message). The branch arrows UI should s
 
 **Expected:** `branchInfoCollection` still populates; `useBranchInfo(parentId)` returns `{siblings, activeId, total}` with `total > 1`; UI chevrons navigate between branches.
 
-### V7 — useDerivedStatus unaffected
+### V7 — useDerivedGate + sessionsCollection status unaffected
 
-Run a session that hits `ask_user`, `permission_request`, and `result`.
+Run a session that hits `ask_user`, `permission_request`, and `result`. `useDerivedStatus` was deleted in PR #39 — status now comes from `sessionsCollection` (D1-mirrored `agent_sessions.status` via `broadcastSessionRow`), and `useDerivedGate` is the only consumer of `messagesCollection` for status-like derivation.
 
-**Expected:** `useDerivedStatus(sessionId)` transitions through `thinking → gate-pending → idle` correctly; StatusBar, sidebar, tab bar all agree.
+**Expected (two independent derivations both healthy):**
+- `useDerivedGate(sessionId)` returns the correct pending gate (`ask_user` or `permission_request`) while the gate is unresolved and `null` after `resolve-gate` / `result` — proving the messages-collection wire migration didn't break the gate-fold
+- `useSession(sessionId).status` transitions through `thinking → gate-pending → idle` (driven by `broadcastSessionRow` on the user-scoped WS, NOT by this PR's session-scoped messages frames) — proving the two broadcast channels remain independent
+- StatusBar, sidebar, tab bar all agree (they all read from `useSession(id).status` per post-#39 rewire)
 
 ### V8 — OPFS upgrade path
 
@@ -538,6 +548,12 @@ export const createMessagesCollection = (sessionId: string) => {
     },
     onInsert: async ({transaction}) => {
       const row = transaction.mutations[0].modified
+      // NOTE: the caller that invokes `collection.insert(...)` for a user
+      // turn MUST pre-compute `parts: [{type:'text', text: content}]` on
+      // the optimistic row so deepEquals reconciles the server echo with
+      // update-in-place (B7/B14). `onInsert` itself only forwards content
+      // to the server — the server re-derives `parts` via the same
+      // transform, yielding an identical row shape for loopback compare.
       const resp = await fetch(`/api/sessions/${sessionId}/messages`, {
         method: 'POST',
         headers: {'content-type': 'application/json'},
