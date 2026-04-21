@@ -303,25 +303,51 @@ change:
 
 **Version source** — `VITE_APP_VERSION` is stamped into the bundle by
 `apps/mobile/scripts/build-android.sh` as `git rev-parse --short HEAD`
-(override via `APP_VERSION=…`). The same script, after `cap sync` (so
-the zip doesn't double-bundle into the APK), emits:
+(override via `APP_VERSION=…`). After `cap sync` (so the zip doesn't
+double-bundle into the APK) the same script runs
+`scripts/build-mobile-ota-bundle.sh`, which stages a copy of
+`dist/client` with `/mobile/` excluded, zips it, writes a local copy at
+`apps/orchestrator/dist/client/mobile/bundle-<sha>.zip` for inspection,
+then uploads to the `duraclaw-mobile` R2 bucket:
 
-- `apps/orchestrator/dist/client/mobile/bundle-<sha>.zip` — the OTA
-  payload, zipped from a tmpdir staging copy of `dist/client` with the
-  `/mobile/` subdir excluded (avoids self-nesting).
-- `apps/orchestrator/dist/client/mobile/version.json` —
-  `{version, path}` read by the Worker's `/api/mobile/updates/manifest`
-  route via `env.ASSETS.fetch('/mobile/version.json')`.
+- `ota/bundle-<sha>.zip` — the Capgo-consumable web-bundle payload.
+- `ota/version.json` — `{version, key}` read by the Worker's
+  `/api/mobile/updates/manifest` route via
+  `env.MOBILE_ASSETS.get('ota/version.json')`.
 
-The APK-fallback counterpart (`/mobile/apk-version.json` +
-`/mobile/duraclaw-<ver>.apk`) is **not** automated yet — you drop the
-signed APK + a matching `apk-version.json` into `dist/client/mobile/`
-before the Worker deploy when you actually need a native bump. Route
-returns `{message: "No APK available"}` when the file is absent.
+The manifest route returns
+`${origin}/api/mobile/assets/ota/bundle-<sha>.zip` — a same-origin
+Worker URL that streams the R2 object back through
+`GET /api/mobile/assets/*` (no R2 public-domain / pre-signed URLs).
+
+Local builds without `CLOUDFLARE_API_TOKEN` skip the R2 upload with a
+warning — the zip is still written locally so you can poke at it. The
+infra deploy pipeline runs the script with creds set so every `main`
+push re-uploads both the zip and the `ota/version.json` pointer. Infra
+misconfig (missing token) is the "OTA channel is dead" failure mode.
+
+**APK-fallback counterpart** — `scripts/publish-mobile-apk.sh` uploads
+a signed release APK to `apk/duraclaw-<version>.apk` and writes
+`apk/version.json` (`{version, key}`) alongside. The
+`GET /api/mobile/apk/latest` route reads the same R2 manifest. This
+step is **only** wired for native-layer bumps (Capacitor / plugin
+bump); it is NOT run on every OTA release. Route returns
+`{message: "No APK available"}` when `apk/version.json` is absent from
+R2.
 
 **Both manifest routes are public** (registered BEFORE `authMiddleware`
 in `apps/orchestrator/src/api/index.ts`) so an expired-session user can
-still update to the current build.
+still update to the current build. The `MOBILE_ASSETS` R2 binding is
+declared optional in the `Env` type — workers deployed without the
+bucket bound (older environments, tests) degrade to "no update
+available" instead of 500'ing.
+
+**APK signing** — `apps/mobile/scripts/sign-android.sh` wraps
+`apksigner` and requires `KEYSTORE_PATH`, `KEYSTORE_PASS`, `KEY_ALIAS`,
+`KEY_PASS`. The keystore and signing credentials live on the infra
+server (same box that runs the deploy pipeline); they are never needed
+in dev worktrees. Production keystore lives in the 1Password
+Engineering vault; inject via CI secret bindings, never commit.
 
 #### Sideloading to the Pixel over wireless ADB (Tailscale)
 
@@ -424,19 +450,24 @@ All deploys are handled by the infra server — pushing to `main` on `origin` tr
 
 **Infra-pipeline contract for mobile OTA** — the pipeline must (a)
 build the orchestrator with `VITE_APP_VERSION` stamped in, and (b)
-between build and `wrangler deploy`, run
-`scripts/build-mobile-ota-bundle.sh` to emit
-`apps/orchestrator/dist/client/mobile/{bundle-<sha>.zip,version.json}`.
-The Worker then serves the current web bundle over
-`/api/mobile/updates/manifest` for Capgo to pull. Without either step
-the OTA channel is dead — every native shell polls, sees no newer
-version, and stays on the bundle the APK shipped with.
+run `scripts/build-mobile-ota-bundle.sh` with `CLOUDFLARE_API_TOKEN` +
+`CLOUDFLARE_ACCOUNT_ID` in-env so the script uploads the zip + the
+`ota/version.json` pointer to the `duraclaw-mobile` R2 bucket. The
+Worker's `/api/mobile/updates/manifest` route then reads from R2 and
+hands Capgo a same-origin URL that streams the bundle through
+`GET /api/mobile/assets/*`. Without step (b) the OTA channel is dead —
+every native shell polls, sees no newer version, and stays on the
+bundle the APK shipped with.
 
 ```bash
 export APP_VERSION=$(git rev-parse --short HEAD)
 VITE_APP_VERSION="$APP_VERSION" \
   pnpm --filter @duraclaw/orchestrator build
-bash scripts/build-mobile-ota-bundle.sh   # emits dist/client/mobile/*
+# Needs CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID in the env so the
+# wrangler r2 object put calls inside the script authenticate against
+# the baseplane-ai account. Skipping = OTA channel silently dead.
+CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=87bd3030… \
+  bash scripts/build-mobile-ota-bundle.sh
 wrangler deploy --cwd apps/orchestrator
 ```
 

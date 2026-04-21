@@ -96,6 +96,21 @@ binding = "AUTH_DB"
 database_name = "duraclaw-auth"
 database_id = "c5b4d822-9bc6-467f-9ad6-7ee779b82e0c"
 
+# R2 bucket for mobile OTA + APK artifacts. Keys:
+#   ota/version.json        — `{ version, key }` pointing at the current zip
+#   ota/bundle-<sha>.zip    — the Capgo-consumable web bundle payload
+#   apk/version.json        — `{ version, key }` pointing at the current APK
+#   apk/duraclaw-<ver>.apk  — the signed APK for native-layer updates
+# Worker reads these via `env.MOBILE_ASSETS.get()` in /api/mobile/* routes
+# and streams zip/APK bytes through `GET /api/mobile/assets/*`, so the URL
+# returned to the Capacitor shell is a same-origin Worker URL — no R2
+# public-domain or pre-signed URLs required. Upload lives in
+# scripts/build-mobile-ota-bundle.sh (invoked by the infra pipeline after
+# the orchestrator build).
+[[r2_buckets]]
+binding = "MOBILE_ASSETS"
+bucket_name = "duraclaw-mobile"
+
 [vars]
 VAPID_SUBJECT = "mailto:push@codevibesmatter.com"
 

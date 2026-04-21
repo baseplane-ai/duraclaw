@@ -41,6 +41,10 @@ export interface Env {
   /** Set to '1' via wrangler secret to short-circuit all non-/login traffic to a 503 maintenance page (#7 cutover). */
   MAINTENANCE_MODE?: string
   ASSETS: Fetcher
+  /** R2 bucket holding mobile OTA + APK artifacts. Optional so local tests
+   *  and dev workers without the bucket bound still work — the
+   *  `/api/mobile/*` routes degrade to "no update available" when absent. */
+  MOBILE_ASSETS?: R2Bucket
   CC_GATEWAY_URL?: string
   CC_GATEWAY_SECRET?: string
   WORKER_PUBLIC_URL?: string

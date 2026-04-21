@@ -768,8 +768,10 @@ export function createApiApp() {
   // Mobile OTA updater manifest — public endpoint (no auth). Capacitor
   // shell POSTs {platform, version_name}; we return {version, url} when the
   // deployed web bundle is newer, or {message} when it's current. The
-  // worker reads `/mobile/version.json` from its own static assets —
-  // written into dist/client/mobile/ by apps/mobile/scripts/build-android.sh.
+  // worker reads `ota/version.json` from the `MOBILE_ASSETS` R2 bucket
+  // (duraclaw-mobile) — written there by scripts/build-mobile-ota-bundle.sh
+  // in the infra pipeline. When the bucket isn't bound (local dev, or
+  // bucket not yet provisioned), we degrade silently to "no update".
   app.post('/api/mobile/updates/manifest', async (c) => {
     let body: { platform?: string; version_name?: string } = {}
     try {
@@ -777,39 +779,78 @@ export function createApiApp() {
     } catch {}
     const current = body.version_name ?? ''
 
-    const versionRes = await c.env.ASSETS.fetch(
-      new Request(`${new URL(c.req.url).origin}/mobile/version.json`),
-    )
-    if (!versionRes.ok) {
+    if (!c.env.MOBILE_ASSETS) {
       return c.json({ message: 'No new version available' })
     }
-    const manifest = (await versionRes.json()) as { version?: string; path?: string }
-    if (!manifest.version || !manifest.path || manifest.version === current) {
+    const obj = await c.env.MOBILE_ASSETS.get('ota/version.json')
+    if (!obj) {
+      return c.json({ message: 'No new version available' })
+    }
+    // Accept either `{ version, key }` (canonical — R2 object key) or the
+    // legacy `{ version, path }` (Worker-asset URL path, pre-R2 shape).
+    const manifest = (await obj.json()) as {
+      version?: string
+      key?: string
+      path?: string
+    }
+    const key = manifest.key ?? manifest.path?.replace(/^\/mobile\//, 'ota/')
+    if (!manifest.version || !key || manifest.version === current) {
       return c.json({ message: 'No new version available' })
     }
     const origin = new URL(c.req.url).origin
     return c.json({
       version: manifest.version,
-      url: `${origin}${manifest.path}`,
+      url: `${origin}/api/mobile/assets/${key}`,
     })
   })
 
   // Mobile native-APK manifest — public endpoint (no auth). Returns the
   // latest signed-APK version + URL so the Capacitor shell can prompt the
   // user to install a native-layer update (new plugin, Capacitor bump).
-  // Reads `/mobile/apk-version.json` from Worker assets. Absence → no
-  // APK available (common — only set when there's a real native bump).
+  // Reads `apk/version.json` from the `MOBILE_ASSETS` R2 bucket. Absence
+  // → no APK available (common — only set when there's a real native bump).
   app.get('/api/mobile/apk/latest', async (c) => {
-    const res = await c.env.ASSETS.fetch(
-      new Request(`${new URL(c.req.url).origin}/mobile/apk-version.json`),
-    )
-    if (!res.ok) return c.json({ message: 'No APK available' })
-    const manifest = (await res.json()) as { version?: string; path?: string }
-    if (!manifest.version || !manifest.path) {
+    if (!c.env.MOBILE_ASSETS) {
+      return c.json({ message: 'No APK available' })
+    }
+    const obj = await c.env.MOBILE_ASSETS.get('apk/version.json')
+    if (!obj) return c.json({ message: 'No APK available' })
+    const manifest = (await obj.json()) as {
+      version?: string
+      key?: string
+      path?: string
+    }
+    const key = manifest.key ?? manifest.path?.replace(/^\/mobile\//, 'apk/')
+    if (!manifest.version || !key) {
       return c.json({ message: 'No APK available' })
     }
     const origin = new URL(c.req.url).origin
-    return c.json({ version: manifest.version, url: `${origin}${manifest.path}` })
+    return c.json({
+      version: manifest.version,
+      url: `${origin}/api/mobile/assets/${key}`,
+    })
+  })
+
+  // Mobile asset passthrough — public endpoint (no auth). Streams R2
+  // objects so the URLs returned by the manifest routes above are
+  // same-origin Worker URLs. Keeps deploy surface minimal: no R2 public
+  // custom domain, no pre-signed URLs, no extra CF config. 404s cleanly
+  // when the bucket isn't bound or the key doesn't exist.
+  app.get('/api/mobile/assets/*', async (c) => {
+    if (!c.env.MOBILE_ASSETS) return c.body('Not found', 404)
+    const url = new URL(c.req.url)
+    const key = url.pathname.replace(/^\/api\/mobile\/assets\//, '')
+    if (!key) return c.body('Not found', 404)
+    const obj = await c.env.MOBILE_ASSETS.get(key)
+    if (!obj) return c.body('Not found', 404)
+    const headers = new Headers()
+    obj.writeHttpMetadata(headers)
+    headers.set('ETag', obj.httpEtag)
+    // Long cache — each release gets a unique key (bundle-<sha>.zip /
+    // duraclaw-<ver>.apk), so mutating the "latest" pointer is a pure
+    // version.json rewrite. No stale binaries.
+    headers.set('Cache-Control', 'public, max-age=31536000, immutable')
+    return new Response(obj.body, { headers })
   })
 
   app.use('/api/*', authMiddleware)
