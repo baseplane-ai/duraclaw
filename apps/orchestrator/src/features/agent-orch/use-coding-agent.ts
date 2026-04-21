@@ -23,6 +23,7 @@ import { type CachedMessage, createMessagesCollection } from '~/db/messages-coll
 import { sessionLocalCollection } from '~/db/session-local-collection'
 import { useMessagesCollection } from '~/hooks/use-messages-collection'
 import { useSession } from '~/hooks/use-sessions-collection'
+import { logDelta } from '~/lib/delta-log'
 import { parseJsonField } from '~/lib/json'
 import { contentToParts } from '~/lib/message-parts'
 import { isNative, wsBaseUrl } from '~/lib/platform'
@@ -251,6 +252,23 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       try {
         const parsed = JSON.parse(typeof message.data === 'string' ? message.data : '')
 
+        // Issue #40 Step 0: one line per arriving frame so we can quantify
+        // background-streaming continuity. No-op unless localStorage flag
+        // `duraclaw.debug.deltaLog` is set to `'1'`.
+        if (parsed && typeof parsed === 'object') {
+          const kind =
+            parsed.type === 'synced-collection-delta' && typeof parsed.collection === 'string'
+              ? `synced-collection-delta:${parsed.collection.split(':')[0]}`
+              : parsed.type === 'gateway_event' && parsed.event?.type
+                ? `gateway_event:${parsed.event.type}`
+                : (parsed.type ?? 'unknown')
+          logDelta('session', {
+            agent: agentName,
+            kind,
+            seq: typeof parsed.seq === 'number' ? parsed.seq : undefined,
+          })
+        }
+
         // Spec #38 P1.1: dispatch SyncedCollectionFrame to per-session
         // handlers (messagesCollection / branchInfoCollection subscribers).
         // The unified `{type:'messages', seq, payload}` wire protocol and
@@ -370,15 +388,23 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     }
   }, [agentName, readyState])
 
-  // Capacitor only: hydrate missed messages on foreground. The WS itself
-  // is left alone — partysocket auto-reconnects if Android killed it while
-  // backgrounded. No-op on web.
+  // Capacitor only: on foreground / network-change, force both the
+  // per-session WS and the singleton user-stream WS to reconnect (defeats
+  // zombie sockets — see use-app-lifecycle.ts for the rationale), then
+  // hydrate missed messages. No-op on web.
   useAppLifecycle({
     hydrate: useCallback(() => {
       connection.call('getMessages', []).catch(() => {
         // Best-effort hydrate; messages collection still falls back to
         // its queryFn for cold-start / stale-cache.
       })
+    }, [connection]),
+    reconnect: useCallback(() => {
+      try {
+        connection.reconnect()
+      } catch {
+        // ignore — socket may already be tearing down
+      }
     }, [connection]),
   })
 

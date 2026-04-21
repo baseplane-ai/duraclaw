@@ -27,6 +27,7 @@
 import type { SyncedCollectionFrame } from '@duraclaw/shared-types'
 import PartySocket from 'partysocket'
 import { useEffect, useState } from 'react'
+import { logDelta } from '~/lib/delta-log'
 import { wsBaseUrl } from '~/lib/platform'
 
 type FrameHandler = (frame: SyncedCollectionFrame<unknown>) => void
@@ -119,6 +120,13 @@ function openSocket(userId: string) {
       return
     }
     if (!frame || frame.type !== 'synced-collection-delta') return
+    // Issue #40 Step 0: one line per arriving frame on the user-stream so
+    // background-streaming continuity tests cover synced collections too.
+    // No-op unless `localStorage['duraclaw.debug.deltaLog'] === '1'`.
+    logDelta('user-stream', {
+      collection: frame.collection,
+      ops: frame.ops?.length,
+    })
     const handlers = frameHandlers.get(frame.collection)
     if (!handlers || handlers.size === 0) return
     for (const h of handlers) {

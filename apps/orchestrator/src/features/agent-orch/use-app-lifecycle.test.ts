@@ -10,12 +10,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => {
   let isNativeValue = true
-  let listenerCb: ((s: { isActive: boolean }) => void) | null = null
-  const removeMock = vi.fn()
-  const addListenerMock = vi.fn(async (_event: string, cb: (s: { isActive: boolean }) => void) => {
-    listenerCb = cb
-    return { remove: removeMock }
-  })
+  let appListenerCb: ((s: { isActive: boolean }) => void) | null = null
+  let netListenerCb: ((s: { connected: boolean }) => void) | null = null
+  const appRemoveMock = vi.fn()
+  const netRemoveMock = vi.fn()
+  const appAddListenerMock = vi.fn(
+    async (_event: string, cb: (s: { isActive: boolean }) => void) => {
+      appListenerCb = cb
+      return { remove: appRemoveMock }
+    },
+  )
+  const netAddListenerMock = vi.fn(
+    async (_event: string, cb: (s: { connected: boolean }) => void) => {
+      netListenerCb = cb
+      return { remove: netRemoveMock }
+    },
+  )
+  const reconnectUserStreamNowMock = vi.fn()
   return {
     setIsNative(v: boolean) {
       isNativeValue = v
@@ -23,17 +34,28 @@ const mocks = vi.hoisted(() => {
     getIsNative() {
       return isNativeValue
     },
-    fire(state: { isActive: boolean }) {
-      listenerCb?.(state)
+    fireAppState(state: { isActive: boolean }) {
+      appListenerCb?.(state)
     },
-    listenerCb: () => listenerCb,
-    removeMock,
-    addListenerMock,
+    fireNetworkStatus(state: { connected: boolean }) {
+      netListenerCb?.(state)
+    },
+    appListenerCb: () => appListenerCb,
+    netListenerCb: () => netListenerCb,
+    appRemoveMock,
+    netRemoveMock,
+    appAddListenerMock,
+    netAddListenerMock,
+    reconnectUserStreamNowMock,
     reset() {
       isNativeValue = true
-      listenerCb = null
-      removeMock.mockReset()
-      addListenerMock.mockClear()
+      appListenerCb = null
+      netListenerCb = null
+      appRemoveMock.mockReset()
+      netRemoveMock.mockReset()
+      appAddListenerMock.mockClear()
+      netAddListenerMock.mockClear()
+      reconnectUserStreamNowMock.mockReset()
     },
   }
 })
@@ -42,19 +64,30 @@ vi.mock('~/lib/platform', () => ({
   isNative: () => mocks.getIsNative(),
 }))
 
+vi.mock('~/hooks/use-user-stream', () => ({
+  reconnectUserStreamNow: () => mocks.reconnectUserStreamNowMock(),
+}))
+
 vi.mock('@capacitor/app', () => ({
   App: {
     addListener: (event: string, cb: (s: { isActive: boolean }) => void) =>
-      mocks.addListenerMock(event, cb),
+      mocks.appAddListenerMock(event, cb),
+  },
+}))
+
+vi.mock('@capacitor/network', () => ({
+  Network: {
+    addListener: (event: string, cb: (s: { connected: boolean }) => void) =>
+      mocks.netAddListenerMock(event, cb),
   },
 }))
 
 import { useAppLifecycle } from './use-app-lifecycle'
 
-/** Wait until the async IIFE inside useEffect has installed its listener. */
+/** Wait until both async listener IIFEs have installed their callbacks. */
 async function flushAsync() {
-  for (let i = 0; i < 50; i++) {
-    if (mocks.addListenerMock.mock.calls.length > 0 && mocks.listenerCb() != null) return
+  for (let i = 0; i < 100; i++) {
+    if (mocks.appListenerCb() != null && mocks.netListenerCb() != null) return
     await Promise.resolve()
   }
 }
@@ -71,51 +104,119 @@ afterEach(() => {
 })
 
 describe('useAppLifecycle', () => {
-  it('is a no-op when isNative() is false (no listener added)', async () => {
+  it('is a no-op when isNative() is false (no listeners added)', async () => {
     mocks.setIsNative(false)
     const hydrate = vi.fn()
-    renderHook(() => useAppLifecycle({ hydrate }))
+    const reconnect = vi.fn()
+    renderHook(() => useAppLifecycle({ hydrate, reconnect }))
     await flushAsync()
-    expect(mocks.addListenerMock).not.toHaveBeenCalled()
+    expect(mocks.appAddListenerMock).not.toHaveBeenCalled()
+    expect(mocks.netAddListenerMock).not.toHaveBeenCalled()
+    expect(mocks.reconnectUserStreamNowMock).not.toHaveBeenCalled()
   })
 
-  it('foreground calls hydrate()', async () => {
+  it('foreground kicks per-session reconnect + user-stream reconnect + hydrate', async () => {
     const hydrate = vi.fn()
-    renderHook(() => useAppLifecycle({ hydrate }))
+    const reconnect = vi.fn()
+    renderHook(() => useAppLifecycle({ hydrate, reconnect }))
     await flushAsync()
-    expect(mocks.addListenerMock).toHaveBeenCalledTimes(1)
+    expect(mocks.appAddListenerMock).toHaveBeenCalledTimes(1)
+    expect(mocks.netAddListenerMock).toHaveBeenCalledTimes(1)
 
-    mocks.fire({ isActive: true })
+    mocks.fireAppState({ isActive: true })
+    expect(reconnect).toHaveBeenCalledTimes(1)
+    expect(mocks.reconnectUserStreamNowMock).toHaveBeenCalledTimes(1)
     expect(hydrate).toHaveBeenCalledTimes(1)
   })
 
-  it('background does not call hydrate()', async () => {
+  it('background does not kick reconnect or hydrate', async () => {
     const hydrate = vi.fn()
-    renderHook(() => useAppLifecycle({ hydrate }))
+    const reconnect = vi.fn()
+    renderHook(() => useAppLifecycle({ hydrate, reconnect }))
     await flushAsync()
 
-    mocks.fire({ isActive: false })
+    mocks.fireAppState({ isActive: false })
     vi.advanceTimersByTime(60_000)
     expect(hydrate).not.toHaveBeenCalled()
+    expect(reconnect).not.toHaveBeenCalled()
+    expect(mocks.reconnectUserStreamNowMock).not.toHaveBeenCalled()
   })
 
-  it('background → foreground cycle calls hydrate() on foreground only', async () => {
+  it('background → foreground cycle kicks only on foreground', async () => {
+    const hydrate = vi.fn()
+    const reconnect = vi.fn()
+    renderHook(() => useAppLifecycle({ hydrate, reconnect }))
+    await flushAsync()
+
+    mocks.fireAppState({ isActive: false })
+    expect(hydrate).not.toHaveBeenCalled()
+    mocks.fireAppState({ isActive: true })
+    expect(reconnect).toHaveBeenCalledTimes(1)
+    expect(mocks.reconnectUserStreamNowMock).toHaveBeenCalledTimes(1)
+    expect(hydrate).toHaveBeenCalledTimes(1)
+  })
+
+  it('network reconnect (connected=true) kicks reconnect + hydrate', async () => {
+    const hydrate = vi.fn()
+    const reconnect = vi.fn()
+    renderHook(() => useAppLifecycle({ hydrate, reconnect }))
+    await flushAsync()
+
+    mocks.fireNetworkStatus({ connected: true })
+    expect(reconnect).toHaveBeenCalledTimes(1)
+    expect(mocks.reconnectUserStreamNowMock).toHaveBeenCalledTimes(1)
+    expect(hydrate).toHaveBeenCalledTimes(1)
+  })
+
+  it('network disconnect (connected=false) does not kick', async () => {
+    const hydrate = vi.fn()
+    const reconnect = vi.fn()
+    renderHook(() => useAppLifecycle({ hydrate, reconnect }))
+    await flushAsync()
+
+    mocks.fireNetworkStatus({ connected: false })
+    expect(reconnect).not.toHaveBeenCalled()
+    expect(mocks.reconnectUserStreamNowMock).not.toHaveBeenCalled()
+    expect(hydrate).not.toHaveBeenCalled()
+  })
+
+  it('reconnect is optional — hydrate + user-stream reconnect still fire without it', async () => {
     const hydrate = vi.fn()
     renderHook(() => useAppLifecycle({ hydrate }))
     await flushAsync()
 
-    mocks.fire({ isActive: false })
-    expect(hydrate).not.toHaveBeenCalled()
-    mocks.fire({ isActive: true })
+    mocks.fireAppState({ isActive: true })
+    expect(mocks.reconnectUserStreamNowMock).toHaveBeenCalledTimes(1)
     expect(hydrate).toHaveBeenCalledTimes(1)
   })
 
-  it('cleanup removes listener', async () => {
+  it('a throw from one callback does not starve the others', async () => {
     const hydrate = vi.fn()
-    const { unmount } = renderHook(() => useAppLifecycle({ hydrate }))
+    const reconnect = vi.fn(() => {
+      throw new Error('boom')
+    })
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      renderHook(() => useAppLifecycle({ hydrate, reconnect }))
+      await flushAsync()
+
+      mocks.fireAppState({ isActive: true })
+      expect(reconnect).toHaveBeenCalledTimes(1)
+      expect(mocks.reconnectUserStreamNowMock).toHaveBeenCalledTimes(1)
+      expect(hydrate).toHaveBeenCalledTimes(1)
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('cleanup removes both listeners', async () => {
+    const hydrate = vi.fn()
+    const reconnect = vi.fn()
+    const { unmount } = renderHook(() => useAppLifecycle({ hydrate, reconnect }))
     await flushAsync()
 
     unmount()
-    expect(mocks.removeMock).toHaveBeenCalledTimes(1)
+    expect(mocks.appRemoveMock).toHaveBeenCalledTimes(1)
+    expect(mocks.netRemoveMock).toHaveBeenCalledTimes(1)
   })
 })
