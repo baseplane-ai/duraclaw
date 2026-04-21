@@ -35,7 +35,7 @@ export function GateResolver({ gate, onResolve, onResolved }: GateResolverProps)
   const [answer, setAnswer] = useState('')
   const [resolving, setResolving] = useState(false)
   const [selections, setSelections] = useState<Map<number, Set<string>>>(new Map())
-  const [otherText, setOtherText] = useState('')
+  const [notesByQuestion, setNotesByQuestion] = useState<Map<number, string>>(new Map())
 
   const handleResolve = async (response: GateResponse) => {
     setResolving(true)
@@ -158,22 +158,32 @@ export function GateResolver({ gate, onResolve, onResolved }: GateResolverProps)
     }
 
     const hasSelection = Array.from(selections.values()).some((s) => s.size > 0)
-    const trimmedOther = otherText.trim()
-    const canSubmit = Boolean(trimmedOther) || hasSelection
+    const hasAnyNote = Array.from(notesByQuestion.values()).some((n) => n.trim().length > 0)
+    const canSubmit = hasSelection || hasAnyNote
 
     const buildAnswer = (): string => {
       const parts: string[] = []
       for (let i = 0; i < questions.length; i++) {
         const selected = selections.get(i)
-        if (selected && selected.size > 0) {
-          parts.push(Array.from(selected).join(', '))
+        const selStr = selected && selected.size > 0 ? Array.from(selected).join(', ') : ''
+        const note = (notesByQuestion.get(i) ?? '').trim()
+        if (selStr && note) {
+          parts.push(`${selStr} (note: ${note})`)
+        } else if (selStr) {
+          parts.push(selStr)
+        } else if (note) {
+          parts.push(note)
         }
       }
-      const selectionStr = parts.join('; ')
-      if (selectionStr && trimmedOther) {
-        return `${selectionStr}; Additional context: ${trimmedOther}`
-      }
-      return selectionStr || trimmedOther
+      return parts.join('; ')
+    }
+
+    const setNoteFor = (qIndex: number, value: string) => {
+      setNotesByQuestion((prev) => {
+        const next = new Map(prev)
+        next.set(qIndex, value)
+        return next
+      })
     }
 
     const handleStructuredSubmit = async () => {
@@ -221,25 +231,23 @@ export function GateResolver({ gate, onResolve, onResolved }: GateResolverProps)
                 )
               })}
             </div>
+            <Input
+              aria-label={`Additional notes for ${q.header}`}
+              className="min-w-0"
+              placeholder="Add notes (optional) — adds to your choice, or use instead of one"
+              value={notesByQuestion.get(qIndex) ?? ''}
+              disabled={resolving}
+              onChange={(e) => setNoteFor(qIndex, e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && canSubmit) {
+                  handleStructuredSubmit()
+                }
+              }}
+            />
           </div>
         ))}
 
-        <div className="flex flex-col gap-2 sm:flex-row">
-          <Input
-            aria-label="Other answer"
-            className="min-w-0 flex-1"
-            placeholder="Other..."
-            value={otherText}
-            disabled={resolving}
-            onChange={(e) => {
-              setOtherText(e.target.value)
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && canSubmit) {
-                handleStructuredSubmit()
-              }
-            }}
-          />
+        <div className="flex justify-end">
           <Button
             size="sm"
             className="w-full sm:w-auto"

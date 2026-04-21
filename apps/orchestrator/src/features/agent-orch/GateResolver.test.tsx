@@ -137,12 +137,12 @@ describe('GateResolver — structured AskUserQuestion', () => {
     expect(onResolve).toHaveBeenCalledWith('gate-1', { answer: 'lodash' })
   })
 
-  it('Other text input works as fallback', async () => {
+  it('per-question notes input works as fallback when no option is picked', async () => {
     const onResolve = vi.fn().mockResolvedValue(undefined)
     render(<GateResolver gate={sampleGate} onResolve={onResolve} />)
 
-    const otherInput = screen.getByPlaceholderText(/other/i)
-    fireEvent.change(otherInput, { target: { value: 'underscore' } })
+    const notesInput = screen.getByLabelText(/additional notes for library/i)
+    fireEvent.change(notesInput, { target: { value: 'underscore' } })
 
     // Submit should be enabled
     const submitBtn = screen.getByRole('button', { name: /submit/i })
@@ -152,16 +152,16 @@ describe('GateResolver — structured AskUserQuestion', () => {
     expect(onResolve).toHaveBeenCalledWith('gate-1', { answer: 'underscore' })
   })
 
-  it('Other text is additive: appended as context alongside a selection', async () => {
+  it('per-question notes are additive: appended alongside a selection', async () => {
     const onResolve = vi.fn().mockResolvedValue(undefined)
     render(<GateResolver gate={sampleGate} onResolve={onResolve} />)
 
     fireEvent.click(screen.getByRole('button', { name: /lodash/i }))
 
-    const otherInput = screen.getByPlaceholderText(/other/i)
-    fireEvent.change(otherInput, { target: { value: 'prefer tree-shakeable' } })
+    const notesInput = screen.getByLabelText(/additional notes for library/i)
+    fireEvent.change(notesInput, { target: { value: 'prefer tree-shakeable' } })
 
-    // Selection must survive typing into Other
+    // Selection must survive typing into notes
     expect(screen.getByRole('button', { name: /lodash/i }).getAttribute('aria-pressed')).toBe(
       'true',
     )
@@ -169,24 +169,43 @@ describe('GateResolver — structured AskUserQuestion', () => {
     fireEvent.click(screen.getByRole('button', { name: /submit/i }))
 
     expect(onResolve).toHaveBeenCalledWith('gate-1', {
-      answer: 'lodash; Additional context: prefer tree-shakeable',
+      answer: 'lodash (note: prefer tree-shakeable)',
     })
   })
 
-  it('Other text is additive in multi-select: appended after all selections', async () => {
+  it('per-question notes are additive in multi-select', async () => {
     const onResolve = vi.fn().mockResolvedValue(undefined)
     render(<GateResolver gate={multiSelectGate} onResolve={onResolve} />)
 
     fireEvent.click(screen.getByRole('button', { name: /dark-mode/i }))
     fireEvent.click(screen.getByRole('button', { name: /i18n/i }))
 
-    const otherInput = screen.getByPlaceholderText(/other/i)
-    fireEvent.change(otherInput, { target: { value: 'also want telemetry' } })
+    const notesInput = screen.getByLabelText(/additional notes for features/i)
+    fireEvent.change(notesInput, { target: { value: 'also want telemetry' } })
 
     fireEvent.click(screen.getByRole('button', { name: /submit/i }))
 
     expect(onResolve).toHaveBeenCalledWith('gate-2', {
-      answer: 'dark-mode, i18n; Additional context: also want telemetry',
+      answer: 'dark-mode, i18n (note: also want telemetry)',
+    })
+  })
+
+  it('multi-question: each question has its own notes input, combined per-question', async () => {
+    const onResolve = vi.fn().mockResolvedValue(undefined)
+    render(<GateResolver gate={multiQuestionGate} onResolve={onResolve} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /lodash/i }))
+    fireEvent.click(screen.getByRole('button', { name: /react/i }))
+
+    const libNotes = screen.getByLabelText(/additional notes for library/i)
+    const fwNotes = screen.getByLabelText(/additional notes for framework/i)
+    fireEvent.change(libNotes, { target: { value: 'tree-shakeable' } })
+    fireEvent.change(fwNotes, { target: { value: 'server components' } })
+
+    fireEvent.click(screen.getByRole('button', { name: /submit/i }))
+
+    expect(onResolve).toHaveBeenCalledWith('gate-3', {
+      answer: 'lodash (note: tree-shakeable); react (note: server components)',
     })
   })
 
