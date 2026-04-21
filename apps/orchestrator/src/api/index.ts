@@ -18,6 +18,7 @@ import { broadcastSyncedDelta } from '~/lib/broadcast-synced-delta'
 import { buildChainRowFromContext, type ChainBuildContext } from '~/lib/chains'
 import { chunkOps } from '~/lib/chunk-frame'
 import { type PushPayload, sendPushNotification } from '~/lib/push'
+import { sendFcmNotification } from '~/lib/push-fcm'
 import type {
   AgentSessionRow,
   ChainSummary,
@@ -1342,6 +1343,86 @@ export function createApiApp() {
 
     console.log(
       `[debug:push] userId=${userId} sent=${subscriptions.length} url=${url} results=${JSON.stringify(results)}`,
+    )
+
+    return c.json({ sent: subscriptions.length, results, payload })
+  })
+
+  /**
+   * Debug FCM push — fans out to every `fcm_subscriptions` row for the
+   * caller. Mirrors `/api/debug/push` but hits `sendFcmNotification()`
+   * instead of the web-push path so we can verify the Capacitor-Android
+   * delivery chain (APK → Firebase registration → server → FCM HTTP v1
+   * → device notification tray) end-to-end from the device itself.
+   *
+   * Requires FCM_SERVICE_ACCOUNT_JSON on the Worker. Prunes gone tokens.
+   */
+  app.post('/api/debug/fcm-push', async (c) => {
+    const userId = c.get('userId')
+    const body = (await c.req.json().catch(() => ({}))) as {
+      sessionId?: string
+      url?: string
+      title?: string
+      body?: string
+      tag?: string
+    }
+
+    const sessionId = body.sessionId ?? ''
+    const url = body.url ?? (sessionId ? `/?session=${sessionId}` : '/')
+    const title = body.title ?? 'Duraclaw debug (FCM)'
+    const payloadBody = body.body ?? `FCM debug push → ${url}`
+    const tag = body.tag ?? 'debug-fcm-push'
+
+    const serviceAccount = c.env.FCM_SERVICE_ACCOUNT_JSON
+    if (!serviceAccount) {
+      return c.json({ error: 'FCM_SERVICE_ACCOUNT_JSON not configured' }, 500)
+    }
+
+    const subsResult = await c.env.AUTH_DB.prepare(
+      'SELECT id, token FROM fcm_subscriptions WHERE user_id = ?',
+    )
+      .bind(userId)
+      .all<{ id: string; token: string }>()
+
+    const subscriptions = subsResult.results
+    if (subscriptions.length === 0) {
+      return c.json(
+        { error: 'No FCM tokens registered for this user — register on device first' },
+        404,
+      )
+    }
+
+    const payload: PushPayload = {
+      title,
+      body: payloadBody,
+      url,
+      tag,
+      sessionId,
+    }
+
+    const results: Array<{
+      id: string
+      tokenHead: string
+      ok: boolean
+      status?: number
+      gone?: boolean
+    }> = []
+    for (const sub of subscriptions) {
+      const r = await sendFcmNotification(sub.token, payload, serviceAccount)
+      results.push({
+        id: sub.id,
+        tokenHead: `${sub.token.slice(0, 20)}...`,
+        ok: r.ok,
+        status: r.status,
+        gone: r.gone,
+      })
+      if (r.gone) {
+        await c.env.AUTH_DB.prepare('DELETE FROM fcm_subscriptions WHERE id = ?').bind(sub.id).run()
+      }
+    }
+
+    console.log(
+      `[debug:fcm-push] userId=${userId} sent=${subscriptions.length} url=${url} results=${JSON.stringify(results)}`,
     )
 
     return c.json({ sent: subscriptions.length, results, payload })
