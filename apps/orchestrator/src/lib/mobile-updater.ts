@@ -8,9 +8,11 @@ interface ManifestResponse {
 }
 
 const NATIVE_PROMPT_KEY = 'duraclaw.apk-prompt.dismissed-version'
+const OTA_APPLIED_KEY = 'duraclaw.ota.last-applied-version'
 
 async function checkWebBundleUpdate(currentVersion: string): Promise<void> {
   const { CapacitorUpdater } = await import('@capgo/capacitor-updater')
+
   const res = await fetch(apiUrl('/api/mobile/updates/manifest'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -21,11 +23,29 @@ async function checkWebBundleUpdate(currentVersion: string): Promise<void> {
   if (!manifest.version || !manifest.url) return
   if (manifest.version === currentVersion) return
 
+  // Capgo's own live state — after a `set()` + reload, the active bundle's
+  // `version` field is the authoritative "what's running", even before the
+  // baked-at-build `VITE_APP_VERSION` in the new bundle gets a chance to
+  // disagree. Checking this prevents the download-set-reload-download loop
+  // we saw when the freshly-loaded bundle re-triggered an update on itself.
+  try {
+    const { bundle } = await CapacitorUpdater.current()
+    if (bundle?.version === manifest.version) return
+  } catch {
+    // `current()` can throw on the first-ever install; fall through.
+  }
+  if (typeof localStorage !== 'undefined') {
+    if (localStorage.getItem(OTA_APPLIED_KEY) === manifest.version) return
+  }
+
   const bundle = await CapacitorUpdater.download({
     version: manifest.version,
     url: manifest.url,
     ...(manifest.checksum ? { checksum: manifest.checksum } : {}),
   })
+  try {
+    localStorage.setItem(OTA_APPLIED_KEY, manifest.version)
+  } catch {}
   await CapacitorUpdater.set({ id: bundle.id })
 }
 
