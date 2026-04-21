@@ -1,7 +1,13 @@
 name = "duraclaw-orchestrator"
 main = "src/server.ts"
 compatibility_date = "2026-03-31"
-compatibility_flags = ["nodejs_compat"]
+# `web_socket_auto_reply_to_close` ships as default on compat date
+# 2026-04-07. We're pinned to 2026-03-31; without this flag the runtime
+# leaves a WS in CLOSING after receiving a Close frame and never replies,
+# so the peer observes abnormal code=1006 drops. Observed as ~70s Gateway
+# WS flap in prod wrangler tail (hundreds of closes/hour with zero
+# clean closes). Opt in explicitly rather than bumping the compat date.
+compatibility_flags = ["nodejs_compat", "web_socket_auto_reply_to_close"]
 
 workers_dev = true
 
