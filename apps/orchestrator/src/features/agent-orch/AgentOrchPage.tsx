@@ -9,19 +9,24 @@
 import type { SessionSummary } from '@duraclaw/shared-types'
 import { createTransaction } from '@tanstack/db'
 import { useNavigate, useSearch } from '@tanstack/react-router'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Header } from '~/components/layout/header'
 import { Main } from '~/components/layout/main'
 import { PushOptInBanner } from '~/components/push-opt-in-banner'
 import { PwaInstallBanner } from '~/components/pwa-install-banner'
 import { QuickPromptInput } from '~/components/quick-prompt-input'
+import { StatusBar } from '~/components/status-bar'
 import { TabBar } from '~/components/tab-bar'
 import { sessionsCollection } from '~/db/sessions-collection'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { useSwipeTabs } from '~/hooks/use-swipe-tabs'
 import { getTabSyncSnapshot, isDraftTabId, newDraftTabId, useTabSync } from '~/hooks/use-tab-sync'
+import { useUserDefaults } from '~/hooks/use-user-defaults'
 import { apiUrl } from '~/lib/platform'
+import type { ContentBlock } from '~/lib/types'
 import { AgentDetailView } from './AgentDetailView'
+import { ChatThread } from './ChatThread'
+import { MessageInput } from './MessageInput'
 import type { SpawnFormConfig } from './SpawnAgentForm'
 import { type SpawnConfig, useCodingAgent } from './use-coding-agent'
 
@@ -336,27 +341,25 @@ function AgentOrchContent() {
               sessionId={activeSessionId}
               spawnConfig={spawnConfig}
             />
+          ) : activeSessionId && isDraftTabId(activeSessionId) && tabProjects[activeSessionId] ? (
+            <DraftDetailView
+              key={`draft-${activeSessionId}`}
+              draftId={activeSessionId}
+              project={tabProjects[activeSessionId]}
+              onSpawn={handleSpawn}
+            />
           ) : (
             <QuickPromptInput
               key={
-                activeSessionId && isDraftTabId(activeSessionId)
-                  ? `draft-${activeSessionId}`
-                  : quickPromptHint
-                    ? `hint-${quickPromptHint.project}-${quickPromptHint.newTab}`
-                    : 'default'
+                quickPromptHint
+                  ? `hint-${quickPromptHint.project}-${quickPromptHint.newTab}`
+                  : 'default'
               }
               onSubmit={handleSpawn}
               projects={projects}
               projectsLoading={projectsLoading}
-              initialProject={
-                activeSessionId && isDraftTabId(activeSessionId)
-                  ? tabProjects[activeSessionId]
-                  : quickPromptHint?.project
-              }
+              initialProject={quickPromptHint?.project}
               initialNewTab={quickPromptHint?.newTab}
-              chatStyle={Boolean(
-                activeSessionId && isDraftTabId(activeSessionId) && tabProjects[activeSessionId],
-              )}
             />
           )}
         </div>
@@ -392,4 +395,57 @@ function AgentDetailWithSpawn({
   }, [spawnConfig, agent.wsReadyState, agent.spawn])
 
   return <AgentDetailView name={sessionId} agent={agent} />
+}
+
+/**
+ * Pre-spawn view rendered into a draft tab. Mirrors AgentDetailView's layout
+ * (empty ChatThread + StatusBar + MessageInput) so the user lands in a blank
+ * chat rather than the centered picker form. On first send, `handleSpawn`
+ * replaces the draft tab id with the real session id and the regular
+ * AgentDetailWithSpawn takes over.
+ */
+function DraftDetailView({
+  draftId,
+  project,
+  onSpawn,
+}: {
+  draftId: string
+  project: string
+  onSpawn: (config: SpawnFormConfig & { newTab?: boolean }) => void
+}) {
+  const { preferences } = useUserDefaults()
+
+  const handleSend = useCallback(
+    (content: string | ContentBlock[]) => {
+      const model = preferences.model ?? 'claude-opus-4-7'
+      const agent = model.startsWith('gpt-') ? 'codex' : 'claude'
+      onSpawn({ project, model, agent, prompt: content })
+    },
+    [project, preferences.model, onSpawn],
+  )
+
+  const branchInfo = useMemo(
+    () => new Map<string, { current: number; total: number; siblings: string[] }>(),
+    [],
+  )
+
+  const noopResolveGate = useCallback(async () => undefined, [])
+
+  return (
+    <div
+      className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden"
+      data-testid="draft-detail-view"
+    >
+      <ChatThread
+        messages={[]}
+        derivedGate={null}
+        isConnecting={false}
+        onResolveGate={noopResolveGate}
+        branchInfo={branchInfo}
+        onSendSuggestion={handleSend}
+      />
+      <StatusBar sessionId={null} />
+      <MessageInput onSend={handleSend} draftKey={draftId} />
+    </div>
+  )
 }
