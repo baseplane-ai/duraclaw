@@ -409,29 +409,21 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   )
   useManagedConnection(agentAdapter, `agent:${agentName}`)
 
-  // Replace the old useAppLifecycle foreground→hydrate() path. The
-  // manager now owns the reconnect trigger (foreground / network
-  // regain); what this hook has to do is replay missed messages when
-  // the socket comes back up. The adapter's `open` event fires on
-  // every (re)connect; the `hasConnectedOnce` ref gates out the
-  // initial mount-time open so we only hydrate on subsequent opens
-  // (true reconnects). Reset when `agentName` changes so the fresh
-  // session's initial open doesn't count as a reconnect.
-  const hydrateHasConnectedOnceRef = useRef(false)
-  const hydrateAgentNameRef = useRef(agentName)
-  if (hydrateAgentNameRef.current !== agentName) {
-    hydrateAgentNameRef.current = agentName
-    hydrateHasConnectedOnceRef.current = false
-  }
+  // Replace the old useAppLifecycle foreground→hydrate() path. Fire a
+  // best-effort `getMessages` hydrate on every (re)connect including
+  // the initial open — pre-GH#42 `useAppLifecycle` did the same via the
+  // initial `pageshow` / Capacitor `appStateChange` kick. The initial
+  // open covers the race where the client's WS subscribes after the DO
+  // has already broadcast the first frames of a brand-new session;
+  // without this the collection sits empty until the next (possibly
+  // never) natural reconnect. Cost is one redundant REST call per
+  // mount, which the old hook was already paying.
   useEffect(() => {
     const onOpen = () => {
-      if (hydrateHasConnectedOnceRef.current) {
-        connection.call('getMessages', []).catch(() => {
-          // Best-effort hydrate; messagesCollection still falls back
-          // to its queryFn for cold-start / stale-cache.
-        })
-      }
-      hydrateHasConnectedOnceRef.current = true
+      connection.call('getMessages', []).catch(() => {
+        // Best-effort hydrate; messagesCollection still falls back to
+        // its queryFn for cold-start / stale-cache.
+      })
     }
     agentAdapter.addEventListener('open', onOpen)
     return () => agentAdapter.removeEventListener('open', onOpen)

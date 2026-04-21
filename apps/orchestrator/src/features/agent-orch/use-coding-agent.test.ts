@@ -317,6 +317,21 @@ let capturedUseAgentConfig: {
 
 const mockCall = vi.fn().mockResolvedValue([])
 
+// Registry of PartySocket-level event listeners, keyed by event name, so
+// tests can simulate `open` / `close` / etc. by calling
+// `firePartySocketEvent('open')`. The `createPartySocketAdapter` wrapper
+// proxies `addEventListener` straight to the underlying PartySocket, so
+// the adapter fires whatever the underlying mock dispatches.
+const partySocketListeners = new Map<string, Set<(ev: unknown) => void>>()
+const firePartySocketEvent = (event: string, ev: unknown = { type: event }) => {
+  const set = partySocketListeners.get(event)
+  if (!set) return
+  for (const fn of Array.from(set)) fn(ev)
+}
+const resetPartySocketListeners = () => {
+  partySocketListeners.clear()
+}
+
 vi.mock('agents/react', () => ({
   useAgent: (config: typeof capturedUseAgentConfig) => {
     capturedUseAgentConfig = config
@@ -327,9 +342,22 @@ vi.mock('agents/react', () => ({
       // instance to mirror readyState through React state (Spec #31: our
       // SessionDO suppresses protocol messages, so useAgent's internal
       // setState never fires on open and `connection.readyState` stays
-      // React-invisible without this event-driven mirror).
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
+      // React-invisible without this event-driven mirror). Back this with
+      // a real listener registry so tests can simulate `open` events and
+      // exercise the on-open hydrate path (GH#42 regression guard).
+      addEventListener: (event: string, fn: (ev: unknown) => void) => {
+        let set = partySocketListeners.get(event)
+        if (!set) {
+          set = new Set()
+          partySocketListeners.set(event, set)
+        }
+        set.add(fn)
+      },
+      removeEventListener: (event: string, fn: (ev: unknown) => void) => {
+        partySocketListeners.get(event)?.delete(fn)
+      },
+      reconnect: vi.fn(),
+      close: vi.fn(),
     }
   },
 }))
@@ -811,5 +839,63 @@ describe('branch tracking (RPC fire-and-forget — GH#38 P1.5)', () => {
     })
 
     expect(mockCall).toHaveBeenCalledWith('getBranchHistory', ['usr-3'])
+  })
+})
+
+describe('WS open → getMessages hydrate (GH#42 regression guard)', () => {
+  // Regression guard: commit 9160d27 moved hydrate into the adapter's
+  // `open` handler but gated it behind a `hasConnectedOnce` ref so the
+  // initial mount-time open did NOT hydrate. That removed the safety
+  // net that the retired `useAppLifecycle` had provided on cold-mount
+  // (via its initial `pageshow` / Capacitor `appStateChange` fire) and
+  // caused brand-new sessions to miss the first broadcast frames in the
+  // subscribe-race — UI froze at "Thought for a few seconds" until full
+  // page reload. The fix: fire `getMessages` on every `open` including
+  // the initial one. This test pins that behavior.
+
+  beforeEach(() => {
+    cachedMessagesStore.clear()
+    sessionsStore.clear()
+    collectionSubs.clear()
+    sessionsSubs.clear()
+    resetPartySocketListeners()
+    capturedUseAgentConfig = null
+    vi.clearAllMocks()
+    mockCall.mockReset()
+    mockCall.mockResolvedValue([])
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  test('initial WS open fires getMessages hydrate on a fresh session', () => {
+    renderHook(() => useCodingAgent('fresh-session-id'))
+
+    // Precondition: mount alone must not have called getMessages yet —
+    // the hydrate is tied to the adapter's open event.
+    expect(mockCall).not.toHaveBeenCalledWith('getMessages', [])
+
+    // Simulate the PartySocket dispatching `open` for the very first
+    // time (initial connect, no prior opens).
+    act(() => {
+      firePartySocketEvent('open')
+    })
+
+    expect(mockCall).toHaveBeenCalledWith('getMessages', [])
+  })
+
+  test('subsequent WS opens also fire getMessages hydrate (reconnect path)', () => {
+    renderHook(() => useCodingAgent('test-session'))
+
+    act(() => {
+      firePartySocketEvent('open')
+    })
+    act(() => {
+      firePartySocketEvent('open')
+    })
+
+    const hydrateCalls = mockCall.mock.calls.filter(([method]) => method === 'getMessages')
+    expect(hydrateCalls).toHaveLength(2)
   })
 })
