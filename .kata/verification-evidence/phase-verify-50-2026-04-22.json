@@ -1,0 +1,127 @@
+{
+  "phaseId": "verify-50",
+  "issueNumber": 50,
+  "branch": "feature/50-status-ttl",
+  "commit": "46b95ee",
+  "pr": 52,
+  "timestamp": "2026-04-22T13:55:00Z",
+  "spec": "planning/specs/50-status-ttl.md",
+  "overall_verdict": "partial",
+  "summary": "All automated VP steps pass (typecheck, 980/980 unit tests, migration 0017 schema check, P3 dead-event grep clean except for intentional B9 wiring, B5 render-layer grep clean, session-runner build). E2E pre-deploy VP step for P1 (`last_event_ts` populated within 11s on a live session) FAILS in local dev: an agent_sessions row created with the client_session_id flow (sess-<uuid>) never receives a last_event_ts write because the DO's flushLastEventTsToD1 targets `this.ctx.id.toString()` (the 64-hex DO hash from idFromName) instead of the client-supplied session id that is the actual D1 primary key. This is a cross-cutting pattern in session-do.ts (12+ writes use `this.ctx.id.toString()` against `agent_sessions.id`), not specifically a GH#50 regression — but it does make the spec's primary success criterion (D1 last_event_ts populated) invisible in any flow that uses client_session_id. Recommend NOT merging PR#52 until the ID source is resolved OR confirmed to behave differently in production (e.g. if prod takes a different non-client_session_id path).",
+  "vp_steps": [
+    {
+      "name": "typecheck orchestrator",
+      "command": "pnpm --filter @duraclaw/orchestrator typecheck",
+      "expected": "clean",
+      "result": "pass",
+      "output": "tsc --noEmit completed with no errors"
+    },
+    {
+      "name": "orchestrator test suite",
+      "command": "pnpm --filter @duraclaw/orchestrator test",
+      "expected": "pass",
+      "result": "pass",
+      "output": "Test Files 81 passed (81) / Tests 980 passed (980) / Duration 6.75s"
+    },
+    {
+      "name": "drizzle-kit check (migration 0017 schema parity)",
+      "command": "cd apps/orchestrator && pnpm drizzle-kit check",
+      "expected": "no drift",
+      "result": "pass",
+      "output": "Everything's fine"
+    },
+    {
+      "name": "derive-status.test.ts (7 cases)",
+      "command": "pnpm --filter @duraclaw/orchestrator test -- derive-status",
+      "expected": "7 cases pass",
+      "result": "pass",
+      "output": "Test Files 1 passed / Tests 7 passed"
+    },
+    {
+      "name": "use-now tests",
+      "command": "pnpm --filter @duraclaw/orchestrator test -- use-now",
+      "expected": "RTL test per spec B4 Verify",
+      "result": "fail",
+      "classification": "misread-vp or missing-task",
+      "output": "No test files found, exiting with code 1. Implementation (apps/orchestrator/src/lib/use-now.tsx) exists but no use-now.test.tsx. Spec P2 task list does NOT include adding a use-now test; only B4 Verify narrative mentions one. VP command was written as if the test exists.",
+      "note": "Additional observation: use-now.tsx deviates from spec Gotchas (line 391) — uses Date.now() as both createContext default and useState initializer, whereas spec mandates 0 + Date.now() only inside useEffect to avoid SSR/hydration mismatch under TanStack Start."
+    },
+    {
+      "name": "session-do test suite",
+      "command": "pnpm --filter @duraclaw/orchestrator test -- session-do",
+      "expected": "all pass, B9 legacy-drop coverage included",
+      "result": "pass",
+      "output": "Test Files 1 passed / Tests 170 passed"
+    },
+    {
+      "name": "session-runner build",
+      "command": "pnpm --filter @duraclaw/session-runner build",
+      "expected": "clean build with HeartbeatEvent emission removed",
+      "result": "pass",
+      "output": "tsup build success; dist/main.js 11.33KB emitted"
+    },
+    {
+      "name": "P3 dead-event grep",
+      "command": "/usr/bin/grep -r 'HeartbeatEvent|SessionStateChangedEvent|session_state_changed' apps/ packages/ --include='*.ts' --include='*.tsx'",
+      "expected": "empty (planning/ hits are fine)",
+      "result": "partial",
+      "classification": "misread-vp",
+      "output": "4 hits, ALL in apps/orchestrator/src/agents/session-do.ts: L237, L1633, L1675 (JSDoc comments mentioning the legacy events by name), L3877 (`if (type === 'heartbeat' || type === 'session_state_changed')` — B9 tolerant-drop dispatch). These are intentional and required by B9. HeartbeatEvent and SessionStateChangedEvent TYPES are fully removed from packages/shared-types and packages/session-runner. Treating as pass with note — VP's `expected: empty` was too aggressive."
+    },
+    {
+      "name": "B5 render-layer grep (session.status / row.status in components/features)",
+      "command": "/usr/bin/grep -rn 'session\\.status|row\\.status' apps/orchestrator/src/components apps/orchestrator/src/features --include='*.ts' --include='*.tsx'",
+      "expected": "zero hits (all 8 reader sites swapped to deriveStatus)",
+      "result": "pass",
+      "output": "empty"
+    },
+    {
+      "name": "local D1 migration apply",
+      "command": "pnpm wrangler d1 migrations apply duraclaw-auth --local",
+      "expected": "0017_last_event_ts.sql applied",
+      "result": "pass",
+      "output": "0017 applied; agent_sessions schema now includes last_event_ts INTEGER"
+    },
+    {
+      "name": "E2E pre-deploy P1: last_event_ts populated within 11s",
+      "command": "axi: sign in + start session + send message; wait ~15s; sqlite3 SELECT id,status,last_event_ts FROM agent_sessions ORDER BY created_at DESC LIMIT 1",
+      "expected": "last_event_ts non-null epoch-ms integer within 11s",
+      "result": "fail",
+      "classification": "code-defect (pre-existing, cross-cutting — surfaced by this VP)",
+      "output": "New session sess-9187066b-37c8-4a5b-a849-f3a637cba167 created at 2026-04-22T13:53:55Z via UI. Runner PID 3112926 confirmed spawned and dial-back WS connected. SessionDO's local session_meta SQLite has correct state (sdk_session_id=82219318-..., status=idle, duration_ms=7713, num_turns=2, cost=0.2004775), but D1 agent_sessions row still reads status='running', num_turns=NULL, duration_ms=NULL, total_cost_usd=NULL, last_event_ts=NULL 60+ seconds after completion. updated_at == created_at (no UPDATE ever hit). Zero D1 rows with id matching the DO hash 70c05c248f...",
+      "root_cause": "session-do.ts:1662 uses `const sessionId = this.ctx.id.toString()` (the 64-hex DO hash from idFromName(client_session_id)), but since commit 2af282c `agent_sessions.id` is the client-supplied 'sess-<uuid>' string. UPDATE WHERE id = <hash> matches 0 rows in the client_session_id flow. Same pattern at session-do.ts:1403, 1442, 1463, 1483, 1508, 1546, 1590, 1616, 1662, 1727, 1840, 3013 — all flushes, reads, and status syncs are silent no-ops for client-created sessions."
+    },
+    {
+      "name": "Post-deploy prod VP (SIGKILL runner, observe transition, query prod D1)",
+      "command": "manual per spec lines 235–246",
+      "result": "deferred",
+      "classification": "not-applicable-pre-merge"
+    }
+  ],
+  "non_blocking_findings": [
+    {
+      "severity": "low",
+      "area": "use-now.tsx hydration safety vs spec Gotchas (L391)",
+      "detail": "createContext(Date.now()) and useState(()=>Date.now()) will cause SSR/hydration mismatch if any SSR-rendered descendant reads useNow() without a <NowProvider> ancestor. Spec mandates createContext(0) + useState(0) with Date.now() only inside useEffect."
+    },
+    {
+      "severity": "low",
+      "area": "spec P1 task 5 naming rename not applied",
+      "detail": "session-do.ts:233 still reads `LAST_EVENT_FLUSH_DEBOUNCE_MS` and surrounding JSDoc (L1631–1637, L1651) still says 'debounce'. Spec P1 explicitly required renaming to LAST_EVENT_FLUSH_THROTTLE_MS because the implementation is a leading-edge throttle, not a debounce. Not behavioural — cosmetic."
+    }
+  ],
+  "blocking_findings": [
+    {
+      "severity": "high",
+      "area": "DO → D1 id mismatch; spec B2 flush is a silent no-op for client_session_id-era rows",
+      "detail": "flushLastEventTsToD1 at session-do.ts:1662 (and all other agent_sessions UPDATE sites in the DO) uses this.ctx.id.toString() — the 64-hex idFromName hash — as the WHERE clause value, but the D1 primary key for every row inserted via the optimistic client_session_id flow (commit 2af282c) is the client-supplied 'sess-<uuid>' string. The two IDs are structurally different and never match. Result: spec B2's primary success criterion (D1 last_event_ts populated within 11s, broadcastSessionRow fanout carries the new ts) fails silently. Empirically reproduced: new session's D1 row still status='running' with last_event_ts=NULL long after the session reached status='idle' in the DO's local session_meta SQLite. All three pre-existing D1 rows (from the last 2 days) also have last_event_ts=NULL and stale status='running', consistent with the mismatch applying fleet-wide. Fix likely requires sourcing sessionId from a canonical state field (this.state.session_id or similar) rather than this.ctx.id.toString() in every agent_sessions write/read in session-do.ts."
+    }
+  ],
+  "environmental_notes": [
+    "Dev orch running at http://127.0.0.1:43613 (derived port for duraclaw-dev2)",
+    "Dev gateway running at http://127.0.0.1:10413",
+    "Spawn → runner → dial-back end-to-end confirmed working (session_meta populated correctly)",
+    "Local D1 file: apps/orchestrator/.wrangler/state/v3/d1/miniflare-D1DatabaseObject/e8de4c49bbf3539556de994b16a49782ffc47b2f45359f4dc7d8342a3ff5d996.sqlite"
+  ],
+  "recommendation": "Do not merge PR#52 until the DO → D1 id source is reconciled. The code change in PR#52 is internally correct (pure unit-tested predicate + migration + reader swap) but the E2E outcome it promises (D1 last_event_ts populated, client TTL derivation flipping stuck sessions to Idle) cannot be observed for any session created through the current UI flow. Either (a) fix the ID source across session-do.ts agent_sessions writes, or (b) if prod genuinely bypasses client_session_id and uses newUniqueId() (need confirmation), amend the spec VP to reflect that path and add a regression test pinning the invariant so it doesn't silently break later."
+}

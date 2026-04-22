@@ -1,0 +1,109 @@
+{
+  "issueNumber": 50,
+  "phaseId": "verify",
+  "branch": "feature/50-status-ttl",
+  "commit": "46b95ee",
+  "pr": 52,
+  "timestamp": "2026-04-22T13:55:00.000Z",
+  "overallPassed": false,
+  "allStepsPassed": false,
+  "overall_verdict": "partial-blocked-on-e2e",
+  "steps": [
+    {
+      "id": "vp1",
+      "title": "typecheck orchestrator",
+      "status": "pass",
+      "passed": true,
+      "output": "tsc --noEmit completed with no errors"
+    },
+    {
+      "id": "vp2",
+      "title": "orchestrator test suite (all tests)",
+      "status": "pass",
+      "passed": true,
+      "output": "Test Files 81 passed (81); Tests 980 passed (980); Duration 6.75s"
+    },
+    {
+      "id": "vp3",
+      "title": "drizzle-kit check (migration 0017 schema parity)",
+      "status": "pass",
+      "passed": true,
+      "output": "Everything's fine"
+    },
+    {
+      "id": "vp4",
+      "title": "derive-status.test.ts (spec B3 predicate — 7 cases)",
+      "status": "pass",
+      "passed": true,
+      "output": "Test Files 1 passed; Tests 7 passed"
+    },
+    {
+      "id": "vp5",
+      "title": "use-now RTL tests (spec B4 Verify)",
+      "status": "fail",
+      "passed": false,
+      "classification": "missing-task",
+      "output": "vitest: No test files found. Implementation apps/orchestrator/src/lib/use-now.tsx exists but there is no use-now.test.tsx. Spec P2 task list does not explicitly include adding one; only B4 Verify narrative mentions RTL test coverage."
+    },
+    {
+      "id": "vp6",
+      "title": "session-do test suite (spec B9 legacy-drop + B1/B2 TTL flush)",
+      "status": "pass",
+      "passed": true,
+      "output": "Test Files 1 passed; Tests 170 passed"
+    },
+    {
+      "id": "vp7",
+      "title": "session-runner build (spec B7 HeartbeatEvent removed)",
+      "status": "pass",
+      "passed": true,
+      "output": "tsup build success; dist/main.js 11.33KB emitted"
+    },
+    {
+      "id": "vp8",
+      "title": "P3 dead-event grep (HeartbeatEvent / SessionStateChangedEvent / session_state_changed)",
+      "status": "pass-with-note",
+      "passed": true,
+      "classification": "misread-vp (expected-empty too aggressive)",
+      "output": "4 hits, all in apps/orchestrator/src/agents/session-do.ts (L237, L1633, L1675 JSDoc comments; L3877 B9 tolerant-drop dispatch `if (type === 'heartbeat' || type === 'session_state_changed')`). These string-literal hits are intentional and required by B9. HeartbeatEvent and SessionStateChangedEvent TYPES are fully removed from packages/shared-types and packages/session-runner."
+    },
+    {
+      "id": "vp9",
+      "title": "B5 render-layer grep (session.status / row.status in components+features)",
+      "status": "pass",
+      "passed": true,
+      "output": "empty — all 8 reader sites swapped to deriveStatus(session, useNow())"
+    },
+    {
+      "id": "vp10",
+      "title": "local D1 migration apply (0017_last_event_ts.sql)",
+      "status": "pass",
+      "passed": true,
+      "output": "0017 applied; agent_sessions schema now includes last_event_ts INTEGER column"
+    },
+    {
+      "id": "vp11",
+      "title": "E2E pre-deploy P1: last_event_ts populated within 11s",
+      "status": "fail",
+      "passed": false,
+      "classification": "code-defect (pre-existing, cross-cutting, surfaced by this VP)",
+      "output": "New session sess-9187066b-37c8-4a5b-a849-f3a637cba167 created via UI at 13:53:55Z. Runner PID 3112926 spawned and dial-back WS connected. SessionDO local session_meta SQLite shows correct terminal state (sdk_session_id=82219318, status=idle, duration_ms=7713, num_turns=2, cost=0.2004775). BUT D1 agent_sessions row still shows status='running', num_turns=NULL, duration_ms=NULL, total_cost_usd=NULL, last_event_ts=NULL, updated_at == created_at 60+ seconds after completion. Root cause: session-do.ts:1662 uses this.ctx.id.toString() (64-hex idFromName hash) as the WHERE clause, but since commit 2af282c agent_sessions.id is 'sess-<uuid>' (client-supplied). UPDATE matches 0 rows. Pattern repeats at session-do.ts lines 1403, 1442, 1463, 1483, 1508, 1546, 1590, 1616, 1662, 1727, 1840, 3013."
+    },
+    {
+      "id": "vp12",
+      "title": "Post-deploy prod VP (SIGKILL runner + D1 query)",
+      "status": "deferred",
+      "passed": null,
+      "classification": "not-applicable-pre-merge",
+      "output": "Manual step per spec lines 235–246; executed only after PR#52 merges and infra pipeline deploys."
+    }
+  ],
+  "blocking_findings": [
+    "DO → D1 id mismatch: flushLastEventTsToD1 (and ~12 other agent_sessions writers in session-do.ts) target this.ctx.id.toString() while D1 PKs are the client-supplied 'sess-<uuid>' strings since commit 2af282c. Flush is a silent no-op in every flow that uses client_session_id. Spec B2's primary success criterion (D1 last_event_ts populated) is unobservable."
+  ],
+  "non_blocking_findings": [
+    "use-now.tsx deviates from spec Gotchas (L391) on SSR/hydration safety — uses Date.now() as both createContext default and useState initializer instead of 0.",
+    "Spec P1 task 5 naming rename not applied — session-do.ts:233 still reads LAST_EVENT_FLUSH_DEBOUNCE_MS; surrounding JSDoc still says 'debounce'."
+  ],
+  "recommendation": "Do not merge PR#52 until the DO→D1 id source is reconciled (either fix session-do.ts writers to use this.state.session_id or equivalent, or confirm + document that prod uses a path where this.ctx.id.toString() === agent_sessions.id). The PR's code is internally correct (unit-tested predicate, migration, reader swap) but its end-to-end value (flipping stuck-running sessions to Idle via D1-driven TTL) cannot be observed for sessions created through the current UI."
+}
