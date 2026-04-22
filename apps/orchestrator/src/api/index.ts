@@ -2643,6 +2643,9 @@ export function createApiApp() {
 
     const httpBase = c.env.CC_GATEWAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
     const gatewayUrl = new URL('/deploy/state', httpBase)
+    // Forward the repo selector from the UI. Gateway whitelists the value.
+    const repo = c.req.query('repo')
+    if (repo) gatewayUrl.searchParams.set('repo', repo)
     const headers: Record<string, string> = {}
     if (c.env.CC_GATEWAY_SECRET) {
       headers.Authorization = `Bearer ${c.env.CC_GATEWAY_SECRET}`

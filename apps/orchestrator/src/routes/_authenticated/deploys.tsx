@@ -3,8 +3,8 @@ import { useEffect, useRef, useState } from 'react'
 import { Header } from '~/components/layout/header'
 import { Main } from '~/components/layout/main'
 import { Badge } from '~/components/ui/badge'
-import { Card, CardContent, CardHeader, CardTitle } from '~/components/ui/card'
 import { ScrollArea } from '~/components/ui/scroll-area'
+import { Tabs, TabsList, TabsTrigger } from '~/components/ui/tabs'
 import { useSession } from '~/lib/auth-client'
 import {
   type DeployState,
@@ -22,6 +22,15 @@ export const Route = createFileRoute('/_authenticated/deploys')({
 })
 
 const POLL_MS = 1000
+
+// Repo selector — extensible. Gateway resolves the state file per repo:
+//   DEPLOY_STATE_PATH_<UPPER> env var, else /data/projects/<id>-infra/.deploy-state.json
+const REPOS: ReadonlyArray<{ id: string; label: string }> = [
+  { id: 'baseplane', label: 'Baseplane' },
+  { id: 'duraclaw', label: 'Duraclaw' },
+]
+
+const REPO_STORAGE_KEY = 'duraclaw.deploys.repo'
 
 function phaseTone(status: PhaseStatusKind): string {
   switch (status) {
@@ -118,17 +127,38 @@ function DeploysPage() {
 }
 
 function DeploysView() {
+  const [repo, setRepo] = useState<string>(() => {
+    if (typeof window === 'undefined') return REPOS[0].id
+    const saved = window.localStorage.getItem(REPO_STORAGE_KEY)
+    return saved && REPOS.some((r) => r.id === saved) ? saved : REPOS[0].id
+  })
   const [state, setState] = useState<DeployState | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [lastFetchedAt, setLastFetchedAt] = useState<number | null>(null)
   const logTailRef = useRef<HTMLDivElement | null>(null)
+
+  // Persist repo selection across reloads.
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem(REPO_STORAGE_KEY, repo)
+  }, [repo])
+
+  // Clear stale state while switching repos so the UI doesn't flash the
+  // previous repo's deploy while the first fetch is in flight.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: setState/setError are stable; we intentionally re-run only on repo change
+  useEffect(() => {
+    setState(null)
+    setError(null)
+  }, [repo])
 
   useEffect(() => {
     let cancelled = false
 
     const load = async () => {
       try {
-        const resp = await fetch('/api/deploys/state', { credentials: 'include' })
+        const resp = await fetch(`/api/deploys/state?repo=${encodeURIComponent(repo)}`, {
+          credentials: 'include',
+        })
         if (!resp.ok) {
           const body = await resp.text().catch(() => '')
           if (!cancelled) setError(`HTTP ${resp.status}: ${body || resp.statusText}`)
@@ -150,7 +180,7 @@ function DeploysView() {
       cancelled = true
       window.clearInterval(handle)
     }
-  }, [])
+  }, [repo])
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: re-run when log count changes to stick to tail
   useEffect(() => {
@@ -163,6 +193,15 @@ function DeploysView() {
     <>
       <Header fixed>
         <h1 className="text-lg font-semibold">Deploys</h1>
+        <Tabs value={repo} onValueChange={setRepo} className="ml-4">
+          <TabsList className="h-8">
+            {REPOS.map((r) => (
+              <TabsTrigger key={r.id} value={r.id} className="text-xs">
+                {r.label}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+        </Tabs>
         <span className="ml-auto text-xs text-muted-foreground">
           {lastFetchedAt
             ? `Updated ${new Date(lastFetchedAt).toLocaleTimeString()}`
@@ -171,21 +210,21 @@ function DeploysView() {
       </Header>
 
       <Main>
-        <div className="space-y-4">
+        <div className="space-y-2">
           {error && (
-            <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
               {error}
             </div>
           )}
 
           {state && (
             <>
-              <CurrentDeployCard state={state} />
-              <PhasesCard state={state} />
-              <WorkersCard state={state} />
-              <LogsCard state={state} logTailRef={logTailRef} />
-              {state.queue.length > 0 && <QueueCard state={state} />}
-              <HistoryCard state={state} />
+              <CurrentDeploySection state={state} />
+              <PhasesSection state={state} />
+              <WorkersSection state={state} />
+              <LogsSection state={state} logTailRef={logTailRef} />
+              {state.queue.length > 0 && <QueueSection state={state} />}
+              <HistorySection state={state} />
             </>
           )}
 
@@ -198,142 +237,148 @@ function DeploysView() {
   )
 }
 
-function CurrentDeployCard({ state }: { state: DeployState }) {
+/** Compact section wrapper — replaces shadcn Card to kill the default p-6. */
+function Section({
+  title,
+  actions,
+  children,
+}: {
+  title: string
+  actions?: React.ReactNode
+  children: React.ReactNode
+}) {
+  return (
+    <section className="rounded-md border bg-card">
+      <header className="flex items-center justify-between gap-2 border-b px-3 py-1.5">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          {title}
+        </h2>
+        {actions}
+      </header>
+      <div className="p-2">{children}</div>
+    </section>
+  )
+}
+
+function CurrentDeploySection({ state }: { state: DeployState }) {
   const { current } = state
   return (
-    <Card>
-      <CardHeader className="flex flex-row items-center justify-between gap-3 space-y-0">
-        <div className="min-w-0">
-          <CardTitle className="truncate">Current Deploy</CardTitle>
-          <p className="mt-1 truncate text-sm text-muted-foreground">
-            {current.commit_message || '—'}
-          </p>
-        </div>
+    <section className="rounded-md border bg-card">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-2">
         <Badge variant="outline" className={cn('shrink-0 capitalize', deployTone(current.status))}>
           {current.status.replace(/_/g, ' ')}
         </Badge>
-      </CardHeader>
-      <CardContent className="grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
-        <Field label="Environment" value={current.environment || '—'} />
-        <Field label="Branch" value={current.branch || '—'} />
-        <Field
-          label="Commit"
+        <p className="min-w-0 flex-1 truncate text-sm font-medium">
+          {current.commit_message || '—'}
+        </p>
+      </div>
+      <div className="flex flex-wrap gap-x-4 gap-y-1 border-t px-3 py-1.5 text-xs">
+        <InlineField label="env" value={current.environment || '—'} />
+        <InlineField label="branch" value={current.branch || '—'} />
+        <InlineField
+          label="commit"
           value={current.commit_sha ? shortSha(current.commit_sha) : '—'}
           mono
         />
-        <Field label="Trigger" value={current.trigger || '—'} />
-        <Field label="Author" value={current.push_author || '—'} />
-        <Field label="Started" value={fmtTime(current.started_at)} />
-        <Field label="Finished" value={fmtTime(current.finished_at) || '—'} />
-        <Field label="Worktree" value={current.worktree_name || '—'} />
-        {current.error && (
-          <div className="col-span-full">
-            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Error
-            </p>
-            <p className="mt-1 whitespace-pre-wrap break-words font-mono text-xs text-destructive">
-              {current.error}
-            </p>
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  )
-}
-
-function Field({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div className="min-w-0">
-      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{label}</p>
-      <p className={cn('truncate', mono && 'font-mono')}>{value}</p>
-    </div>
-  )
-}
-
-function PhasesCard({ state }: { state: DeployState }) {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Phases</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
-          {PHASE_ORDER.map((key) => {
-            const phase = state.current.phases[key]
-            const status = phase?.status ?? 'pending'
-            return (
-              <div
-                key={key}
-                className={cn(
-                  'rounded-md border px-3 py-2 text-xs',
-                  phaseTone(status as PhaseStatusKind),
-                )}
-              >
-                <p className="font-medium">{PHASE_LABEL[key] ?? key}</p>
-                <p className="mt-0.5 capitalize opacity-80">
-                  {(status as string).replace(/_/g, ' ')}
-                </p>
-                {phase?.error && (
-                  <p className="mt-1 truncate font-mono text-[10px]" title={phase.error}>
-                    {phase.error}
-                  </p>
-                )}
-              </div>
-            )
-          })}
+        <InlineField label="trigger" value={current.trigger || '—'} />
+        <InlineField label="author" value={current.push_author || '—'} />
+        <InlineField label="started" value={fmtTime(current.started_at) || '—'} />
+        <InlineField label="finished" value={fmtTime(current.finished_at) || '—'} />
+        {current.worktree_name && <InlineField label="worktree" value={current.worktree_name} />}
+      </div>
+      {current.error && (
+        <div className="border-t px-3 py-1.5">
+          <p className="whitespace-pre-wrap break-words font-mono text-[11px] text-destructive">
+            {current.error}
+          </p>
         </div>
-      </CardContent>
-    </Card>
+      )}
+    </section>
   )
 }
 
-function WorkersCard({ state }: { state: DeployState }) {
+function InlineField({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <span className="inline-flex items-baseline gap-1">
+      <span className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</span>
+      <span className={cn('truncate', mono && 'font-mono')}>{value}</span>
+    </span>
+  )
+}
+
+function PhasesSection({ state }: { state: DeployState }) {
+  return (
+    <Section title="Phases">
+      <div className="grid grid-cols-3 gap-1.5 sm:grid-cols-4 lg:grid-cols-7">
+        {PHASE_ORDER.map((key) => {
+          const phase = state.current.phases[key]
+          const status = phase?.status ?? 'pending'
+          return (
+            <div
+              key={key}
+              className={cn(
+                'rounded border px-2 py-1 text-[11px] leading-tight',
+                phaseTone(status as PhaseStatusKind),
+              )}
+            >
+              <p className="font-medium">{PHASE_LABEL[key] ?? key}</p>
+              <p className="capitalize opacity-80">{(status as string).replace(/_/g, ' ')}</p>
+              {phase?.error && (
+                <p className="mt-0.5 truncate font-mono text-[10px]" title={phase.error}>
+                  {phase.error}
+                </p>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </Section>
+  )
+}
+
+function WorkersSection({ state }: { state: DeployState }) {
   const workers = state.current.workers
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Workers</CardTitle>
-      </CardHeader>
-      <CardContent>
-        {workers.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No workers in this deploy.</p>
-        ) : (
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
-            {workers.map((w) => (
-              <div
-                key={w.name}
-                className={cn('rounded-md border px-3 py-2 text-xs', workerTone(w.status))}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <p className="truncate font-medium" title={w.name}>
-                    {w.name}
-                  </p>
-                  {w.retries > 0 && (
-                    <span className="shrink-0 text-[10px] opacity-70">×{w.retries}</span>
-                  )}
-                </div>
-                <p className="mt-0.5 capitalize opacity-80">{w.status}</p>
-                {w.health && (
-                  <p className="mt-1 text-[10px] opacity-70">
-                    {w.health.healthy ? 'healthy' : 'unhealthy'}
-                    {w.health.statusCode != null ? ` (${w.health.statusCode})` : ''}
-                  </p>
-                )}
-                {w.error && (
-                  <p className="mt-1 truncate font-mono text-[10px]" title={w.error}>
-                    {w.error}
-                  </p>
+    <Section title={`Workers (${workers.length})`}>
+      {workers.length === 0 ? (
+        <p className="px-1 py-0.5 text-xs text-muted-foreground">No workers in this deploy.</p>
+      ) : (
+        <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
+          {workers.map((w) => (
+            <div
+              key={w.name}
+              className={cn(
+                'rounded border px-2 py-1 text-[11px] leading-tight',
+                workerTone(w.status),
+              )}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <p className="truncate font-medium" title={w.name}>
+                  {w.name}
+                </p>
+                {w.retries > 0 && (
+                  <span className="shrink-0 text-[10px] opacity-70">×{w.retries}</span>
                 )}
               </div>
-            ))}
-          </div>
-        )}
-      </CardContent>
-    </Card>
+              <p className="capitalize opacity-80">
+                {w.status}
+                {w.health ? ` · ${w.health.healthy ? 'ok' : 'unhealthy'}` : ''}
+                {w.health?.statusCode != null ? ` (${w.health.statusCode})` : ''}
+              </p>
+              {w.error && (
+                <p className="mt-0.5 truncate font-mono text-[10px]" title={w.error}>
+                  {w.error}
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </Section>
   )
 }
 
-function LogsCard({
+function LogsSection({
   state,
   logTailRef,
 }: {
@@ -342,109 +387,96 @@ function LogsCard({
 }) {
   const logs = state.current.logs
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Logs</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <ScrollArea className="h-72 rounded-md border bg-muted/30">
-          <div ref={logTailRef} className="h-72 overflow-auto p-3 font-mono text-xs leading-5">
-            {logs.length === 0 ? (
-              <p className="text-muted-foreground">No logs yet.</p>
-            ) : (
-              logs.map((entry, i) => (
-                <div
-                  // biome-ignore lint/suspicious/noArrayIndexKey: log entries have no unique id; list is append-only and auto-scrolls
-                  key={i}
-                  className={cn('whitespace-pre-wrap break-words', logTone(entry.level))}
-                >
-                  <span className="opacity-60">{fmtTime(entry.timestamp)}</span>{' '}
-                  <span className="uppercase opacity-70">{entry.level}</span> {entry.message}
-                </div>
-              ))
-            )}
-          </div>
-        </ScrollArea>
-      </CardContent>
-    </Card>
+    <Section title={`Logs (${logs.length})`}>
+      <ScrollArea className="h-60 rounded border bg-muted/30">
+        <div ref={logTailRef} className="h-60 overflow-auto p-2 font-mono text-[11px] leading-4">
+          {logs.length === 0 ? (
+            <p className="text-muted-foreground">No logs yet.</p>
+          ) : (
+            logs.map((entry, i) => (
+              <div
+                // biome-ignore lint/suspicious/noArrayIndexKey: log entries have no unique id; list is append-only and auto-scrolls
+                key={i}
+                className={cn('whitespace-pre-wrap break-words', logTone(entry.level))}
+              >
+                <span className="opacity-60">{fmtTime(entry.timestamp)}</span>{' '}
+                <span className="uppercase opacity-70">{entry.level}</span> {entry.message}
+              </div>
+            ))
+          )}
+        </div>
+      </ScrollArea>
+    </Section>
   )
 }
 
-function QueueCard({ state }: { state: DeployState }) {
+function QueueSection({ state }: { state: DeployState }) {
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Queue ({state.queue.length})</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="space-y-2 text-sm">
-          {state.queue.map((q) => (
+    <Section title={`Queue (${state.queue.length})`}>
+      <div className="space-y-1 text-xs">
+        {state.queue.map((q) => (
+          <div
+            key={`${q.commit_sha}-${q.queued_at}`}
+            className="flex items-center justify-between gap-2 rounded border px-2 py-1"
+          >
+            <div className="min-w-0 flex-1">
+              <p className="truncate">{q.commit_message || '—'}</p>
+              <p className="truncate text-[11px] text-muted-foreground">
+                {q.environment} · {q.branch} · {shortSha(q.commit_sha)} · {q.push_author}
+              </p>
+            </div>
+            <span className="shrink-0 text-[11px] text-muted-foreground">
+              {fmtTime(q.queued_at)}
+            </span>
+          </div>
+        ))}
+      </div>
+    </Section>
+  )
+}
+
+function HistorySection({ state }: { state: DeployState }) {
+  const recent = state.history.slice(-8).reverse()
+  return (
+    <Section title="Recent History">
+      {recent.length === 0 ? (
+        <p className="px-1 py-0.5 text-xs text-muted-foreground">No prior deploys recorded.</p>
+      ) : (
+        <div className="space-y-1 text-xs">
+          {recent.map((h) => (
             <div
-              key={`${q.commit_sha}-${q.queued_at}`}
-              className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"
+              key={`${h.commit_sha}-${h.started_at}`}
+              className="flex items-center justify-between gap-2 rounded border px-2 py-1"
             >
               <div className="min-w-0 flex-1">
-                <p className="truncate">{q.commit_message || '—'}</p>
-                <p className="truncate text-xs text-muted-foreground">
-                  {q.environment} · {q.branch} · {shortSha(q.commit_sha)} · {q.push_author}
+                <div className="flex items-center gap-2">
+                  <Badge
+                    variant="outline"
+                    className={cn(
+                      'shrink-0 px-1.5 py-0 text-[10px] capitalize leading-4',
+                      h.status === 'done'
+                        ? 'bg-emerald-500/15 text-emerald-600 border-emerald-500/30'
+                        : 'bg-destructive/15 text-destructive border-destructive/30',
+                    )}
+                  >
+                    {h.status}
+                  </Badge>
+                  <p className="truncate">{h.commit_message || '—'}</p>
+                </div>
+                <p className="truncate text-[11px] text-muted-foreground">
+                  {h.environment} · {h.branch} · {shortSha(h.commit_sha)} · {h.push_author}
                 </p>
               </div>
-              <span className="shrink-0 text-xs text-muted-foreground">{fmtTime(q.queued_at)}</span>
+              <div className="shrink-0 text-right text-[11px] text-muted-foreground">
+                <div>{fmtTime(h.finished_at)}</div>
+                <div>
+                  {h.workers_deployed}/{h.workers_total} · {fmtDuration(h.duration_seconds)}
+                </div>
+              </div>
             </div>
           ))}
         </div>
-      </CardContent>
-    </Card>
-  )
-}
-
-function HistoryCard({ state }: { state: DeployState }) {
-  const recent = state.history.slice(-8).reverse()
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Recent History</CardTitle>
-      </CardHeader>
-      <CardContent>
-        {recent.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No prior deploys recorded.</p>
-        ) : (
-          <div className="space-y-1.5 text-sm">
-            {recent.map((h) => (
-              <div
-                key={`${h.commit_sha}-${h.started_at}`}
-                className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <Badge
-                      variant="outline"
-                      className={cn(
-                        'shrink-0 capitalize',
-                        h.status === 'done'
-                          ? 'bg-emerald-500/15 text-emerald-600 border-emerald-500/30'
-                          : 'bg-destructive/15 text-destructive border-destructive/30',
-                      )}
-                    >
-                      {h.status}
-                    </Badge>
-                    <p className="truncate">{h.commit_message || '—'}</p>
-                  </div>
-                  <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                    {h.environment} · {h.branch} · {shortSha(h.commit_sha)} · {h.push_author}
-                  </p>
-                </div>
-                <div className="shrink-0 text-right text-xs text-muted-foreground">
-                  <div>{fmtTime(h.finished_at)}</div>
-                  <div>
-                    {h.workers_deployed}/{h.workers_total} · {fmtDuration(h.duration_seconds)}
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </CardContent>
-    </Card>
+      )}
+    </Section>
   )
 }

@@ -101,7 +101,7 @@ const server = Bun.serve<WsData>({
     // GET /deploy/state — read the infra deploy-state.json. Used by the
     // orchestrator's admin /deploys tab to mirror the baseplane-infra TUI.
     if (req.method === 'GET' && path === '/deploy/state') {
-      return handleDeployState()
+      return handleDeployState(url)
     }
 
     // GET /sessions — list all known sessions (B5b)
