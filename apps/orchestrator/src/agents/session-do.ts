@@ -39,6 +39,7 @@ import {
   finalizeStreamingParts,
   mergeFinalAssistantParts,
   partialAssistantToParts,
+  upsertParts,
 } from './gateway-event-mapper'
 import {
   buildGatewayCallbackUrl,
@@ -2121,11 +2122,18 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
             // response) — merge parts into the existing message to mirror the
             // live-streaming merge behavior. Otherwise tool pills get split
             // across N messages and lose their grouping in the UI.
+            //
+            // Dedupe-on-merge via `upsertParts`: SDK transcript replay after
+            // a gate resolution re-emits already-persisted tool_use blocks
+            // (same toolCallId). A naive concat duplicates them and, worse,
+            // un-promotes any gate part that was promoted in-place
+            // (GH#59). `upsertParts` keeps promotion sticky and prevents
+            // state regression from terminal states.
             const existing = this.session.getMessage(currentAssistantMsgId)
             if (existing) {
               this.session.updateMessage({
                 ...existing,
-                parts: [...existing.parts, ...newParts],
+                parts: upsertParts(existing.parts, newParts),
               })
               persisted++
               continue
