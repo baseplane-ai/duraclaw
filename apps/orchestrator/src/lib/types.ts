@@ -128,13 +128,9 @@ export interface AgentSessionRow {
  */
 export interface TabMeta {
   /** Absent → 'session' (legacy rows). */
-  kind?: 'chain' | 'session'
+  kind?: 'session'
   /** One-tab-per-project cluster key for session tabs. */
   project?: string
-  /** Required when kind === 'chain' — one-chain-per-issue cluster key. */
-  issueNumber?: number
-  /** For chain tabs: which mode-session inside the chain is currently live. */
-  activeSessionId?: string
 }
 
 export interface UserTabRow {
@@ -218,4 +214,6 @@ export interface UserPreferencesRow {
   effort: string | null
   hiddenProjects: string | null
   updatedAt: string
+  chainsJson?: string | null
+  defaultChainAutoAdvance?: boolean | null
 }

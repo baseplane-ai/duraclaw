@@ -161,6 +161,8 @@ export type GatewayEvent =
   | ModeTransitionTimeoutEvent
   | ModeTransitionPreambleDegradedEvent
   | ModeTransitionFlushTimeoutEvent
+  | ChainAdvanceEvent
+  | ChainStalledEvent
 
 // ── Mode transition events (DO-synthesised for chain UX) ────────────
 //
@@ -199,6 +201,27 @@ export interface ModeTransitionFlushTimeoutEvent {
   session_id: string
   issueNumber: number
   at: string
+}
+
+// ── Chain auto-advance events (DO-synthesised for chain UX P3) ──────
+//
+// Emitted by SessionDO when a chain-linked session terminates and the
+// DO's `maybeAutoAdvanceChain()` pathway runs `tryAutoAdvance()`.
+// Travel over the browser WS alongside real runner events; the client
+// handler in `use-coding-agent.ts` invalidates `chainsCollection` and
+// surfaces a toast / stall reason for `ChainStatusItem`.
+
+export interface ChainAdvanceEvent {
+  type: 'chain_advance'
+  newSessionId: string
+  nextMode: string
+  issueNumber: number
+}
+
+export interface ChainStalledEvent {
+  type: 'chain_stalled'
+  reason: string
+  issueNumber: number
 }
 
 export interface StoppedEvent {

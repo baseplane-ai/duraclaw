@@ -7,7 +7,6 @@
  */
 
 import { useDraggable } from '@dnd-kit/core'
-import { useNavigate } from '@tanstack/react-router'
 import { useCallback, useState } from 'react'
 import { toast } from 'sonner'
 import { PipelineDots } from '~/components/layout/nav-sessions'
@@ -20,7 +19,7 @@ import { useNextModePrecondition } from '~/hooks/use-chain-preconditions'
 import { useTabSync } from '~/hooks/use-tab-sync'
 import type { ChainSummary, WorktreeReservation } from '~/lib/types'
 import { AdvanceConfirmModal } from './AdvanceConfirmModal'
-import { advanceChain, hasActiveSession } from './advance-chain'
+import { advanceChain, chainProject, hasActiveSession } from './advance-chain'
 
 interface KanbanCardProps {
   chain: ChainSummary
@@ -54,7 +53,6 @@ function shortMode(mode: string | null | undefined): string {
 }
 
 export function KanbanCard({ chain }: KanbanCardProps) {
-  const navigate = useNavigate()
   const { openTab } = useTabSync()
   const { nextMode, nextLabel, canAdvance, reason, loading } = useNextModePrecondition(chain)
   const { forceRelease } = useChainCheckout()
@@ -68,16 +66,16 @@ export function KanbanCard({ chain }: KanbanCardProps) {
   })
 
   const handleOpen = useCallback(() => {
-    openTab(`chain:${chain.issueNumber}`, {
-      kind: 'chain',
-      issueNumber: chain.issueNumber,
+    if (chain.sessions.length === 0) return
+    const sorted = [...chain.sessions].sort((a, b) => {
+      const aTime = new Date(a.lastActivity ?? a.createdAt).getTime()
+      const bTime = new Date(b.lastActivity ?? b.createdAt).getTime()
+      return bTime - aTime
     })
-    navigate({
-      to: '/chain/$issueNumber',
-      params: { issueNumber: String(chain.issueNumber) },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any)
-  }, [chain.issueNumber, navigate, openTab])
+    const latestSessionId = sorted[0]?.id
+    if (!latestSessionId) return
+    openTab(latestSessionId, { project: chainProject(chain) ?? undefined })
+  }, [chain, openTab])
 
   const handleStartNext = useCallback(() => {
     if (!nextMode || !canAdvance) return
@@ -100,13 +98,9 @@ export function KanbanCard({ chain }: KanbanCardProps) {
     }
     setModalOpen(false)
     toast.success(`Started ${nextMode} for #${chain.issueNumber}`)
-    navigate({
-      to: '/chain/$issueNumber',
-      params: { issueNumber: String(chain.issueNumber) },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any)
+    openTab(res.sessionId, { project: chainProject(chain) ?? undefined })
     return true
-  }, [chain, nextMode, navigate])
+  }, [chain, nextMode, openTab])
 
   const handleConfirm = useCallback(async () => {
     await runAdvance()
@@ -185,15 +179,17 @@ export function KanbanCard({ chain }: KanbanCardProps) {
         ) : null}
         <div className="mt-0.5 flex flex-wrap gap-1.5">
           {/* Prevent dnd-kit from intercepting the click on the buttons. */}
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-7 px-2.5 text-xs"
-            onClick={handleOpen}
-            onPointerDown={(e) => e.stopPropagation()}
-          >
-            Open
-          </Button>
+          {chain.sessions.length > 0 ? (
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 px-2.5 text-xs"
+              onClick={handleOpen}
+              onPointerDown={(e) => e.stopPropagation()}
+            >
+              Open
+            </Button>
+          ) : null}
           {nextMode ? (
             <Button
               size="sm"

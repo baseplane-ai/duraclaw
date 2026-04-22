@@ -17,8 +17,16 @@ import { createAuth } from '~/lib/auth'
 import { broadcastSessionRow } from '~/lib/broadcast-session'
 import { broadcastSyncedDelta } from '~/lib/broadcast-synced-delta'
 import { buildChainRowFromContext, type ChainBuildContext } from '~/lib/chains'
+import { checkoutWorktree } from '~/lib/checkout-worktree'
 import { chunkOps } from '~/lib/chunk-frame'
-import { promptToPreviewText } from '~/lib/prompt-preview'
+import { createSession } from '~/lib/create-session'
+import {
+  fetchGatewayFile as sharedFetchGatewayFile,
+  fetchGatewayProjects as sharedFetchGatewayProjects,
+  listGatewayFiles as sharedListGatewayFiles,
+  parseFrontmatter as sharedParseFrontmatter,
+  resolveProjectPath as sharedResolveProjectPath,
+} from '~/lib/gateway-files'
 import { type PushPayload, sendPushNotification } from '~/lib/push'
 import { sendFcmNotification } from '~/lib/push-fcm'
 import type {
@@ -26,13 +34,13 @@ import type {
   ChainSummary,
   ContentBlock,
   ContextUsage,
+  Env,
   KataSessionState,
   ProjectInfo,
   SpecStatusResponse,
   UserPreferencesRow,
   UserTabRow,
   VpStatusResponse,
-  WorktreeReservation,
 } from '~/lib/types'
 import { authMiddleware } from './auth-middleware'
 import { authRoutes } from './auth-routes'
@@ -60,10 +68,6 @@ interface CreateSessionBody {
   client_session_id?: string
 }
 
-// Accept safe client-generated ids like `sess-<uuid>`. Excludes 64-hex
-// which would collide with the `idFromString` branch of getSessionDoId.
-const CLIENT_SESSION_ID_RE = /^[A-Za-z0-9_-]{8,128}$/
-
 const ACTIVE_STATUSES = ['running', 'waiting_input', 'waiting_permission'] as const
 
 const SESSION_PATCH_KEYS = new Set([
@@ -85,6 +89,9 @@ const PREF_PATCH_KEYS = new Set([
   'thinkingMode',
   'effort',
   'hiddenProjects',
+  'chains',
+  'chainsJson',
+  'defaultChainAutoAdvance',
 ])
 
 const PERMISSION_MODES = new Set(['default', 'acceptAll', 'acceptEdits', 'plan'])
@@ -144,42 +151,11 @@ function getSessionDoId(env: ApiAppEnv['Bindings'], sessionId: string) {
     : env.SESSION_AGENT.idFromName(sessionId)
 }
 
-async function fetchGatewayProjects(env: ApiAppEnv['Bindings']): Promise<ProjectInfo[]> {
-  if (!env.CC_GATEWAY_URL) {
-    throw new Error('CC_GATEWAY_URL not configured')
-  }
+const fetchGatewayProjects = (env: ApiAppEnv['Bindings']): Promise<ProjectInfo[]> =>
+  sharedFetchGatewayProjects(env as unknown as Env)
 
-  const httpBase = env.CC_GATEWAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
-  const gatewayUrl = new URL('/projects', httpBase)
-  const headers: Record<string, string> = {}
-  if (env.CC_GATEWAY_SECRET) {
-    headers.Authorization = `Bearer ${env.CC_GATEWAY_SECRET}`
-  }
-
-  const response = await fetch(gatewayUrl.toString(), { headers })
-  if (!response.ok) {
-    throw new Error(`Gateway returned ${response.status}`)
-  }
-
-  return (await response.json()) as ProjectInfo[]
-}
-
-async function resolveProjectPath(
-  env: ApiAppEnv['Bindings'],
-  projectName: string,
-): Promise<string> {
-  try {
-    const projects = await fetchGatewayProjects(env)
-    const match = projects.find((project) => project.name === projectName)
-    if (match?.path) {
-      return match.path
-    }
-  } catch {
-    // Fall back to the conventional path below.
-  }
-
-  return `/data/projects/${projectName}`
-}
+const _resolveProjectPath = (env: ApiAppEnv['Bindings'], projectName: string): Promise<string> =>
+  sharedResolveProjectPath(env as unknown as Env, projectName)
 
 /**
  * Read the user's hidden-project list. Stored on user_preferences as the
@@ -356,84 +332,14 @@ async function fetchGithubPulls(env: ApiAppEnv['Bindings']): Promise<GhPull[]> {
 // now live in ~/lib/chains. The /api/chains handler consumes them indirectly
 // via `buildChainRowFromContext` so the broadcast path shares the exact mapping.
 
-/**
- * Tiny YAML frontmatter parser — handles `---\n<lines>\n---\n` blocks with
- * `key: value` lines. Values are trimmed and stripped of matching outer
- * quotes. Good enough for spec/VP metadata where we only read `status`-style
- * scalars; does not support nested maps or arrays.
- */
-function parseFrontmatter(markdown: string): Record<string, string> {
-  if (!markdown.startsWith('---\n')) return {}
-  const end = markdown.indexOf('\n---\n', 4)
-  if (end < 0) return {}
-  const block = markdown.slice(4, end)
-  const out: Record<string, string> = {}
-  for (const line of block.split('\n')) {
-    const m = line.match(/^([a-zA-Z_][\w-]*):\s*(.*)$/)
-    if (m) out[m[1]] = m[2].replace(/^["']|["']$/g, '').trim()
-  }
-  return out
-}
-
-/**
- * Read a file from the gateway's project-browse endpoint. Returns null on
- * any gateway error (matches spec "graceful degrade" for spec/VP status).
- */
-async function fetchGatewayFile(
-  env: ApiAppEnv['Bindings'],
-  projectName: string,
-  relPath: string,
-): Promise<string | null> {
-  if (!env.CC_GATEWAY_URL) return null
-  const httpBase = env.CC_GATEWAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
-  const url = new URL(
-    `/projects/${encodeURIComponent(projectName)}/files/${relPath
-      .split('/')
-      .map(encodeURIComponent)
-      .join('/')}`,
-    httpBase,
-  )
-  const headers: Record<string, string> = {}
-  if (env.CC_GATEWAY_SECRET) headers.Authorization = `Bearer ${env.CC_GATEWAY_SECRET}`
-  try {
-    const resp = await fetch(url.toString(), { headers })
-    if (!resp.ok) return null
-    return await resp.text()
-  } catch {
-    return null
-  }
-}
-
-interface GatewayFileEntry {
-  name: string
-  path?: string
-  type?: string
-  modified?: string | number
-}
-
-/** List files under a project-relative directory via the gateway. */
-async function listGatewayFiles(
-  env: ApiAppEnv['Bindings'],
-  projectName: string,
-  dirPath: string,
-): Promise<GatewayFileEntry[] | null> {
-  if (!env.CC_GATEWAY_URL) return null
-  const httpBase = env.CC_GATEWAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
-  const url = new URL(`/projects/${encodeURIComponent(projectName)}/files`, httpBase)
-  url.searchParams.set('path', dirPath)
-  url.searchParams.set('depth', '1')
-  const headers: Record<string, string> = {}
-  if (env.CC_GATEWAY_SECRET) headers.Authorization = `Bearer ${env.CC_GATEWAY_SECRET}`
-  try {
-    const resp = await fetch(url.toString(), { headers })
-    if (!resp.ok) return null
-    const data = (await resp.json()) as { entries?: GatewayFileEntry[] } | GatewayFileEntry[]
-    if (Array.isArray(data)) return data
-    return data.entries ?? []
-  } catch {
-    return null
-  }
-}
+// Gateway-file helpers (parseFrontmatter, fetchGatewayFile, listGatewayFiles,
+// resolveProjectPath) moved to ~/lib/gateway-files. Local aliases preserved so
+// the rest of this file continues to type-check without env casts on every call.
+const parseFrontmatter = sharedParseFrontmatter
+const fetchGatewayFile = (env: ApiAppEnv['Bindings'], projectName: string, relPath: string) =>
+  sharedFetchGatewayFile(env as unknown as Env, projectName, relPath)
+const listGatewayFiles = (env: ApiAppEnv['Bindings'], projectName: string, dirPath: string) =>
+  sharedListGatewayFiles(env as unknown as Env, projectName, dirPath)
 
 export function createApiApp() {
   const app = new Hono<ApiAppEnv>()
@@ -1094,6 +1000,8 @@ export function createApiApp() {
       thinkingMode: 'adaptive',
       effort: 'high',
       hiddenProjects: null,
+      chainsJson: null,
+      defaultChainAutoAdvance: false,
       updatedAt: new Date().toISOString(),
     }
     return c.json(defaults)
@@ -1132,6 +1040,84 @@ export function createApiApp() {
       if (typeof body.hiddenProjects !== 'string') {
         return c.json({ error: 'hiddenProjects must be a JSON string or null' }, 400)
       }
+    }
+
+    // Accept both the documented public shape (`chains: {...}`, JS object) and
+    // the collection write-through shape (`chainsJson: string` already
+    // stringified). Both paths land in `chainsJson` column. Public API:
+    // {chains: {"42": {autoAdvance: true}}} — server stringifies and stores.
+    if (body.chains !== undefined && body.chains !== null) {
+      const chains = body.chains
+      if (typeof chains !== 'object' || Array.isArray(chains)) {
+        return c.json({ error: 'chains must be an object' }, 400)
+      }
+      for (const [k, v] of Object.entries(chains as Record<string, unknown>)) {
+        if (typeof k !== 'string') {
+          return c.json({ error: 'Invalid chains shape' }, 400)
+        }
+        if (!/^\d+$/.test(k)) {
+          return c.json({ error: 'Invalid chain key: must be a numeric issue number' }, 400)
+        }
+        if (typeof v !== 'object' || v === null || Array.isArray(v)) {
+          return c.json({ error: 'Invalid chains shape' }, 400)
+        }
+        const entry = v as Record<string, unknown>
+        for (const ek of Object.keys(entry)) {
+          if (ek !== 'autoAdvance') {
+            return c.json({ error: 'Invalid chains shape' }, 400)
+          }
+        }
+        if (entry.autoAdvance !== undefined && typeof entry.autoAdvance !== 'boolean') {
+          return c.json({ error: 'Invalid chains shape' }, 400)
+        }
+      }
+      body.chainsJson = JSON.stringify(chains)
+      delete body.chains
+    } else if (body.chains === null) {
+      body.chainsJson = null
+      delete body.chains
+    }
+    if (body.chainsJson !== undefined && body.chainsJson !== null) {
+      if (typeof body.chainsJson !== 'string') {
+        return c.json({ error: 'chainsJson must be a JSON string or null' }, 400)
+      }
+      // Validate parsed shape — defense-in-depth for the direct-write path.
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(body.chainsJson)
+      } catch {
+        return c.json({ error: 'chainsJson must be valid JSON' }, 400)
+      }
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        return c.json({ error: 'Invalid chains shape' }, 400)
+      }
+      for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+        if (typeof k !== 'string') {
+          return c.json({ error: 'Invalid chains shape' }, 400)
+        }
+        if (!/^\d+$/.test(k)) {
+          return c.json({ error: 'Invalid chain key: must be a numeric issue number' }, 400)
+        }
+        if (typeof v !== 'object' || v === null || Array.isArray(v)) {
+          return c.json({ error: 'Invalid chains shape' }, 400)
+        }
+        const entry = v as Record<string, unknown>
+        for (const ek of Object.keys(entry)) {
+          if (ek !== 'autoAdvance') {
+            return c.json({ error: 'Invalid chains shape' }, 400)
+          }
+        }
+        if (entry.autoAdvance !== undefined && typeof entry.autoAdvance !== 'boolean') {
+          return c.json({ error: 'Invalid chains shape' }, 400)
+        }
+      }
+    }
+    if (
+      body.defaultChainAutoAdvance !== undefined &&
+      body.defaultChainAutoAdvance !== null &&
+      typeof body.defaultChainAutoAdvance !== 'boolean'
+    ) {
+      return c.json({ error: 'defaultChainAutoAdvance must be a boolean' }, 400)
     }
 
     const updatedAt = new Date().toISOString()
@@ -1683,125 +1669,26 @@ export function createApiApp() {
     const userId = c.get('userId')
     const body = (await c.req.json()) as CreateSessionBody
 
-    if (!body.project || !body.prompt) {
-      return c.json({ error: 'Missing required fields: project, prompt' }, 400)
-    }
-
-    // Validate kataIssue — must be a positive integer if supplied. This
-    // protects downstream consumers (chain joins, worktree reservations)
-    // from negative / fractional / NaN issue numbers.
-    if (body.kataIssue !== undefined && body.kataIssue !== null) {
-      if (!Number.isInteger(body.kataIssue) || body.kataIssue <= 0) {
-        return c.json({ error: 'invalid_kata_issue' }, 400)
-      }
-    }
-
-    const projectPath = await resolveProjectPath(c.env, body.project)
-
-    // Optimistic-create path: when the client supplies its own id, bind the
-    // DO by name instead of minting a fresh hex id. `getSessionDoId` routes
-    // non-hex ids through `idFromName`, so the same id resolves the same DO
-    // on every subsequent request.
-    let sessionId: string
-    let doId: DurableObjectId
-    if (body.client_session_id !== undefined) {
-      if (
-        !CLIENT_SESSION_ID_RE.test(body.client_session_id) ||
-        /^[0-9a-f]{64}$/.test(body.client_session_id)
-      ) {
-        return c.json({ error: 'invalid_client_session_id' }, 400)
-      }
-      sessionId = body.client_session_id
-      doId = c.env.SESSION_AGENT.idFromName(sessionId)
-    } else {
-      doId = c.env.SESSION_AGENT.newUniqueId()
-      sessionId = doId.toString()
-    }
-    const sessionDO = c.env.SESSION_AGENT.get(doId)
-
-    const createResponse = await sessionDO.fetch(
-      new Request('https://session/create', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-partykit-room': sessionId,
-          'x-user-id': userId,
-        },
-        body: JSON.stringify({
-          project: body.project,
-          project_path: projectPath,
-          prompt: body.prompt,
-          model: body.model,
-          system_prompt: body.system_prompt,
-          sdk_session_id: body.sdk_session_id,
-          agent: body.agent,
-          userId,
-        }),
-      }),
+    const result = await createSession(
+      c.env as unknown as Env,
+      userId,
+      {
+        project: body.project ?? '',
+        prompt: body.prompt as string | ContentBlock[],
+        model: body.model,
+        system_prompt: body.system_prompt,
+        sdk_session_id: body.sdk_session_id,
+        agent: body.agent,
+        kataIssue: body.kataIssue,
+        client_session_id: body.client_session_id,
+      },
+      c.executionCtx,
     )
 
-    if (!createResponse.ok) {
-      return c.json({ error: 'Failed to create session' }, 500)
+    if (!result.ok) {
+      return c.json({ error: result.error }, result.status as 400 | 500)
     }
-
-    const now = new Date().toISOString()
-    // Reduce ContentBlock[] (image-paste spawn) to readable text — see
-    // `~/lib/prompt-preview` for why we don't want the raw JSON blob
-    // to land in agent_sessions.prompt (displayed as the session title).
-    const promptText = promptToPreviewText(body.prompt)
-    const db = getDb(c.env)
-
-    const baseRow = {
-      id: sessionId,
-      userId,
-      project: body.project,
-      status: 'running',
-      model: body.model ?? null,
-      sdkSessionId: body.sdk_session_id ?? null,
-      createdAt: now,
-      updatedAt: now,
-      lastActivity: now,
-      numTurns: null as number | null,
-      prompt: promptText,
-      summary: null as string | null,
-      title: null as string | null,
-      tag: null as string | null,
-      origin: 'duraclaw',
-      agent: body.agent ?? 'claude',
-      archived: false,
-      durationMs: null as number | null,
-      totalCostUsd: null as number | null,
-      kataMode: null as string | null,
-      kataIssue: typeof body.kataIssue === 'number' ? body.kataIssue : (null as number | null),
-      kataPhase: null as string | null,
-    }
-
-    if (body.sdk_session_id) {
-      // Resume path — UPSERT on sdk_session_id swaps in the new DO id
-      // (matches the previous registry.replaceSessionForResume semantics).
-      await db
-        .insert(agentSessions)
-        .values(baseRow)
-        .onConflictDoUpdate({
-          target: agentSessions.sdkSessionId,
-          set: {
-            id: sessionId,
-            userId,
-            project: body.project,
-            status: 'running',
-            model: baseRow.model,
-            updatedAt: now,
-            lastActivity: now,
-            agent: baseRow.agent,
-          },
-        })
-    } else {
-      await db.insert(agentSessions).values(baseRow)
-    }
-
-    await broadcastSessionRow(c.env, c.executionCtx, sessionId, 'insert')
-
-    return c.json({ session_id: sessionId }, 201)
+    return c.json({ session_id: result.sessionId }, 201)
   })
 
   app.get('/api/sessions/:id', async (c) => {
@@ -2193,18 +2080,6 @@ export function createApiApp() {
   const FORCE_RELEASE_STALE_DAYS = 7
   const FORCE_RELEASE_STALE_MS = FORCE_RELEASE_STALE_DAYS * 86_400_000
 
-  function reservationToDto(r: typeof worktreeReservations.$inferSelect): WorktreeReservation {
-    return {
-      issueNumber: r.issueNumber,
-      worktree: r.worktree,
-      ownerId: r.ownerId,
-      heldSince: r.heldSince,
-      lastActivityAt: r.lastActivityAt,
-      modeAtCheckout: r.modeAtCheckout,
-      stale: !!r.stale,
-    }
-  }
-
   app.post('/api/chains/:issue/checkout', async (c) => {
     const userId = c.get('userId')
     const issueNumber = Number.parseInt(c.req.param('issue'), 10)
@@ -2226,75 +2101,15 @@ export function createApiApp() {
         : 'implementation'
 
     const db = getDb(c.env)
-    const now = new Date().toISOString()
+    const result = await checkoutWorktree(db, { issueNumber, worktree, modeAtCheckout }, userId)
 
-    const existingRows = await db
-      .select()
-      .from(worktreeReservations)
-      .where(eq(worktreeReservations.worktree, worktree))
-      .limit(1)
-    const existing = existingRows[0]
-
-    if (existing) {
-      if (existing.issueNumber === issueNumber) {
-        // Same-chain re-entry — idempotent refresh.
-        const refreshed = await db
-          .update(worktreeReservations)
-          .set({ lastActivityAt: now, stale: false })
-          .where(eq(worktreeReservations.worktree, worktree))
-          .returning()
-        const row = refreshed[0] ?? { ...existing, lastActivityAt: now, stale: false }
-        return c.json({ reservation: reservationToDto(row) })
-      }
-      return c.json(
-        {
-          conflict: reservationToDto(existing),
-          message: `Worktree held by chain #${existing.issueNumber}`,
-        },
-        409,
-      )
+    if (result.ok) {
+      return c.json({ reservation: result.reservation })
     }
-
-    try {
-      const inserted = await db
-        .insert(worktreeReservations)
-        .values({
-          worktree,
-          issueNumber,
-          ownerId: userId,
-          heldSince: now,
-          lastActivityAt: now,
-          modeAtCheckout,
-          stale: false,
-        })
-        .returning()
-      return c.json({ reservation: reservationToDto(inserted[0]) })
-    } catch (err) {
-      // UNIQUE constraint race — re-read and return 409 with winner.
-      const raceRows = await db
-        .select()
-        .from(worktreeReservations)
-        .where(eq(worktreeReservations.worktree, worktree))
-        .limit(1)
-      const winner = raceRows[0]
-      if (winner && winner.issueNumber === issueNumber) {
-        // Unlikely but possible: peer request was for the same chain.
-        return c.json({ reservation: reservationToDto(winner) })
-      }
-      if (winner) {
-        return c.json(
-          {
-            conflict: reservationToDto(winner),
-            message: `Worktree held by chain #${winner.issueNumber}`,
-          },
-          409,
-        )
-      }
-      // Row disappeared between INSERT failure and re-read — surface the
-      // original error rather than invent a state.
-      const message = err instanceof Error ? err.message : 'Checkout failed'
-      return c.json({ error: message }, 500)
+    if (result.status === 409) {
+      return c.json({ conflict: result.conflict, message: result.message }, 409)
     }
+    return c.json({ error: result.error }, 500)
   })
 
   app.post('/api/chains/:issue/release', async (c) => {

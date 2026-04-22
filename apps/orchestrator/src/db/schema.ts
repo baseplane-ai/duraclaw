@@ -273,5 +273,9 @@ export const userPreferences = sqliteTable('user_preferences', {
   // Stored as JSON-stringified `string[]` to avoid a separate junction table.
   // Treated as a 7th column on top of the 6-column block in B-DATA-3.
   hiddenProjects: text('hidden_projects_json'),
+  chainsJson: text('chains_json'),
+  defaultChainAutoAdvance: integer('default_chain_auto_advance', { mode: 'boolean' }).default(
+    false,
+  ),
   updatedAt: text('updated_at').notNull(),
 })

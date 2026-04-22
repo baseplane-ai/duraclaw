@@ -7,6 +7,7 @@
 
 import { GitBranchIcon } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { ChainStatusItem } from '~/components/chain-status-item'
 import { useSessionLocalState } from '~/db/session-local-collection'
 import { useSession } from '~/hooks/use-sessions-collection'
 import { deriveStatus } from '~/lib/derive-status'
@@ -284,7 +285,15 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
         <span className="text-muted-foreground">${totalCostUsd.toFixed(4)}</span>
       )}
       {contextUsage && <ContextBar contextUsage={contextUsage} />}
-      {kataState && <KataStatusItem kataState={kataState} />}
+      {kataState && session?.kataIssue != null ? (
+        <ChainStatusItem
+          kataState={kataState}
+          kataIssue={session.kataIssue}
+          sessionId={sessionId}
+        />
+      ) : (
+        kataState && <KataStatusItem kataState={kataState} />
+      )}
 
       {/* Right-aligned timer — action buttons moved to the composer footer */}
       <div className="ml-auto flex shrink-0 items-center gap-2">

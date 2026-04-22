@@ -4,14 +4,13 @@
  * Row model (user_tabs, one row per open tab):
  *   - `id`          — random row id (surrogate key for PATCH / DELETE)
  *   - `sessionId`   — external key consumed by the UI. Either a real
- *                     agent_session id, a draft id (`draft:<uuid>`), or a
- *                     chain key (`chain:<issueNumber>`).
+ *                     agent_session id or a draft id (`draft:<uuid>`).
  *   - `position`    — integer, `ORDER BY position` drives render order.
  *                     Fractional inserts and drag reorders are expressed
  *                     as contiguous rewrites — see `computeInsertOrder`.
- *   - `meta` (JSON) — stringified `TabMeta`: `{kind, project, issueNumber,
- *                     activeSessionId}`. Adding a meta field is a pure
- *                     client change — the server stores it opaquely.
+ *   - `meta` (JSON) — stringified `TabMeta`: `{kind, project}`. Adding a
+ *                     meta field is a pure client change — the server
+ *                     stores it opaquely.
  *
  * Active tab is LOCAL (useState + localStorage under
  * `duraclaw-active-session`). Cross-device tab *list* sync is the useful
@@ -31,10 +30,6 @@
  * existing row with matching `meta.project` and removes it before
  * inserting the new one — the new row inherits the deleted tab's
  * position via `reusedOrder` so it doesn't jump to the end.
- *
- * One-chain-per-issue: chain tabs carry `meta.kind === 'chain'` +
- * `meta.issueNumber`. A chain tab for an issue that already has one
- * simply re-focuses the existing tab instead of replacing.
  */
 
 import { useLiveQuery } from '@tanstack/react-db'
@@ -60,21 +55,11 @@ export interface OpenTabOptions {
   project?: string
   /** Force a new tab even if another tab for the same project exists. */
   forceNewTab?: boolean
-  /** Tab kind. Absent / 'session' = regular session tab; 'chain' = chain tab. */
-  kind?: 'chain' | 'session'
-  /** Issue number — required when kind === 'chain' (cluster key). */
-  issueNumber?: number
 }
 
 export interface TabEntry {
   project?: string
   order: number
-  /** Absent → 'session' (backwards-compat with legacy entries). */
-  kind?: 'chain' | 'session'
-  /** Required when kind === 'chain'. */
-  issueNumber?: number
-  /** Which mode session inside the chain is currently live (chain tabs). */
-  activeSessionId?: string
 }
 
 const ACTIVE_TAB_KEY = 'duraclaw-active-session'
@@ -96,11 +81,6 @@ export function newDraftTabId(): string {
   return `${DRAFT_TAB_PREFIX}${rand}`
 }
 
-/** Effective tab kind — treats `undefined` as 'session' for legacy rows. */
-function entryKind(e: Pick<TabEntry, 'kind'>): 'chain' | 'session' {
-  return e.kind === 'chain' ? 'chain' : 'session'
-}
-
 export interface UseTabSyncResult {
   /** Ordered list of open session IDs (reactive, sorted by position). */
   openTabs: string[]
@@ -113,9 +93,8 @@ export interface UseTabSyncResult {
    */
   tabProjects: Record<string, string | undefined>
   /**
-   * Full per-tab entry map (reactive). Keyed by sessionId / chain key.
-   * Prefer this over `tabProjects` for new code — it carries `kind`,
-   * `issueNumber`, and `activeSessionId` in addition to `project`.
+   * Full per-tab entry map (reactive). Keyed by sessionId. Prefer this
+   * over `tabProjects` for new code — it carries the full entry shape.
    */
   tabEntries: Record<string, TabEntry>
   /**
@@ -135,8 +114,6 @@ export interface UseTabSyncResult {
   replaceTab: (oldId: string, newId: string, opts?: { dedupProject?: string }) => void
   /** Set the active session (local only). */
   setActive: (sessionId: string | null) => void
-  /** Find an existing chain tab for an issue. Returns its sessionId or null. */
-  findTabByIssue: (issueNumber: number) => string | null
   /** Reorder: move the tab at fromIndex to toIndex. */
   reorder: (fromIndex: number, toIndex: number) => void
   /** User-stream WS status, mapped to the legacy shape for existing callers. */
@@ -167,8 +144,6 @@ function stringifyMeta(m: TabMeta): string {
   const out: TabMeta = {}
   if (m.kind) out.kind = m.kind
   if (m.project !== undefined) out.project = m.project
-  if (m.issueNumber !== undefined) out.issueNumber = m.issueNumber
-  if (m.activeSessionId !== undefined) out.activeSessionId = m.activeSessionId
   return JSON.stringify(out)
 }
 
@@ -213,8 +188,7 @@ function projectRows(rows: readonly UserTabRow[]): TabRowLite[] {
  * cluster instead of always jumping to the far right.
  *
  * A cluster is identified by `clusterKey`:
- *   - `issue:N`   → membership test `e.kind === 'chain' && e.issueNumber === N`
- *   - `project:P` → membership test `e.kind !== 'chain' && e.project === P`
+ *   - `project:P` → membership test `e.project === P`
  *   - null        → no cluster; append at max+1
  *
  * Rules (exported for unit testing):
@@ -236,8 +210,6 @@ export function computeInsertOrder(
   entries: ReadonlyArray<{
     order: number
     project?: string
-    kind?: 'chain' | 'session'
-    issueNumber?: number
   }>,
   clusterKey: string | null,
   reusedOrder: number | null,
@@ -248,19 +220,10 @@ export function computeInsertOrder(
 
   if (!clusterKey) return maxOrder + 1
 
-  const matches = (e: {
-    project?: string
-    kind?: 'chain' | 'session'
-    issueNumber?: number
-  }): boolean => {
-    if (clusterKey.startsWith('issue:')) {
-      const n = Number(clusterKey.slice('issue:'.length))
-      if (!Number.isFinite(n)) return false
-      return entryKind(e) === 'chain' && e.issueNumber === n
-    }
+  const matches = (e: { project?: string }): boolean => {
     if (clusterKey.startsWith('project:')) {
       const p = clusterKey.slice('project:'.length)
-      return entryKind(e) !== 'chain' && e.project === p
+      return e.project === p
     }
     return false
   }
@@ -298,7 +261,6 @@ export function collectReplaceTabDedupIds(
   for (const r of rows) {
     if (r.sessionId === oldId) continue
     if (r.sessionId === newId) continue
-    if (r.meta.kind === 'chain') continue
     if (r.meta.project !== dedupProject) continue
     out.push(r.id)
   }
@@ -347,9 +309,6 @@ export function useTabSync(): UseTabSyncResult {
       const m = r.meta
       const entry: TabEntry = { order: r.position }
       if (m.project !== undefined) entry.project = m.project
-      if (m.kind === 'chain') entry.kind = 'chain'
-      if (m.issueNumber !== undefined) entry.issueNumber = m.issueNumber
-      if (m.activeSessionId !== undefined) entry.activeSessionId = m.activeSessionId
       out[r.sessionId as string] = entry
     }
     return out
@@ -377,18 +336,6 @@ export function useTabSync(): UseTabSyncResult {
     }
   }, [])
 
-  const findTabByIssue = useCallback(
-    (issueNumber: number): string | null => {
-      for (const r of rows) {
-        if (r.meta.kind === 'chain' && r.meta.issueNumber === issueNumber) {
-          return r.sessionId as string
-        }
-      }
-      return null
-    },
-    [rows],
-  )
-
   // ── Actions ─────────────────────────────────────────────────────────
   //
   // Writes go through `userTabsCollection` — its `onInsert` / `onUpdate` /
@@ -401,11 +348,6 @@ export function useTabSync(): UseTabSyncResult {
     (sessionId: string, opts?: OpenTabOptions) => {
       const project = opts?.project
       const forceNewTab = opts?.forceNewTab ?? false
-      const kind: 'chain' | 'session' = opts?.kind === 'chain' ? 'chain' : 'session'
-      const issueNumber = opts?.issueNumber
-
-      // Guard: chain tab requires a numeric issueNumber.
-      if (kind === 'chain' && typeof issueNumber !== 'number') return
 
       // Read live collection state for the existence checks instead of the
       // React `rows` snapshot — `rows` is stale across the same render cycle,
@@ -415,23 +357,11 @@ export function useTabSync(): UseTabSyncResult {
       // the first call.
       const liveRows = projectRows(tabs.toArray)
 
-      // One-chain-per-issue: if a chain tab for this issue already exists,
-      // focus it instead of adding another.
-      if (kind === 'chain' && typeof issueNumber === 'number') {
-        const existing = liveRows.find(
-          (r) => r.meta.kind === 'chain' && r.meta.issueNumber === issueNumber,
-        )
-        if (existing) {
-          setActive(existing.sessionId as string)
-          return
-        }
-      }
-
-      // Already-open under this exact sessionId — update meta.project for
-      // session tabs (chain tabs don't carry project), then activate.
+      // Already-open under this exact sessionId — update meta.project, then
+      // activate.
       const same = liveRows.find((r) => r.sessionId === sessionId)
       if (same) {
-        if (kind === 'session' && project && same.meta.project !== project) {
+        if (project && same.meta.project !== project) {
           tabs.update(same.id, (draft: UserTabRow) => {
             draft.meta = stringifyMeta({ ...same.meta, project })
           })
@@ -440,20 +370,15 @@ export function useTabSync(): UseTabSyncResult {
         return
       }
 
-      const clusterKey: string | null =
-        kind === 'chain' && typeof issueNumber === 'number'
-          ? `issue:${issueNumber}`
-          : kind === 'session' && project
-            ? `project:${project}`
-            : null
+      const clusterKey: string | null = project ? `project:${project}` : null
 
-      // One-tab-per-project (session tabs only): find existing tab(s) for
-      // the same project and delete them. Remember one of their orders so
-      // the replacement slots back into the same position.
+      // One-tab-per-project: find existing tab(s) for the same project and
+      // delete them. Remember one of their orders so the replacement slots
+      // back into the same position.
       let reusedOrder: number | null = null
-      if (kind === 'session' && !forceNewTab && project) {
+      if (!forceNewTab && project) {
         for (const r of liveRows) {
-          if (r.meta.kind !== 'chain' && r.meta.project === project) {
+          if (r.meta.project === project) {
             if (reusedOrder === null) reusedOrder = r.position
             tabs.delete(r.id)
           }
@@ -463,24 +388,19 @@ export function useTabSync(): UseTabSyncResult {
       const remainingEntries =
         reusedOrder !== null
           ? liveRows
-              .filter((r) => !(r.meta.kind !== 'chain' && r.meta.project === project))
+              .filter((r) => r.meta.project !== project)
               .map((r) => ({
                 order: r.position,
                 project: r.meta.project,
-                kind: r.meta.kind,
-                issueNumber: r.meta.issueNumber,
               }))
           : liveRows.map((r) => ({
               order: r.position,
               project: r.meta.project,
-              kind: r.meta.kind,
-              issueNumber: r.meta.issueNumber,
             }))
 
       const order = computeInsertOrder(remainingEntries, clusterKey, reusedOrder)
 
-      const meta: TabMeta =
-        kind === 'chain' ? { kind: 'chain', issueNumber } : project !== undefined ? { project } : {}
+      const meta: TabMeta = project !== undefined ? { project } : {}
 
       // Optimistic insert. `userId` is server-populated.
       tabs.insert({
@@ -652,7 +572,6 @@ export function useTabSync(): UseTabSyncResult {
     closeTab,
     replaceTab,
     setActive,
-    findTabByIssue,
     reorder,
     status,
   }
