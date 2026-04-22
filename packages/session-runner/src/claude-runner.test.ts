@@ -26,6 +26,7 @@ function createMockCtx(overrides?: Partial<RunnerSessionContext>): RunnerSession
   return {
     sessionId: 'test-session',
     abortController: new AbortController(),
+    interrupted: false,
     pendingAnswer: null,
     pendingPermission: null,
     messageQueue: null,
@@ -160,6 +161,110 @@ describe('ClaudeRunner', () => {
       const event = sendSpy.mock.calls[0][0]
       expect(event.type).toBe('error')
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// interrupt-induced SDK throw does not emit error event
+// ---------------------------------------------------------------------------
+
+describe('ClaudeRunner — interrupt handling', () => {
+  it('interrupt that causes SDK throw does not emit error event', async () => {
+    // Mock the Claude Agent SDK so its async iterator throws on the first turn,
+    // simulating the real-world behaviour where `q.interrupt()` on a
+    // long-running / mid-tool-use session causes the SDK generator to throw
+    // rather than cleanly yield a result.
+    vi.resetModules()
+    vi.doMock('@anthropic-ai/claude-agent-sdk', () => ({
+      query: () => ({
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              throw new Error('AbortError: interrupted')
+            },
+          }
+        },
+        async interrupt() {
+          /* no-op — the throw above is what the catch in claude-runner.ts sees */
+        },
+      }),
+      getSessionInfo: async () => null,
+    }))
+
+    // Re-import ClaudeRunner so the dynamic `import('@anthropic-ai/claude-agent-sdk')`
+    // inside runSession picks up the mock.
+    const { ClaudeRunner: MockedRunner } = await import('./claude-runner.js')
+
+    const { ch, parsedMessages } = createMockChannel()
+    const ctx = createMockCtx()
+
+    // Simulate the interrupt command being dispatched (commands.ts sets this
+    // flag before calling q.interrupt()). The SDK throw below is the result
+    // of that interrupt.
+    ctx.interrupted = true
+
+    const runner = new MockedRunner()
+    const cmd = {
+      type: 'execute' as const,
+      // Real project path so resolveProject() doesn't return null.
+      project: 'duraclaw-dev2',
+      prompt: 'hello',
+    }
+
+    await runner.execute(ch as any, cmd, ctx)
+
+    const msgs = parsedMessages()
+    const errorEvents = msgs.filter((m) => m.type === 'error')
+    expect(errorEvents).toEqual([])
+    expect(ctx.meta.state).toBe('aborted')
+
+    vi.doUnmock('@anthropic-ai/claude-agent-sdk')
+    vi.resetModules()
+  })
+
+  it('SDK throw without interrupt/abort still emits error event', async () => {
+    // Regression guard: only the interrupt-flagged path is suppressed — a
+    // genuine SDK failure must still surface as an error event + state=failed.
+    vi.resetModules()
+    vi.doMock('@anthropic-ai/claude-agent-sdk', () => ({
+      query: () => ({
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              throw new Error('SDK exploded')
+            },
+          }
+        },
+        async interrupt() {
+          /* unused */
+        },
+      }),
+      getSessionInfo: async () => null,
+    }))
+
+    const { ClaudeRunner: MockedRunner } = await import('./claude-runner.js')
+
+    const { ch, parsedMessages } = createMockChannel()
+    const ctx = createMockCtx()
+    // Neither interrupted nor aborted.
+
+    const runner = new MockedRunner()
+    const cmd = {
+      type: 'execute' as const,
+      project: 'duraclaw-dev2',
+      prompt: 'hello',
+    }
+
+    await runner.execute(ch as any, cmd, ctx)
+
+    const msgs = parsedMessages()
+    const errorEvents = msgs.filter((m) => m.type === 'error')
+    expect(errorEvents.length).toBe(1)
+    expect(errorEvents[0].error).toContain('SDK exploded')
+    expect(ctx.meta.state).toBe('failed')
+
+    vi.doUnmock('@anthropic-ai/claude-agent-sdk')
+    vi.resetModules()
   })
 })
 

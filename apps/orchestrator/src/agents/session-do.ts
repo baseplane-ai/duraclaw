@@ -3628,17 +3628,19 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         this.session.appendMessage(errorMsg)
         this.broadcastMessage(errorMsg)
 
-        // Transition to 'error' (spec #37 B4) — session surfaces the failure; user
-        // can still resubmit to recover. Clears active_callback_token so the
-        // current runner is terminal.
+        // Transition to idle — session remains interactive and resumable via
+        // sdk_session_id. The error text is already persisted as a visible
+        // system message (see above). Clears active_callback_token so the
+        // current runner is terminal; sendMessage will dial a fresh resume runner
+        // on the user's next turn.
         this.updateState({
-          status: 'error',
+          status: 'idle',
           error: event.error,
           active_callback_token: undefined,
         })
         {
           const _now = new Date().toISOString()
-          this.syncStatusAndErrorToD1('error', event.error ?? null, null, _now)
+          this.syncStatusAndErrorToD1('idle', event.error ?? null, null, _now)
         }
         this.dispatchPush(
           {

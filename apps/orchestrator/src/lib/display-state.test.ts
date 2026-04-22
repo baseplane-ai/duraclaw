@@ -58,15 +58,6 @@ describe('deriveDisplayStateFromStatus', () => {
     expect(deriveDisplayStateFromStatus('waiting_permission', 1).status).toBe('waiting_gate')
   })
 
-  it('maps status="error" → error when ws is open', () => {
-    const result = deriveDisplayStateFromStatus('error' as SessionStatus, 1)
-    expect(result.status).toBe('error')
-    expect(result.label).toBe('Error')
-    expect(result.color).toBe('red')
-    expect(result.icon).toBe('x-circle')
-    expect(result.isInteractive).toBe(false)
-  })
-
   it('maps status="archived" → archived when ws is open', () => {
     const result = deriveDisplayStateFromStatus('archived' as SessionStatus, 1)
     expect(result.status).toBe('archived')

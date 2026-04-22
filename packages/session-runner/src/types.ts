@@ -16,6 +16,10 @@ import type {
 export interface RunnerSessionContext {
   sessionId: string
   abortController: AbortController
+  /** Set to true when a user `interrupt` command is issued. A subsequent
+   * SDK throw is treated as an interrupt-induced abort (no error event,
+   * meta.state='aborted') rather than a failure. */
+  interrupted: boolean
   pendingAnswer: {
     resolve: (answers: Record<string, string>) => void
     reject: (err: Error) => void

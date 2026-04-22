@@ -52,6 +52,13 @@ export async function handleQueryCommand(
 
   switch (cmd.type) {
     case 'interrupt': {
+      // Mark the context as interrupted BEFORE calling q.interrupt(). On
+      // long-running / mid-tool-use sessions the SDK's query generator can
+      // throw rather than cleanly yield a result; the outer catch in
+      // claude-runner.ts uses this flag to suppress the `error` event and
+      // mark meta.state='aborted' so the session lands in `idle` ("just
+      // pausing") instead of `error` (genuine failure).
+      ctx.interrupted = true
       await q.interrupt()
       break
     }

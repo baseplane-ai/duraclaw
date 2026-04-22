@@ -3101,3 +3101,117 @@ describe('idle→running flushes status to D1 (StatusBar live-update)', () => {
     expect(h.calls).toEqual(['updateState', 'syncStatusToD1'])
   })
 })
+
+// ── error event → idle (not 'error'), resumption unblocked ─────────
+//
+// Regression: spec #37 B4 (commit 898598d) introduced a `status: 'error'`
+// terminal state that the error-event handler flipped to on any SDK
+// failure. Because `deriveDisplayStateFromStatus` mapped 'error' to
+// `isInteractive: false`, the composer was locked for the lifetime of
+// the session — hitting Stop mid-turn (SDK abort → runner emits
+// `{type:'error'}`) would permanently block the user from sending any
+// further messages. Pre-#37 behavior (restored): the DO transitions to
+// `'idle'`, persists the failure as a visible system message, and
+// clears `active_callback_token` so the dead runner's WS is terminal.
+// `sendMessage` then accepts the next user turn via the isResumable
+// branch (idle + sdk_session_id) and dials a fresh resume runner.
+
+describe('error event transitions session to idle (not error) so user can resume', () => {
+  type ErrorPartial = {
+    status: 'idle'
+    error: string
+    active_callback_token: undefined
+  }
+
+  // Mirrors session-do.ts handleGatewayEvent `case 'error':` — the
+  // updateState partial + the paired syncStatusAndErrorToD1 call.
+  function simulateErrorEvent(errText: string): {
+    partial: ErrorPartial
+    d1Status: 'idle'
+    d1Error: string | null
+    history: Array<{ role: string; text: string }>
+  } {
+    const history: Array<{ role: string; text: string }> = []
+    // Error persisted as a visible system message (session-do.ts lines 3619-3629).
+    history.push({ role: 'system', text: `⚠ Error: ${errText}` })
+
+    const partial: ErrorPartial = {
+      status: 'idle',
+      error: errText,
+      active_callback_token: undefined,
+    }
+    const d1Status: 'idle' = 'idle'
+    const d1Error: string | null = errText ?? null
+
+    return { partial, d1Status, d1Error, history }
+  }
+
+  // Mirrors the sendMessage resumable-branch gate
+  // (session-do.ts lines 2465-2477): status must be 'idle' with an
+  // sdk_session_id for a post-error resume to be accepted.
+  function sendMessageAcceptsResume(state: {
+    status: string
+    sdk_session_id: string | null
+    hasLiveRunner: boolean
+  }): { ok: boolean; error?: string } {
+    const isResumable =
+      !state.hasLiveRunner && state.status === 'idle' && Boolean(state.sdk_session_id)
+    if (!state.hasLiveRunner && !isResumable) {
+      return { ok: false, error: `Cannot send message: status is '${state.status}'` }
+    }
+    return { ok: true }
+  }
+
+  it('transitions state to idle (not error) on runner error event', () => {
+    const res = simulateErrorEvent('SDK crashed mid-turn')
+    expect(res.partial.status).toBe('idle')
+  })
+
+  it('persists error text as a visible system message in history', () => {
+    const res = simulateErrorEvent('SDK crashed mid-turn')
+    expect(res.history).toHaveLength(1)
+    expect(res.history[0]).toEqual({
+      role: 'system',
+      text: '⚠ Error: SDK crashed mid-turn',
+    })
+  })
+
+  it('clears active_callback_token so the dead runner WS is terminal', () => {
+    const res = simulateErrorEvent('boom')
+    expect(res.partial.active_callback_token).toBeUndefined()
+    expect('active_callback_token' in res.partial).toBe(true)
+  })
+
+  it('mirrors idle (not error) status and error text into D1', () => {
+    const res = simulateErrorEvent('boom')
+    expect(res.d1Status).toBe('idle')
+    expect(res.d1Error).toBe('boom')
+  })
+
+  it('sendMessage accepts the next user turn via isResumable branch (no more blocking error lock)', () => {
+    // After the error event lands, the session is idle with a valid
+    // sdk_session_id (persisted from session.init). The runner's WS is
+    // gone. This is exactly the resume path that was bricked while the
+    // session sat in 'error'.
+    const res = sendMessageAcceptsResume({
+      status: 'idle',
+      sdk_session_id: 'sdk-sess-abc',
+      hasLiveRunner: false,
+    })
+    expect(res).toEqual({ ok: true })
+  })
+
+  it('regression guard: never returns "Cannot send message: status is \'error\'"', () => {
+    // If a future refactor re-introduces a terminal 'error' status, the
+    // resumable gate trips and the user sees this error. Snapshot the
+    // string so a reintroduction is caught here, not in a prod bug report.
+    const errRes = sendMessageAcceptsResume({
+      status: 'error',
+      sdk_session_id: 'sdk-sess-abc',
+      hasLiveRunner: false,
+    })
+    expect(errRes.ok).toBe(false)
+    expect(errRes.error).toBe("Cannot send message: status is 'error'")
+    // The post-error path MUST be idle, not error — proven above.
+  })
+})

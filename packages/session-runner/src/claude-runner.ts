@@ -765,13 +765,16 @@ export class ClaudeRunner {
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : String(err)
 
-      // Don't send error for aborted sessions
-      if (!ac.signal.aborted) {
+      // Don't send error for aborted/interrupted sessions — both are
+      // user-initiated stops that should land the DO in 'idle' (not 'error')
+      // via the gateway-close recovery path.
+      const isIntentionalStop = ac.signal.aborted || ctx.interrupted
+      if (!isIntentionalStop) {
         send(ch, { type: 'error', session_id: sessionId, error: errMsg }, ctx)
       }
-      // Terminal state precedence: abort wins over failure (SIGTERM while
-      // erroring should still surface as "aborted").
-      if (ac.signal.aborted) {
+      // Terminal state precedence: abort/interrupt wins over failure (SIGTERM
+      // or user Stop while erroring should still surface as "aborted").
+      if (isIntentionalStop) {
         ctx.meta.state = 'aborted'
       } else {
         ctx.meta.state = 'failed'
@@ -786,7 +789,7 @@ export class ClaudeRunner {
       // If we reached here without hitting the catch and no terminal state was
       // set yet, this was a natural completion (result event received, loop exited).
       if (ctx.meta.state === 'running') {
-        ctx.meta.state = ac.signal.aborted ? 'aborted' : 'completed'
+        ctx.meta.state = ac.signal.aborted || ctx.interrupted ? 'aborted' : 'completed'
       }
     }
   }

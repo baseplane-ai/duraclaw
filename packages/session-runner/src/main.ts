@@ -331,6 +331,7 @@ async function main(): Promise<void> {
   const ctx: RunnerSessionContext = {
     sessionId: argv.sessionId,
     abortController: new AbortController(),
+    interrupted: false,
     pendingAnswer: null,
     pendingPermission: null,
     messageQueue: null,

@@ -24,7 +24,6 @@ export type DisplayState =
       icon: 'alert'
       isInteractive: true
     }
-  | { status: 'error'; label: 'Error'; color: 'red'; icon: 'x-circle'; isInteractive: false }
   | { status: 'archived'; label: 'Archived'; color: 'gray'; icon: 'archive'; isInteractive: false }
   | {
       status: 'disconnected'
@@ -57,14 +56,6 @@ const WAITING_GATE: DisplayState = {
   color: 'amber',
   icon: 'alert',
   isInteractive: true,
-}
-
-const ERROR: DisplayState = {
-  status: 'error',
-  label: 'Error',
-  color: 'red',
-  icon: 'x-circle',
-  isInteractive: false,
 }
 
 const ARCHIVED: DisplayState = {
@@ -108,7 +99,7 @@ export function deriveDisplayStateFromStatus(
   if (status === undefined) return UNKNOWN
   if (wsReadyState !== 1) return DISCONNECTED
 
-  // Widen to string so forward-compatible statuses ('error', 'archived')
+  // Widen to string so forward-compatible statuses ('archived')
   // can be matched today even though the narrow `SessionStatus` union
   // doesn't currently include them.
   const s = status as string
@@ -124,8 +115,6 @@ export function deriveDisplayStateFromStatus(
     case 'waiting_input':
     case 'waiting_permission':
       return WAITING_GATE
-    case 'error':
-      return ERROR
     case 'archived':
       return ARCHIVED
     default:
@@ -139,7 +128,6 @@ export const DISPLAY_STATES = {
   running: RUNNING,
   idle: IDLE,
   waiting_gate: WAITING_GATE,
-  error: ERROR,
   archived: ARCHIVED,
   disconnected: DISCONNECTED,
   unknown: UNKNOWN,
