@@ -7,7 +7,7 @@
  */
 
 import { useLiveQuery } from '@tanstack/react-db'
-import { Link, useLocation, useNavigate } from '@tanstack/react-router'
+import { useLocation, useNavigate } from '@tanstack/react-router'
 import {
   ArchiveIcon,
   ChevronRight,
@@ -30,7 +30,6 @@ import {
 } from '~/components/ui/dropdown-menu'
 import {
   SidebarGroup,
-  SidebarGroupAction,
   SidebarGroupLabel,
   SidebarMenu,
   SidebarMenuButton,
@@ -342,30 +341,39 @@ export function NavSessions() {
   const searchParams = new URLSearchParams(location.searchStr)
   const activeSessionId = searchParams.get('session')
 
+  const handleNewSession = useCallback(() => {
+    // Clear active tab so AgentOrchPage falls through to QuickPromptInput
+    // instead of re-rendering the last session. activeSessionId is
+    // localStorage-persisted, so navigating to "/" alone doesn't drop it.
+    setActive(null)
+    setOpenMobile(false)
+    navigate({ to: '/' })
+  }, [setActive, setOpenMobile, navigate])
+
   return (
     <>
+      {/* New session — prominent top-level action */}
+      <SidebarGroup>
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              onClick={handleNewSession}
+              tooltip="New session"
+              aria-label="New session"
+            >
+              <PlusIcon className="size-4" />
+              <span>New session</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
+      </SidebarGroup>
+
       {/* Recent sessions */}
       <SidebarGroup>
         <SidebarGroupLabel>
           <ClockIcon className="mr-1 size-3" />
           Recent
         </SidebarGroupLabel>
-        <SidebarGroupAction asChild>
-          <Link
-            to="/"
-            aria-label="New session"
-            onClick={() => {
-              // Clear active tab so AgentOrchPage falls through to
-              // QuickPromptInput instead of re-rendering the last session.
-              // activeSessionId is localStorage-persisted, so navigating to
-              // "/" alone doesn't drop it.
-              setActive(null)
-              setOpenMobile(false)
-            }}
-          >
-            <PlusIcon className="size-4" />
-          </Link>
-        </SidebarGroupAction>
         <SidebarMenu>
           {recent.map((session) => (
             <SidebarMenuItem key={session.id}>
