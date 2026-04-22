@@ -17,8 +17,7 @@ import {
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { useLiveQuery } from '@tanstack/react-db'
-import { useLocation, useNavigate } from '@tanstack/react-router'
-import { ChevronLeftIcon, ChevronRightIcon, CopyPlusIcon, Layers, PlusIcon, X } from 'lucide-react'
+import { ChevronLeftIcon, ChevronRightIcon, CopyPlusIcon, PlusIcon, X } from 'lucide-react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   DropdownMenu,
@@ -39,7 +38,7 @@ import type { SessionRecord } from '~/db/session-record'
 import { getPreviewText, StatusDot } from '~/features/agent-orch/session-utils'
 import { useIsMobile } from '~/hooks/use-mobile'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
-import { isDraftTabId, type TabEntry, useTabSync } from '~/hooks/use-tab-sync'
+import { isDraftTabId } from '~/hooks/use-tab-sync'
 import { deriveStatus } from '~/lib/derive-status'
 import { deriveDisplayStateFromStatus } from '~/lib/display-state'
 import { useNow } from '~/lib/use-now'
@@ -66,10 +65,6 @@ interface TabBarProps {
 interface TabRow {
   sessionId: string
   session: SessionRecord | undefined
-  entry: TabEntry | undefined
-  isChain: boolean
-  chainIssueNumber: number | undefined
-  chainTitle: string | null | undefined
 }
 
 export function TabBar({
@@ -85,10 +80,6 @@ export function TabBar({
   // Include archived sessions so historical tabs (sessions the user archived
   // but still has open in their tab strip) continue to label correctly.
   const { sessions: allSessions } = useSessionsCollection({ includeArchived: true })
-
-  const { tabEntries } = useTabSync()
-  const location = useLocation()
-  const navigate = useNavigate()
 
   const sessionsMap = useMemo(() => {
     const m = new Map<string, SessionRecord>()
@@ -114,50 +105,14 @@ export function TabBar({
     return m
   }, [localRows])
 
-  // Chain tabs resolve their title via kataIssue on any session belonging
-  // to the chain — build a lookup once per sessions snapshot.
-  const sessionsByIssue = useMemo(() => {
-    const m = new Map<number, SessionRecord>()
-    for (const row of allSessions) {
-      if (typeof row.kataIssue === 'number' && !m.has(row.kataIssue)) {
-        m.set(row.kataIssue, row)
-      }
-    }
-    return m
-  }, [allSessions])
-
-  // Parse active chain issue from the URL so chain tabs can show active state
-  // without pulling typed route params (avoid route-tree coupling).
-  const activeChainIssue = useMemo<number | null>(() => {
-    const match = /\/chain\/(\d+)/.exec(location.pathname)
-    if (!match) return null
-    const n = Number.parseInt(match[1] ?? '', 10)
-    return Number.isFinite(n) ? n : null
-  }, [location.pathname])
-
-  // Build tab rows by joining openTabs with sessions / tab entries. Chain
-  // tabs are detected from the entry BEFORE any sessionsMap lookup so
-  // chain ids never render as "session not found" skeletons.
+  // Build tab rows by joining openTabs with sessions.
   const rows = useMemo<TabRow[]>(
     () =>
-      openTabs.map((tabId) => {
-        const entry = tabEntries[tabId]
-        const isChain = entry?.kind === 'chain' && typeof entry.issueNumber === 'number'
-        const chainIssueNumber = isChain ? entry?.issueNumber : undefined
-        const chainTitle =
-          isChain && typeof chainIssueNumber === 'number'
-            ? sessionsByIssue.get(chainIssueNumber)?.title
-            : undefined
-        return {
-          sessionId: tabId,
-          session: isChain ? undefined : sessionsMap.get(tabId),
-          entry,
-          isChain,
-          chainIssueNumber,
-          chainTitle,
-        }
-      }),
-    [openTabs, sessionsMap, tabEntries, sessionsByIssue],
+      openTabs.map((tabId) => ({
+        sessionId: tabId,
+        session: sessionsMap.get(tabId),
+      })),
+    [openTabs, sessionsMap],
   )
 
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -281,23 +236,6 @@ export function TabBar({
         >
           <SortableContext items={openTabs} strategy={horizontalListSortingStrategy}>
             {rows.map((row) => {
-              if (row.isChain && typeof row.chainIssueNumber === 'number') {
-                const issueNumber = row.chainIssueNumber
-                const isActive = activeChainIssue === issueNumber
-                return (
-                  <SortableProjectTab
-                    key={row.sessionId}
-                    sessionId={row.sessionId}
-                    session={undefined}
-                    isChain
-                    chainIssueNumber={issueNumber}
-                    chainTitle={row.chainTitle}
-                    isActive={isActive}
-                    onSelect={() => navigate({ to: `/chain/${issueNumber}` })}
-                    onClose={() => onCloseTab(row.sessionId)}
-                  />
-                )
-              }
               const draftProject = isDraftTabId(row.sessionId)
                 ? tabProjects?.[row.sessionId]
                 : undefined
@@ -358,17 +296,8 @@ export function TabBar({
             <ProjectTab
               sessionId={activeDragRow.sessionId}
               session={activeDragRow.session}
-              liveLocal={
-                activeDragRow.isChain ? undefined : sessionLocalsMap.get(activeDragRow.sessionId)
-              }
-              isChain={activeDragRow.isChain}
-              chainIssueNumber={activeDragRow.chainIssueNumber}
-              chainTitle={activeDragRow.chainTitle}
-              isActive={
-                activeDragRow.isChain
-                  ? activeChainIssue === activeDragRow.chainIssueNumber
-                  : activeDragRow.sessionId === activeSessionId
-              }
+              liveLocal={sessionLocalsMap.get(activeDragRow.sessionId)}
+              isActive={activeDragRow.sessionId === activeSessionId}
               onSelect={() => {}}
               onClose={() => {}}
             />
@@ -387,10 +316,6 @@ interface ProjectTabProps {
   liveLocal?: SessionLocalState | undefined
   /** Project for a draft tab (no session row yet). */
   draftProject?: string | undefined
-  /** Chain-tab marker — renders as a Layers-icon row with no StatusDot. */
-  isChain?: boolean
-  chainIssueNumber?: number | undefined
-  chainTitle?: string | null | undefined
   isActive: boolean
   isDragging?: boolean
   onSelect: () => void
@@ -423,9 +348,6 @@ function ProjectTabInner({
   session,
   liveLocal,
   draftProject,
-  isChain,
-  chainIssueNumber,
-  chainTitle,
   isActive,
   isDragging,
   onSelect,
@@ -438,8 +360,7 @@ function ProjectTabInner({
   const [menuOpen, setMenuOpen] = useState(false)
 
   // Route tab status through `deriveDisplayStateFromStatus` so it agrees
-  // with the status bar + sidebar. Chain tabs have no single session, so
-  // we skip the session lookup entirely and never render a StatusDot.
+  // with the status bar + sidebar.
   // Spec #37 P2b: status / numTurns come from the D1-mirrored
   // sessionsCollection row (= `session` prop, live-synced from the parent's
   // single `useSessionsCollection` subscription); wsReadyState from the
@@ -451,11 +372,8 @@ function ProjectTabInner({
   // `running` tabs degrade to `idle` in lockstep with StatusBar / sidebar.
   const nowTs = useNow()
   const sessionDerived = session ? deriveStatus(session, nowTs) : undefined
-  const tabDisplay = !isChain
-    ? deriveDisplayStateFromStatus(sessionDerived, liveLocal?.wsReadyState ?? 3)
-    : null
-  const tabStatus =
-    tabDisplay && tabDisplay.status !== 'unknown' ? tabDisplay.status : (sessionDerived ?? 'idle')
+  const tabDisplay = deriveDisplayStateFromStatus(sessionDerived, liveLocal?.wsReadyState ?? 3)
+  const tabStatus = tabDisplay.status !== 'unknown' ? tabDisplay.status : (sessionDerived ?? 'idle')
   const tabNumTurns = session?.numTurns ?? 0
 
   useEffect(() => {
@@ -521,9 +439,7 @@ function ProjectTabInner({
     onSelect()
   }, [onSelect])
 
-  const a11yLabel = isChain
-    ? `chain tab #${chainIssueNumber ?? ''}`
-    : `tab ${sessionId.slice(0, 8)}`
+  const a11yLabel = `tab ${sessionId.slice(0, 8)}`
 
   const tabContent = (
     <button
@@ -540,20 +456,7 @@ function ProjectTabInner({
       onTouchCancel={handleTouchEnd}
       aria-label={a11yLabel}
     >
-      {isChain && typeof chainIssueNumber === 'number' ? (
-        <>
-          <Layers className="size-3 text-muted-foreground" />
-          <div className="flex flex-col items-start min-w-0">
-            <span className="text-[11px] text-muted-foreground leading-tight font-normal">
-              Chain
-            </span>
-            <span className="max-w-32 truncate leading-tight">
-              #{chainIssueNumber}
-              {chainTitle ? ` ${chainTitle}` : ''}
-            </span>
-          </div>
-        </>
-      ) : session ? (
+      {session ? (
         <>
           <StatusDot status={tabStatus} numTurns={tabNumTurns} />
           <div className="flex flex-col items-start min-w-0">
@@ -593,18 +496,13 @@ function ProjectTabInner({
     action?.()
   }, [])
 
-  const headingProject = isChain
-    ? null
-    : (session?.project ?? (isDraft ? (draftProject ?? null) : null))
-  const headingTitle = isChain
-    ? `Chain #${chainIssueNumber ?? ''}${chainTitle ? ` · ${chainTitle}` : ''}`
-    : isDraft
-      ? 'New session'
-      : session?.title || session?.project || sessionId.slice(0, 8)
+  const headingProject = session?.project ?? (isDraft ? (draftProject ?? null) : null)
+  const headingTitle = isDraft
+    ? 'New session'
+    : session?.title || session?.project || sessionId.slice(0, 8)
 
-  // Chain rows suppress the project-scoped menu items (no `project` concept).
-  const showNewSessionInTab = !isChain && onNewSessionInTab
-  const showNewTabForProject = !isChain && onNewTabForProject
+  const showNewSessionInTab = onNewSessionInTab
+  const showNewTabForProject = onNewTabForProject
 
   if (isMobile) {
     return (

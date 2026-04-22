@@ -192,3 +192,152 @@ describe('PUT /api/preferences', () => {
     expect(res.status).toBe(401)
   })
 })
+
+describe('PUT /api/preferences (chains + autoAdvance)', () => {
+  let env: any
+  let fakeDb: ReturnType<typeof makeFakeDb>
+
+  beforeEach(() => {
+    env = createMockEnv()
+    fakeDb = makeFakeDb()
+    installFakeDb(fakeDb.db)
+    mockedGetRequestSession.mockResolvedValue({
+      userId: 'user-1',
+      session: { id: 's' },
+      user: { id: 'user-1' },
+    })
+  })
+
+  it('persists chains:{…} by stringifying into chains_json', async () => {
+    const inserted = {
+      userId: 'user-1',
+      permissionMode: 'default',
+      model: 'claude-sonnet-4-20250514',
+      maxBudget: null,
+      thinkingMode: 'adaptive',
+      effort: 'high',
+      hiddenProjects: null,
+      chainsJson: JSON.stringify({ '58': { autoAdvance: true } }),
+      defaultChainAutoAdvance: false,
+      updatedAt: '2026-04-22T00:00:00.000Z',
+    }
+    fakeDb.data.insert = [inserted]
+
+    const app = makeApp(env)
+    const res = await app.request('/api/preferences', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chains: { '58': { autoAdvance: true, activeRung: 'implementation' } },
+      }),
+    })
+
+    // `activeRung` is NOT in the server's allow-list — validator rejects it.
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toMatch(/Invalid chains shape/)
+  })
+
+  it('persists {chains:{"58":{autoAdvance:true}}} as chains_json', async () => {
+    const inserted = {
+      userId: 'user-1',
+      permissionMode: 'default',
+      model: 'claude-sonnet-4-20250514',
+      maxBudget: null,
+      thinkingMode: 'adaptive',
+      effort: 'high',
+      hiddenProjects: null,
+      chainsJson: JSON.stringify({ '58': { autoAdvance: true } }),
+      defaultChainAutoAdvance: false,
+      updatedAt: '2026-04-22T00:00:00.000Z',
+    }
+    fakeDb.data.insert = [inserted]
+
+    const app = makeApp(env)
+    const res = await app.request('/api/preferences', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chains: { '58': { autoAdvance: true } } }),
+    })
+
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { preferences: Record<string, unknown> }
+    expect(body.preferences.chainsJson).toBe(JSON.stringify({ '58': { autoAdvance: true } }))
+    expect(fakeDb.db.insert).toHaveBeenCalled()
+  })
+
+  it('rejects non-numeric chain keys with 400 "Invalid chain key"', async () => {
+    const app = makeApp(env)
+    const res = await app.request('/api/preferences', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chains: { 'not-a-number': { autoAdvance: true } } }),
+    })
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toMatch(/Invalid chain key/)
+  })
+
+  it('persists defaultChainAutoAdvance:true', async () => {
+    const inserted = {
+      userId: 'user-1',
+      permissionMode: 'default',
+      model: 'claude-sonnet-4-20250514',
+      maxBudget: null,
+      thinkingMode: 'adaptive',
+      effort: 'high',
+      hiddenProjects: null,
+      chainsJson: null,
+      defaultChainAutoAdvance: true,
+      updatedAt: '2026-04-22T00:00:00.000Z',
+    }
+    fakeDb.data.insert = [inserted]
+
+    const app = makeApp(env)
+    const res = await app.request('/api/preferences', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ defaultChainAutoAdvance: true }),
+    })
+
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { preferences: Record<string, unknown> }
+    expect(body.preferences.defaultChainAutoAdvance).toBe(true)
+  })
+
+  it('rejects non-boolean defaultChainAutoAdvance with 400', async () => {
+    const app = makeApp(env)
+    const res = await app.request('/api/preferences', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ defaultChainAutoAdvance: 'yes' }),
+    })
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toMatch(/defaultChainAutoAdvance must be a boolean/)
+  })
+
+  it('GET /api/preferences roundtrips stored chains + defaultChainAutoAdvance', async () => {
+    const stored = {
+      userId: 'user-1',
+      permissionMode: 'default',
+      model: 'claude-sonnet-4-20250514',
+      maxBudget: null,
+      thinkingMode: 'adaptive',
+      effort: 'high',
+      hiddenProjects: null,
+      chainsJson: JSON.stringify({ '58': { autoAdvance: true } }),
+      defaultChainAutoAdvance: true,
+      updatedAt: '2026-04-22T00:00:00.000Z',
+    }
+    fakeDb.data.select = [stored]
+
+    const app = makeApp(env)
+    const res = await app.request('/api/preferences')
+
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as Record<string, unknown>
+    expect(body.chainsJson).toBe(JSON.stringify({ '58': { autoAdvance: true } }))
+    expect(body.defaultChainAutoAdvance).toBe(true)
+  })
+})

@@ -346,19 +346,25 @@ export function NavSessions() {
     [archiveSession],
   )
 
+  // Chain double-click → navigate to the chain's latest session.
+  // (Spec #58 P1 removed the dedicated /chain/:issueNumber route; chain
+  // context now surfaces via the StatusBar widget on the session tab.)
   const handleOpenChain = useCallback(
     (issueNumber: number) => {
-      openTab(`chain:${issueNumber}`, { kind: 'chain', issueNumber })
+      const chainSessions = sessions.filter((s) => s.kataIssue === issueNumber)
+      if (chainSessions.length === 0) return
+      const sorted = [...chainSessions].sort((a, b) => {
+        const aTime = new Date(a.lastActivity ?? a.createdAt).getTime()
+        const bTime = new Date(b.lastActivity ?? b.createdAt).getTime()
+        return bTime - aTime
+      })
+      const latest = sorted[0]
+      if (!latest) return
+      openTab(latest.id, { project: latest.project })
       setOpenMobile(false)
-      // Route params typing requires the generated route tree to include
-      // the chain route; cast to the router's expected shape.
-      navigate({
-        to: '/chain/$issueNumber',
-        params: { issueNumber: String(issueNumber) },
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any)
+      navigate({ to: '/', search: { session: latest.id } })
     },
-    [openTab, navigate, setOpenMobile],
+    [openTab, navigate, setOpenMobile, sessions],
   )
 
   // Determine active session from URL. The dashboard (`/`) owns session

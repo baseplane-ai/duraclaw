@@ -16,6 +16,7 @@ import type { SyncedCollectionFrame } from '@duraclaw/shared-types'
 import { createTransaction } from '@tanstack/db'
 import { useAgent } from 'agents/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { toast } from 'sonner'
 import type * as Y from 'yjs'
 import { type BranchInfoRow, createBranchInfoCollection } from '~/db/branch-info-collection'
 import { queryClient } from '~/db/db-instance'
@@ -27,6 +28,7 @@ import {
 import { sessionLocalCollection } from '~/db/session-local-collection'
 import { useMessagesCollection } from '~/hooks/use-messages-collection'
 import { useSession } from '~/hooks/use-sessions-collection'
+import { setStallReason } from '~/lib/chain-stall-store'
 import { createPartySocketAdapter } from '~/lib/connection-manager/adapters/partysocket-adapter'
 import { useManagedConnection } from '~/lib/connection-manager/hooks'
 import { logDelta } from '~/lib/delta-log'
@@ -403,6 +405,20 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           // synced-delta driven.
           if (event.type === 'kata_state' || event.type === 'context_usage') {
             void queryClient.invalidateQueries({ queryKey: ['sessions'] })
+          }
+
+          // Spec 16-chain-ux-p1-5 B6/B7/B9: auto-advance result events.
+          if (event.type === 'chain_advance') {
+            const issue = (event as { issueNumber?: number }).issueNumber
+            const nextMode = (event as { nextMode?: string }).nextMode ?? 'next rung'
+            if (typeof issue === 'number') setStallReason(issue, null)
+            toast.success(`Auto-advanced to ${nextMode}`, { duration: 3000 })
+            void queryClient.invalidateQueries({ queryKey: ['chains'] })
+          } else if (event.type === 'chain_stalled') {
+            const issue = (event as { issueNumber?: number }).issueNumber
+            const reason = (event as { reason?: string }).reason ?? 'Stalled'
+            if (typeof issue === 'number') setStallReason(issue, reason)
+            void queryClient.invalidateQueries({ queryKey: ['chains'] })
           }
 
           // Spec #37 B13: `result` gateway_event handler removed — the

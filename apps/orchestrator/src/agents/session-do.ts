@@ -12,6 +12,7 @@ import { drizzle } from 'drizzle-orm/d1'
 import * as schema from '~/db/schema'
 import { agentSessions, worktreeReservations } from '~/db/schema'
 import { generateActionToken } from '~/lib/action-token'
+import { CORE_RUNGS, tryAutoAdvance } from '~/lib/auto-advance'
 import { broadcastSessionRow } from '~/lib/broadcast-session'
 import { broadcastSyncedDelta } from '~/lib/broadcast-synced-delta'
 import { buildChainRow } from '~/lib/chains'
@@ -32,6 +33,7 @@ import type {
   SessionStatus,
   SpawnConfig,
 } from '~/lib/types'
+import { rebindTabsForSession } from '~/lib/update-tab-session'
 import { getSessionStatus, killSession, listSessions, parseEvent } from '~/lib/vps-client'
 import {
   applyToolResult,
@@ -1170,6 +1172,83 @@ export class SessionDO extends Agent<Env, SessionMeta> {
 
   private broadcastGatewayEvent(event: GatewayEvent) {
     this.broadcastToClients(JSON.stringify({ type: 'gateway_event', event }))
+  }
+
+  /**
+   * Chain auto-advance (spec 16-chain-ux-p1-5 B6 / B7 / B9).
+   *
+   * Runs on the `stopped` terminal transition for sessions stamped with a
+   * `kataIssue` + core `kataMode`. Reads the user's chain auto-advance
+   * preference from D1, runs the gate check, and if green spawns the
+   * successor session + rebinds the user's open tab(s). Emits
+   * `chain_advance` / `chain_stalled` events so the client ChainStatusItem
+   * widget can invalidate chain data and surface a toast / warn indicator.
+   */
+  private async maybeAutoAdvanceChain(): Promise<void> {
+    const userId = this.state.userId
+    const sessionId = this.state.session_id
+    const project = this.state.project
+    const kataMode = this.state.lastKataMode
+    if (!userId || !sessionId || !project || !kataMode) return
+    if (!CORE_RUNGS.has(kataMode)) return
+
+    // kataIssue isn't on SessionMeta — source it from the D1 row we just
+    // wrote in syncStatusToD1 above. A single PK lookup; cheap.
+    let kataIssue: number | null = null
+    try {
+      const rows = await this.d1
+        .select({ kataIssue: agentSessions.kataIssue })
+        .from(agentSessions)
+        .where(eq(agentSessions.id, sessionId))
+        .limit(1)
+      kataIssue = rows[0]?.kataIssue ?? null
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] auto-advance: failed to read kataIssue`, err)
+      return
+    }
+    if (kataIssue == null) return
+
+    try {
+      const result = await tryAutoAdvance(
+        this.env,
+        {
+          sessionId,
+          userId,
+          kataIssue,
+          kataMode,
+          project,
+        },
+        this.ctx,
+      )
+      if (result.action === 'advanced') {
+        try {
+          await rebindTabsForSession(this.env, userId, sessionId, result.newSessionId, this.ctx)
+        } catch (err) {
+          console.error(`[SessionDO:${this.ctx.id}] rebindTabsForSession failed:`, err)
+        }
+        this.broadcastGatewayEvent({
+          type: 'chain_advance',
+          newSessionId: result.newSessionId,
+          nextMode: result.nextMode,
+          issueNumber: kataIssue,
+        })
+      } else if (result.action === 'stalled') {
+        this.broadcastGatewayEvent({
+          type: 'chain_stalled',
+          reason: result.reason,
+          issueNumber: kataIssue,
+        })
+      } else if (result.action === 'error') {
+        console.error(`[SessionDO:${this.ctx.id}] auto-advance error: ${result.error}`)
+        this.broadcastGatewayEvent({
+          type: 'chain_stalled',
+          reason: `Auto-advance failed: ${result.error}`,
+          issueNumber: kataIssue,
+        })
+      }
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] auto-advance uncaught error:`, err)
+    }
   }
 
   private broadcastMessage(message: SessionMessage) {
@@ -3956,7 +4035,14 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           completed_at: new Date().toISOString(),
           active_callback_token: undefined,
         })
-        this.syncStatusToD1(new Date().toISOString())
+        // Chain auto-advance (spec 16-chain-ux-p1-5 B6 / B7 / B9) must run
+        // AFTER syncStatusToD1 flushes — tryAutoAdvance's preconditions query
+        // agent_sessions expecting status='idle' + numTurns>0. Racing these
+        // two fire-and-forget causes chain stalls with a false "No completed
+        // research session" miss.
+        void this.syncStatusToD1(new Date().toISOString())
+          .then(() => this.maybeAutoAdvanceChain())
+          .catch((err) => console.error('[session-do] post-stop chain:', err))
         // GH#50: terminal lifecycle transition.
         void this.flushLastEventTsToD1()
         break

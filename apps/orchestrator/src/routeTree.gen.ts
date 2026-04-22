@@ -11,7 +11,6 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as AuthenticatedAdminUsersRouteImport } from './routes/_authenticated/admin.users'
 import { Route as AuthenticatedBoardRouteImport } from './routes/_authenticated/board'
-import { Route as AuthenticatedChainIssueNumberRouteImport } from './routes/_authenticated/chain.$issueNumber'
 import { Route as AuthenticatedDeploysRouteImport } from './routes/_authenticated/deploys'
 import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/index'
 import { Route as AuthenticatedRouteRouteImport } from './routes/_authenticated/route'
@@ -54,11 +53,6 @@ const AuthenticatedSettingsRoute = AuthenticatedSettingsRouteImport.update({
   path: '/settings',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
-const AuthenticatedChainIssueNumberRoute = AuthenticatedChainIssueNumberRouteImport.update({
-  id: '/chain/$issueNumber',
-  path: '/chain/$issueNumber',
-  getParentRoute: () => AuthenticatedRouteRoute,
-} as any)
 const AuthenticatedSessionIdRoute = AuthenticatedSessionIdRouteImport.update({
   id: '/session/$id',
   path: '/session/$id',
@@ -78,7 +72,6 @@ export interface FileRoutesByFullPath {
   '/settings': typeof AuthenticatedSettingsRoute
   '/admin/users': typeof AuthenticatedAdminUsersRoute
   '/session/$id': typeof AuthenticatedSessionIdRoute
-  '/chain/$issueNumber': typeof AuthenticatedChainIssueNumberRoute
 }
 export interface FileRoutesByTo {
   '/login': typeof LoginRoute
@@ -89,7 +82,6 @@ export interface FileRoutesByTo {
   '/': typeof AuthenticatedIndexRoute
   '/admin/users': typeof AuthenticatedAdminUsersRoute
   '/session/$id': typeof AuthenticatedSessionIdRoute
-  '/chain/$issueNumber': typeof AuthenticatedChainIssueNumberRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -102,7 +94,6 @@ export interface FileRoutesById {
   '/_authenticated/': typeof AuthenticatedIndexRoute
   '/_authenticated/admin/users': typeof AuthenticatedAdminUsersRoute
   '/_authenticated/session/$id': typeof AuthenticatedSessionIdRoute
-  '/_authenticated/chain/$issueNumber': typeof AuthenticatedChainIssueNumberRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -115,7 +106,6 @@ export interface FileRouteTypes {
     | '/settings'
     | '/admin/users'
     | '/session/$id'
-    | '/chain/$issueNumber'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/login'
@@ -126,7 +116,6 @@ export interface FileRouteTypes {
     | '/'
     | '/admin/users'
     | '/session/$id'
-    | '/chain/$issueNumber'
   id:
     | '__root__'
     | '/_authenticated'
@@ -138,7 +127,6 @@ export interface FileRouteTypes {
     | '/_authenticated/'
     | '/_authenticated/admin/users'
     | '/_authenticated/session/$id'
-    | '/_authenticated/chain/$issueNumber'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -198,13 +186,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedSettingsRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
-    '/_authenticated/chain/$issueNumber': {
-      id: '/_authenticated/chain/$issueNumber'
-      path: '/chain/$issueNumber'
-      fullPath: '/chain/$issueNumber'
-      preLoaderRoute: typeof AuthenticatedChainIssueNumberRouteImport
-      parentRoute: typeof AuthenticatedRouteRoute
-    }
     '/_authenticated/session/$id': {
       id: '/_authenticated/session/$id'
       path: '/session/$id'
@@ -229,7 +210,6 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
   AuthenticatedAdminUsersRoute: typeof AuthenticatedAdminUsersRoute
   AuthenticatedSessionIdRoute: typeof AuthenticatedSessionIdRoute
-  AuthenticatedChainIssueNumberRoute: typeof AuthenticatedChainIssueNumberRoute
 }
 
 const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
@@ -239,7 +219,6 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
   AuthenticatedAdminUsersRoute: AuthenticatedAdminUsersRoute,
   AuthenticatedSessionIdRoute: AuthenticatedSessionIdRoute,
-  AuthenticatedChainIssueNumberRoute: AuthenticatedChainIssueNumberRoute,
 }
 
 const AuthenticatedRouteRouteWithChildren = AuthenticatedRouteRoute._addFileChildren(

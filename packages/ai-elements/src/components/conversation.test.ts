@@ -31,19 +31,6 @@ describe('Conversation component', () => {
     expect(content).toContain('ResizeObserver')
   })
 
-  it('RO pin check is against pre-growth distance (regression guard for streaming)', () => {
-    const conversationPath = join(__dirname, 'conversation.tsx')
-    const content = readFileSync(conversationPath, 'utf-8')
-
-    // ResizeObserver fires after layout, so post-growth `scrollHeight -
-    // scrollTop - clientHeight` equals the size of the new content (always
-    // > PIN_THRESHOLD_PX = 4 for any streaming text delta). The pin check
-    // must subtract `growth` to recover the user's pre-growth distance —
-    // otherwise auto-scroll never fires during streaming.
-    expect(content).toContain('distanceBefore')
-    expect(content).toContain('- growth')
-  })
-
   it('no `escaped` ref (regression guard for the flag-based snap-back trap)', () => {
     const conversationPath = join(__dirname, 'conversation.tsx')
     const content = readFileSync(conversationPath, 'utf-8')

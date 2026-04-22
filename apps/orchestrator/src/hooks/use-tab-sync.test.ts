@@ -12,8 +12,7 @@
  * stay put inside their cluster.
  *
  * Cluster keys:
- *   - `project:P` → membership: `kind !== 'chain' && project === P`
- *   - `issue:N`   → membership: `kind === 'chain' && issueNumber === N`
+ *   - `project:P` → membership: `project === P`
  *   - null        → no cluster, append at max+1
  */
 
@@ -24,8 +23,6 @@ import { collectReplaceTabDedupIds, computeInsertOrder } from './use-tab-sync'
 type Entry = {
   order: number
   project?: string
-  kind?: 'chain' | 'session'
-  issueNumber?: number
 }
 
 describe('computeInsertOrder', () => {
@@ -91,76 +88,6 @@ describe('computeInsertOrder', () => {
     ]
     expect(computeInsertOrder(entries, 'project:b', null)).toBe(2.75)
   })
-
-  // ── Chain cluster tests ──────────────────────────────────────────────
-
-  it('chain tab appends at end when no chain tab exists for that issue', () => {
-    // Project "b" exists but it's a session cluster — issue:42 has no
-    // members, so a new chain tab for #42 appends at max+1.
-    const entries: Entry[] = [
-      { order: 1, project: 'a' },
-      { order: 2, project: 'b' },
-    ]
-    expect(computeInsertOrder(entries, 'issue:42', null)).toBe(3)
-  })
-
-  it('chain tabs form their own cluster independent of same-named projects', () => {
-    // A chain tab for issue 42 exists at order 2. Its project field is
-    // irrelevant — membership is by `kind === 'chain' && issueNumber`.
-    // A new chain tab for #42 should slot between 2 and 3.
-    const entries: Entry[] = [
-      { order: 1, project: 'a' },
-      { order: 2, kind: 'chain', issueNumber: 42 },
-      { order: 3, project: 'c' },
-    ]
-    expect(computeInsertOrder(entries, 'issue:42', null)).toBe(2.5)
-  })
-
-  it('two chain tabs for different issues form separate clusters', () => {
-    // Chain #42 at order 2. A new chain tab for #43 doesn't share its
-    // cluster, so #43 appends at max+1.
-    const entries: Entry[] = [
-      { order: 1, project: 'a' },
-      { order: 2, kind: 'chain', issueNumber: 42 },
-      { order: 3, project: 'c' },
-    ]
-    expect(computeInsertOrder(entries, 'issue:43', null)).toBe(4)
-  })
-
-  it('project cluster excludes chain tabs even when they share a project field', () => {
-    // A chain tab happens to carry project: 'b' (defensive — should
-    // never happen in practice, but membership must still exclude it).
-    // The only session-kind 'b' tab is at order 1, next non-b is c at 3
-    // (the chain tab at 2 is not part of the project cluster and not a
-    // next non-cluster tab either). New project-b tab should land
-    // between 1 and 2 (the chain tab is the next non-project-b entry).
-    const entries: Entry[] = [
-      { order: 1, project: 'b' },
-      { order: 2, kind: 'chain', issueNumber: 42, project: 'b' },
-      { order: 3, project: 'c' },
-    ]
-    expect(computeInsertOrder(entries, 'project:b', null)).toBe(1.5)
-  })
-
-  it('chain cluster uses fractional order between cluster-last and next non-cluster tab', () => {
-    // Two chain tabs for #42 at orders 2 and 2.5, then project-c at 3.
-    // New chain tab #42 should slot between 2.5 and 3 → 2.75.
-    const entries: Entry[] = [
-      { order: 1, project: 'a' },
-      { order: 2, kind: 'chain', issueNumber: 42 },
-      { order: 2.5, kind: 'chain', issueNumber: 42 },
-      { order: 3, project: 'c' },
-    ]
-    expect(computeInsertOrder(entries, 'issue:42', null)).toBe(2.75)
-  })
-
-  it('null clusterKey always appends at max+1 regardless of entry shape', () => {
-    const entries: Entry[] = [
-      { order: 1, project: 'a' },
-      { order: 2, kind: 'chain', issueNumber: 42 },
-    ]
-    expect(computeInsertOrder(entries, null, null)).toBe(3)
-  })
 })
 
 // ─── replaceTab dedup candidate selection ───────────────────────────
@@ -186,19 +113,6 @@ describe('collectReplaceTabDedupIds', () => {
     const rows: Row[] = [
       { id: 'r1', sessionId: 'sess-1', meta: { project: 'proj-a' } },
       { id: 'r2', sessionId: 'draft:xyz', meta: {} },
-    ]
-    expect(collectReplaceTabDedupIds(rows, 'draft:xyz', 'sess-2', 'proj-a')).toEqual(['r1'])
-  })
-
-  it('does not touch chain tabs even if they carry a matching project', () => {
-    const rows: Row[] = [
-      { id: 'r1', sessionId: 'sess-1', meta: { project: 'proj-a' } },
-      {
-        id: 'r2',
-        sessionId: 'chain:42',
-        meta: { kind: 'chain', issueNumber: 42, project: 'proj-a' },
-      },
-      { id: 'r3', sessionId: 'draft:xyz', meta: {} },
     ]
     expect(collectReplaceTabDedupIds(rows, 'draft:xyz', 'sess-2', 'proj-a')).toEqual(['r1'])
   })

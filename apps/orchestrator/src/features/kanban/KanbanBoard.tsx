@@ -22,7 +22,6 @@ import {
   useSensors,
 } from '@dnd-kit/core'
 import { useLiveQuery } from '@tanstack/react-db'
-import { useNavigate } from '@tanstack/react-router'
 import { useCallback, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 import { Header } from '~/components/layout/header'
@@ -37,9 +36,10 @@ import {
 import { chainsCollection } from '~/db/chains-collection'
 import { checkPrecondition } from '~/hooks/use-chain-preconditions'
 import { useKanbanLanes } from '~/hooks/use-kanban-lanes'
+import { useTabSync } from '~/hooks/use-tab-sync'
 import type { ChainSummary } from '~/lib/types'
 import { AdvanceConfirmModal } from './AdvanceConfirmModal'
-import { advanceChain } from './advance-chain'
+import { advanceChain, chainProject } from './advance-chain'
 import { KanbanLane } from './KanbanLane'
 
 /** Fixed lane order. Anything not matching falls into 'other'. */
@@ -76,7 +76,7 @@ export function KanbanBoard() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data, isLoading } = useLiveQuery(chainsCollection as any)
   const { isCollapsed, toggle } = useKanbanLanes()
-  const navigate = useNavigate()
+  const { openTab } = useTabSync()
   const [projectFilter, setProjectFilter] = useState(ALL_PROJECTS)
 
   const chains = useMemo(() => (data ? ([...data] as ChainSummary[]) : []), [data])
@@ -163,12 +163,8 @@ export function KanbanBoard() {
       return
     }
     toast.success(`Started ${nextMode} for #${chain.issueNumber}`)
-    navigate({
-      to: '/chain/$issueNumber',
-      params: { issueNumber: String(chain.issueNumber) },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any)
-  }, [pendingAdvance, navigate])
+    openTab(res.sessionId, { project: chainProject(chain) ?? undefined })
+  }, [pendingAdvance, openTab])
 
   return (
     <>
