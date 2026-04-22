@@ -44,11 +44,18 @@ describe('Conversation component', () => {
     expect(content).not.toContain('escaped.current')
   })
 
-  it('ConversationContent scrolls to bottom on mount via useLayoutEffect', () => {
+  it('ConversationContent mount layout-effect is guarded against re-fire', () => {
     const conversationPath = join(__dirname, 'conversation.tsx')
     const content = readFileSync(conversationPath, 'utf-8')
 
+    // On Android WebView, a React concurrent-commit edge case re-invokes
+    // this effect on a persisted fiber+DOM roughly every 430ms. Without
+    // the `scrollTop === 0` guard, each re-fire writes scrollTop back to
+    // the bottom and fights the user's drag. The guard turns every
+    // re-invocation into a no-op while still handling the genuine first-
+    // mount case where scrollTop starts at 0.
     expect(content).toContain('useLayoutEffect')
+    expect(content).toContain('el.scrollTop === 0')
     expect(content).toContain('el.scrollTop = el.scrollHeight - el.clientHeight')
   })
 })

@@ -33,6 +33,7 @@ import { Button } from '../ui/button'
 // ---------------------------------------------------------------------------
 
 const NEAR_BOTTOM_PX = 70
+const PIN_THRESHOLD_PX = 4
 
 interface AutoScrollContext {
   scrollRef: RefCallback<HTMLDivElement>
@@ -77,14 +78,19 @@ function useAutoScroll() {
     const scroll = scrollEl.current
     if (!content || !scroll) return
 
-    // TEMP: RO auto-snap fully disabled to probe whether persistent snap-
-    // back on foreground resume originates here or elsewhere. If the
-    // snap-back stops, the RO path is the culprit and we reinstate it
-    // with a tighter touch-aware gate. If it persists, the snap is coming
-    // from outside this file and we hunt further. No observer installed
-    // during the probe — there's nothing to observe when auto-snap is off.
-    void content
-    void scroll
+    let prevHeight = content.getBoundingClientRect().height
+    const ro = new ResizeObserver(() => {
+      const currentHeight = content.getBoundingClientRect().height
+      const grew = currentHeight > prevHeight
+      prevHeight = currentHeight
+      if (!grew) return
+      const pinned = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < PIN_THRESHOLD_PX
+      if (pinned) {
+        scroll.scrollTop = scroll.scrollHeight
+      }
+    })
+    ro.observe(content)
+    return () => ro.disconnect()
   }, [])
 
   const scrollToBottom = useCallback(() => {
@@ -143,10 +149,18 @@ export const ConversationContent = ({
     [scrollRef],
   )
 
-  // Scroll to bottom before first paint to avoid a flash of content at scrollTop=0
+  // Scroll to bottom before first paint to avoid a flash of content at
+  // scrollTop=0. GUARD: only write when we're actually starting from 0 —
+  // an Android WebView / React concurrent-commit edge case re-invoked
+  // this effect roughly every 430ms on a persisted fiber+DOM, and each
+  // invocation wrote scrollTop=scrollHeight-clientHeight, fighting the
+  // user's drag. Confirmed via CDP monitor: scrollTop writes from this
+  // exact code path (stack: conversation.tsx:<line>) every ~430ms for
+  // minutes on a stable DOM node. The guard makes the write a no-op on
+  // every re-fire while still handling the genuine first-mount case.
   useLayoutEffect(() => {
     const el = scrollNode.current
-    if (el) {
+    if (el && el.scrollTop === 0) {
       el.scrollTop = el.scrollHeight - el.clientHeight
     }
   }, [])
