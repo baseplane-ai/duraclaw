@@ -515,10 +515,41 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   }
 
   onConnect(connection: Connection, ctx: ConnectionContext) {
+    // GH#49 observability: log socket-set size + same-id collision count at
+    // the moment we enter onConnect. Distinguishes the candidate root causes
+    // for the "session WS perma-reconnect after Android background cycle"
+    // pathology: (1) `_pk` collision with a zombie socket still in the
+    // hibernation set, (2) onConnect throw during history replay, (3) the
+    // initial post-foreground attempt hitting a slow DO wake. Grep
+    // `wrangler tail` for `[SessionDO][conn]` during repro.
+    const t0 = Date.now()
+    let totalSockets = -1
+    let sameIdSockets = -1
     try {
-      return this.onConnectInner(connection, ctx)
+      totalSockets = this.ctx.getWebSockets().length
+      sameIdSockets = this.ctx.getWebSockets(connection.id).length
+    } catch {
+      // getWebSockets can't realistically throw, but don't let observability
+      // crash the real handler.
+    }
+    const role = new URL(ctx.request.url).searchParams.get('role') ?? 'browser'
+    console.log(
+      `[SessionDO][conn] enter doId=${this.ctx.id} connId=${connection.id} role=${role} totalSockets=${totalSockets} sameIdSockets=${sameIdSockets}`,
+    )
+    try {
+      const result = this.onConnectInner(connection, ctx)
+      console.log(
+        `[SessionDO][conn] exit doId=${this.ctx.id} connId=${connection.id} role=${role} ms=${Date.now() - t0}`,
+      )
+      return result
     } catch (err) {
-      this.logError('onConnect', err, { connId: connection.id })
+      this.logError('onConnect', err, {
+        connId: connection.id,
+        role,
+        totalSockets,
+        sameIdSockets,
+        ms: Date.now() - t0,
+      })
       throw err
     }
   }
@@ -572,7 +603,14 @@ export class SessionDO extends Agent<Env, SessionMeta> {
         targetClientId: connection.id,
       })
     } catch (err) {
-      console.error(`[SessionDO:${this.ctx.id}] Failed to replay history:`, err)
+      // GH#49: history replay is one of three candidate causes for the
+      // Android-background perma-reconnect pathology. Tag under
+      // `[SessionDO][conn]` so `wrangler tail` greps pull this alongside
+      // the enter/exit markers added above.
+      console.error(
+        `[SessionDO][conn] replay-history failed doId=${this.ctx.id} connId=${connection.id}:`,
+        err,
+      )
       // Error path: broadcastMessages no-ops on empty ops and
       // broadcastBranchInfo no-ops on empty rows without a targetClientId.
       // We still call broadcastBranchInfo targeted so the recipient sees
@@ -656,6 +694,21 @@ export class SessionDO extends Agent<Env, SessionMeta> {
             this.logError('maybeRecoverAfterGatewayDrop', err)
           })
         }
+      } else {
+        // GH#49 observability: pair with the `[SessionDO][conn] enter` log
+        // so we can see per-connId open→close cycles in `wrangler tail`.
+        // `remaining` is the post-close count from ctx.getWebSockets — a
+        // non-zero value with the same id on a reconnect-storm means zombie
+        // sockets are piling up in the hibernation set.
+        let remaining = -1
+        try {
+          remaining = this.ctx.getWebSockets(connection.id).length
+        } catch {
+          // no-op
+        }
+        console.log(
+          `[SessionDO][conn] close doId=${this.ctx.id} connId=${connection.id} code=${code} reason=${JSON.stringify(reason)} sameIdRemaining=${remaining}`,
+        )
       }
 
       super.onClose(connection, code, reason, _wasClean)
