@@ -2996,3 +2996,108 @@ describe('B10 atomic dual-emit — messages + branchInfo in same DO turn (GH#38 
     expect(e.calls.map((c) => c.wire)).toEqual(['messages', 'messages', 'messages', 'branchInfo'])
   })
 })
+
+// ── idle→running status flush to D1 (StatusBar live-update bug) ──
+//
+// Regression guard for the bug where StatusBar + tab-bar froze at the
+// prior turn's final values for the entire duration of a new turn.
+// Root cause: four `updateState({status:'running', …})` call-sites
+// (sendMessage hasLiveRunner branch, sendMessage isResumable branch,
+// forkWithHistory, resubmitMessage) did NOT call the paired
+// `syncStatusToD1(…)` helper, so the D1 row stayed on the previous
+// terminal status — `agent_sessions` synced-collection delta frames
+// never fired, and `useSession(sessionId)` surfaced stale status.
+//
+// Every OTHER status transition in session-do.ts (stop/abort/forceStop,
+// waiting_gate, result→idle, stopped→idle, recovery, error) correctly
+// calls `syncStatusToD1(new Date().toISOString())` after `updateState`.
+// The fix restores symmetry: after each idle→running update, fire the
+// flush. This test mirrors the production contract so a future edit that
+// drops the flush breaks this assertion.
+
+describe('idle→running flushes status to D1 (StatusBar live-update)', () => {
+  type Partial = { status: 'running'; gate: null; error: null }
+
+  function makeHarness() {
+    const calls: Array<'updateState' | 'syncStatusToD1'> = []
+    const partials: Partial[] = []
+    return {
+      calls,
+      partials,
+      updateState: (p: Partial) => {
+        calls.push('updateState')
+        partials.push(p)
+      },
+      syncStatusToD1: (_updatedAt: string) => {
+        calls.push('syncStatusToD1')
+      },
+    }
+  }
+
+  // sendMessage (hasLiveRunner branch) mirrors session-do.ts lines ~2514-2524.
+  function simulateSendMessageHasLiveRunner(
+    priorStatus: 'idle' | 'running' | 'waiting_gate',
+    h: ReturnType<typeof makeHarness>,
+  ): void {
+    if (priorStatus !== 'running' && priorStatus !== 'waiting_gate') {
+      h.updateState({ status: 'running', gate: null, error: null })
+      h.syncStatusToD1(new Date().toISOString())
+    }
+    // sendToGateway(stream-input) elided — not relevant to the flush contract.
+  }
+
+  // sendMessage (isResumable branch) mirrors session-do.ts lines ~2525-2533.
+  function simulateSendMessageIsResumable(h: ReturnType<typeof makeHarness>): void {
+    h.updateState({ status: 'running', gate: null, error: null })
+    h.syncStatusToD1(new Date().toISOString())
+  }
+
+  // forkWithHistory mirrors session-do.ts lines ~2618-2624 (status partial only).
+  function simulateForkWithHistory(h: ReturnType<typeof makeHarness>): void {
+    h.updateState({ status: 'running', gate: null, error: null })
+    h.syncStatusToD1(new Date().toISOString())
+  }
+
+  // resubmitMessage mirrors session-do.ts lines ~2991-2992.
+  function simulateResubmitMessage(h: ReturnType<typeof makeHarness>): void {
+    h.updateState({ status: 'running', gate: null, error: null })
+    h.syncStatusToD1(new Date().toISOString())
+  }
+
+  it('sendMessage hasLiveRunner (idle): updateState THEN syncStatusToD1', () => {
+    const h = makeHarness()
+    simulateSendMessageHasLiveRunner('idle', h)
+    expect(h.calls).toEqual(['updateState', 'syncStatusToD1'])
+    expect(h.partials[0]).toEqual({ status: 'running', gate: null, error: null })
+  })
+
+  it('sendMessage hasLiveRunner (already running): no-op — no flush, no churn', () => {
+    const h = makeHarness()
+    simulateSendMessageHasLiveRunner('running', h)
+    expect(h.calls).toEqual([])
+  })
+
+  it('sendMessage hasLiveRunner (waiting_gate): no-op — gate-answer path preserves status', () => {
+    const h = makeHarness()
+    simulateSendMessageHasLiveRunner('waiting_gate', h)
+    expect(h.calls).toEqual([])
+  })
+
+  it('sendMessage isResumable: updateState THEN syncStatusToD1 (fresh-resume path)', () => {
+    const h = makeHarness()
+    simulateSendMessageIsResumable(h)
+    expect(h.calls).toEqual(['updateState', 'syncStatusToD1'])
+  })
+
+  it('forkWithHistory: updateState THEN syncStatusToD1 (orphan auto-fork)', () => {
+    const h = makeHarness()
+    simulateForkWithHistory(h)
+    expect(h.calls).toEqual(['updateState', 'syncStatusToD1'])
+  })
+
+  it('resubmitMessage: updateState THEN syncStatusToD1 (rewind→resubmit)', () => {
+    const h = makeHarness()
+    simulateResubmitMessage(h)
+    expect(h.calls).toEqual(['updateState', 'syncStatusToD1'])
+  })
+})

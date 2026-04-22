@@ -2515,6 +2515,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       // Promote state back to running so the UI reflects the new turn.
       if (status !== 'running' && status !== 'waiting_gate') {
         this.updateState({ status: 'running', gate: null, error: null })
+        this.syncStatusToD1(new Date().toISOString())
       }
       this.sendToGateway({
         type: 'stream-input',
@@ -2524,6 +2525,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       })
     } else if (isResumable) {
       this.updateState({ status: 'running', gate: null, error: null })
+      this.syncStatusToD1(new Date().toISOString())
       void this.triggerGatewayDial({
         type: 'resume',
         project: this.state.project,
@@ -2621,6 +2623,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       error: null,
       sdk_session_id: null,
     })
+    this.syncStatusToD1(new Date().toISOString())
 
     void this.triggerGatewayDial({
       type: 'execute',
@@ -2989,6 +2992,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
 
     // 4. Send to gateway for execution
     this.updateState({ status: 'running', gate: null, error: null })
+    this.syncStatusToD1(new Date().toISOString())
     void this.triggerGatewayDial({
       type: 'resume',
       project: this.state.project,
