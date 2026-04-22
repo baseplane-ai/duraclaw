@@ -5,7 +5,10 @@
  */
 
 import {
+  Conversation,
+  ConversationContent,
   ConversationEmptyState,
+  ConversationScrollButton,
   Message,
   MessageContent,
   MessageResponse,
@@ -19,7 +22,6 @@ import {
   ToolOutput,
 } from '@duraclaw/ai-elements'
 import {
-  ArrowDownIcon,
   BrainIcon,
   CheckIcon,
   ChevronLeftIcon,
@@ -28,19 +30,8 @@ import {
   FileIcon,
   HistoryIcon,
 } from 'lucide-react'
-import {
-  forwardRef,
-  memo,
-  type ReactNode,
-  useCallback,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react'
-import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
+import { memo, type ReactNode, useCallback, useMemo, useRef, useState } from 'react'
 import { Badge } from '~/components/ui/badge'
-import { Button } from '~/components/ui/button'
 import {
   Sheet,
   SheetContent,
@@ -378,6 +369,17 @@ function CopyMessageButton({ text }: { text: string }) {
 }
 
 interface ChatThreadProps {
+  /**
+   * Identity of the session whose messages we render. Threaded through to
+   * `<Conversation key={sessionId}>` so the IntersectionObserver +
+   * ResizeObserver instances owned by `useAutoScroll` are torn down and
+   * re-armed cleanly on session switch. Without the key, tabs-stay-mounted
+   * (#51) means the same observer survives the `messages` prop swap and
+   * fires against the wrong baseline — exactly the "heavy-session switch
+   * jumps + 235ms scroll violation" from #55. Optional for back-compat with
+   * pre-spawn draft callsites that have no sessionId yet.
+   */
+  sessionId?: string
   messages: SessionMessage[]
   /**
    * Spec-31 P4b: message-derived gate payload, computed upstream via
@@ -727,18 +729,8 @@ const ChatMessageRow = memo(
   },
 )
 
-/**
- * Virtuoso's internal `List` slot — we override it to stamp `role="log"` on
- * the element that actually holds the messages so screen-reader semantics
- * match the pre-virtualisation `Conversation` container.
- */
-const VirtuosoList = forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
-  function VirtuosoList(props, ref) {
-    return <div ref={ref} role="log" {...props} />
-  },
-)
-
 export function ChatThread({
+  sessionId,
   messages,
   derivedGate,
   isConnecting,
@@ -749,73 +741,10 @@ export function ChatThread({
   onBranchNavigate,
   onSendSuggestion,
 }: ChatThreadProps) {
-  const virtuosoRef = useRef<VirtuosoHandle | null>(null)
-  const [atBottom, setAtBottom] = useState(true)
-
-  const scrollToBottom = useCallback(() => {
-    const handle = virtuosoRef.current
-    if (!handle) return
-    handle.scrollToIndex({ index: 'LAST', align: 'end', behavior: 'smooth' })
-  }, [])
-
-  // Scroll-to-bottom when a new optimistic user message appears. Mirrors the
-  // pre-virtualisation ScrollOnUserSend behavior so the outgoing turn doesn't
-  // stay parked above the viewport.
-  const lastUserSendRef = useRef<string | null>(null)
-  useLayoutEffect(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const msg = messages[i]
-      if (
-        msg.role === 'user' &&
-        (msg.id.startsWith('usr-client-') || msg.id.startsWith('usr-optimistic-'))
-      ) {
-        if (msg.id !== lastUserSendRef.current) {
-          lastUserSendRef.current = msg.id
-          scrollToBottom()
-        }
-        return
-      }
-      if (msg.role !== 'user') break
-    }
-  }, [messages, scrollToBottom])
-
-  // Scroll-to-bottom when a pending gate resolves (mirrors ScrollOnGateResolve).
-  const lastPendingGateRef = useRef<string | null>(null)
-  useLayoutEffect(() => {
-    const currentId = derivedGate?.id ?? null
-    if (lastPendingGateRef.current && !currentId) {
-      scrollToBottom()
-    }
-    lastPendingGateRef.current = currentId
-  }, [derivedGate, scrollToBottom])
-
-  const itemContent = useCallback(
-    (index: number, msg: SessionMessage) => (
-      <ChatMessageRow
-        msg={msg}
-        turnIndex={index}
-        derivedGate={derivedGate}
-        readOnly={readOnly}
-        onResolveGate={onResolveGate}
-        onRewind={onRewind}
-        branch={branchInfo?.get(msg.id)}
-        onBranchNavigate={onBranchNavigate}
-      />
-    ),
-    [derivedGate, readOnly, onResolveGate, onRewind, branchInfo, onBranchNavigate],
-  )
-
-  const computeItemKey = useCallback((_index: number, msg: SessionMessage) => msg.id, [])
-
-  const virtuosoComponents = useMemo(
-    () => ({
-      List: VirtuosoList,
-      Footer: () => <div className="h-2" aria-hidden="true" />,
-    }),
-    [],
-  )
-
-  // Empty / connecting placeholder path — bypass virtualisation entirely.
+  // Empty / connecting placeholder path — bypass the Conversation wrapper
+  // entirely. There's no content to auto-scroll and no message list to
+  // render, so mounting the IntersectionObserver + ResizeObserver pair would
+  // be wasted work.
   if (messages.length === 0) {
     return (
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" role="log">
@@ -867,41 +796,34 @@ export function ChatThread({
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-x-clip">
-      <Virtuoso
-        ref={virtuosoRef}
-        style={{ height: '100%' }}
-        className="min-w-0 flex-1 [&_pre]:overflow-x-auto [&_pre]:max-w-full"
-        data={messages}
-        computeItemKey={computeItemKey}
-        itemContent={itemContent}
-        initialTopMostItemIndex={messages.length - 1}
-        // GH#55: skip Virtuoso's "probe" render. Without this, Virtuoso
-        // measures the first rendered item (initialTopMostItemIndex points at
-        // the trailing assistant turn) and assumes every other row is the
-        // same height. On a heavy 65 KB assistant-turn session that's wildly
-        // wrong, so Virtuoso does multiple measurement passes to settle —
-        // observed as a 3× re-render pattern (903ms × 3) on session switch.
-        // 120px is a conservative estimate for a typical user or short
-        // assistant turn; real heights are still measured on scroll-into-view.
-        defaultItemHeight={120}
-        followOutput={(isAtBottom) => (isAtBottom ? 'smooth' : false)}
-        atBottomStateChange={setAtBottom}
-        atBottomThreshold={70}
-        increaseViewportBy={{ top: 600, bottom: 600 }}
-        components={virtuosoComponents}
-      />
-      {!atBottom && (
-        <Button
-          type="button"
-          size="icon"
-          variant="outline"
-          onClick={scrollToBottom}
-          className="absolute bottom-4 left-[50%] translate-x-[-50%] rounded-full dark:bg-background dark:hover:bg-muted"
-          aria-label="Scroll to bottom"
-        >
-          <ArrowDownIcon className="size-4" />
-        </Button>
-      )}
+      {/*
+        `key={sessionId}` is load-bearing. Tabs stay mounted across session
+        switches (#51), so without it the same `<Conversation>` instance —
+        including its IntersectionObserver (bottom sentinel) and
+        ResizeObserver (content-growth pin) — would survive the `messages`
+        prop swap and fire against stale baselines from the previous
+        session. That was the #55 "6× switch regression on heavy sessions"
+        symptom. Keying forces a clean re-init per session; the observers
+        are cheap to reconstruct.
+      */}
+      <Conversation key={sessionId ?? '__no_session__'} className="min-h-0 flex-1">
+        <ConversationContent className="[&_pre]:max-w-full [&_pre]:overflow-x-auto">
+          {messages.map((msg, index) => (
+            <ChatMessageRow
+              key={msg.id}
+              msg={msg}
+              turnIndex={index}
+              derivedGate={derivedGate}
+              readOnly={readOnly}
+              onResolveGate={onResolveGate}
+              onRewind={onRewind}
+              branch={branchInfo?.get(msg.id)}
+              onBranchNavigate={onBranchNavigate}
+            />
+          ))}
+        </ConversationContent>
+        <ConversationScrollButton />
+      </Conversation>
     </div>
   )
 }

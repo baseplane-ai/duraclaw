@@ -128,6 +128,7 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
       data-testid="agent-detail-view"
     >
       <ChatThread
+        sessionId={sessionId}
         messages={messages}
         derivedGate={derivedGate}
         isConnecting={isConnecting}

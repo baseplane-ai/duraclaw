@@ -61,31 +61,6 @@ vi.mock('./GateResolver', () => ({
   GateResolver: () => <div data-testid="gate-resolver" />,
 }))
 
-// Virtuoso depends on real layout (clientHeight) which jsdom can't provide —
-// render every item eagerly so the visible-window logic doesn't gate the test
-// assertions.
-vi.mock('react-virtuoso', () => {
-  const React = require('react') as typeof import('react')
-  const Virtuoso = React.forwardRef(function MockVirtuoso(
-    props: Record<string, unknown>,
-    _ref: React.Ref<unknown>,
-  ) {
-    const data = (props.data as unknown[] | undefined) ?? []
-    const itemContent = props.itemContent as (index: number, item: unknown) => React.ReactNode
-    const computeItemKey = props.computeItemKey as
-      | ((index: number, item: unknown) => React.Key)
-      | undefined
-    return (
-      <div data-testid="virtuoso-mock" role="log">
-        {data.map((item, i) => (
-          <div key={computeItemKey ? computeItemKey(i, item) : i}>{itemContent(i, item)}</div>
-        ))}
-      </div>
-    )
-  })
-  return { Virtuoso }
-})
-
 import type { SessionMessage } from '~/lib/types'
 import { ChatThread } from './ChatThread'
 
