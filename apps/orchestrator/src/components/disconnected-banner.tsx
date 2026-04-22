@@ -1,9 +1,11 @@
 /**
- * DisconnectedBanner — renders above StatusBar when the session WS is
- * disconnected but the session has an sdk_session_id (i.e. there's an
- * on-disk JSONL transcript to resume from). Auto-retries once on mount;
- * shows manual Retry / Resume buttons if auto-retry doesn't reconnect
- * within a few seconds.
+ * DisconnectedBanner — renders above StatusBar when the session WS has
+ * been disconnected for more than DISCONNECT_GRACE_MS and the session
+ * has an sdk_session_id (i.e. there's an on-disk JSONL transcript to
+ * resume from). The grace period keeps transient flaps (visibility
+ * change, network hiccup, normal ConnectionManager reconnect) from
+ * flashing the banner. Auto-retries the gateway dial once the grace
+ * elapses; shows manual Retry / Resume buttons if that RPC fails.
  */
 
 import { WifiOffIcon } from 'lucide-react'
@@ -13,6 +15,15 @@ import { useSession } from '~/hooks/use-sessions-collection'
 import { deriveStatus } from '~/lib/derive-status'
 import { useNow } from '~/lib/use-now'
 import { cn } from '~/lib/utils'
+
+/**
+ * How long the WS must stay disconnected before we surface the banner.
+ * Tuned to ride out the ConnectionManager's foreground/online reconnect
+ * (which schedules with [0, 500) ms stagger) and short network flaps
+ * without flashing UI. Also aligns with the auto-reattach timer, so a
+ * single user-visible action happens after this window elapses.
+ */
+const DISCONNECT_GRACE_MS = 3000
 
 interface DisconnectedBannerProps {
   sessionId: string | null
@@ -35,15 +46,30 @@ export function DisconnectedBanner({
   const status = session ? deriveStatus(session, nowTs) : 'idle'
   const hasSdkSession = Boolean(session?.sdkSessionId)
 
-  // Banner visibility: WS is not open, session is not actively streaming
-  // (idle), and there's an sdk_session_id to resume to.
+  // Baseline: eligible to eventually show if WS is not open, session is
+  // not actively streaming (idle), and there's an sdk_session_id to
+  // resume to. This is the trigger for the grace-period timer — NOT
+  // the banner's visibility gate.
   const isDisconnected = wsReadyState !== 1
   const isRecoverable = status === 'idle'
-  const shouldShow = isDisconnected && isRecoverable && hasSdkSession
+  const isEligible = isDisconnected && isRecoverable && hasSdkSession
 
-  // Auto-retry: attempt reattach once on mount with a 3s delay.
-  // If the WS reconnects before the timer fires, the banner disappears
-  // (shouldShow goes false) and we never fire the RPC.
+  // Track when the disconnected state started. Cleared the moment the
+  // WS comes back or the session becomes non-recoverable, so a brief
+  // flap never accumulates toward the grace threshold.
+  const disconnectedSinceRef = useRef<number | null>(null)
+  if (isEligible) {
+    if (disconnectedSinceRef.current === null) {
+      disconnectedSinceRef.current = Date.now()
+    }
+  } else if (disconnectedSinceRef.current !== null) {
+    disconnectedSinceRef.current = null
+  }
+
+  const disconnectedSince = disconnectedSinceRef.current
+  const hasElapsed = disconnectedSince !== null && nowTs - disconnectedSince >= DISCONNECT_GRACE_MS
+  const shouldShow = isEligible && hasElapsed
+
   const [autoRetried, setAutoRetried] = useState(false)
   const [busy, setBusy] = useState(false)
   const autoRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -54,10 +80,17 @@ export function DisconnectedBanner({
     mountSessionIdRef.current = sessionId
     setAutoRetried(false)
     setBusy(false)
+    disconnectedSinceRef.current = isEligible ? Date.now() : null
   }
 
+  // Auto-retry: once the grace window elapses, fire reattach once.
+  // If the WS reconnects during the window, `isEligible` flips false,
+  // the disconnect timestamp resets, and we never fire the RPC.
   useEffect(() => {
-    if (!shouldShow || autoRetried) return
+    if (!isEligible || autoRetried || disconnectedSince === null) return
+
+    const elapsed = Date.now() - disconnectedSince
+    const delay = Math.max(0, DISCONNECT_GRACE_MS - elapsed)
 
     autoRetryTimerRef.current = setTimeout(async () => {
       setAutoRetried(true)
@@ -69,7 +102,7 @@ export function DisconnectedBanner({
       } finally {
         setBusy(false)
       }
-    }, 3000)
+    }, delay)
 
     return () => {
       if (autoRetryTimerRef.current) {
@@ -77,7 +110,7 @@ export function DisconnectedBanner({
         autoRetryTimerRef.current = null
       }
     }
-  }, [shouldShow, autoRetried, onReattach])
+  }, [isEligible, autoRetried, disconnectedSince, onReattach])
 
   const handleRetry = useCallback(async () => {
     setBusy(true)
