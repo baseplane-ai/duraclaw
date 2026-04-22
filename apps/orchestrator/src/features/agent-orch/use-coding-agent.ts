@@ -120,10 +120,31 @@ const sessionFrameHandlers = new Map<string, Set<SessionFrameHandler>>()
 const sessionReconnectHandlers = new Map<string, Set<SessionReconnectHandler>>()
 
 /**
+ * Pre-subscribe frame buffer. The messagesCollection's inner sync (which calls
+ * `subscribeSessionStream`) is invoked by `persistedCollectionOptions` inside
+ * an async IIFE that awaits OPFS startup-metadata load (see
+ * `@tanstack/db-sqlite-persistence-core/persisted.ts` L2483-2494 — the inner
+ * sync runs one microtask after `await runtime.ensureStartupMetadataLoaded()`).
+ * Meanwhile `useAgent({name})` in the same render opens the WS immediately
+ * and the DO's onConnect synchronously emits the session's full history as
+ * `synced-collection-delta` frames. On session switch the burst races with
+ * subscriber registration; without a buffer those frames are silently dropped
+ * by `dispatchSessionFrame` and the message list only populates on a later
+ * WS reconnect cycle (which re-fires onConnect). Buffer with a 5s TTL so
+ * stale frames from a flapping connection don't leak into a later subscriber.
+ */
+type BufferedFrame = { frame: SyncedCollectionFrame<unknown>; ts: number }
+const sessionFrameBuffer = new Map<string, BufferedFrame[]>()
+const FRAME_BUFFER_TTL_MS = 5000
+
+/**
  * Subscribe to every SyncedCollectionFrame delivered on `sessionId`'s WS.
  * Does NOT pre-filter by `frame.collection` — consumers (messagesCollection,
  * branchInfoCollection) filter internally. Frames on OTHER sessions' WS do
  * not fire this handler. Returns an unsubscribe fn.
+ *
+ * On registration, drains any frames that `dispatchSessionFrame` buffered
+ * while no subscriber was attached (see `sessionFrameBuffer` above).
  */
 export function subscribeSessionStream(
   sessionId: string,
@@ -135,6 +156,19 @@ export function subscribeSessionStream(
     sessionFrameHandlers.set(sessionId, set)
   }
   set.add(handler)
+  const buffered = sessionFrameBuffer.get(sessionId)
+  if (buffered && buffered.length > 0) {
+    sessionFrameBuffer.delete(sessionId)
+    const now = Date.now()
+    for (const entry of buffered) {
+      if (now - entry.ts > FRAME_BUFFER_TTL_MS) continue
+      try {
+        handler(entry.frame)
+      } catch (err) {
+        console.warn('[session-stream] buffered frame handler threw', err)
+      }
+    }
+  }
   return () => {
     const cur = sessionFrameHandlers.get(sessionId)
     if (!cur) return
@@ -169,7 +203,21 @@ export function onSessionStreamReconnect(
 // hook's onMessage / reconnect-detection plumbing wired below.
 function dispatchSessionFrame(sessionId: string, frame: SyncedCollectionFrame<unknown>): void {
   const set = sessionFrameHandlers.get(sessionId)
-  if (!set || set.size === 0) return
+  if (!set || set.size === 0) {
+    // No subscriber yet — buffer for the late-arriving handler (typically the
+    // messagesCollection sync, whose subscribe call is gated behind
+    // persistedCollectionOptions' startup-metadata await). See the
+    // `sessionFrameBuffer` comment above for the race.
+    let q = sessionFrameBuffer.get(sessionId)
+    if (!q) {
+      q = []
+      sessionFrameBuffer.set(sessionId, q)
+    }
+    const now = Date.now()
+    while (q.length > 0 && now - q[0].ts > FRAME_BUFFER_TTL_MS) q.shift()
+    q.push({ frame, ts: now })
+    return
+  }
   for (const h of set) {
     try {
       h(frame)
@@ -195,6 +243,15 @@ function dispatchSessionReconnect(sessionId: string): void {
 export function __resetSessionStreamForTests(): void {
   sessionFrameHandlers.clear()
   sessionReconnectHandlers.clear()
+  sessionFrameBuffer.clear()
+}
+
+/** Test-only dispatch — exercises the internal `dispatchSessionFrame` path. */
+export function __dispatchSessionFrameForTests(
+  sessionId: string,
+  frame: SyncedCollectionFrame<unknown>,
+): void {
+  dispatchSessionFrame(sessionId, frame)
 }
 
 /** Connect to a SessionDO instance by name; returns live state, messages, and RPC helpers. */

@@ -98,11 +98,34 @@ function useAutoScroll() {
 
     let prevHeight = content.getBoundingClientRect().height
     let isInitialSettle = true
+    let settleTimer: ReturnType<typeof setTimeout> | null = null
+    const armSettle = () => {
+      if (settleTimer) clearTimeout(settleTimer)
+      isInitialSettle = true
+      settleTimer = setTimeout(() => {
+        isInitialSettle = false
+      }, SETTLE_MS)
+    }
+    armSettle()
     const ro = new ResizeObserver(() => {
       const currentHeight = content.getBoundingClientRect().height
       const growth = currentHeight - prevHeight
+      // Detect the 0 → N transition: OPFS hydration (or the WS onConnect
+      // history burst) can land after the initial mount-time settle window
+      // has expired. In that case the RO fires against an empty baseline,
+      // the pin-check passes but `behavior: 'smooth'` scrolls visibly
+      // through a suddenly-tall list. Re-arm the instant-scroll window
+      // from *this* moment so the first real content arrival reads as
+      // "already at the bottom" regardless of whether hydration came from
+      // OPFS or the network.
+      const wasEmpty = prevHeight === 0 && currentHeight > 0
       prevHeight = currentHeight
       if (growth <= 0) return
+      if (wasEmpty) {
+        armSettle()
+        scroll.scrollTop = scroll.scrollHeight
+        return
+      }
       const distanceBefore = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight - growth
       if (distanceBefore < PIN_THRESHOLD_PX) {
         scroll.scrollTo({
@@ -112,11 +135,8 @@ function useAutoScroll() {
       }
     })
     ro.observe(content)
-    const settleTimer = setTimeout(() => {
-      isInitialSettle = false
-    }, SETTLE_MS)
     return () => {
-      clearTimeout(settleTimer)
+      if (settleTimer) clearTimeout(settleTimer)
       ro.disconnect()
     }
   }, [])
