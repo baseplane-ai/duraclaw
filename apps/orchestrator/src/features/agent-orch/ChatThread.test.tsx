@@ -24,8 +24,8 @@ vi.mock('@duraclaw/ai-elements', () => ({
   ),
   ConversationScrollButton: () => <div data-testid="scroll-button" />,
   // Ref callbacks are no-ops in jsdom — VirtualizedMessageList calls
-  // `scrollRef(node)` / `contentRef(node)` / `sentinelRef(node)` during
-  // ref-callback attach.
+  // `scrollRef(node)` / `contentRef(node)` during ref-callback attach.
+  // `sentinelRef` retained as a no-op for API back-compat.
   useAutoScrollContext: () => ({
     scrollToBottom: () => {},
     isAtBottom: true,

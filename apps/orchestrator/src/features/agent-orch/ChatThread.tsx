@@ -718,9 +718,6 @@ const ChatMessageRow = memo(
 // `<Conversation>` auto-scroll context via `useAutoScrollContext()`:
 //   - `scrollRef` → the virtualizer's scroll element (IO root).
 //   - `contentRef` → the sized inner div (RO target, height = totalSize).
-//   - `sentinelRef` → zero-height div pinned to the end of virtual space
-//      so the IO bottom-sentinel + `scrollIntoView({block:'end'})` auto-
-//      scroll path keeps working unchanged.
 // Items are absolutely positioned via `translateY(item.start)`. Real row
 // heights replace the estimate as rows paint via `measureElement`.
 // -------------------------------------------------------------------------
@@ -742,7 +739,7 @@ function VirtualizedMessageList({
   branchInfo,
   onBranchNavigate,
 }: VirtualizedMessageListProps) {
-  const { scrollRef, contentRef, sentinelRef } = useAutoScrollContext()
+  const { scrollRef, contentRef } = useAutoScrollContext()
   const scrollElRef = useRef<HTMLDivElement | null>(null)
 
   // Composite ref callback — stashes the node for the virtualizer AND
@@ -819,20 +816,6 @@ function VirtualizedMessageList({
             </div>
           )
         })}
-        {/* Bottom sentinel — pinned to the end of the virtualized height so
-         * `<Conversation>`'s IO-based "is user at bottom?" signal works
-         * unchanged. Zero-height, aria-hidden. */}
-        <div
-          ref={sentinelRef}
-          aria-hidden="true"
-          style={{
-            position: 'absolute',
-            top: totalSize,
-            left: 0,
-            right: 0,
-            height: 0,
-          }}
-        />
       </div>
     </div>
   )
