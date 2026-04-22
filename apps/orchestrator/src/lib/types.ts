@@ -46,6 +46,10 @@ export interface Env {
    *  and dev workers without the bucket bound still work — the
    *  `/api/mobile/*` routes degrade to "no update available" when absent. */
   MOBILE_ASSETS?: R2Bucket
+  /** R2 bucket for session media (images). Oversized base64 image data is
+   *  offloaded here before SQLite persistence (GH#65). Optional — when absent,
+   *  oversized images are truncated instead of offloaded. */
+  SESSION_MEDIA?: R2Bucket
   CC_GATEWAY_URL?: string
   CC_GATEWAY_SECRET?: string
   WORKER_PUBLIC_URL?: string

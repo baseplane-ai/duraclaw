@@ -774,6 +774,26 @@ export function createApiApp() {
     return new Response(obj.body, { headers })
   })
 
+  // ── Session media (R2-backed images) — GH#65 ─────────────────────
+  // Streams image bytes from the SESSION_MEDIA R2 bucket. Placed before
+  // authMiddleware so images render even when the session cookie is being
+  // refreshed (img src tags don't carry credentials reliably in all
+  // browsers). The R2 key itself is unguessable (contains session + msg id).
+  app.get('/api/sessions/media/*', async (c) => {
+    if (!c.env.SESSION_MEDIA) return c.body('Not found', 404)
+    const url = new URL(c.req.url)
+    const key = url.pathname.replace(/^\/api\/sessions\/media\//, '')
+    if (!key) return c.body('Not found', 404)
+    const obj = await c.env.SESSION_MEDIA.get(key)
+    if (!obj) return c.body('Not found', 404)
+    const headers = new Headers()
+    obj.writeHttpMetadata(headers)
+    headers.set('ETag', obj.httpEtag)
+    // Immutable — each image has a unique key (session + message + part index).
+    headers.set('Cache-Control', 'public, max-age=31536000, immutable')
+    return new Response(obj.body, { headers })
+  })
+
   app.use('/api/*', authMiddleware)
 
   // ── User settings (tabs) — direct D1 CRUD (B-API-2) ──────────────

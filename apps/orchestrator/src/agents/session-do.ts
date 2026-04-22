@@ -20,6 +20,7 @@ import { chunkOps } from '~/lib/chunk-frame'
 import { runMigrations } from '~/lib/do-migrations'
 import {
   contentToParts,
+  offloadOversizedImages,
   sanitizePartsForStorage,
   transcriptUserContentToParts,
 } from '~/lib/message-parts'
@@ -564,13 +565,15 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   // ── GH#65: size-safe persistence wrappers ───────────────────────────
   // Every call site that writes to the Session's SQLite-backed message
   // store should go through these so oversized base64 image data is
-  // stripped before it hits the DO SQLite row-size cap (~2 MB).
+  // offloaded to R2 (or truncated as fallback) before it hits the DO
+  // SQLite row-size cap (~2 MB).
 
-  /** appendMessage with pre-write sanitization of oversized image parts. */
+  /** appendMessage with R2 offload for oversized image parts. */
   private async safeAppendMessage(msg: SessionMessage, parentId?: string | null): Promise<void> {
-    sanitizePartsForStorage(msg.parts, {
+    await offloadOversizedImages(msg.parts, {
       sessionId: this.name,
       messageId: msg.id,
+      r2Bucket: this.env.SESSION_MEDIA,
     })
     return this.session.appendMessage(msg, parentId)
   }
@@ -578,6 +581,10 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   /**
    * updateMessage with pre-write sanitization of oversized image parts
    * and `modified_at` tracking for cursor-based reconnect replay.
+   *
+   * Images should already be offloaded to R2 by safeAppendMessage; the
+   * sync truncation here is a safety net for the rare case an update
+   * somehow carries new image data.
    *
    * Without `modified_at`, `replayMessagesFromCursor` (keyset on
    * `created_at`) can never replay an in-place update to a row whose

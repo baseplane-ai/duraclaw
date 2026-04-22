@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   contentToParts,
   getImagePartDataUrl,
   isImageTruncated,
   MAX_PARTS_JSON_BYTES,
+  offloadOversizedImages,
   sanitizePartsForStorage,
   transcriptUserContentToParts,
 } from './message-parts'
@@ -189,5 +190,168 @@ describe('isImageTruncated', () => {
 
   it('returns false for a text part', () => {
     expect(isImageTruncated({ type: 'text', text: 'hello' })).toBe(false)
+  })
+})
+
+// ── GH#65: getImagePartDataUrl with R2 support ─────────────────────
+
+describe('getImagePartDataUrl — R2 support', () => {
+  it('returns API URL when r2Key is set', () => {
+    const part = {
+      type: 'image' as const,
+      input: {
+        source: {
+          type: 'base64' as const,
+          media_type: 'image/png' as const,
+          data: '',
+          r2Key: 'session-media/sess-1/msg-1/0.png',
+        },
+      },
+    }
+    expect(getImagePartDataUrl(part)).toBe('/api/sessions/media/session-media/sess-1/msg-1/0.png')
+  })
+
+  it('returns null for empty data without r2Key', () => {
+    const part = {
+      type: 'image' as const,
+      input: {
+        source: { type: 'base64' as const, media_type: 'image/png' as const, data: '' },
+      },
+    }
+    expect(getImagePartDataUrl(part)).toBeNull()
+  })
+
+  it('returns data URL for inline base64 without r2Key', () => {
+    const part = {
+      type: 'image' as const,
+      input: {
+        source: { type: 'base64' as const, media_type: 'image/png' as const, data: PNG_BASE64 },
+      },
+    }
+    expect(getImagePartDataUrl(part)).toBe(`data:image/png;base64,${PNG_BASE64}`)
+  })
+})
+
+// ── GH#65: offloadOversizedImages (async, R2) ──────────────────────
+
+describe('offloadOversizedImages', () => {
+  function fakeBase64(bytes: number): string {
+    return 'A'.repeat(bytes)
+  }
+
+  function makeImagePart(dataBytes: number) {
+    return {
+      type: 'image' as const,
+      input: {
+        source: {
+          type: 'base64' as const,
+          media_type: 'image/png' as const,
+          data: fakeBase64(dataBytes),
+        },
+      },
+    }
+  }
+
+  /** Minimal R2Bucket mock that records put calls. */
+  function mockR2Bucket() {
+    const puts: Array<{ key: string; body: unknown; options: unknown }> = []
+    return {
+      puts,
+      bucket: {
+        put: vi.fn(async (key: string, body: unknown, options: unknown) => {
+          puts.push({ key, body, options })
+        }),
+      } as unknown as R2Bucket,
+    }
+  }
+
+  it('is a no-op when parts are under the threshold', async () => {
+    const parts = [{ type: 'text', text: 'hello' }]
+    await offloadOversizedImages(parts, { sessionId: 's1', messageId: 'm1' })
+    expect(parts[0]).toEqual({ type: 'text', text: 'hello' })
+  })
+
+  it('uploads to R2 and sets r2Key when bucket is available', async () => {
+    const { bucket, puts } = mockR2Bucket()
+    const parts = [makeImagePart(MAX_PARTS_JSON_BYTES + 1000), { type: 'text', text: 'caption' }]
+    await offloadOversizedImages(parts, {
+      sessionId: 's1',
+      messageId: 'm1',
+      r2Bucket: bucket,
+    })
+
+    const imgPart = parts[0] as any
+    expect(imgPart.input.source.r2Key).toBe('session-media/s1/m1/0.png')
+    expect(imgPart.input.source.data).toBe('')
+    expect(imgPart.truncated).toBeUndefined()
+    expect(puts).toHaveLength(1)
+    expect(puts[0].key).toBe('session-media/s1/m1/0.png')
+
+    // Text part untouched
+    expect(parts[1]).toEqual({ type: 'text', text: 'caption' })
+  })
+
+  it('falls back to truncation when no R2 bucket', async () => {
+    const parts = [makeImagePart(MAX_PARTS_JSON_BYTES + 1000)]
+    await offloadOversizedImages(parts, {
+      sessionId: 's1',
+      messageId: 'm1',
+      r2Bucket: null,
+    })
+
+    const imgPart = parts[0] as any
+    expect(imgPart.input.source.data).toBe('')
+    expect(imgPart.truncated).toBe(true)
+    expect(imgPart.input.source.r2Key).toBeUndefined()
+  })
+
+  it('falls back to truncation when R2 put throws', async () => {
+    const bucket = {
+      put: vi.fn(async () => {
+        throw new Error('R2 unavailable')
+      }),
+    } as unknown as R2Bucket
+    const parts = [makeImagePart(MAX_PARTS_JSON_BYTES + 1000)]
+    await offloadOversizedImages(parts, {
+      sessionId: 's1',
+      messageId: 'm1',
+      r2Bucket: bucket,
+    })
+
+    const imgPart = parts[0] as any
+    expect(imgPart.input.source.data).toBe('')
+    expect(imgPart.truncated).toBe(true)
+  })
+
+  it('uses correct file extension for media type', async () => {
+    const { bucket, puts } = mockR2Bucket()
+    const part = {
+      type: 'image' as const,
+      input: {
+        source: {
+          type: 'base64' as const,
+          media_type: 'image/jpeg' as const,
+          data: fakeBase64(MAX_PARTS_JSON_BYTES + 1000),
+        },
+      },
+    }
+    await offloadOversizedImages([part], {
+      sessionId: 's1',
+      messageId: 'm1',
+      r2Bucket: bucket,
+    })
+
+    expect(puts[0].key).toBe('session-media/s1/m1/0.jpg')
+  })
+
+  it('result fits under threshold after offload', async () => {
+    const { bucket } = mockR2Bucket()
+    const parts = [makeImagePart(MAX_PARTS_JSON_BYTES + 5000)]
+    await offloadOversizedImages(parts, {
+      sessionId: 's1',
+      messageId: 'm1',
+      r2Bucket: bucket,
+    })
+    expect(JSON.stringify(parts).length).toBeLessThan(MAX_PARTS_JSON_BYTES)
   })
 })

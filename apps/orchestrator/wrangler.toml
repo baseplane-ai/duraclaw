@@ -117,6 +117,14 @@ database_id = "c5b4d822-9bc6-467f-9ad6-7ee779b82e0c"
 binding = "MOBILE_ASSETS"
 bucket_name = "duraclaw-mobile"
 
+# R2 bucket for session media (GH#65). Oversized base64 image data from
+# user messages is offloaded here before SQLite persistence — the DO stores
+# only a lightweight `r2Key` reference in the message part, and the Worker
+# streams the image back through `GET /api/sessions/media/*`.
+[[r2_buckets]]
+binding = "SESSION_MEDIA"
+bucket_name = "duraclaw-session-media"
+
 [vars]
 VAPID_SUBJECT = "mailto:push@codevibesmatter.com"
 
