@@ -875,6 +875,15 @@ export function ChatThread({
         computeItemKey={computeItemKey}
         itemContent={itemContent}
         initialTopMostItemIndex={messages.length - 1}
+        // GH#55: skip Virtuoso's "probe" render. Without this, Virtuoso
+        // measures the first rendered item (initialTopMostItemIndex points at
+        // the trailing assistant turn) and assumes every other row is the
+        // same height. On a heavy 65 KB assistant-turn session that's wildly
+        // wrong, so Virtuoso does multiple measurement passes to settle —
+        // observed as a 3× re-render pattern (903ms × 3) on session switch.
+        // 120px is a conservative estimate for a typical user or short
+        // assistant turn; real heights are still measured on scroll-into-view.
+        defaultItemHeight={120}
         followOutput={(isAtBottom) => (isAtBottom ? 'smooth' : false)}
         atBottomStateChange={setAtBottom}
         atBottomThreshold={70}
