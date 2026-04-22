@@ -279,14 +279,22 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     this.currentTurnMessageId = turnState.currentTurnMessageId
 
     // Guard against DO eviction: if SQLite history survived but the
-    // persisted turnCounter is 0 or stale, scan user-turn rows for the
+    // persisted turnCounter is 0 or stale, scan user-turn IDs for the
     // max ordinal. Prevents canonical-ID collisions (GH#14 P3 B6).
+    //
+    // GH#57: replaced getHistory() (recursive CTE + ALL content BLOBs,
+    // ~25MB for a 500-message session) with a lightweight ID-only query.
+    // The old call was the primary cause of "Durable Object storage
+    // operation exceeded timeout which caused object to be reset" on
+    // large sessions — it fired on EVERY DO wake from hibernation.
     try {
-      const history = this.session.getHistory()
+      const userRows = this.sql<{ id: string }>`
+        SELECT id FROM assistant_messages
+        WHERE session_id = '' AND role = 'user'
+      `
       let maxOrdinal = 0
-      for (const msg of history) {
-        const canonical = (msg as { canonical_turn_id?: string }).canonical_turn_id
-        const ord = parseTurnOrdinal(canonical) ?? parseTurnOrdinal(msg.id)
+      for (const row of userRows) {
+        const ord = parseTurnOrdinal(row.id)
         if (ord !== undefined && ord > maxOrdinal) maxOrdinal = ord
       }
       if (maxOrdinal > this.turnCounter) {
@@ -619,46 +627,20 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       return // No replay, no protocol messages
     }
 
-    // Browser connection: replay full message history. Always send the frame
-    // (even empty) so the client has an explicit "history fetched" signal and
-    // doesn't sit gated waiting for a snapshot that would never arrive for a
-    // session with no local history. If the DO is cold and has nothing in
-    // SQLite yet, the client's getMessages RPC will trigger gateway-side
-    // hydration as the source of truth.
-    try {
-      const messages = this.session.getHistory()
-      // GH#38 P1.4: emit SyncedCollectionFrame on the new messages wire so
-      // the messagesCollection converges for this cold browser connection.
-      // `staleIds` is empty — no known prior client state on a fresh connect.
-      const { ops } = deriveSnapshotOps<WireSessionMessage>({
-        oldLeaf: [],
-        newLeaf: messages as unknown as WireSessionMessage[],
-      })
-      for (const chunk of chunkOps(ops)) {
-        this.broadcastMessages({ ops: chunk }, { targetClientId: connection.id })
-      }
-      // GH#38 P1.5: emit branchInfo as a sibling SyncedCollectionFrame on
-      // the same DO turn as the messages frame(s). B10 atomicity: React 18
-      // auto-batches the sibling deltas into a single commit.
-      this.broadcastBranchInfo(this.computeBranchInfo(messages), {
-        targetClientId: connection.id,
-      })
-    } catch (err) {
-      // GH#49: history replay is one of three candidate causes for the
-      // Android-background perma-reconnect pathology. Tag under
-      // `[SessionDO][conn]` so `wrangler tail` greps pull this alongside
-      // the enter/exit markers added above.
-      console.error(
-        `[SessionDO][conn] replay-history failed doId=${this.ctx.id} connId=${connection.id}:`,
-        err,
-      )
-      // Error path: broadcastMessages no-ops on empty ops and
-      // broadcastBranchInfo no-ops on empty rows without a targetClientId.
-      // We still call broadcastBranchInfo targeted so the recipient sees
-      // an explicit "no branches" signal (though in practice this path
-      // hits when getHistory itself threw — the client stays on whatever
-      // cached state it had).
-    }
+    // GH#57: removed full-history push on browser connect. The old code
+    // called getHistory() here (recursive CTE + all content BLOBs), which
+    // for a 500-message session loaded ~25MB of SQLite synchronously on
+    // every tab switch / page reload / mobile foreground — causing "DO
+    // storage operation exceeded timeout" resets on large sessions.
+    //
+    // The client's seq-based sync protocol handles convergence:
+    // - Warm clients: delta frames keep messagesCollection current
+    // - Cold clients: use-coding-agent fires `getMessages` RPC on every
+    //   WS open event (line ~512), which hits the GET /messages handler
+    // - Seq gaps: client calls `requestSnapshot()` RPC
+    //
+    // The getMessages RPC still calls getHistory() — that's the next
+    // optimization target (paginate via the existing cursor path).
 
     // Re-emit gate if session is waiting
     if (this.state.gate && this.state.status === 'waiting_gate') {
@@ -695,15 +677,8 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       if (gwConnId && connection.id === gwConnId) {
         // Gateway message: parse and route to handleGatewayEvent
         this.lastGatewayActivity = Date.now()
-
-        // GH#57: transport-level keepalive from DialBackClient — prevents CF
-        // idle-close (~70s). Bumps lastGatewayActivity (above) but does NOT
-        // enter parseEvent/handleGatewayEvent, so lastEventTs is untouched
-        // and the GH#50 TTL predicate keeps working.
-        const raw = typeof data === 'string' ? data : new TextDecoder().decode(data)
-        if (raw === '{"type":"keepalive"}') return
-
         try {
+          const raw = typeof data === 'string' ? data : new TextDecoder().decode(data)
           const event = parseEvent(raw)
           this.handleGatewayEvent(event)
         } catch (err) {
@@ -1232,10 +1207,16 @@ export class SessionDO extends Agent<Env, SessionMeta> {
    */
   private computeBranchInfoForUserTurn(msg: SessionMessage): BranchInfoRow | undefined {
     try {
-      const history = this.session.getHistory()
-      const idx = history.findIndex((m) => m.id === msg.id)
-      if (idx <= 0) return undefined
-      const parentId = history[idx - 1].id
+      // GH#57: replaced getHistory() (O(N) recursive CTE + all BLOBs) with
+      // a targeted parent_id lookup. The old call loaded ~25MB for a 500-msg
+      // session on every sendMessage, just to find the parent of the new msg.
+      const rows = this.sql<{ parent_id: string | null }>`
+        SELECT parent_id FROM assistant_messages
+        WHERE id = ${msg.id} AND session_id = ''
+        LIMIT 1
+      `
+      const parentId = rows[0]?.parent_id
+      if (!parentId) return undefined
       const branches = this.session.getBranches(parentId)
       const siblings = branches.filter((m) => m.role === 'user').map((m) => m.id)
       if (siblings.length <= 1) return undefined
