@@ -228,11 +228,20 @@ export function TabBar({
     scrollRef.current?.scrollBy({ left: dir === 'left' ? -120 : 120, behavior: 'smooth' })
   }, [])
 
-  // Translate vertical scroll-wheel → horizontal scroll in the tab strip
-  const handleWheel = useCallback((e: React.WheelEvent) => {
-    if (e.deltaY === 0) return
-    e.preventDefault()
-    scrollRef.current?.scrollBy({ left: e.deltaY })
+  // Translate vertical scroll-wheel → horizontal scroll in the tab strip.
+  // Must use a non-passive listener (via useEffect) because React registers
+  // onWheel as passive — calling preventDefault() in a passive listener is
+  // silently ignored and logs a console warning.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent) => {
+      if (e.deltaY === 0) return
+      e.preventDefault()
+      el.scrollBy({ left: e.deltaY })
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
   }, [])
 
   // Scroll active tab into view when it changes
@@ -257,7 +266,6 @@ export function TabBar({
         <div
           ref={scrollRef}
           className="flex items-center border-b bg-background overflow-x-auto scrollbar-none"
-          onWheel={handleWheel}
         >
           <SortableContext items={openTabs} strategy={horizontalListSortingStrategy}>
             {rows.map((row) => {
