@@ -627,20 +627,14 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       return // No replay, no protocol messages
     }
 
-    // GH#57: removed full-history push on browser connect. The old code
-    // called getHistory() here (recursive CTE + all content BLOBs), which
-    // for a 500-message session loaded ~25MB of SQLite synchronously on
-    // every tab switch / page reload / mobile foreground — causing "DO
-    // storage operation exceeded timeout" resets on large sessions.
-    //
-    // The client's seq-based sync protocol handles convergence:
-    // - Warm clients: delta frames keep messagesCollection current
-    // - Cold clients: use-coding-agent fires `getMessages` RPC on every
-    //   WS open event (line ~512), which hits the GET /messages handler
-    // - Seq gaps: client calls `requestSnapshot()` RPC
-    //
-    // The getMessages RPC still calls getHistory() — that's the next
-    // optimization target (paginate via the existing cursor path).
+    // GH#57: sync is cursor-aware delta replay, client-initiated. The old
+    // onConnect speculatively pushed full history (~25MB getHistory() on
+    // every tab switch / page reload / mobile foreground) and caused DO
+    // storage-timeout resets on large sessions. The new contract: the
+    // browser sends `{type:'subscribe:messages', sinceCursor}` as its first
+    // frame after open (see `onMessage` below); we page the indexed
+    // `(session_id, created_at, id)` keyset — bounded, cheap — and
+    // broadcast inserts targeted to just that connection.
 
     // Re-emit gate if session is waiting
     if (this.state.gate && this.state.status === 'waiting_gate') {
@@ -685,6 +679,25 @@ export class SessionDO extends Agent<Env, SessionMeta> {
           this.logError('onMessage.handleGatewayEvent', err)
         }
         return
+      }
+
+      // GH#57: intercept cursor-aware sync subscribe BEFORE the @callable
+      // dispatcher. The browser advertises its tail cursor so we only
+      // replay the gap — cold clients pass null and get everything, warm
+      // clients send `(createdAt, id)` and get only what they're missing.
+      // Frame shape: `{type: 'subscribe:messages', sinceCursor: {createdAt,id} | null}`.
+      if (typeof data === 'string' && data.startsWith('{"type":"subscribe:messages"')) {
+        try {
+          const parsed = JSON.parse(data) as {
+            type: 'subscribe:messages'
+            sinceCursor?: { createdAt: string; id: string } | null
+          }
+          void this.replayMessagesFromCursor(connection, parsed.sinceCursor ?? null)
+          return
+        } catch (err) {
+          this.logError('onMessage.subscribe:messages', err, { connId: connection.id })
+          return
+        }
       }
 
       // Browser message: delegate to Agent base class for @callable RPC dispatch
@@ -1229,6 +1242,68 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       }
     } catch {
       return undefined
+    }
+  }
+
+  /**
+   * Cursor-aware messages replay (GH#57). Called from `onMessage` when the
+   * browser sends `{type:'subscribe:messages', sinceCursor}` as its first
+   * frame after WS open. Pages the composite index
+   * `idx_assistant_messages_session_created_id` at 500 rows/page and
+   * broadcasts each page as a targeted `synced-collection-delta` frame to
+   * just the subscribing connection.
+   *
+   * Replaces the old onConnect full-history push (see onConnectInner).
+   * Cold clients send `sinceCursor=null` → replay starts from epoch.
+   * Warm clients send their OPFS tail `(createdAt, id)` → we stream only
+   * the gap, so tab switches and reconnects with warm caches transfer
+   * zero bytes beyond the envelope when there's nothing new.
+   *
+   * No `getHistory()` call anywhere — each page is an index seek, so the
+   * #57 storage-timeout hazard stays closed even for very long sessions.
+   */
+  private async replayMessagesFromCursor(
+    connection: Connection,
+    sinceCursor: { createdAt: string; id: string } | null,
+  ): Promise<void> {
+    let cursor = sinceCursor ?? { createdAt: '1970-01-01T00:00:00.000Z', id: '' }
+    try {
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const rows = this.sql<{ id: string; created_at: string; content: string }>`
+          SELECT id, created_at, content FROM assistant_messages
+          WHERE session_id = ''
+            AND (
+              (created_at > ${cursor.createdAt})
+              OR (created_at = ${cursor.createdAt} AND id > ${cursor.id})
+            )
+          ORDER BY created_at ASC, id ASC
+          LIMIT 500
+        `
+        if (rows.length === 0) return
+        const msgs: WireSessionMessage[] = []
+        for (const row of rows) {
+          try {
+            msgs.push(JSON.parse(row.content) as WireSessionMessage)
+          } catch {
+            // Unparseable row — skip; defensive, SDK writes valid JSON.
+          }
+        }
+        if (msgs.length > 0) {
+          const ops: SyncedCollectionOp<WireSessionMessage>[] = msgs.map((value) => ({
+            type: 'insert' as const,
+            value,
+          }))
+          for (const chunk of chunkOps(ops)) {
+            this.broadcastMessages({ ops: chunk }, { targetClientId: connection.id })
+          }
+        }
+        if (rows.length < 500) return
+        const last = rows[rows.length - 1]
+        cursor = { createdAt: last.created_at, id: last.id }
+      }
+    } catch (err) {
+      this.logError('replayMessagesFromCursor', err, { connId: connection.id })
     }
   }
 
@@ -3163,7 +3238,14 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     limit?: number
     session_hint?: string
     leafId?: string
-  }) {
+  }): Promise<{ ok: true }> {
+    // GH#57: hydration-only RPC. Message sync moved to the cursor-aware
+    // `subscribe:messages` WS frame handled in `onMessage`, which is
+    // bounded and doesn't call `getHistory()`. This RPC only runs the
+    // discovered-session bootstrap + gateway transcript catch-up side
+    // effects; the return value is intentionally opaque — callers should
+    // not depend on it for history.
+    //
     // Self-initialize from D1 for discovered sessions (#7 p6). The cron in
     // src/api/scheduled.ts UPSERTs gateway-discovered rows into agent_sessions
     // every 5 minutes; this just rehydrates a cold DO from that row when the
@@ -3197,13 +3279,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       await this.hydrateFromGateway()
     }
 
-    // Return messages from Session history
-    try {
-      return this.session.getHistory(opts?.leafId)
-    } catch (err) {
-      console.error(`[SessionDO:${this.ctx.id}] Failed to get history:`, err)
-      return []
-    }
+    return { ok: true }
   }
 
   @callable()

@@ -315,6 +315,7 @@ let capturedUseAgentConfig: {
 } | null = null
 
 const mockCall = vi.fn().mockResolvedValue([])
+const mockSend = vi.fn()
 
 // Registry of PartySocket-level event listeners, keyed by event name, so
 // tests can simulate `open` / `close` / etc. by calling
@@ -336,6 +337,7 @@ vi.mock('agents/react', () => ({
     capturedUseAgentConfig = config
     return {
       call: mockCall,
+      send: mockSend,
       readyState: 3,
       // use-coding-agent subscribes to open/close/error on the PartySocket
       // instance to mirror readyState through React state (Spec #31: our
@@ -833,6 +835,7 @@ describe('WS open → getMessages hydrate (GH#42 regression guard)', () => {
     vi.clearAllMocks()
     mockCall.mockReset()
     mockCall.mockResolvedValue([])
+    mockSend.mockReset()
   })
 
   afterEach(() => {
@@ -867,5 +870,32 @@ describe('WS open → getMessages hydrate (GH#42 regression guard)', () => {
 
     const hydrateCalls = mockCall.mock.calls.filter(([method]) => method === 'getMessages')
     expect(hydrateCalls).toHaveLength(2)
+  })
+
+  // GH#57: cursor-aware sync subscribe frame. Every WS (re)connect must
+  // emit `{type:'subscribe:messages', sinceCursor}` so the DO can reply
+  // with only the gap since the client's tail. Cold collections send
+  // `sinceCursor: null` and receive everything from epoch.
+  test('WS open sends cursor-aware subscribe:messages frame (cold = null cursor)', () => {
+    renderHook(() => useCodingAgent('fresh-session-id'))
+
+    act(() => {
+      firePartySocketEvent('open')
+    })
+
+    const subscribeCalls = mockSend.mock.calls.filter(([raw]) => {
+      if (typeof raw !== 'string') return false
+      try {
+        return (JSON.parse(raw) as { type?: string }).type === 'subscribe:messages'
+      } catch {
+        return false
+      }
+    })
+    expect(subscribeCalls).toHaveLength(1)
+    const payload = JSON.parse(subscribeCalls[0][0] as string) as {
+      type: string
+      sinceCursor: { createdAt: string; id: string } | null
+    }
+    expect(payload.sinceCursor).toBeNull()
   })
 })
