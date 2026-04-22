@@ -5,6 +5,7 @@ import { ThemeProvider } from '~/context/theme-provider'
 import { setUserStreamIdentity } from '~/hooks/use-user-stream'
 import { useSession } from '~/lib/auth-client'
 import { connectionManager } from '~/lib/connection-manager/manager'
+import { NowProvider } from '~/lib/use-now'
 import '~/styles.css'
 
 export const Route = createRootRoute({
@@ -71,8 +72,10 @@ function RootComponent() {
 
   return (
     <ThemeProvider>
-      <Outlet />
-      <Toaster duration={5000} />
+      <NowProvider>
+        <Outlet />
+        <Toaster duration={5000} />
+      </NowProvider>
     </ThemeProvider>
   )
 }

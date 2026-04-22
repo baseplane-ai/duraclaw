@@ -153,21 +153,14 @@ export type GatewayEvent =
   | StoppedEvent
   | ContextUsageEvent
   | RewindResultEvent
-  | SessionStateChangedEvent
   | RateLimitEvent
   | TaskStartedEvent
   | TaskProgressEvent
   | TaskNotificationEvent
-  | HeartbeatEvent
   | ModeTransitionEvent
   | ModeTransitionTimeoutEvent
   | ModeTransitionPreambleDegradedEvent
   | ModeTransitionFlushTimeoutEvent
-
-export interface HeartbeatEvent {
-  type: 'heartbeat'
-  session_id: string
-}
 
 // ── Mode transition events (DO-synthesised for chain UX) ────────────
 //
@@ -229,12 +222,6 @@ export interface RewindResultEvent {
   files_changed?: string[]
   insertions?: number
   deletions?: number
-}
-
-export interface SessionStateChangedEvent {
-  type: 'session_state_changed'
-  session_id: string
-  state: 'idle' | 'running' | 'requires_action'
 }
 
 export interface RateLimitEvent {
@@ -602,6 +589,10 @@ export interface SessionSummary {
   kataStateJson?: string | null
   contextUsageJson?: string | null
   worktreeInfoJson?: string | null
+  // GH#50: epoch-ms of the last GatewayEvent received by the SessionDO.
+  // Read by client `deriveStatus()` predicate to override stuck `running`
+  // rows with `idle` after >45s of silence.
+  lastEventTs?: number | null
 }
 
 // ── Stored Message (for SQLite persistence) ─────────────────────────

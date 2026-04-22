@@ -221,6 +221,31 @@ export function claimSubmitId(
   return { ok: true, duplicate: false }
 }
 
+/**
+ * GH#50 B9: legacy event types that pre-B7 session-runners still emit
+ * while parked in `waitForNext()`. They are logged-once-then-dropped by
+ * `SessionDO.handleGatewayEvent`'s default branch AND — critically —
+ * must NOT bump `lastEventTs`. A zombie runner emitting a heartbeat
+ * every ~10s would otherwise keep refreshing client-side liveness and
+ * defeat the 45s TTL override that is the whole point of GH#50.
+ *
+ * Extracted as a pure constant so the predicate is unit-testable without
+ * importing SessionDO (the class uses TC39 decorators that vitest/oxc
+ * cannot parse).
+ */
+export const LEGACY_DROPPED_EVENT_TYPES = ['heartbeat', 'session_state_changed'] as const
+export type LegacyDroppedEventType = (typeof LEGACY_DROPPED_EVENT_TYPES)[number]
+
+/**
+ * True when `handleGatewayEvent` should bump `lastEventTs` for the given
+ * event. Returns false for legacy frames (see `LEGACY_DROPPED_EVENT_TYPES`)
+ * so TTL-derived status on the client can correctly flip a parked zombie
+ * runner to `idle` after 45s of silence.
+ */
+export function shouldBumpLastEventTs(eventType: string): boolean {
+  return !(LEGACY_DROPPED_EVENT_TYPES as readonly string[]).includes(eventType)
+}
+
 export type PendingGateType = 'ask_user' | 'permission_request'
 
 /**

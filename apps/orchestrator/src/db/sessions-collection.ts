@@ -31,7 +31,7 @@ export const sessionsCollection = createSyncedCollection<SessionSummary, string>
   },
   getKey: (row) => row.id,
   persistence,
-  schemaVersion: 2, // spec #37: widened SessionSummary row shape
+  schemaVersion: 3, // GH#50: added lastEventTs field for client TTL predicate
 
   onInsert: async ({ transaction }) => {
     for (const m of transaction.mutations) {

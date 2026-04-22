@@ -57,6 +57,13 @@
       "when": 1777500000000,
       "tag": "0016_session_state_columns",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "6",
+      "when": 1777600000000,
+      "tag": "0017_last_event_ts",
+      "breakpoints": true
     }
   ]
 }

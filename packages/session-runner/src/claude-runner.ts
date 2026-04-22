@@ -14,9 +14,6 @@ import { buildCleanEnv } from './env.js'
 import { resolveProject } from './project-resolver.js'
 import type { RunnerSessionContext } from './types.js'
 
-/** How often to send a heartbeat on the WS to prevent idle timeout (ms). */
-const HEARTBEAT_INTERVAL_MS = 15_000
-
 /** Debounce interval for kata state file changes (ms). Matches gateway. */
 const KATA_DEBOUNCE_MS = 150
 
@@ -129,23 +126,6 @@ function send(ch: BufferedChannel, event: GatewayEvent, ctx: RunnerSessionContex
   ch.send({ ...(event as unknown as Record<string, unknown>), seq })
   ctx.meta.last_activity_ts = Date.now()
   ctx.meta.last_event_seq = seq
-}
-
-/**
- * Start a heartbeat that sends periodic pings on the WS.
- * This keeps the connection alive while the SDK is blocked executing tools
- * (the for-await loop pauses, so no messages flow during tool execution).
- * Returns a stop function.
- */
-function startHeartbeat(
-  ch: BufferedChannel,
-  sessionId: string,
-  ctx: RunnerSessionContext,
-): () => void {
-  const timer = setInterval(() => {
-    send(ch, { type: 'heartbeat', session_id: sessionId }, ctx)
-  }, HEARTBEAT_INTERVAL_MS)
-  return () => clearInterval(timer)
 }
 
 /** Shape expected by the Claude Agent SDK for streaming user messages. */
@@ -376,7 +356,6 @@ export class ClaudeRunner {
     ctx.messageQueue = queue
 
     let sdkSessionId: string | null = null
-    const stopHeartbeat = startHeartbeat(ch, sessionId, ctx)
     const stopKataWatcher = startKataWatcher(projectPath, cmd.project, ch, ctx)
 
     try {
@@ -586,19 +565,6 @@ export class ClaudeRunner {
               },
               ctx,
             )
-          } else if (
-            message.type === 'system' &&
-            (message as any).subtype === 'session_state_changed'
-          ) {
-            send(
-              ch,
-              {
-                type: 'session_state_changed',
-                session_id: sessionId,
-                state: (message as any).state,
-              },
-              ctx,
-            )
           } else if (message.type === 'rate_limit_event') {
             send(
               ch,
@@ -780,7 +746,6 @@ export class ClaudeRunner {
         ctx.meta.state = 'failed'
       }
     } finally {
-      stopHeartbeat()
       stopKataWatcher()
       // Clean up the message queue and query reference
       queue.done()

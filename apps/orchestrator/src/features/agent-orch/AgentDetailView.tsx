@@ -9,6 +9,8 @@ import { type BranchInfoRow, createBranchInfoCollection } from '~/db/branch-info
 import { projectsCollection } from '~/db/projects-collection'
 import { useDerivedGate } from '~/hooks/use-derived-gate'
 import { useSession } from '~/hooks/use-sessions-collection'
+import { deriveStatus } from '~/lib/derive-status'
+import { useNow } from '~/lib/use-now'
 import { useStatusBarStore } from '~/stores/status-bar'
 import { ChatThread } from './ChatThread'
 import { MessageInput } from './MessageInput'
@@ -91,7 +93,11 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
     [sendMessage],
   )
 
-  const status = session?.status ?? 'idle'
+  // GH#50: TTL-derived status — stuck `running` rows degrade to `idle`
+  // client-side so the composer's `disabled={status === 'waiting_gate'}`
+  // gate stays consistent with StatusBar / sidebar.
+  const nowTs = useNow()
+  const status = session ? deriveStatus(session, nowTs) : 'idle'
 
   // Spec-31 P4b: compute the message-derived gate once here, pass to
   // ChatThread. Replaces the pre-P4b `(gate, status)` dual signal sourced
@@ -124,7 +130,7 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
         submitDraft={submitDraft}
         sessionId={sessionId}
         disabled={status === 'waiting_gate'}
-        status={session?.status}
+        status={status}
         onInterrupt={interrupt}
         onForceStop={forceStop}
         draftKey={draftKey}

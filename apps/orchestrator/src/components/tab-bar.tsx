@@ -40,7 +40,9 @@ import { getPreviewText, StatusDot } from '~/features/agent-orch/session-utils'
 import { useIsMobile } from '~/hooks/use-mobile'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { isDraftTabId, type TabEntry, useTabSync } from '~/hooks/use-tab-sync'
+import { deriveStatus } from '~/lib/derive-status'
 import { deriveDisplayStateFromStatus } from '~/lib/display-state'
+import { useNow } from '~/lib/use-now'
 import { cn } from '~/lib/utils'
 
 interface TabBarProps {
@@ -425,11 +427,15 @@ function ProjectTabInner({
   // We no longer call `useSession()` / `useSessionLocalState()` here — that
   // opened 2N live-query subscriptions for N tabs and re-rendered every
   // tab on any session delta.
+  // GH#50: feed TTL-derived status into the display mapper so stuck
+  // `running` tabs degrade to `idle` in lockstep with StatusBar / sidebar.
+  const nowTs = useNow()
+  const sessionDerived = session ? deriveStatus(session, nowTs) : undefined
   const tabDisplay = !isChain
-    ? deriveDisplayStateFromStatus(session?.status, liveLocal?.wsReadyState ?? 3)
+    ? deriveDisplayStateFromStatus(sessionDerived, liveLocal?.wsReadyState ?? 3)
     : null
   const tabStatus =
-    tabDisplay && tabDisplay.status !== 'unknown' ? tabDisplay.status : (session?.status ?? 'idle')
+    tabDisplay && tabDisplay.status !== 'unknown' ? tabDisplay.status : (sessionDerived ?? 'idle')
   const tabNumTurns = session?.numTurns ?? 0
 
   useEffect(() => {

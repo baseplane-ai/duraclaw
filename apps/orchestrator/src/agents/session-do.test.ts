@@ -10,8 +10,10 @@ import {
   deriveSnapshotOps,
   findPendingGatePart,
   getGatewayConnectionId,
+  LEGACY_DROPPED_EVENT_TYPES,
   loadTurnState,
   resolveStaleThresholdMs,
+  shouldBumpLastEventTs,
   validateGatewayToken,
 } from './session-do-helpers'
 import { SESSION_DO_MIGRATIONS } from './session-do-migrations'
@@ -3213,5 +3215,44 @@ describe('error event transitions session to idle (not error) so user can resume
     expect(errRes.ok).toBe(false)
     expect(errRes.error).toBe("Cannot send message: status is 'error'")
     // The post-error path MUST be idle, not error — proven above.
+  })
+})
+
+describe('GH#50 B1/B9: shouldBumpLastEventTs — legacy-drop does NOT refresh liveness', () => {
+  // Real GatewayEvents (runner is doing SDK work) DO bump liveness. A
+  // per-event bump here is what keeps `deriveStatus` returning `running`
+  // while a turn is actively streaming.
+  it.each([
+    'session.init',
+    'partial_assistant',
+    'assistant',
+    'tool_use_summary',
+    'tool_result',
+    'ask_user',
+    'permission_request',
+    'task_started',
+    'task_progress',
+    'task_notification',
+    'rate_limit',
+    'result',
+    'error',
+    'context_usage',
+    'rewind_result',
+  ])('bumps liveness for real event type %s', (type) => {
+    expect(shouldBumpLastEventTs(type)).toBe(true)
+  })
+
+  // A pre-B7 session-runner parked in `waitForNext()` emits a heartbeat
+  // every ~10s forever. If that bumped liveness, the 45s TTL override
+  // would never fire and GH#50's whole premise collapses. Same for the
+  // older `session_state_changed` frame from Agents-SDK state mirroring.
+  it.each(LEGACY_DROPPED_EVENT_TYPES)('does NOT bump liveness for legacy type %s', (type) => {
+    expect(shouldBumpLastEventTs(type)).toBe(false)
+  })
+
+  it('pins the exact legacy-drop list (spec B9)', () => {
+    // If this assertion breaks, a new legacy event type was added. Update
+    // the list AND the switch-default branch in session-do.ts together.
+    expect([...LEGACY_DROPPED_EVENT_TYPES]).toEqual(['heartbeat', 'session_state_changed'])
   })
 })

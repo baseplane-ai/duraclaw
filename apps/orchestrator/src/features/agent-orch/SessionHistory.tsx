@@ -26,7 +26,9 @@ import {
 } from '~/components/ui/table'
 import type { SessionRecord } from '~/db/session-record'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
+import { deriveStatus } from '~/lib/derive-status'
 import { apiUrl } from '~/lib/platform'
+import { useNow } from '~/lib/use-now'
 
 type SortField = 'updatedAt' | 'createdAt' | 'totalCostUsd' | 'durationMs' | 'numTurns'
 type SortDir = 'asc' | 'desc'
@@ -77,12 +79,14 @@ export function SessionHistory() {
 
   // Include archived so the history surface shows the full set.
   const { sessions: allSessions, isLoading } = useSessionsCollection({ includeArchived: true })
+  const nowTs = useNow()
 
   const filtered = useMemo(() => {
     let result = [...allSessions] as SessionRecord[]
 
-    // Status filter
-    if (statusFilter) result = result.filter((s) => s.status === statusFilter)
+    // Status filter — GH#50: filter on TTL-derived status so stuck
+    // `running` rows don't appear in the "running" filter view.
+    if (statusFilter) result = result.filter((s) => deriveStatus(s, nowTs) === statusFilter)
     // Project filter
     if (projectFilter) result = result.filter((s) => s.project === projectFilter)
     // Search
@@ -104,7 +108,7 @@ export function SessionHistory() {
     })
 
     return result
-  }, [allSessions, statusFilter, projectFilter, searchQuery, sortBy, sortDir])
+  }, [allSessions, statusFilter, projectFilter, searchQuery, sortBy, sortDir, nowTs])
 
   const projects = useMemo(() => {
     return [...new Set(allSessions.map((s) => s.project).filter(Boolean))]
@@ -260,9 +264,14 @@ export function SessionHistory() {
                   </TableCell>
                   <TableCell>{session.project}</TableCell>
                   <TableCell>
-                    <Badge variant={STATUS_VARIANTS[session.status] ?? 'outline'}>
-                      {session.status}
-                    </Badge>
+                    {(() => {
+                      // GH#50: render the TTL-derived status so the column
+                      // matches what the Status filter dropdown is matching on.
+                      const derived = deriveStatus(session, nowTs)
+                      return (
+                        <Badge variant={STATUS_VARIANTS[derived] ?? 'outline'}>{derived}</Badge>
+                      )
+                    })()}
                   </TableCell>
                   <TableCell>{formatDate(session.createdAt)}</TableCell>
                   <TableCell>{formatDuration(session.durationMs)}</TableCell>
