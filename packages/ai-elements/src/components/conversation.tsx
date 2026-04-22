@@ -17,15 +17,23 @@ import { cn } from '../lib/utils'
 import { Button } from '../ui/button'
 
 // ---------------------------------------------------------------------------
-// Auto-scroll context — replaces use-stick-to-bottom with a simple, touch-
-// friendly implementation.  Rules:
-//   1. When content grows and user is "at bottom", scroll to bottom instantly.
-//   2. When user scrolls up, stop auto-scrolling (set escapedFromLock).
-//   3. When user scrolls back near bottom, re-engage auto-scroll.
-//   4. scrollToBottom() manually re-engages from the scroll button.
+// Auto-scroll context. Live scroll position is the source of truth, not a
+// sticky escape flag:
+//   1. ResizeObserver auto-scrolls ONLY when scrollTop is pinned to the
+//      bottom (within PIN_THRESHOLD_PX). Any user-initiated scroll-up by
+//      more than that disables auto-snap until they scroll back.
+//   2. `isAtBottom` uses the wider NEAR_BOTTOM_PX zone — it drives the
+//      scroll-to-bottom button visibility only, not the snap decision.
+//
+// The previous flag-based design lost a race on mobile WebView foreground
+// resume: repeated async re-layout (markdown rehighlight, image reload)
+// fired many ResizeObserver growth events while the user's drag sat inside
+// the 70px near-bottom zone, so the escape flag never flipped and every
+// growth snapped them back. Checking live scrollTop removes that window.
 // ---------------------------------------------------------------------------
 
 const NEAR_BOTTOM_PX = 70
+const PIN_THRESHOLD_PX = 4
 
 interface AutoScrollContext {
   scrollRef: RefCallback<HTMLDivElement>
@@ -46,38 +54,25 @@ function useAutoScroll() {
   const [isAtBottom, setIsAtBottom] = useState(true)
   const scrollEl = useRef<HTMLDivElement | null>(null)
   const contentEl = useRef<HTMLDivElement | null>(null)
-  const escaped = useRef(false)
 
-  // Scroll listener — detect user scroll direction
+  // Scroll listener — track `isAtBottom` for the scroll-to-bottom button.
   useEffect(() => {
     const el = scrollEl.current
     if (!el) return
-    let lastTop = el.scrollTop
 
     const onScroll = () => {
       const { scrollTop, scrollHeight, clientHeight } = el
       const nearBottom = scrollHeight - scrollTop - clientHeight < NEAR_BOTTOM_PX
-
-      if (scrollTop < lastTop && !nearBottom) {
-        // Scrolling up and away from bottom
-        escaped.current = true
-      }
-
-      if (nearBottom) {
-        escaped.current = false
-      }
-
       setIsAtBottom(nearBottom)
-      lastTop = scrollTop
     }
 
     el.addEventListener('scroll', onScroll, { passive: true })
     return () => el.removeEventListener('scroll', onScroll)
   }, [])
 
-  // ResizeObserver — auto-scroll when content grows and user hasn't scrolled up.
-  // Track the previous content height so we only scroll when the content actually
-  // grew (new messages), not when the container shrinks (e.g. mobile keyboard opening).
+  // ResizeObserver — auto-scroll on content growth only while scrollTop is
+  // actually pinned to the bottom. Tracks prev content height so we scroll
+  // on growth (new messages) and skip shrinks (e.g. mobile keyboard opening).
   useEffect(() => {
     const content = contentEl.current
     const scroll = scrollEl.current
@@ -89,8 +84,9 @@ function useAutoScroll() {
       const currentHeight = content.getBoundingClientRect().height
       const grew = currentHeight > prevHeight
       prevHeight = currentHeight
-
-      if (grew && !escaped.current) {
+      if (!grew) return
+      const pinned = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < PIN_THRESHOLD_PX
+      if (pinned) {
         scroll.scrollTop = scroll.scrollHeight
       }
     })
@@ -99,7 +95,6 @@ function useAutoScroll() {
   }, [])
 
   const scrollToBottom = useCallback(() => {
-    escaped.current = false
     const el = scrollEl.current
     if (el) {
       el.scrollTop = el.scrollHeight
