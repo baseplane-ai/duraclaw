@@ -34,6 +34,7 @@ import { Button } from '../ui/button'
 
 const NEAR_BOTTOM_PX = 70
 const PIN_THRESHOLD_PX = 4
+const SETTLE_MS = 500
 
 interface AutoScrollContext {
   scrollRef: RefCallback<HTMLDivElement>
@@ -81,12 +82,22 @@ function useAutoScroll() {
   // which for any streaming text delta (~16+px per line) is always greater
   // than PIN_THRESHOLD_PX. Subtracting the growth recovers the user's actual
   // position relative to the bottom *before* the new content arrived.
+  //
+  // Smooth scroll is gated behind a post-mount settle window. Tab switches
+  // remount this component (parent uses `key={activeSessionId}`), and the
+  // first ~500ms of life is dominated by layout settling — async font load,
+  // code highlighting, child useEffects growing height — none of which is
+  // streaming. Animating those growths visibly looked like "jump up then
+  // smooth scroll down" because each successive growth restarted the
+  // animation chasing a moving target. After SETTLE_MS, the only thing
+  // growing the content is real streaming, where smooth reads as polish.
   useEffect(() => {
     const content = contentEl.current
     const scroll = scrollEl.current
     if (!content || !scroll) return
 
     let prevHeight = content.getBoundingClientRect().height
+    let isInitialSettle = true
     const ro = new ResizeObserver(() => {
       const currentHeight = content.getBoundingClientRect().height
       const growth = currentHeight - prevHeight
@@ -94,11 +105,20 @@ function useAutoScroll() {
       if (growth <= 0) return
       const distanceBefore = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight - growth
       if (distanceBefore < PIN_THRESHOLD_PX) {
-        scroll.scrollTo({ top: scroll.scrollHeight, behavior: 'smooth' })
+        scroll.scrollTo({
+          top: scroll.scrollHeight,
+          behavior: isInitialSettle ? 'auto' : 'smooth',
+        })
       }
     })
     ro.observe(content)
-    return () => ro.disconnect()
+    const settleTimer = setTimeout(() => {
+      isInitialSettle = false
+    }, SETTLE_MS)
+    return () => {
+      clearTimeout(settleTimer)
+      ro.disconnect()
+    }
   }, [])
 
   const scrollToBottom = useCallback(() => {
