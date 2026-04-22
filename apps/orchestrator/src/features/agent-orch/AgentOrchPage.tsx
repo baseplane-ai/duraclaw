@@ -166,29 +166,35 @@ function AgentOrchContent() {
         // TanStack DB deep-equals. Transaction has a no-op mutationFn
         // because the POST has already succeeded — we just need the
         // optimistic-layer overlay until the synced-layer frame lands.
-        const now = new Date().toISOString()
-        const optimisticRow: SessionSummary = {
-          id: sessionId,
-          userId: null,
-          project: config.project,
-          status: 'running',
-          model: config.model ?? null,
-          prompt: typeof config.prompt === 'string' ? config.prompt : JSON.stringify(config.prompt),
-          agent: config.agent ?? 'claude',
-          createdAt: now,
-          updatedAt: now,
-          lastActivity: now,
-          archived: false,
+        //
+        // Skip the insert if the synced delta already landed (CF prod
+        // fan-out can beat `await resp.json()`). A bare insert would
+        // throw DuplicateKeyError, which propagates past the swap below
+        // and leaves the draft tab stuck on its placeholder id.
+        const coll = sessionsCollection as unknown as {
+          insert: (row: SessionSummary) => void
+          has: (key: string) => boolean
         }
-        const tx = createTransaction({ mutationFn: async () => {} })
-        tx.mutate(() => {
-          ;(
-            sessionsCollection as unknown as {
-              insert: (row: SessionSummary) => void
-            }
-          ).insert(optimisticRow)
-        })
-        await tx.isPersisted.promise
+        if (!coll.has(sessionId)) {
+          const now = new Date().toISOString()
+          const optimisticRow: SessionSummary = {
+            id: sessionId,
+            userId: null,
+            project: config.project,
+            status: 'running',
+            model: config.model ?? null,
+            prompt:
+              typeof config.prompt === 'string' ? config.prompt : JSON.stringify(config.prompt),
+            agent: config.agent ?? 'claude',
+            createdAt: now,
+            updatedAt: now,
+            lastActivity: now,
+            archived: false,
+          }
+          const tx = createTransaction({ mutationFn: async () => {} })
+          tx.mutate(() => coll.insert(optimisticRow))
+          await tx.isPersisted.promise
+        }
 
         setSpawnConfig({
           project: config.project,
