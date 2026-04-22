@@ -227,6 +227,44 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   const { messages: cachedMessages, isFetching } = useMessagesCollection(agentName)
   const messages: SessionMessage[] = cachedMessages.map(toSessionMessage)
 
+  // GH#49: on native we MUST pass `query` as a pre-resolved object, not as
+  // an async function. `useAgent`'s async-query path (`isAsyncQuery` true)
+  // installs an `onClose` handler that calls `setAwaitingQueryRefresh(true)`
+  // + `setCacheInvalidatedAt(Date.now())` on every close event. Combined
+  // with `useStableSocket`'s `enabled: boolean` dep, the result is a tight
+  // feedback loop: close → enabled:false → socket.close() (synthetic close
+  // event) → enabled:true → socket.reconnect() (another synthetic close)
+  // → close → … — stuck at ~390ms cadence, never opening. The loop
+  // reproduces deterministically on Android after a background cycle drops
+  // the WS; user-stream + collab are unaffected because they don't use
+  // `useAgent`. Resolving the token ONCE at mount and passing it as a
+  // plain object takes the async path out of the picture entirely. Token
+  // rotation across a live session is rare; on 4401 the server close
+  // propagates normally and the app's login redirect handles re-auth.
+  const [nativeAuthToken, setNativeAuthToken] = useState<string | null>(null)
+  const [nativeAuthTokenResolved, setNativeAuthTokenResolved] = useState(!isNative())
+  useEffect(() => {
+    if (!isNative()) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const { getCapacitorAuthToken } = await import('better-auth-capacitor/client')
+        const token = await getCapacitorAuthToken({ storagePrefix: 'better-auth' })
+        if (cancelled) return
+        setNativeAuthToken(token ?? null)
+      } catch {
+        // Fall through with null — useAgent will connect without the bearer
+        // and the server will reject with 401. That surfaces through the
+        // normal auth-redirect path rather than a silent WS thrash.
+      } finally {
+        if (!cancelled) setNativeAuthTokenResolved(true)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   // Spec #31 P5 B10: no DO-side setState broadcast anymore
   // (shouldSendProtocolMessages returns false). The generic is unused for
   // state sync but `useAgent` still requires one — pass `unknown`.
@@ -238,18 +276,13 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     // the socket on its first close instead of looping through partysocket's
     // infinite auto-reconnect (see ~/lib/ws-debug.ts).
     ...(wsHardFailEnabled() ? { maxRetries: 0 } : {}),
+    // Hold the connection closed on native until we've resolved the bearer
+    // from Capacitor Preferences — connecting without it would 401-loop.
+    enabled: nativeAuthTokenResolved,
     // Capacitor WS can't send cookies cross-origin; pass bearer token as
     // query param so the Worker can inject it as an Authorization header.
-    ...(isNative()
-      ? {
-          query: async (): Promise<Record<string, string | null>> => {
-            const { getCapacitorAuthToken } = await import('better-auth-capacitor/client')
-            const token = await getCapacitorAuthToken({ storagePrefix: 'better-auth' })
-            return token ? { _authToken: token } : {}
-          },
-          queryDeps: [],
-        }
-      : {}),
+    // See GH#49 comment above — this MUST be a plain object, not a fn.
+    ...(isNative() && nativeAuthToken ? { query: { _authToken: nativeAuthToken } } : {}),
     // Spec #31 P5 B9: SDK state broadcast suppressed via
     // `shouldSendProtocolMessages() => false` on the DO. The `SessionState`
     // shape is gone and `onStateUpdate` would never fire — omitted.
