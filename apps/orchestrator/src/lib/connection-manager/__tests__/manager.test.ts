@@ -104,6 +104,22 @@ describe('connectionManager', () => {
     expect(conn.reconnect).not.toHaveBeenCalled()
   })
 
+  it('does NOT schedule reconnect when conn is CONNECTING (partysocket mid-retry)', () => {
+    // Interrupting partysocket's active retry resets its internal
+    // backoff and accelerates the retry cadence to ~300ms, causing a
+    // thrash loop that never recovers. Let partysocket's own backoff
+    // run.
+    connectionManager.start({ random: () => 0 })
+    const conn = makeConn('a', -60_000, 0 /* CONNECTING */)
+    connectionRegistry.register(conn)
+    lifecycleMock.fire('foreground')
+    vi.advanceTimersByTime(600)
+    expect(conn.reconnect).not.toHaveBeenCalled()
+    lifecycleMock.fire('online')
+    vi.advanceTimersByTime(600)
+    expect(conn.reconnect).not.toHaveBeenCalled()
+  })
+
   it('ignores background / offline / hidden / visible', () => {
     connectionManager.start({ random: () => 0 })
     const conn = makeConn('a', -60_000)
