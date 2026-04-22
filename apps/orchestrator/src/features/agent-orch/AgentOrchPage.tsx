@@ -23,6 +23,7 @@ import { useSwipeTabs } from '~/hooks/use-swipe-tabs'
 import { getTabSyncSnapshot, isDraftTabId, newDraftTabId, useTabSync } from '~/hooks/use-tab-sync'
 import { useUserDefaults } from '~/hooks/use-user-defaults'
 import { apiUrl } from '~/lib/platform'
+import { promptToPreviewText } from '~/lib/prompt-preview'
 import type { ContentBlock } from '~/lib/types'
 import { AgentDetailView } from './AgentDetailView'
 import { ChatThread } from './ChatThread'
@@ -146,8 +147,11 @@ function AgentOrchContent() {
       // idempotent (SessionDO returns 'Session already active').
       const clientSessionId = `sess-${crypto.randomUUID()}`
       const now = new Date().toISOString()
-      const promptText =
-        typeof config.prompt === 'string' ? config.prompt : JSON.stringify(config.prompt)
+      // Reduce a ContentBlock[] (e.g. image-paste spawn) to a readable
+      // preview string — otherwise the full JSON blob (including base64
+      // image payloads) leaks through as the session's displayed title
+      // via the `session.title || summary || prompt` fallback chain.
+      const promptText = promptToPreviewText(config.prompt)
 
       const optimisticRow: SessionSummary = {
         id: clientSessionId,

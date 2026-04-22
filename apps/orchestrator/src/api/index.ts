@@ -18,6 +18,7 @@ import { broadcastSessionRow } from '~/lib/broadcast-session'
 import { broadcastSyncedDelta } from '~/lib/broadcast-synced-delta'
 import { buildChainRowFromContext, type ChainBuildContext } from '~/lib/chains'
 import { chunkOps } from '~/lib/chunk-frame'
+import { promptToPreviewText } from '~/lib/prompt-preview'
 import { type PushPayload, sendPushNotification } from '~/lib/push'
 import { sendFcmNotification } from '~/lib/push-fcm'
 import type {
@@ -1737,7 +1738,10 @@ export function createApiApp() {
     }
 
     const now = new Date().toISOString()
-    const promptText = typeof body.prompt === 'string' ? body.prompt : JSON.stringify(body.prompt)
+    // Reduce ContentBlock[] (image-paste spawn) to readable text — see
+    // `~/lib/prompt-preview` for why we don't want the raw JSON blob
+    // to land in agent_sessions.prompt (displayed as the session title).
+    const promptText = promptToPreviewText(body.prompt)
     const db = getDb(c.env)
 
     const baseRow = {
