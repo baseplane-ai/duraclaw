@@ -23,7 +23,16 @@ vi.mock('@duraclaw/ai-elements', () => ({
     </div>
   ),
   ConversationScrollButton: () => <div data-testid="scroll-button" />,
-  useAutoScrollContext: () => ({ scrollToBottom: () => {}, isAtBottom: true }),
+  // Ref callbacks are no-ops in jsdom — VirtualizedMessageList calls
+  // `scrollRef(node)` / `contentRef(node)` / `sentinelRef(node)` during
+  // ref-callback attach.
+  useAutoScrollContext: () => ({
+    scrollToBottom: () => {},
+    isAtBottom: true,
+    scrollRef: () => {},
+    contentRef: () => {},
+    sentinelRef: () => {},
+  }),
   Message: ({ children, from }: Record<string, unknown>) => (
     <div data-testid={`message-${from}`}>{children as React.ReactNode}</div>
   ),
@@ -55,6 +64,27 @@ vi.mock('@duraclaw/ai-elements', () => ({
   ToolHeader: () => <div />,
   ToolInput: () => <div />,
   ToolOutput: () => <div />,
+}))
+
+// jsdom has no layout, so @tanstack/react-virtual's real `useVirtualizer`
+// sees a 0×0 viewport and renders zero items. The tests assert on rendered
+// message rows, so stub it to render every item flat.
+vi.mock('@tanstack/react-virtual', () => ({
+  useVirtualizer: ({ count }: { count: number }) => ({
+    getVirtualItems: () =>
+      Array.from({ length: count }, (_, i) => ({
+        index: i,
+        start: i * 160,
+        size: 160,
+        end: (i + 1) * 160,
+        key: i,
+        lane: 0,
+      })),
+    getTotalSize: () => count * 160,
+    measureElement: () => {},
+    scrollToIndex: () => {},
+    scrollToOffset: () => {},
+  }),
 }))
 
 vi.mock('./GateResolver', () => ({

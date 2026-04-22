@@ -6,7 +6,6 @@
 
 import {
   Conversation,
-  ConversationContent,
   ConversationEmptyState,
   ConversationScrollButton,
   Message,
@@ -20,7 +19,9 @@ import {
   type ToolHeaderProps,
   ToolInput,
   ToolOutput,
+  useAutoScrollContext,
 } from '@duraclaw/ai-elements'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import {
   BrainIcon,
   CheckIcon,
@@ -370,13 +371,10 @@ function CopyMessageButton({ text }: { text: string }) {
 
 interface ChatThreadProps {
   /**
-   * Identity of the session whose messages we render. Threaded through to
-   * `<Conversation key={sessionId}>` so the IntersectionObserver +
-   * ResizeObserver instances owned by `useAutoScroll` are torn down and
-   * re-armed cleanly on session switch. Without the key, tabs-stay-mounted
-   * (#51) means the same observer survives the `messages` prop swap and
-   * fires against the wrong baseline — exactly the "heavy-session switch
-   * jumps + 235ms scroll violation" from #55. Optional for back-compat with
+   * Identity of the session whose messages we render. Currently only used
+   * for diagnostics (e.g. `data-session-id` attributes); `AgentOrchPage`
+   * already wraps this subtree in `key={activeSessionId}` so `<Conversation>`
+   * and the virtualizer always remount on session switch. Kept optional for
    * pre-spawn draft callsites that have no sessionId yet.
    */
   sessionId?: string
@@ -729,6 +727,136 @@ const ChatMessageRow = memo(
   },
 )
 
+// -------------------------------------------------------------------------
+// Virtualized message list. Replaces `<ConversationContent>`'s full-DOM
+// render so a 500-message thread mounts ~20 rows (viewport + overscan)
+// instead of 500 on every session switch. Wired into the existing
+// `<Conversation>` auto-scroll context via `useAutoScrollContext()`:
+//   - `scrollRef` → the virtualizer's scroll element (IO root).
+//   - `contentRef` → the sized inner div (RO target, height = totalSize).
+//   - `sentinelRef` → zero-height div pinned to the end of virtual space
+//      so the IO bottom-sentinel + `scrollIntoView({block:'end'})` auto-
+//      scroll path keeps working unchanged.
+// Items are absolutely positioned via `translateY(item.start)`. Real row
+// heights replace the estimate as rows paint via `measureElement`.
+// -------------------------------------------------------------------------
+
+interface VirtualizedMessageListProps {
+  messages: SessionMessage[]
+  derivedGate: DerivedGatePayload | null
+  readOnly?: boolean
+  onResolveGate: (gateId: string, response: GateResponse) => Promise<unknown>
+  onRewind?: (turnIndex: number) => void
+  branchInfo?: Map<string, { current: number; total: number; siblings: string[] }>
+  onBranchNavigate?: (messageId: string, direction: 'prev' | 'next') => void
+}
+
+function VirtualizedMessageList({
+  messages,
+  derivedGate,
+  readOnly,
+  onResolveGate,
+  onRewind,
+  branchInfo,
+  onBranchNavigate,
+}: VirtualizedMessageListProps) {
+  const { scrollRef, contentRef, sentinelRef } = useAutoScrollContext()
+  const scrollElRef = useRef<HTMLDivElement | null>(null)
+
+  // Composite ref callback — stashes the node for the virtualizer AND
+  // forwards to `<Conversation>`'s scroll-element ref so the IO root is
+  // the same element we're scrolling.
+  const setScrollEl = useCallback(
+    (node: HTMLDivElement | null) => {
+      scrollElRef.current = node
+      scrollRef(node)
+    },
+    [scrollRef],
+  )
+
+  const getItemKey = useCallback(
+    (index: number) => messages[index]?.id ?? `idx-${index}`,
+    [messages],
+  )
+
+  const virtualizer = useVirtualizer({
+    count: messages.length,
+    getScrollElement: () => scrollElRef.current,
+    // 160px is a ballpark "short text turn" estimate. measureElement
+    // replaces it with the real height as each row paints, so early
+    // scroll offsets tighten up within the first few frames even on
+    // heavy threads.
+    estimateSize: () => 160,
+    overscan: 6,
+    getItemKey,
+    // Top / bottom breathing room around the list (previously the
+    // `p-4` on <ConversationContent>).
+    paddingStart: 16,
+    paddingEnd: 16,
+    // 32px inter-row gap (previously `gap-8` on <ConversationContent>).
+    gap: 32,
+  })
+
+  const virtualItems = virtualizer.getVirtualItems()
+  const totalSize = virtualizer.getTotalSize()
+
+  return (
+    <div ref={setScrollEl} style={{ height: '100%', width: '100%', overflowY: 'auto' }}>
+      <div
+        ref={contentRef}
+        className="[&_pre]:max-w-full [&_pre]:overflow-x-auto"
+        style={{ height: totalSize, width: '100%', position: 'relative' }}
+      >
+        {virtualItems.map((item) => {
+          const msg = messages[item.index]
+          if (!msg) return null
+          return (
+            <div
+              key={item.key}
+              data-index={item.index}
+              ref={virtualizer.measureElement}
+              style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                right: 0,
+                paddingLeft: 16,
+                paddingRight: 16,
+                transform: `translateY(${item.start}px)`,
+              }}
+            >
+              <ChatMessageRow
+                msg={msg}
+                turnIndex={item.index}
+                derivedGate={derivedGate}
+                readOnly={readOnly}
+                onResolveGate={onResolveGate}
+                onRewind={onRewind}
+                branch={branchInfo?.get(msg.id)}
+                onBranchNavigate={onBranchNavigate}
+              />
+            </div>
+          )
+        })}
+        {/* Bottom sentinel — pinned to the end of the virtualized height so
+         * `<Conversation>`'s IO-based "is user at bottom?" signal works
+         * unchanged. Zero-height, aria-hidden. */}
+        <div
+          ref={sentinelRef}
+          aria-hidden="true"
+          style={{
+            position: 'absolute',
+            top: totalSize,
+            left: 0,
+            right: 0,
+            height: 0,
+          }}
+        />
+      </div>
+    </div>
+  )
+}
+
 export function ChatThread({
   sessionId,
   messages,
@@ -795,33 +923,20 @@ export function ChatThread({
   }
 
   return (
-    <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-x-clip">
-      {/*
-        `key={sessionId}` is load-bearing. Tabs stay mounted across session
-        switches (#51), so without it the same `<Conversation>` instance —
-        including its IntersectionObserver (bottom sentinel) and
-        ResizeObserver (content-growth pin) — would survive the `messages`
-        prop swap and fire against stale baselines from the previous
-        session. That was the #55 "6× switch regression on heavy sessions"
-        symptom. Keying forces a clean re-init per session; the observers
-        are cheap to reconstruct.
-      */}
-      <Conversation key={sessionId ?? '__no_session__'} className="min-h-0 flex-1">
-        <ConversationContent className="[&_pre]:max-w-full [&_pre]:overflow-x-auto">
-          {messages.map((msg, index) => (
-            <ChatMessageRow
-              key={msg.id}
-              msg={msg}
-              turnIndex={index}
-              derivedGate={derivedGate}
-              readOnly={readOnly}
-              onResolveGate={onResolveGate}
-              onRewind={onRewind}
-              branch={branchInfo?.get(msg.id)}
-              onBranchNavigate={onBranchNavigate}
-            />
-          ))}
-        </ConversationContent>
+    <div
+      className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-x-clip"
+      data-session-id={sessionId}
+    >
+      <Conversation className="min-h-0 flex-1">
+        <VirtualizedMessageList
+          messages={messages}
+          derivedGate={derivedGate}
+          readOnly={readOnly}
+          onResolveGate={onResolveGate}
+          onRewind={onRewind}
+          branchInfo={branchInfo}
+          onBranchNavigate={onBranchNavigate}
+        />
         <ConversationScrollButton />
       </Conversation>
     </div>
