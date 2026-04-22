@@ -401,14 +401,7 @@ function renderPart(
   derivedGate: DerivedGatePayload | null,
   onResolveGate: (gateId: string, response: GateResponse) => Promise<unknown>,
   readOnly?: boolean,
-  skipPendingGateId?: string | null,
 ) {
-  // When the gate is hoisted to the bottom of the thread (see ChatThread),
-  // skip its inline render so it only appears in the pinned slot. Resolved
-  // ask_user / permission parts still render inline as history.
-  if (skipPendingGateId && part.toolCallId === skipPendingGateId) {
-    return null
-  }
   if (part.type === 'text') {
     return (
       <Message key={index} from="assistant">
@@ -541,7 +534,6 @@ interface ChatMessageRowProps {
   msg: SessionMessage
   turnIndex: number
   derivedGate: DerivedGatePayload | null
-  pendingGateId: string | null
   readOnly?: boolean
   onResolveGate: (gateId: string, response: GateResponse) => Promise<unknown>
   onRewind?: (turnIndex: number) => void
@@ -568,7 +560,6 @@ const ChatMessageRow = memo(
     msg,
     turnIndex,
     derivedGate,
-    pendingGateId,
     readOnly,
     onResolveGate,
     onRewind,
@@ -638,12 +629,12 @@ const ChatMessageRow = memo(
         }
         flushReasoning()
         flushPending()
-        nodes.push(renderPart(part, i, derivedGate, onResolveGate, readOnly, pendingGateId))
+        nodes.push(renderPart(part, i, derivedGate, onResolveGate, readOnly))
       })
       flushReasoning()
       flushPending()
       return nodes
-    }, [msg, derivedGate, onResolveGate, readOnly, pendingGateId])
+    }, [msg, derivedGate, onResolveGate, readOnly])
 
     if (msg.role === 'user') {
       const textPart = msg.parts.find((p) => p.type === 'text')
@@ -706,7 +697,6 @@ const ChatMessageRow = memo(
     if (
       prev.turnIndex !== next.turnIndex ||
       prev.derivedGate !== next.derivedGate ||
-      prev.pendingGateId !== next.pendingGateId ||
       prev.readOnly !== next.readOnly ||
       prev.onResolveGate !== next.onResolveGate ||
       prev.onRewind !== next.onRewind ||
@@ -759,41 +749,6 @@ export function ChatThread({
   onBranchNavigate,
   onSendSuggestion,
 }: ChatThreadProps) {
-  // Find the single pending gate (if any) so we can hoist it to the bottom of
-  // the thread. The session-level invariant is that at most one gate is
-  // pending at a time, so a linear scan that takes the first match is safe.
-  let pendingGatePart: SessionMessagePart | null = null
-  if (!readOnly) {
-    outer: for (const msg of messages) {
-      if (msg.role !== 'assistant') continue
-      for (const part of msg.parts) {
-        if (isPendingGate(part, readOnly, derivedGate)) {
-          pendingGatePart = part
-          break outer
-        }
-      }
-    }
-  }
-  const pendingGateId = pendingGatePart?.toolCallId ?? null
-
-  const pinnedGateNode = pendingGatePart?.toolCallId
-    ? (() => {
-        const resolvedGate =
-          pendingGatePart.type === 'tool-ask_user'
-            ? {
-                id: pendingGatePart.toolCallId,
-                type: 'ask_user' as const,
-                detail: pendingGatePart.input,
-              }
-            : {
-                id: pendingGatePart.toolCallId,
-                type: 'permission_request' as const,
-                detail: pendingGatePart.input,
-              }
-        return <GateResolver gate={resolvedGate} onResolve={onResolveGate} />
-      })()
-    : null
-
   const virtuosoRef = useRef<VirtuosoHandle | null>(null)
   const [atBottom, setAtBottom] = useState(true)
 
@@ -840,7 +795,6 @@ export function ChatThread({
         msg={msg}
         turnIndex={index}
         derivedGate={derivedGate}
-        pendingGateId={pendingGateId}
         readOnly={readOnly}
         onResolveGate={onResolveGate}
         onRewind={onRewind}
@@ -848,7 +802,7 @@ export function ChatThread({
         onBranchNavigate={onBranchNavigate}
       />
     ),
-    [derivedGate, pendingGateId, readOnly, onResolveGate, onRewind, branchInfo, onBranchNavigate],
+    [derivedGate, readOnly, onResolveGate, onRewind, branchInfo, onBranchNavigate],
   )
 
   const computeItemKey = useCallback((_index: number, msg: SessionMessage) => msg.id, [])
@@ -907,9 +861,6 @@ export function ChatThread({
             </ConversationEmptyState>
           )}
         </div>
-        {pinnedGateNode && (
-          <div className="shrink-0 overflow-y-auto border-t p-3 max-h-[50vh]">{pinnedGateNode}</div>
-        )}
       </div>
     )
   }
@@ -930,20 +881,6 @@ export function ChatThread({
         increaseViewportBy={{ top: 600, bottom: 600 }}
         components={virtuosoComponents}
       />
-      {/*
-        Pending gate (ask_user / permission_request) always renders pinned
-        to the bottom of the thread, regardless of where the underlying
-        tool part sits inside its assistant turn. Once the user answers,
-        the part's state flips and `renderPart` renders the resolved Q/A
-        inline at its turn position; this pinned slot empties and
-        the gate-resolve effect above nudges the viewport so the user
-        doesn't lose context.
-      */}
-      {pinnedGateNode && (
-        <div className="shrink-0 overflow-y-auto border-t bg-background p-3 max-h-[50vh]">
-          {pinnedGateNode}
-        </div>
-      )}
       {!atBottom && (
         <Button
           type="button"
