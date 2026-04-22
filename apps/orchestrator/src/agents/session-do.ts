@@ -282,6 +282,31 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     // before we query those tables directly via this.sql.
     const pathLength = this.session.getPathLength()
 
+    // Belt-and-suspenders for migration v10: `replayMessagesFromCursor` (and
+    // the `modified_at` UPDATE in `safeUpdateMessage`) reference the column
+    // unconditionally. The v10 `up` runs in `runMigrations` BEFORE
+    // `Session.create(this)` above, so on DOs where the SDK hadn't yet
+    // lazy-created `assistant_messages` at v10's runtime, the ALTER caught
+    // "no such table" and silently skipped — but `_schema_version` still
+    // marks v10 applied, so it never runs again. The SDK later creates the
+    // table without the column, and every subsequent subscribe replay
+    // throws `no such column: modified_at` — caught in the outer try/catch,
+    // so the client silently receives zero history frames. Symptom: session
+    // with N turns of persisted state shows an empty chat thread on
+    // (re)connect.
+    //
+    // Re-apply here, AFTER Session.create has guaranteed the table exists.
+    // Idempotent: swallows "duplicate column" on DOs where v10 already
+    // added the column.
+    try {
+      this.ctx.storage.sql.exec(`ALTER TABLE assistant_messages ADD COLUMN modified_at TEXT`)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (!msg.toLowerCase().includes('duplicate column')) {
+        console.warn(`[SessionDO:${this.ctx.id}] ensure modified_at column failed`, err)
+      }
+    }
+
     // Load persisted turn state from assistant_config
     const turnState = loadTurnState(this.sql.bind(this), pathLength)
     this.turnCounter = turnState.turnCounter
