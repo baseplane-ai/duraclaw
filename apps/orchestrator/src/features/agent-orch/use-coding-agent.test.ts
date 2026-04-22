@@ -12,7 +12,6 @@
  * - Gap detection: out-of-order delta → requestSnapshot RPC, stale deltas dropped
  * - Legacy { type:'messages', messages } shape still tolerated for deploy rollover
  * - sendMessage: optimistic insert in SessionMessage format, rollback on failure
- * - injectQaPair: parts-based qa_pair message
  * - Legacy gateway_event: only non-message events processed (kata_state, context_usage, result)
  * - Stripped events (assistant, tool_result, partial_assistant, file_changed) no longer handled
  */
@@ -573,35 +572,6 @@ describe('sendMessage (SessionMessage format)', () => {
     })
 
     expect(result.current.messages[0].parts).toEqual([{ type: 'text', text: 'hello' }])
-  })
-})
-
-describe('injectQaPair (SessionMessage format)', () => {
-  beforeEach(() => {
-    cachedMessagesStore.clear()
-    sessionsStore.clear()
-    collectionSubs.clear()
-    sessionsSubs.clear()
-    capturedUseAgentConfig = null
-    vi.clearAllMocks()
-  })
-
-  afterEach(() => {
-    vi.restoreAllMocks()
-  })
-
-  test('injects qa_pair message with parts format', () => {
-    const { result } = renderHook(() => useCodingAgent('test-session'))
-
-    act(() => {
-      result.current.injectQaPair('What is 2+2?', '4')
-    })
-
-    expect(result.current.messages).toHaveLength(1)
-    const msg = result.current.messages[0]
-    expect(msg.role).toBe('qa_pair')
-    expect(msg.id).toMatch(/^qa-/)
-    expect(msg.parts).toEqual([{ type: 'text', text: 'Q: What is 2+2?\nA: 4' }])
   })
 })
 

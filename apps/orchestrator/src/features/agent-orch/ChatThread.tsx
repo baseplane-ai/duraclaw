@@ -104,6 +104,53 @@ function isPendingGate(
   return false
 }
 
+/**
+ * Parse the question text out of an ask_user part's `input`. Mirrors the
+ * shape-handling in GateResolver so resolved history and the live prompt
+ * read from the same source. Returns a list of display-ready question
+ * strings (one per structured question, or a single legacy string).
+ */
+function parseAskUserQuestions(input: unknown): string[] {
+  if (!input || typeof input !== 'object') {
+    return [typeof input === 'string' ? input : JSON.stringify(input)]
+  }
+  const obj = input as { questions?: unknown; question?: unknown }
+  if (Array.isArray(obj.questions) && obj.questions.length > 0) {
+    return (obj.questions as Array<{ question?: unknown }>).map((q) =>
+      typeof q?.question === 'string' ? q.question : '',
+    )
+  }
+  if (typeof obj.question === 'string') return [obj.question]
+  return [JSON.stringify(input)]
+}
+
+function ResolvedAskUser({ part }: { part: SessionMessagePart }) {
+  const questions = parseAskUserQuestions(part.input)
+  const denied = part.state === 'output-denied'
+  const answer = denied
+    ? 'Declined'
+    : typeof part.output === 'string'
+      ? part.output
+      : part.output != null
+        ? JSON.stringify(part.output)
+        : ''
+  return (
+    <div className="min-w-0 space-y-1 rounded-lg border-l-2 border-info/30 bg-info/5 p-3">
+      {questions.map((q, i) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: questions share no stable id
+        <p key={`q-${i}`} className="break-words text-sm">
+          <span className="font-medium text-muted-foreground">Q:</span> {q}
+        </p>
+      ))}
+      {answer && (
+        <p className="break-words text-sm">
+          <span className="font-medium text-muted-foreground">A:</span> {answer}
+        </p>
+      )}
+    </div>
+  )
+}
+
 function ToolCallDetail({ part }: { part: SessionMessagePart }) {
   const state = (part.state as ToolHeaderProps['state']) ?? 'input-available'
   return (
@@ -334,7 +381,6 @@ interface ChatThreadProps {
   isConnecting?: boolean
   onResolveGate: (gateId: string, response: GateResponse) => Promise<unknown>
   readOnly?: boolean
-  onQaResolved?: (question: string, answer: string) => void
   onRewind?: (turnIndex: number) => void
   branchInfo?: Map<string, { current: number; total: number; siblings: string[] }>
   onBranchNavigate?: (messageId: string, direction: 'prev' | 'next') => void
@@ -347,7 +393,6 @@ function renderPart(
   derivedGate: DerivedGatePayload | null,
   onResolveGate: (gateId: string, response: GateResponse) => Promise<unknown>,
   readOnly?: boolean,
-  onQaResolved?: (question: string, answer: string) => void,
   skipPendingGateId?: string | null,
 ) {
   // When the gate is hoisted to the bottom of the thread (see ChatThread),
@@ -412,24 +457,24 @@ function renderPart(
             type: 'permission_request' as const,
             detail: part.input,
           }
-    return (
-      <GateResolver
-        key={index}
-        gate={resolvedGate}
-        onResolve={onResolveGate}
-        onResolved={onQaResolved}
-      />
-    )
+    return <GateResolver key={index} gate={resolvedGate} onResolve={onResolveGate} />
   }
 
-  // Resolved gate parts — still render expanded (defaultOpen) so there is no
-  // collapsed-chip display variant for ask_user / permission history. This is
-  // a deliberate UX contract: gates always show as expanded blocks, never as
-  // badge pills, regardless of lifecycle state.
-  if (isGateCandidate(part)) {
+  // Resolved ask_user — the part itself is the canonical Q/A record (input
+  // holds the question(s), output holds the answer). Render as a
+  // conversational block, not as a Tool with a JSON dump — the raw
+  // structured-question blob was a meaningless artifact in history.
+  if (part.type === 'tool-ask_user') {
+    return <ResolvedAskUser key={index} part={part} />
+  }
+
+  // Resolved permission — keep a Tool block for the audit trail, but don't
+  // force it open; a resolved approval doesn't need its JSON re-expanded
+  // every render.
+  if (part.type === 'tool-permission') {
     const state = (part.state as ToolHeaderProps['state']) ?? 'output-available'
     return (
-      <Tool key={index} defaultOpen>
+      <Tool key={index}>
         <ToolHeader
           {...({
             type: 'dynamic-tool',
@@ -515,13 +560,33 @@ function ScrollOnUserSend({ messages }: { messages: SessionMessage[] }) {
   return null
 }
 
+/**
+ * Scroll-to-bottom when a pending gate resolves. Without this, answering an
+ * ask_user prompt would leave the viewport parked on the now-empty pinned
+ * slot while the resolved Q/A block snaps into its inline position further
+ * up-thread. We track the last-seen pending gate id and scroll on disappearance.
+ */
+function ScrollOnGateResolve({ derivedGate }: { derivedGate: DerivedGatePayload | null }) {
+  const { scrollToBottom } = useAutoScrollContext()
+  const lastPendingRef = useRef<string | null>(null)
+
+  useLayoutEffect(() => {
+    const currentId = derivedGate?.id ?? null
+    if (lastPendingRef.current && !currentId) {
+      scrollToBottom()
+    }
+    lastPendingRef.current = currentId
+  }, [derivedGate, scrollToBottom])
+
+  return null
+}
+
 export function ChatThread({
   messages,
   derivedGate,
   isConnecting,
   onResolveGate,
   readOnly,
-  onQaResolved,
   onRewind,
   branchInfo,
   onBranchNavigate,
@@ -558,9 +623,7 @@ export function ChatThread({
                 type: 'permission_request' as const,
                 detail: pendingGatePart.input,
               }
-        return (
-          <GateResolver gate={resolvedGate} onResolve={onResolveGate} onResolved={onQaResolved} />
-        )
+        return <GateResolver gate={resolvedGate} onResolve={onResolveGate} />
       })()
     : null
 
@@ -622,18 +685,6 @@ export function ChatThread({
                 <span>Rewind</span>
               </button>
             ) : null
-
-            if (msg.role === 'qa_pair') {
-              const textPart = msg.parts.find((p) => p.type === 'text')
-              return (
-                <div key={msg.id} className="group relative" data-turn-index={turnIndex}>
-                  <div className="min-w-0 space-y-1 rounded-lg border-l-2 border-info/30 bg-info/5 p-3">
-                    <p className="break-words text-sm">{textPart?.text || ''}</p>
-                  </div>
-                  {rewindButton}
-                </div>
-              )
-            }
 
             if (msg.role === 'user') {
               const textPart = msg.parts.find((p) => p.type === 'text')
@@ -732,17 +783,7 @@ export function ChatThread({
                 // the underlying parts were interleaved.
                 flushReasoning()
                 flushPending()
-                nodes.push(
-                  renderPart(
-                    part,
-                    i,
-                    derivedGate,
-                    onResolveGate,
-                    readOnly,
-                    onQaResolved,
-                    pendingGateId,
-                  ),
-                )
+                nodes.push(renderPart(part, i, derivedGate, onResolveGate, readOnly, pendingGateId))
               })
               flushReasoning()
               flushPending()
@@ -761,13 +802,15 @@ export function ChatThread({
           Pending gate (ask_user / permission_request) always renders pinned
           to the bottom of the thread, regardless of where the underlying
           tool part sits inside its assistant turn. Once the user answers,
-          the gate resolves, `injectQaPair` appends a normal qa_pair user
-          message, and this slot disappears — the answer then scrolls away
-          naturally as new assistant turns arrive.
+          the part's state flips and `renderPart` renders the resolved Q/A
+          inline at its turn position; this pinned slot empties and
+          `ScrollOnGateResolve` nudges the viewport so the user doesn't
+          lose context.
         */}
         {pinnedGateNode}
       </ConversationContent>
       <ScrollOnUserSend messages={messages} />
+      <ScrollOnGateResolve derivedGate={derivedGate} />
       <ConversationScrollButton />
     </Conversation>
   )

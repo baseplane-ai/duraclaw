@@ -28,10 +28,9 @@ interface GateResolverProps {
     detail: unknown
   }
   onResolve: (gateId: string, response: GateResponse) => Promise<unknown>
-  onResolved?: (question: string, answer: string) => void
 }
 
-export function GateResolver({ gate, onResolve, onResolved }: GateResolverProps) {
+export function GateResolver({ gate, onResolve }: GateResolverProps) {
   const [answer, setAnswer] = useState('')
   const [resolving, setResolving] = useState(false)
   const [selections, setSelections] = useState<Map<number, Set<string>>>(new Map())
@@ -101,7 +100,6 @@ export function GateResolver({ gate, onResolve, onResolved }: GateResolverProps)
 
       const handleAskUserResolve = async (userAnswer: string) => {
         await handleResolve({ answer: userAnswer })
-        onResolved?.(question, userAnswer)
       }
 
       return (
@@ -189,8 +187,6 @@ export function GateResolver({ gate, onResolve, onResolved }: GateResolverProps)
     const handleStructuredSubmit = async () => {
       const answerStr = buildAnswer()
       await handleResolve({ answer: answerStr })
-      const questionText = questions.map((q) => q.question).join('; ')
-      onResolved?.(questionText, answerStr)
     }
 
     return (

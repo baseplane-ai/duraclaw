@@ -52,7 +52,6 @@ function makeAgent(overrides: Partial<UseCodingAgentResult> = {}): UseCodingAgen
     submitDraft: vi.fn(async () => ({ ok: true, sent: true })),
     forkWithHistory: vi.fn(),
     rewind: vi.fn(),
-    injectQaPair: vi.fn(),
     resubmitMessage: vi.fn(),
     navigateBranch: vi.fn(),
     ...overrides,

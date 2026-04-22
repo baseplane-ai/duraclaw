@@ -73,7 +73,6 @@ export interface UseCodingAgentResult {
   /** Spawn a fresh SDK session with the current transcript prepended; recovers from orphaned sdk_session_id. */
   forkWithHistory: (content: string | ContentBlock[]) => Promise<unknown>
   rewind: (turnIndex: number) => Promise<{ ok: boolean; error?: string }>
-  injectQaPair: (question: string, answer: string) => void
   resubmitMessage: (
     messageId: string,
     content: string,
@@ -446,22 +445,6 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     [connection],
   )
 
-  const injectQaPair = useCallback(
-    (question: string, answer: string) => {
-      try {
-        messagesCollection.insert({
-          id: `qa-${Date.now()}`,
-          sessionId: agentName,
-          role: 'qa_pair',
-          parts: [{ type: 'text', text: `Q: ${question}\nA: ${answer}` }],
-        } as CachedMessage & Record<string, unknown>)
-      } catch {
-        // duplicate id or collection not ready — drop
-      }
-    },
-    [agentName, messagesCollection],
-  )
-
   // Return the live WS readyState rather than a state-presence proxy: once
   // `state` arrives and the socket later closes we want consumers to see the
   // real transition (0 connecting, 1 open, 2 closing, 3 closed). Reads the
@@ -739,7 +722,6 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     submitDraft,
     forkWithHistory,
     rewind,
-    injectQaPair,
     resubmitMessage,
     navigateBranch,
   }

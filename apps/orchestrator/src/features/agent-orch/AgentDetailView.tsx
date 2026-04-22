@@ -30,7 +30,6 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
     sendMessage,
     submitDraft,
     rewind,
-    injectQaPair,
     navigateBranch,
   } = agent
 
@@ -113,7 +112,6 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
         derivedGate={derivedGate}
         isConnecting={isConnecting}
         onResolveGate={resolveGate}
-        onQaResolved={injectQaPair}
         onRewind={rewind}
         branchInfo={branchInfo}
         onBranchNavigate={navigateBranch}
