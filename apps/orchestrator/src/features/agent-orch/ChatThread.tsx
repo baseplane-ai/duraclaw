@@ -907,7 +907,9 @@ export function ChatThread({
             </ConversationEmptyState>
           )}
         </div>
-        {pinnedGateNode && <div className="shrink-0 border-t p-3">{pinnedGateNode}</div>}
+        {pinnedGateNode && (
+          <div className="shrink-0 overflow-y-auto border-t p-3 max-h-[50vh]">{pinnedGateNode}</div>
+        )}
       </div>
     )
   }
@@ -938,7 +940,9 @@ export function ChatThread({
         doesn't lose context.
       */}
       {pinnedGateNode && (
-        <div className="shrink-0 border-t bg-background p-3">{pinnedGateNode}</div>
+        <div className="shrink-0 overflow-y-auto border-t bg-background p-3 max-h-[50vh]">
+          {pinnedGateNode}
+        </div>
       )}
       {!atBottom && (
         <Button
