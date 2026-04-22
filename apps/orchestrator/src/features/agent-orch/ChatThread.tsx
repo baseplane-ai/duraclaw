@@ -21,7 +21,7 @@ import {
   ToolOutput,
   useAutoScrollContext,
 } from '@duraclaw/ai-elements'
-import { useVirtualizer } from '@tanstack/react-virtual'
+import { useVirtualizer, type VirtualItem } from '@tanstack/react-virtual'
 import {
   BrainIcon,
   CheckIcon,
@@ -853,6 +853,10 @@ const ChatMessageRow = memo(
 // -------------------------------------------------------------------------
 
 interface VirtualizedMessageListProps {
+  // sessionId keys the measurements cache so virtualizer row heights
+  // survive component remount (tab switch, route remount). See
+  // `measurementsCacheBySession` below.
+  sessionId?: string
   messages: SessionMessage[]
   readOnly?: boolean
   onResolveGate: (gateId: string, response: GateResponse) => Promise<unknown>
@@ -861,7 +865,45 @@ interface VirtualizedMessageListProps {
   onBranchNavigate?: (messageId: string, direction: 'prev' | 'next') => void
 }
 
+// -------------------------------------------------------------------------
+// Per-session virtualizer measurements cache.
+//
+// Without this, every remount of `VirtualizedMessageList` starts with all
+// rows at the 160px `estimateSize` → paint #1 lands rows at estimate-based
+// `translateY(item.start)` → `measureElement` fires as rows hit the DOM →
+// real heights replace the estimates → paint #2 lands rows at their real
+// positions. The delta between paints is the "fast text shift like a
+// rerender with slightly different positions" jitter visible on every
+// tab-switch / route remount.
+//
+// `initialMeasurementsCache` (exposed by @tanstack/react-virtual v3.10+)
+// lets us seed the virtualizer with the prior mount's measurements so
+// paint #1 is already at real positions. `onChange` keeps the cache
+// current so the next remount benefits from the latest heights.
+//
+// Keys are stable message ids (see `getItemKey`), so rewind / branch-
+// navigate that drops ids just leaves stale cache entries that the
+// virtualizer ignores on next measure.
+//
+// Capped at MAX_CACHED_SESSIONS via FIFO eviction (Map iteration is
+// insertion order) so the cache doesn't grow unbounded across a long
+// lived tab.
+// -------------------------------------------------------------------------
+const MAX_CACHED_SESSIONS = 32
+const measurementsCacheBySession = new Map<string, Array<VirtualItem>>()
+
+function setSessionMeasurementsCache(sessionId: string, cache: Array<VirtualItem>) {
+  if (measurementsCacheBySession.has(sessionId)) {
+    measurementsCacheBySession.delete(sessionId)
+  } else if (measurementsCacheBySession.size >= MAX_CACHED_SESSIONS) {
+    const oldest = measurementsCacheBySession.keys().next().value
+    if (oldest !== undefined) measurementsCacheBySession.delete(oldest)
+  }
+  measurementsCacheBySession.set(sessionId, cache)
+}
+
 function VirtualizedMessageList({
+  sessionId,
   messages,
   readOnly,
   onResolveGate,
@@ -892,9 +934,11 @@ function VirtualizedMessageList({
     count: messages.length,
     getScrollElement: () => scrollElRef.current,
     // 160px is a ballpark "short text turn" estimate. measureElement
-    // replaces it with the real height as each row paints, so early
-    // scroll offsets tighten up within the first few frames even on
-    // heavy threads.
+    // replaces it with the real height as each row paints. On first
+    // mount of a given session this still runs, but on every subsequent
+    // remount `initialMeasurementsCache` below seeds real heights from
+    // the prior mount so paint #1 lands rows at their real positions —
+    // no visible estimate→measurement shift.
     estimateSize: () => 160,
     overscan: 6,
     getItemKey,
@@ -904,6 +948,20 @@ function VirtualizedMessageList({
     paddingEnd: 16,
     // 32px inter-row gap (previously `gap-8` on <ConversationContent>).
     gap: 32,
+    // Seed from the prior mount's measurements (if any) to kill the
+    // remount jitter. Re-read from the Map on every render is cheap;
+    // the virtualizer only consults `initialMeasurementsCache` on
+    // instance construction.
+    initialMeasurementsCache: sessionId ? measurementsCacheBySession.get(sessionId) : undefined,
+    // Persist the latest measurements for the next remount. `onChange`
+    // fires on every state transition; Map.set is O(1) and the array
+    // reference only changes when the virtualizer re-measures, so this
+    // is effectively free.
+    onChange: (instance) => {
+      if (sessionId) {
+        setSessionMeasurementsCache(sessionId, instance.measurementsCache)
+      }
+    },
   })
 
   const virtualItems = virtualizer.getVirtualItems()
@@ -1022,6 +1080,7 @@ export function ChatThread({
     >
       <Conversation className="min-h-0 flex-1">
         <VirtualizedMessageList
+          sessionId={sessionId}
           messages={messages}
           readOnly={readOnly}
           onResolveGate={onResolveGate}
