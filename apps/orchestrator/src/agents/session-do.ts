@@ -18,6 +18,7 @@ import { buildChainRow } from '~/lib/chains'
 import { chunkOps } from '~/lib/chunk-frame'
 import { runMigrations } from '~/lib/do-migrations'
 import { contentToParts, transcriptUserContentToParts } from '~/lib/message-parts'
+import { promptToPreviewText } from '~/lib/prompt-preview'
 import { type PushPayload, sendPushNotification } from '~/lib/push'
 import { sendFcmNotification } from '~/lib/push-fcm'
 import type {
@@ -2149,7 +2150,11 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       project: config.project,
       project_path: config.project,
       model: config.model ?? null,
-      prompt: typeof config.prompt === 'string' ? config.prompt : JSON.stringify(config.prompt),
+      // Store a readable preview, not a JSON blob of base64 image data —
+      // see `~/lib/prompt-preview`. Message parts preserve the full
+      // ContentBlock[] fidelity; `SessionMeta.prompt` is only for state
+      // snapshots / logs.
+      prompt: promptToPreviewText(config.prompt),
       started_at: now,
       created_at: this.state.created_at || now,
       updated_at: now,
@@ -2216,7 +2221,8 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       project: config.project,
       project_path: config.project,
       model: config.model ?? null,
-      prompt: typeof config.prompt === 'string' ? config.prompt : JSON.stringify(config.prompt),
+      // Readable preview — not a JSON blob. See `~/lib/prompt-preview`.
+      prompt: promptToPreviewText(config.prompt),
       started_at: now,
       created_at: this.state.created_at || now,
       updated_at: now,
@@ -2225,18 +2231,15 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     this.setState(resumeState)
     this.persistMetaPatch(resumeState)
 
-    // Persist resume prompt as a user message
+    // Persist resume prompt as a user message — use contentToParts so
+    // image-paste resumes preserve the image/text block fidelity instead
+    // of collapsing to a single text part with stringified JSON.
     this.turnCounter++
     const userMsgId = `usr-${this.turnCounter}`
     const userMsg: SessionMessage & { canonical_turn_id?: string } = {
       id: userMsgId,
       role: 'user',
-      parts: [
-        {
-          type: 'text',
-          text: typeof config.prompt === 'string' ? config.prompt : JSON.stringify(config.prompt),
-        },
-      ],
+      parts: contentToParts(config.prompt),
       createdAt: new Date(),
       canonical_turn_id: userMsgId,
     }
