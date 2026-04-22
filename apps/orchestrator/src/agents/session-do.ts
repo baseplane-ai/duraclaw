@@ -50,6 +50,7 @@ import {
   getGatewayConnectionId,
   loadTurnState,
   resolveStaleThresholdMs,
+  shouldBumpLastEventTs,
 } from './session-do-helpers'
 import { SESSION_DO_MIGRATIONS } from './session-do-migrations'
 
@@ -1629,11 +1630,13 @@ export class SessionDO extends Agent<Env, SessionMeta> {
 
   /**
    * GH#50: bump in-memory `lastEventTs` to now and arm the debounced
-   * flush. Called from the entry to `handleGatewayEvent` (B1) so every
-   * event — including the legacy `heartbeat` / `session_state_changed`
-   * frames dropped by B9 — refreshes liveness. The debounce ensures
-   * a 200-event burst yields at most one D1 write; lifecycle handlers
-   * call `flushLastEventTsToD1()` directly to bypass the debounce on
+   * flush. Called from the entry to `handleGatewayEvent` (B1) for every
+   * event EXCEPT legacy `heartbeat` / `session_state_changed` frames,
+   * which are dropped by B9 WITHOUT refreshing liveness — a pre-B7 zombie
+   * runner parked in `waitForNext()` must not be able to keep itself
+   * looking alive via heartbeats. The debounce ensures a 200-event burst
+   * yields at most one D1 write; lifecycle handlers call
+   * `flushLastEventTsToD1()` directly to bypass the debounce on
    * meaningful state transitions.
    */
   private bumpLastEventTs() {
@@ -3290,11 +3293,15 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
   // ── Gateway Event Handling ─────────────────────────────────────
 
   handleGatewayEvent(event: GatewayEvent) {
-    // GH#50 B1: every GatewayEvent refreshes runner-liveness for the client
-    // TTL predicate. Must run BEFORE the legacy-event drop in B9 so a
-    // stray heartbeat from an in-flight pre-P3 runner still bumps liveness
-    // during the rollout window. Pure synchronous in-memory write.
-    this.bumpLastEventTs()
+    // GH#50 B1: every REAL GatewayEvent refreshes runner-liveness for the
+    // client TTL predicate. Legacy heartbeat / session_state_changed frames
+    // from pre-B7 runners are EXCLUDED — a parked zombie runner sending a
+    // heartbeat every ~10s is precisely the signal the TTL is designed to
+    // expire, so bumping liveness on those frames would defeat the whole
+    // point of GH#50. Pure synchronous in-memory write.
+    if (shouldBumpLastEventTs((event as { type: string }).type)) {
+      this.bumpLastEventTs()
+    }
     switch (event.type) {
       case 'session.init':
         this.updateState({ sdk_session_id: event.sdk_session_id, model: event.model })
@@ -3868,11 +3875,15 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
 
       // Events that don't produce message parts — just broadcast raw
       default: {
-        // GH#50 B9: tolerant drop for legacy events from in-flight pre-P3
-        // runners during the rollout window. `bumpLastEventTs()` already
-        // ran at the dispatch entry, so the legacy frame still refreshes
-        // liveness for the client TTL predicate. Log once per DO instance
-        // per event type, then drop silently.
+        // GH#50 B9: tolerant drop for legacy events from in-flight pre-B7
+        // runners during the rollout window. We intentionally do NOT bump
+        // `lastEventTs` for these frames (see the guarded call at the top
+        // of handleGatewayEvent) — a zombie runner parked in
+        // `waitForNext()` will emit a heartbeat every ~10s for hours, and
+        // if that refreshed liveness, the client TTL would never fire and
+        // the row would show `running` forever. Dropping without bumping
+        // means the 45s TTL elapses and the UI flips to `idle` without
+        // needing the runner to exit.
         const type = (event as { type: string }).type
         if (type === 'heartbeat' || type === 'session_state_changed') {
           const sid =
