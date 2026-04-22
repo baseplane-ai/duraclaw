@@ -2,7 +2,7 @@
  * GateResolver — UI for resolving CodingAgent permission/question gates.
  */
 
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { Badge } from '~/components/ui/badge'
 import { Button } from '~/components/ui/button'
@@ -31,10 +31,22 @@ interface GateResolverProps {
 }
 
 export function GateResolver({ gate, onResolve }: GateResolverProps) {
+  const containerRef = useRef<HTMLDivElement>(null)
   const [answer, setAnswer] = useState('')
   const [resolving, setResolving] = useState(false)
   const [selections, setSelections] = useState<Map<number, Set<string>>>(new Map())
   const [notesByQuestion, setNotesByQuestion] = useState<Map<number, string>>(new Map())
+
+  // Auto-scroll the gate into view when it mounts. The old pinned-gate div
+  // was removed (9c1f759) and gates now render inline in the message list.
+  // Without this, a gate in a message above the viewport is invisible.
+  useEffect(() => {
+    // Small delay so the layout settles before measuring position.
+    const t = setTimeout(() => {
+      containerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }, 80)
+    return () => clearTimeout(t)
+  }, []) // mount-only
 
   const handleResolve = async (response: GateResponse) => {
     setResolving(true)
@@ -59,7 +71,10 @@ export function GateResolver({ gate, onResolve }: GateResolverProps) {
       typeof gate.detail === 'string' ? gate.detail : JSON.stringify(gate.detail, null, 2)
 
     return (
-      <div className="min-w-0 space-y-3 rounded-lg border border-warning/30 bg-warning/5 p-3">
+      <div
+        ref={containerRef}
+        className="min-w-0 space-y-3 rounded-lg border border-warning/30 bg-warning/5 p-3"
+      >
         <div className="text-sm font-medium text-warning">Permission Request</div>
         <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs">
           {detail}
@@ -104,7 +119,10 @@ export function GateResolver({ gate, onResolve }: GateResolverProps) {
       }
 
       return (
-        <div className="min-w-0 space-y-3 rounded-lg border border-info/30 bg-info/5 p-3">
+        <div
+          ref={containerRef}
+          className="min-w-0 space-y-3 rounded-lg border border-info/30 bg-info/5 p-3"
+        >
           <div className="text-sm font-medium text-info">Agent Question</div>
           <p className="break-words text-sm">{question}</p>
           <Label className="sr-only" htmlFor="gate-answer">
@@ -191,7 +209,10 @@ export function GateResolver({ gate, onResolve }: GateResolverProps) {
     }
 
     return (
-      <div className="min-w-0 space-y-3 rounded-lg border border-info/30 bg-info/5 p-3">
+      <div
+        ref={containerRef}
+        className="min-w-0 space-y-3 rounded-lg border border-info/30 bg-info/5 p-3"
+      >
         <div className="text-sm font-medium text-info">Agent Question</div>
 
         {questions.map((q, qIndex) => (

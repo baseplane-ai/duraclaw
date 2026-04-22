@@ -140,6 +140,8 @@ describe('useDerivedGate', () => {
       }),
     ]
     const { result } = renderHook(() => useDerivedGate('sess'))
-    expect(result.current?.id).toBe('first')
+    // Backward scan returns the most recent pending gate — that's the one
+    // the user needs to interact with. The older gate may be stale.
+    expect(result.current?.id).toBe('second')
   })
 })

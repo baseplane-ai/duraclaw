@@ -100,7 +100,6 @@ afterEach(() => {
 
 describe('ChatThread MessageBranch', () => {
   const defaultProps = {
-    derivedGate: null,
     state: null,
     isConnecting: false,
     onResolveGate: vi.fn(),
@@ -337,7 +336,6 @@ describe('ChatThread MessageBranch', () => {
 
 describe('ChatThread Suggestions', () => {
   const defaultProps = {
-    derivedGate: null,
     state: null,
     isConnecting: false,
     onResolveGate: vi.fn(),
@@ -407,7 +405,6 @@ describe('ChatThread Suggestions', () => {
  */
 describe('ChatThread reasoning consolidation', () => {
   const defaultProps = {
-    derivedGate: null,
     state: null,
     isConnecting: false,
     onResolveGate: vi.fn(),

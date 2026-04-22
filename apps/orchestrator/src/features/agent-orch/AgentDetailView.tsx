@@ -7,7 +7,6 @@ import { useCallback, useEffect, useMemo } from 'react'
 import { StatusBar } from '~/components/status-bar'
 import { type BranchInfoRow, createBranchInfoCollection } from '~/db/branch-info-collection'
 import { projectsCollection } from '~/db/projects-collection'
-import { useDerivedGate } from '~/hooks/use-derived-gate'
 import { useSession } from '~/hooks/use-sessions-collection'
 import { deriveStatus } from '~/lib/derive-status'
 import { useNow } from '~/lib/use-now'
@@ -113,11 +112,6 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
   const nowTs = useNow()
   const status = session ? deriveStatus(session, nowTs) : 'idle'
 
-  // Spec-31 P4b: compute the message-derived gate once here, pass to
-  // ChatThread. Replaces the pre-P4b `(gate, status)` dual signal sourced
-  // from SessionState.
-  const derivedGate = useDerivedGate(sessionId)
-
   // Draft key scopes localStorage drafts. Tabs ARE sessions (userTabsCollection
   // rows keyed by sessionId), so use sessionId directly — no separate tab ID.
   const draftKey = sessionId
@@ -130,7 +124,6 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
       <ChatThread
         sessionId={sessionId}
         messages={messages}
-        derivedGate={derivedGate}
         isConnecting={isConnecting}
         onResolveGate={resolveGate}
         onRewind={rewind}

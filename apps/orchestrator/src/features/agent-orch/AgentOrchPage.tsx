@@ -445,7 +445,6 @@ function DraftDetailView({
     >
       <ChatThread
         messages={[]}
-        derivedGate={null}
         isConnecting={false}
         onResolveGate={noopResolveGate}
         branchInfo={branchInfo}

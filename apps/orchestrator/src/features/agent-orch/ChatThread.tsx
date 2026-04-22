@@ -41,7 +41,6 @@ import {
   SheetTitle,
 } from '~/components/ui/sheet'
 import { Skeleton } from '~/components/ui/skeleton'
-import type { DerivedGatePayload } from '~/hooks/use-derived-gate'
 import { getImagePartDataUrl } from '~/lib/message-parts'
 import type { GateResponse, SessionMessage, SessionMessagePart } from '~/lib/types'
 import { GateResolver } from './GateResolver'
@@ -89,19 +88,15 @@ function isGateCandidate(part: SessionMessagePart): boolean {
   return (part.type === 'tool-ask_user' || part.type === 'tool-permission') && !!part.toolCallId
 }
 
-function isPendingGate(
-  part: SessionMessagePart,
-  readOnly: boolean | undefined,
-  derivedGate: DerivedGatePayload | null,
-): boolean {
+function isPendingGate(part: SessionMessagePart, readOnly: boolean | undefined): boolean {
   if (!isGateCandidate(part) || readOnly) return false
-  // Spec-31 B7: message-derived gate. The part's own state is the primary
-  // signal; we also accept the derived-gate pointer as a defensive match
-  // in case the part's state hasn't propagated yet (parity with the
-  // pre-P4b dual signal, minus the SessionState.gate path).
-  if (part.state === 'approval-requested') return true
-  if (derivedGate && part.toolCallId && derivedGate.id === part.toolCallId) return true
-  return false
+  // The part's own persisted state is the sole signal. The old dual-signal
+  // path (part.state + derivedGate pointer) caused flicker when the two
+  // disagreed for a single render tick — GateResolver would unmount then
+  // remount, losing local form state and producing the "flicker-no-send"
+  // symptom. The part state is authoritative and propagates atomically
+  // via TanStack DB upsert from the DO's broadcastMessage.
+  return part.state === 'approval-requested'
 }
 
 /**
@@ -379,13 +374,6 @@ interface ChatThreadProps {
    */
   sessionId?: string
   messages: SessionMessage[]
-  /**
-   * Spec-31 P4b: message-derived gate payload, computed upstream via
-   * `useDerivedGate(agentName)`. Supersedes the pre-P4b `(gate, status)`
-   * dual signal sourced from `SessionState`. Non-active callers that don't
-   * mount `useCodingAgent` pass `null`.
-   */
-  derivedGate: DerivedGatePayload | null
   isConnecting?: boolean
   onResolveGate: (gateId: string, response: GateResponse) => Promise<unknown>
   readOnly?: boolean
@@ -398,7 +386,6 @@ interface ChatThreadProps {
 function renderPart(
   part: SessionMessagePart,
   index: number,
-  derivedGate: DerivedGatePayload | null,
   onResolveGate: (gateId: string, response: GateResponse) => Promise<unknown>,
   readOnly?: boolean,
 ) {
@@ -442,10 +429,7 @@ function renderPart(
   // The server validates the gateId on resolveGate (returns stale-gate error
   // if the gate moved on), and once resolved the part state transitions away
   // from 'approval-requested' via broadcastMessage so this stops rendering.
-  if (isPendingGate(part, readOnly, derivedGate) && part.toolCallId) {
-    // Reconstruct the gate payload from the persisted part — the derived
-    // gate lookup already matched by toolCallId, so the part IS the
-    // authoritative source. No live SessionState.gate merge needed.
+  if (isPendingGate(part, readOnly) && part.toolCallId) {
     const resolvedGate =
       part.type === 'tool-ask_user'
         ? {
@@ -458,7 +442,12 @@ function renderPart(
             type: 'permission_request' as const,
             detail: part.input,
           }
-    return <GateResolver key={index} gate={resolvedGate} onResolve={onResolveGate} />
+    // Stable key: toolCallId is unique per gate invocation. Using array
+    // index caused remounts when preceding parts shifted, destroying the
+    // GateResolver's local form state (answer text, selections).
+    return (
+      <GateResolver key={`gate-${part.toolCallId}`} gate={resolvedGate} onResolve={onResolveGate} />
+    )
   }
 
   // Resolved ask_user — the part itself is the canonical Q/A record (input
@@ -533,7 +522,6 @@ function renderPart(
 interface ChatMessageRowProps {
   msg: SessionMessage
   turnIndex: number
-  derivedGate: DerivedGatePayload | null
   readOnly?: boolean
   onResolveGate: (gateId: string, response: GateResponse) => Promise<unknown>
   onRewind?: (turnIndex: number) => void
@@ -559,7 +547,6 @@ const ChatMessageRow = memo(
   function ChatMessageRow({
     msg,
     turnIndex,
-    derivedGate,
     readOnly,
     onResolveGate,
     onRewind,
@@ -615,9 +602,7 @@ const ChatMessageRow = memo(
       }
       msg.parts.forEach((part, i) => {
         const isGroupableTool =
-          part.type?.startsWith('tool-') &&
-          !isGateCandidate(part) &&
-          !isPendingGate(part, readOnly, derivedGate)
+          part.type?.startsWith('tool-') && !isGateCandidate(part) && !isPendingGate(part, readOnly)
         if (isGroupableTool) {
           pending.push(part)
           return
@@ -629,12 +614,12 @@ const ChatMessageRow = memo(
         }
         flushReasoning()
         flushPending()
-        nodes.push(renderPart(part, i, derivedGate, onResolveGate, readOnly))
+        nodes.push(renderPart(part, i, onResolveGate, readOnly))
       })
       flushReasoning()
       flushPending()
       return nodes
-    }, [msg, derivedGate, onResolveGate, readOnly])
+    }, [msg, onResolveGate, readOnly])
 
     if (msg.role === 'user') {
       const textPart = msg.parts.find((p) => p.type === 'text')
@@ -696,7 +681,6 @@ const ChatMessageRow = memo(
     // are unchanged.
     if (
       prev.turnIndex !== next.turnIndex ||
-      prev.derivedGate !== next.derivedGate ||
       prev.readOnly !== next.readOnly ||
       prev.onResolveGate !== next.onResolveGate ||
       prev.onRewind !== next.onRewind ||
@@ -743,7 +727,6 @@ const ChatMessageRow = memo(
 
 interface VirtualizedMessageListProps {
   messages: SessionMessage[]
-  derivedGate: DerivedGatePayload | null
   readOnly?: boolean
   onResolveGate: (gateId: string, response: GateResponse) => Promise<unknown>
   onRewind?: (turnIndex: number) => void
@@ -753,7 +736,6 @@ interface VirtualizedMessageListProps {
 
 function VirtualizedMessageList({
   messages,
-  derivedGate,
   readOnly,
   onResolveGate,
   onRewind,
@@ -828,7 +810,6 @@ function VirtualizedMessageList({
               <ChatMessageRow
                 msg={msg}
                 turnIndex={item.index}
-                derivedGate={derivedGate}
                 readOnly={readOnly}
                 onResolveGate={onResolveGate}
                 onRewind={onRewind}
@@ -860,7 +841,6 @@ function VirtualizedMessageList({
 export function ChatThread({
   sessionId,
   messages,
-  derivedGate,
   isConnecting,
   onResolveGate,
   readOnly,
@@ -930,7 +910,6 @@ export function ChatThread({
       <Conversation className="min-h-0 flex-1">
         <VirtualizedMessageList
           messages={messages}
-          derivedGate={derivedGate}
           readOnly={readOnly}
           onResolveGate={onResolveGate}
           onRewind={onRewind}
