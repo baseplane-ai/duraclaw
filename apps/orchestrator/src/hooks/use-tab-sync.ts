@@ -493,16 +493,35 @@ export function useTabSync(): UseTabSyncResult {
     (oldId: string, newId: string) => {
       if (oldId === newId) return
       const row = rows.find((r) => r.sessionId === oldId)
-      if (!row) return
+      if (!row) {
+        // Stuck-tab debug (2026-04-22): if the draft row the caller saw has
+        // already been dropped from the React snapshot — e.g. the user_tabs
+        // delta for a peer-device close landed between send-click and here —
+        // the swap silently no-ops and the URL ends up pointing at an id
+        // with no tab. Surface it.
+        console.warn(
+          '[replaceTab] old row not found',
+          JSON.stringify({ oldId, newId, openRows: rows.map((r) => r.sessionId) }),
+        )
+        return
+      }
 
       // If newId is already open, drop the draft and activate the existing one.
       const dupe = rows.find((r) => r.sessionId === newId)
       if (dupe) {
+        console.info(
+          '[replaceTab] dupe path (delete draft, activate existing)',
+          JSON.stringify({ oldId, newId, draftRowId: row.id, dupeRowId: dupe.id }),
+        )
         tabs.delete(row.id)
         if (activeSessionId === oldId) setActive(newId)
         return
       }
 
+      console.info(
+        '[replaceTab] swap path (PATCH sessionId)',
+        JSON.stringify({ oldId, newId, rowId: row.id }),
+      )
       tabs.update(row.id, (draft: UserTabRow) => {
         draft.sessionId = newId
       })

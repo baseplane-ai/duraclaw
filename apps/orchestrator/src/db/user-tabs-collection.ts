@@ -43,7 +43,17 @@ function createUserTabsCollection() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(m.modified),
         })
-        if (!resp.ok) throw new Error(`Tab insert failed: ${resp.status}`)
+        if (!resp.ok) {
+          // Observability guardrail: stuck-tab debug (2026-04-22). A silent
+          // rollback of an optimistic insert is invisible from the UI — log
+          // the response body so the next recurrence leaves breadcrumbs.
+          const body = await resp.text().catch(() => '<unreadable>')
+          console.warn(
+            '[user-tabs] POST failed',
+            JSON.stringify({ status: resp.status, body: body.slice(0, 200), sent: m.modified }),
+          )
+          throw new Error(`Tab insert failed: ${resp.status}`)
+        }
       }
     },
 
@@ -54,14 +64,37 @@ function createUserTabsCollection() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(m.changes),
         })
-        if (!resp.ok) throw new Error(`Tab update failed: ${resp.status}`)
+        if (!resp.ok) {
+          // Stuck-tab debug: the draft→real swap is a PATCH to `sessionId`.
+          // A 400/500 here rolls the optimistic change back and the tab
+          // reverts to the draft id. Log before throwing so the root cause
+          // is visible in console / adb logcat.
+          const body = await resp.text().catch(() => '<unreadable>')
+          console.warn(
+            '[user-tabs] PATCH failed',
+            JSON.stringify({
+              status: resp.status,
+              body: body.slice(0, 200),
+              tabId: m.key,
+              changes: m.changes,
+            }),
+          )
+          throw new Error(`Tab update failed: ${resp.status}`)
+        }
       }
     },
 
     onDelete: async ({ transaction }) => {
       for (const m of transaction.mutations) {
         const resp = await fetch(apiUrl(`/api/user-settings/tabs/${m.key}`), { method: 'DELETE' })
-        if (!resp.ok) throw new Error(`Tab delete failed: ${resp.status}`)
+        if (!resp.ok) {
+          const body = await resp.text().catch(() => '<unreadable>')
+          console.warn(
+            '[user-tabs] DELETE failed',
+            JSON.stringify({ status: resp.status, body: body.slice(0, 200), tabId: m.key }),
+          )
+          throw new Error(`Tab delete failed: ${resp.status}`)
+        }
       }
     },
   })
