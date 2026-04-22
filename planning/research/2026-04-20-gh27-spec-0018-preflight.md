@@ -9,7 +9,7 @@ items_researched: 6
 
 # Research: GH#27 spec 0018 preflight
 
-Codebase validation of [`planning/specs/0018-docs-as-yjs-dialback-runners.md`](../specs/0018-docs-as-yjs-dialback-runners.md) before it enters formal spec review (P3).
+Codebase validation of [`planning/specs/27-docs-as-yjs-dialback-runners.md`](../specs/27-docs-as-yjs-dialback-runners.md) before it enters formal spec review (P3).
 
 ## Context
 

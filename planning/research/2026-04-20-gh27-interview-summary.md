@@ -5,7 +5,7 @@ type: interview
 status: complete
 github_issue: 27
 inputs:
-  - planning/specs/0018-docs-as-yjs-dialback-runners.md
+  - planning/specs/27-docs-as-yjs-dialback-runners.md
   - planning/research/2026-04-20-gh27-spec-0018-preflight.md
   - planning/research/2026-04-19-mdsync-research-alignment.md
 ---
