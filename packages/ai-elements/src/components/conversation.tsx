@@ -70,9 +70,17 @@ function useAutoScroll() {
     return () => el.removeEventListener('scroll', onScroll)
   }, [])
 
-  // ResizeObserver — auto-scroll on content growth only while scrollTop is
-  // actually pinned to the bottom. Tracks prev content height so we scroll
-  // on growth (new messages) and skip shrinks (e.g. mobile keyboard opening).
+  // ResizeObserver — auto-scroll on content growth only while scrollTop was
+  // pinned to the bottom *before* the growth. Tracks prev content height so
+  // we scroll on growth (new messages / streaming deltas) and skip shrinks
+  // (e.g. mobile keyboard opening).
+  //
+  // Pin check is against the PRE-growth distance: ResizeObserver fires after
+  // layout, so `scrollHeight` already reflects the new content but `scrollTop`
+  // hasn't moved — the live distance from bottom equals the growth amount,
+  // which for any streaming text delta (~16+px per line) is always greater
+  // than PIN_THRESHOLD_PX. Subtracting the growth recovers the user's actual
+  // position relative to the bottom *before* the new content arrived.
   useEffect(() => {
     const content = contentEl.current
     const scroll = scrollEl.current
@@ -81,11 +89,11 @@ function useAutoScroll() {
     let prevHeight = content.getBoundingClientRect().height
     const ro = new ResizeObserver(() => {
       const currentHeight = content.getBoundingClientRect().height
-      const grew = currentHeight > prevHeight
+      const growth = currentHeight - prevHeight
       prevHeight = currentHeight
-      if (!grew) return
-      const pinned = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < PIN_THRESHOLD_PX
-      if (pinned) {
+      if (growth <= 0) return
+      const distanceBefore = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight - growth
+      if (distanceBefore < PIN_THRESHOLD_PX) {
         scroll.scrollTop = scroll.scrollHeight
       }
     })
