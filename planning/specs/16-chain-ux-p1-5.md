@@ -4,7 +4,7 @@ type: project
 issue_type: feature
 status: draft
 priority: high
-github_issue: 16
+github_issue: 58
 created: 2026-04-22
 updated: 2026-04-22  # Review round 1 fixes applied
 supersedes: "16-chain-ux.md phase p1 (Chain tab surface / Feature 3B)"

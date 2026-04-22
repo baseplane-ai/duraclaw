@@ -3,7 +3,7 @@ date: 2026-04-22
 topic: Chain StatusBar widget — replace chain tabs with inline chain context (p1.5)
 type: feature
 status: complete
-github_issue: 16
+github_issue: 58
 items_researched: 5
 ---
 
