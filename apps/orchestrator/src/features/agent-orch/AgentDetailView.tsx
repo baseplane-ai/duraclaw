@@ -11,8 +11,6 @@ import { useDerivedGate } from '~/hooks/use-derived-gate'
 import { useSession } from '~/hooks/use-sessions-collection'
 import { useStatusBarStore } from '~/stores/status-bar'
 import { ChatThread } from './ChatThread'
-import { ConversationDownload } from './ConversationDownload'
-import { KataStatePanel } from './KataStatePanel'
 import { MessageInput } from './MessageInput'
 import type { UseCodingAgentResult } from './use-coding-agent'
 
@@ -24,7 +22,6 @@ interface AgentDetailViewProps {
 export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps) {
   const {
     messages,
-    kataState,
     isConnecting,
     stop,
     interrupt,
@@ -111,15 +108,6 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
       className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden"
       data-testid="agent-detail-view"
     >
-      <KataStatePanel kataState={kataState} />
-
-      <div className="flex items-center justify-end px-4 py-1">
-        <ConversationDownload
-          messages={messages}
-          sessionId={session?.sdkSessionId ?? sessionId ?? 'unknown'}
-        />
-      </div>
-
       <ChatThread
         messages={messages}
         derivedGate={derivedGate}

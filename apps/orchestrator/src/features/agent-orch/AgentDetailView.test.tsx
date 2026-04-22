@@ -28,22 +28,8 @@ vi.mock('./ChatThread', () => ({
   ),
 }))
 
-vi.mock('./KataStatePanel', () => ({
-  KataStatePanel: () => <div data-testid="kata-state-panel" />,
-}))
-
 vi.mock('./MessageInput', () => ({
   MessageInput: () => <div data-testid="message-input" />,
-}))
-
-vi.mock('./ConversationDownload', () => ({
-  ConversationDownload: ({ messages, sessionId }: Record<string, unknown>) => (
-    <div
-      data-testid="conversation-download"
-      data-message-count={(messages as unknown[]).length}
-      data-session-id={sessionId as string}
-    />
-  ),
 }))
 
 function makeAgent(overrides: Partial<UseCodingAgentResult> = {}): UseCodingAgentResult {
@@ -89,12 +75,25 @@ describe('AgentDetailView', () => {
     expect(container.querySelector('[data-testid="session-metadata-header"]')).toBeNull()
   })
 
-  it('renders ChatThread and KataStatePanel', () => {
+  it('renders ChatThread', () => {
     const agent = makeAgent()
     render(<AgentDetailView name="test" agent={agent} />)
 
     expect(screen.getByTestId('chat-thread')).toBeTruthy()
-    expect(screen.getByTestId('kata-state-panel')).toBeTruthy()
+  })
+
+  it('does not render KataStatePanel', () => {
+    const agent = makeAgent()
+    render(<AgentDetailView name="test" agent={agent} />)
+
+    expect(screen.queryByTestId('kata-state-panel')).toBeNull()
+  })
+
+  it('does not render ConversationDownload', () => {
+    const agent = makeAgent()
+    render(<AgentDetailView name="test-session" agent={agent} />)
+
+    expect(screen.queryByTestId('conversation-download')).toBeNull()
   })
 
   it('renders MessageInput when status is running', () => {
@@ -153,19 +152,6 @@ describe('AgentDetailView', () => {
     const store = useStatusBarStore.getState()
     expect(store.onStop).toBeNull()
     expect(store.onInterrupt).toBeNull()
-  })
-
-  it('renders ConversationDownload with messages and sessionId', () => {
-    // Spec-31 P5 B10: ConversationDownload receives `live.sdkSessionId ??
-    // sessionId ?? 'unknown'`. With no live-state row seeded, the fallback
-    // is the `name` prop passed to AgentDetailView.
-    const agent = makeAgent()
-    render(<AgentDetailView name="test-session" agent={agent} />)
-
-    const download = screen.getByTestId('conversation-download')
-    expect(download).toBeTruthy()
-    expect(download.getAttribute('data-message-count')).toBe('0')
-    expect(download.getAttribute('data-session-id')).toBe('test-session')
   })
 
   it('passes onSendSuggestion to ChatThread when not terminal', () => {
