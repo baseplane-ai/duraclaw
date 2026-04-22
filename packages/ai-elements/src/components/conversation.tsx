@@ -156,7 +156,19 @@ function useAutoScroll() {
           sentinel.scrollIntoView({ block: 'end', inline: 'nearest' })
           return
         }
-        if (isAtBottomRef.current) {
+        // During the initial settle window the IO signal is unreliable for
+        // the "stay pinned" decision. Per the HTML rendering order, IO
+        // callbacks run *before* RO in the same frame — so when a history
+        // burst or OPFS hydration grows the content, IO has already flipped
+        // `isAtBottomRef` to `false` (the sentinel was shoved below the
+        // viewport by the growth itself) by the time our RO-scheduled rAF
+        // runs. If we gate on `isAtBottom` we'd correctly read `false` and
+        // leave the user parked at the top of a 50-message history — the
+        // exact "default scroll position is wrong on tab switch" symptom.
+        // So during mount, treat every growth as pin-to-bottom; after
+        // SETTLE_MS (streaming-only regime), honor the IO gate so scrolling
+        // up mid-stream disables auto-follow.
+        if (isInitialSettle || isAtBottomRef.current) {
           sentinel.scrollIntoView({
             block: 'end',
             inline: 'nearest',
