@@ -9,7 +9,6 @@ import {
   useCallback,
   useContext,
   useEffect,
-  useLayoutEffect,
   useRef,
   useState,
 } from 'react'
@@ -17,28 +16,34 @@ import { cn } from '../lib/utils'
 import { Button } from '../ui/button'
 
 // ---------------------------------------------------------------------------
-// Auto-scroll context. Live scroll position is the source of truth, not a
-// sticky escape flag:
-//   1. ResizeObserver auto-scrolls ONLY when scrollTop is pinned to the
-//      bottom (within PIN_THRESHOLD_PX). Any user-initiated scroll-up by
-//      more than that disables auto-snap until they scroll back.
-//   2. `isAtBottom` uses the wider NEAR_BOTTOM_PX zone — it drives the
-//      scroll-to-bottom button visibility only, not the snap decision.
+// Auto-scroll is driven entirely by asynchronous observers — no synchronous
+// scroll-geometry reads from JS:
+//   1. IntersectionObserver on a zero-height bottom sentinel tells us when
+//      the user is within NEAR_BOTTOM_PX of the end. Replaces a scroll-event
+//      handler that used to read `scrollTop/scrollHeight/clientHeight` on
+//      every scroll tick.
+//   2. ResizeObserver on the content container fires on growth; when the
+//      IO says we're at the bottom we pin by calling
+//      `sentinel.scrollIntoView({block:'end'})` — the browser handles the
+//      math without us forcing layout.
 //
-// The previous flag-based design lost a race on mobile WebView foreground
-// resume: repeated async re-layout (markdown rehighlight, image reload)
-// fired many ResizeObserver growth events while the user's drag sat inside
-// the 70px near-bottom zone, so the escape flag never flipped and every
-// growth snapped them back. Checking live scrollTop removes that window.
+// Why this shape: the prior design synchronously read layout props inside
+// both the scroll handler AND the RO callback, and wrote `scrollTop` in
+// between. On tab-switch mount (parent uses `key={activeSessionId}`),
+// Shiki + Streamdown async highlighting fired the RO dozens of times per
+// second; each growth tick was a read-write-read reflow cascade that
+// DevTools flagged as 35–63ms `[Violation] Forced reflow` chains. The
+// visual symptom was mis-aligned first-paint + a jumpy catch-up scroll.
+// IO + scrollIntoView removes every synchronous read from the hot path.
 // ---------------------------------------------------------------------------
 
 const NEAR_BOTTOM_PX = 70
-const PIN_THRESHOLD_PX = 4
 const SETTLE_MS = 500
 
 interface AutoScrollContext {
   scrollRef: RefCallback<HTMLDivElement>
   contentRef: RefCallback<HTMLDivElement>
+  sentinelRef: RefCallback<HTMLDivElement>
   isAtBottom: boolean
   scrollToBottom: () => void
 }
@@ -53,52 +58,71 @@ export function useAutoScrollContext() {
 
 function useAutoScroll() {
   const [isAtBottom, setIsAtBottom] = useState(true)
+  // Mirror of `isAtBottom` for synchronous read inside the RO callback.
+  // Reading React state from an imperative callback is stale-by-design;
+  // the ref tracks the latest IO signal without triggering a re-render.
+  const isAtBottomRef = useRef(true)
   const scrollEl = useRef<HTMLDivElement | null>(null)
   const contentEl = useRef<HTMLDivElement | null>(null)
+  const sentinelEl = useRef<HTMLDivElement | null>(null)
 
-  // Scroll listener — track `isAtBottom` for the scroll-to-bottom button.
+  // IntersectionObserver — drives `isAtBottom` asynchronously. The
+  // sentinel is a zero-height div at the end of the content; the IO's
+  // bottom `rootMargin` extends the viewport so the sentinel registers
+  // as "intersecting" while the user is still NEAR_BOTTOM_PX away. No
+  // synchronous layout reads in our code — the browser batches.
   useEffect(() => {
-    const el = scrollEl.current
-    if (!el) return
+    const scroll = scrollEl.current
+    const sentinel = sentinelEl.current
+    if (!scroll || !sentinel) return
 
-    const onScroll = () => {
-      const { scrollTop, scrollHeight, clientHeight } = el
-      const nearBottom = scrollHeight - scrollTop - clientHeight < NEAR_BOTTOM_PX
-      setIsAtBottom(nearBottom)
-    }
-
-    el.addEventListener('scroll', onScroll, { passive: true })
-    return () => el.removeEventListener('scroll', onScroll)
+    const io = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0]
+        if (!entry) return
+        isAtBottomRef.current = entry.isIntersecting
+        setIsAtBottom(entry.isIntersecting)
+      },
+      {
+        root: scroll,
+        rootMargin: `0px 0px ${NEAR_BOTTOM_PX}px 0px`,
+        threshold: 0,
+      },
+    )
+    io.observe(sentinel)
+    return () => io.disconnect()
   }, [])
 
-  // ResizeObserver — auto-scroll on content growth only while scrollTop was
-  // pinned to the bottom *before* the growth. Tracks prev content height so
-  // we scroll on growth (new messages / streaming deltas) and skip shrinks
-  // (e.g. mobile keyboard opening).
+  // ResizeObserver — auto-scroll on content growth when the user was
+  // already pinned to the bottom (per the IO signal). We read `height`
+  // from `entry.contentRect` (no forced layout) and write via
+  // `sentinel.scrollIntoView` (the browser schedules the scroll without
+  // us computing offsets).
   //
-  // Pin check is against the PRE-growth distance: ResizeObserver fires after
-  // layout, so `scrollHeight` already reflects the new content but `scrollTop`
-  // hasn't moved — the live distance from bottom equals the growth amount,
-  // which for any streaming text delta (~16+px per line) is always greater
-  // than PIN_THRESHOLD_PX. Subtracting the growth recovers the user's actual
-  // position relative to the bottom *before* the new content arrived.
+  // Multiple sequential growth ticks (Shiki async-highlight bursts,
+  // Streamdown rehydrating code blocks, etc.) are coalesced through a
+  // single requestAnimationFrame so we never queue N overlapping scroll
+  // writes per animation frame.
   //
-  // Smooth scroll is gated behind a post-mount settle window. Tab switches
-  // remount this component (parent uses `key={activeSessionId}`), and the
-  // first ~500ms of life is dominated by layout settling — async font load,
-  // code highlighting, child useEffects growing height — none of which is
-  // streaming. Animating those growths visibly looked like "jump up then
-  // smooth scroll down" because each successive growth restarted the
-  // animation chasing a moving target. After SETTLE_MS, the only thing
-  // growing the content is real streaming, where smooth reads as polish.
+  // Smooth scroll is gated behind a post-mount settle window. Tab
+  // switches remount this component (parent uses `key={activeSessionId}`),
+  // and the first ~500ms of life is dominated by layout settling — async
+  // font load, code highlighting, child useEffects growing height — none
+  // of which is streaming. Animating those growths visibly looked like
+  // "jump up then smooth scroll down" because each successive growth
+  // restarted the animation chasing a moving target. After SETTLE_MS the
+  // only thing growing the content is real streaming, where smooth reads
+  // as polish.
   useEffect(() => {
     const content = contentEl.current
-    const scroll = scrollEl.current
-    if (!content || !scroll) return
+    const sentinel = sentinelEl.current
+    if (!content || !sentinel) return
 
-    let prevHeight = content.getBoundingClientRect().height
+    let prevHeight = 0
     let isInitialSettle = true
     let settleTimer: ReturnType<typeof setTimeout> | null = null
+    let rafId: number | null = null
+
     const armSettle = () => {
       if (settleTimer) clearTimeout(settleTimer)
       isInitialSettle = true
@@ -107,44 +131,53 @@ function useAutoScroll() {
       }, SETTLE_MS)
     }
     armSettle()
-    const ro = new ResizeObserver(() => {
-      const currentHeight = content.getBoundingClientRect().height
+
+    const ro = new ResizeObserver((entries) => {
+      const entry = entries[0]
+      if (!entry) return
+      const currentHeight = entry.contentRect.height
       const growth = currentHeight - prevHeight
       // Detect the 0 → N transition: OPFS hydration (or the WS onConnect
       // history burst) can land after the initial mount-time settle window
-      // has expired. In that case the RO fires against an empty baseline,
-      // the pin-check passes but `behavior: 'smooth'` scrolls visibly
-      // through a suddenly-tall list. Re-arm the instant-scroll window
-      // from *this* moment so the first real content arrival reads as
-      // "already at the bottom" regardless of whether hydration came from
-      // OPFS or the network.
+      // has expired. In that case the RO fires against an empty baseline;
+      // a `behavior: 'smooth'` scroll would animate visibly through a
+      // suddenly-tall list. Re-arm the instant-scroll window so the first
+      // real content arrival reads as "already at the bottom" regardless
+      // of whether hydration came from OPFS or the network.
       const wasEmpty = prevHeight === 0 && currentHeight > 0
       prevHeight = currentHeight
       if (growth <= 0) return
-      if (wasEmpty) {
-        armSettle()
-        scroll.scrollTop = scroll.scrollHeight
-        return
-      }
-      const distanceBefore = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight - growth
-      if (distanceBefore < PIN_THRESHOLD_PX) {
-        scroll.scrollTo({
-          top: scroll.scrollHeight,
-          behavior: isInitialSettle ? 'auto' : 'smooth',
-        })
-      }
+
+      if (rafId !== null) return
+      rafId = requestAnimationFrame(() => {
+        rafId = null
+        if (wasEmpty) {
+          armSettle()
+          sentinel.scrollIntoView({ block: 'end', inline: 'nearest' })
+          return
+        }
+        if (isAtBottomRef.current) {
+          sentinel.scrollIntoView({
+            block: 'end',
+            inline: 'nearest',
+            behavior: isInitialSettle ? 'auto' : 'smooth',
+          })
+        }
+      })
     })
     ro.observe(content)
     return () => {
       if (settleTimer) clearTimeout(settleTimer)
+      if (rafId !== null) cancelAnimationFrame(rafId)
       ro.disconnect()
     }
   }, [])
 
   const scrollToBottom = useCallback(() => {
-    const el = scrollEl.current
-    if (el) {
-      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+    const sentinel = sentinelEl.current
+    if (sentinel) {
+      sentinel.scrollIntoView({ block: 'end', inline: 'nearest', behavior: 'smooth' })
+      isAtBottomRef.current = true
       setIsAtBottom(true)
     }
   }, [])
@@ -158,7 +191,11 @@ function useAutoScroll() {
     contentEl.current = node
   }, [])
 
-  return { scrollRef, contentRef, isAtBottom, scrollToBottom }
+  const sentinelRef: RefCallback<HTMLDivElement> = useCallback((node) => {
+    sentinelEl.current = node
+  }, [])
+
+  return { scrollRef, contentRef, sentinelRef, isAtBottom, scrollToBottom }
 }
 
 // ---------------------------------------------------------------------------
@@ -185,38 +222,17 @@ export const ConversationContent = ({
   children,
   ...props
 }: ConversationContentProps) => {
-  const { scrollRef, contentRef } = useAutoScrollContext()
-  const scrollNode = useRef<HTMLDivElement | null>(null)
-
-  // Wire up the ref callback and keep a local ref for the layout effect
-  const mergedScrollRef: RefCallback<HTMLDivElement> = useCallback(
-    (node) => {
-      scrollNode.current = node
-      scrollRef(node)
-    },
-    [scrollRef],
-  )
-
-  // Scroll to bottom before first paint to avoid a flash of content at
-  // scrollTop=0. GUARD: only write when we're actually starting from 0 —
-  // an Android WebView / React concurrent-commit edge case re-invoked
-  // this effect roughly every 430ms on a persisted fiber+DOM, and each
-  // invocation wrote scrollTop=scrollHeight-clientHeight, fighting the
-  // user's drag. Confirmed via CDP monitor: scrollTop writes from this
-  // exact code path (stack: conversation.tsx:<line>) every ~430ms for
-  // minutes on a stable DOM node. The guard makes the write a no-op on
-  // every re-fire while still handling the genuine first-mount case.
-  useLayoutEffect(() => {
-    const el = scrollNode.current
-    if (el && el.scrollTop === 0) {
-      el.scrollTop = el.scrollHeight - el.clientHeight
-    }
-  }, [])
+  const { scrollRef, contentRef, sentinelRef } = useAutoScrollContext()
 
   return (
-    <div ref={mergedScrollRef} style={{ height: '100%', width: '100%', overflowY: 'auto' }}>
+    <div ref={scrollRef} style={{ height: '100%', width: '100%', overflowY: 'auto' }}>
       <div ref={contentRef} className={cn('flex flex-col gap-8 p-4', className)} {...props}>
         {children}
+        {/* Zero-height sentinel for the IntersectionObserver + target for
+         * `scrollIntoView({block:'end'})`. Sits inside the content container
+         * so it participates in the flex-column layout but contributes no
+         * height. `aria-hidden` so SR users don't see a stray landmark. */}
+        <div ref={sentinelRef} aria-hidden="true" style={{ height: 0 }} />
       </div>
     </div>
   )
