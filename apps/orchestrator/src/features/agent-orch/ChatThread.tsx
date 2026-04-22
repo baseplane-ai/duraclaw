@@ -21,7 +21,7 @@ import {
   ToolOutput,
   useAutoScrollContext,
 } from '@duraclaw/ai-elements'
-import { useVirtualizer, type VirtualItem } from '@tanstack/react-virtual'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import {
   BrainIcon,
   CheckIcon,
@@ -31,7 +31,15 @@ import {
   FileIcon,
   HistoryIcon,
 } from 'lucide-react'
-import { memo, type ReactNode, useCallback, useMemo, useRef, useState } from 'react'
+import {
+  memo,
+  type ReactNode,
+  useCallback,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { Badge } from '~/components/ui/badge'
 import {
   Sheet,
@@ -853,10 +861,6 @@ const ChatMessageRow = memo(
 // -------------------------------------------------------------------------
 
 interface VirtualizedMessageListProps {
-  // sessionId keys the measurements cache so virtualizer row heights
-  // survive component remount (tab switch, route remount). See
-  // `measurementsCacheBySession` below.
-  sessionId?: string
   messages: SessionMessage[]
   readOnly?: boolean
   onResolveGate: (gateId: string, response: GateResponse) => Promise<unknown>
@@ -865,45 +869,13 @@ interface VirtualizedMessageListProps {
   onBranchNavigate?: (messageId: string, direction: 'prev' | 'next') => void
 }
 
-// -------------------------------------------------------------------------
-// Per-session virtualizer measurements cache.
-//
-// Without this, every remount of `VirtualizedMessageList` starts with all
-// rows at the 160px `estimateSize` → paint #1 lands rows at estimate-based
-// `translateY(item.start)` → `measureElement` fires as rows hit the DOM →
-// real heights replace the estimates → paint #2 lands rows at their real
-// positions. The delta between paints is the "fast text shift like a
-// rerender with slightly different positions" jitter visible on every
-// tab-switch / route remount.
-//
-// `initialMeasurementsCache` (exposed by @tanstack/react-virtual v3.10+)
-// lets us seed the virtualizer with the prior mount's measurements so
-// paint #1 is already at real positions. `onChange` keeps the cache
-// current so the next remount benefits from the latest heights.
-//
-// Keys are stable message ids (see `getItemKey`), so rewind / branch-
-// navigate that drops ids just leaves stale cache entries that the
-// virtualizer ignores on next measure.
-//
-// Capped at MAX_CACHED_SESSIONS via FIFO eviction (Map iteration is
-// insertion order) so the cache doesn't grow unbounded across a long
-// lived tab.
-// -------------------------------------------------------------------------
-const MAX_CACHED_SESSIONS = 32
-const measurementsCacheBySession = new Map<string, Array<VirtualItem>>()
-
-function setSessionMeasurementsCache(sessionId: string, cache: Array<VirtualItem>) {
-  if (measurementsCacheBySession.has(sessionId)) {
-    measurementsCacheBySession.delete(sessionId)
-  } else if (measurementsCacheBySession.size >= MAX_CACHED_SESSIONS) {
-    const oldest = measurementsCacheBySession.keys().next().value
-    if (oldest !== undefined) measurementsCacheBySession.delete(oldest)
-  }
-  measurementsCacheBySession.set(sessionId, cache)
-}
+// Hard cap on the settle window — if the virtualizer hasn't converged in
+// this many ms we reveal anyway so a pathological thread doesn't stay
+// invisible forever. 100ms is well above any realistic settle on
+// modern hardware (typically ~16–32ms = 1–2 rAFs).
+const SETTLE_FALLBACK_MS = 100
 
 function VirtualizedMessageList({
-  sessionId,
   messages,
   readOnly,
   onResolveGate,
@@ -934,11 +906,10 @@ function VirtualizedMessageList({
     count: messages.length,
     getScrollElement: () => scrollElRef.current,
     // 160px is a ballpark "short text turn" estimate. measureElement
-    // replaces it with the real height as each row paints. On first
-    // mount of a given session this still runs, but on every subsequent
-    // remount `initialMeasurementsCache` below seeds real heights from
-    // the prior mount so paint #1 lands rows at their real positions —
-    // no visible estimate→measurement shift.
+    // replaces it with the real height as each row paints. The
+    // visibility gate below hides the list until `scrollHeight` is
+    // stable, so the estimate→measurement swap is invisible to the
+    // user.
     estimateSize: () => 160,
     overscan: 6,
     getItemKey,
@@ -948,27 +919,75 @@ function VirtualizedMessageList({
     paddingEnd: 16,
     // 32px inter-row gap (previously `gap-8` on <ConversationContent>).
     gap: 32,
-    // Seed from the prior mount's measurements (if any) to kill the
-    // remount jitter. Re-read from the Map on every render is cheap;
-    // the virtualizer only consults `initialMeasurementsCache` on
-    // instance construction.
-    initialMeasurementsCache: sessionId ? measurementsCacheBySession.get(sessionId) : undefined,
-    // Persist the latest measurements for the next remount. `onChange`
-    // fires on every state transition; Map.set is O(1) and the array
-    // reference only changes when the virtualizer re-measures, so this
-    // is effectively free.
-    onChange: (instance) => {
-      if (sessionId) {
-        setSessionMeasurementsCache(sessionId, instance.measurementsCache)
-      }
-    },
   })
 
   const virtualItems = virtualizer.getVirtualItems()
   const totalSize = virtualizer.getTotalSize()
 
+  // --------------------------------------------------------------------
+  // Settle gate — hide the list until the virtualizer's `scrollHeight`
+  // is stable for two consecutive rAFs, then reveal.
+  //
+  // The virtualizer's estimate→measurement cycle (rows render at 160px
+  // estimates on paint #1, `measureElement` fires, real heights replace
+  // the estimates, rows reposition on paint #2) is the source of the
+  // visible "fast text shift like a rerender with slightly different
+  // positions" jitter on every mount — including the first mount after
+  // a hard reload, which no in-memory cache can fix.
+  //
+  // `visibility: hidden` still lets the virtualizer mount rows and
+  // `measureElement` fire; only paint is suppressed, so the settle
+  // completes while the user sees nothing, and reveal shows the final
+  // layout directly.
+  //
+  // Mount-only effect: after settle we NEVER re-hide. Streaming deltas,
+  // new turns, branch navigation all proceed visibly — otherwise every
+  // `partial_assistant` tick would flicker the whole chat.
+  // --------------------------------------------------------------------
+  const [isSettled, setIsSettled] = useState(false)
+  useLayoutEffect(() => {
+    const el = scrollElRef.current
+    if (!el) {
+      // No scroll element on first layout effect — reveal immediately so
+      // we don't lock the empty state invisible.
+      setIsSettled(true)
+      return
+    }
+    let lastHeight = 0
+    let stableFrames = 0
+    let rafId = 0
+    const tick = () => {
+      const h = el.scrollHeight
+      if (h > 0 && h === lastHeight) {
+        stableFrames += 1
+        if (stableFrames >= 2) {
+          setIsSettled(true)
+          return
+        }
+      } else {
+        stableFrames = 0
+        lastHeight = h
+      }
+      rafId = requestAnimationFrame(tick)
+    }
+    rafId = requestAnimationFrame(tick)
+    const timeoutId = window.setTimeout(() => setIsSettled(true), SETTLE_FALLBACK_MS)
+    return () => {
+      if (rafId) cancelAnimationFrame(rafId)
+      window.clearTimeout(timeoutId)
+    }
+  }, [])
+
   return (
-    <div ref={setScrollEl} style={{ height: '100%', width: '100%', overflowY: 'auto' }}>
+    <div
+      ref={setScrollEl}
+      style={{
+        height: '100%',
+        width: '100%',
+        overflowY: 'auto',
+        visibility: isSettled ? undefined : 'hidden',
+      }}
+    >
       <div
         ref={contentRef}
         className="[&_pre]:max-w-full [&_pre]:overflow-x-auto"
@@ -1080,7 +1099,6 @@ export function ChatThread({
     >
       <Conversation className="min-h-0 flex-1">
         <VirtualizedMessageList
-          sessionId={sessionId}
           messages={messages}
           readOnly={readOnly}
           onResolveGate={onResolveGate}
