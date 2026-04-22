@@ -16,6 +16,8 @@ import { Button } from '~/components/ui/button'
 import { Input } from '~/components/ui/input'
 import { ScrollArea } from '~/components/ui/scroll-area'
 import type { SessionRecord } from '~/db/session-record'
+import { deriveStatus } from '~/lib/derive-status'
+import { useNow } from '~/lib/use-now'
 import { cn } from '~/lib/utils'
 import { useWorkspaceStore } from '~/stores/workspace'
 import { ActiveStrip } from './ActiveStrip'
@@ -77,6 +79,7 @@ export function SessionSidebar({
   const [dateRange, setDateRange] = useState<DateRange>('this-week')
   const [showOlder, setShowOlder] = useState(false)
   const workspaceProjects = useWorkspaceStore((s) => s.workspaceProjects)
+  const nowTs = useNow()
 
   const filteredSessions = sessions.filter((s) => {
     if (workspaceProjects && !workspaceProjects.includes(s.project)) return false
@@ -91,8 +94,11 @@ export function SessionSidebar({
       )
         return false
     }
-    if (statusFilter === 'running') return s.status === 'running'
-    if (statusFilter === 'completed') return s.status === 'idle'
+    // GH#50: filter on TTL-derived status so stuck `running` rows don't
+    // incorrectly populate the "Running" chip.
+    const derived = deriveStatus(s, nowTs)
+    if (statusFilter === 'running') return derived === 'running'
+    if (statusFilter === 'completed') return derived === 'idle'
     return true
   })
 
@@ -168,7 +174,9 @@ export function SessionSidebar({
               <span
                 className={cn(
                   'size-2 rounded-full',
-                  session.status === 'running' ? 'bg-green-500' : 'bg-gray-400',
+                  // GH#50: TTL-derived status so stuck `running` rows
+                  // fade to gray when the runner stops emitting.
+                  deriveStatus(session, nowTs) === 'running' ? 'bg-green-500' : 'bg-gray-400',
                 )}
               />
             </button>

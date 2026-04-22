@@ -12,7 +12,9 @@ import {
 } from '~/components/ui/command'
 import { useSearch } from '~/context/search-provider'
 import { useTheme } from '~/context/theme-provider'
+import { deriveStatus } from '~/lib/derive-status'
 import { apiUrl } from '~/lib/platform'
+import { useNow } from '~/lib/use-now'
 import { cn } from '~/lib/utils'
 import { sidebarData } from './layout/data/sidebar-data'
 import { ScrollArea } from './ui/scroll-area'
@@ -28,7 +30,10 @@ export function CommandMenu() {
       title?: string | null
       project: string
       status: string
-      updated_at: string
+      // Drizzle returns camelCase keys from `.select().from(agentSessions)`.
+      // GH#50: `lastEventTs` is the epoch-ms TTL anchor for client-side
+      // `deriveStatus()`.
+      lastEventTs?: number | null
     }>
   >([])
   const [projects, setProjects] = useState<Array<{ name: string; branch: string; dirty: boolean }>>(
@@ -59,6 +64,8 @@ export function CommandMenu() {
       .catch(() => {})
   }, [open])
 
+  const nowTs = useNow()
+
   const runCommand = React.useCallback(
     (command: () => unknown) => {
       setOpen(false)
@@ -75,28 +82,36 @@ export function CommandMenu() {
           <CommandEmpty>No results found.</CommandEmpty>
           {sessions.length > 0 && (
             <CommandGroup heading="Recent Sessions">
-              {sessions.slice(0, 5).map((s) => (
-                <CommandItem
-                  key={s.id}
-                  value={`session ${s.title || s.id} ${s.project}`}
-                  onSelect={() =>
-                    runCommand(() => navigate({ to: '/', search: { session: s.id } }))
-                  }
-                >
-                  <span
-                    className={cn(
-                      'mr-2 size-2 rounded-full',
-                      s.status === 'running'
-                        ? 'bg-green-500'
-                        : s.status === 'waiting_gate'
-                          ? 'bg-yellow-500'
-                          : 'border border-gray-400',
-                    )}
-                  />
-                  <span className="flex-1 truncate">{s.title || s.id.slice(0, 12)}</span>
-                  <span className="ml-2 text-xs text-muted-foreground">{s.project}</span>
-                </CommandItem>
-              ))}
+              {sessions.slice(0, 5).map((s) => {
+                // GH#50: TTL-derived status — falls through to `s.status`
+                // for rows without a `last_event_ts` (older deployments).
+                const derived = deriveStatus(
+                  { status: s.status, lastEventTs: s.lastEventTs ?? null },
+                  nowTs,
+                )
+                return (
+                  <CommandItem
+                    key={s.id}
+                    value={`session ${s.title || s.id} ${s.project}`}
+                    onSelect={() =>
+                      runCommand(() => navigate({ to: '/', search: { session: s.id } }))
+                    }
+                  >
+                    <span
+                      className={cn(
+                        'mr-2 size-2 rounded-full',
+                        derived === 'running'
+                          ? 'bg-green-500'
+                          : derived === 'waiting_gate'
+                            ? 'bg-yellow-500'
+                            : 'border border-gray-400',
+                      )}
+                    />
+                    <span className="flex-1 truncate">{s.title || s.id.slice(0, 12)}</span>
+                    <span className="ml-2 text-xs text-muted-foreground">{s.project}</span>
+                  </CommandItem>
+                )
+              })}
             </CommandGroup>
           )}
           {projects.length > 0 && (

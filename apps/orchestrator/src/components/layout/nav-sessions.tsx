@@ -45,8 +45,10 @@ import { userPreferencesCollection } from '~/db/user-preferences-collection'
 import { getPreviewText, StatusDot } from '~/features/agent-orch/session-utils'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { newDraftTabId, useTabSync } from '~/hooks/use-tab-sync'
+import { deriveStatus } from '~/lib/derive-status'
 import { apiUrl } from '~/lib/platform'
 import type { PrInfo, ProjectInfo } from '~/lib/types'
+import { useNow } from '~/lib/use-now'
 import { cn } from '~/lib/utils'
 
 /** ProjectInfo extended with the `hidden` flag added by the API route */
@@ -231,6 +233,7 @@ export function NavSessions() {
   const location = useLocation()
   const navigate = useNavigate()
   const { openTab } = useTabSync()
+  const nowTs = useNow()
 
   // Synced collections: projects + user preferences (GH#32 phase p4).
   // Replaces the old direct GET /api/gateway/projects/all client fetch —
@@ -412,7 +415,10 @@ export function NavSessions() {
                   tooltip={`${getDisplayName(session)} — ${session.project}`}
                   onClick={() => handleSelect(session)}
                 >
-                  <StatusDot status={session.status || 'idle'} numTurns={session.numTurns ?? 0} />
+                  <StatusDot
+                    status={deriveStatus(session, nowTs)}
+                    numTurns={session.numTurns ?? 0}
+                  />
                   <div className="flex min-w-0 flex-col">
                     <span className="truncate text-sm leading-tight">
                       {getDisplayName(session)}
@@ -571,6 +577,7 @@ function WorktreeNode({
   const hasSessions = sessions.length > 0
   const isHidden = project.hidden === true
   const [maxVisible, setMaxVisible] = useState(5)
+  const nowTs = useNow()
 
   // Partition sessions into kataIssue chain groups and orphan rows.
   const chainGroups = new Map<number, SessionRecord[]>()
@@ -662,7 +669,10 @@ function WorktreeNode({
                     isActive={activeSessionId === session.id}
                     onClick={() => onSelect(session)}
                   >
-                    <StatusDot status={session.status || 'idle'} numTurns={session.numTurns ?? 0} />
+                    <StatusDot
+                      status={deriveStatus(session, nowTs)}
+                      numTurns={session.numTurns ?? 0}
+                    />
                     <span className="truncate">{getDisplayName(session)}</span>
                   </SidebarMenuSubButton>
                 </SessionContextMenu>
@@ -706,22 +716,25 @@ function isLiveStatus(status: string | null | undefined): boolean {
 }
 
 /** "Completed" — finished a turn and no longer live. */
-function isCompletedSession(session: SessionRecord): boolean {
+function isCompletedSession(session: SessionRecord, derivedStatus: string): boolean {
   // Backend parks finished sessions as `idle` (FilterChipBar: 'completed'
   // → s.status === 'idle'). Require at least one turn so fresh drafts
-  // don't light up the dot.
-  const s = session.status as string
-  if (s === 'completed') return true
-  return s === 'idle' && (session.numTurns ?? 0) > 0
+  // don't light up the dot. GH#50: read from TTL-derived status so a
+  // stuck `running` row lights the "completed" dot once it falls stale.
+  if (derivedStatus === 'completed') return true
+  return derivedStatus === 'idle' && (session.numTurns ?? 0) > 0
 }
 
 export function PipelineDots({ sessions }: { sessions: SessionRecord[] }) {
+  const nowTs = useNow()
   const parts = CHAIN_STAGES.map((stage) => {
     const inStage = sessions.filter((s) => (s.kataMode ? stage.match(s.kataMode) : false))
-    if (inStage.some((s) => isLiveStatus(s.status))) {
+    // GH#50: derive TTL-aware status once per row.
+    const inStageDerived = inStage.map((s) => ({ session: s, status: deriveStatus(s, nowTs) }))
+    if (inStageDerived.some(({ status }) => isLiveStatus(status))) {
       return { char: '*', className: 'text-blue-400' }
     }
-    if (inStage.some((s) => isCompletedSession(s))) {
+    if (inStageDerived.some(({ session, status }) => isCompletedSession(session, status))) {
       return { char: '\u25CF', className: 'text-foreground' }
     }
     return { char: 'o', className: 'text-muted-foreground' }
@@ -761,6 +774,7 @@ function ChainNode({
   const hasActive = sessions.some((s) => s.id === activeSessionId)
   const sorted = [...sessions].sort(byActivity)
   const title = sorted[0]?.title?.trim() || ''
+  const nowTs = useNow()
 
   const handleDoubleClick = useCallback(
     (e: React.MouseEvent) => {
@@ -794,7 +808,10 @@ function ChainNode({
                     onClick={() => onSelect(session)}
                     title={session.id}
                   >
-                    <StatusDot status={session.status || 'idle'} numTurns={session.numTurns ?? 0} />
+                    <StatusDot
+                      status={deriveStatus(session, nowTs)}
+                      numTurns={session.numTurns ?? 0}
+                    />
                     <span className="truncate">{session.kataMode || getDisplayName(session)}</span>
                   </SidebarMenuSubButton>
                 </SessionContextMenu>
@@ -828,6 +845,7 @@ function OrphanProjectGroup({
   const [maxVisible, setMaxVisible] = useState(5)
   const displayed = sessions.slice(0, maxVisible)
   const hasMore = sessions.length > maxVisible
+  const nowTs = useNow()
 
   return (
     <Collapsible
@@ -853,7 +871,10 @@ function OrphanProjectGroup({
                     isActive={activeSessionId === session.id}
                     onClick={() => onSelect(session)}
                   >
-                    <StatusDot status={session.status || 'idle'} numTurns={session.numTurns ?? 0} />
+                    <StatusDot
+                      status={deriveStatus(session, nowTs)}
+                      numTurns={session.numTurns ?? 0}
+                    />
                     <span className="truncate">{getDisplayName(session)}</span>
                   </SidebarMenuSubButton>
                 </SessionContextMenu>

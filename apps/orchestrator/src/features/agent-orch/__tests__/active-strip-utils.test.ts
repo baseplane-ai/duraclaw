@@ -16,40 +16,50 @@ function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
   }
 }
 
+// GH#50: `isQualifyingSession` now takes the TTL-derived status as its
+// second argument (caller threads in `deriveStatus(session, nowTs)`).
 describe('isQualifyingSession', () => {
   it('returns true for running sessions', () => {
-    expect(isQualifyingSession(makeSession({ status: 'running' }))).toBe(true)
+    expect(isQualifyingSession(makeSession({ status: 'running' }), 'running')).toBe(true)
   })
 
   it('returns true for waiting_input sessions', () => {
-    expect(isQualifyingSession(makeSession({ status: 'waiting_input' }))).toBe(true)
+    expect(isQualifyingSession(makeSession({ status: 'waiting_input' }), 'waiting_input')).toBe(
+      true,
+    )
   })
 
   it('returns true for waiting_gate sessions', () => {
-    expect(isQualifyingSession(makeSession({ status: 'waiting_gate' }))).toBe(true)
+    expect(isQualifyingSession(makeSession({ status: 'waiting_gate' }), 'waiting_gate')).toBe(true)
   })
 
   it('returns true for waiting_permission sessions', () => {
-    expect(isQualifyingSession(makeSession({ status: 'waiting_permission' }))).toBe(true)
+    expect(
+      isQualifyingSession(makeSession({ status: 'waiting_permission' }), 'waiting_permission'),
+    ).toBe(true)
   })
 
   it('returns true for idle sessions updated within 2 hours', () => {
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString()
-    expect(isQualifyingSession(makeSession({ status: 'idle', updatedAt: oneHourAgo }))).toBe(true)
+    expect(
+      isQualifyingSession(makeSession({ status: 'idle', updatedAt: oneHourAgo }), 'idle'),
+    ).toBe(true)
   })
 
   it('returns false for idle sessions updated more than 2 hours ago', () => {
     const threeHoursAgo = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString()
-    expect(isQualifyingSession(makeSession({ status: 'idle', updatedAt: threeHoursAgo }))).toBe(
+    expect(
+      isQualifyingSession(makeSession({ status: 'idle', updatedAt: threeHoursAgo }), 'idle'),
+    ).toBe(false)
+  })
+
+  it('returns false for completed sessions', () => {
+    expect(isQualifyingSession(makeSession({ status: 'completed' as any }), 'completed')).toBe(
       false,
     )
   })
 
-  it('returns false for completed sessions', () => {
-    expect(isQualifyingSession(makeSession({ status: 'completed' as any }))).toBe(false)
-  })
-
   it('returns false for failed sessions', () => {
-    expect(isQualifyingSession(makeSession({ status: 'failed' }))).toBe(false)
+    expect(isQualifyingSession(makeSession({ status: 'failed' }), 'failed')).toBe(false)
   })
 })

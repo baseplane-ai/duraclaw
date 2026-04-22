@@ -12,7 +12,9 @@ import { Badge } from '~/components/ui/badge'
 import { useSessionLocalState } from '~/db/session-local-collection'
 import type { SessionRecord } from '~/db/session-record'
 import { useSession } from '~/hooks/use-sessions-collection'
+import { deriveStatus } from '~/lib/derive-status'
 import { deriveDisplayStateFromStatus } from '~/lib/display-state'
+import { useNow } from '~/lib/use-now'
 import { cn } from '~/lib/utils'
 import { useWorkspaceStore } from '~/stores/workspace'
 import { ActiveStrip } from './ActiveStrip'
@@ -90,9 +92,11 @@ function SwipeableCard({
 
   const liveSession = useSession(session.id)
   const local = useSessionLocalState(session.id)
+  const nowTs = useNow()
   const numTurns = liveSession?.numTurns ?? session.numTurns ?? 0
   const isLive = local?.wsReadyState === 1
-  const rawStatus = liveSession?.status ?? session.status ?? 'idle'
+  // GH#50: derive via TTL predicate — stuck `running` degrades to `idle`.
+  const rawStatus = liveSession ? deriveStatus(liveSession, nowTs) : deriveStatus(session, nowTs)
   const display = deriveDisplayStateFromStatus(rawStatus, local?.wsReadyState ?? 3)
   const status = display.status !== 'unknown' ? display.status : rawStatus
   const displayName = session.title || getPreviewText(session) || session.id.slice(0, 8)
@@ -151,9 +155,11 @@ function SwipeableCard({
 function OlderSessionRow({ session, onClick }: { session: SessionRecord; onClick: () => void }) {
   const liveSession = useSession(session.id)
   const local = useSessionLocalState(session.id)
+  const nowTs = useNow()
   const numTurns = liveSession?.numTurns ?? session.numTurns ?? 0
   const isLive = local?.wsReadyState === 1
-  const rawStatus = liveSession?.status ?? session.status ?? 'idle'
+  // GH#50: derive via TTL predicate.
+  const rawStatus = liveSession ? deriveStatus(liveSession, nowTs) : deriveStatus(session, nowTs)
   const display = deriveDisplayStateFromStatus(rawStatus, local?.wsReadyState ?? 3)
   const status = display.status !== 'unknown' ? display.status : rawStatus
   return (
@@ -187,12 +193,17 @@ export function SessionCardList({
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [dateRange, setDateRange] = useState<DateRange>('this-week')
   const [showOlder, setShowOlder] = useState(false)
+  const nowTs = useNow()
 
   const filteredSessions = sessions.filter((s) => {
     if (workspaceProjects && !workspaceProjects.includes(s.project)) return false
     if (s.archived) return false
-    if (statusFilter === 'running') return s.status === 'running'
-    if (statusFilter === 'completed') return s.status === 'idle'
+    // GH#50: filter on TTL-derived status so stuck `running` rows don't
+    // incorrectly populate the "Running" chip. The user-visible behaviour
+    // matches the card render above.
+    const derived = deriveStatus(s, nowTs)
+    if (statusFilter === 'running') return derived === 'running'
+    if (statusFilter === 'completed') return derived === 'idle'
     return true
   })
 

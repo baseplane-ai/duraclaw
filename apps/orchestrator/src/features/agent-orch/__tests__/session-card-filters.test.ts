@@ -136,7 +136,7 @@ describe('active strip + filter interaction', () => {
       updatedAt: new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString(),
     })
     // Running always qualifies for strip
-    expect(isQualifyingSession(oldRunning)).toBe(true)
+    expect(isQualifyingSession(oldRunning, 'running')).toBe(true)
     // But by creation date, it falls outside "this-week"
     const { older } = getRecentAndOlder([oldRunning], 'this-week')
     expect(older).toHaveLength(1)
@@ -148,7 +148,7 @@ describe('active strip + filter interaction', () => {
       createdAt: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString(),
       updatedAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
     })
-    expect(isQualifyingSession(recentIdleOldCreation)).toBe(true)
+    expect(isQualifyingSession(recentIdleOldCreation, 'idle')).toBe(true)
     // But by creation date, it's old
     const { older } = getRecentAndOlder([recentIdleOldCreation], 'this-week')
     expect(older).toHaveLength(1)

@@ -219,6 +219,27 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   private lastSyncedStatus: SessionStatus | null = null
   private lastSyncedError: string | null = null
 
+  /**
+   * GH#50: epoch-ms of the last GatewayEvent received on this DO. Bumped
+   * synchronously in `handleGatewayEvent` (and by the legacy-drop branch
+   * in `onMessage`) before any other event handling — this is the
+   * runner-liveness signal the client TTL predicate reads via the
+   * `agent_sessions.last_event_ts` D1 column. The in-memory value is
+   * pushed to D1 by `flushLastEventTsToD1()` either immediately
+   * (lifecycle transitions) or after a 10s debounce (streaming bursts).
+   */
+  private lastEventTs = 0
+  private lastEventFlushTimer: ReturnType<typeof setTimeout> | null = null
+  private readonly LAST_EVENT_FLUSH_DEBOUNCE_MS = 10_000
+
+  /**
+   * GH#50 B9: legacy-event drop log dedupe set. Pre-P3 in-flight runners
+   * may continue to send `heartbeat` / `session_state_changed` frames
+   * during the deploy window; we want one warn line per type per DO
+   * instance, then silent drop.
+   */
+  private loggedLegacyEventTypes = new Set<string>()
+
   // ── Lifecycle ──────────────────────────────────────────────────
 
   async onStart() {
@@ -686,6 +707,11 @@ export class SessionDO extends Agent<Env, SessionMeta> {
           this.logError('onClose.deleteKv', err)
         }
 
+        // GH#50: gateway WS drop is itself a lifecycle transition — flush
+        // so the client picks up the last-known liveness marker before the
+        // (potentially long) recovery path completes.
+        void this.flushLastEventTsToD1()
+
         // If session was active, the connection dropped unexpectedly. Ask the
         // gateway for the runner's live state before running the local recovery
         // path — if the runner is still alive, its DialBackClient will reconnect
@@ -768,12 +794,13 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     const result = await getSessionStatus(gatewayUrl, this.env.CC_GATEWAY_SECRET, sessionId, 5_000)
 
     if (result.kind === 'state') {
-      if (result.body.state === 'running') {
-        console.log(`[SessionDO:${this.ctx.id}] WS dropped, runner alive — skipping recovery`)
-        return
-      }
+      // GH#50 B6: trust the client TTL predicate over the gateway's
+      // optimistic `state === 'running'` report. The DO must run recovery
+      // unconditionally when the WS drops so a stuck runner doesn't keep
+      // the row in `running` forever — the client's deriveStatus() will
+      // mark it idle on its own once `last_event_ts` ages out of TTL.
       console.log(
-        `[SessionDO:${this.ctx.id}] WS dropped, runner terminal (${result.body.state}) — running recovery`,
+        `[SessionDO:${this.ctx.id}] WS dropped, gateway reports state=${result.body.state} — running recovery`,
       )
       await this.recoverFromDroppedConnection()
       return
@@ -974,6 +1001,9 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       active_callback_token: undefined,
     })
     this.syncStatusToD1(new Date().toISOString())
+    // GH#50: recovery completed — flush so client TTL has the final
+    // liveness marker for the now-idle row.
+    void this.flushLastEventTsToD1()
 
     // Notify connected clients
     this.broadcastToClients(
@@ -1595,6 +1625,65 @@ export class SessionDO extends Agent<Env, SessionMeta> {
         }
       })()
     }, 5000)
+  }
+
+  /**
+   * GH#50: bump in-memory `lastEventTs` to now and arm the debounced
+   * flush. Called from the entry to `handleGatewayEvent` (B1) so every
+   * event — including the legacy `heartbeat` / `session_state_changed`
+   * frames dropped by B9 — refreshes liveness. The debounce ensures
+   * a 200-event burst yields at most one D1 write; lifecycle handlers
+   * call `flushLastEventTsToD1()` directly to bypass the debounce on
+   * meaningful state transitions.
+   */
+  private bumpLastEventTs() {
+    this.lastEventTs = Date.now()
+    if (this.lastEventFlushTimer) return
+    this.lastEventFlushTimer = setTimeout(() => {
+      this.lastEventFlushTimer = null
+      void this.flushLastEventTsToD1()
+    }, this.LAST_EVENT_FLUSH_DEBOUNCE_MS)
+  }
+
+  /**
+   * GH#50: write the current in-memory `lastEventTs` to D1 and fan out
+   * a synced-collection delta so client `agent_sessions` rows pick up
+   * the new TTL marker. Bypasses the debounce timer if armed (clears it
+   * on entry). No-op if no event has ever been observed (lastEventTs ===
+   * 0) — protects pre-flush hydrate paths from writing 0.
+   */
+  private async flushLastEventTsToD1(): Promise<void> {
+    if (this.lastEventFlushTimer) {
+      clearTimeout(this.lastEventFlushTimer)
+      this.lastEventFlushTimer = null
+    }
+    if (this.lastEventTs === 0) return
+    try {
+      const sessionId = this.ctx.id.toString()
+      await this.d1
+        .update(agentSessions)
+        .set({ lastEventTs: this.lastEventTs })
+        .where(eq(agentSessions.id, sessionId))
+      await broadcastSessionRow(this.env, this.ctx, sessionId, 'update')
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Failed to flush last_event_ts to D1:`, err)
+    }
+  }
+
+  /**
+   * GH#50 B9: tolerant log-once-then-drop for legacy event types
+   * (`heartbeat`, `session_state_changed`) emitted by pre-P3 runners
+   * during the rollout window. Liveness bump (B1) runs BEFORE this drop
+   * so the legacy frame still refreshes the TTL — clients with P2
+   * shipped never see a flap.
+   */
+  private handleLegacyEvent(type: string, sessionId: string | null) {
+    if (!this.loggedLegacyEventTypes.has(type)) {
+      console.warn(
+        `[session-do] dropped legacy event type=${type} sessionId=${sessionId ?? 'unknown'}`,
+      )
+      this.loggedLegacyEventTypes.add(type)
+    }
   }
 
   /**
@@ -2472,6 +2561,8 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
 
     if (scalarMatched) {
       this.updateState({ status: 'running', gate: null })
+      // GH#50: gate-close lifecycle transition.
+      void this.flushLastEventTsToD1()
     }
     // else: a newer gate is still live in state.gate — leave the scalar
     // alone. The resolved part has already been flipped to
@@ -3199,6 +3290,11 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
   // ── Gateway Event Handling ─────────────────────────────────────
 
   handleGatewayEvent(event: GatewayEvent) {
+    // GH#50 B1: every GatewayEvent refreshes runner-liveness for the client
+    // TTL predicate. Must run BEFORE the legacy-event drop in B9 so a
+    // stray heartbeat from an in-flight pre-P3 runner still bumps liveness
+    // during the rollout window. Pure synchronous in-memory write.
+    this.bumpLastEventTs()
     switch (event.type) {
       case 'session.init':
         this.updateState({ sdk_session_id: event.sdk_session_id, model: event.model })
@@ -3206,6 +3302,9 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         if (event.sdk_session_id) {
           this.syncSdkSessionIdToD1(event.sdk_session_id, new Date().toISOString())
         }
+        // GH#50: lifecycle transition — bypass debounce so new sessions
+        // populate `last_event_ts` immediately for the TTL predicate.
+        void this.flushLastEventTsToD1()
         break
 
       case 'partial_assistant': {
@@ -3387,6 +3486,8 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           },
         })
         this.syncStatusToD1(new Date().toISOString())
+        // GH#50: gate-open lifecycle transition.
+        void this.flushLastEventTsToD1()
         this.dispatchPush(
           {
             title: this.state.project || 'Duraclaw',
@@ -3419,6 +3520,8 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           },
         })
         this.syncStatusToD1(new Date().toISOString())
+        // GH#50: gate-open lifecycle transition.
+        void this.flushLastEventTsToD1()
         ;(async () => {
           try {
             const actionToken = await generateActionToken(
@@ -3554,6 +3657,9 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           const _now = new Date().toISOString()
           this.syncStatusToD1(_now)
           this.syncResultToD1(_now)
+          // GH#50: turn-complete lifecycle transition. Bypass debounce so
+          // the client sidebar resolves to its post-turn `idle` cleanly.
+          void this.flushLastEventTsToD1()
         }
         // Spec #37 B9: the legacy per-turn summary WS frame is retired —
         // numTurns / totalCostUsd / durationMs now reach the client via the
@@ -3611,6 +3717,8 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           active_callback_token: undefined,
         })
         this.syncStatusToD1(new Date().toISOString())
+        // GH#50: terminal lifecycle transition.
+        void this.flushLastEventTsToD1()
         break
       }
 
@@ -3697,6 +3805,8 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         {
           const _now = new Date().toISOString()
           this.syncStatusAndErrorToD1('idle', event.error ?? null, null, _now)
+          // GH#50: error lifecycle transition.
+          void this.flushLastEventTsToD1()
         }
         this.dispatchPush(
           {
@@ -3710,10 +3820,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         )
         break
       }
-
-      // Heartbeat from gateway — just keeps the connection alive, no broadcast needed
-      case 'heartbeat':
-        break
 
       // P3 B4: parse `context_usage` to `ContextUsage`, drain probe resolvers,
       // and update `session_meta.context_usage_json` + cached_at. The original
@@ -3762,8 +3868,20 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
 
       // Events that don't produce message parts — just broadcast raw
       default: {
-        // rewind_result, session_state_changed, rate_limit,
-        // task_started, task_progress, task_notification — broadcast as-is
+        // GH#50 B9: tolerant drop for legacy events from in-flight pre-P3
+        // runners during the rollout window. `bumpLastEventTs()` already
+        // ran at the dispatch entry, so the legacy frame still refreshes
+        // liveness for the client TTL predicate. Log once per DO instance
+        // per event type, then drop silently.
+        const type = (event as { type: string }).type
+        if (type === 'heartbeat' || type === 'session_state_changed') {
+          const sid =
+            (event as { session_id?: string | null }).session_id ?? this.state.session_id ?? null
+          this.handleLegacyEvent(type, sid)
+          break
+        }
+        // rewind_result, rate_limit, task_started, task_progress,
+        // task_notification — broadcast as-is
         this.broadcastGatewayEvent(event)
         break
       }

@@ -11,6 +11,8 @@
 import { Badge } from '~/components/ui/badge'
 import type { SessionRecord } from '~/db/session-record'
 import { formatTimeAgo, StatusDot } from '~/features/agent-orch/session-utils'
+import { deriveStatus } from '~/lib/derive-status'
+import { useNow } from '~/lib/use-now'
 
 interface ChainTimelineRowProps {
   session: SessionRecord
@@ -20,23 +22,24 @@ interface ChainTimelineRowProps {
   prNumber?: number
 }
 
-function deriveStatusLabel(session: SessionRecord): string {
-  // SessionRecord.status is typed as SessionStatus (the 5 live states) but
-  // D1 rows can also carry terminal strings like 'completed' / 'crashed'
-  // that predate or sidestep the narrow type. Widen to string for the
-  // switch below.
-  const s: string = session.status || 'idle'
-  if (s === 'completed') return 'done'
-  if (s === 'crashed') return 'crashed'
-  if (s === 'running') return 'live'
-  if (s.startsWith('waiting')) return 'waiting'
+function deriveStatusLabel(derivedStatus: string): string {
+  // GH#50: derivedStatus is the TTL-aware status (from `deriveStatus(session,
+  // nowTs)`). D1 rows can carry terminal strings like 'completed' /
+  // 'crashed' that predate or sidestep the narrow SessionStatus type, so
+  // widen to string for the switch below.
+  if (derivedStatus === 'completed') return 'done'
+  if (derivedStatus === 'crashed') return 'crashed'
+  if (derivedStatus === 'running') return 'live'
+  if (derivedStatus.startsWith('waiting')) return 'waiting'
   return 'idle'
 }
 
 export function ChainTimelineRow({ session, active, liveText, prNumber }: ChainTimelineRowProps) {
   const ts = session.lastActivity ?? session.createdAt
   const mode = session.kataMode ?? 'session'
-  const statusLabel = deriveStatusLabel(session)
+  const nowTs = useNow()
+  const derivedStatus = deriveStatus(session, nowTs)
+  const statusLabel = deriveStatusLabel(derivedStatus)
   const showPrChip = typeof prNumber === 'number' && session.kataMode === 'implementation'
 
   return (
@@ -46,7 +49,7 @@ export function ChainTimelineRow({ session, active, liveText, prNumber }: ChainT
       }`}
     >
       <div className="flex items-center gap-3">
-        <StatusDot status={session.status || 'idle'} numTurns={session.numTurns ?? 0} />
+        <StatusDot status={derivedStatus} numTurns={session.numTurns ?? 0} />
         <Badge variant="outline" className="font-mono">
           {mode}
         </Badge>

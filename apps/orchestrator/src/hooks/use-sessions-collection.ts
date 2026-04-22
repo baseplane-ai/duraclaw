@@ -69,6 +69,8 @@ function rowToSessionRecord(row: SessionSummary): SessionRecord {
     kataMode: row.kataMode ?? null,
     kataIssue: row.kataIssue ?? null,
     kataPhase: row.kataPhase ?? null,
+    // GH#50: pass through epoch-ms TTL marker for `deriveStatus()`.
+    lastEventTs: row.lastEventTs ?? null,
   }
 }
 

@@ -17,7 +17,6 @@ import type {
   RewindResultEvent,
   SessionInitEvent,
   SessionSource,
-  SessionStateChangedEvent,
   SessionStatus,
   SessionSummary,
   SetModelCommand,
@@ -233,11 +232,6 @@ describe('shared-types: SDK feature expansion (#13)', () => {
       insertions: 5,
       deletions: 2,
     }
-    const stateChanged: GatewayEvent = {
-      type: 'session_state_changed',
-      session_id: 's1',
-      state: 'running',
-    }
     const rateLimit: GatewayEvent = {
       type: 'rate_limit',
       session_id: 's1',
@@ -267,23 +261,10 @@ describe('shared-types: SDK feature expansion (#13)', () => {
 
     expect(ctxUsage.type).toBe('context_usage')
     expect(rewindResult.type).toBe('rewind_result')
-    expect(stateChanged.type).toBe('session_state_changed')
     expect(rateLimit.type).toBe('rate_limit')
     expect(taskStarted.type).toBe('task_started')
     expect(taskProgress.type).toBe('task_progress')
     expect(taskNotification.type).toBe('task_notification')
-  })
-
-  test('SessionStateChangedEvent accepts all valid states', () => {
-    const states = ['idle', 'running', 'requires_action'] as const
-    for (const state of states) {
-      const event: SessionStateChangedEvent = {
-        type: 'session_state_changed',
-        session_id: 's1',
-        state,
-      }
-      expect(event.state).toBe(state)
-    }
   })
 
   test('TaskNotificationEvent accepts all valid statuses', () => {

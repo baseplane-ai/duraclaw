@@ -9,9 +9,11 @@ import { GitBranchIcon } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useSessionLocalState } from '~/db/session-local-collection'
 import { useSession } from '~/hooks/use-sessions-collection'
+import { deriveStatus } from '~/lib/derive-status'
 import { deriveDisplayStateFromStatus } from '~/lib/display-state'
 import { parseJsonField } from '~/lib/json'
 import type { KataSessionState, PrInfo, SessionStatus } from '~/lib/types'
+import { useNow } from '~/lib/use-now'
 import { cn } from '~/lib/utils'
 import type { ContextUsage, WorktreeInfo } from '~/stores/status-bar'
 
@@ -232,10 +234,13 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
   // `status` column (DO-authoritative via messagesCollection fold).
   const session = useSession(sessionId)
   const local = useSessionLocalState(sessionId)
+  const nowTs = useNow()
 
   if (!sessionId) return null
   const readyState = local?.wsReadyState ?? 3
-  const status: SessionStatus = session?.status ?? 'idle'
+  // GH#50: TTL-derived status — overrides stuck `running` rows to `idle`
+  // after >45s of silence from the runner.
+  const status: SessionStatus = session ? deriveStatus(session, nowTs) : 'idle'
   // Force `wsReadyState=1` when deriving the display label so it stays
   // anchored to the session's actual status (Running / Idle / Needs
   // Attention) regardless of WS health. Connection health is communicated
