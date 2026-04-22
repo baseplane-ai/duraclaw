@@ -16,9 +16,10 @@ import {
   useSortable,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
+import { useLiveQuery } from '@tanstack/react-db'
 import { useLocation, useNavigate } from '@tanstack/react-router'
 import { ChevronLeftIcon, ChevronRightIcon, CopyPlusIcon, Layers, PlusIcon, X } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -33,11 +34,11 @@ import {
   SheetHeader,
   SheetTitle,
 } from '~/components/ui/sheet'
-import { useSessionLocalState } from '~/db/session-local-collection'
+import { type SessionLocalState, sessionLocalCollection } from '~/db/session-local-collection'
 import type { SessionRecord } from '~/db/session-record'
 import { getPreviewText, StatusDot } from '~/features/agent-orch/session-utils'
 import { useIsMobile } from '~/hooks/use-mobile'
-import { useSession, useSessionsCollection } from '~/hooks/use-sessions-collection'
+import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { isDraftTabId, type TabEntry, useTabSync } from '~/hooks/use-tab-sync'
 import { deriveDisplayStateFromStatus } from '~/lib/display-state'
 import { cn } from '~/lib/utils'
@@ -94,6 +95,22 @@ export function TabBar({
     }
     return m
   }, [allSessions])
+
+  // Hoist `sessionLocalCollection` + `sessionsCollection` subscriptions to
+  // the parent so N tabs share ONE live query each, not 2N. Perf: previously
+  // every tab called `useSession(id)` + `useSessionLocalState(id)` →
+  // any session/local update re-rendered all N tabs. Now only the affected
+  // tab re-renders (because `ProjectTab` is `memo()`'d with shallow-compare
+  // and gets its slice as a prop).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: localRows } = useLiveQuery(sessionLocalCollection as any)
+  const sessionLocalsMap = useMemo(() => {
+    const m = new Map<string, SessionLocalState>()
+    for (const row of (localRows ?? []) as SessionLocalState[]) {
+      m.set(row.id, row)
+    }
+    return m
+  }, [localRows])
 
   // Chain tabs resolve their title via kataIssue on any session belonging
   // to the chain — build a lookup once per sessions snapshot.
@@ -268,6 +285,7 @@ export function TabBar({
                   key={row.sessionId}
                   sessionId={row.sessionId}
                   session={row.session}
+                  liveLocal={sessionLocalsMap.get(row.sessionId)}
                   draftProject={draftProject}
                   isActive={row.sessionId === activeSessionId}
                   onSelect={() => onSelectSession(row.sessionId)}
@@ -318,6 +336,9 @@ export function TabBar({
             <ProjectTab
               sessionId={activeDragRow.sessionId}
               session={activeDragRow.session}
+              liveLocal={
+                activeDragRow.isChain ? undefined : sessionLocalsMap.get(activeDragRow.sessionId)
+              }
               isChain={activeDragRow.isChain}
               chainIssueNumber={activeDragRow.chainIssueNumber}
               chainTitle={activeDragRow.chainTitle}
@@ -339,6 +360,9 @@ export function TabBar({
 interface ProjectTabProps {
   sessionId: string
   session: SessionRecord | undefined
+  /** Transient WS readyState row for this session (hoisted from parent so
+   *  each tab doesn't open its own `useSessionLocalState` subscription). */
+  liveLocal?: SessionLocalState | undefined
   /** Project for a draft tab (no session row yet). */
   draftProject?: string | undefined
   /** Chain-tab marker — renders as a Layers-icon row with no StatusDot. */
@@ -372,9 +396,10 @@ function SortableProjectTab(props: ProjectTabProps) {
   )
 }
 
-function ProjectTab({
+function ProjectTabInner({
   sessionId,
   session,
+  liveLocal,
   draftProject,
   isChain,
   chainIssueNumber,
@@ -394,15 +419,18 @@ function ProjectTab({
   // with the status bar + sidebar. Chain tabs have no single session, so
   // we skip the session lookup entirely and never render a StatusDot.
   // Spec #37 P2b: status / numTurns come from the D1-mirrored
-  // sessionsCollection row; wsReadyState from the transient local row.
-  const liveSession = useSession(isChain ? null : sessionId)
-  const liveLocal = useSessionLocalState(isChain ? null : sessionId)
+  // sessionsCollection row (= `session` prop, live-synced from the parent's
+  // single `useSessionsCollection` subscription); wsReadyState from the
+  // transient local row (= `liveLocal` prop, hoisted at the parent).
+  // We no longer call `useSession()` / `useSessionLocalState()` here — that
+  // opened 2N live-query subscriptions for N tabs and re-rendered every
+  // tab on any session delta.
   const tabDisplay = !isChain
-    ? deriveDisplayStateFromStatus(liveSession?.status, liveLocal?.wsReadyState ?? 3)
+    ? deriveDisplayStateFromStatus(session?.status, liveLocal?.wsReadyState ?? 3)
     : null
   const tabStatus =
     tabDisplay && tabDisplay.status !== 'unknown' ? tabDisplay.status : (session?.status ?? 'idle')
-  const tabNumTurns = liveSession?.numTurns ?? session?.numTurns ?? 0
+  const tabNumTurns = session?.numTurns ?? 0
 
   useEffect(() => {
     if (isDragging) setMenuOpen(false)
@@ -644,3 +672,11 @@ function ProjectTab({
     </DropdownMenu>
   )
 }
+
+/**
+ * Memoized ProjectTab — shallow-compares props. The parent now passes
+ * `session` + `liveLocal` as stable references from `sessionsMap` /
+ * `sessionLocalsMap`, so a tab only re-renders when its own session row
+ * or its own transient local row actually changes.
+ */
+const ProjectTab = memo(ProjectTabInner)

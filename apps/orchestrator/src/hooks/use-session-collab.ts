@@ -59,6 +59,16 @@ export interface UseSessionCollabResult {
 }
 
 export const TYPING_DEBOUNCE_MS = 2000
+/**
+ * Throttle window for the leading-edge `typing=true` awareness write.
+ * Typing indicators don't need 60fps fidelity — 500ms is long enough
+ * that we don't spam peers with awareness 'change' events on every
+ * keystroke, short enough that the indicator appears to light up
+ * "instantly" when someone starts typing. (First keystroke always
+ * fires; subsequent keystrokes inside the same typing burst are no-ops
+ * at the awareness layer because `typing` is already true.)
+ */
+export const TYPING_LEADING_THROTTLE_MS = 500
 
 export function useSessionCollab(opts: { sessionId: string }): UseSessionCollabResult {
   const { sessionId } = opts
@@ -185,31 +195,70 @@ export function useSessionCollab(opts: { sessionId: string }): UseSessionCollabR
     [provider, ytext],
   )
 
-  // Typing indicator debounce timer. Local-only — a timer per client, not
-  // an awareness field, so hibernation-safe.
-  const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Typing indicator debounce timers. Local-only — timers per client, not
+  // awareness fields, so hibernation-safe.
+  //
+  // Perf: `notifyTyping` runs on every keystroke. We must NOT touch
+  // awareness on every call — each `setLocalStateField` triggers a
+  // y-protocols 'change' event that every local awareness subscriber
+  // (TypingIndicator, PresenceBar, CursorOverlay) re-runs through. We
+  // throttle the leading-edge `typing=true` write to at most once per
+  // TYPING_LEADING_THROTTLE_MS, and (re)schedule a trailing
+  // `typing=false` write TYPING_DEBOUNCE_MS after the last keystroke.
+  // The trailing timer's handle is only reset on the trailing fire or on
+  // unmount — not on every keystroke — so keystrokes that arrive while a
+  // trailing timer is already pending are effectively no-ops.
+  const typingTrailingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const typingTrailingDeadlineRef = useRef<number>(0)
+  const typingLeadingThrottleRef = useRef<number>(0)
 
   const notifyTyping = useCallback(() => {
     if (!provider) return
     const awareness = provider.awareness
-    const cur = awareness.getLocalState() as { typing?: boolean } | null
-    if (!cur?.typing) {
-      awareness.setLocalStateField('typing', true)
+    const now = Date.now()
+
+    // Leading edge — fire `typing=true` at most once per throttle window.
+    // The existing awareness-state check also gates the no-op case where
+    // the trailing timer hasn't elapsed yet.
+    if (now - typingLeadingThrottleRef.current >= TYPING_LEADING_THROTTLE_MS) {
+      const cur = awareness.getLocalState() as { typing?: boolean } | null
+      if (!cur?.typing) {
+        awareness.setLocalStateField('typing', true)
+      }
+      typingLeadingThrottleRef.current = now
     }
-    if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
-    typingTimerRef.current = setTimeout(() => {
-      awareness.setLocalStateField('typing', false)
-      typingTimerRef.current = null
-    }, TYPING_DEBOUNCE_MS)
+
+    // Trailing edge — ensure a `typing=false` fires 2s after the last
+    // keystroke. We DON'T clearTimeout on every keystroke (that's cheap
+    // but still ~thousands of ops/sec for a fast typist). Instead, we
+    // stash the deadline and let a single outstanding timer re-arm itself
+    // if more keystrokes arrived while it was asleep.
+    typingTrailingDeadlineRef.current = now + TYPING_DEBOUNCE_MS
+    if (typingTrailingTimerRef.current === null) {
+      const arm = (delay: number) => {
+        typingTrailingTimerRef.current = setTimeout(() => {
+          const remaining = typingTrailingDeadlineRef.current - Date.now()
+          if (remaining > 0) {
+            // More keystrokes came in while we were asleep — re-arm.
+            arm(remaining)
+            return
+          }
+          awareness.setLocalStateField('typing', false)
+          typingTrailingTimerRef.current = null
+          typingLeadingThrottleRef.current = 0
+        }, delay)
+      }
+      arm(TYPING_DEBOUNCE_MS)
+    }
   }, [provider])
 
   // Clear any pending typing timer on unmount so it doesn't fire against
   // a destroyed awareness instance.
   useEffect(() => {
     return () => {
-      if (typingTimerRef.current) {
-        clearTimeout(typingTimerRef.current)
-        typingTimerRef.current = null
+      if (typingTrailingTimerRef.current) {
+        clearTimeout(typingTrailingTimerRef.current)
+        typingTrailingTimerRef.current = null
       }
     }
   }, [])

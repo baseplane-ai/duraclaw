@@ -363,14 +363,27 @@ function ComposerActions({
   onForceStop,
 }: ComposerActionsProps) {
   const controller = usePromptInputController()
-  const [yLen, setYLen] = useState<number>(ytext ? ytext.length : 0)
+  // Perf: track only the 0↔non-empty transition of the shared draft, not
+  // its full length. `ytext.observe` fires on every keystroke; setting a
+  // numeric `yLen` would cause ComposerActions to re-render on every
+  // character. The only consumer of the draft-length signal here is the
+  // Submit button's `hasText` check, so a boolean that only changes on
+  // emptiness transitions is strictly sufficient and re-renders ~0
+  // times mid-typing.
+  const [isDraftEmpty, setIsDraftEmpty] = useState<boolean>(ytext ? ytext.length === 0 : true)
   const [interruptSentAt, setInterruptSentAt] = useState<number | null>(null)
   const [, setTick] = useState(0)
 
   useEffect(() => {
     if (!ytext) return
-    setYLen(ytext.length)
-    const update = () => setYLen(ytext.length)
+    setIsDraftEmpty(ytext.length === 0)
+    const update = () => {
+      // Functional setState + the React bail-out on reference equality
+      // means this is a no-op for the vast majority of keystrokes (any
+      // that don't cross the emptiness boundary).
+      const next = ytext.length === 0
+      setIsDraftEmpty((prev) => (prev === next ? prev : next))
+    }
     ytext.observe(update)
     return () => ytext.unobserve(update)
   }, [ytext])
@@ -398,7 +411,7 @@ function ComposerActions({
   }, [interruptSentAt])
 
   const controllerText = controller.textInput.value
-  const hasText = ytext ? yLen > 0 : controllerText.trim().length > 0
+  const hasText = ytext ? !isDraftEmpty : controllerText.trim().length > 0
   const showInterrupt = isRunning && !hasText && Boolean(onInterrupt)
 
   const showForceStop =

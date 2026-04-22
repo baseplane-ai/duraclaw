@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { connectionRegistry } from './registry'
 import type { ManagedConnection } from './types'
 
@@ -86,9 +86,21 @@ export function useConnectionStatus(): ConnectionStatus {
     }
   }, [])
 
-  const connections = snap.map((c) => ({ id: c.id, readyState: c.readyState }))
-  // Empty registry → vacuously online.
-  const isOnline = snap.every((c) => c.readyState === WebSocket.OPEN)
-
-  return { isOnline, connections }
+  // Perf: every `setTick` bump re-renders this hook, but the derived
+  // `{isOnline, connections}` shape only actually changes when the
+  // (id, readyState) tuple set changes. Memoise on a stable signature
+  // so every downstream consumer doesn't see a fresh object ref
+  // (and doesn't cascade-re-render) on every WS heartbeat tick.
+  // `sig` is a stable string signature derived from `snap` — memoising
+  // on `sig` instead of `snap` is the whole point (snap is a fresh ref
+  // on every setTick, sig only changes on a real (id,readyState)
+  // transition).
+  const sig = snap.map((c) => `${c.id}:${c.readyState}`).join('|')
+  // biome-ignore lint/correctness/useExhaustiveDependencies: deliberate — see comment above `sig`.
+  return useMemo(() => {
+    const connections = snap.map((c) => ({ id: c.id, readyState: c.readyState }))
+    // Empty registry → vacuously online.
+    const isOnline = snap.every((c) => c.readyState === WebSocket.OPEN)
+    return { isOnline, connections }
+  }, [sig])
 }

@@ -5,10 +5,7 @@
  */
 
 import {
-  Conversation,
-  ConversationContent,
   ConversationEmptyState,
-  ConversationScrollButton,
   Message,
   MessageContent,
   MessageResponse,
@@ -20,9 +17,9 @@ import {
   type ToolHeaderProps,
   ToolInput,
   ToolOutput,
-  useAutoScrollContext,
 } from '@duraclaw/ai-elements'
 import {
+  ArrowDownIcon,
   BrainIcon,
   CheckIcon,
   ChevronLeftIcon,
@@ -31,8 +28,19 @@ import {
   FileIcon,
   HistoryIcon,
 } from 'lucide-react'
-import { type ReactNode, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import {
+  forwardRef,
+  memo,
+  type ReactNode,
+  useCallback,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
+import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import { Badge } from '~/components/ui/badge'
+import { Button } from '~/components/ui/button'
 import {
   Sheet,
   SheetContent,
@@ -525,61 +533,220 @@ function renderPart(
 }
 
 /**
- * Scroll-to-bottom when the user sends a new message. Resets the auto-scroll
- * `escaped` flag so subsequent assistant content streams into view instead of
- * the user message "staying behind" at the bottom.
- *
- * Must live inside <Conversation> to access the scroll context.
+ * Props passed to the memoized per-message row. Kept as stable/primitive
+ * references so React.memo's shallow compare only returns false when the
+ * message's identity, parts-length, or trailing text length changes.
  */
-function ScrollOnUserSend({ messages }: { messages: SessionMessage[] }) {
-  const { scrollToBottom } = useAutoScrollContext()
-  const seenRef = useRef<string | null>(null)
-
-  useLayoutEffect(() => {
-    // Detect when a new optimistic user message appears in the list.
-    // P3 (GH#14): optimistic user rows are keyed on `usr-client-<uuid>` by
-    // `newClientMessageId()`; `usr-optimistic-*` is the legacy prototype id
-    // still used by the debug session-collection route.
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const msg = messages[i]
-      if (
-        msg.role === 'user' &&
-        (msg.id.startsWith('usr-client-') || msg.id.startsWith('usr-optimistic-'))
-      ) {
-        if (msg.id !== seenRef.current) {
-          seenRef.current = msg.id
-          scrollToBottom()
-        }
-        return
-      }
-      // Only look at the trailing user messages
-      if (msg.role !== 'user') break
-    }
-  }, [messages, scrollToBottom])
-
-  return null
+interface ChatMessageRowProps {
+  msg: SessionMessage
+  turnIndex: number
+  derivedGate: DerivedGatePayload | null
+  pendingGateId: string | null
+  readOnly?: boolean
+  onResolveGate: (gateId: string, response: GateResponse) => Promise<unknown>
+  onRewind?: (turnIndex: number) => void
+  branch?: { current: number; total: number; siblings: string[] }
+  onBranchNavigate?: (messageId: string, direction: 'prev' | 'next') => void
 }
 
 /**
- * Scroll-to-bottom when a pending gate resolves. Without this, answering an
- * ask_user prompt would leave the viewport parked on the now-empty pinned
- * slot while the resolved Q/A block snaps into its inline position further
- * up-thread. We track the last-seen pending gate id and scroll on disappearance.
+ * Memoized renderer for a single message turn (user or assistant).
+ *
+ * Performance invariants:
+ *  - Wrapped in `React.memo` with a custom comparator that checks `msg.id`,
+ *    `msg.parts.length`, and the trailing part's `text.length` — the three
+ *    signals that actually move during a streaming turn.
+ *  - Inline closures for `onRewind(turnIndex)` / `onBranchNavigate(msg.id, _)`
+ *    are materialised via `useCallback` so they don't invalidate children
+ *    on every parent render.
+ *  - Assistant-message rendering hoists `nodes` / `pending` / `reasoningBuf`
+ *    inside a `useMemo` keyed on the same shallow-compare tuple so the
+ *    flush-and-emit loop only re-runs when something actually changed.
  */
-function ScrollOnGateResolve({ derivedGate }: { derivedGate: DerivedGatePayload | null }) {
-  const { scrollToBottom } = useAutoScrollContext()
-  const lastPendingRef = useRef<string | null>(null)
+const ChatMessageRow = memo(
+  function ChatMessageRow({
+    msg,
+    turnIndex,
+    derivedGate,
+    pendingGateId,
+    readOnly,
+    onResolveGate,
+    onRewind,
+    branch,
+    onBranchNavigate,
+  }: ChatMessageRowProps) {
+    const handleRewind = useCallback(() => {
+      onRewind?.(turnIndex)
+    }, [onRewind, turnIndex])
 
-  useLayoutEffect(() => {
-    const currentId = derivedGate?.id ?? null
-    if (lastPendingRef.current && !currentId) {
-      scrollToBottom()
+    const handleBranchNavigate = useCallback(
+      (dir: 'prev' | 'next') => {
+        onBranchNavigate?.(msg.id, dir)
+      },
+      [onBranchNavigate, msg.id],
+    )
+
+    const rewindButton = onRewind ? (
+      <button
+        key={`rewind-${msg.id}`}
+        type="button"
+        onClick={handleRewind}
+        aria-label="Rewind to this turn"
+        title="Rewind to this point"
+        data-testid={`rewind-turn-${turnIndex}`}
+        className="absolute right-2 top-2 flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground group-hover:opacity-100"
+      >
+        <HistoryIcon className="size-3" />
+        <span>Rewind</span>
+      </button>
+    ) : null
+
+    // Assistant-message grouping: consolidate reasoning + tool parts into
+    // chip rows and intersperse them with text / gate parts. Memoised so a
+    // parent re-render that doesn't change the message shape doesn't
+    // re-run the flush loop or re-allocate `nodes`.
+    const assistantNodes = useMemo(() => {
+      if (msg.role !== 'assistant') return null
+      const nodes: ReactNode[] = []
+      let pending: SessionMessagePart[] = []
+      let reasoningBuf: SessionMessagePart[] = []
+      const flushReasoning = () => {
+        if (reasoningBuf.length === 0) return
+        nodes.push(
+          <ReasoningPillRow key={`thoughts-${msg.id}-${nodes.length}`} parts={reasoningBuf} />,
+        )
+        reasoningBuf = []
+      }
+      const flushPending = () => {
+        if (pending.length === 0) return
+        nodes.push(<ToolPillRow key={`pills-${msg.id}-${nodes.length}`} parts={pending} />)
+        pending = []
+      }
+      msg.parts.forEach((part, i) => {
+        const isGroupableTool =
+          part.type?.startsWith('tool-') &&
+          !isGateCandidate(part) &&
+          !isPendingGate(part, readOnly, derivedGate)
+        if (isGroupableTool) {
+          pending.push(part)
+          return
+        }
+        if (part.type === 'data-file-changed') return
+        if (part.type === 'reasoning') {
+          reasoningBuf.push(part)
+          return
+        }
+        flushReasoning()
+        flushPending()
+        nodes.push(renderPart(part, i, derivedGate, onResolveGate, readOnly, pendingGateId))
+      })
+      flushReasoning()
+      flushPending()
+      return nodes
+    }, [msg, derivedGate, onResolveGate, readOnly, pendingGateId])
+
+    if (msg.role === 'user') {
+      const textPart = msg.parts.find((p) => p.type === 'text')
+      const imageParts = msg.parts.flatMap((p) => {
+        const url = getImagePartDataUrl(p)
+        return url ? [{ part: p, url }] : []
+      })
+      return (
+        <div key={msg.id} className="group relative" data-turn-index={turnIndex}>
+          <Message from="user">
+            <MessageContent>
+              <div className="flex min-w-0 flex-col gap-2">
+                {imageParts.length > 0 && (
+                  <div className="flex flex-wrap gap-2">
+                    {imageParts.map(({ url }, i) => (
+                      <img
+                        // biome-ignore lint/suspicious/noArrayIndexKey: images share no stable id; order is fixed
+                        key={i}
+                        src={url}
+                        alt="User attachment"
+                        className="max-h-64 max-w-full rounded border object-contain"
+                      />
+                    ))}
+                  </div>
+                )}
+                <div className="flex min-w-0 items-start justify-between gap-2">
+                  <span className="min-w-0 break-words">{textPart?.text || ''}</span>
+                  {branch && onBranchNavigate && (
+                    <MessageBranch
+                      current={branch.current}
+                      total={branch.total}
+                      onNavigate={handleBranchNavigate}
+                    />
+                  )}
+                </div>
+              </div>
+            </MessageContent>
+          </Message>
+          {rewindButton}
+        </div>
+      )
     }
-    lastPendingRef.current = currentId
-  }, [derivedGate, scrollToBottom])
 
-  return null
-}
+    if (msg.role === 'assistant') {
+      return (
+        <div key={msg.id} className="group relative" data-turn-index={turnIndex}>
+          <div className="space-y-2">{assistantNodes}</div>
+          {rewindButton}
+        </div>
+      )
+    }
+
+    return null
+  },
+  (prev, next) => {
+    // Fast-path bailouts: if any non-msg prop changes we must re-render. The
+    // comparator only returns true (i.e. "skip re-render") when every input
+    // is referentially equal AND the message shape signals we care about
+    // are unchanged.
+    if (
+      prev.turnIndex !== next.turnIndex ||
+      prev.derivedGate !== next.derivedGate ||
+      prev.pendingGateId !== next.pendingGateId ||
+      prev.readOnly !== next.readOnly ||
+      prev.onResolveGate !== next.onResolveGate ||
+      prev.onRewind !== next.onRewind ||
+      prev.branch !== next.branch ||
+      prev.onBranchNavigate !== next.onBranchNavigate
+    ) {
+      return false
+    }
+    const a = prev.msg
+    const b = next.msg
+    if (a === b) return true
+    if (a.id !== b.id) return false
+    if (a.role !== b.role) return false
+    const aParts = a.parts
+    const bParts = b.parts
+    if (aParts.length !== bParts.length) return false
+    const aLast = aParts[aParts.length - 1]
+    const bLast = bParts[bParts.length - 1]
+    if (!aLast || !bLast) return aLast === bLast
+    // Streaming deltas mutate the trailing part's text; catch that without
+    // deep-comparing the whole parts array.
+    const aText = typeof aLast.text === 'string' ? aLast.text.length : 0
+    const bText = typeof bLast.text === 'string' ? bLast.text.length : 0
+    if (aText !== bText) return false
+    if (aLast.state !== bLast.state) return false
+    if (aLast.type !== bLast.type) return false
+    return true
+  },
+)
+
+/**
+ * Virtuoso's internal `List` slot — we override it to stamp `role="log"` on
+ * the element that actually holds the messages so screen-reader semantics
+ * match the pre-virtualisation `Conversation` container.
+ */
+const VirtuosoList = forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
+  function VirtuosoList(props, ref) {
+    return <div ref={ref} role="log" {...props} />
+  },
+)
 
 export function ChatThread({
   messages,
@@ -627,191 +794,164 @@ export function ChatThread({
       })()
     : null
 
+  const virtuosoRef = useRef<VirtuosoHandle | null>(null)
+  const [atBottom, setAtBottom] = useState(true)
+
+  const scrollToBottom = useCallback(() => {
+    const handle = virtuosoRef.current
+    if (!handle) return
+    handle.scrollToIndex({ index: 'LAST', align: 'end', behavior: 'smooth' })
+  }, [])
+
+  // Scroll-to-bottom when a new optimistic user message appears. Mirrors the
+  // pre-virtualisation ScrollOnUserSend behavior so the outgoing turn doesn't
+  // stay parked above the viewport.
+  const lastUserSendRef = useRef<string | null>(null)
+  useLayoutEffect(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i]
+      if (
+        msg.role === 'user' &&
+        (msg.id.startsWith('usr-client-') || msg.id.startsWith('usr-optimistic-'))
+      ) {
+        if (msg.id !== lastUserSendRef.current) {
+          lastUserSendRef.current = msg.id
+          scrollToBottom()
+        }
+        return
+      }
+      if (msg.role !== 'user') break
+    }
+  }, [messages, scrollToBottom])
+
+  // Scroll-to-bottom when a pending gate resolves (mirrors ScrollOnGateResolve).
+  const lastPendingGateRef = useRef<string | null>(null)
+  useLayoutEffect(() => {
+    const currentId = derivedGate?.id ?? null
+    if (lastPendingGateRef.current && !currentId) {
+      scrollToBottom()
+    }
+    lastPendingGateRef.current = currentId
+  }, [derivedGate, scrollToBottom])
+
+  const itemContent = useCallback(
+    (index: number, msg: SessionMessage) => (
+      <ChatMessageRow
+        msg={msg}
+        turnIndex={index}
+        derivedGate={derivedGate}
+        pendingGateId={pendingGateId}
+        readOnly={readOnly}
+        onResolveGate={onResolveGate}
+        onRewind={onRewind}
+        branch={branchInfo?.get(msg.id)}
+        onBranchNavigate={onBranchNavigate}
+      />
+    ),
+    [derivedGate, pendingGateId, readOnly, onResolveGate, onRewind, branchInfo, onBranchNavigate],
+  )
+
+  const computeItemKey = useCallback((_index: number, msg: SessionMessage) => msg.id, [])
+
+  const virtuosoComponents = useMemo(
+    () => ({
+      List: VirtuosoList,
+      Footer: () => <div className="h-2" aria-hidden="true" />,
+    }),
+    [],
+  )
+
+  // Empty / connecting placeholder path — bypass virtualisation entirely.
+  if (messages.length === 0) {
+    return (
+      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" role="log">
+        <div className="flex-1 overflow-y-auto overflow-x-hidden p-4">
+          {isConnecting ? (
+            <div className="space-y-6 p-2">
+              <div className="flex items-start gap-3">
+                <Skeleton className="size-8 rounded-full" />
+                <div className="flex-1 space-y-2">
+                  <Skeleton className="h-4 w-3/4" />
+                  <Skeleton className="h-4 w-1/2" />
+                </div>
+              </div>
+              <div className="flex items-start gap-3">
+                <Skeleton className="size-8 rounded-full" />
+                <div className="flex-1 space-y-2">
+                  <Skeleton className="h-4 w-5/6" />
+                  <Skeleton className="h-4 w-2/3" />
+                  <Skeleton className="h-4 w-1/3" />
+                </div>
+              </div>
+            </div>
+          ) : (
+            <ConversationEmptyState>
+              <div className="space-y-1">
+                <h3 className="text-sm font-medium">
+                  {onSendSuggestion ? 'Start a conversation' : 'No messages yet'}
+                </h3>
+                <p className="text-sm text-muted-foreground">
+                  {onSendSuggestion
+                    ? 'Choose a suggestion or type your own message'
+                    : 'The session will appear here as it runs'}
+                </p>
+              </div>
+              {onSendSuggestion && (
+                <Suggestions className="mt-4 justify-center">
+                  <Suggestion suggestion="Explain this codebase" onClick={onSendSuggestion} />
+                  <Suggestion suggestion="Run the test suite" onClick={onSendSuggestion} />
+                  <Suggestion suggestion="What changed recently?" onClick={onSendSuggestion} />
+                  <Suggestion suggestion="Find and fix bugs" onClick={onSendSuggestion} />
+                </Suggestions>
+              )}
+            </ConversationEmptyState>
+          )}
+        </div>
+        {pinnedGateNode && <div className="shrink-0 border-t p-3">{pinnedGateNode}</div>}
+      </div>
+    )
+  }
+
   return (
-    <Conversation className="min-h-0 min-w-0 flex-1 overflow-x-clip">
-      <ConversationContent className="min-w-0 overflow-x-hidden [&_pre]:overflow-x-auto [&_pre]:max-w-full">
-        {messages.length === 0 && isConnecting ? (
-          <div className="space-y-6 p-6">
-            <div className="flex items-start gap-3">
-              <Skeleton className="size-8 rounded-full" />
-              <div className="flex-1 space-y-2">
-                <Skeleton className="h-4 w-3/4" />
-                <Skeleton className="h-4 w-1/2" />
-              </div>
-            </div>
-            <div className="flex items-start gap-3">
-              <Skeleton className="size-8 rounded-full" />
-              <div className="flex-1 space-y-2">
-                <Skeleton className="h-4 w-5/6" />
-                <Skeleton className="h-4 w-2/3" />
-                <Skeleton className="h-4 w-1/3" />
-              </div>
-            </div>
-          </div>
-        ) : messages.length === 0 ? (
-          <ConversationEmptyState>
-            <div className="space-y-1">
-              <h3 className="text-sm font-medium">
-                {onSendSuggestion ? 'Start a conversation' : 'No messages yet'}
-              </h3>
-              <p className="text-sm text-muted-foreground">
-                {onSendSuggestion
-                  ? 'Choose a suggestion or type your own message'
-                  : 'The session will appear here as it runs'}
-              </p>
-            </div>
-            {onSendSuggestion && (
-              <Suggestions className="mt-4 justify-center">
-                <Suggestion suggestion="Explain this codebase" onClick={onSendSuggestion} />
-                <Suggestion suggestion="Run the test suite" onClick={onSendSuggestion} />
-                <Suggestion suggestion="What changed recently?" onClick={onSendSuggestion} />
-                <Suggestion suggestion="Find and fix bugs" onClick={onSendSuggestion} />
-              </Suggestions>
-            )}
-          </ConversationEmptyState>
-        ) : (
-          messages.map((msg, turnIndex) => {
-            const rewindButton = onRewind ? (
-              <button
-                key={`rewind-${msg.id}`}
-                type="button"
-                onClick={() => onRewind(turnIndex)}
-                aria-label="Rewind to this turn"
-                title="Rewind to this point"
-                data-testid={`rewind-turn-${turnIndex}`}
-                className="absolute right-2 top-2 flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground group-hover:opacity-100"
-              >
-                <HistoryIcon className="size-3" />
-                <span>Rewind</span>
-              </button>
-            ) : null
-
-            if (msg.role === 'user') {
-              const textPart = msg.parts.find((p) => p.type === 'text')
-              const imageParts = msg.parts.flatMap((p) => {
-                const url = getImagePartDataUrl(p)
-                return url ? [{ part: p, url }] : []
-              })
-              const branch = branchInfo?.get(msg.id)
-              return (
-                <div key={msg.id} className="group relative" data-turn-index={turnIndex}>
-                  <Message from="user">
-                    <MessageContent>
-                      <div className="flex min-w-0 flex-col gap-2">
-                        {imageParts.length > 0 && (
-                          <div className="flex flex-wrap gap-2">
-                            {imageParts.map(({ url }, i) => (
-                              <img
-                                // biome-ignore lint/suspicious/noArrayIndexKey: images share no stable id; order is fixed
-                                key={i}
-                                src={url}
-                                alt="User attachment"
-                                className="max-h-64 max-w-full rounded border object-contain"
-                              />
-                            ))}
-                          </div>
-                        )}
-                        <div className="flex min-w-0 items-start justify-between gap-2">
-                          <span className="min-w-0 break-words">{textPart?.text || ''}</span>
-                          {branch && onBranchNavigate && (
-                            <MessageBranch
-                              current={branch.current}
-                              total={branch.total}
-                              onNavigate={(dir) => onBranchNavigate(msg.id, dir)}
-                            />
-                          )}
-                        </div>
-                      </div>
-                    </MessageContent>
-                  </Message>
-                  {rewindButton}
-                </div>
-              )
-            }
-
-            if (msg.role === 'assistant') {
-              const nodes: ReactNode[] = []
-              let pending: SessionMessagePart[] = []
-              let reasoningBuf: SessionMessagePart[] = []
-              const flushReasoning = () => {
-                if (reasoningBuf.length === 0) return
-                nodes.push(
-                  <ReasoningPillRow
-                    key={`thoughts-${msg.id}-${nodes.length}`}
-                    parts={reasoningBuf}
-                  />,
-                )
-                reasoningBuf = []
-              }
-              const flushPending = () => {
-                if (pending.length === 0) return
-                nodes.push(<ToolPillRow key={`pills-${msg.id}-${nodes.length}`} parts={pending} />)
-                pending = []
-              }
-              msg.parts.forEach((part, i) => {
-                // ask_user / permission parts NEVER collapse into the chip
-                // row — they must always render as standalone expanded blocks
-                // (GateResolver when pending, defaultOpen Tool when resolved).
-                // This removes the failure mode where a lagging state update
-                // on a blurred tab landed the gate in the pill bucket and the
-                // UI stayed invisible after refocus.
-                const isGroupableTool =
-                  part.type?.startsWith('tool-') &&
-                  !isGateCandidate(part) &&
-                  !isPendingGate(part, readOnly, derivedGate)
-                if (isGroupableTool) {
-                  // Buffer alongside any accumulated reasoning — both flush
-                  // together on the next text part so that even when the agent
-                  // interleaves thoughts with tool calls they still consolidate
-                  // into one thought chip + one tool chip per text span.
-                  pending.push(part)
-                  return
-                }
-                // data-file-changed narration rows are redundant with the tool
-                // pills (which already group by file path in the detail sheet).
-                // Skip without flushing so they don't fragment the chip run.
-                if (part.type === 'data-file-changed') return
-                // Collapse reasoning parts into a single chip rather than
-                // emitting one "Thought for a few seconds" block per thought.
-                if (part.type === 'reasoning') {
-                  reasoningBuf.push(part)
-                  return
-                }
-                // text / gate / error / etc. — real message break.
-                // Reasoning chip is always rendered before the tool chip so the
-                // "thought then acted" reading is preserved visually even when
-                // the underlying parts were interleaved.
-                flushReasoning()
-                flushPending()
-                nodes.push(renderPart(part, i, derivedGate, onResolveGate, readOnly, pendingGateId))
-              })
-              flushReasoning()
-              flushPending()
-              return (
-                <div key={msg.id} className="group relative" data-turn-index={turnIndex}>
-                  <div className="space-y-2">{nodes}</div>
-                  {rewindButton}
-                </div>
-              )
-            }
-
-            return null
-          })
-        )}
-        {/*
-          Pending gate (ask_user / permission_request) always renders pinned
-          to the bottom of the thread, regardless of where the underlying
-          tool part sits inside its assistant turn. Once the user answers,
-          the part's state flips and `renderPart` renders the resolved Q/A
-          inline at its turn position; this pinned slot empties and
-          `ScrollOnGateResolve` nudges the viewport so the user doesn't
-          lose context.
-        */}
-        {pinnedGateNode}
-      </ConversationContent>
-      <ScrollOnUserSend messages={messages} />
-      <ScrollOnGateResolve derivedGate={derivedGate} />
-      <ConversationScrollButton />
-    </Conversation>
+    <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-x-clip">
+      <Virtuoso
+        ref={virtuosoRef}
+        style={{ height: '100%' }}
+        className="min-w-0 flex-1 [&_pre]:overflow-x-auto [&_pre]:max-w-full"
+        data={messages}
+        computeItemKey={computeItemKey}
+        itemContent={itemContent}
+        initialTopMostItemIndex={messages.length - 1}
+        followOutput={(isAtBottom) => (isAtBottom ? 'smooth' : false)}
+        atBottomStateChange={setAtBottom}
+        atBottomThreshold={70}
+        increaseViewportBy={{ top: 600, bottom: 600 }}
+        components={virtuosoComponents}
+      />
+      {/*
+        Pending gate (ask_user / permission_request) always renders pinned
+        to the bottom of the thread, regardless of where the underlying
+        tool part sits inside its assistant turn. Once the user answers,
+        the part's state flips and `renderPart` renders the resolved Q/A
+        inline at its turn position; this pinned slot empties and
+        the gate-resolve effect above nudges the viewport so the user
+        doesn't lose context.
+      */}
+      {pinnedGateNode && (
+        <div className="shrink-0 border-t bg-background p-3">{pinnedGateNode}</div>
+      )}
+      {!atBottom && (
+        <Button
+          type="button"
+          size="icon"
+          variant="outline"
+          onClick={scrollToBottom}
+          className="absolute bottom-4 left-[50%] translate-x-[-50%] rounded-full dark:bg-background dark:hover:bg-muted"
+          aria-label="Scroll to bottom"
+        >
+          <ArrowDownIcon className="size-4" />
+        </Button>
+      )}
+    </div>
   )
 }
