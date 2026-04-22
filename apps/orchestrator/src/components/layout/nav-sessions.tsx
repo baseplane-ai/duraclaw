@@ -220,7 +220,7 @@ export function NavSessions() {
   const { setOpenMobile } = useSidebar()
   const location = useLocation()
   const navigate = useNavigate()
-  const { openTab } = useTabSync()
+  const { openTab, setActive } = useTabSync()
 
   // Synced collections: projects + user preferences (GH#32 phase p4).
   // Replaces the old direct GET /api/gateway/projects/all client fetch —
@@ -351,7 +351,18 @@ export function NavSessions() {
           Recent
         </SidebarGroupLabel>
         <SidebarGroupAction asChild>
-          <Link to="/" aria-label="New session" onClick={() => setOpenMobile(false)}>
+          <Link
+            to="/"
+            aria-label="New session"
+            onClick={() => {
+              // Clear active tab so AgentOrchPage falls through to
+              // QuickPromptInput instead of re-rendering the last session.
+              // activeSessionId is localStorage-persisted, so navigating to
+              // "/" alone doesn't drop it.
+              setActive(null)
+              setOpenMobile(false)
+            }}
+          >
             <PlusIcon className="size-4" />
           </Link>
         </SidebarGroupAction>
