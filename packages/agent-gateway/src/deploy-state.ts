@@ -7,16 +7,22 @@ const DEFAULT_DEPLOY_STATE_PATH = '/data/projects/baseplane-infra/.deploy-state.
 const REPO_NAME_RE = /^[a-z][a-z0-9-]{0,31}$/
 
 function resolveStatePath(repo: string | null): string | null {
-  if (!repo) {
-    return process.env.DEPLOY_STATE_PATH ?? DEFAULT_DEPLOY_STATE_PATH
+  // Reject malformed repo names up front to guard against path traversal via
+  // the per-repo env-var lookup below.
+  if (repo && !REPO_NAME_RE.test(repo)) return null
+
+  // Per-repo override wins when present — lets operators pin a specific state
+  // file even when there's no `<repo>-infra` sibling checkout.
+  if (repo) {
+    const envKey = `DEPLOY_STATE_PATH_${repo.toUpperCase().replace(/-/g, '_')}`
+    const envPath = process.env[envKey]
+    if (envPath) return envPath
   }
-  if (!REPO_NAME_RE.test(repo)) return null
-  const envKey = `DEPLOY_STATE_PATH_${repo.toUpperCase().replace(/-/g, '_')}`
-  const envPath = process.env[envKey]
-  if (envPath) return envPath
-  // Convention: each repo has a sibling `<repo>-infra` checkout whose deploy
-  // server writes `.deploy-state.json`. Override via the env var above.
-  return `/data/projects/${repo}-infra/.deploy-state.json`
+
+  // Default: one shared baseplane-infra deploy server drives every project
+  // (baseplane, duraclaw, …) and writes a single `.deploy-state.json`. There
+  // is no `<repo>-infra` sibling convention — infra is centralized.
+  return process.env.DEPLOY_STATE_PATH ?? DEFAULT_DEPLOY_STATE_PATH
 }
 
 export async function handleDeployState(url?: URL): Promise<Response> {
