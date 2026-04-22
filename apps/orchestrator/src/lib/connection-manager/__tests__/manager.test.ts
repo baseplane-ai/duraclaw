@@ -38,11 +38,16 @@ import { connectionManager } from '../manager'
 import { connectionRegistry } from '../registry'
 import type { ManagedConnection } from '../types'
 
-function makeConn(id: string, lastSeenOffset = -6000): ManagedConnection {
+// Default `readyState=3` (CLOSED) so the scheduler treats the conn as eligible
+// for reconnect. The manager skips OPEN sockets (readyState=1) by design —
+// tearing down a live socket on lifecycle events caused the Agents SDK WS
+// re-handshake loop we're defending against. Tests that want to exercise the
+// OPEN-skip path pass `readyState: 1` explicitly.
+function makeConn(id: string, lastSeenOffset = -6000, readyState = 3): ManagedConnection {
   return {
     id,
     kind: 'partysocket',
-    readyState: 1,
+    readyState,
     lastSeenTs: Date.now() + lastSeenOffset,
     reconnect: vi.fn(),
     close: vi.fn(),
@@ -80,6 +85,21 @@ describe('connectionManager', () => {
     const conn = makeConn('a', -2000) // fresh
     connectionRegistry.register(conn)
     lifecycleMock.fire('foreground')
+    vi.advanceTimersByTime(600)
+    expect(conn.reconnect).not.toHaveBeenCalled()
+  })
+
+  it('does NOT schedule reconnect when conn is stale but still OPEN', () => {
+    // Live partysocket with stale lastSeenTs (no message traffic) must be
+    // left alone — reconnect() on an OPEN Agents SDK WS triggered a
+    // perma-failing re-handshake loop on Capacitor Android foreground.
+    connectionManager.start({ random: () => 0 })
+    const conn = makeConn('a', -60_000, 1 /* OPEN */)
+    connectionRegistry.register(conn)
+    lifecycleMock.fire('foreground')
+    vi.advanceTimersByTime(600)
+    expect(conn.reconnect).not.toHaveBeenCalled()
+    lifecycleMock.fire('online')
     vi.advanceTimersByTime(600)
     expect(conn.reconnect).not.toHaveBeenCalled()
   })

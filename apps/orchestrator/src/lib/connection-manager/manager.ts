@@ -70,6 +70,14 @@ function onLifecycleEvent(event: LifecycleEvent): void {
 
   const now = Date.now()
   for (const conn of connectionRegistry.snapshot()) {
+    // Skip OPEN sockets — tearing down a live session WS triggers a
+    // partysocket re-handshake loop that can perma-fail on the Agents
+    // SDK path. If a socket is genuinely zombied (OPEN in JS, dead at
+    // the OS), the next user-initiated send will surface a close event
+    // and flip readyState, at which point the next foreground/online
+    // tick will reconnect it. Non-OPEN (CONNECTING/CLOSING/CLOSED)
+    // sockets are the ones that actually benefit from being nudged.
+    if (conn.readyState === WebSocket.OPEN) continue
     if (now - conn.lastSeenTs > STALE_THRESHOLD_MS) {
       scheduleReconnect(conn, event)
     }
