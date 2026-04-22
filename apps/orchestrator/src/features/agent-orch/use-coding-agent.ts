@@ -76,6 +76,10 @@ export interface UseCodingAgentResult {
   submitDraft: (yText: Y.Text) => Promise<{ ok: boolean; error?: string; sent?: boolean }>
   /** Spawn a fresh SDK session with the current transcript prepended; recovers from orphaned sdk_session_id. */
   forkWithHistory: (content: string | ContentBlock[]) => Promise<unknown>
+  /** Retry the gateway dial — used by DisconnectedBanner for reattach. */
+  reattach: () => Promise<unknown>
+  /** Force-resume from the on-disk JSONL transcript — escape hatch for stuck sessions. */
+  resumeFromTranscript: () => Promise<unknown>
   rewind: (turnIndex: number) => Promise<{ ok: boolean; error?: string }>
   resubmitMessage: (
     messageId: string,
@@ -544,6 +548,11 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   )
   const interrupt = useCallback(() => connection.call('interrupt', []), [connection])
   const getContextUsage = useCallback(() => connection.call('getContextUsage', []), [connection])
+  const reattach = useCallback(() => connection.call('reattach', []), [connection])
+  const resumeFromTranscript = useCallback(
+    () => connection.call('resumeFromTranscript', []),
+    [connection],
+  )
   const resolveGate = useCallback(
     (gateId: string, response: GateResponse) => connection.call('resolveGate', [gateId, response]),
     [connection],
@@ -825,6 +834,8 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     sendMessage,
     submitDraft,
     forkWithHistory,
+    reattach,
+    resumeFromTranscript,
     rewind,
     resubmitMessage,
     navigateBranch,

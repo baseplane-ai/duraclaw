@@ -2353,6 +2353,79 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
 
   // ── @callable RPC Methods ─────────────────────────────────────
 
+  /**
+   * Retry the gateway dial — used by the DisconnectedBanner when the
+   * client WS is alive but no gateway-role runner is connected. If the
+   * session has an `sdk_session_id` we resume from the on-disk JSONL;
+   * otherwise there's nothing to reconnect to. Idempotent: calling
+   * twice just re-POSTs to the gateway.
+   */
+  @callable()
+  async reattach(): Promise<{ ok: boolean; error?: string }> {
+    const hasLiveRunner = Boolean(this.getGatewayConnectionId())
+    if (hasLiveRunner) {
+      return { ok: true } // already connected
+    }
+    if (!this.state.sdk_session_id) {
+      return { ok: false, error: 'No sdk_session_id — nothing to reattach' }
+    }
+    if (!this.state.project) {
+      return { ok: false, error: 'No project set — cannot dial gateway' }
+    }
+    if (!this.env.CC_GATEWAY_URL || !this.env.WORKER_PUBLIC_URL) {
+      return {
+        ok: false,
+        error: 'Gateway not configured (missing CC_GATEWAY_URL or WORKER_PUBLIC_URL)',
+      }
+    }
+
+    this.updateState({ status: 'running', gate: null, error: null })
+    this.syncStatusToD1(new Date().toISOString())
+    void this.triggerGatewayDial({
+      type: 'resume',
+      project: this.state.project,
+      prompt: '',
+      sdk_session_id: this.state.sdk_session_id,
+    })
+    return { ok: true }
+  }
+
+  /**
+   * Force-resume from the on-disk JSONL transcript — the escape hatch when
+   * the DO thinks the session is `running` but the WS is dead and normal
+   * reattach can't proceed. Rotates the callback token (which 4401-kills
+   * any orphan runner), then triggers a fresh `resume` dial. The orphan
+   * runner sees `4410 token_rotated` on its WS, aborts, and exits cleanly.
+   */
+  @callable()
+  async resumeFromTranscript(): Promise<{ ok: boolean; error?: string }> {
+    if (!this.state.sdk_session_id) {
+      return { ok: false, error: 'No sdk_session_id — nothing to resume' }
+    }
+    if (!this.state.project) {
+      return { ok: false, error: 'No project set — cannot dial gateway' }
+    }
+    if (!this.env.CC_GATEWAY_URL || !this.env.WORKER_PUBLIC_URL) {
+      return {
+        ok: false,
+        error: 'Gateway not configured (missing CC_GATEWAY_URL or WORKER_PUBLIC_URL)',
+      }
+    }
+
+    // triggerGatewayDial handles token rotation internally — it closes
+    // the old gateway WS with 4410 before POSTing to spawn a new runner.
+    // That 4410 is what kills the orphan.
+    this.updateState({ status: 'running', gate: null, error: null })
+    this.syncStatusToD1(new Date().toISOString())
+    void this.triggerGatewayDial({
+      type: 'resume',
+      project: this.state.project,
+      prompt: '',
+      sdk_session_id: this.state.sdk_session_id,
+    })
+    return { ok: true }
+  }
+
   @callable()
   async spawn(config: SpawnConfig): Promise<{ ok: boolean; session_id?: string; error?: string }> {
     if (this.state.status === 'running' || this.state.status === 'waiting_gate') {
