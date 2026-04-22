@@ -33,7 +33,6 @@ import { Button } from '../ui/button'
 // ---------------------------------------------------------------------------
 
 const NEAR_BOTTOM_PX = 70
-const PIN_THRESHOLD_PX = 4
 
 interface AutoScrollContext {
   scrollRef: RefCallback<HTMLDivElement>
@@ -78,37 +77,19 @@ function useAutoScroll() {
     const scroll = scrollEl.current
     if (!content || !scroll) return
 
-    let prevHeight = content.getBoundingClientRect().height
-
-    const ro = new ResizeObserver(() => {
-      const currentHeight = content.getBoundingClientRect().height
-      const grew = currentHeight > prevHeight
-      prevHeight = currentHeight
-      if (!grew) return
-      const pinned = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < PIN_THRESHOLD_PX
-      // TEMP debug: log every potential snap decision so we can see on a
-      // device whether the RO path is the snap source.
-      console.warn('[conv-snap] grew=true', {
-        prevH: Math.round(prevHeight),
-        curH: Math.round(currentHeight),
-        top: Math.round(scroll.scrollTop),
-        sH: Math.round(scroll.scrollHeight),
-        cH: Math.round(scroll.clientHeight),
-        pinned,
-      })
-      if (pinned) {
-        scroll.scrollTop = scroll.scrollHeight
-      }
-    })
-    ro.observe(content)
-    return () => ro.disconnect()
+    // TEMP: RO auto-snap fully disabled to probe whether persistent snap-
+    // back on foreground resume originates here or elsewhere. If the
+    // snap-back stops, the RO path is the culprit and we reinstate it
+    // with a tighter touch-aware gate. If it persists, the snap is coming
+    // from outside this file and we hunt further. No observer installed
+    // during the probe — there's nothing to observe when auto-snap is off.
+    void content
+    void scroll
   }, [])
 
   const scrollToBottom = useCallback(() => {
     const el = scrollEl.current
     if (el) {
-      // TEMP debug
-      console.warn('[conv-snap] scrollToBottom()', new Error().stack?.split('\n').slice(1, 5))
       el.scrollTop = el.scrollHeight
       setIsAtBottom(true)
     }
@@ -166,8 +147,6 @@ export const ConversationContent = ({
   useLayoutEffect(() => {
     const el = scrollNode.current
     if (el) {
-      // TEMP debug
-      console.warn('[conv-snap] mount layout-effect → scrollTop=scrollHeight')
       el.scrollTop = el.scrollHeight - el.clientHeight
     }
   }, [])

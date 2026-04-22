@@ -31,18 +31,17 @@ describe('Conversation component', () => {
     expect(content).toContain('ResizeObserver')
   })
 
-  it('auto-snap decision checks live scrollTop, not a sticky escape flag', () => {
+  it('no `escaped` ref (regression guard for the flag-based snap-back trap)', () => {
     const conversationPath = join(__dirname, 'conversation.tsx')
     const content = readFileSync(conversationPath, 'utf-8')
 
     // Regression guard (mobile WebView foreground-resume): the flag-based
-    // `escaped.current` design raced repeated growth events and trapped the
-    // user inside the 70px near-bottom zone. Live position is the source of
-    // truth — `pinned` is computed inside the ResizeObserver callback and
-    // no `escaped` ref exists.
+    // `escaped.current` design raced repeated growth events and trapped
+    // the user inside the 70px near-bottom zone. The new design either
+    // uses live scrollTop (pinned check) or disables RO snap entirely —
+    // both are acceptable; what's NOT acceptable is re-introducing a
+    // sticky escape flag.
     expect(content).not.toContain('escaped.current')
-    expect(content).toContain('const pinned =')
-    expect(content).toContain('PIN_THRESHOLD_PX')
   })
 
   it('ConversationContent scrolls to bottom on mount via useLayoutEffect', () => {
