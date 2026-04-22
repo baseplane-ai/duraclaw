@@ -700,6 +700,14 @@ export interface SyncedCollectionFrame<TRow = unknown> {
   collection: string
   ops: Array<SyncedCollectionOp<TRow>>
   /**
+   * When true, `ops` represents the complete current state of the
+   * collection (all rows as insert ops). The client diffs against its
+   * local state: upserts everything in the frame, deletes any local key
+   * NOT present in the frame. This makes deletes implicit — if a row is
+   * missing from the snapshot, it's gone. No lost-delete risk.
+   */
+  snapshot?: boolean
+  /**
    * Optional per-stream monotonic counter stamped by the server;
    * observability only, clients MUST NOT gate on it. Introduced by
    * `broadcastMessages` in SessionDO (GH#38 P1.2) so operators can

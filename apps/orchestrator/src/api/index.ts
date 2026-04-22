@@ -16,6 +16,7 @@ import { validateActionToken } from '~/lib/action-token'
 import { createAuth } from '~/lib/auth'
 import { broadcastSessionRow } from '~/lib/broadcast-session'
 import { broadcastSyncedDelta } from '~/lib/broadcast-synced-delta'
+import { broadcastTabsSnapshot } from '~/lib/broadcast-tabs-snapshot'
 import { buildChainRowFromContext, type ChainBuildContext } from '~/lib/chains'
 import { chunkOps } from '~/lib/chunk-frame'
 import { promptToPreviewText } from '~/lib/prompt-preview'
@@ -922,9 +923,7 @@ export function createApiApp() {
         .values({ id, userId, sessionId, position, createdAt, meta })
         .returning()
       const newRow = inserted[0] as UserTabRow
-      c.executionCtx.waitUntil(
-        broadcastSyncedDelta(c.env, userId, 'user_tabs', [{ type: 'insert', value: newRow }]),
-      )
+      c.executionCtx.waitUntil(broadcastTabsSnapshot(c.env, userId, db))
       return c.json({ tab: newRow }, 201)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
@@ -950,9 +949,7 @@ export function createApiApp() {
       // (the optimistic row stays orphaned otherwise — see openTab's local
       // dedup safeguard for the rendering side of the same race).
       const canonical = existing[0] as UserTabRow
-      c.executionCtx.waitUntil(
-        broadcastSyncedDelta(c.env, userId, 'user_tabs', [{ type: 'insert', value: canonical }]),
-      )
+      c.executionCtx.waitUntil(broadcastTabsSnapshot(c.env, userId, db))
       return c.json({ tab: canonical }, 200)
     }
   })
@@ -983,9 +980,7 @@ export function createApiApp() {
     }
 
     const updatedRow = updated[0] as UserTabRow
-    c.executionCtx.waitUntil(
-      broadcastSyncedDelta(c.env, userId, 'user_tabs', [{ type: 'update', value: updatedRow }]),
-    )
+    c.executionCtx.waitUntil(broadcastTabsSnapshot(c.env, userId, db))
     return c.json({ tab: updatedRow })
   })
 
@@ -1003,9 +998,7 @@ export function createApiApp() {
       return c.json({ error: 'Tab not found' }, 404)
     }
 
-    c.executionCtx.waitUntil(
-      broadcastSyncedDelta(c.env, userId, 'user_tabs', [{ type: 'delete', key: tabId }]),
-    )
+    c.executionCtx.waitUntil(broadcastTabsSnapshot(c.env, userId, db))
     return c.body(null, 204)
   })
 
@@ -1054,20 +1047,7 @@ export function createApiApp() {
       await db.batch([first, ...rest])
     }
 
-    const reorderedRows = (await db
-      .select()
-      .from(userTabs)
-      .where(
-        and(eq(userTabs.userId, userId), inArray(userTabs.id, ids), isNull(userTabs.deletedAt)),
-      )) as UserTabRow[]
-    c.executionCtx.waitUntil(
-      broadcastSyncedDelta(
-        c.env,
-        userId,
-        'user_tabs',
-        reorderedRows.map((row) => ({ type: 'update', value: row })),
-      ),
-    )
+    c.executionCtx.waitUntil(broadcastTabsSnapshot(c.env, userId, db))
     return c.json({ ok: true })
   })
 
