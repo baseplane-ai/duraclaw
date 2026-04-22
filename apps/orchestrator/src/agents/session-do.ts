@@ -766,6 +766,14 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     const actualError = error !== undefined ? error : connection
     const conn = error !== undefined ? (connection as Connection) : undefined
     this.logError('onError', actualError, conn ? { connId: conn.id } : undefined)
+    // Re-throw so the SDK's `_tryCatch` wrapper (index.js:1082) gets a real
+    // Error object from the `throw this.onError(e)` line rather than
+    // `throw undefined`. Without this, any throw inside onConnect /
+    // onMessage surfaces on the client as a bare close 1006 with no stack
+    // in wrangler tail — the cause of the session-WS 1ms-flap diagnostic
+    // black hole (issue #61). Throwing here satisfies the `void` return
+    // type because throwing functions widen to `never`.
+    throw actualError instanceof Error ? actualError : new Error(String(actualError))
   }
 
   /**
