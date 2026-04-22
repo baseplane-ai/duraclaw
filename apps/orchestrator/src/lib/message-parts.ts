@@ -14,6 +14,9 @@ import type { ContentBlock } from '~/lib/types'
  */
 export interface UserImagePart extends SessionMessagePart {
   type: 'image'
+  /** When true, `source.data` was stripped before SQLite persistence because
+   *  the serialized row would have exceeded the DO SQLite row-size cap. */
+  truncated?: boolean
   input: {
     source: {
       type: 'base64'
@@ -22,6 +25,12 @@ export interface UserImagePart extends SessionMessagePart {
     }
   }
 }
+
+/**
+ * CF DO SQLite caps TEXT/BLOB at ~2 MB per row. We use 1 MiB as a safe
+ * threshold — well under the limit to leave room for envelope + other columns.
+ */
+export const MAX_PARTS_JSON_BYTES = 1024 * 1024 // 1 MiB
 
 function isUserImagePart(part: SessionMessagePart): part is UserImagePart {
   return (
@@ -123,5 +132,53 @@ export function transcriptUserContentToParts(content: unknown): SessionMessagePa
     // Unknown block shape — preserve pre-fix fallback so nothing is lost.
     parts.push({ type: 'text', text: JSON.stringify(block) })
   }
+  return parts
+}
+
+/**
+ * Returns true when the part is a UserImagePart whose base64 data was
+ * stripped before SQLite storage. UI consumers should show a placeholder.
+ */
+export function isImageTruncated(part: SessionMessagePart): boolean {
+  return isUserImagePart(part) && part.truncated === true
+}
+
+/**
+ * Strip oversized base64 image data from parts so the JSON-serialized
+ * SessionMessage fits within the CF DO SQLite row-size limit.
+ *
+ * When the total serialized size of `parts` exceeds `MAX_PARTS_JSON_BYTES`,
+ * every `UserImagePart` has its `source.data` replaced with an empty string
+ * and its `truncated` flag set to `true`. The function is a no-op when parts
+ * are already under the threshold.
+ *
+ * Returns the (possibly mutated) parts array. Mutation is intentional — the
+ * caller is about to persist these parts and does not need the originals.
+ */
+export function sanitizePartsForStorage(
+  parts: SessionMessagePart[],
+  context?: { sessionId?: string; messageId?: string },
+): SessionMessagePart[] {
+  const serialized = JSON.stringify(parts)
+  if (serialized.length <= MAX_PARTS_JSON_BYTES) return parts
+
+  let stripped = false
+  for (const part of parts) {
+    if (isUserImagePart(part) && part.input.source.data.length > 0) {
+      part.input.source.data = ''
+      part.truncated = true
+      stripped = true
+    }
+  }
+
+  if (stripped) {
+    console.warn('[sanitize-parts] Stripped oversized base64 image data before SQLite write', {
+      sessionId: context?.sessionId ?? 'unknown',
+      messageId: context?.messageId ?? 'unknown',
+      originalBytes: serialized.length,
+      sanitizedBytes: JSON.stringify(parts).length,
+    })
+  }
+
   return parts
 }

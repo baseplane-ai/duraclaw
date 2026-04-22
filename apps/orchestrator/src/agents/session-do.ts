@@ -18,7 +18,11 @@ import { broadcastSyncedDelta } from '~/lib/broadcast-synced-delta'
 import { buildChainRow } from '~/lib/chains'
 import { chunkOps } from '~/lib/chunk-frame'
 import { runMigrations } from '~/lib/do-migrations'
-import { contentToParts, transcriptUserContentToParts } from '~/lib/message-parts'
+import {
+  contentToParts,
+  sanitizePartsForStorage,
+  transcriptUserContentToParts,
+} from '~/lib/message-parts'
 import { promptToPreviewText } from '~/lib/prompt-preview'
 import { type PushPayload, sendPushNotification } from '~/lib/push'
 import { sendFcmNotification } from '~/lib/push-fcm'
@@ -556,6 +560,29 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     return super.onRequest(request)
   }
 
+  // ── GH#65: size-safe persistence wrappers ───────────────────────────
+  // Every call site that writes to the Session's SQLite-backed message
+  // store should go through these so oversized base64 image data is
+  // stripped before it hits the DO SQLite row-size cap (~2 MB).
+
+  /** appendMessage with pre-write sanitization of oversized image parts. */
+  private async safeAppendMessage(msg: SessionMessage, parentId?: string | null): Promise<void> {
+    sanitizePartsForStorage(msg.parts, {
+      sessionId: this.name,
+      messageId: msg.id,
+    })
+    return this.session.appendMessage(msg, parentId)
+  }
+
+  /** updateMessage with pre-write sanitization of oversized image parts. */
+  private safeUpdateMessage(msg: SessionMessage): void {
+    sanitizePartsForStorage(msg.parts, {
+      sessionId: this.name,
+      messageId: msg.id,
+    })
+    this.session.updateMessage(msg)
+  }
+
   onConnect(connection: Connection, ctx: ConnectionContext) {
     // GH#49 observability: log socket-set size + same-id collision count at
     // the moment we enter onConnect. Distinguishes the candidate root causes
@@ -1041,7 +1068,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       const existing = this.session.getMessage(this.currentTurnMessageId)
       if (existing) {
         const finalizedParts = finalizeStreamingParts(existing.parts)
-        this.session.updateMessage({ ...existing, parts: finalizedParts })
+        this.safeUpdateMessage({ ...existing, parts: finalizedParts })
         this.broadcastMessage({ ...existing, parts: finalizedParts })
       }
       this.currentTurnMessageId = null
@@ -1538,7 +1565,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       }
       const updatedMsg: SessionMessage = { ...msg, parts: updatedParts }
       try {
-        this.session.updateMessage(updatedMsg)
+        this.safeUpdateMessage(updatedMsg)
         this.broadcastMessage(updatedMsg)
       } catch (err) {
         console.error(`[SessionDO:${this.ctx.id}] Failed to promote gate part:`, err)
@@ -1571,7 +1598,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
         createdAt: new Date(),
       }
       try {
-        void this.session.appendMessage(gateMsg)
+        void this.safeAppendMessage(gateMsg)
         this.broadcastMessage(gateMsg)
       } catch (err) {
         console.error(`[SessionDO:${this.ctx.id}] Failed to create standalone gate:`, err)
@@ -2196,7 +2223,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
             parts: transcriptUserContentToParts(content),
             createdAt: new Date(),
           }
-          await this.session.appendMessage(sessionMsg, lastMsgId)
+          await this.safeAppendMessage(sessionMsg, lastMsgId)
           lastMsgId = msgId
           // A new user message ends any in-progress assistant turn — reset the
           // accumulator so the next assistant event starts a fresh message.
@@ -2218,7 +2245,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
             // state regression from terminal states.
             const existing = this.session.getMessage(currentAssistantMsgId)
             if (existing) {
-              this.session.updateMessage({
+              this.safeUpdateMessage({
                 ...existing,
                 parts: upsertParts(existing.parts, newParts),
               })
@@ -2234,7 +2261,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
             parts: newParts,
             createdAt: new Date(),
           }
-          await this.session.appendMessage(sessionMsg, lastMsgId)
+          await this.safeAppendMessage(sessionMsg, lastMsgId)
           lastMsgId = msgId
           currentAssistantMsgId = msgId
           persisted++
@@ -2244,7 +2271,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
             const existing = this.session.getMessage(lastMsgId)
             if (existing) {
               const updatedParts = applyToolResult(existing.parts, msg)
-              this.session.updateMessage({ ...existing, parts: updatedParts })
+              this.safeUpdateMessage({ ...existing, parts: updatedParts })
             }
           }
           persisted++
@@ -2545,7 +2572,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       canonical_turn_id: userMsgId,
     }
     try {
-      await this.session.appendMessage(userMsg)
+      await this.safeAppendMessage(userMsg)
       this.persistTurnState()
       this.broadcastMessage(userMsg)
     } catch (err) {
@@ -2616,7 +2643,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       canonical_turn_id: userMsgId,
     }
     try {
-      await this.session.appendMessage(userMsg)
+      await this.safeAppendMessage(userMsg)
       this.persistTurnState()
       this.broadcastMessage(userMsg)
     } catch (err) {
@@ -2835,7 +2862,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       })
       const updatedMsg: SessionMessage = { ...msg, parts: updatedParts }
       try {
-        this.session.updateMessage(updatedMsg)
+        this.safeUpdateMessage(updatedMsg)
       } catch (err) {
         // updateMessage can fail if the message was garbage-collected,
         // created via the standalone fallback path, or the DO rehydrated
@@ -3022,7 +3049,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       canonical_turn_id: canonicalTurnId,
     }
     try {
-      await this.session.appendMessage(userMsg)
+      await this.safeAppendMessage(userMsg)
       this.persistTurnState()
       // GH#38 P1.5 / B10: emit messages + branchInfo siblings back-to-back
       // on the same DO turn. broadcastBranchInfo no-ops when the new turn
@@ -3128,7 +3155,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       canonical_turn_id: userMsgId,
     }
     try {
-      await this.session.appendMessage(userMsg)
+      await this.safeAppendMessage(userMsg)
       this.persistTurnState()
       // GH#38 P1.5 / B10: emit messages + branchInfo siblings back-to-back.
       this.broadcastMessages([userMsg as unknown as WireSessionMessage])
@@ -3192,7 +3219,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       )
       const updatedMsg: SessionMessage = { ...msg, parts: updatedParts }
       try {
-        this.session.updateMessage(updatedMsg)
+        this.safeUpdateMessage(updatedMsg)
         this.broadcastMessage(updatedMsg)
       } catch (err) {
         console.error(`[SessionDO:${this.ctx.id}] Failed to mark gate interrupted:`, err)
@@ -3462,7 +3489,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       const existing = this.session.getMessage(this.currentTurnMessageId)
       if (existing) {
         const finalizedParts = finalizeStreamingParts(existing.parts)
-        this.session.updateMessage({ ...existing, parts: finalizedParts })
+        this.safeUpdateMessage({ ...existing, parts: finalizedParts })
       }
       this.currentTurnMessageId = null
     }
@@ -3490,7 +3517,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     }
 
     try {
-      this.session.appendMessage(newUserMsg, parentId)
+      this.safeAppendMessage(newUserMsg, parentId)
       this.persistTurnState()
       this.broadcastMessage(newUserMsg)
       // DO-authored snapshot (B2): broadcast the branch view so all clients
@@ -3645,7 +3672,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
             }
             const updatedMsg: SessionMessage = { ...existing, parts: updatedParts }
             try {
-              this.session.updateMessage(updatedMsg)
+              this.safeUpdateMessage(updatedMsg)
               this.broadcastMessage(updatedMsg)
             } catch (err) {
               console.error(`[SessionDO:${this.ctx.id}] Failed to update partial assistant:`, err)
@@ -3666,7 +3693,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
               createdAt: new Date(),
             }
             try {
-              this.session.appendMessage(msg)
+              this.safeAppendMessage(msg)
               this.persistTurnState()
               this.broadcastMessage(msg)
             } catch (err) {
@@ -3712,7 +3739,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
             }
             const updatedMsg: SessionMessage = { ...existing, parts: updatedParts }
             try {
-              this.session.updateMessage(updatedMsg)
+              this.safeUpdateMessage(updatedMsg)
               this.broadcastMessage(updatedMsg)
             } catch (err) {
               console.error(`[SessionDO:${this.ctx.id}] Failed to update partial:`, err)
@@ -3745,12 +3772,12 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         }
         try {
           if (existing) {
-            this.session.updateMessage(msg)
+            this.safeUpdateMessage(msg)
           } else {
             // No partial fired first — append from scratch. Parent defaults to
             // latestLeafRow(), which is the user row this assistant replies
             // to. See partial_assistant branch for the full rationale.
-            this.session.appendMessage(msg)
+            this.safeAppendMessage(msg)
           }
           this.currentTurnMessageId = null
           this.persistTurnState()
@@ -3771,7 +3798,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           const updatedParts = applyToolResult(existing.parts, event)
           const updatedMsg: SessionMessage = { ...existing, parts: updatedParts }
           try {
-            this.session.updateMessage(updatedMsg)
+            this.safeUpdateMessage(updatedMsg)
             this.broadcastMessage(updatedMsg)
           } catch (err) {
             console.error(`[SessionDO:${this.ctx.id}] Failed to persist tool result:`, err)
@@ -3885,7 +3912,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           ]
           const updatedMsg: SessionMessage = { ...existing, parts: updatedParts }
           try {
-            this.session.updateMessage(updatedMsg)
+            this.safeUpdateMessage(updatedMsg)
             this.broadcastMessage(updatedMsg)
           } catch (err) {
             console.error(`[SessionDO:${this.ctx.id}] Failed to persist file_changed:`, err)
@@ -3900,7 +3927,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           const existing = this.session.getMessage(this.currentTurnMessageId)
           if (existing) {
             const finalizedParts = finalizeStreamingParts(existing.parts)
-            this.session.updateMessage({ ...existing, parts: finalizedParts })
+            this.safeUpdateMessage({ ...existing, parts: finalizedParts })
             this.broadcastMessage({ ...existing, parts: finalizedParts })
           }
           this.currentTurnMessageId = null
@@ -3917,7 +3944,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
             parts: [{ type: 'text', text: `⚠ Error: ${event.result}` }],
             createdAt: new Date(),
           }
-          this.session.appendMessage(errorMsg)
+          this.safeAppendMessage(errorMsg)
           this.broadcastMessage(errorMsg)
         }
 
@@ -3937,7 +3964,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
                 { type: 'text', text: event.result, state: 'done' },
               ]
               const updatedMsg: SessionMessage = { ...lastMsg, parts: updatedParts }
-              this.session.updateMessage(updatedMsg)
+              this.safeUpdateMessage(updatedMsg)
               this.broadcastMessage(updatedMsg)
             } else {
               this.turnCounter++
@@ -3948,7 +3975,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
                 parts: [{ type: 'text', text: event.result, state: 'done' }],
                 createdAt: new Date(),
               }
-              this.session.appendMessage(resultMsg)
+              this.safeAppendMessage(resultMsg)
               this.broadcastMessage(resultMsg)
             }
           }
@@ -4022,7 +4049,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           const existing = this.session.getMessage(this.currentTurnMessageId)
           if (existing) {
             const finalizedParts = finalizeStreamingParts(existing.parts)
-            this.session.updateMessage({ ...existing, parts: finalizedParts })
+            this.safeUpdateMessage({ ...existing, parts: finalizedParts })
           }
           this.currentTurnMessageId = null
           this.persistTurnState()
@@ -4100,7 +4127,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           const existing = this.session.getMessage(this.currentTurnMessageId)
           if (existing) {
             const finalizedParts = finalizeStreamingParts(existing.parts)
-            this.session.updateMessage({ ...existing, parts: finalizedParts })
+            this.safeUpdateMessage({ ...existing, parts: finalizedParts })
           }
           this.currentTurnMessageId = null
           this.persistTurnState()
@@ -4115,7 +4142,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           parts: [{ type: 'text', text: `⚠ Error: ${event.error}` }],
           createdAt: new Date(),
         }
-        this.session.appendMessage(errorMsg)
+        this.safeAppendMessage(errorMsg)
         this.broadcastMessage(errorMsg)
 
         // Transition to idle — session remains interactive and resumable via

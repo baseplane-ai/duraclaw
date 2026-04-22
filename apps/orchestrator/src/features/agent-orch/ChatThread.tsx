@@ -41,7 +41,7 @@ import {
   SheetTitle,
 } from '~/components/ui/sheet'
 import { Skeleton } from '~/components/ui/skeleton'
-import { getImagePartDataUrl } from '~/lib/message-parts'
+import { getImagePartDataUrl, isImageTruncated } from '~/lib/message-parts'
 import type { GateResponse, SessionMessage, SessionMessagePart } from '~/lib/types'
 import { GateResolver } from './GateResolver'
 
@@ -635,8 +635,9 @@ const ChatMessageRow = memo(
     if (msg.role === 'user') {
       const textPart = msg.parts.find((p) => p.type === 'text')
       const imageParts = msg.parts.flatMap((p) => {
+        if (isImageTruncated(p)) return [{ part: p, url: null as string | null, truncated: true }]
         const url = getImagePartDataUrl(p)
-        return url ? [{ part: p, url }] : []
+        return url ? [{ part: p, url, truncated: false }] : []
       })
       return (
         <div key={msg.id} className="group relative" data-turn-index={turnIndex}>
@@ -645,15 +646,25 @@ const ChatMessageRow = memo(
               <div className="flex min-w-0 flex-col gap-2">
                 {imageParts.length > 0 && (
                   <div className="flex flex-wrap gap-2">
-                    {imageParts.map(({ url }, i) => (
-                      <img
-                        // biome-ignore lint/suspicious/noArrayIndexKey: images share no stable id; order is fixed
-                        key={i}
-                        src={url}
-                        alt="User attachment"
-                        className="max-h-64 max-w-full rounded border object-contain"
-                      />
-                    ))}
+                    {imageParts.map(({ url, truncated }, i) =>
+                      truncated ? (
+                        <div
+                          // biome-ignore lint/suspicious/noArrayIndexKey: images share no stable id; order is fixed
+                          key={i}
+                          className="flex h-24 w-40 items-center justify-center rounded border border-dashed border-muted-foreground/30 bg-muted/50 text-xs text-muted-foreground"
+                        >
+                          Image too large to store
+                        </div>
+                      ) : (
+                        <img
+                          // biome-ignore lint/suspicious/noArrayIndexKey: images share no stable id; order is fixed
+                          key={i}
+                          src={url as string}
+                          alt="User attachment"
+                          className="max-h-64 max-w-full rounded border object-contain"
+                        />
+                      ),
+                    )}
                   </div>
                 )}
                 <div className="flex min-w-0 items-start justify-between gap-2">
