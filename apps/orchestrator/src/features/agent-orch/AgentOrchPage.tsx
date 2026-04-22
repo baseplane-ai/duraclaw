@@ -2,8 +2,9 @@
  * AgentOrchPage — Main page for spawning and observing sessions.
  *
  * Layout: tab bar + main area (selected agent detail view or quick prompt).
- * Tab state is Yjs-backed via useTabSync — one-tab-per-project is enforced
- * inside the hook, so callers just pass `project` when opening tabs.
+ * Tab state is D1-backed via useTabSync (userTabsCollection) — one-tab-per-
+ * project is enforced inside the hook, so callers just pass `project` when
+ * opening tabs.
  */
 
 import type { SessionSummary } from '@duraclaw/shared-types'

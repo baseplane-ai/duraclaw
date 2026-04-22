@@ -98,8 +98,8 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
   // from SessionState.
   const derivedGate = useDerivedGate(sessionId)
 
-  // Draft key scopes localStorage drafts. Now that tabs ARE sessions (Yjs
-  // Y.Array of sessionIds), use sessionId directly — no separate tab ID.
+  // Draft key scopes localStorage drafts. Tabs ARE sessions (userTabsCollection
+  // rows keyed by sessionId), so use sessionId directly — no separate tab ID.
   const draftKey = sessionId
 
   return (

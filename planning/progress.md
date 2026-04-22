@@ -41,7 +41,7 @@ Shipped via PR #17 (squash-merged) + GH#18 fix. Four sub-features:
 
 | Sub | Name | Status | Notes |
 |-----|------|--------|-------|
-| 3B | Chain Tab Surface | done | Yjs-backed chain tabs one-per-issue. Sidebar groups sessions under chain nodes with 5-dot pipeline indicator. `/chain/:issueNumber` route renders vertical timeline of mode sessions. Auto-opens on session spawn when `kataIssue` is set. |
+| 3B | Chain Tab Surface | done | D1-backed chain tabs one-per-issue (userTabsCollection). Sidebar groups sessions under chain nodes with 5-dot pipeline indicator. `/chain/:issueNumber` route renders vertical timeline of mode sessions. Auto-opens on session spawn when `kataIssue` is set. |
 | 3C | Mode-Enter Session Reset | done | `handleModeTransition` in SessionDO closes runner WS with code `4411 mode_transition`, waits 5s, builds preamble from prior session context, respawns in new mode. Emitter path: session-runner watches `.kata/sessions/` state.json, emits `KataStateEvent` over dial-back WS (GH#18 fix). |
 | 3D | Kanban Board (`/board`) | done | Swim lanes by issue type (enhancement/bug/other). 6-column pipeline: backlog → research → planning → impl → verify → done. Column derived from latest session's kataMode + issue open/closed state. Drag-to-advance with single-step adjacency rule + precondition gates. Project filter dropdown scopes board to chains with sessions in a specific worktree. Horizontal scroll layout for mobile (min-w-180px columns, snap scroll). |
 | 3E | Worktree Checkout | done | D1 `worktree_reservations` table (migration 0009). Code-touching modes (implementation/verify/debug/task) acquire exclusive worktree lock via `/api/chains/:issue/checkout`. 409 conflict with force-release modal. Checkout auto-runs on advance. |

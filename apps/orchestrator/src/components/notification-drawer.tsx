@@ -50,7 +50,7 @@ export function NotificationDrawer({ open, onOpenChange }: NotificationDrawerPro
     markRead(n.id)
     onOpenChange(false)
     // Navigation to /?session=X triggers AgentOrchPage's deep-link effect,
-    // which calls openTab() on the Yjs Y.Array.
+    // which calls openTab() on userTabsCollection.
     navigate({ to: '/', search: { session: n.sessionId } })
   }
 

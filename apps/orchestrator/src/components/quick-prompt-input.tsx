@@ -89,9 +89,9 @@ export function QuickPromptInput({
   const [images, setImages] = useState<ImagePreview[]>([])
   const [imageError, setImageError] = useState<string | null>(null)
 
-  // Check if selected project already has an open tab — read from Yjs open
-  // tabs + sessions collection to see if any open tab's session matches the
-  // selected project.
+  // Check if selected project already has an open tab — read from
+  // userTabsCollection + sessions collection to see if any open tab's
+  // session matches the selected project.
   const { openTabs: openTabIds } = useTabSync()
   // Include archived so historical tabs still resolve their project for the
   // "existing tab" detection below.

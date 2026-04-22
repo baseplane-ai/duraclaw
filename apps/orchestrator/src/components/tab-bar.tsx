@@ -43,13 +43,14 @@ import { deriveDisplayStateFromStatus } from '~/lib/display-state'
 import { cn } from '~/lib/utils'
 
 interface TabBarProps {
-  /** Ordered list of session IDs from Yjs Y.Array. */
+  /** Ordered list of session IDs from userTabsCollection (ORDER BY position). */
   openTabs: string[]
   /** The session currently being viewed. */
   activeSessionId: string | null
   /**
-   * {sessionId → project} map from the Yjs tabs entry. Used to label
-   * draft tabs whose sessionId is not yet in the sessions collection.
+   * {sessionId → project} map derived from userTabsCollection row meta.
+   * Used to label draft tabs whose sessionId is not yet in the sessions
+   * collection.
    */
   tabProjects?: Record<string, string | undefined>
   onSelectSession: (sessionId: string) => void

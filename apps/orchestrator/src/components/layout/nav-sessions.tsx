@@ -311,7 +311,7 @@ export function NavSessions() {
   const handleSelect = useCallback(
     (session: SessionRecord) => {
       // Navigation to /?session=X triggers AgentOrchPage's deep-link effect,
-      // which calls openTab() on the Yjs Y.Array. No direct tab manipulation needed.
+      // which calls openTab() on userTabsCollection. No direct tab manipulation needed.
       setOpenMobile(false)
       navigate({ to: '/', search: { session: session.id } })
     },
