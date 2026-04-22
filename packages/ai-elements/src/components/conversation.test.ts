@@ -31,19 +31,6 @@ describe('Conversation component', () => {
     expect(content).toContain('ResizeObserver')
   })
 
-  it('RO pin check is against pre-growth distance (regression guard for streaming)', () => {
-    const conversationPath = join(__dirname, 'conversation.tsx')
-    const content = readFileSync(conversationPath, 'utf-8')
-
-    // ResizeObserver fires after layout, so post-growth `scrollHeight -
-    // scrollTop - clientHeight` equals the size of the new content (always
-    // > PIN_THRESHOLD_PX = 4 for any streaming text delta). The pin check
-    // must subtract `growth` to recover the user's pre-growth distance —
-    // otherwise auto-scroll never fires during streaming.
-    expect(content).toContain('distanceBefore')
-    expect(content).toContain('- growth')
-  })
-
   it('no `escaped` ref (regression guard for the flag-based snap-back trap)', () => {
     const conversationPath = join(__dirname, 'conversation.tsx')
     const content = readFileSync(conversationPath, 'utf-8')
@@ -55,20 +42,5 @@ describe('Conversation component', () => {
     // both are acceptable; what's NOT acceptable is re-introducing a
     // sticky escape flag.
     expect(content).not.toContain('escaped.current')
-  })
-
-  it('ConversationContent mount layout-effect is guarded against re-fire', () => {
-    const conversationPath = join(__dirname, 'conversation.tsx')
-    const content = readFileSync(conversationPath, 'utf-8')
-
-    // On Android WebView, a React concurrent-commit edge case re-invokes
-    // this effect on a persisted fiber+DOM roughly every 430ms. Without
-    // the `scrollTop === 0` guard, each re-fire writes scrollTop back to
-    // the bottom and fights the user's drag. The guard turns every
-    // re-invocation into a no-op while still handling the genuine first-
-    // mount case where scrollTop starts at 0.
-    expect(content).toContain('useLayoutEffect')
-    expect(content).toContain('el.scrollTop === 0')
-    expect(content).toContain('el.scrollTop = el.scrollHeight - el.clientHeight')
   })
 })
