@@ -94,7 +94,7 @@ function useAutoScroll() {
       if (growth <= 0) return
       const distanceBefore = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight - growth
       if (distanceBefore < PIN_THRESHOLD_PX) {
-        scroll.scrollTop = scroll.scrollHeight
+        scroll.scrollTo({ top: scroll.scrollHeight, behavior: 'smooth' })
       }
     })
     ro.observe(content)
@@ -104,7 +104,7 @@ function useAutoScroll() {
   const scrollToBottom = useCallback(() => {
     const el = scrollEl.current
     if (el) {
-      el.scrollTop = el.scrollHeight
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
       setIsAtBottom(true)
     }
   }, [])
