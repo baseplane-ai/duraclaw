@@ -46,7 +46,22 @@ async function checkWebBundleUpdate(currentVersion: string): Promise<void> {
   try {
     localStorage.setItem(OTA_APPLIED_KEY, manifest.version)
   } catch {}
-  await CapacitorUpdater.set({ id: bundle.id })
+  // Queue the new bundle as "next" and then explicitly reload the WebView.
+  //
+  // Capgo docs say `set()` self-reloads, but on Android we've observed the
+  // pointer flipping to the new bundle while the WebView keeps serving the
+  // old JS from cache until the process is killed (2026-04-22 debug: bundle
+  // `3aa32b4` reported as current by Capgo while the WebView was still
+  // executing `index-BNUdqtUp.js` from `16a6bf3` — only `am force-stop` +
+  // relaunch picked up the new bundle).
+  //
+  // `next()` + `reload()` is Capgo's documented "recommended way to apply
+  // updates": `next()` queues the bundle without destroying the current JS
+  // context, and `reload()` triggers the same reload behaviour that happens
+  // automatically when the app backgrounds — deterministic and doesn't
+  // depend on Capgo's implicit reload-after-set firing on every device.
+  await CapacitorUpdater.next({ id: bundle.id })
+  await CapacitorUpdater.reload()
 }
 
 async function checkNativeApkUpdate(): Promise<void> {
