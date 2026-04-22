@@ -44,7 +44,7 @@ import type { SessionRecord } from '~/db/session-record'
 import { userPreferencesCollection } from '~/db/user-preferences-collection'
 import { getPreviewText, StatusDot } from '~/features/agent-orch/session-utils'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
-import { useTabSync } from '~/hooks/use-tab-sync'
+import { newDraftTabId, useTabSync } from '~/hooks/use-tab-sync'
 import { apiUrl } from '~/lib/platform'
 import type { PrInfo, ProjectInfo } from '~/lib/types'
 import { cn } from '~/lib/utils'
@@ -219,7 +219,7 @@ export function NavSessions() {
   const { setOpenMobile } = useSidebar()
   const location = useLocation()
   const navigate = useNavigate()
-  const { openTab, setActive } = useTabSync()
+  const { openTab } = useTabSync()
 
   // Synced collections: projects + user preferences (GH#32 phase p4).
   // Replaces the old direct GET /api/gateway/projects/all client fetch —
@@ -342,13 +342,16 @@ export function NavSessions() {
   const activeSessionId = searchParams.get('session')
 
   const handleNewSession = useCallback(() => {
-    // Clear active tab so AgentOrchPage falls through to QuickPromptInput
-    // instead of re-rendering the last session. activeSessionId is
-    // localStorage-persisted, so navigating to "/" alone doesn't drop it.
-    setActive(null)
+    // Open a fresh draft tab (no preselected project). AgentOrchPage's
+    // render branches off activeSessionId; if it matches an existing
+    // (real or draft) tab, the page keeps showing that session. Creating
+    // a new draft forces the page onto the QuickPromptInput picker via
+    // the "draft id with no project meta" fall-through.
+    const draftId = newDraftTabId()
+    openTab(draftId)
     setOpenMobile(false)
-    navigate({ to: '/' })
-  }, [setActive, setOpenMobile, navigate])
+    navigate({ to: '/', search: { session: draftId } })
+  }, [openTab, setOpenMobile, navigate])
 
   return (
     <>
