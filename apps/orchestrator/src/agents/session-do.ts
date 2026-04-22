@@ -1400,7 +1400,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
 
   private async syncStatusToD1(updatedAt: string, opts: { bumpLastActivity?: boolean } = {}) {
     try {
-      const sessionId = this.ctx.id.toString()
+      const sessionId = this.name
       const newStatus = this.state.status
       const shouldClearError = newStatus === 'running' || newStatus === 'idle'
       const nextError = shouldClearError ? null : this.lastSyncedError
@@ -1439,7 +1439,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
    */
   private async initStatusCacheAndReconcile() {
     try {
-      const sessionId = this.ctx.id.toString()
+      const sessionId = this.name
       const rows = await this.d1
         .select({ status: agentSessions.status, error: agentSessions.error })
         .from(agentSessions)
@@ -1460,7 +1460,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
 
   private async syncResultToD1(updatedAt: string) {
     try {
-      const sessionId = this.ctx.id.toString()
+      const sessionId = this.name
       await this.d1
         .update(agentSessions)
         .set({
@@ -1480,7 +1480,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
 
   private async syncSdkSessionIdToD1(sdkSessionId: string, updatedAt: string) {
     try {
-      const sessionId = this.ctx.id.toString()
+      const sessionId = this.name
       await this.d1
         .update(agentSessions)
         .set({ sdkSessionId, updatedAt })
@@ -1505,7 +1505,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     updatedAt: string,
   ) {
     try {
-      const sessionId = this.ctx.id.toString()
+      const sessionId = this.name
       const shouldClearError = errorMsg == null && (status === 'running' || status === 'idle')
       const errorFields =
         errorMsg != null
@@ -1543,7 +1543,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
    */
   private async syncKataAllToD1(kataState: KataSessionState | null, updatedAt: string) {
     try {
-      const sessionId = this.ctx.id.toString()
+      const sessionId = this.name
       await this.d1
         .update(agentSessions)
         .set({
@@ -1587,7 +1587,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   // biome-ignore lint/correctness/noUnusedPrivateClassMembers: intentional, see above
   private async syncWorktreeInfoToD1(worktreeInfoJson: string | null, updatedAt: string) {
     try {
-      const sessionId = this.ctx.id.toString()
+      const sessionId = this.name
       await this.d1
         .update(agentSessions)
         .set({ worktreeInfoJson, updatedAt })
@@ -1613,7 +1613,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       if (pending == null) return
       void (async () => {
         try {
-          const sessionId = this.ctx.id.toString()
+          const sessionId = this.name
           const updatedAt = new Date().toISOString()
           await this.d1
             .update(agentSessions)
@@ -1659,7 +1659,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     }
     if (this.lastEventTs === 0) return
     try {
-      const sessionId = this.ctx.id.toString()
+      const sessionId = this.name
       await this.d1
         .update(agentSessions)
         .set({ lastEventTs: this.lastEventTs })
@@ -1724,7 +1724,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
    * spawns a fresh runner in the new mode with an artifact-pointer preamble.
    */
   private async handleModeTransition(kataState: KataSessionState, fromMode: string | null) {
-    const sessionId = this.ctx.id.toString()
+    const sessionId = this.name
     const toMode = kataState.currentMode ?? ''
     const issueNumber = kataState.issueNumber ?? 0
 
@@ -1837,7 +1837,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     const issueNumber = ks.issueNumber ?? 0
     const mode = ks.currentMode ?? 'unknown'
     const phase = ks.currentPhase ?? 'p0'
-    const sessionId = this.ctx.id.toString()
+    const sessionId = this.name
 
     // Issue title is not a first-class field on the DO — leave as 'untitled'
     // until chain metadata plumbing lands (downstream P5 work).
@@ -3010,7 +3010,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
    * value even when the runner is dead because the D1 mirror survives.
    */
   async getKataState(): Promise<{ kataState: KataSessionState | null; fetchedAt: string }> {
-    const sessionId = this.ctx.id.toString()
+    const sessionId = this.name
     try {
       const rows = await this.d1
         .select({
