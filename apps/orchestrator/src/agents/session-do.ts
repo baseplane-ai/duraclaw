@@ -163,6 +163,11 @@ const META_COLUMN_MAP: Partial<Record<keyof SessionMeta, string>> = {
  * unlike setInterval which stops when the DO is evicted from memory.
  */
 const WATCHDOG_INTERVAL_MS = 30_000
+/** GH#57: grace period before running recovery when the gateway reports the
+ * runner is still alive. Gives DialBackClient time to reconnect after a
+ * transient CF WS flap. If the runner re-dials within this window (detected
+ * in onConnectInner), the timer is cancelled and the session resumes. */
+const RECOVERY_GRACE_MS = 15_000
 
 /**
  * Parse a canonical user-turn ordinal from a message id or canonical_turn_id.
@@ -189,6 +194,9 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   private cachedGatewayConnId: string | null = null
   /** Timestamp of the last gateway event received on the WS connection. */
   private lastGatewayActivity = 0
+  /** GH#57: pending recovery timer — set when WS drops but gateway says runner
+   * is still alive. Cleared when the runner reconnects (onConnectInner). */
+  private recoveryGraceTimer: ReturnType<typeof setTimeout> | null = null
   /** Per-session monotonic sequence for MessagesFrame broadcasts (B1). Persisted in typed `session_meta.message_seq`; survives DO rehydrate. */
   private messageSeq = 0
   /**
@@ -597,6 +605,16 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       this.sql`INSERT OR REPLACE INTO kv (key, value) VALUES ('gateway_conn_id', ${connection.id})`
       this.cachedGatewayConnId = connection.id
       this.lastGatewayActivity = Date.now()
+
+      // GH#57: runner reconnected after a transient WS flap — cancel the
+      // pending recovery grace timer so we don't clear the callback token.
+      if (this.recoveryGraceTimer) {
+        console.log(
+          `[SessionDO:${this.ctx.id}] Runner reconnected — cancelling recovery grace timer`,
+        )
+        this.clearRecoveryGraceTimer()
+      }
+
       console.log(`[SessionDO:${this.ctx.id}] Gateway connected: conn=${connection.id}`)
       return // No replay, no protocol messages
     }
@@ -677,8 +695,15 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       if (gwConnId && connection.id === gwConnId) {
         // Gateway message: parse and route to handleGatewayEvent
         this.lastGatewayActivity = Date.now()
+
+        // GH#57: transport-level keepalive from DialBackClient — prevents CF
+        // idle-close (~70s). Bumps lastGatewayActivity (above) but does NOT
+        // enter parseEvent/handleGatewayEvent, so lastEventTs is untouched
+        // and the GH#50 TTL predicate keeps working.
+        const raw = typeof data === 'string' ? data : new TextDecoder().decode(data)
+        if (raw === '{"type":"keepalive"}') return
+
         try {
-          const raw = typeof data === 'string' ? data : new TextDecoder().decode(data)
           const event = parseEvent(raw)
           this.handleGatewayEvent(event)
         } catch (err) {
@@ -795,15 +820,34 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     const result = await getSessionStatus(gatewayUrl, this.env.CC_GATEWAY_SECRET, sessionId, 5_000)
 
     if (result.kind === 'state') {
-      // GH#50 B6: trust the client TTL predicate over the gateway's
-      // optimistic `state === 'running'` report. The DO must run recovery
-      // unconditionally when the WS drops so a stuck runner doesn't keep
-      // the row in `running` forever — the client's deriveStatus() will
-      // mark it idle on its own once `last_event_ts` ages out of TTL.
+      // GH#57: the runner is still alive on the VPS — its DialBackClient
+      // will attempt to reconnect (1s/3s/9s backoff). Give it a grace
+      // window before running recovery. If onConnectInner fires within
+      // the window, the timer is cancelled and the session resumes without
+      // clearing active_callback_token.
+      //
+      // This fixes the GH#50 B6 regression where unconditional recovery
+      // on any WS drop cleared the token and killed the runner's reconnect
+      // with 4401. The watchdog alarm (90s stale threshold) is the
+      // long-stop safety net if the runner never reconnects.
       console.log(
-        `[SessionDO:${this.ctx.id}] WS dropped, gateway reports state=${result.body.state} — running recovery`,
+        `[SessionDO:${this.ctx.id}] WS dropped, gateway reports state=${result.body.state} — scheduling recovery grace (${RECOVERY_GRACE_MS}ms)`,
       )
-      await this.recoverFromDroppedConnection()
+      this.clearRecoveryGraceTimer()
+      this.recoveryGraceTimer = setTimeout(async () => {
+        this.recoveryGraceTimer = null
+        // Double-check: if the runner reconnected in the meantime, skip.
+        if (this.getGatewayConnectionId()) {
+          console.log(
+            `[SessionDO:${this.ctx.id}] Recovery grace expired but runner reconnected — skipping recovery`,
+          )
+          return
+        }
+        console.log(
+          `[SessionDO:${this.ctx.id}] Recovery grace expired, no reconnect — running recovery`,
+        )
+        await this.recoverFromDroppedConnection()
+      }, RECOVERY_GRACE_MS)
       return
     }
 
@@ -936,6 +980,15 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   }
 
   /** Schedule the next watchdog alarm. */
+  /** GH#57: cancel any pending recovery grace timer (runner reconnected or
+   * recovery running through another path). */
+  private clearRecoveryGraceTimer() {
+    if (this.recoveryGraceTimer !== null) {
+      clearTimeout(this.recoveryGraceTimer)
+      this.recoveryGraceTimer = null
+    }
+  }
+
   private scheduleWatchdog() {
     this.ctx.storage.setAlarm(Date.now() + WATCHDOG_INTERVAL_MS)
   }
@@ -974,6 +1027,9 @@ export class SessionDO extends Agent<Env, SessionMeta> {
    * syncs any missed messages, and transitions to the correct status.
    */
   private async recoverFromDroppedConnection() {
+    // GH#57: clear any pending grace timer — we're running recovery now.
+    this.clearRecoveryGraceTimer()
+
     // Sync any missed messages from the gateway transcript
     try {
       await this.hydrateFromGateway()

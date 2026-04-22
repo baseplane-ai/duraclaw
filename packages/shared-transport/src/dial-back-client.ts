@@ -34,6 +34,11 @@ const BACKOFF_MULTIPLIER = 3
 const BACKOFF_CAP = 30_000
 const STABLE_THRESHOLD = 10_000
 const STARTUP_TIMEOUT = 15 * 60 * 1000
+/** Interval between keepalive frames sent to prevent CF idle-close (~70s).
+ * Must be shorter than CF's idle threshold with margin. The frame is a bare
+ * `{"type":"keepalive"}` JSON string — NOT a GatewayEvent, so it doesn't
+ * bump the DO's `lastEventTs` or affect the GH#50 TTL predicate. */
+const KEEPALIVE_INTERVAL_MS = 25_000
 /** After this many post-connect reconnect attempts with no 10s-stable window
  * in between, treat the DO as permanently unreachable and give up. */
 const MAX_POST_CONNECT_ATTEMPTS = 20
@@ -55,6 +60,7 @@ export class DialBackClient {
   private ws: WebSocket | null = null
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private healthTimer: ReturnType<typeof setTimeout> | null = null
+  private keepaliveTimer: ReturnType<typeof setInterval> | null = null
   private attempt = 0
   private stopped = false
   private startedAt: number | null = null
@@ -102,6 +108,7 @@ export class DialBackClient {
       clearTimeout(this.healthTimer)
       this.healthTimer = null
     }
+    this.clearKeepalive()
     if (this.ws) {
       this.channel.detachWebSocket()
       this.ws.close()
@@ -136,17 +143,28 @@ export class DialBackClient {
       this.healthTimer = setTimeout(() => {
         this.attempt = 0
       }, STABLE_THRESHOLD)
+
+      // GH#57: start keepalive to prevent CF idle-close (~70s). Sends a
+      // transport-level frame that the DO intercepts before parseEvent —
+      // no GatewayEvent emitted, no lastEventTs bump, no TTL pollution.
+      this.clearKeepalive()
+      this.keepaliveTimer = setInterval(() => {
+        if (this.ws?.readyState === 1 /* OPEN */) {
+          this.ws.send('{"type":"keepalive"}')
+        }
+      }, KEEPALIVE_INTERVAL_MS)
     }
 
     ws.onclose = (e: { code?: number; reason?: string } = {}) => {
       if (this.stopped || ws !== this.ws) return
       this.channel.detachWebSocket()
 
-      // Clear health timer
+      // Clear health timer + keepalive
       if (this.healthTimer !== null) {
         clearTimeout(this.healthTimer)
         this.healthTimer = null
       }
+      this.clearKeepalive()
 
       const code = e.code
       const reason = e.reason ?? ''
@@ -187,6 +205,13 @@ export class DialBackClient {
       } catch {
         console.warn('DialBackClient: failed to parse message', e.data)
       }
+    }
+  }
+
+  private clearKeepalive(): void {
+    if (this.keepaliveTimer !== null) {
+      clearInterval(this.keepaliveTimer)
+      this.keepaliveTimer = null
     }
   }
 
