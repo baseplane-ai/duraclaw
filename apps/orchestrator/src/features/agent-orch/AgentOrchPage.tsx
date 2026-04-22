@@ -134,97 +134,88 @@ function AgentOrchContent() {
   }, [])
 
   const handleSpawn = useCallback(
-    async (config: SpawnFormConfig & { newTab?: boolean }) => {
-      try {
-        // TODO: wire worktree checkout here when AgentOrchPage learns
-        // kataIssue from the spawn form. Chain-scoped code-touching spawns
-        // from the kanban go through advance-chain.ts which handles this;
-        // freeform spawns from this form currently bypass the gate.
-        const resp = await fetch(apiUrl('/api/sessions'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            project: config.project,
-            prompt: config.prompt,
-            model: config.model,
-            agent: config.agent,
-          }),
-        })
-        if (!resp.ok) return
+    (config: SpawnFormConfig & { newTab?: boolean }) => {
+      // Optimistic-create path: the UI swaps to AgentDetailView immediately
+      // with a client-minted session id, and POST /api/sessions fires in the
+      // background. The server binds the DO via `idFromName(clientSessionId)`
+      // and echoes the D1 row via broadcastSessionRow — which reconciles our
+      // optimistic overlay by deep-equals. WS orderings are safe: if it
+      // opens before `/create` completes, onConnect replays empty history
+      // and the spawn-triggered broadcast later delivers the user message;
+      // the second `agent.spawn()` call from AgentDetailWithSpawn is
+      // idempotent (SessionDO returns 'Session already active').
+      const clientSessionId = `sess-${crypto.randomUUID()}`
+      const now = new Date().toISOString()
+      const promptText =
+        typeof config.prompt === 'string' ? config.prompt : JSON.stringify(config.prompt)
 
-        const data = (await resp.json()) as { session_id: string }
-        const sessionId = data.session_id
-
-        // Optimistic insert into sessionsCollection so the tab title and
-        // status bar populate immediately after navigate. Without this,
-        // both surfaces render blank until the server's
-        // broadcastSessionRow('insert') WS delta arrives, which races
-        // the first render of the new tab (and loses on slow networks
-        // or cold DO dispatch). Field shape mirrors the baseRow the
-        // server writes in POST /api/sessions (status: 'running',
-        // agent defaulted to 'claude'); the server echo reconciles via
-        // TanStack DB deep-equals. Transaction has a no-op mutationFn
-        // because the POST has already succeeded — we just need the
-        // optimistic-layer overlay until the synced-layer frame lands.
-        //
-        // Skip the insert if the synced delta already landed (CF prod
-        // fan-out can beat `await resp.json()`). A bare insert would
-        // throw DuplicateKeyError, which propagates past the swap below
-        // and leaves the draft tab stuck on its placeholder id.
-        const coll = sessionsCollection as unknown as {
-          insert: (row: SessionSummary) => void
-          has: (key: string) => boolean
-        }
-        if (!coll.has(sessionId)) {
-          const now = new Date().toISOString()
-          const optimisticRow: SessionSummary = {
-            id: sessionId,
-            userId: null,
-            project: config.project,
-            status: 'running',
-            model: config.model ?? null,
-            prompt:
-              typeof config.prompt === 'string' ? config.prompt : JSON.stringify(config.prompt),
-            agent: config.agent ?? 'claude',
-            createdAt: now,
-            updatedAt: now,
-            lastActivity: now,
-            archived: false,
-          }
-          const tx = createTransaction({ mutationFn: async () => {} })
-          tx.mutate(() => coll.insert(optimisticRow))
-          await tx.isPersisted.promise
-        }
-
-        setSpawnConfig({
-          project: config.project,
-          prompt: config.prompt,
-          model: config.model,
-          agent: config.agent,
-        })
-        setQuickPromptHint(null)
-
-        // If a draft tab is active, hydrate it in place (keep its slot);
-        // otherwise fall back to the original open-a-tab behavior.
-        const activeDraft = isDraftTabId(activeSessionId) ? activeSessionId : null
-        if (activeDraft) {
-          replaceTab(activeDraft, sessionId)
-        } else {
-          const session = sessions.find((s) => s.id === sessionId)
-          if (session?.kataIssue != null) {
-            openTab(`chain:${session.kataIssue}`, {
-              kind: 'chain',
-              issueNumber: session.kataIssue,
-            })
-          }
-          openTab(sessionId, { project: config.project, forceNewTab: config.newTab })
-        }
-        navigate({ to: '/', search: { session: sessionId } })
-      } catch (err) {
-        console.error('[AgentOrch] Spawn failed:', err)
+      const optimisticRow: SessionSummary = {
+        id: clientSessionId,
+        userId: null,
+        project: config.project,
+        status: 'running',
+        model: config.model ?? null,
+        prompt: promptText,
+        agent: config.agent ?? 'claude',
+        origin: 'duraclaw',
+        createdAt: now,
+        updatedAt: now,
+        lastActivity: now,
+        archived: false,
       }
+
+      const tx = createTransaction({
+        mutationFn: async () => {
+          const resp = await fetch(apiUrl('/api/sessions'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({
+              client_session_id: clientSessionId,
+              project: config.project,
+              prompt: config.prompt,
+              model: config.model,
+              agent: config.agent,
+            }),
+          })
+          if (!resp.ok) {
+            throw new Error(`Failed to create session: ${resp.status}`)
+          }
+        },
+      })
+
+      const coll = sessionsCollection as unknown as {
+        insert: (row: SessionSummary) => void
+        has: (key: string) => boolean
+      }
+      tx.mutate(() => {
+        if (!coll.has(clientSessionId)) coll.insert(optimisticRow)
+      })
+
+      setSpawnConfig({
+        project: config.project,
+        prompt: config.prompt,
+        model: config.model,
+        agent: config.agent,
+      })
+      setQuickPromptHint(null)
+
+      const activeDraft = isDraftTabId(activeSessionId) ? activeSessionId : null
+      if (activeDraft) {
+        replaceTab(activeDraft, clientSessionId)
+      } else {
+        openTab(clientSessionId, { project: config.project, forceNewTab: config.newTab })
+      }
+      navigate({ to: '/', search: { session: clientSessionId } })
+
+      // Surface POST failures without blocking UI. If the server rejects the
+      // create, the optimistic row rolls back via the tx; the user is left
+      // on an orphaned tab until they close it — acceptable for a rare path.
+      tx.isPersisted.promise.catch((err) => {
+        console.error('[AgentOrch] Spawn failed:', err)
+      })
     },
-    [navigate, openTab, replaceTab, activeSessionId, sessions],
+    [navigate, openTab, replaceTab, activeSessionId],
   )
 
   const handleSelectSession = useCallback(

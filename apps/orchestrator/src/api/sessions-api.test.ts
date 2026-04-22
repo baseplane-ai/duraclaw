@@ -259,6 +259,59 @@ describe('POST /api/sessions', () => {
     expect(fakeDb.db.insert).toHaveBeenCalled()
   })
 
+  it('uses client_session_id verbatim when supplied (optimistic create)', async () => {
+    env.SESSION_AGENT.idFromName.mockReturnValue({ toString: () => 'named-do-id' })
+    const app = makeApp(env)
+    const res = await app.request('/api/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        project: 'my-project',
+        prompt: 'do stuff',
+        client_session_id: 'sess-abc-123',
+      }),
+    })
+
+    expect(res.status).toBe(201)
+    const body = (await res.json()) as { session_id: string }
+    expect(body.session_id).toBe('sess-abc-123')
+    expect(env.SESSION_AGENT.idFromName).toHaveBeenCalledWith('sess-abc-123')
+    expect(env.SESSION_AGENT.newUniqueId).not.toHaveBeenCalled()
+  })
+
+  it('rejects client_session_id that looks like a raw DO hex id', async () => {
+    const app = makeApp(env)
+    const hex64 = '0'.repeat(64)
+    const res = await app.request('/api/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        project: 'my-project',
+        prompt: 'do stuff',
+        client_session_id: hex64,
+      }),
+    })
+
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toBe('invalid_client_session_id')
+  })
+
+  it('rejects malformed client_session_id', async () => {
+    const app = makeApp(env)
+    const res = await app.request('/api/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        project: 'my-project',
+        prompt: 'do stuff',
+        client_session_id: 'bad id with spaces',
+      }),
+    })
+
+    expect(res.status).toBe(400)
+  })
+
   it('returns 500 when DO returns non-ok response', async () => {
     env.SESSION_AGENT.get.mockReturnValue({
       fetch: vi.fn().mockResolvedValue(

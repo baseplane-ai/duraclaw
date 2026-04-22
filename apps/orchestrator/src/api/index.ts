@@ -50,7 +50,18 @@ interface CreateSessionBody {
    *  shows up in its chain immediately, before kata's own sync writes
    *  the value back. */
   kataIssue?: number
+  /** Optional client-supplied session id for optimistic creation. When
+   *  present, the DO is bound via `idFromName(client_session_id)` and the
+   *  value is used verbatim as the D1 row id — letting the client render
+   *  the new session instantly and fire POST /api/sessions in the
+   *  background. Must not match the 64-char hex shape used by DO
+   *  `idFromString` (see `getSessionDoId`). */
+  client_session_id?: string
 }
+
+// Accept safe client-generated ids like `sess-<uuid>`. Excludes 64-hex
+// which would collide with the `idFromString` branch of getSessionDoId.
+const CLIENT_SESSION_ID_RE = /^[A-Za-z0-9_-]{8,128}$/
 
 const ACTIVE_STATUSES = ['running', 'waiting_input', 'waiting_permission'] as const
 
@@ -1679,8 +1690,25 @@ export function createApiApp() {
 
     const projectPath = await resolveProjectPath(c.env, body.project)
 
-    const doId = c.env.SESSION_AGENT.newUniqueId()
-    const sessionId = doId.toString()
+    // Optimistic-create path: when the client supplies its own id, bind the
+    // DO by name instead of minting a fresh hex id. `getSessionDoId` routes
+    // non-hex ids through `idFromName`, so the same id resolves the same DO
+    // on every subsequent request.
+    let sessionId: string
+    let doId: DurableObjectId
+    if (body.client_session_id !== undefined) {
+      if (
+        !CLIENT_SESSION_ID_RE.test(body.client_session_id) ||
+        /^[0-9a-f]{64}$/.test(body.client_session_id)
+      ) {
+        return c.json({ error: 'invalid_client_session_id' }, 400)
+      }
+      sessionId = body.client_session_id
+      doId = c.env.SESSION_AGENT.idFromName(sessionId)
+    } else {
+      doId = c.env.SESSION_AGENT.newUniqueId()
+      sessionId = doId.toString()
+    }
     const sessionDO = c.env.SESSION_AGENT.get(doId)
 
     const createResponse = await sessionDO.fetch(
