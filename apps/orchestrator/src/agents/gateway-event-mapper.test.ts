@@ -5,6 +5,8 @@ import {
   finalizeStreamingParts,
   mergeFinalAssistantParts,
   partialAssistantToParts,
+  upsertParts,
+  upsertToolPart,
 } from './gateway-event-mapper'
 
 describe('assistantContentToParts', () => {
@@ -295,5 +297,215 @@ describe('mergeFinalAssistantParts', () => {
     ]
     const result = mergeFinalAssistantParts(existing, [])
     expect(result[0].state).toBe('input-available')
+  })
+})
+
+// GH#59 — ask_user replay duplication regression guard
+describe('upsertToolPart', () => {
+  it('appends parts that have no toolCallId', () => {
+    const existing = [{ type: 'text', text: 'hi', state: 'done' as const }]
+    const incoming = { type: 'reasoning', text: 'thought', state: 'done' as const }
+    const out = upsertToolPart(existing, incoming)
+    expect(out).toEqual([...existing, incoming])
+  })
+
+  it('appends when no existing part matches the toolCallId', () => {
+    const existing = [
+      {
+        type: 'tool-Bash',
+        toolCallId: 'tc-a',
+        toolName: 'Bash',
+        input: {},
+        state: 'input-available' as const,
+      },
+    ]
+    const incoming = {
+      type: 'tool-Read',
+      toolCallId: 'tc-b',
+      toolName: 'Read',
+      input: { path: '/x' },
+      state: 'input-available' as const,
+    }
+    const out = upsertToolPart(existing, incoming)
+    expect(out).toHaveLength(2)
+    expect(out[1]).toEqual(incoming)
+  })
+
+  it('upserts in place (does not grow the array) when the toolCallId matches', () => {
+    const existing = [
+      {
+        type: 'tool-Bash',
+        toolCallId: 'tc-1',
+        toolName: 'Bash',
+        input: { command: 'ls' },
+        state: 'input-available' as const,
+      },
+    ]
+    const incoming = {
+      type: 'tool-Bash',
+      toolCallId: 'tc-1',
+      toolName: 'Bash',
+      input: { command: 'ls' },
+      state: 'output-available' as const,
+      output: 'file.txt',
+    }
+    const out = upsertToolPart(existing, incoming)
+    expect(out).toHaveLength(1)
+    expect(out[0].state).toBe('output-available')
+    expect(out[0].output).toBe('file.txt')
+  })
+
+  it('keeps the promoted gate type when replay re-introduces the SDK-original name', () => {
+    // Simulates: `promoteToolPartToGate` has already flipped this part from
+    // `tool-AskUserQuestion` to `tool-ask_user`. Then transcript replay
+    // re-emits the original `tool_use` block with name `AskUserQuestion`.
+    // The promotion must stick — otherwise the client falls back to a pill.
+    const existing = [
+      {
+        type: 'tool-ask_user',
+        toolCallId: 'tc-gate',
+        toolName: 'ask_user',
+        input: { questions: [{ question: 'ok?' }] },
+        state: 'approval-requested' as const,
+      },
+    ]
+    const incoming = {
+      type: 'tool-AskUserQuestion',
+      toolCallId: 'tc-gate',
+      toolName: 'AskUserQuestion',
+      input: { questions: [{ question: 'ok?' }] },
+      state: 'input-available' as const,
+    }
+    const out = upsertToolPart(existing, incoming)
+    expect(out).toHaveLength(1)
+    expect(out[0].type).toBe('tool-ask_user')
+    expect(out[0].toolName).toBe('AskUserQuestion') // toolName from incoming wins
+  })
+
+  it('does not regress a terminal output state back to input-available', () => {
+    // Simulates: tool already produced a result; replay emits the
+    // pre-result input-available shape. The terminal state must win.
+    const existing = [
+      {
+        type: 'tool-Bash',
+        toolCallId: 'tc-done',
+        toolName: 'Bash',
+        input: { command: 'ls' },
+        state: 'output-available' as const,
+        output: 'x.txt',
+      },
+    ]
+    const incoming = {
+      type: 'tool-Bash',
+      toolCallId: 'tc-done',
+      toolName: 'Bash',
+      input: { command: 'ls' },
+      state: 'input-available' as const,
+    }
+    const out = upsertToolPart(existing, incoming)
+    expect(out).toHaveLength(1)
+    expect(out[0].state).toBe('output-available')
+    expect(out[0].output).toBe('x.txt')
+  })
+
+  it('does not regress a resolved gate (approval-given) back to approval-requested', () => {
+    const existing = [
+      {
+        type: 'tool-ask_user',
+        toolCallId: 'tc-gate',
+        toolName: 'ask_user',
+        input: { questions: [] },
+        state: 'approval-given' as const,
+        output: 'Red',
+      },
+    ]
+    const incoming = {
+      type: 'tool-AskUserQuestion',
+      toolCallId: 'tc-gate',
+      toolName: 'AskUserQuestion',
+      input: { questions: [] },
+      state: 'approval-requested' as const,
+    }
+    const out = upsertToolPart(existing, incoming)
+    expect(out[0].state).toBe('approval-given')
+    expect(out[0].type).toBe('tool-ask_user')
+    expect(out[0].output).toBe('Red')
+  })
+})
+
+describe('upsertParts', () => {
+  it('collapses a full transcript-replay sequence to zero duplicates', () => {
+    // Exact shape of the GH#59 regression: after Round 1 gate resolves, the
+    // SDK replays the earlier tool_use blocks. Pre-fix this concat produced
+    // 13 parts; post-fix the dedupe collapses it to the unique set.
+    const existing = [
+      { type: 'reasoning', text: 'thought', state: 'done' as const },
+      { type: 'text', text: 'intro', state: 'done' as const },
+      {
+        type: 'tool-ToolSearch',
+        toolCallId: 'tc-search',
+        toolName: 'ToolSearch',
+        input: {},
+        state: 'output-available' as const,
+        output: 'ok',
+      },
+      {
+        type: 'tool-Bash',
+        toolCallId: 'tc-bash',
+        toolName: 'Bash',
+        input: { command: 'ls' },
+        state: 'output-available' as const,
+        output: 'x',
+      },
+      { type: 'text', text: 'asking', state: 'done' as const },
+      {
+        type: 'tool-ask_user',
+        toolCallId: 'tc-gate',
+        toolName: 'ask_user',
+        input: { questions: [] },
+        state: 'output-available' as const,
+        output: 'Red',
+      },
+    ]
+    const replayed = [
+      { type: 'text', text: 'intro', state: 'done' as const }, // duplicate text appended
+      {
+        type: 'tool-ToolSearch',
+        toolCallId: 'tc-search',
+        toolName: 'ToolSearch',
+        input: {},
+        state: 'input-available' as const,
+      },
+      {
+        type: 'tool-Bash',
+        toolCallId: 'tc-bash',
+        toolName: 'Bash',
+        input: { command: 'ls' },
+        state: 'input-available' as const,
+      },
+      { type: 'text', text: 'asking', state: 'done' as const }, // duplicate text appended
+      {
+        type: 'tool-AskUserQuestion',
+        toolCallId: 'tc-gate',
+        toolName: 'AskUserQuestion',
+        input: { questions: [] },
+        state: 'output-available' as const,
+      },
+    ]
+
+    const merged = upsertParts(existing, replayed)
+
+    // Tool parts with known toolCallIds must NOT grow: 3 unique ids.
+    const toolCallIds = merged.map((p) => p.toolCallId).filter(Boolean)
+    expect(toolCallIds.length).toBe(new Set(toolCallIds).size)
+    expect(toolCallIds.sort()).toEqual(['tc-bash', 'tc-gate', 'tc-search'])
+
+    // Terminal states held; promoted gate type held.
+    const gate = merged.find((p) => p.toolCallId === 'tc-gate')!
+    expect(gate.type).toBe('tool-ask_user')
+    expect(gate.state).toBe('output-available')
+    const bash = merged.find((p) => p.toolCallId === 'tc-bash')!
+    expect(bash.state).toBe('output-available')
+    expect(bash.output).toBe('x')
   })
 })

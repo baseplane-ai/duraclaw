@@ -84,8 +84,19 @@ function groupByFilePath(parts: SessionMessagePart[]): {
 // session gate (e.g. a state-update event that arrived while the tab was
 // blurred and got batched on refocus) silently renders as a badge instead of
 // the inline GateResolver UI.
+//
+// Defense-in-depth (GH#59): the server-side `promoteToolPartToGate` renames
+// `tool-AskUserQuestion` / `tool-<Permission*>` into the promoted shapes
+// below. If a promotion broadcast is missed or a transcript-replay delta
+// re-introduces the un-promoted type, we still recognise it as a gate
+// candidate provided the state says so — i.e. treat
+// `tool-AskUserQuestion` with `approval-requested` + toolCallId as a gate.
+// With the server-side dedupe in place this fallback is rarely hit, but it
+// protects against latent brittleness in the append path.
 function isGateCandidate(part: SessionMessagePart): boolean {
-  return (part.type === 'tool-ask_user' || part.type === 'tool-permission') && !!part.toolCallId
+  if (!part.toolCallId) return false
+  if (part.type === 'tool-ask_user' || part.type === 'tool-permission') return true
+  return part.type === 'tool-AskUserQuestion' && part.state === 'approval-requested'
 }
 
 function isPendingGate(part: SessionMessagePart, readOnly: boolean | undefined): boolean {
@@ -718,9 +729,6 @@ const ChatMessageRow = memo(
 // `<Conversation>` auto-scroll context via `useAutoScrollContext()`:
 //   - `scrollRef` → the virtualizer's scroll element (IO root).
 //   - `contentRef` → the sized inner div (RO target, height = totalSize).
-//   - `sentinelRef` → zero-height div pinned to the end of virtual space
-//      so the IO bottom-sentinel + `scrollIntoView({block:'end'})` auto-
-//      scroll path keeps working unchanged.
 // Items are absolutely positioned via `translateY(item.start)`. Real row
 // heights replace the estimate as rows paint via `measureElement`.
 // -------------------------------------------------------------------------
@@ -742,7 +750,7 @@ function VirtualizedMessageList({
   branchInfo,
   onBranchNavigate,
 }: VirtualizedMessageListProps) {
-  const { scrollRef, contentRef, sentinelRef } = useAutoScrollContext()
+  const { scrollRef, contentRef } = useAutoScrollContext()
   const scrollElRef = useRef<HTMLDivElement | null>(null)
 
   // Composite ref callback — stashes the node for the virtualizer AND
@@ -819,20 +827,6 @@ function VirtualizedMessageList({
             </div>
           )
         })}
-        {/* Bottom sentinel — pinned to the end of the virtualized height so
-         * `<Conversation>`'s IO-based "is user at bottom?" signal works
-         * unchanged. Zero-height, aria-hidden. */}
-        <div
-          ref={sentinelRef}
-          aria-hidden="true"
-          style={{
-            position: 'absolute',
-            top: totalSize,
-            left: 0,
-            right: 0,
-            height: 0,
-          }}
-        />
       </div>
     </div>
   )

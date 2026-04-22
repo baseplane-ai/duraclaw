@@ -1,30 +1,38 @@
 /**
  * Messages collection factory — per-sessionId collections driven by the
- * session WS (GH#47).
+ * session WS (GH#47 / GH#57).
  *
- * Historically built on `@tanstack/query-db-collection`'s
- * `queryCollectionOptions`, which treats `queryFn` as an authoritative
- * snapshot — fundamentally incompatible with cursor-based incremental
- * fetching, and redundant with the DO's onConnect replay. This module now
- * follows the TanStack DB "collection-options-creator" pattern: build a
- * `CollectionConfig` directly whose `sync.sync` subscribes to the
- * per-session WS stream and applies `synced-collection-delta` frames
- * through `begin / write / commit`.
+ * Built on TanStack DB's "collection-options-creator" pattern: the
+ * factory returns a raw `CollectionConfig` whose `sync.sync` subscribes
+ * to the per-session WS stream and applies `synced-collection-delta`
+ * frames through `begin / write / commit`. No REST `queryFn` — that
+ * treats every fetch as an authoritative snapshot (via
+ * `applySuccessfulResult`, which deletes rows the response omits) and is
+ * fundamentally incompatible with cursor-based incremental fetching.
  *
- * - Cold load: `SessionDO.onConnect` replays `session.getHistory()` as a
- *   `{type:'insert'}` burst on the new client connection — no REST
- *   round-trip. The persisted OPFS cache (via `persistedCollectionOptions`)
- *   is the authoritative pre-WS view.
- * - Reconnect: free resume. WS reopens → DO re-emits history; TanStack
- *   DB's insert→update auto-conversion (61e8b57) keeps idempotent.
+ * Sync is **client-initiated, cursor-aware delta replay** (GH#57). On
+ * every WS (re)connect the client sends a single
+ * `{type:'subscribe:messages', sinceCursor}` frame (wired in
+ * `use-coding-agent.ts`). The DO's `replayMessagesFromCursor` pages the
+ * indexed `(session_id, created_at, id)` keyset at 500 rows/page and
+ * broadcasts targeted insert frames to just that connection. Cold
+ * clients pass `null` and receive everything; warm clients pass their
+ * OPFS tail and receive only the gap.
+ *
+ * - Cold load: OPFS persisted cache renders instantly, then the subscribe
+ *   frame backfills anything the cache is missing.
+ * - Reconnect: same subscribe frame — DO only replays the gap since the
+ *   client's tail cursor, not the full history. Tab switches with warm
+ *   caches transfer zero bytes of backlog.
+ * - Seq gaps on the live stream: re-issue the subscribe frame (the
+ *   cursor naturally advances each time the collection grows).
  * - Optimistic user turns: `onInsert` POSTs `/api/sessions/:id/messages`
- *   with `{content, clientId, createdAt}` — unchanged. The server adopts
- *   the `clientId` as the row's primary id so the WS echo reconciles in
- *   place via TanStack DB deepEquals.
- * - `markReady()` fires eagerly at sync-start: there is no snapshot to
- *   wait for, and the WS onConnect burst (if any) is delivered shortly
- *   after. Empty-history sessions are ready immediately rather than
- *   hanging on a frame that never arrives.
+ *   with `{content, clientId, createdAt}`. The server adopts `clientId`
+ *   as the row's primary id so the WS echo reconciles in place via
+ *   TanStack DB deepEquals.
+ * - `markReady()` fires eagerly at sync-start: OPFS hydrate is
+ *   synchronous, and the subscribe replay arrives shortly after WS open.
+ *   Empty-history sessions aren't gated on a frame that never arrives.
  *
  * Memoised per-sessionId so repeat `createMessagesCollection(id)` calls
  * return a stable Collection instance (required for `useLiveQuery`
@@ -111,16 +119,19 @@ export function messagesCollectionOptions(sessionId: string): CollectionConfig<C
       },
     )
 
-    // Reconnect is a no-op: the DO's onConnect replays `getHistory()` as a
-    // fresh insert burst on every new WS connection. The insert→update
-    // auto-conversion above absorbs the overlap.
+    // Reconnect is a no-op HERE — the subscribe frame is sent from the
+    // WS-open hook in `use-coding-agent.ts`, not this sync fn. That hook
+    // runs on every (re)connect (initial open + post-reconnect) and
+    // computes the tail cursor off THIS collection, so the DO only
+    // replays the gap since our last known row. The insert→update
+    // auto-conversion above still absorbs any overlap.
     const unsubReconnect = onSessionStreamReconnect(sessionId, () => {})
 
-    // No initial snapshot to wait for — WS delta frames (cold onConnect burst
-    // + live deltas) are the sole sync channel. Mark ready eagerly so
-    // consumers (useLiveQuery, optimistic mutations) aren't gated on WS
-    // state, and empty-history sessions don't hang on a frame that never
-    // arrives.
+    // No initial snapshot to wait for — OPFS hydrate is synchronous and
+    // the cursor-aware subscribe replay arrives shortly after WS open.
+    // Mark ready eagerly so consumers (useLiveQuery, optimistic
+    // mutations) aren't gated on WS state, and empty-history sessions
+    // don't hang on a frame that never arrives.
     markReady()
 
     return () => {
@@ -194,6 +205,37 @@ export function createMessagesCollection(sessionId: string): MessagesCollection 
  * New code should call `createMessagesCollection(sessionId)` directly.
  */
 export const messagesCollection = createMessagesCollection('__legacy__')
+
+/**
+ * Compute the tail `(createdAt, id)` cursor for a messages collection —
+ * used by the WS-open hook to send a `subscribe:messages` frame so the
+ * DO only replays rows newer than what we already have.
+ *
+ * Returns `null` for an empty collection (cold client; DO replays from
+ * epoch) or when no row carries a `createdAt` (degraded mode; treat as
+ * cold).
+ */
+export function computeTailCursor(
+  collection: MessagesCollection,
+): { createdAt: string; id: string } | null {
+  let maxCreatedAt = ''
+  let maxId = ''
+  try {
+    for (const [id, msg] of collection as Iterable<[string, CachedMessage]>) {
+      const raw = msg.createdAt
+      const ts = typeof raw === 'string' ? raw : raw instanceof Date ? raw.toISOString() : ''
+      if (!ts) continue
+      if (ts > maxCreatedAt || (ts === maxCreatedAt && id > maxId)) {
+        maxCreatedAt = ts
+        maxId = id
+      }
+    }
+  } catch {
+    // Collection may not be ready yet — fall back to cold cursor.
+    return null
+  }
+  return maxCreatedAt === '' ? null : { createdAt: maxCreatedAt, id: maxId }
+}
 
 /** Evict messages older than 30 days across every cached collection. */
 export function evictOldMessages() {

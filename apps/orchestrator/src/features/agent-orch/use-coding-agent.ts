@@ -20,7 +20,11 @@ import { toast } from 'sonner'
 import type * as Y from 'yjs'
 import { type BranchInfoRow, createBranchInfoCollection } from '~/db/branch-info-collection'
 import { queryClient } from '~/db/db-instance'
-import { type CachedMessage, createMessagesCollection } from '~/db/messages-collection'
+import {
+  type CachedMessage,
+  computeTailCursor,
+  createMessagesCollection,
+} from '~/db/messages-collection'
 import { sessionLocalCollection } from '~/db/session-local-collection'
 import { useMessagesCollection } from '~/hooks/use-messages-collection'
 import { useSession } from '~/hooks/use-sessions-collection'
@@ -74,6 +78,10 @@ export interface UseCodingAgentResult {
   submitDraft: (yText: Y.Text) => Promise<{ ok: boolean; error?: string; sent?: boolean }>
   /** Spawn a fresh SDK session with the current transcript prepended; recovers from orphaned sdk_session_id. */
   forkWithHistory: (content: string | ContentBlock[]) => Promise<unknown>
+  /** Retry the gateway dial — used by DisconnectedBanner for reattach. */
+  reattach: () => Promise<unknown>
+  /** Force-resume from the on-disk JSONL transcript — escape hatch for stuck sessions. */
+  resumeFromTranscript: () => Promise<unknown>
   rewind: (turnIndex: number) => Promise<{ ok: boolean; error?: string }>
   resubmitMessage: (
     messageId: string,
@@ -514,25 +522,35 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   )
   useManagedConnection(agentAdapter, `agent:${agentName}`)
 
-  // Replace the old useAppLifecycle foreground→hydrate() path. Fire a
-  // best-effort `getMessages` hydrate on every (re)connect including
-  // the initial open — pre-GH#42 `useAppLifecycle` did the same via the
-  // initial `pageshow` / Capacitor `appStateChange` kick. The initial
-  // open covers the race where the client's WS subscribes after the DO
-  // has already broadcast the first frames of a brand-new session;
-  // without this the collection sits empty until the next (possibly
-  // never) natural reconnect. Cost is one redundant REST call per
-  // mount, which the old hook was already paying.
+  // On every (re)connect: fire the hydration RPC (D1 init for discovered
+  // sessions + VPS gateway transcript catch-up) and send the cursor-aware
+  // `subscribe:messages` frame. The RPC is side-effect-only — actual
+  // message sync flows back through the WS delta stream that the DO emits
+  // in response to the subscribe frame.
+  //
+  // Why here rather than inside `messagesCollection.sync`: this hook owns
+  // the PartySocket and sees its `open` events; the collection's sync fn
+  // only sees delta frames and has no handle on the socket. Keeping the
+  // subscribe trigger at the socket layer also means it runs on every
+  // reconnect, including ones the connection-manager schedules for
+  // foreground / online transitions (GH#42).
   useEffect(() => {
     const onOpen = () => {
       connection.call('getMessages', []).catch(() => {
-        // Best-effort hydrate; messagesCollection still falls back to
-        // its queryFn for cold-start / stale-cache.
+        // Side-effect RPC; return value intentionally ignored.
       })
+      try {
+        const sinceCursor = computeTailCursor(messagesCollection)
+        connection.send(JSON.stringify({ type: 'subscribe:messages', sinceCursor }))
+      } catch {
+        // computeTailCursor is defensive; any throw falls back to a
+        // cold-load subscribe so the client still receives history.
+        connection.send(JSON.stringify({ type: 'subscribe:messages', sinceCursor: null }))
+      }
     }
     agentAdapter.addEventListener('open', onOpen)
     return () => agentAdapter.removeEventListener('open', onOpen)
-  }, [agentAdapter, connection])
+  }, [agentAdapter, connection, messagesCollection])
 
   const spawn = useCallback(
     (config: SpawnConfig) => connection.call('spawn', [config]),
@@ -546,6 +564,11 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   )
   const interrupt = useCallback(() => connection.call('interrupt', []), [connection])
   const getContextUsage = useCallback(() => connection.call('getContextUsage', []), [connection])
+  const reattach = useCallback(() => connection.call('reattach', []), [connection])
+  const resumeFromTranscript = useCallback(
+    () => connection.call('resumeFromTranscript', []),
+    [connection],
+  )
   const resolveGate = useCallback(
     (gateId: string, response: GateResponse) => connection.call('resolveGate', [gateId, response]),
     [connection],
@@ -827,6 +850,8 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     sendMessage,
     submitDraft,
     forkWithHistory,
+    reattach,
+    resumeFromTranscript,
     rewind,
     resubmitMessage,
     navigateBranch,

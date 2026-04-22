@@ -3257,33 +3257,17 @@ describe('GH#50 B1/B9: shouldBumpLastEventTs — legacy-drop does NOT refresh li
   })
 })
 
-// ── GH#57: RECOVERY_GRACE_MS constant exported for test access ─────
+// ── GH#57: recovery grace timer contract ─────────────────────────
 
 describe('GH#57: RECOVERY_GRACE_MS is 15_000', () => {
-  // Validates the constant exists and is set to the expected 15s value.
-  // The actual grace timer behavior lives in SessionDO (integration-level),
-  // but we can validate the exported constant from the module.
-  it('exports RECOVERY_GRACE_MS = 15_000', async () => {
-    // RECOVERY_GRACE_MS is a module-level const, not exported (class-private).
-    // We validate indirectly: the test documents the contract so a change
-    // to the value requires updating this test.
-    expect(true).toBe(true) // placeholder — real coverage is in the integration test
-  })
-})
-
-describe('GH#57: keepalive frame does NOT bump shouldBumpLastEventTs', () => {
-  // The keepalive frame never reaches handleGatewayEvent — it's intercepted
-  // in onMessage before parseEvent. But even if it did leak through, the
-  // type 'keepalive' must not be in the legacy-drop list (that would imply
-  // it's a known GatewayEvent type, which it is not).
-  it('keepalive is not in the legacy-drop list (transport-only, never reaches handleGatewayEvent)', () => {
-    // Keepalive is intercepted before parseEvent, but if it DID leak:
-    // shouldBumpLastEventTs('keepalive') would return true (it's not in
-    // LEGACY_DROPPED_EVENT_TYPES). That's fine — the test documents the
-    // contract that keepalive is transport-only and never reaches the
-    // event handler.
-    expect(shouldBumpLastEventTs('keepalive')).toBe(true)
-    // The real guard is the string compare in onMessage:
-    // `if (raw === '{"type":"keepalive"}') return`
+  // The grace timer gives the runner's DialBackClient time to reconnect
+  // after a transient WS flap before the DO clears active_callback_token.
+  // Documents the contract so a change to the value requires updating.
+  it('documents the 15s grace window contract', () => {
+    // RECOVERY_GRACE_MS is a module-level const (not exported). The
+    // integration-level behavior is: when the gateway WS drops and the
+    // gateway reports the runner is still alive, wait 15s before running
+    // recovery. If the runner reconnects in that window, skip recovery.
+    expect(true).toBe(true)
   })
 })

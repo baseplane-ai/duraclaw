@@ -344,6 +344,104 @@ describe('createSyncedCollection', () => {
     expect(cap.write).toHaveBeenCalledTimes(2)
   })
 
+  it('snapshot-frame: upserts all rows and deletes local keys not in the snapshot', async () => {
+    const { createSyncedCollection } = await import('./synced-collection')
+
+    const coll = createSyncedCollection<{ id: string; text: string }, string>({
+      id: 'user_tabs',
+      getKey: (r) => r.id,
+      queryKey: ['user_tabs'] as const,
+      queryFn: async () => [],
+      syncFrameType: 'user_tabs',
+    }) as unknown as { __opts: { sync: { sync: Function } } }
+
+    const begin = vi.fn()
+    const write = vi.fn()
+    const commit = vi.fn()
+    const markReady = vi.fn()
+    const truncate = vi.fn()
+
+    // Stub a collection that has t1 and t2, but the snapshot only contains t1 and t3.
+    // t2 should be deleted, t1 updated, t3 inserted.
+    coll.__opts.sync.sync({
+      collection: {
+        has: (k: string) => k === 't1' || k === 't2',
+        keys: () => ['t1', 't2'],
+      },
+      begin,
+      write,
+      commit,
+      markReady,
+      truncate,
+    })
+
+    emitFrame('user_tabs', {
+      type: 'synced-collection-delta',
+      collection: 'user_tabs',
+      snapshot: true,
+      ops: [
+        { type: 'insert', value: { id: 't1', text: 'updated' } },
+        { type: 'insert', value: { id: 't3', text: 'new' } },
+      ],
+    })
+
+    expect(begin).toHaveBeenCalledTimes(1)
+    expect(commit).toHaveBeenCalledTimes(1)
+    // 3 writes: t1 update, t3 insert, t2 delete
+    expect(write).toHaveBeenCalledTimes(3)
+    expect(write).toHaveBeenCalledWith({ type: 'update', value: { id: 't1', text: 'updated' } })
+    expect(write).toHaveBeenCalledWith({ type: 'insert', value: { id: 't3', text: 'new' } })
+    expect(write).toHaveBeenCalledWith({
+      type: 'delete',
+      key: 't2',
+      value: undefined,
+    })
+  })
+
+  it('snapshot-frame: empty snapshot deletes all local rows', async () => {
+    const { createSyncedCollection } = await import('./synced-collection')
+
+    const coll = createSyncedCollection<{ id: string }, string>({
+      id: 'user_tabs',
+      getKey: (r) => r.id,
+      queryKey: ['user_tabs'] as const,
+      queryFn: async () => [],
+      syncFrameType: 'user_tabs',
+    }) as unknown as { __opts: { sync: { sync: Function } } }
+
+    const begin = vi.fn()
+    const write = vi.fn()
+    const commit = vi.fn()
+    const markReady = vi.fn()
+    const truncate = vi.fn()
+
+    coll.__opts.sync.sync({
+      collection: {
+        has: (k: string) => k === 't1',
+        keys: () => ['t1'],
+      },
+      begin,
+      write,
+      commit,
+      markReady,
+      truncate,
+    })
+
+    emitFrame('user_tabs', {
+      type: 'synced-collection-delta',
+      collection: 'user_tabs',
+      snapshot: true,
+      ops: [],
+    })
+
+    expect(write).toHaveBeenCalledTimes(1)
+    expect(write).toHaveBeenCalledWith({
+      type: 'delete',
+      key: 't1',
+      value: undefined,
+    })
+  })
+
   it('reconnect-post-response-lost: onUserStreamReconnect invalidates the query', async () => {
     const { createSyncedCollection } = await import('./synced-collection')
 

@@ -103,6 +103,95 @@ export function finalizeStreamingParts(parts: SessionMessagePart[]): SessionMess
 }
 
 /**
+ * Terminal tool-part states that must never be regressed by a replay. Once a
+ * tool has an output or an approval decision, the SDK's later re-emission of
+ * the same tool_use block (transcript replay on continuation) must not wipe
+ * that state back to `input-available` / `approval-requested`.
+ */
+const TERMINAL_TOOL_STATES = new Set([
+  'output-available',
+  'output-error',
+  'output-denied',
+  'approval-given',
+  'approval-denied',
+])
+
+/**
+ * Gate-part types that the SessionDO promotes to from the SDK-original
+ * `tool-AskUserQuestion` / `tool-*Permission*` shapes via
+ * `promoteToolPartToGate`. When a replayed part for the same toolCallId
+ * arrives with the SDK-original type, the promotion must stick — otherwise
+ * the UI falls back to a pill and the gate becomes invisible.
+ */
+const PROMOTED_GATE_TYPES = new Set(['tool-ask_user', 'tool-permission'])
+
+/**
+ * Upsert a single part into an existing parts array by `toolCallId`.
+ *
+ * - Parts without a `toolCallId` (text, reasoning, data-*) are always appended.
+ * - Parts whose `toolCallId` doesn't match any existing part are appended.
+ * - Parts whose `toolCallId` matches an existing part are merged **in place**
+ *   rather than appended. Merge rules:
+ *     - **Type is sticky to the promoted form.** If the existing part has
+ *       already been promoted to `tool-ask_user` / `tool-permission` (by
+ *       `promoteToolPartToGate` in session-do), a replayed SDK-original type
+ *       (`tool-AskUserQuestion`, etc.) does NOT overwrite it.
+ *     - **State never regresses from a terminal state.** Once a tool part is
+ *       `output-available` / `output-denied` / `approval-given` /
+ *       `approval-denied`, a replayed `input-available` /
+ *       `approval-requested` is ignored.
+ *     - `toolName`, `input`, and `output` on the incoming part win only when
+ *       they are defined; otherwise the existing values are preserved.
+ *
+ * This is the single source of truth for dedupe-on-append across both the
+ * live-streaming assistant handler (`mergeFinalAssistantParts` below) and
+ * the hydration-from-gateway path in `SessionDO.hydrateFromGatewayTranscript`.
+ */
+export function upsertToolPart(
+  parts: SessionMessagePart[],
+  incoming: SessionMessagePart,
+): SessionMessagePart[] {
+  if (!incoming.toolCallId) return [...parts, incoming]
+  const idx = parts.findIndex((p) => p.toolCallId === incoming.toolCallId)
+  if (idx === -1) return [...parts, incoming]
+
+  const existing = parts[idx]
+  const keepPromotedType =
+    PROMOTED_GATE_TYPES.has(existing.type as string) &&
+    !PROMOTED_GATE_TYPES.has(incoming.type as string)
+  const existingIsTerminal = TERMINAL_TOOL_STATES.has(existing.state as string)
+
+  const merged: SessionMessagePart = {
+    ...existing,
+    type: keepPromotedType ? existing.type : (incoming.type ?? existing.type),
+    toolName: incoming.toolName ?? existing.toolName,
+    toolCallId: existing.toolCallId,
+    input: incoming.input ?? existing.input,
+    output: incoming.output ?? existing.output,
+    state: existingIsTerminal ? existing.state : (incoming.state ?? existing.state),
+  }
+  const next = [...parts]
+  next[idx] = merged
+  return next
+}
+
+/**
+ * Fold a batch of incoming parts into an existing parts array, upserting
+ * tool parts by `toolCallId` (see `upsertToolPart`). Non-tool parts (text,
+ * reasoning) are appended in order.
+ */
+export function upsertParts(
+  existing: SessionMessagePart[],
+  incoming: SessionMessagePart[],
+): SessionMessagePart[] {
+  let out = existing
+  for (const p of incoming) {
+    out = upsertToolPart(out, p)
+  }
+  return out
+}
+
+/**
  * Merge the final `assistant` event content with any previously-accumulated
  * streaming parts so delta-accumulated text/reasoning survives finalize.
  *
@@ -113,6 +202,9 @@ export function finalizeStreamingParts(parts: SessionMessagePart[]): SessionMess
  * - If the message had streaming text/reasoning, the matching kind from the final
  *   `assistant` event is dropped (the streamed copy is authoritative — the SDK may
  *   or may not re-emit thinking blocks in the final event).
+ * - Tool parts are upserted by toolCallId (see `upsertToolPart`) so transcript
+ *   replay after gate resolution cannot re-append already-persisted tool_use
+ *   blocks as new parts — that path produced the GH#59 ask_user replay bug.
  * - If no existing parts are supplied, the final event's parts are used directly.
  */
 export function mergeFinalAssistantParts(
@@ -127,11 +219,13 @@ export function mergeFinalAssistantParts(
   const hadStreamingReasoning = existingParts.some(
     (p) => p.type === 'reasoning' && p.state === 'streaming',
   )
-  const additions: SessionMessagePart[] = []
+  let out = finalized
   for (const np of finalParts) {
     if (np.type === 'text' && hadStreamingText) continue
     if (np.type === 'reasoning' && hadStreamingReasoning) continue
-    additions.push(np)
+    // Tool parts dedupe by toolCallId; text/reasoning flow through as appends
+    // because upsertToolPart treats a missing toolCallId as append.
+    out = upsertToolPart(out, np)
   }
-  return [...finalized, ...additions]
+  return out
 }

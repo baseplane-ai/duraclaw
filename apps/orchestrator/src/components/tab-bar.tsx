@@ -184,12 +184,21 @@ export function TabBar({
   }, [])
 
   // Translate vertical scroll-wheel → horizontal scroll in the tab strip.
-  // Must use a non-passive listener (via useEffect) because React registers
-  // onWheel as passive — calling preventDefault() in a passive listener is
-  // silently ignored and logs a console warning. Only intercept when the
-  // tab strip has horizontal overflow; otherwise let normal page scroll through.
-  useEffect(() => {
-    const el = scrollRef.current
+  // Attach via a callback ref (not useEffect + empty deps) because the
+  // scroll container is conditionally rendered — `rows.length === 0`
+  // returns null, so `scrollRef.current` is null on the first effect run
+  // and the `[]`-dep effect never re-runs when the element appears.
+  // Must be non-passive because React registers onWheel as passive, and
+  // passive listeners silently ignore preventDefault().
+  const wheelCleanupRef = useRef<(() => void) | null>(null)
+  const scrollCallbackRef = useCallback((el: HTMLDivElement | null) => {
+    // Clean up previous listener
+    wheelCleanupRef.current?.()
+    wheelCleanupRef.current = null
+
+    // Update the imperative ref other code relies on
+    ;(scrollRef as React.MutableRefObject<HTMLDivElement | null>).current = el
+
     if (!el) return
     const onWheel = (e: WheelEvent) => {
       if (e.deltaY === 0) return
@@ -199,7 +208,7 @@ export function TabBar({
       el.scrollBy({ left: e.deltaY })
     }
     el.addEventListener('wheel', onWheel, { passive: false })
-    return () => el.removeEventListener('wheel', onWheel)
+    wheelCleanupRef.current = () => el.removeEventListener('wheel', onWheel)
   }, [])
 
   // Scroll active tab into view when it changes
@@ -222,7 +231,7 @@ export function TabBar({
     >
       <div className="relative" data-testid="tab-bar">
         <div
-          ref={scrollRef}
+          ref={scrollCallbackRef}
           className="flex items-center border-b bg-background overflow-x-auto scrollbar-none"
         >
           <SortableContext items={openTabs} strategy={horizontalListSortingStrategy}>

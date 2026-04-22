@@ -41,6 +41,7 @@ import {
   finalizeStreamingParts,
   mergeFinalAssistantParts,
   partialAssistantToParts,
+  upsertParts,
 } from './gateway-event-mapper'
 import {
   buildGatewayCallbackUrl,
@@ -281,14 +282,22 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     this.currentTurnMessageId = turnState.currentTurnMessageId
 
     // Guard against DO eviction: if SQLite history survived but the
-    // persisted turnCounter is 0 or stale, scan user-turn rows for the
+    // persisted turnCounter is 0 or stale, scan user-turn IDs for the
     // max ordinal. Prevents canonical-ID collisions (GH#14 P3 B6).
+    //
+    // GH#57: replaced getHistory() (recursive CTE + ALL content BLOBs,
+    // ~25MB for a 500-message session) with a lightweight ID-only query.
+    // The old call was the primary cause of "Durable Object storage
+    // operation exceeded timeout which caused object to be reset" on
+    // large sessions — it fired on EVERY DO wake from hibernation.
     try {
-      const history = this.session.getHistory()
+      const userRows = this.sql<{ id: string }>`
+        SELECT id FROM assistant_messages
+        WHERE session_id = '' AND role = 'user'
+      `
       let maxOrdinal = 0
-      for (const msg of history) {
-        const canonical = (msg as { canonical_turn_id?: string }).canonical_turn_id
-        const ord = parseTurnOrdinal(canonical) ?? parseTurnOrdinal(msg.id)
+      for (const row of userRows) {
+        const ord = parseTurnOrdinal(row.id)
         if (ord !== undefined && ord > maxOrdinal) maxOrdinal = ord
       }
       if (maxOrdinal > this.turnCounter) {
@@ -621,46 +630,14 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       return // No replay, no protocol messages
     }
 
-    // Browser connection: replay full message history. Always send the frame
-    // (even empty) so the client has an explicit "history fetched" signal and
-    // doesn't sit gated waiting for a snapshot that would never arrive for a
-    // session with no local history. If the DO is cold and has nothing in
-    // SQLite yet, the client's getMessages RPC will trigger gateway-side
-    // hydration as the source of truth.
-    try {
-      const messages = this.session.getHistory()
-      // GH#38 P1.4: emit SyncedCollectionFrame on the new messages wire so
-      // the messagesCollection converges for this cold browser connection.
-      // `staleIds` is empty — no known prior client state on a fresh connect.
-      const { ops } = deriveSnapshotOps<WireSessionMessage>({
-        oldLeaf: [],
-        newLeaf: messages as unknown as WireSessionMessage[],
-      })
-      for (const chunk of chunkOps(ops)) {
-        this.broadcastMessages({ ops: chunk }, { targetClientId: connection.id })
-      }
-      // GH#38 P1.5: emit branchInfo as a sibling SyncedCollectionFrame on
-      // the same DO turn as the messages frame(s). B10 atomicity: React 18
-      // auto-batches the sibling deltas into a single commit.
-      this.broadcastBranchInfo(this.computeBranchInfo(messages), {
-        targetClientId: connection.id,
-      })
-    } catch (err) {
-      // GH#49: history replay is one of three candidate causes for the
-      // Android-background perma-reconnect pathology. Tag under
-      // `[SessionDO][conn]` so `wrangler tail` greps pull this alongside
-      // the enter/exit markers added above.
-      console.error(
-        `[SessionDO][conn] replay-history failed doId=${this.ctx.id} connId=${connection.id}:`,
-        err,
-      )
-      // Error path: broadcastMessages no-ops on empty ops and
-      // broadcastBranchInfo no-ops on empty rows without a targetClientId.
-      // We still call broadcastBranchInfo targeted so the recipient sees
-      // an explicit "no branches" signal (though in practice this path
-      // hits when getHistory itself threw — the client stays on whatever
-      // cached state it had).
-    }
+    // GH#57: sync is cursor-aware delta replay, client-initiated. The old
+    // onConnect speculatively pushed full history (~25MB getHistory() on
+    // every tab switch / page reload / mobile foreground) and caused DO
+    // storage-timeout resets on large sessions. The new contract: the
+    // browser sends `{type:'subscribe:messages', sinceCursor}` as its first
+    // frame after open (see `onMessage` below); we page the indexed
+    // `(session_id, created_at, id)` keyset — bounded, cheap — and
+    // broadcast inserts targeted to just that connection.
 
     // Re-emit gate if session is waiting
     if (this.state.gate && this.state.status === 'waiting_gate') {
@@ -697,21 +674,33 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       if (gwConnId && connection.id === gwConnId) {
         // Gateway message: parse and route to handleGatewayEvent
         this.lastGatewayActivity = Date.now()
-
-        // GH#57: transport-level keepalive from DialBackClient — prevents CF
-        // idle-close (~70s). Bumps lastGatewayActivity (above) but does NOT
-        // enter parseEvent/handleGatewayEvent, so lastEventTs is untouched
-        // and the GH#50 TTL predicate keeps working.
-        const raw = typeof data === 'string' ? data : new TextDecoder().decode(data)
-        if (raw === '{"type":"keepalive"}') return
-
         try {
+          const raw = typeof data === 'string' ? data : new TextDecoder().decode(data)
           const event = parseEvent(raw)
           this.handleGatewayEvent(event)
         } catch (err) {
           this.logError('onMessage.handleGatewayEvent', err)
         }
         return
+      }
+
+      // GH#57: intercept cursor-aware sync subscribe BEFORE the @callable
+      // dispatcher. The browser advertises its tail cursor so we only
+      // replay the gap — cold clients pass null and get everything, warm
+      // clients send `(createdAt, id)` and get only what they're missing.
+      // Frame shape: `{type: 'subscribe:messages', sinceCursor: {createdAt,id} | null}`.
+      if (typeof data === 'string' && data.startsWith('{"type":"subscribe:messages"')) {
+        try {
+          const parsed = JSON.parse(data) as {
+            type: 'subscribe:messages'
+            sinceCursor?: { createdAt: string; id: string } | null
+          }
+          void this.replayMessagesFromCursor(connection, parsed.sinceCursor ?? null)
+          return
+        } catch (err) {
+          this.logError('onMessage.subscribe:messages', err, { connId: connection.id })
+          return
+        }
       }
 
       // Browser message: delegate to Agent base class for @callable RPC dispatch
@@ -779,6 +768,14 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     const actualError = error !== undefined ? error : connection
     const conn = error !== undefined ? (connection as Connection) : undefined
     this.logError('onError', actualError, conn ? { connId: conn.id } : undefined)
+    // Re-throw so the SDK's `_tryCatch` wrapper (index.js:1082) gets a real
+    // Error object from the `throw this.onError(e)` line rather than
+    // `throw undefined`. Without this, any throw inside onConnect /
+    // onMessage surfaces on the client as a bare close 1006 with no stack
+    // in wrangler tail — the cause of the session-WS 1ms-flap diagnostic
+    // black hole (issue #61). Throwing here satisfies the `void` return
+    // type because throwing functions widen to `never`.
+    throw actualError instanceof Error ? actualError : new Error(String(actualError))
   }
 
   /**
@@ -1311,10 +1308,16 @@ export class SessionDO extends Agent<Env, SessionMeta> {
    */
   private computeBranchInfoForUserTurn(msg: SessionMessage): BranchInfoRow | undefined {
     try {
-      const history = this.session.getHistory()
-      const idx = history.findIndex((m) => m.id === msg.id)
-      if (idx <= 0) return undefined
-      const parentId = history[idx - 1].id
+      // GH#57: replaced getHistory() (O(N) recursive CTE + all BLOBs) with
+      // a targeted parent_id lookup. The old call loaded ~25MB for a 500-msg
+      // session on every sendMessage, just to find the parent of the new msg.
+      const rows = this.sql<{ parent_id: string | null }>`
+        SELECT parent_id FROM assistant_messages
+        WHERE id = ${msg.id} AND session_id = ''
+        LIMIT 1
+      `
+      const parentId = rows[0]?.parent_id
+      if (!parentId) return undefined
       const branches = this.session.getBranches(parentId)
       const siblings = branches.filter((m) => m.role === 'user').map((m) => m.id)
       if (siblings.length <= 1) return undefined
@@ -1327,6 +1330,68 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       }
     } catch {
       return undefined
+    }
+  }
+
+  /**
+   * Cursor-aware messages replay (GH#57). Called from `onMessage` when the
+   * browser sends `{type:'subscribe:messages', sinceCursor}` as its first
+   * frame after WS open. Pages the composite index
+   * `idx_assistant_messages_session_created_id` at 500 rows/page and
+   * broadcasts each page as a targeted `synced-collection-delta` frame to
+   * just the subscribing connection.
+   *
+   * Replaces the old onConnect full-history push (see onConnectInner).
+   * Cold clients send `sinceCursor=null` → replay starts from epoch.
+   * Warm clients send their OPFS tail `(createdAt, id)` → we stream only
+   * the gap, so tab switches and reconnects with warm caches transfer
+   * zero bytes beyond the envelope when there's nothing new.
+   *
+   * No `getHistory()` call anywhere — each page is an index seek, so the
+   * #57 storage-timeout hazard stays closed even for very long sessions.
+   */
+  private async replayMessagesFromCursor(
+    connection: Connection,
+    sinceCursor: { createdAt: string; id: string } | null,
+  ): Promise<void> {
+    let cursor = sinceCursor ?? { createdAt: '1970-01-01T00:00:00.000Z', id: '' }
+    try {
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const rows = this.sql<{ id: string; created_at: string; content: string }>`
+          SELECT id, created_at, content FROM assistant_messages
+          WHERE session_id = ''
+            AND (
+              (created_at > ${cursor.createdAt})
+              OR (created_at = ${cursor.createdAt} AND id > ${cursor.id})
+            )
+          ORDER BY created_at ASC, id ASC
+          LIMIT 500
+        `
+        if (rows.length === 0) return
+        const msgs: WireSessionMessage[] = []
+        for (const row of rows) {
+          try {
+            msgs.push(JSON.parse(row.content) as WireSessionMessage)
+          } catch {
+            // Unparseable row — skip; defensive, SDK writes valid JSON.
+          }
+        }
+        if (msgs.length > 0) {
+          const ops: SyncedCollectionOp<WireSessionMessage>[] = msgs.map((value) => ({
+            type: 'insert' as const,
+            value,
+          }))
+          for (const chunk of chunkOps(ops)) {
+            this.broadcastMessages({ ops: chunk }, { targetClientId: connection.id })
+          }
+        }
+        if (rows.length < 500) return
+        const last = rows[rows.length - 1]
+        cursor = { createdAt: last.created_at, id: last.id }
+      }
+    } catch (err) {
+      this.logError('replayMessagesFromCursor', err, { connId: connection.id })
     }
   }
 
@@ -2144,11 +2209,18 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
             // response) — merge parts into the existing message to mirror the
             // live-streaming merge behavior. Otherwise tool pills get split
             // across N messages and lose their grouping in the UI.
+            //
+            // Dedupe-on-merge via `upsertParts`: SDK transcript replay after
+            // a gate resolution re-emits already-persisted tool_use blocks
+            // (same toolCallId). A naive concat duplicates them and, worse,
+            // un-promotes any gate part that was promoted in-place
+            // (GH#59). `upsertParts` keeps promotion sticky and prevents
+            // state regression from terminal states.
             const existing = this.session.getMessage(currentAssistantMsgId)
             if (existing) {
               this.session.updateMessage({
                 ...existing,
-                parts: [...existing.parts, ...newParts],
+                parts: upsertParts(existing.parts, newParts),
               })
               persisted++
               continue
@@ -2359,6 +2431,79 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
   }
 
   // ── @callable RPC Methods ─────────────────────────────────────
+
+  /**
+   * Retry the gateway dial — used by the DisconnectedBanner when the
+   * client WS is alive but no gateway-role runner is connected. If the
+   * session has an `sdk_session_id` we resume from the on-disk JSONL;
+   * otherwise there's nothing to reconnect to. Idempotent: calling
+   * twice just re-POSTs to the gateway.
+   */
+  @callable()
+  async reattach(): Promise<{ ok: boolean; error?: string }> {
+    const hasLiveRunner = Boolean(this.getGatewayConnectionId())
+    if (hasLiveRunner) {
+      return { ok: true } // already connected
+    }
+    if (!this.state.sdk_session_id) {
+      return { ok: false, error: 'No sdk_session_id — nothing to reattach' }
+    }
+    if (!this.state.project) {
+      return { ok: false, error: 'No project set — cannot dial gateway' }
+    }
+    if (!this.env.CC_GATEWAY_URL || !this.env.WORKER_PUBLIC_URL) {
+      return {
+        ok: false,
+        error: 'Gateway not configured (missing CC_GATEWAY_URL or WORKER_PUBLIC_URL)',
+      }
+    }
+
+    this.updateState({ status: 'running', gate: null, error: null })
+    this.syncStatusToD1(new Date().toISOString())
+    void this.triggerGatewayDial({
+      type: 'resume',
+      project: this.state.project,
+      prompt: '',
+      sdk_session_id: this.state.sdk_session_id,
+    })
+    return { ok: true }
+  }
+
+  /**
+   * Force-resume from the on-disk JSONL transcript — the escape hatch when
+   * the DO thinks the session is `running` but the WS is dead and normal
+   * reattach can't proceed. Rotates the callback token (which 4401-kills
+   * any orphan runner), then triggers a fresh `resume` dial. The orphan
+   * runner sees `4410 token_rotated` on its WS, aborts, and exits cleanly.
+   */
+  @callable()
+  async resumeFromTranscript(): Promise<{ ok: boolean; error?: string }> {
+    if (!this.state.sdk_session_id) {
+      return { ok: false, error: 'No sdk_session_id — nothing to resume' }
+    }
+    if (!this.state.project) {
+      return { ok: false, error: 'No project set — cannot dial gateway' }
+    }
+    if (!this.env.CC_GATEWAY_URL || !this.env.WORKER_PUBLIC_URL) {
+      return {
+        ok: false,
+        error: 'Gateway not configured (missing CC_GATEWAY_URL or WORKER_PUBLIC_URL)',
+      }
+    }
+
+    // triggerGatewayDial handles token rotation internally — it closes
+    // the old gateway WS with 4410 before POSTing to spawn a new runner.
+    // That 4410 is what kills the orphan.
+    this.updateState({ status: 'running', gate: null, error: null })
+    this.syncStatusToD1(new Date().toISOString())
+    void this.triggerGatewayDial({
+      type: 'resume',
+      project: this.state.project,
+      prompt: '',
+      sdk_session_id: this.state.sdk_session_id,
+    })
+    return { ok: true }
+  }
 
   @callable()
   async spawn(config: SpawnConfig): Promise<{ ok: boolean; session_id?: string; error?: string }> {
@@ -3261,7 +3406,14 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     limit?: number
     session_hint?: string
     leafId?: string
-  }) {
+  }): Promise<{ ok: true }> {
+    // GH#57: hydration-only RPC. Message sync moved to the cursor-aware
+    // `subscribe:messages` WS frame handled in `onMessage`, which is
+    // bounded and doesn't call `getHistory()`. This RPC only runs the
+    // discovered-session bootstrap + gateway transcript catch-up side
+    // effects; the return value is intentionally opaque — callers should
+    // not depend on it for history.
+    //
     // Self-initialize from D1 for discovered sessions (#7 p6). The cron in
     // src/api/scheduled.ts UPSERTs gateway-discovered rows into agent_sessions
     // every 5 minutes; this just rehydrates a cold DO from that row when the
@@ -3295,13 +3447,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       await this.hydrateFromGateway()
     }
 
-    // Return messages from Session history
-    try {
-      return this.session.getHistory(opts?.leafId)
-    } catch (err) {
-      console.error(`[SessionDO:${this.ctx.id}] Failed to get history:`, err)
-      return []
-    }
+    return { ok: true }
   }
 
   @callable()

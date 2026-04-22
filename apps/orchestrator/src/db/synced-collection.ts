@@ -118,6 +118,42 @@ export function createSyncedCollection<TRow extends object, TKey extends string 
 
     const unsubFrame = subscribe((frame: SyncedCollectionFrame<unknown>) => {
       if (frame.collection !== effectiveCollection) return
+
+      if (frame.snapshot) {
+        // Full-state snapshot: ops contains every current row. Diff against
+        // local state — upsert everything in the frame, delete anything
+        // local that's missing. Deletes are implicit (no lost-delete risk).
+        const incomingKeys = new Set<string | number>()
+        params.begin()
+        for (const op of frame.ops) {
+          if (op.type === 'delete') continue // snapshots shouldn't carry deletes, but skip if they do
+          const key = config.getKey(op.value as TRow)
+          incomingKeys.add(key)
+          const hasFn = params.collection?.has
+          const alreadyPresent = typeof hasFn === 'function' && hasFn.call(params.collection, key)
+          params.write({
+            type: alreadyPresent ? 'update' : 'insert',
+            value: op.value,
+          })
+        }
+        // Delete any local keys not present in the snapshot.
+        const keysFn = params.collection?.keys
+        if (typeof keysFn === 'function') {
+          for (const localKey of keysFn.call(params.collection)) {
+            if (!incomingKeys.has(localKey)) {
+              params.write({
+                type: 'delete',
+                key: localKey,
+                value: undefined as never,
+              })
+            }
+          }
+        }
+        params.commit()
+        return
+      }
+
+      // Delta frame — apply ops individually.
       params.begin()
       for (const op of frame.ops) {
         if (op.type === 'delete') {

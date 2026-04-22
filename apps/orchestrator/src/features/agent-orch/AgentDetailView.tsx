@@ -4,6 +4,7 @@
 
 import { useLiveQuery } from '@tanstack/react-db'
 import { useCallback, useEffect, useMemo } from 'react'
+import { DisconnectedBanner } from '~/components/disconnected-banner'
 import { StatusBar } from '~/components/status-bar'
 import { type BranchInfoRow, createBranchInfoCollection } from '~/db/branch-info-collection'
 import { projectsCollection } from '~/db/projects-collection'
@@ -39,6 +40,8 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
     submitDraft,
     rewind,
     navigateBranch,
+    reattach,
+    resumeFromTranscript,
   } = agent
 
   // Spec #37 P2b: read the D1-mirrored session row for status / project /
@@ -132,6 +135,11 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
         onSendSuggestion={handleSendSuggestion}
       />
 
+      <DisconnectedBanner
+        sessionId={sessionId}
+        onReattach={reattach}
+        onResumeFromTranscript={resumeFromTranscript}
+      />
       <StatusBar sessionId={sessionId} />
       <MessageInput
         onSend={sendMessage}

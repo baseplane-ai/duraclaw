@@ -43,4 +43,44 @@ describe('Conversation component', () => {
     // sticky escape flag.
     expect(content).not.toContain('escaped.current')
   })
+
+  it('mount layout-effect is guarded against re-fire', () => {
+    const conversationPath = join(__dirname, 'conversation.tsx')
+    const content = readFileSync(conversationPath, 'utf-8')
+
+    // On Android WebView, a React concurrent-commit edge case re-invokes
+    // this effect on a persisted fiber+DOM roughly every 430ms. Without
+    // the `scrollTop === 0` guard, each re-fire writes scrollTop back to
+    // the bottom and fights the user's drag. The guard turns every
+    // re-invocation into a no-op while still handling the genuine first-
+    // mount case where scrollTop starts at 0.
+    expect(content).toContain('useLayoutEffect')
+    expect(content).toContain('el.scrollTop === 0')
+    expect(content).toContain('el.scrollTop = el.scrollHeight - el.clientHeight')
+  })
+
+  it('user-intent detection uses a scroll listener (not IntersectionObserver)', () => {
+    const conversationPath = join(__dirname, 'conversation.tsx')
+    const content = readFileSync(conversationPath, 'utf-8')
+
+    // IntersectionObserver on a bottom sentinel conflates "content grew
+    // and shoved the sentinel out" with "user scrolled up" — both flip
+    // the same signal. The scroll event is the only primitive that
+    // fires uniformly for every real user-input path (wheel, trackpad,
+    // touch-swipe, scrollbar drag, keyboard) without firing for growth.
+    expect(content).toContain("addEventListener('scroll'")
+    expect(content).not.toContain('IntersectionObserver')
+  })
+
+  it('programmatic scroll writes are flagged so they do not flip pin state', () => {
+    const conversationPath = join(__dirname, 'conversation.tsx')
+    const content = readFileSync(conversationPath, 'utf-8')
+
+    // Our own `scrollTop = scrollHeight - clientHeight` writes dispatch
+    // a scroll event synchronously on the same element. Without a
+    // programmatic-write guard the scroll listener would re-interpret
+    // every auto-pin as a user scroll and immediately un-pin.
+    expect(content).toContain('programmaticRef')
+    expect(content).toMatch(/programmaticRef\.current\s*=\s*true/)
+  })
 })

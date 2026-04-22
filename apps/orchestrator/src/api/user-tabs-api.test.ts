@@ -15,15 +15,19 @@ vi.mock('~/lib/broadcast-synced-delta', () => ({
   broadcastSyncedDelta: vi.fn().mockResolvedValue(undefined),
 }))
 
+vi.mock('~/lib/broadcast-tabs-snapshot', () => ({
+  broadcastTabsSnapshot: vi.fn().mockResolvedValue(undefined),
+}))
+
 vi.mock('drizzle-orm/d1', () => ({
   drizzle: vi.fn(() => (globalThis as any).__fakeDb),
 }))
 
-import { broadcastSyncedDelta } from '~/lib/broadcast-synced-delta'
+import { broadcastTabsSnapshot } from '~/lib/broadcast-tabs-snapshot'
 import { createApiApp } from './index'
 
 const mockedGetRequestSession = vi.mocked(getRequestSession)
-const mockedBroadcast = vi.mocked(broadcastSyncedDelta)
+const mockedBroadcastSnapshot = vi.mocked(broadcastTabsSnapshot)
 
 function createMockEnv() {
   return {
@@ -119,7 +123,7 @@ describe('DELETE /api/user-settings/tabs/:id', () => {
     env = createMockEnv()
     fakeDb = makeFakeDb()
     installFakeDb(fakeDb.db)
-    mockedBroadcast.mockClear()
+    mockedBroadcastSnapshot.mockClear()
     mockedGetRequestSession.mockResolvedValue({
       userId: 'user-1',
       session: { id: 's' },
@@ -151,16 +155,18 @@ describe('DELETE /api/user-settings/tabs/:id', () => {
     expect(res.status).toBe(404)
   })
 
-  it('fires a {type:delete} synced-delta broadcast on success', async () => {
+  it('fires a snapshot broadcast on success (full-state sync, not per-op delta)', async () => {
     fakeDb.data.update = [{ id: 't1' }]
 
     const app = makeApp(env)
     const res = await app.request('/api/user-settings/tabs/t1', { method: 'DELETE' })
 
     expect(res.status).toBe(204)
-    expect(mockedBroadcast).toHaveBeenCalledWith(expect.anything(), 'user-1', 'user_tabs', [
-      { type: 'delete', key: 't1' },
-    ])
+    expect(mockedBroadcastSnapshot).toHaveBeenCalledWith(
+      expect.anything(),
+      'user-1',
+      expect.anything(),
+    )
   })
 
   it('returns 401 when not authenticated', async () => {
