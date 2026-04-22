@@ -1639,36 +1639,42 @@ export function createApiApp() {
 
     // Update existing D1 rows with fresh gateway data (cost, status, model).
     // Does not insert — the gateway's thin response lacks project/prompt info.
-    await db.transaction(async (tx) => {
-      for (const s of snapshots) {
-        if (!s.sdk_session_id) {
-          skipped++
-          continue
-        }
-
-        const lastActivity = s.last_activity_ts ? new Date(s.last_activity_ts).toISOString() : now
-
-        const status = s.state === 'running' ? 'running' : 'idle'
-
-        try {
-          await tx
-            .update(agentSessions)
-            .set({
-              status,
-              model: s.model ?? undefined,
-              updatedAt: now,
-              lastActivity: lastActivity,
-              numTurns: s.turn_count || undefined,
-              totalCostUsd: s.cost.usd || undefined,
-            })
-            .where(eq(agentSessions.sdkSessionId, s.sdk_session_id))
-          updated++
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err)
-          console.warn(`[sync] update failed for ${s.sdk_session_id}: ${message}`)
-        }
+    // D1 does not support interactive BEGIN/COMMIT — use db.batch() for
+    // atomic multi-statement writes.
+    const syncable = snapshots.filter((s) => {
+      if (!s.sdk_session_id) {
+        skipped++
+        return false
       }
+      return true
     })
+    const updateStmts = syncable.map((s) => {
+      const sdkId = s.sdk_session_id as string // guarded by filter above
+      const lastActivity = s.last_activity_ts ? new Date(s.last_activity_ts).toISOString() : now
+      const status = s.state === 'running' ? 'running' : 'idle'
+      return db
+        .update(agentSessions)
+        .set({
+          status,
+          model: s.model ?? undefined,
+          updatedAt: now,
+          lastActivity: lastActivity,
+          numTurns: s.turn_count || undefined,
+          totalCostUsd: s.cost.usd || undefined,
+        })
+        .where(eq(agentSessions.sdkSessionId, sdkId))
+    })
+
+    if (updateStmts.length > 0) {
+      const [first, ...rest] = updateStmts
+      try {
+        await db.batch([first, ...rest])
+        updated = updateStmts.length
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        console.warn(`[sync] batch update failed: ${message}`)
+      }
+    }
 
     return c.json({ updated, skipped, total: snapshots.length })
   })
