@@ -231,12 +231,15 @@ export function TabBar({
   // Translate vertical scroll-wheel → horizontal scroll in the tab strip.
   // Must use a non-passive listener (via useEffect) because React registers
   // onWheel as passive — calling preventDefault() in a passive listener is
-  // silently ignored and logs a console warning.
+  // silently ignored and logs a console warning. Only intercept when the
+  // tab strip has horizontal overflow; otherwise let normal page scroll through.
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
     const onWheel = (e: WheelEvent) => {
       if (e.deltaY === 0) return
+      // Don't hijack scroll when there's nothing to scroll horizontally
+      if (el.scrollWidth <= el.clientWidth) return
       e.preventDefault()
       el.scrollBy({ left: e.deltaY })
     }
