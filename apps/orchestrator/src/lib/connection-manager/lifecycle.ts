@@ -34,6 +34,11 @@ const listeners = new Set<Listener>()
 let teardown: (() => void) | null = null
 
 function emit(event: LifecycleEvent): void {
+  // Always-on so Capacitor Android release APKs surface these via
+  // `adb logcat -s Capacitor/Console:V`. Essential for diagnosing
+  // whether thrash is lifecycle-driven (foreground/online storms) vs
+  // transport-driven (WS close codes).
+  console.info(`[cm-lifecycle] ${event}`)
   for (const l of listeners) {
     try {
       l(event)

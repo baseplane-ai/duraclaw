@@ -7,6 +7,12 @@ const config: CapacitorConfig = {
   server: {
     androidScheme: 'https',
   },
+  android: {
+    // Release APKs default to `debug` which suppresses WebView console.*
+    // output. Keep it on so `adb logcat -s Capacitor/Console:V` surfaces
+    // [cm], [ws:*], and [cm-lifecycle] lines from signed builds.
+    loggingBehavior: 'production',
+  },
   plugins: {
     CapacitorUpdater: {
       autoUpdate: false,

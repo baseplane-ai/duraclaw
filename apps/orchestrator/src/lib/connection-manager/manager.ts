@@ -32,11 +32,11 @@ function logReconnect(entry: ReconnectLogEntry): void {
   if (lastReconnectLog.length > LOG_RING_SIZE) {
     lastReconnectLog.splice(0, lastReconnectLog.length - LOG_RING_SIZE)
   }
-  if (import.meta.env.DEV) {
-    console.debug(
-      `[cm] reconnect id=${entry.id} lastSeenMs=${entry.lastSeenMs} delay=${entry.delay} reason=${entry.reason}`,
-    )
-  }
+  // Always-on — reconnects are rare enough to be low-noise, and this is
+  // the only signal that diagnoses WS thrash on release APKs via logcat.
+  console.info(
+    `[cm] reconnect id=${entry.id} lastSeenMs=${entry.lastSeenMs} delay=${entry.delay} reason=${entry.reason}`,
+  )
 }
 
 function scheduleReconnect(conn: ManagedConnection, reason: ReconnectReason): void {

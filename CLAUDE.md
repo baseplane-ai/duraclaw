@@ -415,6 +415,38 @@ Gotchas:
   `/usr/bin/grep -E` when parsing `dumpsys package` / `pm list packages`
   output.
 
+#### Tailing WebView console to logcat (connection thrash triage)
+
+Capacitor's `android.loggingBehavior: 'production'` (set in
+`apps/mobile/capacitor.config.ts`) routes WebView `console.*` output to
+logcat in release APKs — without it, signed builds silently swallow
+every client-side log. Tag is `Capacitor/Console`. Relevant prefixes
+emitted by the client:
+
+- `[cm] reconnect …` — ConnectionManager scheduled a reconnect
+  (reason: `foreground` / `online` / `manual`, with `lastSeenMs`).
+- `[cm-lifecycle] <event>` — `foreground` / `background` / `online` /
+  `offline` / `visible` / `hidden` fan-out from Capacitor +
+  `window`/`document` listeners.
+- `[ws:<channel>] open|close|error …` — per-socket lifecycle from
+  `attachWsDebug`. Channels include `session:<agentName>`,
+  `user-stream`, and `collab:<sessionId>`. Close events carry
+  `code`, `reason`, `wasClean`, `uptime`, and the full `url`.
+
+Standard filter (live-tail, triage stuck-connecting / thrash):
+
+```bash
+export PATH="/home/ubuntu/Android/sdk/platform-tools:$PATH"
+adb -s 100.113.109.57:<PORT> logcat -c        # clear backlog
+adb -s 100.113.109.57:<PORT> logcat "*:S" \
+  Capacitor/Console:V Capacitor:V chromium:V
+```
+
+Keep `chromium:V` in the filter so you also catch native-layer WebView
+errors (cert chain, WS handshake failures) that don't go through
+`console.*`. To widen when hunting a non-obvious cause, drop the `*:S`
+silencer and pipe through `/usr/bin/grep -E 'cm|ws:|Capacitor|chromium'`.
+
 ### packages/agent-gateway (VPS control plane)
 
 - **Not the SDK host anymore** — that moved to `session-runner`. Gateway just spawns detached runners and exposes HTTP endpoints for the DO.
