@@ -84,8 +84,19 @@ function groupByFilePath(parts: SessionMessagePart[]): {
 // session gate (e.g. a state-update event that arrived while the tab was
 // blurred and got batched on refocus) silently renders as a badge instead of
 // the inline GateResolver UI.
+//
+// Defense-in-depth (GH#59): the server-side `promoteToolPartToGate` renames
+// `tool-AskUserQuestion` / `tool-<Permission*>` into the promoted shapes
+// below. If a promotion broadcast is missed or a transcript-replay delta
+// re-introduces the un-promoted type, we still recognise it as a gate
+// candidate provided the state says so — i.e. treat
+// `tool-AskUserQuestion` with `approval-requested` + toolCallId as a gate.
+// With the server-side dedupe in place this fallback is rarely hit, but it
+// protects against latent brittleness in the append path.
 function isGateCandidate(part: SessionMessagePart): boolean {
-  return (part.type === 'tool-ask_user' || part.type === 'tool-permission') && !!part.toolCallId
+  if (!part.toolCallId) return false
+  if (part.type === 'tool-ask_user' || part.type === 'tool-permission') return true
+  return part.type === 'tool-AskUserQuestion' && part.state === 'approval-requested'
 }
 
 function isPendingGate(part: SessionMessagePart, readOnly: boolean | undefined): boolean {
