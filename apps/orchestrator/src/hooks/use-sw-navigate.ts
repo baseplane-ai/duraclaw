@@ -144,6 +144,15 @@ export function useSwNavigate() {
     // don't fire visibilitychange reliably on PWA resume.
     const focusHandler = () => drainPendingNav('focus')
     window.addEventListener('focus', focusHandler)
+    // And on pageshow — this is the one event that reliably fires when
+    // Android Chrome restores an installed PWA from freeze-dry / bfcache,
+    // whereas both `visibilitychange` and `focus` are documented to skip.
+    // `event.persisted === true` means bfcache restore; we drain on every
+    // pageshow regardless (fresh loads already drain via the mount call).
+    const pageshowHandler = (event: PageTransitionEvent) => {
+      drainPendingNav(event.persisted ? 'pageshow:bfcache' : 'pageshow')
+    }
+    window.addEventListener('pageshow', pageshowHandler)
 
     return () => {
       console.log('[sw:nav] cleaning up listeners')
@@ -156,6 +165,7 @@ export function useSwNavigate() {
       }
       document.removeEventListener('visibilitychange', visibilityHandler)
       window.removeEventListener('focus', focusHandler)
+      window.removeEventListener('pageshow', pageshowHandler)
     }
   }, [])
 }
