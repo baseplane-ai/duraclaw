@@ -86,6 +86,16 @@ function useAutoScroll() {
       prevHeight = currentHeight
       if (!grew) return
       const pinned = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < PIN_THRESHOLD_PX
+      // TEMP debug: log every potential snap decision so we can see on a
+      // device whether the RO path is the snap source.
+      console.warn('[conv-snap] grew=true', {
+        prevH: Math.round(prevHeight),
+        curH: Math.round(currentHeight),
+        top: Math.round(scroll.scrollTop),
+        sH: Math.round(scroll.scrollHeight),
+        cH: Math.round(scroll.clientHeight),
+        pinned,
+      })
       if (pinned) {
         scroll.scrollTop = scroll.scrollHeight
       }
@@ -97,6 +107,8 @@ function useAutoScroll() {
   const scrollToBottom = useCallback(() => {
     const el = scrollEl.current
     if (el) {
+      // TEMP debug
+      console.warn('[conv-snap] scrollToBottom()', new Error().stack?.split('\n').slice(1, 5))
       el.scrollTop = el.scrollHeight
       setIsAtBottom(true)
     }
@@ -154,6 +166,8 @@ export const ConversationContent = ({
   useLayoutEffect(() => {
     const el = scrollNode.current
     if (el) {
+      // TEMP debug
+      console.warn('[conv-snap] mount layout-effect → scrollTop=scrollHeight')
       el.scrollTop = el.scrollHeight - el.clientHeight
     }
   }, [])
