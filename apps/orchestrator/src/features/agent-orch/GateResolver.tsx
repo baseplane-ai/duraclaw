@@ -8,7 +8,7 @@ import { Badge } from '~/components/ui/badge'
 import { Button } from '~/components/ui/button'
 import { Input } from '~/components/ui/input'
 import { Label } from '~/components/ui/label'
-import type { GateResponse } from '~/lib/types'
+import type { GateResponse, StructuredAnswer } from '~/lib/types'
 import { cn } from '~/lib/utils'
 
 interface Question {
@@ -178,21 +178,16 @@ export function GateResolver({ gate, onResolve }: GateResolverProps) {
     const hasAnyNote = Array.from(notesByQuestion.values()).some((n) => n.trim().length > 0)
     const canSubmit = hasSelection || hasAnyNote
 
-    const buildAnswer = (): string => {
-      const parts: string[] = []
+    const buildStructuredAnswers = (): StructuredAnswer[] => {
+      const result: StructuredAnswer[] = []
       for (let i = 0; i < questions.length; i++) {
         const selected = selections.get(i)
-        const selStr = selected && selected.size > 0 ? Array.from(selected).join(', ') : ''
+        const label = selected && selected.size > 0 ? Array.from(selected).join(', ') : ''
         const note = (notesByQuestion.get(i) ?? '').trim()
-        if (selStr && note) {
-          parts.push(`${selStr} (note: ${note})`)
-        } else if (selStr) {
-          parts.push(selStr)
-        } else if (note) {
-          parts.push(note)
-        }
+        if (!label && !note) continue // skip unanswered entries entirely — server's flatten helper also skips them
+        result.push(note ? { label, note } : { label })
       }
-      return parts.join('; ')
+      return result
     }
 
     const setNoteFor = (qIndex: number, value: string) => {
@@ -204,8 +199,8 @@ export function GateResolver({ gate, onResolve }: GateResolverProps) {
     }
 
     const handleStructuredSubmit = async () => {
-      const answerStr = buildAnswer()
-      await handleResolve({ answer: answerStr })
+      const answers = buildStructuredAnswers()
+      await handleResolve({ answers })
     }
 
     return (

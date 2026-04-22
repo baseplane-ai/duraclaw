@@ -16,6 +16,7 @@ export type {
   SessionSummary,
   SpawnConfig,
   StoredMessage,
+  StructuredAnswer,
   UIStreamChunk,
   UserPreferences,
 } from '@duraclaw/shared-types'

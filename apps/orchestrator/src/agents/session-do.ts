@@ -31,6 +31,7 @@ import type {
   KataSessionState,
   SessionStatus,
   SpawnConfig,
+  StructuredAnswer,
 } from '~/lib/types'
 import { getSessionStatus, killSession, listSessions, parseEvent } from '~/lib/vps-client'
 import {
@@ -2675,6 +2676,18 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     return { ok: true, kill: killResult }
   }
 
+  private flattenStructuredAnswers(answers: StructuredAnswer[]): string {
+    const parts: string[] = []
+    for (const a of answers) {
+      const label = (a.label ?? '').trim()
+      const note = (a.note ?? '').trim()
+      if (label && note) parts.push(`${label} (note: ${note})`)
+      else if (label) parts.push(label)
+      else if (note) parts.push(note)
+    }
+    return parts.join('; ')
+  }
+
   @callable()
   async resolveGate(
     gateId: string,
@@ -2718,12 +2731,21 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         tool_call_id: gateId,
         allowed: response.approved,
       })
-    } else if (gate.type === 'ask_user' && response.answer !== undefined) {
+    } else if (gate.type === 'ask_user') {
+      let flatAnswer: string | undefined
+      if (response.answers !== undefined) {
+        flatAnswer = this.flattenStructuredAnswers(response.answers)
+      } else if (response.answer !== undefined) {
+        flatAnswer = response.answer
+      }
+      if (flatAnswer === undefined) {
+        return { ok: false, error: 'Invalid response for gate type' }
+      }
       this.sendToGateway({
         type: 'answer',
         session_id: this.state.session_id ?? '',
         tool_call_id: gateId,
-        answers: { answer: response.answer },
+        answers: { answer: flatAnswer },
       })
     } else {
       return { ok: false, error: 'Invalid response for gate type' }
@@ -2748,6 +2770,9 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
             state: response.approved ? 'output-available' : 'output-denied',
             ...(response.approved && response.answer ? { output: response.answer } : {}),
           }
+        }
+        if (response.answers !== undefined) {
+          return { ...p, state: 'output-available', output: { answers: response.answers } }
         }
         if (response.answer !== undefined) {
           return { ...p, state: 'output-available', output: response.answer }

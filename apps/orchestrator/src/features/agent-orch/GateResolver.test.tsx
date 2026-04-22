@@ -134,7 +134,10 @@ describe('GateResolver — structured AskUserQuestion', () => {
     fireEvent.click(screen.getByRole('button', { name: /lodash/i }))
     fireEvent.click(screen.getByRole('button', { name: /submit/i }))
 
-    expect(onResolve).toHaveBeenCalledWith('gate-1', { answer: 'lodash' })
+    // Structured wire format (GH#63): answers[] parallel to questions[].
+    expect(onResolve).toHaveBeenCalledWith('gate-1', {
+      answers: [{ label: 'lodash' }],
+    })
   })
 
   it('per-question notes input works as fallback when no option is picked', async () => {
@@ -149,7 +152,9 @@ describe('GateResolver — structured AskUserQuestion', () => {
     expect(submitBtn).toHaveProperty('disabled', false)
 
     fireEvent.click(submitBtn)
-    expect(onResolve).toHaveBeenCalledWith('gate-1', { answer: 'underscore' })
+    expect(onResolve).toHaveBeenCalledWith('gate-1', {
+      answers: [{ label: '', note: 'underscore' }],
+    })
   })
 
   it('per-question notes are additive: appended alongside a selection', async () => {
@@ -169,7 +174,7 @@ describe('GateResolver — structured AskUserQuestion', () => {
     fireEvent.click(screen.getByRole('button', { name: /submit/i }))
 
     expect(onResolve).toHaveBeenCalledWith('gate-1', {
-      answer: 'lodash (note: prefer tree-shakeable)',
+      answers: [{ label: 'lodash', note: 'prefer tree-shakeable' }],
     })
   })
 
@@ -186,7 +191,7 @@ describe('GateResolver — structured AskUserQuestion', () => {
     fireEvent.click(screen.getByRole('button', { name: /submit/i }))
 
     expect(onResolve).toHaveBeenCalledWith('gate-2', {
-      answer: 'dark-mode, i18n (note: also want telemetry)',
+      answers: [{ label: 'dark-mode, i18n', note: 'also want telemetry' }],
     })
   })
 
@@ -205,7 +210,10 @@ describe('GateResolver — structured AskUserQuestion', () => {
     fireEvent.click(screen.getByRole('button', { name: /submit/i }))
 
     expect(onResolve).toHaveBeenCalledWith('gate-3', {
-      answer: 'lodash (note: tree-shakeable); react (note: server components)',
+      answers: [
+        { label: 'lodash', note: 'tree-shakeable' },
+        { label: 'react', note: 'server components' },
+      ],
     })
   })
 
@@ -231,7 +239,9 @@ describe('GateResolver — structured AskUserQuestion', () => {
     fireEvent.click(screen.getByRole('button', { name: /i18n/i }))
     fireEvent.click(screen.getByRole('button', { name: /submit/i }))
 
-    expect(onResolve).toHaveBeenCalledWith('gate-2', { answer: 'dark-mode, i18n' })
+    expect(onResolve).toHaveBeenCalledWith('gate-2', {
+      answers: [{ label: 'dark-mode, i18n' }],
+    })
   })
 
   it('renders multiple questions when array has 2+ items', () => {

@@ -130,12 +130,86 @@ function parseAskUserQuestions(input: unknown): string[] {
   return [JSON.stringify(input)]
 }
 
+/**
+ * Extract the structured `answers` array from a resolved ask_user part's
+ * `output`, if present. Mirrors the server-side storage shape
+ * (`part.output = { answers: StructuredAnswer[] }`). Returns null when the
+ * output is a legacy flat string (or absent / malformed).
+ */
+function parseStructuredAnswers(output: unknown): Array<{ label: string; note?: string }> | null {
+  if (!output || typeof output !== 'object') return null
+  const obj = output as { answers?: unknown }
+  if (!Array.isArray(obj.answers)) return null
+  const out: Array<{ label: string; note?: string }> = []
+  for (const entry of obj.answers) {
+    if (!entry || typeof entry !== 'object') return null
+    const e = entry as { label?: unknown; note?: unknown }
+    if (typeof e.label !== 'string') return null
+    out.push(
+      typeof e.note === 'string' && e.note.length > 0
+        ? { label: e.label, note: e.note }
+        : { label: e.label },
+    )
+  }
+  return out
+}
+
 function ResolvedAskUser({ part }: { part: SessionMessagePart }) {
   const questions = parseAskUserQuestions(part.input)
   const denied = part.state === 'output-denied'
-  const answer = denied
-    ? 'Declined'
-    : typeof part.output === 'string'
+  const structuredAnswers = denied ? null : parseStructuredAnswers(part.output)
+
+  // Declined path — preserve existing single-line "Declined" rendering.
+  if (denied) {
+    return (
+      <div className="min-w-0 space-y-1 rounded-lg border-l-2 border-info/30 bg-info/5 p-3">
+        {questions.map((q, i) => (
+          // biome-ignore lint/suspicious/noArrayIndexKey: questions share no stable id
+          <p key={`q-${i}`} className="break-words text-sm">
+            <span className="font-medium text-muted-foreground">Q:</span> {q}
+          </p>
+        ))}
+        <p className="break-words text-sm">
+          <span className="font-medium text-muted-foreground">A:</span> Declined
+        </p>
+      </div>
+    )
+  }
+
+  // Structured path — pair each question with its answer (and optional
+  // note). Two-column layout on sm+ (Q left, A right); stacked on mobile.
+  if (structuredAnswers) {
+    return (
+      <div className="min-w-0 space-y-2 rounded-lg border-l-2 border-info/30 bg-info/5 p-3">
+        {questions.map((q, i) => {
+          const ans = structuredAnswers[i]
+          return (
+            <div
+              // biome-ignore lint/suspicious/noArrayIndexKey: questions share no stable id; order matches answers
+              key={`qa-${i}`}
+              className="flex flex-col gap-1 sm:flex-row sm:gap-4"
+            >
+              <div className="min-w-0 flex-1 break-words text-sm">
+                <span className="font-medium text-muted-foreground">Q:</span> {q}
+              </div>
+              <div className="min-w-0 flex-1 break-words text-sm">
+                <span className="font-medium text-muted-foreground">A:</span> {ans?.label || ''}
+                {ans?.note ? (
+                  <span className="block text-muted-foreground text-xs">(note: {ans.note})</span>
+                ) : null}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    )
+  }
+
+  // Legacy flat-string path — render questions then a single joined answer
+  // at the bottom. Kept for rows persisted before structured `answers`
+  // landed.
+  const answer =
+    typeof part.output === 'string'
       ? part.output
       : part.output != null
         ? JSON.stringify(part.output)
@@ -599,6 +673,16 @@ const ChatMessageRow = memo(
       const nodes: ReactNode[] = []
       let pending: SessionMessagePart[] = []
       let reasoningBuf: SessionMessagePart[] = []
+      // Bug #63 D: pending-gate nodes are hoisted to the end of the turn
+      // rather than rendered in-flow. Without this, if reasoning / text /
+      // other tool parts were emitted AFTER the gate in the same
+      // assistant turn (e.g. because `promoteToolPartToGate` flipped the
+      // gate part at its original index), the gate renders mid-turn
+      // instead of at the bottom where the user's attention is.
+      // Resolved gates (tool-ask_user / tool-permission with non-pending
+      // state) still render inline at their natural position so history
+      // shows the Q/A at the point the agent asked.
+      let pendingGate: ReactNode | null = null
       const flushReasoning = () => {
         if (reasoningBuf.length === 0) return
         nodes.push(
@@ -623,12 +707,19 @@ const ChatMessageRow = memo(
           reasoningBuf.push(part)
           return
         }
+        // Capture pending gate separately so it can be appended after the
+        // loop, regardless of where it appeared in `msg.parts`.
+        if (isPendingGate(part, readOnly)) {
+          pendingGate = renderPart(part, i, onResolveGate, readOnly)
+          return
+        }
         flushReasoning()
         flushPending()
         nodes.push(renderPart(part, i, onResolveGate, readOnly))
       })
       flushReasoning()
       flushPending()
+      if (pendingGate) nodes.push(pendingGate)
       return nodes
     }, [msg, onResolveGate, readOnly])
 
@@ -718,6 +809,23 @@ const ChatMessageRow = memo(
     if (aText !== bText) return false
     if (aLast.state !== bLast.state) return false
     if (aLast.type !== bLast.type) return false
+    // Full-parts scan: the trailing-part fast-path above catches streaming
+    // text deltas cheaply, but it misses in-place mutations to interior
+    // parts — e.g. `promoteToolPartToGate` flipping part[N-2] from
+    // `tool-AskUserQuestion`/`input-available` to `tool-ask_user`/
+    // `approval-requested` while the trailing text part is untouched. Bug
+    // #63 A: without this scan the memo returns true and the gate stays
+    // invisible until a refresh. N is small in practice (a turn typically
+    // has a handful of parts) and this only runs when length matches.
+    for (let i = 0; i < aParts.length; i++) {
+      const ap = aParts[i]
+      const bp = bParts[i]
+      if (ap === bp) continue
+      if (!ap || !bp) return false
+      if (ap.type !== bp.type) return false
+      if (ap.state !== bp.state) return false
+      if (ap.toolCallId !== bp.toolCallId) return false
+    }
     return true
   },
 )
