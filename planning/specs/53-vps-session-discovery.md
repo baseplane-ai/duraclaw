@@ -4,9 +4,9 @@ type: project
 issue_type: feature
 status: draft
 priority: high
-github_issue: 27
+github_issue: 53
 created: 2026-04-12
-updated: 2026-04-12
+updated: 2026-04-22
 phases:
   - id: p1
     name: "SessionSource adapter interface and Claude adapter"

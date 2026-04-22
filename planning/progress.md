@@ -26,7 +26,8 @@
 | 15 | Unified Tauri Tray App | spec | [0015-unified-tray-packaging.md](specs/0015-unified-tray-packaging.md) | Distribution/packaging |
 | 24 | UX Ergonomics | done | [24-ux-ergonomics.md](specs/24-ux-ergonomics.md) | — |
 | 12 | Cass Session API | spec | [12-cass-session-api.md](specs/12-cass-session-api.md) | — |
-| 27 | VPS Session Discovery | done | [27-vps-session-discovery.md](specs/27-vps-session-discovery.md) | — |
+| 53 | VPS Session Discovery | draft | [53-vps-session-discovery.md](specs/53-vps-session-discovery.md) | — |
+| 27 | Docs-runner + RepoDocumentDO (real-time markdown collab) | approved (P0 spike pending) | [27-docs-as-yjs-dialback-runners.md](specs/27-docs-as-yjs-dialback-runners.md) | — |
 | 29 | Mobile Cards + Nav Cleanup (11.1-11.2) | not-started | — | — |
 | 30 | Cmd+K Fuzzy Finder + Keyboard Nav (11.3-11.4) | not-started | — | #29 (cards exist first) |
 | 31 | Mobile Swipe + Live Card Previews (11.5-11.6) | not-started | — | #29 |
