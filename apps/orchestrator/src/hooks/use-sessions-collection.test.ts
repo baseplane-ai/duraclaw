@@ -164,6 +164,59 @@ describe('useSessionsCollection', () => {
     expect(result.current.sessions.map((s) => s.id)).toEqual(['new', 'mid', 'old'])
   })
 
+  // Regression guard for the sidebar-thrash bug: sub-5s differences in
+  // `lastActivity` must NOT reorder the list. Any two rows whose
+  // `lastActivity` falls in the same 5-second bucket fall back to
+  // `createdAt` DESC (then `id` ASC) — a stable, frame-invariant order.
+  // Without bucketing, concurrent agent turns leap-frog the "Recent" list
+  // as each turn stamps a fresh millisecond timestamp.
+  it('buckets sub-5s lastActivity differences and tiebreaks by createdAt desc', () => {
+    mockLiveQueryData = [
+      // Both within the same 5s bucket. 'older-created' is ~9s older in
+      // createdAt; 'newer-created' was created later. Even though
+      // 'older-created' has a later lastActivity (later in the same
+      // bucket), it should NOT leap-frog 'newer-created'.
+      makeSummaryRow({
+        id: 'older-created',
+        createdAt: '2026-01-01T00:00:00Z',
+        lastActivity: '2026-01-10T12:00:04.900Z',
+        updatedAt: '2026-01-10T12:00:04.900Z',
+      }),
+      makeSummaryRow({
+        id: 'newer-created',
+        createdAt: '2026-01-05T00:00:00Z',
+        lastActivity: '2026-01-10T12:00:00.100Z',
+        updatedAt: '2026-01-10T12:00:00.100Z',
+      }),
+    ]
+
+    const { result } = renderHook(() => useSessionsCollection())
+    // newer-created must stay on top: same activity bucket → createdAt
+    // tiebreak picks the more recently created session.
+    expect(result.current.sessions.map((s) => s.id)).toEqual(['newer-created', 'older-created'])
+  })
+
+  // Reorder still happens when activity crosses a 5s bucket boundary.
+  it('does reorder when lastActivity crosses a 5s bucket boundary', () => {
+    mockLiveQueryData = [
+      makeSummaryRow({
+        id: 'stale',
+        createdAt: '2026-01-05T00:00:00Z',
+        lastActivity: '2026-01-10T12:00:00.000Z', // bucket = 12:00:00
+        updatedAt: '2026-01-10T12:00:00.000Z',
+      }),
+      makeSummaryRow({
+        id: 'fresh',
+        createdAt: '2026-01-01T00:00:00Z', // created earlier
+        lastActivity: '2026-01-10T12:00:06.000Z', // bucket = 12:00:05 (one bucket newer)
+        updatedAt: '2026-01-10T12:00:06.000Z',
+      }),
+    ]
+
+    const { result } = renderHook(() => useSessionsCollection())
+    expect(result.current.sessions.map((s) => s.id)).toEqual(['fresh', 'stale'])
+  })
+
   it('returns empty array when data is undefined', () => {
     mockLiveQueryData = undefined
     const { result } = renderHook(() => useSessionsCollection())

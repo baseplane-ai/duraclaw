@@ -86,14 +86,26 @@ export function useSessionsCollection(
     if (!data) return [] as SessionRecord[]
     const projected = (data as SessionSummary[]).map(rowToSessionRecord)
     const filtered = includeArchived ? projected : projected.filter((s) => !s.archived)
+    // Bucket lastActivity to 5s before comparing + tiebreak by createdAt /
+    // id, so rapid concurrent-turn `last_activity` bumps don't leap-frog
+    // rows. Keep in sync with `byActivity` in nav-sessions.tsx.
+    const ACTIVITY_BUCKET_MS = 5_000
     return filtered.sort((a, b) => {
       // Sessions with real lastActivity (from gateway) sort first, NULLs last
       const aHas = !!a.lastActivity
       const bHas = !!b.lastActivity
       if (aHas !== bHas) return aHas ? -1 : 1
-      const aTime = new Date(a.lastActivity ?? a.updatedAt).getTime()
-      const bTime = new Date(b.lastActivity ?? b.updatedAt).getTime()
-      return bTime - aTime
+      const aBucket = Math.floor(
+        new Date(a.lastActivity ?? a.updatedAt).getTime() / ACTIVITY_BUCKET_MS,
+      )
+      const bBucket = Math.floor(
+        new Date(b.lastActivity ?? b.updatedAt).getTime() / ACTIVITY_BUCKET_MS,
+      )
+      if (aBucket !== bBucket) return bBucket - aBucket
+      const aCreated = new Date(a.createdAt).getTime()
+      const bCreated = new Date(b.createdAt).getTime()
+      if (aCreated !== bCreated) return bCreated - aCreated
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
     })
   }, [data, includeArchived])
 

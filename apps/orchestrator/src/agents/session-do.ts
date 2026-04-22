@@ -206,6 +206,17 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     resolve: (v: ContextUsage | null) => void
     reject: (e: unknown) => void
   }> = []
+  /**
+   * Cache of the last status+error we synced to D1. Used by `syncStatusToD1` /
+   * `syncStatusAndErrorToD1` to short-circuit redundant writes — critical for
+   * the belt-and-suspenders hydrate reconciliation (L269-ish), which
+   * previously stamped `last_activity = now()` on every DO wake and scrambled
+   * the sidebar "Recent" ordering. Initialized from D1 by
+   * `initStatusCacheAndReconcile` on hydrate; kept coherent by every write
+   * path in `sync*ToD1` below.
+   */
+  private lastSyncedStatus: SessionStatus | null = null
+  private lastSyncedError: string | null = null
 
   // ── Lifecycle ──────────────────────────────────────────────────
 
@@ -263,10 +274,16 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     // leaves D1 diverged from the DO's in-memory truth. Re-emit on every
     // rehydrate so clients observe the DO's last-known status the next
     // time this DO is loaded — the synced-collection delta pushes the
-    // corrected row to the user's UserSettingsDO. Fire-and-forget; a
-    // failure here is survivable because the next real state transition
-    // will retry.
-    void this.syncStatusToD1(new Date().toISOString())
+    // corrected row to the user's UserSettingsDO.
+    //
+    // NOTE: this path must NOT bump `last_activity`. DO rehydrate is not
+    // user activity — stamping `last_activity = now()` every wake caused
+    // the sidebar "Recent" list to thrash as DOs were touched by tab
+    // navigation, WS reconnects, etc. `initStatusCacheAndReconcile`
+    // primes the status cache from D1 first, so the common "D1 already
+    // matches" case is a true no-op (no write, no broadcast). Divergent
+    // cases still write but leave `last_activity` untouched.
+    void this.initStatusCacheAndReconcile()
   }
 
   /**
@@ -1297,24 +1314,64 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     return drizzle(this.env.AUTH_DB, { schema })
   }
 
-  private async syncStatusToD1(updatedAt: string) {
+  private async syncStatusToD1(updatedAt: string, opts: { bumpLastActivity?: boolean } = {}) {
     try {
       const sessionId = this.ctx.id.toString()
       const newStatus = this.state.status
       const shouldClearError = newStatus === 'running' || newStatus === 'idle'
+      const nextError = shouldClearError ? null : this.lastSyncedError
+      // Fast no-op: nothing to reconcile. Prevents spurious lastActivity
+      // bumps + delta-frame broadcasts on hydrate reconciliation and on
+      // same-status re-emits that would otherwise scramble the sidebar
+      // "Recent" ordering (sessions jumping around on every DO wake).
+      if (this.lastSyncedStatus === newStatus && this.lastSyncedError === nextError) {
+        return
+      }
+      const bumpLastActivity = opts.bumpLastActivity !== false
       await this.d1
         .update(agentSessions)
         .set({
           status: newStatus,
           updatedAt,
-          lastActivity: updatedAt,
+          ...(bumpLastActivity ? { lastActivity: updatedAt } : {}),
           ...(shouldClearError ? { error: null, errorCode: null } : {}),
         })
         .where(eq(agentSessions.id, sessionId))
       await broadcastSessionRow(this.env, this.ctx, sessionId, 'update')
+      this.lastSyncedStatus = newStatus
+      this.lastSyncedError = nextError
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to sync status to D1:`, err)
     }
+  }
+
+  /**
+   * Hydrate-path reconciliation. Reads the current `status` + `error` from
+   * D1 to prime `lastSyncedStatus` / `lastSyncedError`, then calls
+   * `syncStatusToD1` with `bumpLastActivity: false` so the belt-and-
+   * suspenders reconcile never touches `last_activity`. If D1 already
+   * matches the DO's in-memory state, the subsequent sync is a no-op via
+   * the cache fast path — no write, no broadcast, no sidebar jitter.
+   */
+  private async initStatusCacheAndReconcile() {
+    try {
+      const sessionId = this.ctx.id.toString()
+      const rows = await this.d1
+        .select({ status: agentSessions.status, error: agentSessions.error })
+        .from(agentSessions)
+        .where(eq(agentSessions.id, sessionId))
+        .limit(1)
+      const row = rows[0]
+      if (row) {
+        this.lastSyncedStatus = row.status as SessionStatus
+        this.lastSyncedError = row.error ?? null
+      }
+    } catch {
+      // Best-effort prime. If the read fails the cache stays null and the
+      // next write path will issue a real UPDATE + broadcast — same as
+      // the prior behaviour.
+    }
+    void this.syncStatusToD1(new Date().toISOString(), { bumpLastActivity: false })
   }
 
   private async syncResultToD1(updatedAt: string) {
@@ -1382,6 +1439,13 @@ export class SessionDO extends Agent<Env, SessionMeta> {
         })
         .where(eq(agentSessions.id, sessionId))
       await broadcastSessionRow(this.env, this.ctx, sessionId, 'update')
+      // Keep the cache coherent so the next `syncStatusToD1` fast-path
+      // reflects this write. Without this, a subsequent same-status
+      // `syncStatusToD1` call could spuriously write again (not broken,
+      // but wasteful).
+      this.lastSyncedStatus = status
+      this.lastSyncedError =
+        errorMsg != null ? errorMsg : shouldClearError ? null : this.lastSyncedError
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to sync status+error to D1:`, err)
     }

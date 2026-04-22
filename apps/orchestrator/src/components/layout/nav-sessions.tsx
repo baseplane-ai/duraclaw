@@ -132,14 +132,25 @@ function SessionContextMenu({
   )
 }
 
-/** Sort by lastActivity DESC, NULLs last (fall back to updated_at within NULL group) */
+/**
+ * Sort by lastActivity DESC, NULLs last (fall back to updated_at within NULL
+ * group). Timestamps are coarsened to 5-second buckets before comparison and
+ * tie-broken by `createdAt` DESC then `id`, so sub-second `last_activity`
+ * bumps from concurrent agent turns don't leap-frog rows in the sidebar.
+ * Any change at the 5-second granularity still reorders normally.
+ */
+const ACTIVITY_BUCKET_MS = 5_000
 function byActivity(a: SessionRecord, b: SessionRecord): number {
   const aHas = !!a.lastActivity
   const bHas = !!b.lastActivity
   if (aHas !== bHas) return aHas ? -1 : 1
-  const aTime = new Date(a.lastActivity ?? a.updatedAt).getTime()
-  const bTime = new Date(b.lastActivity ?? b.updatedAt).getTime()
-  return bTime - aTime
+  const aBucket = Math.floor(new Date(a.lastActivity ?? a.updatedAt).getTime() / ACTIVITY_BUCKET_MS)
+  const bBucket = Math.floor(new Date(b.lastActivity ?? b.updatedAt).getTime() / ACTIVITY_BUCKET_MS)
+  if (aBucket !== bBucket) return bBucket - aBucket
+  const aCreated = new Date(a.createdAt).getTime()
+  const bCreated = new Date(b.createdAt).getTime()
+  if (aCreated !== bCreated) return bCreated - aCreated
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
 }
 
 // ── PR badge ──────────────────────────────────────────────────────
