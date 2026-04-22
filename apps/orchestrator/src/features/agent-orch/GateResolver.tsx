@@ -39,11 +39,12 @@ export function GateResolver({ gate, onResolve }: GateResolverProps) {
   const handleResolve = async (response: GateResponse) => {
     setResolving(true)
     try {
-      const result = (await onResolve(gate.id, response)) as
-        | { ok: boolean; error?: string }
-        | undefined
-      if (result && !result.ok) {
-        toast.error(result.error || 'Failed to submit response')
+      const raw = await onResolve(gate.id, response)
+      const result = raw as { ok?: boolean; error?: string } | null | undefined
+      // Anything except an explicit {ok: true} is a failure — surface it so
+      // the user knows their answer didn't land and can retry.
+      if (!result || result.ok !== true) {
+        toast.error(result?.error || 'Failed to submit response — try again')
       }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to submit response')
