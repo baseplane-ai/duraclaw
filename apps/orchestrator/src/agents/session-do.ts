@@ -2533,6 +2533,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // guessing the message ID via currentTurnMessageId / turnCounter — the
     // part may live in any message after promoteToolPartToGate.
     const history = this.session.getHistory()
+    let partUpdated = false
     for (let i = history.length - 1; i >= 0; i--) {
       const msg = history[i]
       const partIdx = msg.parts.findIndex((p) => p.toolCallId === gateId)
@@ -2555,11 +2556,41 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       const updatedMsg: SessionMessage = { ...msg, parts: updatedParts }
       try {
         this.session.updateMessage(updatedMsg)
-        this.broadcastMessage(updatedMsg)
       } catch (err) {
-        console.error(`[SessionDO:${this.ctx.id}] Failed to update gate resolution:`, err)
+        // updateMessage can fail if the message was garbage-collected,
+        // created via the standalone fallback path, or the DO rehydrated
+        // from hibernation with stale session state. Log but still
+        // broadcast so the client UI clears the gate.
+        console.error(`[SessionDO:${this.ctx.id}] resolveGate: updateMessage failed:`, err)
+      }
+      // Always broadcast even if updateMessage threw — the client needs
+      // the part-state flip to clear its GateResolver. Without this the
+      // UI stays stuck showing the gate prompt with no error feedback.
+      try {
+        this.broadcastMessage(updatedMsg)
+        partUpdated = true
+      } catch (err) {
+        console.error(`[SessionDO:${this.ctx.id}] resolveGate: broadcastMessage failed:`, err)
+        return {
+          ok: false,
+          error: 'Gate answer sent to agent but failed to update UI — retry or reload',
+        }
       }
       break
+    }
+
+    if (!partUpdated) {
+      // The gateway command was already sent (answer delivered to runner),
+      // but we couldn't find the message part to flip its state. The UI
+      // gate will stay visible until the next message broadcast refreshes
+      // the part. Return an error so the client can surface it.
+      console.error(
+        `[SessionDO:${this.ctx.id}] resolveGate: no message part found for toolCallId '${gateId}' — answer sent to agent but UI not updated`,
+      )
+      return {
+        ok: false,
+        error: 'Answer sent but gate UI may not clear — try reloading if it stays visible',
+      }
     }
 
     if (scalarMatched) {
