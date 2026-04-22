@@ -1883,60 +1883,73 @@ export function createApiApp() {
   // persisted row id so the server echo reconciles via TanStack DB
   // deepEquals (no delete+insert churn on loopback).
   app.post('/api/sessions/:id/messages', async (c) => {
-    const userId = c.get('userId')
-    const ownership = await getOwnedSession(c.env, c.req.param('id'), userId)
-    if (!ownership.ok) {
-      return c.json(
-        { error: ownership.status === 404 ? 'Session not found' : 'Forbidden' },
-        ownership.status,
-      )
-    }
-
-    let rawBody: unknown
+    // Wrap the entire handler so any unhandled throw (D1 read error, DO
+    // fetch failure, JSON parse, etc.) surfaces as a JSON `{error}` body
+    // instead of Hono's default plain-text "Internal Server Error". The
+    // prior shape gave zero diagnostic signal for the message-send path
+    // — the user just saw a blank 500 and we had to guess where in the
+    // handler/DO chain the throw fired.
+    const sessionId = c.req.param('id')
     try {
-      rawBody = await c.req.json()
-    } catch {
-      return c.json({ error: 'invalid JSON body' }, 400)
-    }
-    const body = rawBody as {
-      content?: unknown
-      clientId?: unknown
-      createdAt?: unknown
-    }
-    if (typeof body.content !== 'string' || body.content.length === 0) {
-      return c.json({ error: 'content must be a non-empty string' }, 400)
-    }
-    if (typeof body.clientId !== 'string' || !/^usr-client-[a-z0-9-]+$/.test(body.clientId)) {
-      return c.json({ error: 'clientId must match /^usr-client-[a-z0-9-]+$/' }, 400)
-    }
-    if (typeof body.createdAt !== 'string' || Number.isNaN(new Date(body.createdAt).getTime())) {
-      return c.json({ error: 'createdAt must be a valid ISO 8601 string' }, 400)
-    }
+      const userId = c.get('userId')
+      const ownership = await getOwnedSession(c.env, sessionId, userId)
+      if (!ownership.ok) {
+        return c.json(
+          { error: ownership.status === 404 ? 'Session not found' : 'Forbidden' },
+          ownership.status,
+        )
+      }
 
-    const doId = getSessionDoId(c.env, ownership.session.id)
-    const sessionDO = c.env.SESSION_AGENT.get(doId)
-    const response = await sessionDO.fetch(
-      new Request('https://session/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-partykit-room': ownership.session.id,
-          'x-user-id': userId,
-        },
-        body: JSON.stringify({
-          content: body.content,
-          clientId: body.clientId,
-          createdAt: body.createdAt,
+      let rawBody: unknown
+      try {
+        rawBody = await c.req.json()
+      } catch {
+        return c.json({ error: 'invalid JSON body' }, 400)
+      }
+      const body = rawBody as {
+        content?: unknown
+        clientId?: unknown
+        createdAt?: unknown
+      }
+      if (typeof body.content !== 'string' || body.content.length === 0) {
+        return c.json({ error: 'content must be a non-empty string' }, 400)
+      }
+      if (typeof body.clientId !== 'string' || !/^usr-client-[a-z0-9-]+$/.test(body.clientId)) {
+        return c.json({ error: 'clientId must match /^usr-client-[a-z0-9-]+$/' }, 400)
+      }
+      if (typeof body.createdAt !== 'string' || Number.isNaN(new Date(body.createdAt).getTime())) {
+        return c.json({ error: 'createdAt must be a valid ISO 8601 string' }, 400)
+      }
+
+      const doId = getSessionDoId(c.env, ownership.session.id)
+      const sessionDO = c.env.SESSION_AGENT.get(doId)
+      const response = await sessionDO.fetch(
+        new Request('https://session/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-partykit-room': ownership.session.id,
+            'x-user-id': userId,
+          },
+          body: JSON.stringify({
+            content: body.content,
+            clientId: body.clientId,
+            createdAt: body.createdAt,
+          }),
         }),
-      }),
-    )
+      )
 
-    const text = await response.text()
-    try {
-      const parsed = JSON.parse(text) as Record<string, unknown>
-      return c.json(parsed, response.status as 200 | 400 | 403 | 404 | 409 | 500)
-    } catch {
-      return c.json({ error: text || 'send failed' }, response.status as 400 | 500)
+      const text = await response.text()
+      try {
+        const parsed = JSON.parse(text) as Record<string, unknown>
+        return c.json(parsed, response.status as 200 | 400 | 403 | 404 | 409 | 500)
+      } catch {
+        return c.json({ error: text || 'send failed' }, response.status as 400 | 500)
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`[POST /api/sessions/${sessionId}/messages] unhandled:`, err)
+      return c.json({ error: msg }, 500)
     }
   })
 
