@@ -1028,29 +1028,30 @@ export function createApiApp() {
     const ids = orderedIds as string[]
     const db = getDb(c.env)
 
-    const result = await db.transaction(async (tx) => {
-      const owned = await tx
-        .select({ id: userTabs.id })
-        .from(userTabs)
-        .where(
-          and(eq(userTabs.userId, userId), inArray(userTabs.id, ids), isNull(userTabs.deletedAt)),
-        )
-      if (owned.length !== ids.length) {
-        return { ok: false as const }
-      }
-      for (let idx = 0; idx < ids.length; idx++) {
-        await tx
+    // D1 does not support interactive BEGIN/COMMIT transactions — drizzle's
+    // `db.transaction()` throws on the D1 binding. Use `db.batch()` for
+    // atomic multi-statement writes and do the ownership precheck with a
+    // plain SELECT. A concurrent delete between the check and the batch is
+    // a benign race: the batched UPDATEs filter by userId + deletedAt IS
+    // NULL, so stale ids become no-ops rather than cross-user writes.
+    const owned = await db
+      .select({ id: userTabs.id })
+      .from(userTabs)
+      .where(
+        and(eq(userTabs.userId, userId), inArray(userTabs.id, ids), isNull(userTabs.deletedAt)),
+      )
+    if (owned.length !== ids.length) {
+      return c.json({ error: 'One or more ids not owned by caller' }, 400)
+    }
+
+    if (ids.length > 0) {
+      const [first, ...rest] = ids.map((id, idx) =>
+        db
           .update(userTabs)
           .set({ position: idx })
-          .where(
-            and(eq(userTabs.id, ids[idx]), eq(userTabs.userId, userId), isNull(userTabs.deletedAt)),
-          )
-      }
-      return { ok: true as const }
-    })
-
-    if (!result.ok) {
-      return c.json({ error: 'One or more ids not owned by caller' }, 400)
+          .where(and(eq(userTabs.id, id), eq(userTabs.userId, userId), isNull(userTabs.deletedAt))),
+      )
+      await db.batch([first, ...rest])
     }
 
     const reorderedRows = (await db
