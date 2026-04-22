@@ -574,13 +574,29 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     return this.session.appendMessage(msg, parentId)
   }
 
-  /** updateMessage with pre-write sanitization of oversized image parts. */
+  /**
+   * updateMessage with pre-write sanitization of oversized image parts
+   * and `modified_at` tracking for cursor-based reconnect replay.
+   *
+   * Without `modified_at`, `replayMessagesFromCursor` (keyset on
+   * `created_at`) can never replay an in-place update to a row whose
+   * `created_at` is behind the client's cursor — the root cause of the
+   * "final assistant text missing until refresh" bug on long tool-heavy
+   * turns where the tab was backgrounded during the turn.
+   */
   private safeUpdateMessage(msg: SessionMessage): void {
     sanitizePartsForStorage(msg.parts, {
       sessionId: this.name,
       messageId: msg.id,
     })
     this.session.updateMessage(msg)
+    try {
+      this
+        .sql`UPDATE assistant_messages SET modified_at = ${new Date().toISOString()} WHERE id = ${msg.id} AND session_id = ''`
+    } catch {
+      // Best-effort — modified_at is a reconnect hint, not a correctness gate.
+      // Fails silently if migration v10 hasn't run on this DO yet.
+    }
   }
 
   onConnect(connection: Connection, ctx: ConnectionContext) {
@@ -1391,6 +1407,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
             AND (
               (created_at > ${cursor.createdAt})
               OR (created_at = ${cursor.createdAt} AND id > ${cursor.id})
+              OR (modified_at IS NOT NULL AND modified_at > ${cursor.createdAt})
             )
           ORDER BY created_at ASC, id ASC
           LIMIT 500

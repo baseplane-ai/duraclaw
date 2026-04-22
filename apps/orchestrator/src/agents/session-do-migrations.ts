@@ -150,4 +150,35 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 10,
+    description:
+      'Add modified_at column + index to assistant_messages for cursor-based replay of in-place updates. Fixes: reconnect after tab-background during long tool-heavy turns missed final assistant text because replayMessagesFromCursor used strictly-greater (created_at, id) keyset — in-place updates to rows behind the cursor were never replayed.',
+    up: (sql) => {
+      try {
+        sql.exec(`ALTER TABLE assistant_messages ADD COLUMN modified_at TEXT`)
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (
+          !msg.toLowerCase().includes('duplicate column') &&
+          !msg.toLowerCase().includes('no such table')
+        ) {
+          console.warn('[migration v10] unexpected error adding modified_at column', e)
+          throw e
+        }
+      }
+      try {
+        sql.exec(
+          `CREATE INDEX IF NOT EXISTS idx_assistant_messages_modified
+            ON assistant_messages (session_id, modified_at)`,
+        )
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (!msg.toLowerCase().includes('no such table')) {
+          console.warn('[migration v10] unexpected error creating modified_at index', e)
+          throw e
+        }
+      }
+    },
+  },
 ]
