@@ -42,6 +42,7 @@ import type {
   GateResponse,
   KataSessionState,
   SessionMessage,
+  SessionMessagePart,
   SpawnConfig,
 } from '~/lib/types'
 import { attachWsDebug, wsHardFailEnabled } from '~/lib/ws-debug'
@@ -569,9 +570,101 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     () => connection.call('resumeFromTranscript', []),
     [connection],
   )
+  /**
+   * Resolve a pending gate.
+   *
+   * Bug #63 B: optimistically flip the gate part's state to
+   * `output-available` + stamp the local `output` so the GateResolver
+   * collapses into the resolved Q/A block immediately, rather than
+   * waiting for the server echo. The server's canonical row reconciles
+   * via the messagesCollection synced-delta path on success; on RPC
+   * failure we re-assert the pre-mutation part so the user can retry.
+   *
+   * Output shape mirrors the server's `resolveGate` storage (see
+   * session-do `resolveGate`):
+   *   - structured ask_user: `{ answers: StructuredAnswer[] }` (object)
+   *   - legacy flat ask_user: `response.answer` (string)
+   *   - permission: `'Approved'` / `'Declined'` (string)
+   */
   const resolveGate = useCallback(
-    (gateId: string, response: GateResponse) => connection.call('resolveGate', [gateId, response]),
-    [connection],
+    async (gateId: string, response: GateResponse) => {
+      // Snapshot the current row so we can roll back on RPC failure. We
+      // iterate the live collection to find the message whose parts
+      // include a pending gate part with `toolCallId === gateId`.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const coll = messagesCollection as any
+      let targetMsgId: string | undefined
+      let preMutationParts: SessionMessagePart[] | undefined
+      try {
+        for (const [id, row] of coll as Iterable<[string, CachedMessage]>) {
+          const parts = row.parts ?? []
+          const idx = parts.findIndex(
+            (p) => p.toolCallId === gateId && p.state === 'approval-requested',
+          )
+          if (idx >= 0) {
+            targetMsgId = id
+            preMutationParts = parts
+            break
+          }
+        }
+      } catch {
+        // collection not iterable yet — skip optimistic write entirely.
+      }
+
+      const optimisticOutput: unknown = Array.isArray(response.answers)
+        ? { answers: response.answers }
+        : typeof response.answer === 'string'
+          ? response.answer
+          : typeof response.approved === 'boolean'
+            ? response.approved
+              ? 'Approved'
+              : 'Declined'
+            : undefined
+
+      if (targetMsgId && preMutationParts && optimisticOutput !== undefined) {
+        const nextParts = preMutationParts.map((p) =>
+          p.toolCallId === gateId && p.state === 'approval-requested'
+            ? { ...p, state: 'output-available' as const, output: optimisticOutput }
+            : p,
+        )
+        try {
+          coll.utils.writeUpsert({
+            ...(coll.get?.(targetMsgId) ?? {}),
+            id: targetMsgId,
+            sessionId: agentName,
+            role: 'assistant',
+            parts: nextParts,
+          })
+        } catch {
+          // writeUpsert is best-effort; fall through to RPC regardless.
+        }
+      }
+
+      try {
+        const result = await connection.call('resolveGate', [gateId, response])
+        return result
+      } catch (err) {
+        // Roll back the optimistic mutation so the GateResolver reappears
+        // and the user can retry. The server echo won't arrive on RPC
+        // failure, so we have to re-assert the pre-state manually.
+        if (targetMsgId && preMutationParts) {
+          try {
+            coll.utils.writeUpsert({
+              ...(coll.get?.(targetMsgId) ?? {}),
+              id: targetMsgId,
+              sessionId: agentName,
+              role: 'assistant',
+              parts: preMutationParts,
+            })
+          } catch {
+            // If the collection is in a funky state, a reconnect snapshot
+            // will reconcile eventually.
+          }
+        }
+        throw err
+      }
+    },
+    [agentName, connection, messagesCollection],
   )
 
   // Return the live WS readyState rather than a state-presence proxy: once

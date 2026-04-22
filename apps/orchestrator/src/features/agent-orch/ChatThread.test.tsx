@@ -544,3 +544,279 @@ describe('ChatThread reasoning consolidation', () => {
     expect(screen.getByText('×2')).toBeTruthy()
   })
 })
+
+/**
+ * Paired Q/A render for resolved `tool-ask_user` parts. The server persists
+ * the output as `{ answers: StructuredAnswer[] }` (issue #63); rows
+ * persisted before that landed stored a flat string. The resolved render
+ * must handle both — and surface "Declined" for gates the user refused.
+ */
+describe('ChatThread ResolvedAskUser paired Q/A render', () => {
+  const defaultProps = {
+    state: null,
+    isConnecting: false,
+    onResolveGate: vi.fn(),
+    readOnly: false,
+  }
+
+  it('renders paired Q/A when output is structured answers object', () => {
+    const messages: SessionMessage[] = [
+      {
+        id: 'msg-1',
+        role: 'assistant',
+        parts: [
+          {
+            type: 'tool-ask_user',
+            toolCallId: 'ga1',
+            state: 'output-available',
+            input: {
+              questions: [
+                { question: 'Which color?', header: 'color', options: [], multiSelect: false },
+                { question: 'Which size?', header: 'size', options: [], multiSelect: false },
+              ],
+            },
+            output: {
+              answers: [{ label: 'Blue' }, { label: 'Small', note: 'prefer tight' }],
+            },
+          } as unknown as SessionMessage['parts'][number],
+        ],
+        createdAt: new Date(),
+      },
+    ]
+
+    render(<ChatThread {...defaultProps} messages={messages} />)
+
+    expect(screen.getByText('Which color?')).toBeTruthy()
+    expect(screen.getByText('Which size?')).toBeTruthy()
+    expect(screen.getByText('Blue')).toBeTruthy()
+    expect(screen.getByText('Small')).toBeTruthy()
+    // Note is rendered as "(note: prefer tight)" in its own span.
+    expect(screen.getByText('(note: prefer tight)')).toBeTruthy()
+  })
+
+  it('renders legacy joined string answer at bottom when output is a string', () => {
+    const messages: SessionMessage[] = [
+      {
+        id: 'msg-1',
+        role: 'assistant',
+        parts: [
+          {
+            type: 'tool-ask_user',
+            toolCallId: 'ga1',
+            state: 'output-available',
+            input: {
+              questions: [
+                { question: 'Which color?', header: 'color', options: [], multiSelect: false },
+                { question: 'Which size?', header: 'size', options: [], multiSelect: false },
+              ],
+            },
+            output: 'Blue; Small (note: prefer tight)',
+          } as unknown as SessionMessage['parts'][number],
+        ],
+        createdAt: new Date(),
+      },
+    ]
+
+    render(<ChatThread {...defaultProps} messages={messages} />)
+
+    // Questions still listed.
+    expect(screen.getByText('Which color?')).toBeTruthy()
+    expect(screen.getByText('Which size?')).toBeTruthy()
+    // Legacy joined answer rendered once, at the bottom.
+    expect(screen.getByText('Blue; Small (note: prefer tight)')).toBeTruthy()
+  })
+
+  it('renders "Declined" when state is output-denied', () => {
+    const messages: SessionMessage[] = [
+      {
+        id: 'msg-1',
+        role: 'assistant',
+        parts: [
+          {
+            type: 'tool-ask_user',
+            toolCallId: 'ga1',
+            state: 'output-denied',
+            input: {
+              questions: [
+                { question: 'Which color?', header: 'color', options: [], multiSelect: false },
+                { question: 'Which size?', header: 'size', options: [], multiSelect: false },
+              ],
+            },
+            output: undefined,
+          } as unknown as SessionMessage['parts'][number],
+        ],
+        createdAt: new Date(),
+      },
+    ]
+
+    render(<ChatThread {...defaultProps} messages={messages} />)
+
+    expect(screen.getByText('Declined')).toBeTruthy()
+  })
+})
+
+/**
+ * Bug #63 D: pending gates are hoisted to the bottom of their assistant
+ * turn so the user's attention lands on the prompt, regardless of where
+ * the `tool-ask_user`/`tool-permission` part landed in `msg.parts`.
+ * Resolved (non-pending) ask_user parts still render inline at their
+ * natural position to preserve conversational order in history.
+ */
+describe('ChatThread pending-gate position', () => {
+  const defaultProps = {
+    state: null,
+    isConnecting: false,
+    onResolveGate: vi.fn(),
+    readOnly: false,
+  }
+
+  it('renders a pending gate at the bottom of the assistant turn even when it is not the last part', () => {
+    const messages: SessionMessage[] = [
+      {
+        id: 'msg-1',
+        role: 'assistant',
+        parts: [
+          { type: 'text', text: 'text-before-gate', state: 'done' },
+          {
+            type: 'tool-ask_user',
+            toolCallId: 'ga-pending',
+            state: 'approval-requested',
+            input: {
+              questions: [
+                { question: 'Proceed?', header: 'proceed', options: [], multiSelect: false },
+              ],
+            },
+          } as unknown as SessionMessage['parts'][number],
+          { type: 'text', text: 'text-after-gate', state: 'done' },
+        ],
+        createdAt: new Date(),
+      },
+    ]
+
+    render(<ChatThread {...defaultProps} messages={messages} />)
+
+    const gate = screen.getByTestId('gate-resolver')
+    const textAfter = screen.getByText('text-after-gate')
+
+    // Gate must render AFTER the text part that originally followed it.
+    // DOCUMENT_POSITION_FOLLOWING (0x04) means textAfter precedes gate.
+    expect(textAfter.compareDocumentPosition(gate) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('leaves resolved (non-pending) ask_user parts in their natural order', () => {
+    const messages: SessionMessage[] = [
+      {
+        id: 'msg-1',
+        role: 'assistant',
+        parts: [
+          { type: 'text', text: 'text-before', state: 'done' },
+          {
+            type: 'tool-ask_user',
+            toolCallId: 'ga-resolved',
+            state: 'output-available',
+            input: {
+              questions: [
+                { question: 'Resolved question?', header: 'q', options: [], multiSelect: false },
+              ],
+            },
+            output: { answers: [{ label: 'Yes' }] },
+          } as unknown as SessionMessage['parts'][number],
+          { type: 'text', text: 'text-after', state: 'done' },
+        ],
+        createdAt: new Date(),
+      },
+    ]
+
+    render(<ChatThread {...defaultProps} messages={messages} />)
+
+    const textBefore = screen.getByText('text-before')
+    const resolvedQuestion = screen.getByText('Resolved question?')
+    const textAfter = screen.getByText('text-after')
+
+    // text-before → resolved Q/A → text-after (natural order).
+    expect(
+      textBefore.compareDocumentPosition(resolvedQuestion) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+    expect(
+      resolvedQuestion.compareDocumentPosition(textAfter) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+  })
+})
+
+/**
+ * Bug #63 A: the ChatMessageRow memo comparator must scan every part for
+ * type / state / toolCallId changes — not just the trailing part — so that
+ * `promoteToolPartToGate` flipping an interior part from
+ * `tool-AskUserQuestion`/`input-available` to `tool-ask_user`/
+ * `approval-requested` causes a re-render. Without the full-parts scan
+ * the memo returns true and the gate stays invisible until a refresh.
+ */
+describe('ChatThread message memo — interior part state change', () => {
+  const defaultProps = {
+    state: null,
+    isConnecting: false,
+    onResolveGate: vi.fn(),
+    readOnly: false,
+  }
+
+  it('re-renders when an interior part flips to approval-requested after initial render', () => {
+    const initialMessages: SessionMessage[] = [
+      {
+        id: 'msg-1',
+        role: 'assistant',
+        parts: [
+          { type: 'text', text: 'text-A', state: 'done' },
+          {
+            type: 'tool-AskUserQuestion',
+            toolCallId: 'ga-promo',
+            toolName: 'AskUserQuestion',
+            state: 'input-available',
+            input: {
+              questions: [
+                { question: 'Proceed?', header: 'proceed', options: [], multiSelect: false },
+              ],
+            },
+          } as unknown as SessionMessage['parts'][number],
+          { type: 'text', text: 'text-B', state: 'done' },
+        ],
+        createdAt: new Date(),
+      },
+    ]
+
+    const { rerender } = render(<ChatThread {...defaultProps} messages={initialMessages} />)
+
+    // Gate prompt NOT shown initially — part is input-available, not
+    // approval-requested, so isPendingGate returns false.
+    expect(screen.queryByTestId('gate-resolver')).toBeNull()
+
+    // Flip the interior part to the promoted gate shape. Same message id,
+    // same parts length — only the interior part's type+state change.
+    const updatedMessages: SessionMessage[] = [
+      {
+        id: 'msg-1',
+        role: 'assistant',
+        parts: [
+          { type: 'text', text: 'text-A', state: 'done' },
+          {
+            type: 'tool-ask_user',
+            toolCallId: 'ga-promo',
+            toolName: 'ask_user',
+            state: 'approval-requested',
+            input: {
+              questions: [
+                { question: 'Proceed?', header: 'proceed', options: [], multiSelect: false },
+              ],
+            },
+          } as unknown as SessionMessage['parts'][number],
+          { type: 'text', text: 'text-B', state: 'done' },
+        ],
+        createdAt: new Date(),
+      },
+    ]
+
+    rerender(<ChatThread {...defaultProps} messages={updatedMessages} />)
+
+    // Memo comparator's full-parts scan must catch the interior promotion.
+    expect(screen.getByTestId('gate-resolver')).toBeTruthy()
+  })
+})

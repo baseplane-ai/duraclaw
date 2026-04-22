@@ -578,9 +578,35 @@ export interface SpawnConfig {
   max_budget_usd?: number
 }
 
+/**
+ * Per-question structured answer from the AskUserQuestion structured-questions UI.
+ * `label` is the chosen option label (or empty if only a note was provided).
+ * `note` is the free-text addendum.
+ */
+export interface StructuredAnswer {
+  label: string
+  note?: string
+}
+
 export interface GateResponse {
+  /** Permission gate response. */
   approved?: boolean
+  /**
+   * Legacy flat answer. Still used for:
+   *  - permission gates with a text reason (none today, but shape preserved).
+   *  - single-question (legacy) ask_user payloads with no `questions` array.
+   *  - back-compat with rows persisted before structured `answers` landed.
+   */
   answer?: string
+  /**
+   * Structured per-question answers from ask_user. Parallel to the
+   * `input.questions[]` array — `answers[i]` is the answer to `questions[i]`.
+   * When present, the server persists `part.output = { answers }` (object)
+   * so `ResolvedAskUser` can render paired Q/A, and serializes to a joined
+   * flat string for the gateway `answer` command (the SDK runner still
+   * expects a single string).
+   */
+  answers?: StructuredAnswer[]
 }
 
 export interface SessionSummary {
