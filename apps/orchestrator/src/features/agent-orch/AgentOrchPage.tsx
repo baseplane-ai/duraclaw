@@ -206,7 +206,11 @@ function AgentOrchContent() {
 
       const activeDraft = isDraftTabId(activeSessionId) ? activeSessionId : null
       if (activeDraft) {
-        replaceTab(activeDraft, clientSessionId)
+        replaceTab(
+          activeDraft,
+          clientSessionId,
+          config.newTab ? undefined : { dedupProject: config.project },
+        )
       } else {
         openTab(clientSessionId, { project: config.project, forceNewTab: config.newTab })
       }

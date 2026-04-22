@@ -132,7 +132,7 @@ export interface UseTabSyncResult {
    * preserving order and project metadata. Activates the new id if the
    * old id was active. No-op if oldId isn't present.
    */
-  replaceTab: (oldId: string, newId: string) => void
+  replaceTab: (oldId: string, newId: string, opts?: { dedupProject?: string }) => void
   /** Set the active session (local only). */
   setActive: (sessionId: string | null) => void
   /** Find an existing chain tab for an issue. Returns its sessionId or null. */
@@ -273,6 +273,36 @@ export function computeInsertOrder(
   if (nextOrders.length === 0) return lastClusterOrder + 1
   const nextOrder = nextOrders.reduce((m, o) => (o < m ? o : m), Infinity)
   return (lastClusterOrder + nextOrder) / 2
+}
+
+/**
+ * Identify dedup-candidate row ids for `replaceTab` when called with
+ * `opts.dedupProject`. Returns every row that belongs to the same
+ * project cluster and is NOT the old draft row or a row already on the
+ * new (target) sessionId — those are handled by the swap/dupe paths.
+ *
+ * Exported for unit testing; callers inside `useTabSync` iterate the
+ * result and `tabs.delete(id)` each.
+ */
+export function collectReplaceTabDedupIds(
+  rows: ReadonlyArray<{
+    id: string
+    sessionId: string | null
+    meta: TabMeta
+  }>,
+  oldId: string,
+  newId: string,
+  dedupProject: string,
+): string[] {
+  const out: string[] = []
+  for (const r of rows) {
+    if (r.sessionId === oldId) continue
+    if (r.sessionId === newId) continue
+    if (r.meta.kind === 'chain') continue
+    if (r.meta.project !== dedupProject) continue
+    out.push(r.id)
+  }
+  return out
 }
 
 /**
@@ -490,9 +520,12 @@ export function useTabSync(): UseTabSyncResult {
   )
 
   const replaceTab = useCallback(
-    (oldId: string, newId: string) => {
+    (oldId: string, newId: string, opts?: { dedupProject?: string }) => {
       if (oldId === newId) return
-      const row = rows.find((r) => r.sessionId === oldId)
+      // Read live collection state for the existence checks — see comment on
+      // `openTab` for why `rows` (React snapshot) is stale across sync calls.
+      const liveRows = projectRows(tabs.toArray)
+      const row = liveRows.find((r) => r.sessionId === oldId)
       if (!row) {
         // Stuck-tab debug (2026-04-22): if the draft row the caller saw has
         // already been dropped from the React snapshot — e.g. the user_tabs
@@ -501,13 +534,32 @@ export function useTabSync(): UseTabSyncResult {
         // with no tab. Surface it.
         console.warn(
           '[replaceTab] old row not found',
-          JSON.stringify({ oldId, newId, openRows: rows.map((r) => r.sessionId) }),
+          JSON.stringify({ oldId, newId, openRows: liveRows.map((r) => r.sessionId) }),
         )
         return
       }
 
+      // One-tab-per-project dedup: caller opted in by passing `dedupProject`.
+      // Happens BEFORE the swap/dupe paths so peer project tabs are collapsed
+      // regardless of whether the target sessionId already has a row.
+      if (opts?.dedupProject) {
+        const dedupIds = collectReplaceTabDedupIds(liveRows, oldId, newId, opts.dedupProject)
+        if (dedupIds.length > 0) {
+          console.info(
+            '[replaceTab] dedup',
+            JSON.stringify({
+              oldId,
+              newId,
+              project: opts.dedupProject,
+              deletedRowIds: dedupIds,
+            }),
+          )
+          for (const id of dedupIds) tabs.delete(id)
+        }
+      }
+
       // If newId is already open, drop the draft and activate the existing one.
-      const dupe = rows.find((r) => r.sessionId === newId)
+      const dupe = liveRows.find((r) => r.sessionId === newId)
       if (dupe) {
         console.info(
           '[replaceTab] dupe path (delete draft, activate existing)',
@@ -524,10 +576,16 @@ export function useTabSync(): UseTabSyncResult {
       )
       tabs.update(row.id, (draft: UserTabRow) => {
         draft.sessionId = newId
+        if (opts?.dedupProject) {
+          const currentMeta = parseMeta(draft.meta)
+          if (currentMeta.project !== opts.dedupProject) {
+            draft.meta = stringifyMeta({ ...currentMeta, project: opts.dedupProject })
+          }
+        }
       })
       if (activeSessionId === oldId) setActive(newId)
     },
-    [rows, activeSessionId, setActive],
+    [activeSessionId, setActive],
   )
 
   const reorder = useCallback(

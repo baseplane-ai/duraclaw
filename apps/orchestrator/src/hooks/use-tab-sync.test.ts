@@ -18,7 +18,8 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { computeInsertOrder } from './use-tab-sync'
+import type { TabMeta } from '~/lib/types'
+import { collectReplaceTabDedupIds, computeInsertOrder } from './use-tab-sync'
 
 type Entry = {
   order: number
@@ -159,5 +160,84 @@ describe('computeInsertOrder', () => {
       { order: 2, kind: 'chain', issueNumber: 42 },
     ]
     expect(computeInsertOrder(entries, null, null)).toBe(3)
+  })
+})
+
+// ─── replaceTab dedup candidate selection ───────────────────────────
+//
+// Regression coverage for the project-tab-accumulation bug: when the
+// user submits a new session from an active draft tab and there's
+// already a tab for the same project, `replaceTab` must collapse the
+// existing project tab instead of leaving two tabs for the same
+// project. Core identification logic is pure — the caller deletes the
+// returned ids from the collection.
+
+type Row = {
+  id: string
+  sessionId: string | null
+  meta: TabMeta
+}
+
+describe('collectReplaceTabDedupIds', () => {
+  it('deletes peer project tabs but not the draft being replaced', () => {
+    // Existing tab for proj-a (row "r1") + active draft (row "r2").
+    // Submitting the draft as a new proj-a session should flag r1 for
+    // deletion; r2 stays (it will be swapped to the new sessionId).
+    const rows: Row[] = [
+      { id: 'r1', sessionId: 'sess-1', meta: { project: 'proj-a' } },
+      { id: 'r2', sessionId: 'draft:xyz', meta: {} },
+    ]
+    expect(collectReplaceTabDedupIds(rows, 'draft:xyz', 'sess-2', 'proj-a')).toEqual(['r1'])
+  })
+
+  it('does not touch chain tabs even if they carry a matching project', () => {
+    const rows: Row[] = [
+      { id: 'r1', sessionId: 'sess-1', meta: { project: 'proj-a' } },
+      {
+        id: 'r2',
+        sessionId: 'chain:42',
+        meta: { kind: 'chain', issueNumber: 42, project: 'proj-a' },
+      },
+      { id: 'r3', sessionId: 'draft:xyz', meta: {} },
+    ]
+    expect(collectReplaceTabDedupIds(rows, 'draft:xyz', 'sess-2', 'proj-a')).toEqual(['r1'])
+  })
+
+  it('does not touch tabs for other projects', () => {
+    const rows: Row[] = [
+      { id: 'r1', sessionId: 'sess-1', meta: { project: 'proj-a' } },
+      { id: 'r2', sessionId: 'sess-other', meta: { project: 'proj-b' } },
+      { id: 'r3', sessionId: 'draft:xyz', meta: {} },
+    ]
+    expect(collectReplaceTabDedupIds(rows, 'draft:xyz', 'sess-2', 'proj-a')).toEqual(['r1'])
+  })
+
+  it('skips the target newId even when its row carries the same project', () => {
+    // Racy case: if the new sessionId already has a row (dupe path),
+    // we must not delete it — the dupe path activates it.
+    const rows: Row[] = [
+      { id: 'r1', sessionId: 'sess-2', meta: { project: 'proj-a' } },
+      { id: 'r2', sessionId: 'draft:xyz', meta: {} },
+    ]
+    expect(collectReplaceTabDedupIds(rows, 'draft:xyz', 'sess-2', 'proj-a')).toEqual([])
+  })
+
+  it('returns empty when no peer tabs match', () => {
+    const rows: Row[] = [
+      { id: 'r1', sessionId: 'sess-other', meta: { project: 'proj-b' } },
+      { id: 'r2', sessionId: 'draft:xyz', meta: {} },
+    ]
+    expect(collectReplaceTabDedupIds(rows, 'draft:xyz', 'sess-2', 'proj-a')).toEqual([])
+  })
+
+  it('flags every peer tab when the project has accumulated more than one', () => {
+    // Regression safety net: if the leak already happened, the next
+    // submit should collapse all of them, not just one.
+    const rows: Row[] = [
+      { id: 'r1', sessionId: 'sess-1', meta: { project: 'proj-a' } },
+      { id: 'r2', sessionId: 'sess-1b', meta: { project: 'proj-a' } },
+      { id: 'r3', sessionId: 'draft:xyz', meta: {} },
+    ]
+    expect(collectReplaceTabDedupIds(rows, 'draft:xyz', 'sess-2', 'proj-a')).toEqual(['r1', 'r2'])
   })
 })
