@@ -275,38 +275,49 @@ export function NavSessions() {
     [hiddenSet],
   )
 
-  const visible = sessions.filter((s) => !s.archived)
+  // Perf: memoize the whole visible/recent/sessionsByProject/repo/orphan
+  // derivation on `[sessions, projects]`. These maps were previously rebuilt
+  // on every NavSessions render — including unrelated renders triggered by
+  // ANY hook update in this component — producing new Map/array references
+  // every time and cascading re-renders into `RepoGroup` / `WorktreeNode`
+  // children. With `useMemo` we only rebuild when the underlying collections
+  // actually change.
+  const { visible, recent, sessionsByProject } = useMemo(() => {
+    const visible = sessions.filter((s) => !s.archived)
+    const recent = [...visible].sort(byActivity).slice(0, 5)
 
-  // Recent: last 5 sessions by lastActivity
-  const recent = [...visible].sort(byActivity).slice(0, 5)
-
-  // Build session lookup by project name
-  const sessionsByProject = new Map<string, SessionRecord[]>()
-  for (const session of visible) {
-    const key = session.project || 'unknown'
-    if (!sessionsByProject.has(key)) sessionsByProject.set(key, [])
-    sessionsByProject.get(key)?.push(session)
-  }
-  for (const [, projectSessions] of sessionsByProject) {
-    projectSessions.sort(byActivity)
-  }
-
-  // Group projects by repo_origin
-  const repoGroups = new Map<string, ProjectInfoWithHidden[]>()
-  for (const project of projects) {
-    const key = project.repo_origin || 'Unknown'
-    if (!repoGroups.has(key)) repoGroups.set(key, [])
-    repoGroups.get(key)?.push(project)
-  }
-
-  // Find sessions whose project doesn't match any known worktree (orphans)
-  const knownProjectNames = new Set(projects.map((p) => p.name))
-  const orphanGroups = new Map<string, SessionRecord[]>()
-  for (const [projectName, projectSessions] of sessionsByProject) {
-    if (!knownProjectNames.has(projectName)) {
-      orphanGroups.set(projectName, projectSessions)
+    const sessionsByProject = new Map<string, SessionRecord[]>()
+    for (const session of visible) {
+      const key = session.project || 'unknown'
+      if (!sessionsByProject.has(key)) sessionsByProject.set(key, [])
+      sessionsByProject.get(key)?.push(session)
     }
-  }
+    for (const [, projectSessions] of sessionsByProject) {
+      projectSessions.sort(byActivity)
+    }
+    return { visible, recent, sessionsByProject }
+  }, [sessions])
+
+  const repoGroups = useMemo(() => {
+    const repoGroups = new Map<string, ProjectInfoWithHidden[]>()
+    for (const project of projects) {
+      const key = project.repo_origin || 'Unknown'
+      if (!repoGroups.has(key)) repoGroups.set(key, [])
+      repoGroups.get(key)?.push(project)
+    }
+    return repoGroups
+  }, [projects])
+
+  const orphanGroups = useMemo(() => {
+    const knownProjectNames = new Set(projects.map((p) => p.name))
+    const orphanGroups = new Map<string, SessionRecord[]>()
+    for (const [projectName, projectSessions] of sessionsByProject) {
+      if (!knownProjectNames.has(projectName)) {
+        orphanGroups.set(projectName, projectSessions)
+      }
+    }
+    return orphanGroups
+  }, [projects, sessionsByProject])
 
   const handleSelect = useCallback(
     (session: SessionRecord) => {
