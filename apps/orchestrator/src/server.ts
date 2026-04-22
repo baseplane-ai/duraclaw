@@ -45,6 +45,22 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url)
 
+    // Capacitor WS upgrades can't attach cookies (cross-origin) or custom
+    // headers (browser WS limitation), so native clients pass the bearer
+    // token via `?_authToken=<jwt>`. Hoist it to `Authorization: Bearer`
+    // once at the top so every downstream auth path — getRequestSession
+    // inside DO onConnect, routePartykitRequest's `/parties/*` dispatch,
+    // the collab WS route — sees an authenticated request. Previously
+    // only the session-agent WS branch did this inline, which left
+    // `/parties/user-settings/*` (user-stream WS) perma-rejecting on
+    // native and thrashing via partysocket's reconnect loop.
+    const tokenFromQuery = url.searchParams.get('_authToken')
+    if (tokenFromQuery && !request.headers.get('Authorization')) {
+      const headers = new Headers(request.headers)
+      headers.set('Authorization', `Bearer ${tokenFromQuery}`)
+      request = new Request(request, { headers })
+    }
+
     // CORS preflight for Capacitor + dev origins (#26). WS upgrades skip
     // CORS entirely (browser CORS rules don't apply to the WS handshake).
     const origin = request.headers.get('Origin')
@@ -118,18 +134,10 @@ export default {
           return stub.fetch(wsRequest)
         }
 
-        // Browser auth: require Better Auth session. WebSocket can't send
-        // custom headers, so Capacitor clients pass the bearer token as a
-        // `_authToken` query param. Inject it as an Authorization header so
-        // the bearer() plugin converts it to a session cookie for getRequestSession.
-        let authRequest = request
-        const bearerToken = url.searchParams.get('_authToken')
-        if (bearerToken && !request.headers.get('Authorization')) {
-          const headers = new Headers(request.headers)
-          headers.set('Authorization', `Bearer ${bearerToken}`)
-          authRequest = new Request(request, { headers })
-        }
-        const authSession = await getRequestSession(env, authRequest)
+        // Browser auth: require Better Auth session. The top-level handler
+        // has already hoisted `?_authToken` to `Authorization: Bearer` so
+        // getRequestSession sees an authenticated request on Capacitor too.
+        const authSession = await getRequestSession(env, request)
         if (!authSession) {
           return new Response('Unauthorized', { status: 401 })
         }

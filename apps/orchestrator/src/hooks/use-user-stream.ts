@@ -31,7 +31,7 @@ import { createPartySocketAdapter } from '~/lib/connection-manager/adapters/part
 import { connectionRegistry } from '~/lib/connection-manager/registry'
 import type { ManagedConnection } from '~/lib/connection-manager/types'
 import { logDelta } from '~/lib/delta-log'
-import { wsBaseUrl } from '~/lib/platform'
+import { isNative, wsBaseUrl } from '~/lib/platform'
 import { attachWsDebug, wsHardFailEnabled } from '~/lib/ws-debug'
 
 type FrameHandler = (frame: SyncedCollectionFrame<unknown>) => void
@@ -89,6 +89,23 @@ function openSocket(userId: string) {
     // the socket on its first close instead of looping through partysocket's
     // infinite auto-reconnect (see ~/lib/ws-debug.ts).
     ...(wsHardFailEnabled() ? { maxRetries: 0 } : {}),
+    // Capacitor WebView can't send cookies cross-origin (capacitor://localhost
+    // → dura.baseplane.ai) and WS upgrades can't attach custom headers, so
+    // native clients must pass the better-auth-capacitor bearer as a query
+    // param. server.ts hoists `_authToken` to `Authorization: Bearer` before
+    // dispatching `/parties/*`, so `getRequestSession` in UserSettingsDO
+    // accepts the upgrade instead of rejecting with 401 → close code 1000.
+    // Without this every connect attempt closes with `uptime=never-opened`
+    // and partysocket retries forever.
+    ...(isNative()
+      ? {
+          query: async (): Promise<Record<string, string>> => {
+            const { getCapacitorAuthToken } = await import('better-auth-capacitor/client')
+            const token = await getCapacitorAuthToken({ storagePrefix: 'better-auth' })
+            return token ? { _authToken: token } : {}
+          },
+        }
+      : {}),
   })
 
   attachWsDebug('user-stream', ws)
