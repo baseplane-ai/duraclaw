@@ -6,10 +6,13 @@ import { useLiveQuery } from '@tanstack/react-db'
 import { useCallback, useEffect, useMemo } from 'react'
 import { DisconnectedBanner } from '~/components/disconnected-banner'
 import { StatusBar } from '~/components/status-bar'
+import { VisibilityBadge } from '~/components/visibility-badge'
 import { type BranchInfoRow, createBranchInfoCollection } from '~/db/branch-info-collection'
 import { projectsCollection } from '~/db/projects-collection'
 import { useSession } from '~/hooks/use-sessions-collection'
+import { useSession as useAuthSession } from '~/lib/auth-client'
 import { deriveStatus } from '~/lib/derive-status'
+import { apiUrl } from '~/lib/platform'
 import { useNow } from '~/lib/use-now'
 import { useStatusBarStore } from '~/stores/status-bar'
 import { ChatThread } from './ChatThread'
@@ -119,6 +122,37 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
   // rows keyed by sessionId), so use sessionId directly — no separate tab ID.
   const draftKey = sessionId
 
+  // Spec #68 B12: visibility badge + admin-only toggle.
+  const { data: authSession } = useAuthSession()
+  const role = (authSession as { user?: { role?: string } } | null)?.user?.role ?? 'user'
+  const isAdmin = role === 'admin'
+  const visibility = session?.visibility
+  const handleToggleVisibility = useCallback(async () => {
+    if (!visibility) return
+    const next = visibility === 'public' ? 'private' : 'public'
+    if (next === 'public') {
+      const confirmed = window.confirm('Make this session visible to all users?')
+      if (!confirmed) return
+    }
+    try {
+      const resp = await fetch(apiUrl(`/api/sessions/${sessionId}/visibility`), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ visibility: next }),
+      })
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => '')
+        window.alert(`Failed to update visibility (${resp.status}): ${body}`)
+      }
+    } catch (err) {
+      window.alert(
+        `Failed to update visibility: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+    // Synced-collection delta brings the row up to date — no manual refresh.
+  }, [sessionId, visibility])
+
   return (
     <div
       className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden"
@@ -140,6 +174,20 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
         onReattach={reattach}
         onResumeFromTranscript={resumeFromTranscript}
       />
+      {visibility && (
+        <div className="flex items-center gap-2 px-3 py-1 text-[10px]">
+          <VisibilityBadge visibility={visibility} showLabel />
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={handleToggleVisibility}
+              className="text-[10px] text-muted-foreground underline hover:text-foreground"
+            >
+              Make {visibility === 'public' ? 'private' : 'public'}
+            </button>
+          )}
+        </div>
+      )}
       <StatusBar sessionId={sessionId} />
       <MessageInput
         onSend={sendMessage}

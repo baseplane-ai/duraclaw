@@ -33,6 +33,23 @@ vi.mock('partyserver', () => ({
   routePartykitRequest: vi.fn().mockResolvedValue(null),
 }))
 
+// Spec #68 B8 — server.ts now queries D1 for session visibility via
+// drizzle to gate WS upgrades. Stub drizzle so these pre-existing tests
+// (which don't set up a real D1 shape) still exercise the WS-forward
+// path. Default: return an empty result so the "D1 row doesn't exist
+// yet" race-friendly branch is taken → access is allowed.
+vi.mock('drizzle-orm/d1', () => ({
+  drizzle: vi.fn(() => ({
+    select: vi.fn(() => ({
+      from: vi.fn(() => ({
+        where: vi.fn(() => ({
+          limit: vi.fn(async () => []),
+        })),
+      })),
+    })),
+  })),
+}))
+
 import { getRequestSession } from './api/auth-session'
 import serverExport from './server'
 

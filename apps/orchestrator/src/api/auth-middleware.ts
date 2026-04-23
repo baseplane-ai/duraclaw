@@ -24,5 +24,6 @@ export const authMiddleware = createMiddleware<ApiAppEnv>(async (c, next) => {
   }
 
   c.set('userId', session.userId)
+  c.set('role', session.role)
   await next()
 })

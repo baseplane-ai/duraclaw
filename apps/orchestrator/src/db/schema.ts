@@ -166,6 +166,7 @@ export const agentSessions = sqliteTable(
     // `deriveStatus()` to override stuck `running` rows after >45s of
     // silence. Distinct from `lastActivity` (TEXT ISO, sidebar sort).
     lastEventTs: integer('last_event_ts'),
+    visibility: text('visibility').notNull().default('private'),
   },
   (t) => ({
     sdkIdUnique: uniqueIndex('idx_agent_sessions_sdk_id')
@@ -173,6 +174,10 @@ export const agentSessions = sqliteTable(
       .where(sql`${t.sdkSessionId} IS NOT NULL`),
     userLastActivity: index('idx_agent_sessions_user_last_activity').on(t.userId, t.lastActivity),
     userProject: index('idx_agent_sessions_user_project').on(t.userId, t.project),
+    visibilityLastActivity: index('idx_agent_sessions_visibility_last_activity').on(
+      t.visibility,
+      t.lastActivity,
+    ),
   }),
 )
 
@@ -257,6 +262,7 @@ export const projects = sqliteTable('projects', {
   rootPath: text('root_path').notNull(),
   updatedAt: text('updated_at').notNull(),
   deletedAt: text('deleted_at'),
+  visibility: text('visibility').notNull().default('private'),
 })
 
 export const userPreferences = sqliteTable('user_preferences', {

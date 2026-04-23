@@ -168,7 +168,9 @@ describe('project hiding', () => {
 
       await app.request('/api/gateway/projects')
 
-      expect(fakeDb.db.select).toHaveBeenCalledTimes(1)
+      // One select for user_preferences (hiddenProjects), one for projects
+      // (visibility map) — spec #68 P2 widened this endpoint.
+      expect(fakeDb.db.select).toHaveBeenCalledTimes(2)
     })
   })
 
@@ -216,6 +218,8 @@ describe('project hiding', () => {
         name: 'alpha',
         path: '/data/projects/alpha',
         hidden: true,
+        // Spec #68 P2: projects carry a `visibility` field; unknown-in-D1 → 'private'.
+        visibility: 'private',
       })
     })
 

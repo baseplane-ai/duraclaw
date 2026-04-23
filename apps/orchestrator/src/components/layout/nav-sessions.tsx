@@ -39,17 +39,28 @@ import {
   SidebarMenuSubItem,
   useSidebar,
 } from '~/components/ui/sidebar'
+import { VisibilityBadge } from '~/components/visibility-badge'
 import { projectsCollection } from '~/db/projects-collection'
 import type { SessionRecord } from '~/db/session-record'
 import { userPreferencesCollection } from '~/db/user-preferences-collection'
 import { getPreviewText, StatusDot } from '~/features/agent-orch/session-utils'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { newDraftTabId, useTabSync } from '~/hooks/use-tab-sync'
+import { useSession as useAuthSession } from '~/lib/auth-client'
 import { deriveStatus } from '~/lib/derive-status'
 import { apiUrl } from '~/lib/platform'
 import type { PrInfo, ProjectInfo } from '~/lib/types'
 import { useNow } from '~/lib/use-now'
 import { cn } from '~/lib/utils'
+import { filterSessionsByMode, type SessionFilterMode } from './nav-sessions-filter'
+
+const SESSION_FILTER_STORAGE_KEY = 'duraclaw.session-filter'
+
+function readInitialFilterMode(): SessionFilterMode {
+  if (typeof window === 'undefined') return 'all'
+  const raw = window.localStorage.getItem(SESSION_FILTER_STORAGE_KEY)
+  return raw === 'mine' ? 'mine' : 'all'
+}
 
 /** ProjectInfo extended with the `hidden` flag added by the API route */
 interface ProjectInfoWithHidden extends ProjectInfo {
@@ -235,6 +246,18 @@ export function NavSessions() {
   const { openTab } = useTabSync()
   const nowTs = useNow()
 
+  // Spec #68 B11: client-side "All / Mine" filter. Default 'all' — server
+  // list already widens to `user_id = ? OR visibility = 'public'`.
+  const { data: authSession } = useAuthSession()
+  const currentUserId = (authSession as { user?: { id?: string } } | null)?.user?.id ?? null
+  const [filterMode, setFilterMode] = useState<SessionFilterMode>(() => readInitialFilterMode())
+  const handleFilterChange = useCallback((mode: SessionFilterMode) => {
+    setFilterMode(mode)
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(SESSION_FILTER_STORAGE_KEY, mode)
+    }
+  }, [])
+
   // Synced collections: projects + user preferences (GH#32 phase p4).
   // Replaces the old direct GET /api/gateway/projects/all client fetch —
   // the projects collection is now driven by UserSettingsDO delta frames
@@ -286,7 +309,8 @@ export function NavSessions() {
   // children. With `useMemo` we only rebuild when the underlying collections
   // actually change.
   const { visible, recent, sessionsByProject } = useMemo(() => {
-    const visible = sessions.filter((s) => !s.archived)
+    const notArchived = sessions.filter((s) => !s.archived)
+    const visible = filterSessionsByMode(notArchived, filterMode, currentUserId)
     const recent = [...visible].sort(byActivity).slice(0, 5)
 
     const sessionsByProject = new Map<string, SessionRecord[]>()
@@ -299,7 +323,7 @@ export function NavSessions() {
       projectSessions.sort(byActivity)
     }
     return { visible, recent, sessionsByProject }
-  }, [sessions])
+  }, [sessions, filterMode, currentUserId])
 
   const repoGroups = useMemo(() => {
     const repoGroups = new Map<string, ProjectInfoWithHidden[]>()
@@ -402,6 +426,36 @@ export function NavSessions() {
         </SidebarMenu>
       </SidebarGroup>
 
+      {/* Spec #68 B11: All / Mine filter toggle */}
+      <SidebarGroup>
+        <div className="flex gap-1 px-2">
+          <button
+            type="button"
+            onClick={() => handleFilterChange('all')}
+            className={cn(
+              'flex-1 rounded px-2 py-1 text-xs',
+              filterMode === 'all'
+                ? 'bg-sidebar-accent text-sidebar-accent-foreground'
+                : 'text-muted-foreground hover:bg-sidebar-accent/50',
+            )}
+          >
+            All Sessions
+          </button>
+          <button
+            type="button"
+            onClick={() => handleFilterChange('mine')}
+            className={cn(
+              'flex-1 rounded px-2 py-1 text-xs',
+              filterMode === 'mine'
+                ? 'bg-sidebar-accent text-sidebar-accent-foreground'
+                : 'text-muted-foreground hover:bg-sidebar-accent/50',
+            )}
+          >
+            My Sessions
+          </button>
+        </div>
+      </SidebarGroup>
+
       {/* Recent sessions */}
       <SidebarGroup>
         <SidebarGroupLabel>
@@ -426,8 +480,14 @@ export function NavSessions() {
                     numTurns={session.numTurns ?? 0}
                   />
                   <div className="flex min-w-0 flex-col">
-                    <span className="truncate text-sm leading-tight">
-                      {getDisplayName(session)}
+                    <span className="flex items-center gap-1 truncate text-sm leading-tight">
+                      <span className="truncate">{getDisplayName(session)}</span>
+                      {currentUserId && session.userId !== currentUserId && (
+                        <VisibilityBadge
+                          visibility={session.visibility}
+                          className="ml-1 shrink-0"
+                        />
+                      )}
                     </span>
                     <span className="truncate text-[11px] text-muted-foreground leading-tight">
                       {session.project}

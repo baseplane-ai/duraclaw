@@ -196,4 +196,23 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 12,
+    description:
+      'Add sender_id column to assistant_messages for multi-user collab (spec #68 B14). NULL for legacy rows (pre-shared-session).',
+    up: (sql) => {
+      try {
+        sql.exec(`ALTER TABLE assistant_messages ADD COLUMN sender_id TEXT`)
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (
+          !msg.toLowerCase().includes('duplicate column') &&
+          !msg.toLowerCase().includes('no such table')
+        ) {
+          console.warn('[migration v12] unexpected error adding sender_id column', e)
+          throw e
+        }
+      }
+    },
+  },
 ]

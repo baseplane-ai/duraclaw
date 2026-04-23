@@ -1,12 +1,45 @@
+import { eq } from 'drizzle-orm'
+import { drizzle } from 'drizzle-orm/d1'
 import { routePartykitRequest } from 'partyserver'
 import { SessionCollabDOv2 } from './agents/session-collab-do'
 import { SessionCollabDO } from './agents/session-collab-do-legacy'
 import { SessionDO } from './agents/session-do'
 import { UserSettingsDO } from './agents/user-settings-do'
 import { createApiApp } from './api'
+import type { RequestSession } from './api/auth-session'
 import { getRequestSession } from './api/auth-session'
 import { scheduled } from './api/scheduled'
+import * as schema from './db/schema'
+import { agentSessions } from './db/schema'
 import type { Env } from './lib/types'
+
+/**
+ * Spec #68 B8 / B9 — shared ACL gate for WS upgrades.
+ *
+ * Returns `true` if the authenticated user may open a WS connection for
+ * `sessionId` (owner, or session is public, or user is admin). Also
+ * returns `true` when the session doesn't yet exist in D1 (race with
+ * create) — the DO's own onConnect will reject if the session truly
+ * doesn't exist, preserving the pre-existing race-friendly behaviour.
+ */
+async function checkSessionAccess(
+  env: Env,
+  sessionId: string,
+  authSession: RequestSession,
+): Promise<boolean> {
+  const db = drizzle(env.AUTH_DB, { schema })
+  const rows = await db
+    .select({ userId: agentSessions.userId, visibility: agentSessions.visibility })
+    .from(agentSessions)
+    .where(eq(agentSessions.id, sessionId))
+    .limit(1)
+  const sessionRow = rows[0]
+  if (!sessionRow) return true
+  const isOwner = sessionRow.userId === authSession.userId || sessionRow.userId === 'system'
+  const isPublic = sessionRow.visibility === 'public'
+  const isAdmin = authSession.role === 'admin'
+  return isOwner || isPublic || isAdmin
+}
 
 // Gateway + session-runner decoupling live on prod as of 2026-04-17 (#1).
 const WS_ROUTE = /^\/(?:api\/sessions|agents\/session-agent)\/([^/]+)(?:\/(ws|agent))?$/
@@ -104,6 +137,12 @@ export default {
       if (!authSession) {
         return new Response('Unauthorized', { status: 401 })
       }
+      // Spec #68 B9 — non-owners may join a public session's collab WS;
+      // admins may join any session. Private sessions stay owner-only.
+      const allowed = await checkSessionAccess(env, sessionId, authSession)
+      if (!allowed) {
+        return new Response('Forbidden', { status: 403 })
+      }
       const doId = env.SESSION_COLLAB.idFromName(sessionId)
       const stub = env.SESSION_COLLAB.get(doId)
       const headers = new Headers(request.headers)
@@ -140,6 +179,14 @@ export default {
         const authSession = await getRequestSession(env, request)
         if (!authSession) {
           return new Response('Unauthorized', { status: 401 })
+        }
+
+        // Spec #68 B8 — non-owners may open the session WS if the session
+        // is public, or if the caller is admin. If the D1 row doesn't
+        // exist yet (create race), defer the check to the DO.
+        const allowed = await checkSessionAccess(env, sessionId, authSession)
+        if (!allowed) {
+          return new Response('Forbidden', { status: 403 })
         }
 
         const headers = new Headers(request.headers)
