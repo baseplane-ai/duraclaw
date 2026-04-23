@@ -2061,7 +2061,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     newType: string,
     newToolName: string,
     input: Record<string, unknown>,
-  ) {
+  ): 'promoted' | 'already-resolved' | 'no-part' {
     // Walk messages newest-first looking for the part the assistant event
     // already created (type = `tool-{SdkToolName}`, toolCallId matches).
     const history = this.session.getHistory()
@@ -2070,6 +2070,24 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       const msg = history[i]
       const idx = msg.parts.findIndex((p) => p.toolCallId === toolCallId)
       if (idx === -1) continue
+
+      // Race guard: with the SDK-native direct-render path, a fast user can
+      // submit before this `ask_user` event reaches the DO. If the matching
+      // part is already in a terminal output state (resolveGate ran first),
+      // do NOT regress `state` back to `approval-requested` — that re-opens
+      // the GateResolver in the UI and leaves it stuck. Return
+      // 'already-resolved' so the caller skips its scalar-gate side
+      // effects too.
+      const existingState = msg.parts[idx].state
+      if (
+        existingState === 'output-available' ||
+        existingState === 'output-error' ||
+        existingState === 'output-denied' ||
+        existingState === 'approval-given' ||
+        existingState === 'approval-denied'
+      ) {
+        return 'already-resolved'
+      }
 
       const updatedParts = [...msg.parts]
       updatedParts[idx] = {
@@ -2119,7 +2137,9 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       } catch (err) {
         console.error(`[SessionDO:${this.ctx.id}] Failed to create standalone gate:`, err)
       }
+      return 'no-part'
     }
+    return 'promoted'
   }
 
   private persistTurnState() {
@@ -4439,9 +4459,21 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         // This avoids the old design's race: previously we appended a
         // *second* part looked up via currentTurnMessageId which could miss
         // if turnCounter drifted between the assistant and ask_user events.
-        this.promoteToolPartToGate(event.tool_call_id, 'tool-ask_user', 'ask_user', {
-          questions: event.questions,
-        })
+        const askPromoteResult = this.promoteToolPartToGate(
+          event.tool_call_id,
+          'tool-ask_user',
+          'ask_user',
+          { questions: event.questions },
+        )
+
+        // Race guard: with the SDK-native direct-render path, a fast user
+        // can submit before this event reaches the DO. If the part is
+        // already resolved (resolveGate ran first), skip the
+        // status/gate/push side effects — they'd re-open a closed gate in
+        // the UI and fire a duplicate notification.
+        if (askPromoteResult === 'already-resolved') {
+          break
+        }
 
         // PRESERVE existing side effects exactly
         this.updateState({
@@ -4472,10 +4504,17 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       case 'permission_request': {
         // Same strategy as ask_user: promote the existing tool part created
         // by the assistant event rather than appending a duplicate.
-        this.promoteToolPartToGate(event.tool_call_id, 'tool-permission', 'permission', {
-          tool_name: event.tool_name,
-          tool_call_id: event.tool_call_id,
-        })
+        const permPromoteResult = this.promoteToolPartToGate(
+          event.tool_call_id,
+          'tool-permission',
+          'permission',
+          { tool_name: event.tool_name, tool_call_id: event.tool_call_id },
+        )
+
+        // Same race guard as ask_user (see above).
+        if (permPromoteResult === 'already-resolved') {
+          break
+        }
 
         // PRESERVE all existing side effects (state update, D1 sync, action token, push)
         this.updateState({
