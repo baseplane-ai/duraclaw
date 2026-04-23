@@ -483,7 +483,37 @@ export class SessionDO extends Agent<Env, SessionMeta> {
             headers: { 'Content-Type': 'application/json' },
           })
         }
-        return new Response(JSON.stringify({ messages: this.session.getHistory() }), {
+        // Cold-load (no cursor). Historically this called
+        // `this.session.getHistory()` — a recursive CTE that walked the full
+        // parent chain and read every row's content BLOB. On sessions with
+        // inlined base64 images (issue #65) the aggregate read exceeded the
+        // DO's storage-operation wall-time, resetting the object and 500-ing
+        // the request — preventing resume. Bound to the most recent 500 rows
+        // via the same keyset index the cursor branch uses, so the page is an
+        // O(500) index seek, not a full-history CTE. WS delta + cursor paging
+        // handle any further catch-up.
+        const rows = this.sql<{
+          content: string
+          created_at: string
+          modified_at: string | null
+        }>`
+          SELECT content, created_at, modified_at FROM assistant_messages
+          WHERE session_id = ''
+          ORDER BY created_at DESC, id DESC
+          LIMIT 500
+        `
+        const buffered: Array<Record<string, unknown>> = []
+        for (const row of rows) {
+          try {
+            const parsed = JSON.parse(row.content) as Record<string, unknown>
+            parsed.modifiedAt = row.modified_at ?? row.created_at
+            buffered.push(parsed)
+          } catch {
+            // Skip unparseable rows — defensive; Session writes valid JSON.
+          }
+        }
+        const messages = buffered.reverse()
+        return new Response(JSON.stringify({ messages }), {
           headers: { 'Content-Type': 'application/json' },
         })
       } catch (err) {

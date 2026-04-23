@@ -2277,7 +2277,26 @@ describe('/messages cursor REST handler (GH#38 P1.2)', () => {
       }
       return { status: 200, body: { messages } }
     }
-    return { status: 200, body: { messages: deps.getHistory() } }
+    // Cold load: bounded keyset — most recent 500 rows sorted DESC, then
+    // reversed to ASC. Mirrors the DO's switch from `session.getHistory()`
+    // (recursive CTE + all BLOBs, storage-timeout culprit) to a flat seek.
+    const recent = deps.rows
+      .filter((r) => r.session_id === sessionId)
+      .sort((a, b) => {
+        if (a.created_at !== b.created_at) return a.created_at < b.created_at ? 1 : -1
+        return a.id < b.id ? 1 : -1
+      })
+      .slice(0, 500)
+      .reverse()
+    const coldMessages: unknown[] = []
+    for (const r of recent) {
+      try {
+        coldMessages.push(JSON.parse(r.content))
+      } catch {
+        /* skip */
+      }
+    }
+    return { status: 200, body: { messages: coldMessages } }
   }
 
   function makeRow(id: string, createdAt: string, sessionId = 'sess-x'): Row {
@@ -2289,14 +2308,42 @@ describe('/messages cursor REST handler (GH#38 P1.2)', () => {
     }
   }
 
-  it('returns full getHistory() when no cursor params (cold load)', async () => {
-    const history = [{ id: 'h1' }, { id: 'h2' }]
+  it('cold load (no cursor) returns rows from the flat table, not getHistory()', async () => {
+    // Regression for DO storage-operation timeout: the old cold-load path
+    // called `session.getHistory()` which recursive-CTE-walked the full
+    // parent chain and pulled every content BLOB, timing out the DO on
+    // large sessions with inlined base64 images. The bounded keyset
+    // replacement must NOT invoke getHistory().
+    const rows = [makeRow('a', '2026-04-01T00:00:00Z'), makeRow('b', '2026-04-02T00:00:00Z')]
     const res = await runMessagesHandler(new URL('https://x/messages'), 'sess-x', {
-      rows: [makeRow('a', '2026-04-01T00:00:00Z')],
-      getHistory: () => history,
+      rows,
+      getHistory: () => {
+        throw new Error('getHistory() must not be called on cold load')
+      },
     })
     expect(res.status).toBe(200)
-    expect(res.body).toEqual({ messages: history })
+    expect(res.body.messages.map((m: any) => m.id)).toEqual(['a', 'b'])
+  })
+
+  it('cold load caps at 500 rows and returns the most recent window ASC', async () => {
+    // 700 rows; cold load with no cursor should return the 500 most recent
+    // (indexes 200..699) sorted ASC. Guards the DO storage-operation
+    // timeout fix from regressing to an unbounded scan.
+    const rows: Row[] = []
+    for (let i = 0; i < 700; i++) {
+      const t = new Date(2026, 3, 1, 0, 0, i).toISOString()
+      rows.push(makeRow(`msg-${i.toString().padStart(4, '0')}`, t))
+    }
+    const res = await runMessagesHandler(new URL('https://x/messages'), 'sess-x', {
+      rows,
+      getHistory: () => {
+        throw new Error('getHistory() must not be called on cold load')
+      },
+    })
+    expect(res.status).toBe(200)
+    expect(res.body.messages).toHaveLength(500)
+    expect(res.body.messages[0].id).toBe('msg-0200')
+    expect(res.body.messages[499].id).toBe('msg-0699')
   })
 
   it('returns rows strictly after (created_at, id), sorted ASC, capped 500', async () => {
