@@ -5,9 +5,12 @@
  * from the parent route; when null, the bar renders nothing.
  */
 
+import type { ProjectInfo } from '@duraclaw/shared-types'
+import { useLiveQuery } from '@tanstack/react-db'
 import { GitBranchIcon } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ChainStatusItem } from '~/components/chain-status-item'
+import { projectsCollection } from '~/db/projects-collection'
 import { useSessionLocalState } from '~/db/session-local-collection'
 import { useSession } from '~/hooks/use-sessions-collection'
 import { deriveStatus } from '~/lib/derive-status'
@@ -229,6 +232,24 @@ function KataStatusItem({ kataState }: { kataState: KataSessionState }) {
   )
 }
 
+function useWorktreeInfoFromProjects(projectName: string): WorktreeInfo | null {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: projects } = useLiveQuery((q) => q.from({ p: projectsCollection as any }))
+  return useMemo(() => {
+    if (!projectName || !projects || projects.length === 0) return null
+    const match = (projects as unknown as ProjectInfo[]).find((p) => p.name === projectName)
+    if (!match) return null
+    return {
+      name: match.name,
+      branch: match.branch,
+      dirty: match.dirty,
+      ahead: match.ahead ?? 0,
+      behind: match.behind ?? 0,
+      pr: match.pr ?? null,
+    }
+  }, [projects, projectName])
+}
+
 export function StatusBar({ sessionId }: { sessionId: string | null }) {
   // Spec #37 P2b: read the D1-mirrored row through `useSession` and the
   // transient WS readyState through `useSessionLocalState`. Status is the
@@ -236,6 +257,9 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
   const session = useSession(sessionId)
   const local = useSessionLocalState(sessionId)
   const nowTs = useNow()
+  // Must be called unconditionally (before any early return) to preserve
+  // hook order across the `if (!sessionId) return null` guard below.
+  const worktreeInfoFromProjects = useWorktreeInfoFromProjects(session?.project ?? '')
 
   // GH#69 B6: tripwire for TTL idle override firing with WS OPEN. Must be
   // declared before any early return so hook order stays stable across
@@ -301,7 +325,14 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
   const durationMs = session?.durationMs ?? null
   const contextUsage = parseJsonField<ContextUsage>(session?.contextUsageJson ?? null)
   const kataState = parseJsonField<KataSessionState>(session?.kataStateJson ?? null)
-  const worktreeInfo = parseJsonField<WorktreeInfo>(session?.worktreeInfoJson ?? null)
+  // DO-side `syncWorktreeInfoToD1` is defined but unwired (see
+  // session-do.ts:2352), so `worktreeInfoJson` is always null today. Fall
+  // back to deriving the branch/PR segment from `projectsCollection` —
+  // which is synced from the gateway with live git state — keyed by the
+  // session's project name. Restores the pre-spec-#37 branch + PR display
+  // in the status bar until the DO-side writer lands.
+  const worktreeInfoFromDo = parseJsonField<WorktreeInfo>(session?.worktreeInfoJson ?? null)
+  const worktreeInfo = worktreeInfoFromDo ?? worktreeInfoFromProjects
 
   return (
     <div
