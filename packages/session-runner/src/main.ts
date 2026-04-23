@@ -23,7 +23,7 @@
 
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { BufferedChannel, DialBackClient } from '@duraclaw/shared-transport'
+import { BufferedChannel, DialBackClient, type GapSentinel } from '@duraclaw/shared-transport'
 import type { ExecuteCommand, GatewayCommand, ResumeCommand } from '@duraclaw/shared-types'
 import { atomicOverwrite, atomicWriteOnce } from './atomic.js'
 import { ClaudeRunner } from './claude-runner.js'
@@ -323,7 +323,58 @@ async function main(): Promise<void> {
   await fs.writeFile(argv.pidFile, JSON.stringify(pidPayload))
 
   // --- Step 5: dial + SDK ---
-  const channel = new BufferedChannel()
+  // Spec GH#75 B8 — if a prior runner crashed between BufferedChannel
+  // overflow and WS reattach, the `.gap` sidecar holds the coalesced
+  // sentinel we need to replay on first attach. Parse defensively: any
+  // read/parse/shape failure falls through to a fresh channel (the gap is
+  // lost, but startup is never blocked).
+  const gapPath = `${argv.metaFile}.gap`
+  let initialPendingGap: GapSentinel | null = null
+  try {
+    const raw = await fs.readFile(gapPath, 'utf8')
+    const parsed = JSON.parse(raw) as Partial<GapSentinel>
+    if (
+      parsed &&
+      parsed.type === 'gap' &&
+      typeof parsed.dropped_count === 'number' &&
+      typeof parsed.from_seq === 'number' &&
+      typeof parsed.to_seq === 'number'
+    ) {
+      initialPendingGap = {
+        type: 'gap',
+        dropped_count: parsed.dropped_count,
+        from_seq: parsed.from_seq,
+        to_seq: parsed.to_seq,
+      }
+    } else {
+      console.warn(`[session-runner] ignoring malformed .gap sidecar at ${gapPath}`)
+    }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code !== 'ENOENT') {
+      console.warn(
+        `[session-runner] failed to read .gap sidecar at ${gapPath}: ${(err as Error).message}`,
+      )
+    }
+  }
+
+  const channel = new BufferedChannel({
+    initialPendingGap,
+    // Spec GH#75 B8 — atomically persist the sentinel on every overflow,
+    // unlink on a successful drain. atomicOverwrite handles tmp+rename so
+    // a crash mid-write never leaves a torn JSON.
+    persistGap: async (gap) => {
+      if (gap === null) {
+        try {
+          await fs.unlink(gapPath)
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+        }
+      } else {
+        await atomicOverwrite(gapPath, JSON.stringify(gap))
+      }
+    },
+  })
 
   // Build the per-session context. `messageQueue` / `query` are filled by the
   // runner once session.init arrives; `commandQueue` buffers DO->runner

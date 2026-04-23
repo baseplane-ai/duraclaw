@@ -56,6 +56,7 @@ import {
   claimSubmitId,
   constantTimeEquals,
   deriveSnapshotOps,
+  finalizeResultTurn,
   findPendingGatePart,
   getGatewayConnectionId,
   loadTurnState,
@@ -1658,8 +1659,28 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       if (conn.id === gwConnId) continue // Skip gateway connection
       try {
         conn.send(data)
-      } catch {
-        // Connection already closed
+      } catch (err) {
+        // GH#75 B6: surface broadcast-drop failures so we can diagnose frames
+        // that never reach the client (e.g. socket closed mid-send). Parse
+        // best-effort to capture the frame type (+ collection for synced
+        // deltas) without throwing on unexpected payload shapes.
+        let frameType = 'unparseable'
+        let collection: string | undefined
+        try {
+          const parsed = JSON.parse(data) as { type?: unknown; collection?: unknown }
+          frameType = typeof parsed.type === 'string' ? parsed.type : 'unknown'
+          if (frameType === 'synced-collection-delta' && typeof parsed.collection === 'string') {
+            collection = parsed.collection
+          }
+        } catch {
+          frameType = 'unparseable'
+        }
+        console.warn(
+          `[SessionDO:${this.ctx.id}] broadcast drop sessionId=${this.name} connId=${conn.id} frameType=${frameType}${
+            collection ? ` collection=${collection}` : ''
+          } messageSeq=${this.messageSeq}`,
+          err,
+        )
       }
     }
   }
@@ -1964,6 +1985,11 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       collection: `messages:${this.name}`,
       ops,
       messageSeq: this.messageSeq,
+      // GH#75: targeted sends (cursor-replay, requestSnapshot reply)
+      // bypass client gap-gating. Clients install `lastSeq = max(lastSeq,
+      // messageSeq)` after applying and apply ops even when the current
+      // watermark is ahead.
+      ...(opts.targetClientId ? { targeted: true as const } : {}),
     }
     const data = JSON.stringify(frame)
     if (opts.targetClientId) {
@@ -2002,6 +2028,11 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       collection: `branchInfo:${this.name}`,
       ops,
       messageSeq: this.messageSeq,
+      // GH#75: same targeted-frame contract as broadcastMessages — the
+      // snapshot / cursor-replay path delivers branchInfo rows in
+      // lockstep with the messages frame and both must bypass client
+      // gap-gating.
+      ...(opts.targetClientId ? { targeted: true as const } : {}),
     }
     const data = JSON.stringify(frame)
     if (opts.targetClientId) {
@@ -4228,13 +4259,24 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
   }
 
   @callable()
-  async requestSnapshot(): Promise<{ ok: true } | { ok: false; error: 'session_empty' }> {
+  async requestSnapshot(
+    opts: { targetClientId?: string } = {},
+  ): Promise<{ ok: true } | { ok: false; error: 'session_empty' }> {
     const messages = this.session.getHistory()
     if (messages.length === 0) return { ok: false, error: 'session_empty' }
-    // Known limitation: scope reconnect snapshot to the requesting client
-    // once `@callable` surfaces the caller connection id. Broadcast to all
-    // clients for now — harmless over-delivery in multi-client sessions
-    // (the client's per-session `lastSeq` watermark drops stale frames).
+    // GH#75: client passes its PartySocket `connection.id` as
+    // `targetClientId`. When present, forward to the targeted paths so
+    // both the messages frame and the sibling branchInfo frame carry
+    // `targeted: true` and land only on the requesting connection —
+    // non-recipients stay aligned with the shared seq stream.
+    // Trust boundary: a spoofed targetClientId can only redirect this
+    // session's own history to a conn already a member of this DO's
+    // connection set (same session, same user's client). No cross-user
+    // data exfiltration path; worst case is a self-DoS.
+    // Backward compat: caller may omit `opts` entirely (or pass
+    // `undefined`), in which case we fall back to the pre-GH#75
+    // broadcast behavior and the client's per-session `lastSeq`
+    // watermark drops stale frames.
     // GH#38 P1.4: emit SyncedCollectionFrame on the new messages wire.
     // staleIds = [] — a client-requested resync has no known prior state
     // from the server's perspective; fresh is the full history.
@@ -4243,10 +4285,10 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       newLeaf: messages as unknown as WireSessionMessage[],
     })
     for (const chunk of chunkOps(ops)) {
-      this.broadcastMessages({ ops: chunk })
+      this.broadcastMessages({ ops: chunk }, opts)
     }
     // GH#38 P1.5 / B15: emit sibling branchInfo frame on the same DO turn.
-    this.broadcastBranchInfo(this.computeBranchInfo(messages))
+    this.broadcastBranchInfo(this.computeBranchInfo(messages), opts)
     return { ok: true }
   }
 
@@ -4283,6 +4325,25 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       this.bumpLastEventTs()
     }
     switch (event.type) {
+      // GH#75 B4: relay BufferedChannel gap sentinel from the runner →
+      // DO → client. The runner stamps `{type:'gap', dropped_count,
+      // from_seq, to_seq}` on its WS when the pre-reattach buffer
+      // overflowed; on the client we treat this as a synthetic gap
+      // trigger and fire requestSnapshot. We don't try to reconcile the
+      // sentinel's runner-seq range — runner.seq and DO.messageSeq are
+      // different namespaces and the snapshot is the only safe
+      // rehydration.
+      case 'gap':
+        this.broadcastToClients(
+          JSON.stringify({
+            type: 'gap',
+            dropped_count: (event as { dropped_count?: number }).dropped_count ?? 0,
+            from_seq: (event as { from_seq?: number }).from_seq ?? 0,
+            to_seq: (event as { to_seq?: number }).to_seq ?? 0,
+          }),
+        )
+        break
+
       case 'session.init':
         this.updateState({ sdk_session_id: event.sdk_session_id, model: event.model })
         // Sync sdk_session_id to D1 so discovery won't create a duplicate row.
@@ -4582,91 +4643,107 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       }
 
       case 'result': {
-        // Finalize orphaned streaming parts
-        if (this.currentTurnMessageId) {
-          const existing = this.session.getMessage(this.currentTurnMessageId)
-          if (existing) {
-            const finalizedParts = finalizeStreamingParts(existing.parts)
-            this.safeUpdateMessage({ ...existing, parts: finalizedParts })
-            this.broadcastMessage({ ...existing, parts: finalizedParts })
-          }
-          this.currentTurnMessageId = null
-          this.persistTurnState()
-        }
+        // GH#75 P1.2 B7 — REORDER GUARD: all per-message broadcast frames
+        // for this turn MUST fire before we flip state to `idle` and sync
+        // status to D1. Client derived-status folds over messagesCollection
+        // (spec #31), so if status flips first the sidebar can resolve to
+        // idle while the final assistant frame is still in flight. The
+        // `finalizeResultTurn` helper encodes the ordering by construction;
+        // do not inline the phases without preserving that invariant.
+        const _now = new Date().toISOString()
+        finalizeResultTurn({
+          broadcastPhase: () => {
+            // Finalize orphaned streaming parts
+            if (this.currentTurnMessageId) {
+              const existing = this.session.getMessage(this.currentTurnMessageId)
+              if (existing) {
+                const finalizedParts = finalizeStreamingParts(existing.parts)
+                this.safeUpdateMessage({ ...existing, parts: finalizedParts })
+                this.broadcastMessage({ ...existing, parts: finalizedParts })
+              }
+              this.currentTurnMessageId = null
+              this.persistTurnState()
+            }
 
-        // If SDK reported an error result, show it inline as a system message
-        if (event.is_error && event.result) {
-          this.turnCounter++
-          const errorMsgId = `err-${this.turnCounter}`
-          const errorMsg: SessionMessage = {
-            id: errorMsgId,
-            role: 'system',
-            parts: [{ type: 'text', text: `⚠ Error: ${event.result}` }],
-            createdAt: new Date(),
-          }
-          this.safeAppendMessage(errorMsg)
-          this.broadcastMessage(errorMsg)
-        }
-
-        // If the SDK result contains text that isn't already in the last message,
-        // append it as a visible assistant message so the final response is shown.
-        if (!event.is_error && event.result && typeof event.result === 'string') {
-          const lastMsgId = `msg-${this.turnCounter}`
-          const lastMsg = this.session.getMessage(lastMsgId)
-          const lastHasText = lastMsg?.parts?.some(
-            (p) => p.type === 'text' && p.state === 'done' && p.text,
-          )
-          if (!lastHasText) {
-            // The last assistant turn had only tool calls, no final text — add result text
-            if (lastMsg) {
-              const updatedParts: SessionMessagePart[] = [
-                ...lastMsg.parts,
-                { type: 'text', text: event.result, state: 'done' },
-              ]
-              const updatedMsg: SessionMessage = { ...lastMsg, parts: updatedParts }
-              this.safeUpdateMessage(updatedMsg)
-              this.broadcastMessage(updatedMsg)
-            } else {
+            // If SDK reported an error result, show it inline as a system message
+            if (event.is_error && event.result) {
               this.turnCounter++
-              const resultMsgId = `msg-${this.turnCounter}`
-              const resultMsg: SessionMessage = {
-                id: resultMsgId,
-                role: 'assistant',
-                parts: [{ type: 'text', text: event.result, state: 'done' }],
+              const errorMsgId = `err-${this.turnCounter}`
+              const errorMsg: SessionMessage = {
+                id: errorMsgId,
+                role: 'system',
+                parts: [{ type: 'text', text: `⚠ Error: ${event.result}` }],
                 createdAt: new Date(),
               }
-              this.safeAppendMessage(resultMsg)
-              this.broadcastMessage(resultMsg)
+              this.safeAppendMessage(errorMsg)
+              this.broadcastMessage(errorMsg)
             }
-          }
-        }
 
-        // PRESERVE all existing side effects — always transition to idle.
-        // NOTE: `type=result` is a *turn-complete* signal from the SDK, not a
-        // session-complete signal. The session-runner stays alive waiting on
-        // stream-input for the next turn (see claude-runner multi-turn loop),
-        // so we keep active_callback_token intact — clearing it would block the
-        // runner from re-dialling if its WS flaps. The token is cleared only
-        // on true terminal transitions (stopped/failed/aborted/crashed).
-        this.updateState({
-          status: 'idle',
-          completed_at: new Date().toISOString(),
-          result: event.result,
-          duration_ms: (this.state.duration_ms ?? 0) + (event.duration_ms ?? 0),
-          total_cost_usd: (this.state.total_cost_usd ?? 0) + (event.total_cost_usd ?? 0),
-          num_turns: this.state.num_turns + (event.num_turns ?? 0),
-          error: event.is_error ? event.result : null,
-          summary: event.sdk_summary ?? this.state.summary,
-          gate: null,
+            // If the SDK result contains text that isn't already in the last message,
+            // append it as a visible assistant message so the final response is shown.
+            if (!event.is_error && event.result && typeof event.result === 'string') {
+              const lastMsgId = `msg-${this.turnCounter}`
+              const lastMsg = this.session.getMessage(lastMsgId)
+              const lastHasText = lastMsg?.parts?.some(
+                (p) => p.type === 'text' && p.state === 'done' && p.text,
+              )
+              if (!lastHasText) {
+                // The last assistant turn had only tool calls, no final text — add result text
+                if (lastMsg) {
+                  const updatedParts: SessionMessagePart[] = [
+                    ...lastMsg.parts,
+                    { type: 'text', text: event.result, state: 'done' },
+                  ]
+                  const updatedMsg: SessionMessage = { ...lastMsg, parts: updatedParts }
+                  this.safeUpdateMessage(updatedMsg)
+                  this.broadcastMessage(updatedMsg)
+                } else {
+                  this.turnCounter++
+                  const resultMsgId = `msg-${this.turnCounter}`
+                  const resultMsg: SessionMessage = {
+                    id: resultMsgId,
+                    role: 'assistant',
+                    parts: [{ type: 'text', text: event.result, state: 'done' }],
+                    createdAt: new Date(),
+                  }
+                  this.safeAppendMessage(resultMsg)
+                  this.broadcastMessage(resultMsg)
+                }
+              }
+            }
+          },
+          updateStateIdle: () => {
+            // PRESERVE all existing side effects — always transition to idle.
+            // NOTE: `type=result` is a *turn-complete* signal from the SDK, not a
+            // session-complete signal. The session-runner stays alive waiting on
+            // stream-input for the next turn (see claude-runner multi-turn loop),
+            // so we keep active_callback_token intact — clearing it would block the
+            // runner from re-dialling if its WS flaps. The token is cleared only
+            // on true terminal transitions (stopped/failed/aborted/crashed).
+            this.updateState({
+              status: 'idle',
+              completed_at: new Date().toISOString(),
+              result: event.result,
+              duration_ms: (this.state.duration_ms ?? 0) + (event.duration_ms ?? 0),
+              total_cost_usd: (this.state.total_cost_usd ?? 0) + (event.total_cost_usd ?? 0),
+              num_turns: this.state.num_turns + (event.num_turns ?? 0),
+              error: event.is_error ? event.result : null,
+              summary: event.sdk_summary ?? this.state.summary,
+              gate: null,
+            })
+          },
+          syncStatusToD1: () => {
+            this.syncStatusToD1(_now)
+          },
+          syncResultToD1: () => {
+            this.syncResultToD1(_now)
+          },
+          flushLastEventTsToD1: () => {
+            // GH#50: turn-complete lifecycle transition. Bypass debounce so
+            // the client sidebar resolves to its post-turn `idle` cleanly.
+            void this.flushLastEventTsToD1()
+          },
         })
-        {
-          const _now = new Date().toISOString()
-          this.syncStatusToD1(_now)
-          this.syncResultToD1(_now)
-          // GH#50: turn-complete lifecycle transition. Bypass debounce so
-          // the client sidebar resolves to its post-turn `idle` cleanly.
-          void this.flushLastEventTsToD1()
-        }
         // Spec #37 B9: the legacy per-turn summary WS frame is retired —
         // numTurns / totalCostUsd / durationMs now reach the client via the
         // `agent_sessions` synced-collection delta emitted by syncResultToD1

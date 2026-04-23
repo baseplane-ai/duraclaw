@@ -318,6 +318,33 @@ describe('createReaper.reapOnce', () => {
     }
   })
 
+  it('terminal GC also unlinks .meta.json.gap sidecars (spec GH#75 B8)', async () => {
+    // Pre-populate an older-than-threshold terminal triplet PLUS a .gap
+    // sidecar that a crashed runner would have left behind. All four should
+    // disappear in a single sweep.
+    const exitMtime = FIXED_NOW - 61 * 60_000
+    await writeSession(tmpDir, {
+      id: 'OLD-GAP',
+      exit: { state: 'crashed', exit_code: null, duration_ms: 999 },
+      exitMtime,
+      writeLog: true,
+    })
+    const gapPath = nodePath.join(tmpDir, 'OLD-GAP.meta.json.gap')
+    await fs.writeFile(
+      gapPath,
+      JSON.stringify({ type: 'gap', dropped_count: 1, from_seq: 1, to_seq: 1 }),
+    )
+
+    const reaper = createReaper(baseOpts({ livenessCheck: () => false }))
+    const report = await reaper.reapOnce()
+    reaper.stop()
+
+    expect(report.terminalFilesDeleted).toEqual(['OLD-GAP'])
+    await expect(fs.stat(gapPath)).rejects.toThrow()
+    await expect(fs.stat(nodePath.join(tmpDir, 'OLD-GAP.exit'))).rejects.toThrow()
+    await expect(fs.stat(nodePath.join(tmpDir, 'OLD-GAP.log'))).rejects.toThrow()
+  })
+
   it('leaves terminal files alone when .exit is young', async () => {
     const exitMtime = FIXED_NOW - 30 * 60_000
     await writeSession(tmpDir, {

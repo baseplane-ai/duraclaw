@@ -163,6 +163,22 @@ export type GatewayEvent =
   | ModeTransitionFlushTimeoutEvent
   | ChainAdvanceEvent
   | ChainStalledEvent
+  | GapSentinelEvent
+
+/**
+ * GH#75 B4: BufferedChannel gap sentinel relayed from the session-runner.
+ * Emitted when the runner's ring buffer overflowed while the WS was down,
+ * so some number of events were dropped between `from_seq` and `to_seq`.
+ * The DO forwards this as a `{type:'gap'}` frame to every connected
+ * client, which treats it as a synthetic gap trigger and fires
+ * `requestSnapshot`.
+ */
+export interface GapSentinelEvent {
+  type: 'gap'
+  dropped_count?: number
+  from_seq?: number
+  to_seq?: number
+}
 
 // ── Mode transition events (DO-synthesised for chain UX) ────────────
 //
@@ -777,11 +793,33 @@ export interface SyncedCollectionFrame<TRow = unknown> {
    */
   snapshot?: boolean
   /**
-   * Optional per-stream monotonic counter stamped by the server;
-   * observability only, clients MUST NOT gate on it. Introduced by
-   * `broadcastMessages` in SessionDO (GH#38 P1.2) so operators can
-   * correlate frames across server logs without surfacing a reconcile
-   * knob to the client. Legacy user-scoped callers do not populate it.
+   * Per-stream monotonic seq stamped by the DO in `broadcastMessages` /
+   * `broadcastBranchInfo` for non-targeted frames. Advances monotonically
+   * on every non-targeted send; echoed (unchanged) on targeted sends so
+   * non-recipients stay aligned with the shared stream.
+   *
+   * GH#75: clients MUST track `lastSeq` per session and request a
+   * snapshot on non-targeted gap (`messageSeq > lastSeq + 1`). Stale
+   * non-targeted frames (`messageSeq <= lastSeq`) MUST be dropped.
+   * Targeted frames (see `targeted`) bypass the gap-check entirely and
+   * install `lastSeq = max(lastSeq, messageSeq)` after applying.
+   *
+   * Legacy user-scoped callers (UserSettingsDO fanout) do not populate
+   * this field — those collections have no gap-detection path.
    */
   messageSeq?: number
+  /**
+   * GH#75: set by the DO on every frame emitted to a single
+   * `targetClientId` (cursor-replay in `replayMessagesFromCursor` and
+   * full-history replies from the `requestSnapshot` @callable). Clients
+   * MUST bypass `lastSeq` gap-gating on targeted frames and install
+   * `lastSeq = max(lastSeq, messageSeq)` after applying. Orthogonal to
+   * `snapshot` — targeted frames do NOT carry implicit-delete semantics
+   * (cursor-replay is chunked by LIMIT 500 and the full-history snapshot
+   * reply is cold-start fresh where the client already has no state).
+   *
+   * Older servers never emit this field, older clients never read it —
+   * OTA / version-skew safe.
+   */
+  targeted?: boolean
 }

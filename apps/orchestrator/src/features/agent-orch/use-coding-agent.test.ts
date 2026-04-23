@@ -16,6 +16,7 @@
  * - Stripped events (assistant, tool_result, partial_assistant, file_changed) no longer handled
  */
 
+import type { SyncedCollectionFrame } from '@duraclaw/shared-types'
 import { getActiveTransaction } from '@tanstack/db'
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
@@ -372,7 +373,7 @@ vi.mock('agents/react', () => ({
 }))
 
 // Import after mocks
-import { useCodingAgent } from './use-coding-agent'
+import { __frameRouterDecisionForTests, useCodingAgent } from './use-coding-agent'
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -905,5 +906,327 @@ describe('WS open → getMessages hydrate (GH#42 regression guard)', () => {
       sinceCursor: { modifiedAt: string; id: string } | null
     }
     expect(payload.sinceCursor).toBeNull()
+  })
+})
+
+// ── GH#75 P1.1: client-side seq-gap detection ─────────────────────────
+//
+// Spec: planning/specs/75-client-frame-drop-recovery.md (behaviors B1/B3/B4/B5)
+//
+// Server-side bits (DO stamps `targeted:true`, relays BufferedChannel gap
+// sentinels, `requestSnapshot({targetClientId})` delivery) are covered by
+// `session-do.ts` integration tests — test case (h) from the spec frontmatter
+// lives there, not here. This suite covers the client dispatcher logic.
+//
+// Two layers of test:
+// 1. Pure unit tests of `__frameRouterDecisionForTests` — no React / WS
+//    plumbing, just the decision function.
+// 2. Hook-driven tests via `onMessage` that also validate the
+//    `requestSnapshot` RPC fan-out and dedupe.
+
+describe('client-side seq-gap detection (GH#75 P1.1)', () => {
+  function makeDelta(
+    collection: string,
+    seq: number | undefined,
+    opts: { targeted?: boolean } = {},
+  ): MessageEvent {
+    return makeWsMessage({
+      type: 'synced-collection-delta',
+      collection,
+      ops: [],
+      ...(typeof seq === 'number' ? { messageSeq: seq } : {}),
+      ...(opts.targeted === true ? { targeted: true } : {}),
+    })
+  }
+
+  beforeEach(() => {
+    cachedMessagesStore.clear()
+    sessionsStore.clear()
+    collectionSubs.clear()
+    sessionsSubs.clear()
+    capturedUseAgentConfig = null
+    vi.clearAllMocks()
+    mockCall.mockReset()
+    mockCall.mockResolvedValue({ ok: true })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.useRealTimers()
+  })
+
+  // ── Pure helper tests ──────────────────────────────────────────────
+
+  test('__frameRouterDecisionForTests: non-session collection passes through', () => {
+    const map = new Map<string, number>()
+    const frame = {
+      type: 'synced-collection-delta',
+      collection: 'projects',
+      ops: [],
+    } as SyncedCollectionFrame<unknown>
+    const d = __frameRouterDecisionForTests(frame, map, 's')
+    expect(d.action).toBe('passthrough')
+  })
+
+  test('__frameRouterDecisionForTests: targeted frame applies and advances', () => {
+    const map = new Map([['s', 3]])
+    const frame = {
+      type: 'synced-collection-delta',
+      collection: 'messages:s',
+      ops: [],
+      messageSeq: 5,
+      targeted: true,
+    } as SyncedCollectionFrame<unknown>
+    const d = __frameRouterDecisionForTests(frame, map, 's')
+    expect(d).toEqual({ action: 'apply', advanceSeqTo: 5, clearPending: true })
+  })
+
+  test('__frameRouterDecisionForTests: targeted snapshot at seq=20 applies', () => {
+    const map = new Map([['s', 3]])
+    const frame = {
+      type: 'synced-collection-delta',
+      collection: 'messages:s',
+      ops: [],
+      messageSeq: 20,
+      targeted: true,
+    } as SyncedCollectionFrame<unknown>
+    const d = __frameRouterDecisionForTests(frame, map, 's')
+    expect(d).toEqual({ action: 'apply', advanceSeqTo: 20, clearPending: true })
+  })
+
+  test('__frameRouterDecisionForTests: happy path seq=last+1 applies', () => {
+    const map = new Map([['s', 2]])
+    const frame = {
+      type: 'synced-collection-delta',
+      collection: 'messages:s',
+      ops: [],
+      messageSeq: 3,
+    } as SyncedCollectionFrame<unknown>
+    expect(__frameRouterDecisionForTests(frame, map, 's')).toEqual({
+      action: 'apply',
+      advanceSeqTo: 3,
+    })
+  })
+
+  test('__frameRouterDecisionForTests: gap detected when seq > last+1', () => {
+    const map = new Map([['s', 2]])
+    const frame = {
+      type: 'synced-collection-delta',
+      collection: 'messages:s',
+      ops: [],
+      messageSeq: 4,
+    } as SyncedCollectionFrame<unknown>
+    expect(__frameRouterDecisionForTests(frame, map, 's')).toEqual({ action: 'gap', seq: 4 })
+  })
+
+  test('__frameRouterDecisionForTests: stale drop when seq <= last', () => {
+    const map = new Map([['s', 3]])
+    const frame = {
+      type: 'synced-collection-delta',
+      collection: 'messages:s',
+      ops: [],
+      messageSeq: 2,
+    } as SyncedCollectionFrame<unknown>
+    expect(__frameRouterDecisionForTests(frame, map, 's')).toEqual({ action: 'stale', seq: 2 })
+  })
+
+  test('__frameRouterDecisionForTests: legacy frame without messageSeq applies, no advance', () => {
+    const map = new Map<string, number>()
+    const frame = {
+      type: 'synced-collection-delta',
+      collection: 'messages:s',
+      ops: [],
+    } as SyncedCollectionFrame<unknown>
+    expect(__frameRouterDecisionForTests(frame, map, 's')).toEqual({ action: 'apply' })
+  })
+
+  test('__frameRouterDecisionForTests: cold-start (lastSeq=0) with seq=5 is a gap', () => {
+    // Hibernation wake: DO rehydrates with persisted seq, first emission
+    // isn't seq=1. Client MUST fire requestSnapshot.
+    const map = new Map<string, number>()
+    const frame = {
+      type: 'synced-collection-delta',
+      collection: 'messages:s',
+      ops: [],
+      messageSeq: 5,
+    } as SyncedCollectionFrame<unknown>
+    expect(__frameRouterDecisionForTests(frame, map, 's')).toEqual({ action: 'gap', seq: 5 })
+  })
+
+  // ── Hook-driven tests (exercise onMessage + RPC wiring) ────────────
+
+  test('case a: seq=1,2,4,5 non-targeted → requestSnapshot fires once; seq=4,5 not applied', () => {
+    // Spec frontmatter (a): deliver 1,2,4,5 — gap at 4 triggers snapshot;
+    // 4 and 5 are NOT applied to the watermark (they stay pending until the
+    // targeted snapshot reply arrives).
+    renderHook(() => useCodingAgent('s'))
+
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(makeDelta('messages:s', 1))
+      capturedUseAgentConfig?.onMessage?.(makeDelta('messages:s', 2))
+      capturedUseAgentConfig?.onMessage?.(makeDelta('messages:s', 4))
+      capturedUseAgentConfig?.onMessage?.(makeDelta('messages:s', 5))
+    })
+
+    const snapshotCalls = mockCall.mock.calls.filter(([method]) => method === 'requestSnapshot')
+    expect(snapshotCalls).toHaveLength(1)
+    // Watermark should still be 2 (4/5 not applied).
+    const watermark = (window as unknown as { __lastSeq?: Map<string, number> }).__lastSeq
+    expect(watermark?.get('s')).toBe(2)
+  })
+
+  test('case b: seq=1,2,3 then replayed 2,3 → stale frames dropped', () => {
+    renderHook(() => useCodingAgent('s'))
+
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(makeDelta('messages:s', 1))
+      capturedUseAgentConfig?.onMessage?.(makeDelta('messages:s', 2))
+      capturedUseAgentConfig?.onMessage?.(makeDelta('messages:s', 3))
+    })
+    // No snapshot call on happy path.
+    expect(mockCall.mock.calls.filter(([m]) => m === 'requestSnapshot')).toHaveLength(0)
+
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(makeDelta('messages:s', 2))
+      capturedUseAgentConfig?.onMessage?.(makeDelta('messages:s', 3))
+    })
+    // Still no snapshot (stale, not gap).
+    expect(mockCall.mock.calls.filter(([m]) => m === 'requestSnapshot')).toHaveLength(0)
+    const watermark = (window as unknown as { __lastSeq?: Map<string, number> }).__lastSeq
+    expect(watermark?.get('s')).toBe(3)
+  })
+
+  test('case c: targeted cursor-replay messageSeq=5 at lastSeq=3 → applies, lastSeq=5', () => {
+    renderHook(() => useCodingAgent('s'))
+
+    // Seed watermark to 3.
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(makeDelta('messages:s', 1))
+      capturedUseAgentConfig?.onMessage?.(makeDelta('messages:s', 2))
+      capturedUseAgentConfig?.onMessage?.(makeDelta('messages:s', 3))
+    })
+
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(makeDelta('messages:s', 5, { targeted: true }))
+    })
+
+    // Targeted bypass: no gap triggered, watermark jumps to 5.
+    expect(mockCall.mock.calls.filter(([m]) => m === 'requestSnapshot')).toHaveLength(0)
+    const watermark = (window as unknown as { __lastSeq?: Map<string, number> }).__lastSeq
+    expect(watermark?.get('s')).toBe(5)
+  })
+
+  test('case d: targeted snapshot messageSeq=20 at lastSeq=3 → applies, lastSeq=20', () => {
+    renderHook(() => useCodingAgent('s'))
+
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(makeDelta('messages:s', 1))
+      capturedUseAgentConfig?.onMessage?.(makeDelta('messages:s', 2))
+      capturedUseAgentConfig?.onMessage?.(makeDelta('messages:s', 3))
+    })
+
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(makeDelta('messages:s', 20, { targeted: true }))
+    })
+
+    expect(mockCall.mock.calls.filter(([m]) => m === 'requestSnapshot')).toHaveLength(0)
+    const watermark = (window as unknown as { __lastSeq?: Map<string, number> }).__lastSeq
+    expect(watermark?.get('s')).toBe(20)
+  })
+
+  test('case e: back-to-back gap detects within 10ms → exactly one requestSnapshot RPC (dedupe)', () => {
+    renderHook(() => useCodingAgent('s'))
+
+    act(() => {
+      // Cold start: lastSeq=0, seq=5 is a gap → fires once.
+      capturedUseAgentConfig?.onMessage?.(makeDelta('messages:s', 5))
+      // Second gap frame before the targeted reply arrives → dedupe should
+      // suppress the second RPC.
+      capturedUseAgentConfig?.onMessage?.(makeDelta('messages:s', 6))
+    })
+
+    const snapshotCalls = mockCall.mock.calls.filter(([m]) => m === 'requestSnapshot')
+    expect(snapshotCalls).toHaveLength(1)
+  })
+
+  test('case f: cold-start lastSeq=0, first frame messageSeq=5 → requestSnapshot fires', () => {
+    // Spec frontmatter (f): hibernation wake happy path — persisted seq
+    // means first emission isn't seq=1.
+    renderHook(() => useCodingAgent('s'))
+
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(makeDelta('messages:s', 5))
+    })
+
+    const snapshotCalls = mockCall.mock.calls.filter(([m]) => m === 'requestSnapshot')
+    expect(snapshotCalls).toHaveLength(1)
+  })
+
+  test('case g: {type:"gap"} frame arrives → requestSnapshot RPC called', () => {
+    // Spec frontmatter (g): BufferedChannel gap sentinel forwarded from
+    // runner → DO → client.
+    renderHook(() => useCodingAgent('s'))
+
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage({ type: 'gap', dropped_count: 10, from_seq: 100, to_seq: 110 }),
+      )
+    })
+
+    const snapshotCalls = mockCall.mock.calls.filter(([m]) => m === 'requestSnapshot')
+    expect(snapshotCalls).toHaveLength(1)
+  })
+
+  // case (h) — DO-side delivery scoping of requestSnapshot({targetClientId})
+  // belongs in session-do integration tests (targeted-broadcast delivery
+  // is a server concern). Not covered here.
+
+  test('targeted frame clears pendingSnapshot so a later gap can re-fire', () => {
+    // Sanity check B5: after a gap triggers a snapshot, the arrival of the
+    // targeted reply clears the dedupe flag so a subsequent real gap
+    // (much later in the stream) can also fire.
+    renderHook(() => useCodingAgent('s'))
+
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(makeDelta('messages:s', 5)) // gap 1
+      // Targeted reply lands and installs watermark at 5.
+      capturedUseAgentConfig?.onMessage?.(makeDelta('messages:s', 5, { targeted: true }))
+      // New gap at 10 (watermark is 5) → should fire a second RPC.
+      capturedUseAgentConfig?.onMessage?.(makeDelta('messages:s', 10))
+    })
+
+    const snapshotCalls = mockCall.mock.calls.filter(([m]) => m === 'requestSnapshot')
+    expect(snapshotCalls).toHaveLength(2)
+  })
+
+  test('branchInfo session-scoped collection is gap-gated on same watermark', () => {
+    // Both messages:<id> and branchInfo:<id> share the DO's messageSeq
+    // counter. A gap on branchInfo should also fire requestSnapshot.
+    renderHook(() => useCodingAgent('s'))
+
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(makeDelta('branchInfo:s', 5))
+    })
+
+    const snapshotCalls = mockCall.mock.calls.filter(([m]) => m === 'requestSnapshot')
+    expect(snapshotCalls).toHaveLength(1)
+  })
+
+  test('cross-user collection (e.g. projects) with no messageSeq is NOT gap-gated', () => {
+    // UserSettingsDO fanout collections don't populate messageSeq. They
+    // must pass through to dispatchSessionFrame unchanged.
+    renderHook(() => useCodingAgent('s'))
+
+    act(() => {
+      capturedUseAgentConfig?.onMessage?.(
+        makeWsMessage({
+          type: 'synced-collection-delta',
+          collection: 'projects',
+          ops: [],
+        }),
+      )
+    })
+
+    expect(mockCall.mock.calls.filter(([m]) => m === 'requestSnapshot')).toHaveLength(0)
   })
 })

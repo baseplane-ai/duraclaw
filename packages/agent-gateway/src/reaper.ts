@@ -381,12 +381,18 @@ export function createReaper(opts: ReaperOptions): Reaper {
 
       const pidPath = path.join(sessionsDir, `${sessionId}.pid`)
       const metaPath = path.join(sessionsDir, `${sessionId}.meta.json`)
+      // Spec GH#75 B8 — the BufferedChannel gap-sentinel sidecar lives next
+      // to the meta file; clean it up in the same terminal-GC sweep so we
+      // don't leave orphaned `.gap` files for sessions that have long since
+      // finished.
+      const gapPath = path.join(sessionsDir, `${sessionId}.meta.json.gap`)
       const logPath = path.join(sessionsDir, `${sessionId}.log`)
       const cmdPath = path.join(sessionsDir, `${sessionId}.cmd`)
 
       // Unlink best-effort — ENOENT is fine.
       await unlinkSafe(pidPath, logger)
       await unlinkSafe(metaPath, logger)
+      await unlinkSafe(gapPath, logger)
       await unlinkSafe(exitPath, logger)
       await unlinkSafe(logPath, logger)
       await unlinkSafe(cmdPath, logger)

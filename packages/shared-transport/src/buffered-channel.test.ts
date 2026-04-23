@@ -269,4 +269,116 @@ describe('BufferedChannel', () => {
 
     expect(info).not.toHaveBeenCalled()
   })
+
+  // ── Spec GH#75 B8 — persistGap sidecar ───────────────────────────
+  describe('persistGap sidecar (spec GH#75 B8)', () => {
+    // Helper: flush the microtask + promise queue so schedulePersistGap's
+    // async IIFE has a chance to invoke the mock before we assert.
+    const flush = () => new Promise((r) => setTimeout(r, 0))
+
+    it('invokes persistGap with the full sentinel on first drop and with the coalesced sentinel on subsequent drops', async () => {
+      const persistGap = vi.fn<[GapSentinel | null], Promise<void>>().mockResolvedValue(undefined)
+      const ch = new BufferedChannel({ maxEvents: 2, persistGap })
+
+      // Fill buffer up to capacity — no drops yet.
+      ch.send({ seq: 1 })
+      ch.send({ seq: 2 })
+      await flush()
+      expect(persistGap).not.toHaveBeenCalled()
+
+      // seq=3 evicts seq=1 (first drop) — persistGap called with the new gap.
+      ch.send({ seq: 3 })
+      await flush()
+      expect(persistGap).toHaveBeenCalledTimes(1)
+      expect(persistGap.mock.calls[0][0]).toEqual({
+        type: 'gap',
+        dropped_count: 1,
+        from_seq: 1,
+        to_seq: 1,
+      })
+
+      // seq=4 evicts seq=2 — coalesced sentinel now covers 1..2.
+      ch.send({ seq: 4 })
+      await flush()
+      expect(persistGap).toHaveBeenCalledTimes(2)
+      expect(persistGap.mock.calls[1][0]).toEqual({
+        type: 'gap',
+        dropped_count: 2,
+        from_seq: 1,
+        to_seq: 2,
+      })
+    })
+
+    it('invokes persistGap(null) after a successful WS attach drains the sentinel', async () => {
+      const persistGap = vi.fn<[GapSentinel | null], Promise<void>>().mockResolvedValue(undefined)
+      const ch = new BufferedChannel({ maxEvents: 1, persistGap })
+
+      ch.send({ seq: 1 })
+      ch.send({ seq: 2 }) // evicts seq=1, first drop
+      await flush()
+      expect(persistGap).toHaveBeenLastCalledWith(
+        expect.objectContaining({ type: 'gap', from_seq: 1, to_seq: 1 }),
+      )
+
+      const ws = new MockWebSocket()
+      ch.attachWebSocket(ws as unknown as WebSocket)
+      await flush()
+
+      // First frame on the wire is the sentinel, then the buffered event.
+      expect(JSON.parse(ws.sent[0]).type).toBe('gap')
+      // persistGap(null) fires post-send to clear the sidecar.
+      expect(persistGap).toHaveBeenLastCalledWith(null)
+    })
+
+    it('initialPendingGap seeds the channel — sent on first WS attach, then cleared', async () => {
+      const persistGap = vi.fn<[GapSentinel | null], Promise<void>>().mockResolvedValue(undefined)
+      const seed: GapSentinel = {
+        type: 'gap',
+        dropped_count: 42,
+        from_seq: 100,
+        to_seq: 141,
+      }
+      const ch = new BufferedChannel({ persistGap, initialPendingGap: seed })
+
+      const ws = new MockWebSocket()
+      ch.attachWebSocket(ws as unknown as WebSocket)
+      await flush()
+
+      // Seeded sentinel goes out as the first (and only) frame.
+      expect(ws.sent.length).toBe(1)
+      expect(JSON.parse(ws.sent[0])).toEqual(seed)
+      // persistGap(null) invoked post-send, nothing before.
+      expect(persistGap).toHaveBeenCalledTimes(1)
+      expect(persistGap).toHaveBeenCalledWith(null)
+    })
+
+    it('persistGap rejection is caught — recordDrop does not throw, warn is logged', async () => {
+      const warn = vi.fn()
+      const logger = { info: vi.fn(), warn, error: vi.fn() }
+      const persistGap = vi
+        .fn<[GapSentinel | null], Promise<void>>()
+        .mockRejectedValue(new Error('disk full'))
+      const ch = new BufferedChannel({
+        maxEvents: 1,
+        sessionId: 'abc',
+        logger,
+        persistGap,
+      })
+
+      // Drive a drop; recordDrop → schedulePersistGap → async IIFE → rejection.
+      expect(() => {
+        ch.send({ seq: 1 })
+        ch.send({ seq: 2 })
+      }).not.toThrow()
+      await flush()
+
+      expect(persistGap).toHaveBeenCalled()
+      const persistWarn = warn.mock.calls.find((c) =>
+        (c[0] as string).includes('[buffered-channel] persistGap failed'),
+      )
+      expect(persistWarn).toBeDefined()
+      expect(persistWarn?.[0] as string).toContain('sessionId=abc')
+      expect(persistWarn?.[0] as string).toContain('disk full')
+    })
+  })
 })

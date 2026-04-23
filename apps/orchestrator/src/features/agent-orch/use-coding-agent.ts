@@ -265,9 +265,80 @@ export function __dispatchSessionFrameForTests(
   dispatchSessionFrame(sessionId, frame)
 }
 
+/**
+ * GH#75 P1.1: per-session gap detector for `synced-collection-delta` frames.
+ * Pure helper extracted from the `onMessage` closure for unit-testability.
+ *
+ * Behavior (see planning/specs/75-client-frame-drop-recovery.md B1/B3/B4):
+ * - Session-scoped frames are those whose `collection` starts with
+ *   `messages:` or `branchInfo:` — they share the DO's `messageSeq`
+ *   counter. Other collections (cross-user fanout) pass through untouched.
+ * - Targeted frames (cursor-replay / requestSnapshot reply) bypass the
+ *   gap-check and install `lastSeq = max(lastSeq, messageSeq)`. Arrival
+ *   also clears the in-flight `pendingSnapshot` entry for this agentName.
+ * - Non-targeted frames whose `messageSeq === last + 1` apply and advance
+ *   the watermark. `> last + 1` triggers a snapshot RPC (deduped) and the
+ *   frame is NOT applied. `<= last` frames are dropped silently.
+ * - Frames without a numeric `messageSeq` (legacy / cross-user fanout)
+ *   apply without changing the watermark.
+ */
+export type FrameRouterDecision =
+  | { action: 'apply'; advanceSeqTo?: number; clearPending?: boolean }
+  | { action: 'gap'; seq: number }
+  | { action: 'stale'; seq: number }
+  | { action: 'passthrough' }
+
+export function __frameRouterDecisionForTests(
+  frame: SyncedCollectionFrame<unknown>,
+  lastSeqMap: Map<string, number>,
+  agentName: string,
+): FrameRouterDecision {
+  const isSessionScoped =
+    typeof frame.collection === 'string' &&
+    (frame.collection.startsWith('messages:') || frame.collection.startsWith('branchInfo:'))
+  if (!isSessionScoped) return { action: 'passthrough' }
+
+  const seq = frame.messageSeq
+  if (frame.targeted === true) {
+    const advance = typeof seq === 'number' ? seq : undefined
+    return { action: 'apply', advanceSeqTo: advance, clearPending: true }
+  }
+
+  if (typeof seq !== 'number') {
+    // Legacy / cross-user fanout — apply but do not touch the watermark.
+    return { action: 'apply' }
+  }
+
+  const last = lastSeqMap.get(agentName) ?? 0
+  if (seq === last + 1) return { action: 'apply', advanceSeqTo: seq }
+  if (seq > last + 1) return { action: 'gap', seq }
+  return { action: 'stale', seq }
+}
+
 /** Connect to a SessionDO instance by name; returns live state, messages, and RPC helpers. */
 export function useCodingAgent(agentName: string): UseCodingAgentResult {
   const prevAgentNameRef = useRef(agentName)
+
+  // GH#75 P1.1: per-agentName monotonic watermark. Advanced on every
+  // applied frame (happy path + targeted). `max` folded on targeted so
+  // snapshot replies carrying messageSeq=20 jump the cursor, not rewind.
+  const lastSeqRef = useRef<Map<string, number>>(new Map())
+  // GH#75 P1.1: in-flight snapshot-request dedupe. Cleared when a targeted
+  // frame arrives (the reply satisfies the request) or a 10s watchdog
+  // fires (defensive against lost replies so the session isn't wedged).
+  const pendingSnapshotRef = useRef<Set<string>>(new Set())
+  // GH#75 P1.1: watchdog-timer handles keyed by agentName. A fresh RPC
+  // fires cancel any pending watchdog from an earlier RPC so a stale
+  // timer can't spuriously delete the in-flight flag of a newer request.
+  const pendingSnapshotTimerRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+
+  // DEV: expose the watermark map for manual `scripts/axi eval` triage.
+  // Gated behind `typeof window` so SSR doesn't trip.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return
+    if (typeof window === 'undefined') return
+    ;(window as unknown as { __lastSeq?: Map<string, number> }).__lastSeq = lastSeqRef.current
+  }, [])
 
   // Per-agentName collection (memoised inside createMessagesCollection, so the
   // same factory call returns the same instance on re-render).
@@ -358,6 +429,27 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       try {
         const parsed = JSON.parse(typeof message.data === 'string' ? message.data : '')
 
+        // GH#75 P1.1: deduped snapshot-request helper. In-flight flag lives
+        // in `pendingSnapshotRef`; a 10s watchdog timer (tracked per session
+        // in `pendingSnapshotTimerRef`) clears the flag if the targeted
+        // reply never arrives. A fresh arm cancels any prior watchdog so a
+        // stale timer can't delete a newer request's in-flight flag.
+        const armSnapshotRequest = () => {
+          if (pendingSnapshotRef.current.has(agentName)) return
+          pendingSnapshotRef.current.add(agentName)
+          const targetClientId = (connection as unknown as { id?: string }).id
+          connection.call('requestSnapshot', [{ targetClientId }]).catch((err: unknown) => {
+            console.warn('[session-stream] requestSnapshot failed', err)
+          })
+          const priorTimer = pendingSnapshotTimerRef.current.get(agentName)
+          if (priorTimer) clearTimeout(priorTimer)
+          const timer = setTimeout(() => {
+            pendingSnapshotRef.current.delete(agentName)
+            pendingSnapshotTimerRef.current.delete(agentName)
+          }, 10_000)
+          pendingSnapshotTimerRef.current.set(agentName, timer)
+        }
+
         // Issue #40 Step 0: one line per arriving frame so we can quantify
         // background-streaming continuity. No-op unless localStorage flag
         // `duraclaw.debug.deltaLog` is set to `'1'`.
@@ -368,11 +460,25 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
               : parsed.type === 'gateway_event' && parsed.event?.type
                 ? `gateway_event:${parsed.event.type}`
                 : (parsed.type ?? 'unknown')
-          logDelta('session', {
-            agent: agentName,
-            kind,
-            seq: typeof parsed.seq === 'number' ? parsed.seq : undefined,
-          })
+          // GH#75 review nit: SyncedCollectionFrame uses `messageSeq`, not `seq`.
+          // Fall back to `parsed.seq` for legacy gateway_event frames.
+          const seq =
+            typeof parsed.messageSeq === 'number'
+              ? parsed.messageSeq
+              : typeof parsed.seq === 'number'
+                ? parsed.seq
+                : undefined
+          logDelta('session', { agent: agentName, kind, seq })
+        }
+
+        // GH#75 B4: runner → DO → client relay of BufferedChannel gap
+        // sentinel. Treat as a synthetic gap trigger: fire a snapshot RPC
+        // (deduped) and return — the reply's `targeted` frame will
+        // install the watermark on arrival.
+        if (parsed && parsed.type === 'gap') {
+          logDelta('session', { agent: agentName, kind: 'gap-sentinel' })
+          armSnapshotRequest()
+          return
         }
 
         // Spec #38 P1.1: dispatch SyncedCollectionFrame to per-session
@@ -382,8 +488,44 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         // in P1.5 — the DO now emits only `synced-collection-delta` frames
         // for messages and branchInfo (via `broadcastMessages` /
         // `broadcastBranchInfo`).
+        //
+        // GH#75 P1.1 B1/B3/B4: gap-gate session-scoped frames (collections
+        // starting with `messages:` / `branchInfo:`) on the DO-stamped
+        // `messageSeq`. Cross-user collections (UserSettingsDO fanout)
+        // pass through untouched.
         if (parsed && parsed.type === 'synced-collection-delta') {
-          dispatchSessionFrame(agentName, parsed as SyncedCollectionFrame<unknown>)
+          const frame = parsed as SyncedCollectionFrame<unknown>
+          const decision = __frameRouterDecisionForTests(frame, lastSeqRef.current, agentName)
+          if (decision.action === 'passthrough') {
+            dispatchSessionFrame(agentName, frame)
+            return
+          }
+          if (decision.action === 'apply') {
+            dispatchSessionFrame(agentName, frame)
+            if (typeof decision.advanceSeqTo === 'number') {
+              const cur = lastSeqRef.current.get(agentName) ?? 0
+              if (decision.advanceSeqTo > cur) {
+                lastSeqRef.current.set(agentName, decision.advanceSeqTo)
+              }
+            }
+            if (decision.clearPending) {
+              // A targeted frame satisfies the in-flight snapshot request.
+              pendingSnapshotRef.current.delete(agentName)
+              const timer = pendingSnapshotTimerRef.current.get(agentName)
+              if (timer) {
+                clearTimeout(timer)
+                pendingSnapshotTimerRef.current.delete(agentName)
+              }
+            }
+            return
+          }
+          if (decision.action === 'stale') {
+            logDelta('session', { agent: agentName, kind: 'stale-drop', seq: decision.seq })
+            return
+          }
+          // decision.action === 'gap'
+          logDelta('session', { agent: agentName, kind: 'gap-detected', seq: decision.seq })
+          armSnapshotRequest()
           return
         }
 
@@ -514,6 +656,16 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         dispatchSessionReconnect(agentName)
       }
       hasOpenedOnceRef.current = true
+      // GH#75 P1.1 B5: clear in-flight snapshot dedupe on every open so a
+      // reconnect isn't wedged by a pre-disconnect request that will
+      // never reply. Do NOT reset `lastSeq` — cursor-replay from the DO
+      // will arrive as targeted frames and advance it naturally.
+      pendingSnapshotRef.current.delete(agentName)
+      const pendingTimer = pendingSnapshotTimerRef.current.get(agentName)
+      if (pendingTimer) {
+        clearTimeout(pendingTimer)
+        pendingSnapshotTimerRef.current.delete(agentName)
+      }
     }
     prevReadyStateRef.current = readyState
   }, [agentName, readyState])
