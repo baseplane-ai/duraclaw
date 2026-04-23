@@ -244,3 +244,155 @@ to one component.
 3. Spike #2 (BufferedChannel coalesce) behind a feature flag; ship after
    #1 lands so we can measure each independently.
 4. CSS + `use-stick-to-bottom` (#4) as a small follow-up PR after #1.
+
+---
+
+## Addendum: settle jitter — the "everything is tied to the live query" axis
+
+The burst discussion above focuses on **rate**: too many events arriving
+per unit time. The other half of the reconnect-jump experience is
+**structural coupling**: the whole chat rendering tree is subscribed to
+one `useLiveQuery(messagesCollection)`, so *every* `begin/commit` — burst
+or not — re-renders the entire `ChatThread → virtualizer →
+ResizeObserver → scroll pin` chain.
+
+### Evidence in the codebase
+
+`apps/orchestrator/src/hooks/use-messages-collection.ts:71-77` literally
+documents the failure mode:
+
+> `useLiveQuery` re-emits on every sync event (REST cold-load → WS
+> snapshot burst → WS first delta fire in rapid succession on session
+> mount); without this guard each emission produces a fresh sorted array
+
+The guard (the `signature` in the same file, lines 98-111) is keyed on
+`[length, per-row id, parts.length, trailing text length]`. It absorbs
+**redundant** emits (same content re-broadcast) but not **genuine
+growth** — every `partial_assistant` tick grows the trailing text, the
+signature changes, a new `messages` array reference is produced,
+ChatThread re-renders, the virtualizer re-measures, scroll-pin
+recomputes. The "everything settling" jitter is exactly this chain
+firing once per emit.
+
+The existing mount-settle gate in `ChatThread.tsx:957-989` masks this on
+first paint — `visibility: hidden` until `scrollHeight` is stable for
+2 rAFs — but is explicitly **mount-only**: "after settle we NEVER
+re-hide." The comment acknowledges the trade-off directly: "otherwise
+every `partial_assistant` tick would flicker the whole chat."
+
+So the gate protects first-mount thrash but is **disarmed during
+reconnect** — which is structurally identical to mount (the collection
+churns through a rapid cold-load → subscribe-replay → live-delta-fire
+sequence), just with a non-empty starting state.
+
+### Root-cause framing
+
+Three distinct churn sources fire inside the reconnect settle window:
+
+1. **OPFS hydrate replay** — persisted cache re-emits rows at sync start
+   (`messages-collection.ts:98-127` applies them through `begin/commit`).
+2. **Subscribe:messages cursor replay** — DO pages 500 rows, each page
+   becoming 1+ frames, each frame a separate commit
+   (`session-do.ts:1873-1936`).
+3. **Live-delta resumption** — the first `partial_assistant` of the
+   in-flight turn lands, and subsequent ones continue at 50–500 Hz.
+
+Each commit fires `useLiveQuery` → `useMessagesCollection`'s `useMemo`
+→ new `messages` reference → ChatThread render → virtualizer O(n)
+offset recompute → ResizeObserver scroll-pin. The DO throttle (rec #1)
+shrinks source #3; it does nothing for #1 and #2. The settle window
+stays noisy.
+
+### Fix direction — reduce coupling, not just rate
+
+#### 5. [Highest-leverage addendum rec] Reconnect settle gate
+
+Extend the mount-only settle in `ChatThread.tsx` to re-engage on a
+reconnect signal (from `connectionManager` — specifically the
+`hasConnectedOnce && subsequent open` transition already tracked in
+`use-coding-agent.ts`). Semantics:
+
+- On reconnect-open: set `isSettled = false`, hide list with
+  `visibility: hidden`.
+- Re-run the same rAF loop watching `scrollHeight` for 2 stable frames,
+  with a hard 200 ms ceiling (same `SETTLE_FALLBACK_MS`).
+- Reveal once stable. User sees "previous view → final view" with no
+  intermediate flicker.
+
+Cost: ~30 lines, all in `ChatThread.tsx`. Zero change to the data
+layer. Masks the entire settle storm for #1–#3, orthogonally to rate.
+
+Risk: if a new partial starts streaming *during* the settle window,
+user waits ≤200 ms for the first character. Acceptable — matches
+first-mount UX today.
+
+#### 6. Decouple the tail from the history
+
+Architectural fix: render the *in-progress assistant row* from a
+different subscription than the historical list. Two variants:
+
+- **6a (pragmatic).** Selector-based `useLiveQuery` — TanStack DB's
+  query builder supports projections; query the collection for "rows
+  whose `id` matches the active streaming message" separately from
+  "all other rows." Two queries → two subscribers → only the tail
+  subscription fires on text growth. History stays stable.
+- **6b (cleaner).** Ref-tracked `currentStreamingRow` updated directly
+  by the WS dispatcher, bypassing `messagesCollection` for the hot row.
+  The streaming bubble subscribes via `useSyncExternalStore`. When the
+  turn finalises (`result` event), the final row is written back to
+  the collection and the ref is cleared. History only touched on turn
+  boundaries.
+
+6a is the shippable choice. 6b is cleaner but requires atomic "final
+write + ref clear" sequencing to avoid flicker at the handoff.
+
+Impact: ChatThread / virtualizer only re-render on **structural**
+changes (new turns, branch-navigate) — not on every token. Scroll pin
+stops chasing text growth. "Everything is tied to the live query"
+coupling is broken.
+
+#### 7. `useDeferredValue` on the messages array (broader scope)
+
+Already in the main stack as rec #3 — scoped there to the Streamdown
+text prop only. Extending it to the **whole `messages` array** passed
+into `VirtualizedMessageList` would let React 19 de-prioritise
+virtualizer recompute during bursts. Compared to rec #5:
+
+- Rec #5 is hard hide → reveal, masks completely.
+- Rec #7 is a soft yield, keeps the list visible but accepts stale
+  intermediates.
+
+These compose — use #5 for reconnect, #7 for in-flight bursts.
+
+#### 8. Suppress scroll-pin during settle
+
+If rec #5 is in place, gate the pin on `isSettled`: do one final
+scroll-to-bottom on reveal, not N scrolls during settle. Trivial add-on
+to #5.
+
+### Updated recommendation priority
+
+Order for shipping, reflecting both rate and coupling axes:
+
+1. **Rec #1 (DO broadcast throttle)** — cuts emit rate at the source.
+2. **Rec #5 (reconnect settle gate)** — masks settle-window churn.
+   *Lowest-effort structural fix; orthogonal to rec #1 — ship in the
+   same PR wave.*
+3. **Rec #3/#7 (`useDeferredValue`)** — soft yield for in-flight bursts.
+4. **Rec #6a (selector-based tail/history split)** — the deep fix;
+   ship after #1+#5 so we can measure what residual jitter remains.
+5. **Rec #4/#8 (scroll + CSS polish)** — final polish layer.
+
+Recs #5 and #6a are the two that **specifically answer the "everything
+is tied to the live query" observation**; rec #1 alone does not.
+
+### Open questions (addendum)
+
+- Does TanStack DB's query DSL cleanly support the rec #6a selector
+  (stable ref-identity when filter matches the same row), or do we
+  need two collections?
+- Does the existing signature guard in `use-messages-collection.ts`
+  become a liability once the tail is on its own subscription? (It's a
+  blunt dedupe; with structural decoupling it may be redundant.)
+- Mobile WebView rAF cadence — does the 2-rAF stability check fire
+  reliably on Android WebView, or do we need a longer fallback?
