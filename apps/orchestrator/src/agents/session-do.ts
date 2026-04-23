@@ -61,6 +61,7 @@ import {
   loadTurnState,
   resolveStaleThresholdMs,
   shouldBumpLastEventTs,
+  shouldForceFlushLastEventTs,
 } from './session-do-helpers'
 import { SESSION_DO_MIGRATIONS } from './session-do-migrations'
 
@@ -251,6 +252,18 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   private lastEventTs = 0
   private lastEventFlushTimer: ReturnType<typeof setTimeout> | null = null
   private readonly LAST_EVENT_FLUSH_DEBOUNCE_MS = 10_000
+  /**
+   * GH#status-idle-while-streaming: epoch-ms of the most recent successful
+   * `flushLastEventTsToD1()`. Pairs with `LAST_EVENT_FLUSH_MAX_INTERVAL_MS`
+   * to bound D1 lag during a continuous `partial_assistant` burst — the
+   * 10s debounce above arms exactly once at the start of the burst and
+   * never re-arms (`if (this.lastEventFlushTimer) return`), so without a
+   * ceiling D1 can lag the in-memory value by the full turn duration and
+   * the client's 45s TTL predicate (derive-status.ts) wrongly flips
+   * running → idle mid-stream.
+   */
+  private lastEventFlushedAt = 0
+  private readonly LAST_EVENT_FLUSH_MAX_INTERVAL_MS = 20_000
 
   /**
    * GH#50 B9: legacy-event drop log dedupe set. Pre-P3 in-flight runners
@@ -2378,6 +2391,23 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to persist last_event_ts to SQLite:`, err)
     }
+    // Max-interval ceiling: during a continuous partial_assistant burst the
+    // 10s debounce arms once and every later event hits the early-return
+    // below, so D1 `last_event_ts` would otherwise stay pinned at "10s after
+    // turn start" for the full turn. Once the gap since the last successful
+    // flush exceeds the ceiling, force an immediate flush (which also
+    // re-pushes session_status so tabs that silently stayed OPEN across a
+    // refocus pick up fresh liveStatus).
+    if (
+      shouldForceFlushLastEventTs(
+        this.lastEventTs,
+        this.lastEventFlushedAt,
+        this.LAST_EVENT_FLUSH_MAX_INTERVAL_MS,
+      )
+    ) {
+      void this.flushLastEventTsToD1()
+      return
+    }
     if (this.lastEventFlushTimer) return
     this.lastEventFlushTimer = setTimeout(() => {
       this.lastEventFlushTimer = null
@@ -2405,6 +2435,15 @@ export class SessionDO extends Agent<Env, SessionMeta> {
         .set({ lastEventTs: this.lastEventTs })
         .where(eq(agentSessions.id, sessionId))
       await broadcastSessionRow(this.env, this.ctx, sessionId, 'update')
+      this.lastEventFlushedAt = this.lastEventTs
+      // Piggyback a zero-latency session_status push on the periodic flush.
+      // On tab refocus the ConnectionManager skips reconnect for sockets
+      // that are already OPEN with fresh lastSeenTs, so onConnectInner
+      // never fires and the client's cleared-on-close liveStatus is never
+      // refreshed. Re-broadcasting current status/gate/error alongside the
+      // liveness flush lets those tabs self-heal without waiting for the
+      // next status transition.
+      this.broadcastSessionStatus()
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to flush last_event_ts to D1:`, err)
     }

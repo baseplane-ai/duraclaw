@@ -246,6 +246,31 @@ export function shouldBumpLastEventTs(eventType: string): boolean {
   return !(LEGACY_DROPPED_EVENT_TYPES as readonly string[]).includes(eventType)
 }
 
+/**
+ * True when the next `bumpLastEventTs()` call should skip the 10s debounce
+ * and force an immediate `flushLastEventTsToD1()`. Fires once the gap
+ * between the in-memory `lastEventTs` and the most recent D1 flush exceeds
+ * `maxIntervalMs`.
+ *
+ * Exists because a continuous burst of `partial_assistant` deltas ≤ the
+ * debounce window never re-arms the debounce timer (`bumpLastEventTs` has
+ * an `if (this.lastEventFlushTimer) return` early-return), so without a
+ * ceiling the D1 `last_event_ts` column can lag the in-memory value by
+ * the full turn duration and the client's 45s TTL predicate
+ * (`deriveStatus` in `~/lib/derive-status.ts`) wrongly flips
+ * `running` → `idle` mid-stream.
+ *
+ * Extracted as a pure predicate so it is unit-testable without importing
+ * SessionDO (TC39 decorators defeat vitest/oxc parsing on the class).
+ */
+export function shouldForceFlushLastEventTs(
+  lastEventTs: number,
+  lastEventFlushedAt: number,
+  maxIntervalMs: number,
+): boolean {
+  return lastEventTs - lastEventFlushedAt > maxIntervalMs
+}
+
 export type PendingGateType = 'ask_user' | 'permission_request'
 
 /**

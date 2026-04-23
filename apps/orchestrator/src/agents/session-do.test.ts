@@ -14,6 +14,7 @@ import {
   loadTurnState,
   resolveStaleThresholdMs,
   shouldBumpLastEventTs,
+  shouldForceFlushLastEventTs,
   validateGatewayToken,
 } from './session-do-helpers'
 import { SESSION_DO_MIGRATIONS } from './session-do-migrations'
@@ -3485,6 +3486,56 @@ describe('GH#50 B1/B9: shouldBumpLastEventTs — legacy-drop does NOT refresh li
     // If this assertion breaks, a new legacy event type was added. Update
     // the list AND the switch-default branch in session-do.ts together.
     expect([...LEGACY_DROPPED_EVENT_TYPES]).toEqual(['heartbeat', 'session_state_changed'])
+  })
+})
+
+// ── Idle-while-streaming regression: max-interval flush ceiling ──
+//
+// Bug: during a long assistant turn, `bumpLastEventTs` armed the 10s debounce
+// on the first event and early-returned on every subsequent one, so D1
+// `last_event_ts` only flushed at turn start + turn end. For any turn longer
+// than TTL_MS=45s, the client's `deriveStatus()` predicate wrongly flipped
+// `running` → `idle` mid-stream. The fix is a max-interval ceiling that
+// force-flushes once the in-memory `lastEventTs` is more than 20s ahead of
+// the last successful D1 flush.
+
+describe('shouldForceFlushLastEventTs: max-interval ceiling during streaming', () => {
+  const MAX = 20_000
+
+  it('returns false before the ceiling (debounce-only regime)', () => {
+    // A burst where the last flush just happened — well under 20s elapsed.
+    expect(shouldForceFlushLastEventTs(10_000, 5_000, MAX)).toBe(false)
+  })
+
+  it('returns false at exactly the ceiling boundary (strict >)', () => {
+    // `>` not `>=` so the 10s debounce retains exclusive ownership of
+    // the [0, 20s] window — the ceiling only fires once the gap has
+    // strictly exceeded the max.
+    expect(shouldForceFlushLastEventTs(20_000, 0, MAX)).toBe(false)
+  })
+
+  it('returns true once the gap strictly exceeds the ceiling', () => {
+    // First bump of a streaming burst that has been running past the
+    // ceiling without the debounce getting a chance to re-arm — force
+    // flush now so D1 can't lag forever.
+    expect(shouldForceFlushLastEventTs(20_001, 0, MAX)).toBe(true)
+  })
+
+  it('returns true for a long continuous partial_assistant burst (60s turn)', () => {
+    // Realistic scenario: turn started at t=0, first flush at t=10s
+    // (debounce fired once), then partial_assistant deltas every ~100ms
+    // for 60s. At t=60_000 the gap (60_000 - 10_000 = 50_000) exceeds
+    // MAX so the ceiling kicks in — the cause of the "Idle while
+    // streaming" StatusBar flip is now bounded.
+    expect(shouldForceFlushLastEventTs(60_000, 10_000, MAX)).toBe(true)
+  })
+
+  it('returns false immediately after a fresh flush (flushedAt = lastEventTs)', () => {
+    // After `flushLastEventTsToD1` succeeds it sets
+    // `lastEventFlushedAt = lastEventTs`. The next bump must not
+    // re-trigger the ceiling — otherwise every event would force-flush
+    // and we'd lose the debounce entirely.
+    expect(shouldForceFlushLastEventTs(12_345, 12_345, MAX)).toBe(false)
   })
 })
 
