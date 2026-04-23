@@ -334,14 +334,6 @@ interface ComposerActionsProps {
 export const FORCE_STOP_RELABEL_MS = 3_000
 
 /**
- * Grace period (ms) after the session stops running before the stop
- * button disappears. Keeps the "Stopping..." indicator visible so the
- * user knows the interrupt landed, even if the runner flushes a few
- * more buffered events before dying.
- */
-export const STOPPING_GRACE_MS = 3_000
-
-/**
  * Renders the combined send/interrupt button inside the prompt input
  * footer. Must live inside <PromptInputProvider> so it can read the
  * current draft text from the controller.
@@ -382,7 +374,6 @@ function ComposerActions({
   // times mid-typing.
   const [isDraftEmpty, setIsDraftEmpty] = useState<boolean>(ytext ? ytext.length === 0 : true)
   const [interruptSentAt, setInterruptSentAt] = useState<number | null>(null)
-  const [stoppingGrace, setStoppingGrace] = useState(false)
   const [, setTick] = useState(0)
 
   useEffect(() => {
@@ -401,17 +392,11 @@ function ComposerActions({
 
   const isRunning = status === 'running' || status === 'waiting_gate'
 
-  // Status left the busy set → enter a stopping grace period so the
-  // button stays visible while the runner flushes buffered events,
-  // then clear after STOPPING_GRACE_MS.
+  // Status left the busy set → clear the interrupt timer so the next
+  // busy spin starts from zero.
   useEffect(() => {
     if (!isRunning && interruptSentAt !== null) {
-      setStoppingGrace(true)
-      const t = setTimeout(() => {
-        setInterruptSentAt(null)
-        setStoppingGrace(false)
-      }, STOPPING_GRACE_MS)
-      return () => clearTimeout(t)
+      setInterruptSentAt(null)
     }
   }, [isRunning, interruptSentAt])
 
@@ -429,8 +414,7 @@ function ComposerActions({
 
   const controllerText = controller.textInput.value
   const hasText = ytext ? !isDraftEmpty : controllerText.trim().length > 0
-  const isStoppingGrace = stoppingGrace && interruptSentAt !== null && !isRunning
-  const showInterrupt = (isRunning || isStoppingGrace) && !hasText && Boolean(onInterrupt)
+  const showInterrupt = isRunning && !hasText && Boolean(onInterrupt)
 
   const showForceStop =
     showInterrupt &&
@@ -441,7 +425,7 @@ function ComposerActions({
   // The submit button stays interactive when it's acting as the
   // interrupt button even if the composer is "disabled" (waiting_gate) —
   // users should always be able to cut off a runaway turn.
-  const submitDisabled = (disabled && !showInterrupt && !hasText) || isStoppingGrace
+  const submitDisabled = disabled && !showInterrupt && !hasText
 
   const handleStop = () => {
     if (showForceStop && onForceStop) {
@@ -461,23 +445,18 @@ function ComposerActions({
       status={showInterrupt ? 'streaming' : undefined}
       onStop={showInterrupt ? handleStop : undefined}
       title={
-        isStoppingGrace
-          ? 'Stopping\u2026'
-          : showForceStop
-            ? 'Force stop — the interrupt didn\u2019t land. This SIGTERMs the runner process.'
-            : showInterrupt
-              ? 'Interrupt current turn'
-              : undefined
+        showForceStop
+          ? 'Force stop — the interrupt didn\u2019t land. This SIGTERMs the runner process.'
+          : showInterrupt
+            ? 'Interrupt current turn'
+            : undefined
       }
       data-force-stop={showForceStop ? 'true' : undefined}
       className={cn(
-        isStoppingGrace && 'bg-red-400/60 text-white cursor-not-allowed opacity-70',
         showInterrupt &&
           !showForceStop &&
-          !isStoppingGrace &&
           'bg-red-500/90 text-white hover:bg-red-500 animate-pulse shadow-[0_0_0_0_rgba(239,68,68,0.6)]',
         showForceStop &&
-          !isStoppingGrace &&
           'bg-red-700 text-white hover:bg-red-800 ring-2 ring-red-300 ring-offset-1 shadow-lg',
       )}
     >
