@@ -20,6 +20,7 @@ import { chunkOps } from '~/lib/chunk-frame'
 import { runMigrations } from '~/lib/do-migrations'
 import {
   contentToParts,
+  MAX_PARTS_JSON_BYTES,
   offloadOversizedImages,
   sanitizePartsForStorage,
   transcriptUserContentToParts,
@@ -276,6 +277,15 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     // into the existing state blob so we pick up newly-persisted columns
     // while preserving any transient fields the setState JSON still holds.
     this.hydrateMetaFromSql()
+
+    // GH#65: retrofit oversized `assistant_messages` rows written before the
+    // write-path fix landed. Must run BEFORE any code path that reads the
+    // `content` column — the SDK's `getHistory()` / cursor replay hit
+    // `SQLITE_TOOBIG` on rows that exceed the DO SQLite 2 MB parameter cap
+    // and cause the DO to crash uncaught, leaving the session permanently
+    // stuck. Gated by the `session_meta.oversized_retrofit_applied_at`
+    // once-flag (migration v15) so the scan runs exactly once per DO.
+    await this.retrofitOversizedRows()
 
     this.session = Session.create(this)
 
@@ -607,6 +617,164 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   // store should go through these so oversized base64 image data is
   // offloaded to R2 (or truncated as fallback) before it hits the DO
   // SQLite row-size cap (~2 MB).
+
+  /**
+   * GH#65 retrofit: on cold start, rewrite any pre-existing oversized rows
+   * in `assistant_messages` so the SDK's replay paths (getHistory / cursor
+   * replay) can SELECT `content` without hitting `SQLITE_TOOBIG` (CF Workers
+   * SQLite caps parameters at ~2 MB).
+   *
+   * Idempotent via the `session_meta.oversized_retrofit_applied_at`
+   * once-flag (migration v15). `LENGTH(content)` is metadata-level and does
+   * NOT materialise the BLOB, so the scan works on rows we cannot SELECT.
+   *
+   * For each oversized row we try to read, parse, and offload its images to
+   * R2 (or truncate if the bucket is unavailable). Rows so oversized that
+   * even SELECT throws are replaced with a stub text part so the DO can at
+   * least boot. Failures to UPDATE an individual row are logged but do not
+   * abort the whole scan.
+   */
+  private async retrofitOversizedRows(): Promise<void> {
+    // Honour the once-flag first. Column is on `session_meta` row id=1
+    // (migration v6 seeds it). Any non-null value means the scan has run
+    // on this DO.
+    try {
+      const metaRows = this.sql<{ oversized_retrofit_applied_at: string | null }>`
+        SELECT oversized_retrofit_applied_at FROM session_meta WHERE id = 1
+      `
+      if (metaRows[0]?.oversized_retrofit_applied_at) return
+    } catch (err) {
+      // Column missing (pre-v15 DO that somehow skipped the migration) —
+      // the scan is still safe to run; log and continue.
+      console.warn(
+        `[SessionDO:${this.ctx.id}] retrofitOversizedRows: flag lookup failed, running scan anyway:`,
+        err,
+      )
+    }
+
+    // Identify rows whose serialized content exceeds the threshold. The
+    // SDK lazily creates `assistant_messages` on first use — a brand-new DO
+    // may not have the table yet. Quietly no-op in that case.
+    let oversized: Array<{ id: string; len: number }> = []
+    try {
+      oversized = this.sql<{ id: string; len: number }>`
+        SELECT id, LENGTH(content) AS len
+        FROM assistant_messages
+        WHERE session_id = '' AND LENGTH(content) > ${MAX_PARTS_JSON_BYTES}
+      `
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (!msg.toLowerCase().includes('no such table')) {
+        console.warn(`[SessionDO:${this.ctx.id}] retrofitOversizedRows: scan failed:`, err)
+      }
+      // Best-effort — still mark the flag so we don't rescan every wake.
+      this.markRetrofitApplied()
+      return
+    }
+
+    if (oversized.length === 0) {
+      this.markRetrofitApplied()
+      return
+    }
+
+    console.info(
+      `[SessionDO:${this.ctx.id}] retrofitOversizedRows: found ${oversized.length} oversized row(s)`,
+    )
+
+    for (const row of oversized) {
+      const originalBytes = row.len
+      let newParts: SessionMessagePart[]
+      try {
+        // Try to read the content — may throw SQLITE_TOOBIG even on SELECT.
+        const contentRows = this.sql<{ content: string }>`
+          SELECT content FROM assistant_messages
+          WHERE id = ${row.id} AND session_id = '' LIMIT 1
+        `
+        if (contentRows.length === 0) continue
+        const parts = JSON.parse(contentRows[0].content) as SessionMessagePart[]
+        await offloadOversizedImages(parts, {
+          sessionId: this.name,
+          messageId: row.id,
+          r2Bucket: this.env.SESSION_MEDIA,
+        })
+        newParts = parts
+      } catch (err) {
+        // Row is so oversized even SELECT blows up, or it's malformed.
+        // Replace the whole message's parts with a stub so the DO can boot.
+        console.warn(
+          `[SessionDO:${this.ctx.id}] retrofitOversizedRows: row ${row.id} unreadable (${originalBytes} bytes), replacing with stub:`,
+          err,
+        )
+        newParts = [
+          {
+            type: 'text',
+            text: '[content dropped by GH#65 retrofit — row exceeded SQLite 2 MB cap]',
+          },
+        ]
+      }
+
+      // Rewrite the row. We serialise only `parts` here, but the SDK stores
+      // the whole wire message object as JSON. For readable rows we round-
+      // trip through the full object; for unreadable rows we build a minimal
+      // object. Since the unreadable path cannot read `content`, we build a
+      // stand-in using only `id` + stub parts + `role='assistant'` (the SDK
+      // treats role=assistant as safe for display; it will be re-replaced on
+      // next snapshot if the runner pushes a newer version).
+      let newContent: string
+      try {
+        const contentRows = this.sql<{ content: string; role: string }>`
+          SELECT content, role FROM assistant_messages
+          WHERE id = ${row.id} AND session_id = '' LIMIT 1
+        `
+        if (contentRows.length > 0) {
+          let base: Record<string, unknown>
+          try {
+            base = JSON.parse(contentRows[0].content) as Record<string, unknown>
+          } catch {
+            base = { id: row.id, role: contentRows[0].role }
+          }
+          base.parts = newParts
+          newContent = JSON.stringify(base)
+        } else {
+          newContent = JSON.stringify({ id: row.id, role: 'assistant', parts: newParts })
+        }
+      } catch {
+        // SELECT itself blew up — build a minimal stub.
+        newContent = JSON.stringify({ id: row.id, role: 'assistant', parts: newParts })
+      }
+
+      try {
+        this.sql`
+          UPDATE assistant_messages
+          SET content = ${newContent}
+          WHERE id = ${row.id} AND session_id = ''
+        `
+        console.info(
+          `[SessionDO:${this.ctx.id}] retrofitOversizedRows: rewrote ${row.id} (${originalBytes} → ${newContent.length} bytes)`,
+        )
+      } catch (err) {
+        console.error(
+          `[SessionDO:${this.ctx.id}] retrofitOversizedRows: UPDATE ${row.id} failed:`,
+          err,
+        )
+      }
+    }
+
+    this.markRetrofitApplied()
+  }
+
+  private markRetrofitApplied(): void {
+    const ts = new Date().toISOString()
+    try {
+      this.sql`
+        UPDATE session_meta
+        SET oversized_retrofit_applied_at = ${ts}
+        WHERE id = 1
+      `
+    } catch (err) {
+      console.warn(`[SessionDO:${this.ctx.id}] markRetrofitApplied failed:`, err)
+    }
+  }
 
   /** appendMessage with R2 offload for oversized image parts. */
   private async safeAppendMessage(msg: SessionMessage, parentId?: string | null): Promise<void> {

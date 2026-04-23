@@ -262,4 +262,23 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 15,
+    description:
+      'Add oversized_retrofit_applied_at to session_meta for the GH#65 cold-start retrofit once-flag. NULL means the retrofit scan has not run on this DO yet; any ISO-8601 string value means the scan has completed (idempotent — safe to leave set forever). Column is an internal flag; not mirrored in SessionMeta / META_COLUMN_MAP.',
+    up: (sql) => {
+      try {
+        sql.exec(`ALTER TABLE session_meta ADD COLUMN oversized_retrofit_applied_at TEXT`)
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (!msg.toLowerCase().includes('duplicate column')) {
+          console.warn(
+            '[migration v15] unexpected error adding oversized_retrofit_applied_at column',
+            e,
+          )
+          throw e
+        }
+      }
+    },
+  },
 ]
