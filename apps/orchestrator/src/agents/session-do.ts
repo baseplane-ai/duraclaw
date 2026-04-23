@@ -2794,25 +2794,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       return { ok: false, error: 'Session already active' }
     }
 
-    // Belt-and-suspenders guard against cross-session spawn leaks. If this
-    // DO already has persisted user turns, it is NOT a fresh session — a
-    // stale client spawnConfig has leaked to the wrong AgentDetailWithSpawn
-    // mount. Don't gate on `turnCounter`: loadTurnState seeds a fresh DO to
-    // `pathLength + 1` (≥1) when no persisted config exists, so a truthy
-    // counter does not imply real history. Scan `assistant_messages` for an
-    // actual user row instead.
-    const hasPersistedHistory =
-      [
-        ...this
-          .sql`SELECT 1 FROM assistant_messages WHERE session_id = '' AND role = 'user' LIMIT 1`,
-      ].length > 0
-    if (hasPersistedHistory) {
-      console.error(
-        `[SessionDO:${this.ctx.id}] spawn rejected: session already has persisted user history (cross-session spawn leak)`,
-      )
-      return { ok: false, error: 'Session already has history — spawn rejected' }
-    }
-
     const now = new Date().toISOString()
     const id = this.ctx.id.toString()
 
