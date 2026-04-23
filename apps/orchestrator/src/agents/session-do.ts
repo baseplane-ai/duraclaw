@@ -2794,6 +2794,17 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       return { ok: false, error: 'Session already active' }
     }
 
+    // GH#75: belt-and-suspenders guard against cross-session spawn. If this
+    // DO already has message history, it is NOT a fresh session — a stale
+    // client spawnConfig has leaked to the wrong AgentDetailWithSpawn mount.
+    // Reject so we don't overwrite an existing session's state/history.
+    if (this.turnCounter > 0) {
+      console.error(
+        `[SessionDO:${this.ctx.id}] spawn rejected: turnCounter=${this.turnCounter} — session already has history (cross-session spawn leak)`,
+      )
+      return { ok: false, error: 'Session already has history — spawn rejected' }
+    }
+
     const now = new Date().toISOString()
     const id = this.ctx.id.toString()
 

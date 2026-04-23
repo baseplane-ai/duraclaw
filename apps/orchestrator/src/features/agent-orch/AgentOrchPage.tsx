@@ -98,7 +98,9 @@ function AgentOrchContent() {
     }
   }, [activeSessionId, openTabs, setActive, navigate, searchSessionId])
 
-  const [spawnConfig, setSpawnConfig] = useState<SpawnConfig | null>(null)
+  const [spawnConfig, setSpawnConfig] = useState<
+    (SpawnConfig & { targetSessionId?: string }) | null
+  >(null)
   const [quickPromptHint, setQuickPromptHint] = useState<{
     project: string
     newTab: boolean
@@ -196,6 +198,7 @@ function AgentOrchContent() {
         prompt: config.prompt,
         model: config.model,
         agent: config.agent,
+        targetSessionId: clientSessionId,
       })
       setQuickPromptHint(null)
 
@@ -371,7 +374,7 @@ function AgentDetailWithSpawn({
   spawnConfig,
 }: {
   sessionId: string
-  spawnConfig: SpawnConfig | null
+  spawnConfig: (SpawnConfig & { targetSessionId?: string }) | null
 }) {
   const agent = useCodingAgent(sessionId)
   const spawnedRef = useRef(false)
@@ -381,13 +384,23 @@ function AgentDetailWithSpawn({
     // (readyState === 1) instead — semantically this matches the old
     // "initial state delivered" trigger since the state push immediately
     // followed connection establishment.
-    if (spawnConfig && agent.wsReadyState === 1 && !spawnedRef.current) {
+    //
+    // Guard: only spawn if this component's sessionId matches the
+    // spawnConfig's targetSessionId. Prevents a cross-session data leak
+    // where a stale spawnConfig could fire spawn() on the wrong DO
+    // during a tab-switch race (GH#75).
+    if (
+      spawnConfig &&
+      (!spawnConfig.targetSessionId || spawnConfig.targetSessionId === sessionId) &&
+      agent.wsReadyState === 1 &&
+      !spawnedRef.current
+    ) {
       spawnedRef.current = true
       agent.spawn(spawnConfig).catch((err: unknown) => {
         console.error('[AgentOrch] Spawn failed:', err)
       })
     }
-  }, [spawnConfig, agent.wsReadyState, agent.spawn])
+  }, [spawnConfig, sessionId, agent.wsReadyState, agent.spawn])
 
   return <AgentDetailView name={sessionId} agent={agent} />
 }
