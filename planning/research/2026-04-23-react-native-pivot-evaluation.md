@@ -34,30 +34,47 @@ definitely not 3–6 months. That is comparable to #70's 1–2 weeks and
 delivers dramatically more — iOS unlock, entire WebView bug class
 eliminated, single-codebase web+native via Tamagui's compiler.
 
-**Recommendation (revised):** **ship #70 AND start the RN spike in
-parallel.**
+**Recommendation (final, superseding earlier passes — see §10):**
+reframe the project as **universalizing the orchestrator web app
+first, with native as the last step**, not a mobile pivot with web
+side-effects. Four independently-shippable phases, each ~3–6 days at
+repo velocity:
 
-- #70 protects the shipping Android app during the pivot — 1 week.
-- In parallel, a **3-day de-risking spike** on the actually-hard
-  constraints: `better-auth-react-native` adapter, op-sqlite vs
-  expo-sqlite under our workload, `@xyflow/react` → Skia port or
-  feature-gate, `react-jsx-parser` RN interpreter or scope-out, Rive
-  RN SDK port. If the spike lands clean → commit to the full pivot in
-  the following ~2 weeks. If a blocker emerges → fall back to #70 +
-  Option C (RN shell + WebView).
-- **Option C loses most of its appeal** under this recalibration —
-  Tamagui's one-codebase property already gives us the "native feel
-  with shared UI code" that C was approximating, without the WebView
-  bridge tax.
-- **Option D (iterative) is also less attractive** at AI-velocity —
-  the per-iteration setup cost dominates when each screen takes
-  hours, so a batched full migration is cheaper than drip-feed.
+- **P1** — Tamagui adoption in orchestrator (web only). Measures the
+  hypothesis that part of "janky" is actually web-perf + whole-tree
+  re-render from hook-based themes/media. No mobile risk. Likely
+  kills some of the work in the `react-offscreen-patch.ts`,
+  chat-thread virtualization patches, and session-switch triple-
+  render fixes we've been shipping all week.
+- **P2** — universalize via **react-native-web**. The orchestrator
+  web build keeps shipping unchanged (RNW → DOM is transparent).
+  Component tree becomes universal. Dual-shipping disappears before
+  a native build exists.
+- **P3** — add native target (Expo SDK 54, iOS + Android). Capacitor
+  seams swap out: auth → `better-auth-react-native`, SQLite →
+  op-sqlite, push → `@react-native-firebase/messaging`, OTA → EAS
+  Update, lifecycle → AppState/NetInfo. WS uses RN native WebSocket.
+- **P4** — Maestro + AI-codegen parity eval harness, iOS App Store
+  submission.
 
-Hard constraints that remain regardless of velocity and still gate the
-decision: `better-auth-react-native` doesn't exist — we own that and
-its auth-flow testing. `expo-sqlite` has documented production bugs
-(expo#37169). The Expo-Go-vs-production WebSocket mismatch is a known
-foot-gun. All three must pass the de-risking spike before committing.
+**Total: ~2–3 weeks wall clock at repo velocity.** Intermediate value
+at each phase — no big-bang landing.
+
+**Option C (RN shell + WebView) is fully demoted** — Tamagui + RNW
+give the one-codebase universal property that C was approximating,
+without the WebView bridge tax.
+
+**#70 is now optional.** In the §10 frame, P1 + P2 don't touch the
+shipping Capacitor Android app, and P3 replaces it with an RN app
+that has native sockets from day one. Only keep #70 on the board as
+Plan B if P1 or P2 blocks.
+
+Remaining hard constraints (gate P3, not earlier): 
+`better-auth-react-native` doesn't exist — we own it.
+`expo-sqlite` has documented production bugs (expo#37169) so the
+SQLite-adapter choice needs validation under our workload.
+`@xyflow/react`, `react-jsx-parser`, Rive WebGL2, media-chrome all
+need accepted RN fallbacks (feature-gate or rebuild).
 
 ---
 
@@ -426,6 +443,8 @@ External (2026):
 - [Zeego — native menus for React (Native) on Radix primitives](https://zeego.dev/)
 - [Maestro — YAML-driven E2E for RN (no native build)](https://maestro.dev/insights/best-react-native-testing-frameworks)
 - [Panto AI — React Native automated testing platform 2026](https://www.getpanto.ai/products/react-native-automated-testing)
+- [Tamagui — Why a Compiler](https://tamagui.dev/docs/intro/why-a-compiler)
+- [React Native for Web (Nicolas Gallagher, Meta)](https://necolas.github.io/react-native-web/)
 
 ---
 
@@ -574,3 +593,170 @@ while RN work lands. #70 keeps it stable during that window. If the
 pivot lands clean, #70's Kotlin plugin code is discardable — that's
 acceptable given its 1-week cost and the stability it buys during
 the transition.
+
+---
+
+## 10. Addendum — Tamagui compiler + react-native-web reframe
+
+After drafting §9, direct reading of the Tamagui "Why a Compiler" doc
+and the react-native-web docs exposed one more wrong mental model that
+keeps inflating the cost: I was still thinking "Android Capacitor app"
+vs "Android RN app" as two separate platforms. The right 2026 framing
+is **one universal React Native application with DOM + iOS + Android
+targets**, with Tamagui as the optimizing compiler and react-native-
+web as the web target. That collapses the decision to a web app
+upgrade that coincidentally unlocks native, rather than a mobile
+rewrite that also has a web cost.
+
+### 10.1 react-native-web — what it actually is
+
+From the docs: *"an accessible implementation of React Native's
+Components and APIs that is interoperable with React DOM."* Owned by
+Nicolas Gallagher (Meta Platforms). Properties:
+
+- `<View>`, `<Text>`, `<Image>`, `<ScrollView>`, `<Pressable>`,
+  `Animated`, gestures, keyboard input all compile to standard DOM.
+- *"Bundle only what you use"* — tree-shakeable, incremental adoption.
+- *"Rely on scoped styles and automatic vendor-prefixing. Support
+  RTL layouts."*
+- *"React Native for Web powers web support in multi-platform React
+  tools like Expo, React Native Elements, React Native Paper, and
+  NativeBase"* — it's the de-facto web target for the Expo/RN stack
+  in 2026.
+- Production: Twitter/X web is the reference implementation
+  (Gallagher built it there), plus Flipkart, Major League Soccer,
+  Uber's marketing site, Expo docs.
+
+**What this means for us:** the orchestrator doesn't need to be "a
+web app + a RN app that share some code." It can be **one RN code
+tree that compiles to DOM via RNW for the CF Worker and to native
+for iOS/Android.** A single component tree. No bridge between
+platforms, no parity diff to maintain.
+
+### 10.2 Tamagui compiler — what problem it actually solves
+
+From "Why a Compiler": the framing isn't *"Radix replacement"* (my
+earlier reading). It's a direct response to **universal apps doing
+CSS-in-JS with hook-based themes/media queries causing whole-tree
+re-renders.** Concrete claims from the doc:
+
+- *"extracts all types of styling syntax into atomic CSS"* — no
+  runtime style object generation
+- *"partial evaluation and hoisting… removes a high % of inline
+  styles"* — build-time constant folding
+- *"reduces tree depth, flattening expensive styled components into
+  div or View… 30–50% of components typically flatten"* — less
+  reconciliation, less DOM
+- *"evaluates useMedia and useTheme hooks, turning logical
+  expressions into media queries and CSS variables"* — no whole-tree
+  re-render on theme toggle / viewport change
+- Cited perf: without the compiler, *"medium-complexity pages will
+  drop from 100% Lighthouse to half or worse."* With it: ~15+
+  Lighthouse points recovered on their own marketing pages.
+- On native: *"within 5% of hand-optimizing React Native code."*
+
+### 10.3 Why this matters for problems we already have on web
+
+Looking back at the orchestrator's own pain log through a Tamagui
+lens, several existing issues look like textbook compiler wins we
+never attributed to CSS-in-JS + hook-re-render cost:
+
+- **`react-offscreen-patch.ts`** (`apps/orchestrator/src/lib/react-offscreen-patch.ts:1-51`) — patches the Android WebView × React 19 Offscreen
+  scheduler. Under Tamagui, much of the offending re-render traffic
+  disappears because theme/media aren't hook-driven anymore.
+  May not eliminate the patch but shrinks its surface.
+- **`perf(chat-thread): kill session-switch measurement triple-
+  render (#55) (#56)`** (git log 2026-04-22) — triple-render on
+  session switch is exactly the "whole-tree re-render" failure
+  mode the compiler is designed to eliminate.
+- **`perf(orchestrator): virtualize message list + kill re-render
+  storms (#54)`** — same category.
+- **`fix(chat): hide virtualized list until scrollHeight settles —
+  kill mount jitter uniformly`** — mount-time reflow driven by
+  cascading style computation; compiler flattening directly targets
+  this.
+- **`fix(chat): eliminate remount jitter via per-session
+  virtualizer measurements cache`** — measurement cache is a
+  downstream workaround for style recalc thrash.
+
+None of these prove Tamagui would have prevented them, but the
+pattern is consistent enough that adopting it is worth tracking as
+**a web-perf play first, universal-native play second.** That is
+the exact inverse of how I framed this doc in §1.
+
+### 10.4 Revised path — universalize the web, then target native
+
+Given §10.1 + §10.2 + §10.3, the pivot reshapes into **four
+independently-shippable phases**, each with standalone value:
+
+| Phase | Scope | Repo-velocity wall clock | Shippable on its own? |
+|---|---|---|---|
+| **P1. Tamagui adoption in orchestrator (web only)** | Port `components/ui/` + screens to Tamagui primitives behind a compatibility layer. Themes + media queries migrate. Drop hand-rolled CSS-in-JS. Keep Radix where Tamagui has no equivalent (alert/dialog stay on Radix for now). | **~3–5 days** with parallel impl-agents | ✅ Ships to existing web; measurable Lighthouse + re-render wins. No mobile risk. |
+| **P2. Universal refactor via react-native-web** | Swap orchestrator entry to render against `react-native-web`. Add Expo/Metro bundler as alternative target; Vite stays for the CF Worker build. Component tree becomes universal. Drop `react-dom`-only libs (ansi-to-react, react-jsx-parser, media-chrome, Rive WebGL2) or feature-gate. | **~4–6 days** | ✅ Ships to existing web unchanged (RNW → DOM is transparent). Prepares native target without adding one yet. |
+| **P3. Native target (Expo, iOS + Android)** | Add RN entry via Expo SDK 54. Swap Capacitor seams: auth → `better-auth-react-native`, SQLite → op-sqlite, push → `@react-native-firebase/messaging`, OTA → EAS Update, lifecycle → AppState/NetInfo. WS uses RN native WebSocket. | **~4–6 days** | ✅ Android parity with signed APK; iOS parity with TestFlight. Capacitor app sunset. |
+| **P4. Eval + polish** | Maestro + visual regression harness, AI-codegen parity loop per screen, iOS App Store submission, Play Store upgrade. | **~3–5 days** (mostly parallel) | ✅ Production-ready universal app. |
+
+**Total: ~2–3 weeks wall clock at repo velocity, matching §9.3 —
+but now with intermediate value at each phase instead of a single
+big-bang landing.** Phase 1 alone likely closes some of the
+"janky" complaint because it's a web-perf delta before any native
+work. Phase 2 pays for itself by collapsing dual-shipping before
+we've even shipped a native build. Phase 3 and 4 are additive.
+
+### 10.5 Gates by phase (decision points, not de-risking theatre)
+
+- **After P1** — did the Lighthouse/re-render deltas hit? If yes,
+  continue. If no, stop here; the perf story isn't what was hurting
+  and the rest of the pivot is motivated by native-only goals, which
+  changes the cost/benefit math.
+- **After P2** — does the web build on RNW ship clean? Are the hard-
+  incompatible libs (xyflow, jsx-parser, Rive, media-chrome)
+  acceptably feature-gated or replaced? If yes, continue. If one of
+  them is load-bearing and can't be replaced cheaply, stop at P2
+  (universal web) and defer native.
+- **After P3** — does `better-auth-react-native` + op-sqlite + push
+  + OTA pass dogfood on signed builds? If yes, ship. If not, the
+  Capacitor shell stays primary for the remaining unblocked seams.
+- **After P4** — standard ship gate (App Store, Play Store, prod
+  canary).
+
+### 10.6 What #70 becomes in this frame
+
+In the §9 frame, #70 was "insurance for the Capacitor app during
+the pivot." In the §10 frame, #70 is **less essential** because:
+
+- P1 + P2 don't touch the Android Capacitor app at all (web refactor
+  only); the shipping build stays on its current Capacitor stack
+  unchanged for ~1.5–2 weeks with zero additional risk.
+- P3 replaces the Capacitor Android app with an RN Android app that
+  has native sockets from day one — the #70 problem just *doesn't
+  exist* in that build.
+
+If P1 ships cleanly and we're committed to P3, **#70 becomes
+optional** — the Capacitor app keeps its current (imperfect)
+transport for ~1 more week, then gets replaced. If P1 or P2 blocks,
+then #70 is still the right Plan B.
+
+### 10.7 Recommendation (final)
+
+Supersedes §9.4 recommendation:
+
+1. **Do not start with #70.** Start with **P1 (Tamagui adoption in
+   orchestrator web)**. It's independently valuable, carries no
+   mobile risk, and measures a hypothesis (is part of "janky" really
+   web-perf + whole-tree re-render?) before committing.
+2. **If P1 lands clean, proceed to P2 (universalize via
+   react-native-web).** The Capacitor app still ships unchanged
+   through this phase.
+3. **If P2 lands clean, gate P3 on a 2-day spike** covering just the
+   three things no library fixes: `better-auth-react-native`,
+   op-sqlite vs expo-sqlite under our workload, and
+   xyflow/jsx-parser/Rive/media-chrome fallbacks.
+4. **If the P3 spike passes, ship P3 + P4** and retire Capacitor.
+5. **Skip #70** unless P1 or P2 blocks. The sockets it fixes will be
+   replaced wholesale by native WebSocket in RN anyway.
+
+This keeps the "ship #70 first" optionality if anything ahead
+blocks, but re-centers the project around a **web-first incremental
+universalization** that happens to unlock native as its last step,
+rather than a mobile pivot that drags along a web cost.
