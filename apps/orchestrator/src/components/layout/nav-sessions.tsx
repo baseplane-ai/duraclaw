@@ -8,18 +8,7 @@
 
 import { useLiveQuery } from '@tanstack/react-db'
 import { useLocation, useNavigate } from '@tanstack/react-router'
-import {
-  ArchiveIcon,
-  ChevronRight,
-  ClockIcon,
-  EditIcon,
-  Eye,
-  EyeOff,
-  FolderGit2,
-  GitBranchIcon,
-  Layers,
-  PlusIcon,
-} from 'lucide-react'
+import { ArchiveIcon, ChevronRight, EditIcon, Eye, EyeOff, PlusIcon } from 'lucide-react'
 import { useCallback, useMemo, useRef, useState } from 'react'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '~/components/ui/collapsible'
 import {
@@ -39,6 +28,7 @@ import {
   SidebarMenuSubItem,
   useSidebar,
 } from '~/components/ui/sidebar'
+import { Tooltip, TooltipContent, TooltipTrigger } from '~/components/ui/tooltip'
 import { VisibilityBadge } from '~/components/visibility-badge'
 import { projectsCollection } from '~/db/projects-collection'
 import type { SessionRecord } from '~/db/session-record'
@@ -69,6 +59,34 @@ interface ProjectInfoWithHidden extends ProjectInfo {
 
 function getDisplayName(session: SessionRecord): string {
   return session.title || getPreviewText(session) || session.id.slice(0, 8)
+}
+
+/**
+ * Truncated label that reveals the full text in a tooltip on hover.
+ * Used for worktree/project/session names which frequently overflow the
+ * narrow sidebar column. Rendered as the `last-child` span of a menu
+ * button so the parent's `[&>span:last-child]:truncate` rule applies.
+ */
+function TruncatedText({
+  children,
+  tooltip,
+  className,
+}: {
+  children: React.ReactNode
+  tooltip?: React.ReactNode
+  className?: string
+}) {
+  const tip = tooltip ?? children
+  return (
+    <Tooltip delayDuration={300}>
+      <TooltipTrigger asChild>
+        <span className={cn('truncate', className)}>{children}</span>
+      </TooltipTrigger>
+      <TooltipContent side="right" className="max-w-xs break-all">
+        {tip}
+      </TooltipContent>
+    </Tooltip>
+  )
 }
 
 // ── Context menu for session items ─────────────────────────────────
@@ -458,10 +476,7 @@ export function NavSessions() {
 
       {/* Recent sessions */}
       <SidebarGroup>
-        <SidebarGroupLabel>
-          <ClockIcon className="mr-1 size-3" />
-          Recent
-        </SidebarGroupLabel>
+        <SidebarGroupLabel>Recent</SidebarGroupLabel>
         <SidebarMenu>
           {recent.map((session) => (
             <SidebarMenuItem key={session.id}>
@@ -481,7 +496,9 @@ export function NavSessions() {
                   />
                   <div className="flex min-w-0 flex-col">
                     <span className="flex items-center gap-1 truncate text-sm leading-tight">
-                      <span className="truncate">{getDisplayName(session)}</span>
+                      <TruncatedText tooltip={`${getDisplayName(session)} — ${session.project}`}>
+                        {getDisplayName(session)}
+                      </TruncatedText>
                       {currentUserId && session.userId !== currentUserId && (
                         <VisibilityBadge
                           visibility={session.visibility}
@@ -509,10 +526,7 @@ export function NavSessions() {
 
       {/* Unified worktree tree: repo → worktree (branch/dirty/PR) → sessions */}
       <SidebarGroup>
-        <SidebarGroupLabel>
-          <FolderGit2 className="mr-1 size-3" />
-          Worktrees
-        </SidebarGroupLabel>
+        <SidebarGroupLabel>Worktrees</SidebarGroupLabel>
         <SidebarMenu>
           {Array.from(repoGroups.entries()).map(([repoOrigin, repoProjects]) => (
             <RepoGroup
@@ -590,10 +604,11 @@ function RepoGroup({
       <SidebarMenuItem>
         <CollapsibleTrigger asChild>
           <SidebarMenuButton tooltip={orgRepo}>
-            <FolderGit2 className="size-4" />
-            <span className="truncate">{orgRepo}</span>
-            <span className="ml-auto text-xs text-muted-foreground">{projects.length}</span>
-            <ChevronRight className="ml-1 size-3 transition-transform duration-200 group-data-[state=open]/collapsible:rotate-90" />
+            <ChevronRight className="size-3 transition-transform duration-200 group-data-[state=open]/collapsible:rotate-90" />
+            <TruncatedText>{orgRepo}</TruncatedText>
+            <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+              {projects.length}
+            </span>
           </SidebarMenuButton>
         </CollapsibleTrigger>
         <CollapsibleContent>
@@ -672,10 +687,14 @@ function WorktreeNode({
     // Worktree with no sessions — show as a leaf with branch info
     return (
       <SidebarMenuSubItem>
-        <SidebarMenuSubButton className={cn('group/wt', isHidden && 'opacity-40')}>
-          <GitBranchIcon className="size-3 shrink-0 mt-0.5" />
+        <SidebarMenuSubButton className={cn('group/wt h-auto py-1', isHidden && 'opacity-40')}>
           <div className="flex min-w-0 flex-1 flex-col">
-            <span className="truncate text-sm leading-tight">{project.name}</span>
+            <TruncatedText
+              className="text-sm leading-tight"
+              tooltip={`${project.name} — ${project.branch}`}
+            >
+              {project.name}
+            </TruncatedText>
             <span className="flex items-center gap-1 truncate text-[11px] text-muted-foreground leading-tight">
               {project.branch}
               <WorktreeIndicators project={project} />
@@ -701,17 +720,21 @@ function WorktreeNode({
     <Collapsible asChild defaultOpen={hasActive || sessions.length <= 3} className="group/wt-col">
       <SidebarMenuSubItem>
         <CollapsibleTrigger asChild>
-          <SidebarMenuSubButton className={cn(isHidden && 'opacity-40')}>
-            <GitBranchIcon className="size-3 shrink-0 mt-0.5" />
+          <SidebarMenuSubButton className={cn('h-auto py-1', isHidden && 'opacity-40')}>
+            <ChevronRight className="size-3 shrink-0 transition-transform duration-200 group-data-[state=open]/wt-col:rotate-90" />
             <div className="flex min-w-0 flex-1 flex-col">
-              <span className="truncate text-sm leading-tight">{project.name}</span>
+              <TruncatedText
+                className="text-sm leading-tight"
+                tooltip={`${project.name} — ${project.branch}`}
+              >
+                {project.name}
+              </TruncatedText>
               <span className="flex items-center gap-1 truncate text-[11px] text-muted-foreground leading-tight">
                 {project.branch}
                 <WorktreeIndicators project={project} />
               </span>
             </div>
             <span className="shrink-0 text-[10px] text-muted-foreground">{sessions.length}</span>
-            <ChevronRight className="ml-0.5 size-2.5 shrink-0 transition-transform duration-200 group-data-[state=open]/wt-col:rotate-90" />
           </SidebarMenuSubButton>
         </CollapsibleTrigger>
         <CollapsibleContent>
@@ -739,7 +762,7 @@ function WorktreeNode({
                       status={deriveStatus(session, nowTs)}
                       numTurns={session.numTurns ?? 0}
                     />
-                    <span className="truncate">{getDisplayName(session)}</span>
+                    <TruncatedText>{getDisplayName(session)}</TruncatedText>
                   </SidebarMenuSubButton>
                 </SessionContextMenu>
               </SidebarMenuSubItem>
@@ -856,12 +879,11 @@ function ChainNode({
       <SidebarMenuSubItem>
         <CollapsibleTrigger asChild>
           <SidebarMenuSubButton onDoubleClick={handleDoubleClick}>
-            <Layers className="size-3 shrink-0" />
-            <span className="truncate">
+            <ChevronRight className="size-3 shrink-0 transition-transform duration-200 group-data-[state=open]/chain:rotate-90" />
+            <TruncatedText tooltip={title ? `#${issueNumber} ${title}` : `#${issueNumber}`}>
               {title ? `#${issueNumber} ${title}` : `#${issueNumber}`}
-            </span>
+            </TruncatedText>
             <PipelineDots sessions={sessions} />
-            <ChevronRight className="ml-0.5 size-2.5 shrink-0 transition-transform duration-200 group-data-[state=open]/chain:rotate-90" />
           </SidebarMenuSubButton>
         </CollapsibleTrigger>
         <CollapsibleContent>
@@ -878,7 +900,9 @@ function ChainNode({
                       status={deriveStatus(session, nowTs)}
                       numTurns={session.numTurns ?? 0}
                     />
-                    <span className="truncate">{session.kataMode || getDisplayName(session)}</span>
+                    <TruncatedText tooltip={getDisplayName(session)}>
+                      {session.kataMode || getDisplayName(session)}
+                    </TruncatedText>
                   </SidebarMenuSubButton>
                 </SessionContextMenu>
               </SidebarMenuSubItem>
@@ -922,10 +946,11 @@ function OrphanProjectGroup({
       <SidebarMenuItem>
         <CollapsibleTrigger asChild>
           <SidebarMenuButton tooltip={project}>
-            <FolderGit2 className="size-4 text-muted-foreground" />
-            <span className="truncate">{project}</span>
-            <span className="ml-auto text-xs text-muted-foreground">{sessions.length}</span>
-            <ChevronRight className="ml-1 size-3 transition-transform duration-200 group-data-[state=open]/collapsible:rotate-90" />
+            <ChevronRight className="size-3 text-muted-foreground transition-transform duration-200 group-data-[state=open]/collapsible:rotate-90" />
+            <TruncatedText className="text-muted-foreground">{project}</TruncatedText>
+            <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+              {sessions.length}
+            </span>
           </SidebarMenuButton>
         </CollapsibleTrigger>
         <CollapsibleContent>
@@ -941,7 +966,7 @@ function OrphanProjectGroup({
                       status={deriveStatus(session, nowTs)}
                       numTurns={session.numTurns ?? 0}
                     />
-                    <span className="truncate">{getDisplayName(session)}</span>
+                    <TruncatedText>{getDisplayName(session)}</TruncatedText>
                   </SidebarMenuSubButton>
                 </SessionContextMenu>
               </SidebarMenuSubItem>
