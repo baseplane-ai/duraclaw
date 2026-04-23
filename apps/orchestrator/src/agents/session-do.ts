@@ -633,13 +633,13 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   }
 
   onConnect(connection: Connection, ctx: ConnectionContext) {
-    // GH#49 observability: log socket-set size + same-id collision count at
-    // the moment we enter onConnect. Distinguishes the candidate root causes
-    // for the "session WS perma-reconnect after Android background cycle"
-    // pathology: (1) `_pk` collision with a zombie socket still in the
-    // hibernation set, (2) onConnect throw during history replay, (3) the
-    // initial post-foreground attempt hitting a slow DO wake. Grep
-    // `wrangler tail` for `[SessionDO][conn]` during repro.
+    // GH#49 + GH#61 observability: log socket-set size + same-id collision
+    // count at the moment we enter onConnect. The `[SessionDO][conn] enter`
+    // log is the critical diagnostic anchor — if a 1006 close appears in
+    // `wrangler tail` WITHOUT a preceding `enter` for the same connId, the
+    // throw happened inside the SDK wrapper (before our code runs), pointing
+    // to `_setConnectionNoProtocol` or `_ensureConnectionWrapped`. If `enter`
+    // appears without `exit`, the throw is in our `onConnectInner`.
     const t0 = Date.now()
     let totalSockets = -1
     let sameIdSockets = -1
@@ -652,7 +652,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     }
     const role = new URL(ctx.request.url).searchParams.get('role') ?? 'browser'
     console.log(
-      `[SessionDO][conn] enter doId=${this.ctx.id} connId=${connection.id} role=${role} totalSockets=${totalSockets} sameIdSockets=${sameIdSockets}`,
+      `[SessionDO][conn] enter doId=${this.ctx.id} connId=${connection.id} role=${role} totalSockets=${totalSockets} sameIdSockets=${sameIdSockets} status=${this.state.status}`,
     )
     try {
       const result = this.onConnectInner(connection, ctx)
@@ -667,6 +667,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
         totalSockets,
         sameIdSockets,
         ms: Date.now() - t0,
+        status: this.state.status,
       })
       throw err
     }
@@ -815,20 +816,34 @@ export class SessionDO extends Agent<Env, SessionMeta> {
           })
         }
       } else {
-        // GH#49 observability: pair with the `[SessionDO][conn] enter` log
-        // so we can see per-connId open→close cycles in `wrangler tail`.
-        // `remaining` is the post-close count from ctx.getWebSockets — a
-        // non-zero value with the same id on a reconnect-storm means zombie
-        // sockets are piling up in the hibernation set.
+        // GH#49 + GH#61 observability: pair with the `[SessionDO][conn]
+        // enter` log so we can see per-connId open→close cycles in
+        // `wrangler tail`. `remaining` is the post-close count from
+        // ctx.getWebSockets — a non-zero value with the same id on a
+        // reconnect-storm means zombie sockets are piling up in the
+        // hibernation set.
         let remaining = -1
         try {
           remaining = this.ctx.getWebSockets(connection.id).length
         } catch {
           // no-op
         }
-        console.log(
-          `[SessionDO][conn] close doId=${this.ctx.id} connId=${connection.id} code=${code} reason=${JSON.stringify(reason)} sameIdRemaining=${remaining}`,
-        )
+        if (code === 1006) {
+          // GH#61: 1006 = abnormal closure — the server-side handler threw
+          // without a clean close frame. This is the diagnostic anchor for
+          // the "1ms WS flap" pathology. Cross-reference with `[conn] enter`
+          // / `[conn] exit` logs for the same connId:
+          //   - No `enter` → SDK wrapper threw before our onConnect ran
+          //   - `enter` without `exit` → our onConnectInner threw
+          //   - Both `enter` + `exit` → SDK post-handler code threw
+          console.error(
+            `[SessionDO][conn] 1006-diag doId=${this.ctx.id} connId=${connection.id} reason=${JSON.stringify(reason)} sameIdRemaining=${remaining} status=${this.state.status} hasGateway=${!!this.getGatewayConnectionId()} lastGatewayActivity=${this.lastGatewayActivity} sessionId=${this.state.session_id ?? 'none'}`,
+          )
+        } else {
+          console.log(
+            `[SessionDO][conn] close doId=${this.ctx.id} connId=${connection.id} code=${code} reason=${JSON.stringify(reason)} sameIdRemaining=${remaining}`,
+          )
+        }
       }
 
       super.onClose(connection, code, reason, _wasClean)
@@ -843,7 +858,14 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     // context. Normalise both.
     const actualError = error !== undefined ? error : connection
     const conn = error !== undefined ? (connection as Connection) : undefined
-    this.logError('onError', actualError, conn ? { connId: conn.id } : undefined)
+    // GH#61: emit full DO state alongside the error so a single wrangler-tail
+    // capture is enough to diagnose the 1006 flap without a reproduction.
+    this.logError('onError', actualError, {
+      ...(conn ? { connId: conn.id } : {}),
+      status: this.state.status,
+      hasGateway: !!this.getGatewayConnectionId(),
+      sessionId: this.state.session_id ?? 'none',
+    })
     // Re-throw so the SDK's `_tryCatch` wrapper (index.js:1082) gets a real
     // Error object from the `throw this.onError(e)` line rather than
     // `throw undefined`. Without this, any throw inside onConnect /
