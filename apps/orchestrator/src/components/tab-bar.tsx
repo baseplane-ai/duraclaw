@@ -19,6 +19,7 @@ import { CSS } from '@dnd-kit/utilities'
 import { useLiveQuery } from '@tanstack/react-db'
 import { ChevronLeftIcon, ChevronRightIcon, CopyPlusIcon, PlusIcon, X } from 'lucide-react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { SessionPresenceIcons } from '~/components/session-presence-icons'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -469,6 +470,7 @@ function ProjectTabInner({
       {session ? (
         <>
           <StatusDot status={tabStatus} numTurns={tabNumTurns} />
+          <SessionPresenceIcons sessionId={sessionId} />
           <div className="flex flex-col items-start min-w-0">
             <span className="text-[11px] text-muted-foreground leading-tight font-normal">
               {session.project}

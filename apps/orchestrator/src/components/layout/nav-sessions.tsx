@@ -10,6 +10,7 @@ import { useLiveQuery } from '@tanstack/react-db'
 import { useLocation, useNavigate } from '@tanstack/react-router'
 import { ArchiveIcon, ChevronRight, EditIcon, Eye, EyeOff, PlusIcon } from 'lucide-react'
 import { useCallback, useMemo, useRef, useState } from 'react'
+import { SessionPresenceIcons } from '~/components/session-presence-icons'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '~/components/ui/collapsible'
 import {
   DropdownMenu,
@@ -495,6 +496,7 @@ export function NavSessions() {
                     status={deriveStatus(session, nowTs)}
                     numTurns={session.numTurns ?? 0}
                   />
+                  <SessionPresenceIcons sessionId={session.id} />
                   <div className="flex min-w-0 flex-col">
                     <span className="flex items-center gap-1 truncate text-sm leading-tight">
                       <TruncatedText tooltip={`${getDisplayName(session)} — ${session.project}`}>
