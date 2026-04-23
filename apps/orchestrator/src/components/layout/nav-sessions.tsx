@@ -269,6 +269,7 @@ export function NavSessions() {
   const { data: authSession } = useAuthSession()
   const currentUserId = (authSession as { user?: { id?: string } } | null)?.user?.id ?? null
   const [filterMode, setFilterMode] = useState<SessionFilterMode>(() => readInitialFilterMode())
+  const [recentExpanded, setRecentExpanded] = useState(false)
   const handleFilterChange = useCallback((mode: SessionFilterMode) => {
     setFilterMode(mode)
     if (typeof window !== 'undefined') {
@@ -329,7 +330,7 @@ export function NavSessions() {
   const { visible, recent, sessionsByProject } = useMemo(() => {
     const notArchived = sessions.filter((s) => !s.archived)
     const visible = filterSessionsByMode(notArchived, filterMode, currentUserId)
-    const recent = [...visible].sort(byActivity).slice(0, 5)
+    const recent = [...visible].sort(byActivity).slice(0, 25)
 
     const sessionsByProject = new Map<string, SessionRecord[]>()
     for (const session of visible) {
@@ -478,7 +479,7 @@ export function NavSessions() {
       <SidebarGroup>
         <SidebarGroupLabel>Recent</SidebarGroupLabel>
         <SidebarMenu>
-          {recent.map((session) => (
+          {(recentExpanded ? recent : recent.slice(0, 5)).map((session) => (
             <SidebarMenuItem key={session.id}>
               <SessionContextMenu
                 session={session}
@@ -518,6 +519,15 @@ export function NavSessions() {
             <SidebarMenuItem>
               <SidebarMenuButton disabled>
                 <span className="text-muted-foreground">No sessions yet</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          )}
+          {recent.length > 5 && (
+            <SidebarMenuItem>
+              <SidebarMenuButton onClick={() => setRecentExpanded((v) => !v)}>
+                <span className="text-xs text-muted-foreground">
+                  {recentExpanded ? 'Show less' : `${recent.length - 5} more…`}
+                </span>
               </SidebarMenuButton>
             </SidebarMenuItem>
           )}
