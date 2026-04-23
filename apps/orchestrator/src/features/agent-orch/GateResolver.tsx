@@ -40,10 +40,13 @@ export function GateResolver({ gate, onResolve }: GateResolverProps) {
   // Auto-scroll the gate into view when it mounts. The old pinned-gate div
   // was removed (9c1f759) and gates now render inline in the message list.
   // Without this, a gate in a message above the viewport is invisible.
+  // `block: 'start'` pins the gate's top edge to the viewport top so the
+  // question(s) are what the user sees first — centering pushed short
+  // gates into the middle of the screen with blank space above.
   useEffect(() => {
     // Small delay so the layout settles before measuring position.
     const t = setTimeout(() => {
-      containerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      containerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     }, 80)
     return () => clearTimeout(t)
   }, []) // mount-only
