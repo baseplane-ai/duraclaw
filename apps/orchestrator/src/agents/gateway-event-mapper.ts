@@ -63,6 +63,13 @@ function extractToolOutput(content: unknown): string | undefined {
 /**
  * Apply a tool_result event to existing message parts.
  * Finds the matching tool part by toolCallId and updates its state/output.
+ *
+ * Special case for ask_user gates: `resolveGate` stores the answer as a
+ * structured `{ answers: StructuredAnswer[] }` object so the UI can render
+ * a paired Q/A grid. The SDK's AskUserQuestion tool subsequently emits a
+ * flat text tool_result — overwriting the structured output with that
+ * string collapses the UI into the legacy single-line "flat answer"
+ * fallback. Keep the structured output intact; only advance `state`.
  */
 export function applyToolResult(
   existingParts: SessionMessagePart[],
@@ -76,11 +83,20 @@ export function applyToolResult(
 
     const idx = updatedParts.findIndex((p) => p.toolCallId === toolUseId)
     if (idx !== -1) {
+      const existing = updatedParts[idx]
       const isError = b.is_error === true
+      const isAskUserPart =
+        existing.type === 'tool-ask_user' || existing.type === 'tool-AskUserQuestion'
+      const hasStructuredAnswers =
+        existing.output != null &&
+        typeof existing.output === 'object' &&
+        Array.isArray((existing.output as { answers?: unknown }).answers)
+
       updatedParts[idx] = {
-        ...updatedParts[idx],
+        ...existing,
         state: isError ? 'output-error' : 'output-available',
-        output: extractToolOutput(b.content),
+        output:
+          isAskUserPart && hasStructuredAnswers ? existing.output : extractToolOutput(b.content),
       }
     }
   }

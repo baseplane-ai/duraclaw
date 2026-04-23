@@ -172,6 +172,76 @@ describe('applyToolResult', () => {
     expect(result[0].output).toBe('result-1')
     expect(result[1].state).toBe('output-error')
   })
+
+  it('preserves a structured ask_user output when tool_result brings a flat string', () => {
+    // resolveGate stamps { answers: [...] } so the UI renders a paired Q/A
+    // grid. The SDK's AskUserQuestion tool emits a flattened text
+    // tool_result afterwards — overwriting the structured output collapses
+    // the UI to the legacy single-line fallback.
+    const existing = [
+      {
+        type: 'tool-AskUserQuestion',
+        toolCallId: 'tc-ask',
+        toolName: 'AskUserQuestion',
+        state: 'output-available',
+        input: {
+          questions: [
+            { question: 'Which color?', header: 'color', options: [], multiSelect: false },
+          ],
+        },
+        output: { answers: [{ label: 'Blue' }] },
+      },
+    ]
+    const event = {
+      content: [{ tool_use_id: 'tc-ask', content: 'Blue', is_error: false }],
+    }
+    const result = applyToolResult(existing, event)
+    expect(result[0].state).toBe('output-available')
+    expect(result[0].output).toEqual({ answers: [{ label: 'Blue' }] })
+  })
+
+  it('also preserves structured output for the promoted tool-ask_user type', () => {
+    const existing = [
+      {
+        type: 'tool-ask_user',
+        toolCallId: 'tc-ask',
+        toolName: 'ask_user',
+        state: 'output-available',
+        input: {
+          questions: [{ question: 'Which size?', header: 'size', options: [], multiSelect: false }],
+        },
+        output: { answers: [{ label: 'Small', note: 'prefer tight' }] },
+      },
+    ]
+    const event = {
+      content: [{ tool_use_id: 'tc-ask', content: 'Small (note: prefer tight)' }],
+    }
+    const result = applyToolResult(existing, event)
+    expect(result[0].output).toEqual({
+      answers: [{ label: 'Small', note: 'prefer tight' }],
+    })
+  })
+
+  it('still overwrites ask_user output when nothing structured was stored', () => {
+    // Legacy path / resume-replay path: the part has no structured answer
+    // object yet, so the tool_result string is the authoritative display
+    // text. Only skip the overwrite when we'd actually lose structure.
+    const existing = [
+      {
+        type: 'tool-AskUserQuestion',
+        toolCallId: 'tc-ask',
+        toolName: 'AskUserQuestion',
+        state: 'input-available',
+        input: { questions: [] },
+      },
+    ]
+    const event = {
+      content: [{ tool_use_id: 'tc-ask', content: 'some answer' }],
+    }
+    const result = applyToolResult(existing, event)
+    expect(result[0].state).toBe('output-available')
+    expect(result[0].output).toBe('some answer')
+  })
 })
 
 describe('finalizeStreamingParts', () => {
