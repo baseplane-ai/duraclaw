@@ -66,6 +66,7 @@ function useAutoScroll() {
   const scrollEl = useRef<HTMLDivElement | null>(null)
   const contentEl = useRef<HTMLDivElement | null>(null)
   const prevHeightRef = useRef(0)
+  const lastScrollTopRef = useRef(0)
 
   const setPinned = useCallback((next: boolean) => {
     pinnedRef.current = next
@@ -89,14 +90,57 @@ function useAutoScroll() {
 
   // Scroll listener — fires for every user input path (wheel, trackpad,
   // touch-swipe, scrollbar drag, keyboard). Our own writes are gated out
-  // by `programmaticRef`.
+  // by `programmaticRef`. Direction-aware: only re-pins when the user
+  // scrolls *down* and lands near the bottom. Scrolling up while near
+  // the bottom (common during streaming, since `pinNow` just wrote
+  // `scrollTop` to the bottom) unpins immediately.
   const onScroll = useCallback(() => {
     if (programmaticRef.current) return
     const el = scrollEl.current
     if (!el) return
-    const distance = el.scrollHeight - el.scrollTop - el.clientHeight
-    setPinned(distance <= NEAR_BOTTOM_PX)
+    const scrollTop = el.scrollTop
+    const distance = el.scrollHeight - scrollTop - el.clientHeight
+    const scrolledDown = scrollTop >= lastScrollTopRef.current
+    lastScrollTopRef.current = scrollTop
+    if (!scrolledDown) {
+      // User scrolled up — unpin unconditionally.
+      setPinned(false)
+    } else if (distance <= NEAR_BOTTOM_PX) {
+      // User scrolled down and landed near bottom — re-pin.
+      setPinned(true)
+    }
   }, [setPinned])
+
+  // Direct user-input listeners. Wheel / touchstart / touchmove fire
+  // synchronously with the actual user action — before the browser
+  // updates scrollTop and before the scroll event. This lets us flip
+  // pinnedRef off the instant the user expresses intent to scroll up,
+  // winning the race against any programmatic pin that's in flight.
+  // On mobile WebViews the scroll event also lags the compositor,
+  // making these listeners the only reliable signal during active drag.
+  const touchStartYRef = useRef(0)
+
+  const onWheel = useCallback(
+    (e: WheelEvent) => {
+      if (e.deltaY < 0) setPinned(false)
+    },
+    [setPinned],
+  )
+
+  const onTouchStart = useCallback((e: TouchEvent) => {
+    touchStartYRef.current = e.touches[0]?.clientY ?? 0
+  }, [])
+
+  const onTouchMove = useCallback(
+    (e: TouchEvent) => {
+      const y = e.touches[0]?.clientY
+      if (y === undefined) return
+      // Finger moving downward (y grows) = content scrolling up = unpin.
+      // 8px threshold absorbs micro-jitter / tap-recognition slop.
+      if (y - touchStartYRef.current > 8) setPinned(false)
+    },
+    [setPinned],
+  )
 
   // Initial pin: on first mount / tab-switch remount, jump to the bottom
   // before paint so OPFS-cached messages render already-scrolled. The
@@ -119,13 +163,10 @@ function useAutoScroll() {
   })
 
   // ResizeObserver — content growth (streaming deltas, OPFS hydration,
-  // history burst) pins to bottom while `pinnedRef` is true. The pin
-  // check also uses `distanceBefore` (pre-growth distance) as a
-  // belt-and-suspenders against the case where a very first growth tick
-  // lands before the scroll listener has had a chance to record the
-  // initial position: RO fires *after* layout, so at callback time
-  // `scrollHeight - scrollTop - clientHeight` equals the size of the new
-  // content. Subtract `growth` to recover the user's real position.
+  // history burst) pins to bottom while `pinnedRef` is true. `pinnedRef`
+  // is the sole gate — the old `userWasNearBottom` fallback read
+  // `scrollTop` that `pinNow` had just clobbered to the bottom, so it
+  // always evaluated true and re-pinned a user who had scrolled up.
   useEffect(() => {
     const content = contentEl.current
     if (!content) return
@@ -137,23 +178,13 @@ function useAutoScroll() {
       const growth = newHeight - prevHeightRef.current
       prevHeightRef.current = newHeight
       if (growth <= 0) return
-
-      const el = scrollEl.current
-      if (!el) return
-      const distanceBefore = el.scrollHeight - el.scrollTop - el.clientHeight - growth
-      const userWasNearBottom = distanceBefore <= NEAR_BOTTOM_PX
-      if (!pinnedRef.current && !userWasNearBottom) return
+      if (!pinnedRef.current) return
 
       if (rafId !== null) return
       rafId = requestAnimationFrame(() => {
         rafId = null
-        // Re-check pinnedRef: the user's scroll event may have fired
-        // between the RO callback above and this rAF tick, flipping the
-        // pin off. Without this re-read, a delta that arrives while the
-        // user is mid-scroll-up schedules a pinNow() whose pinnedRef
-        // check already passed — yanking the user back to the bottom
-        // one frame after they scrolled up. pinnedRef is synchronous
-        // and authoritative; read it as late as possible.
+        // Re-check: wheel / touch / scroll handlers may have flipped
+        // pinnedRef off between the RO callback and this rAF tick.
         if (!pinnedRef.current) return
         pinNow()
       })
@@ -166,20 +197,27 @@ function useAutoScroll() {
   }, [pinNow])
 
   // Scroll-element ref callback: stores the node AND attaches the scroll
-  // listener. Swapping nodes (rare — only on full remount) cleans up
-  // the previous listener first.
+  // listener plus the direct user-input listeners. Swapping nodes
+  // (rare — only on full remount) cleans up the previous listeners
+  // first.
   const scrollRef: RefCallback<HTMLDivElement> = useCallback(
     (node) => {
       const prev = scrollEl.current
       if (prev && prev !== node) {
         prev.removeEventListener('scroll', onScroll)
+        prev.removeEventListener('wheel', onWheel)
+        prev.removeEventListener('touchstart', onTouchStart)
+        prev.removeEventListener('touchmove', onTouchMove)
       }
       scrollEl.current = node
       if (node) {
         node.addEventListener('scroll', onScroll, { passive: true })
+        node.addEventListener('wheel', onWheel, { passive: true })
+        node.addEventListener('touchstart', onTouchStart, { passive: true })
+        node.addEventListener('touchmove', onTouchMove, { passive: true })
       }
     },
-    [onScroll],
+    [onScroll, onWheel, onTouchStart, onTouchMove],
   )
 
   const contentRef: RefCallback<HTMLDivElement> = useCallback((node) => {
