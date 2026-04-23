@@ -147,6 +147,14 @@ function useAutoScroll() {
       if (rafId !== null) return
       rafId = requestAnimationFrame(() => {
         rafId = null
+        // Re-check pinnedRef: the user's scroll event may have fired
+        // between the RO callback above and this rAF tick, flipping the
+        // pin off. Without this re-read, a delta that arrives while the
+        // user is mid-scroll-up schedules a pinNow() whose pinnedRef
+        // check already passed — yanking the user back to the bottom
+        // one frame after they scrolled up. pinnedRef is synchronous
+        // and authoritative; read it as late as possible.
+        if (!pinnedRef.current) return
         pinNow()
       })
     })
