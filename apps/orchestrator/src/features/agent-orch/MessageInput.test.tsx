@@ -208,7 +208,7 @@ describe('MessageInput force-stop escalation (state-driven relabel)', () => {
   /**
    * The composer relabels the interrupt button to "Force stop" when a
    * previously fired `interrupt` hasn't settled within the relabel window
-   * (see FORCE_STOP_RELABEL_MS in MessageInput.tsx, default 5s). Tests
+   * (see FORCE_STOP_RELABEL_MS in MessageInput.tsx, default 3s). Tests
    * drive a fake timer past the threshold so we don't sleep.
    */
   it('does NOT show force-stop on first click — only interrupt fires', () => {
@@ -254,7 +254,7 @@ describe('MessageInput force-stop escalation (state-driven relabel)', () => {
 
       // Drive the relabel timer past the threshold.
       act(() => {
-        vi.advanceTimersByTime(5_001)
+        vi.advanceTimersByTime(3_001)
       })
 
       // Now the button should carry the force-stop affordance.

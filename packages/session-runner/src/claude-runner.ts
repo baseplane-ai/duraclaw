@@ -745,7 +745,7 @@ export class ClaudeRunner {
       //
       // Normal results: forwarded to orchestrator, then wait for the next
       // user message (stream-input) before resuming.
-      while (!ac.signal.aborted && sdkSessionId) {
+      while (!ac.signal.aborted && !ctx.interrupted && sdkSessionId) {
         let nextContent: string | ContentBlock[]
 
         if (wasIdleStop) {
