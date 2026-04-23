@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Header } from '~/components/layout/header'
 import { Main } from '~/components/layout/main'
 import { Badge } from '~/components/ui/badge'
@@ -7,6 +7,7 @@ import { ScrollArea } from '~/components/ui/scroll-area'
 import { Tabs, TabsList, TabsTrigger } from '~/components/ui/tabs'
 import { useSession } from '~/lib/auth-client'
 import {
+  type CurrentDeploy,
   type DeployState,
   type DeployStatus,
   type LogLevel,
@@ -143,20 +144,13 @@ function DeploysView() {
     window.localStorage.setItem(REPO_STORAGE_KEY, repo)
   }, [repo])
 
-  // Clear stale state while switching repos so the UI doesn't flash the
-  // previous repo's deploy while the first fetch is in flight.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: setState/setError are stable; we intentionally re-run only on repo change
-  useEffect(() => {
-    setState(null)
-    setError(null)
-  }, [repo])
-
   useEffect(() => {
     let cancelled = false
 
     const load = async () => {
       try {
-        const resp = await fetch(`/api/deploys/state?repo=${encodeURIComponent(repo)}`, {
+        // Fetch the shared state file once — repo filtering happens client-side.
+        const resp = await fetch('/api/deploys/state', {
           credentials: 'include',
         })
         if (!resp.ok) {
@@ -180,14 +174,38 @@ function DeploysView() {
       cancelled = true
       window.clearInterval(handle)
     }
-  }, [repo])
+  }, [])
+
+  // Client-side filter: isolate current deploy and queue by selected repo.
+  // History entries lack worktree_name so they stay unfiltered (shared pipeline).
+  const filtered = useMemo(() => {
+    if (!state) return null
+    const repoMatch = (wt: string | null | undefined) => !wt || wt === repo
+    const currentMatch = repoMatch(state.current.worktree_name)
+    return {
+      ...state,
+      current: currentMatch
+        ? state.current
+        : ({
+            ...state.current,
+            status: 'idle' as const,
+            logs: [],
+            phases: {},
+            workers: [],
+          } satisfies CurrentDeploy),
+      queue: state.queue.filter((q) => {
+        if (q.worktree_path) return q.worktree_path.includes(`/${repo}`)
+        return true
+      }),
+    }
+  }, [state, repo])
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: re-run when log count changes to stick to tail
   useEffect(() => {
     const el = logTailRef.current
     if (!el) return
     el.scrollTop = el.scrollHeight
-  }, [state?.current.logs.length])
+  }, [filtered?.current.logs.length])
 
   return (
     <>
@@ -217,18 +235,18 @@ function DeploysView() {
             </div>
           )}
 
-          {state && (
+          {filtered && (
             <>
-              <CurrentDeploySection state={state} />
-              <PhasesSection state={state} />
-              <WorkersSection state={state} />
-              <LogsSection state={state} logTailRef={logTailRef} />
-              {state.queue.length > 0 && <QueueSection state={state} />}
-              <HistorySection state={state} />
+              <CurrentDeploySection state={filtered} />
+              <PhasesSection state={filtered} />
+              <WorkersSection state={filtered} />
+              <LogsSection state={filtered} logTailRef={logTailRef} />
+              {filtered.queue.length > 0 && <QueueSection state={filtered} />}
+              <HistorySection state={filtered} />
             </>
           )}
 
-          {!state && !error && (
+          {!filtered && !error && (
             <p className="text-sm text-muted-foreground">Loading deploy state…</p>
           )}
         </div>
