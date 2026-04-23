@@ -1205,6 +1205,30 @@ describe('SessionDO status-aware recovery', () => {
     expect(spy).toHaveBeenCalledTimes(1)
   })
 
+  // Terminal runner states — recovery must run immediately (not wait 15s grace).
+  // Only 'running' runners can reconnect via DialBackClient backoff; the rest
+  // have exited and will never come back. Running recovery right away avoids
+  // a wedged 'running' status if the grace setTimeout is lost to hibernation.
+  it.each([
+    'crashed',
+    'failed',
+    'aborted',
+  ] as const)('runs recovery immediately when gateway reports state:%s', async (state) => {
+    mockStatus({
+      ok: true,
+      state,
+      sdk_session_id: 'sdk-1',
+      last_activity_ts: 0,
+      last_event_seq: 0,
+      cost: { input_tokens: 0, output_tokens: 0, usd: 0 },
+      model: null,
+      turn_count: 0,
+    })
+    const spy = vi.fn()
+    await simulateMaybeRecover('http://gw', 'sess-1', 'sec', spy)
+    expect(spy).toHaveBeenCalledTimes(1)
+  })
+
   it('runs recovery on 404 (orphan)', async () => {
     globalThis.fetch = vi.fn(async () => new Response('{}', { status: 404 })) as any
     const spy = vi.fn()
@@ -1262,6 +1286,47 @@ describe('SessionDO watchdog env threshold', () => {
   it('does not trigger recovery while a gateway conn is still present', () => {
     const env = { STALE_THRESHOLD_MS: '60000' }
     expect(wouldRecover(env, 120_000, true)).toBe(false)
+  })
+})
+
+// ── Hibernation-safe recovery grace (durable kv deadline) ─────────
+//
+// maybeRecoverAfterGatewayDrop persists `recovery_grace_until` in kv
+// alongside the in-memory setTimeout so that a hibernation-evicted DO
+// still runs recovery on the next alarm tick rather than staying wedged
+// in status='running' with no attached runner.
+
+describe('SessionDO alarm: durable recovery grace', () => {
+  /**
+   * Mirrors the alarm() branch that consults kv for a stored grace deadline
+   * (session-do.ts: `recovery_grace_until`). Returns the action the alarm
+   * handler will take.
+   */
+  function graceAction(params: {
+    graceUntil: number | null
+    now: number
+    hasGateway: boolean
+  }): 'recover' | 'clear_only' | 'noop' {
+    if (params.graceUntil === null) return 'noop'
+    if (params.now < params.graceUntil) return 'noop'
+    // Deadline passed — the alarm handler deletes the kv row, then decides.
+    return params.hasGateway ? 'clear_only' : 'recover'
+  }
+
+  it('runs recovery when the stored deadline has passed and no runner is attached', () => {
+    expect(graceAction({ graceUntil: 1000, now: 2000, hasGateway: false })).toBe('recover')
+  })
+
+  it('skips recovery when the runner reconnected during the grace window', () => {
+    expect(graceAction({ graceUntil: 1000, now: 2000, hasGateway: true })).toBe('clear_only')
+  })
+
+  it('does nothing when the deadline is in the future (still in grace)', () => {
+    expect(graceAction({ graceUntil: 5000, now: 2000, hasGateway: false })).toBe('noop')
+  })
+
+  it('does nothing when no deadline is persisted (no grace in flight)', () => {
+    expect(graceAction({ graceUntil: null, now: 2000, hasGateway: false })).toBe('noop')
   })
 })
 
@@ -3197,17 +3262,27 @@ describe('error event transitions session to idle (not error) so user can resume
   // Mirrors the sendMessage resumable-branch gate
   // (session-do.ts lines 2465-2477): status must be 'idle' with an
   // sdk_session_id for a post-error resume to be accepted.
+  //
+  // Also mirrors the auto-heal that precedes the gate — if status is
+  // 'running'/'waiting_gate' but no runner is attached, recovery runs
+  // inline (flipping status to 'idle') before the gate is evaluated.
   function sendMessageAcceptsResume(state: {
     status: string
     sdk_session_id: string | null
     hasLiveRunner: boolean
-  }): { ok: boolean; error?: string } {
-    const isResumable =
-      !state.hasLiveRunner && state.status === 'idle' && Boolean(state.sdk_session_id)
-    if (!state.hasLiveRunner && !isResumable) {
-      return { ok: false, error: `Cannot send message: status is '${state.status}'` }
+  }): { ok: boolean; error?: string; healed?: boolean } {
+    let status = state.status
+    let healed = false
+    if (!state.hasLiveRunner && (status === 'running' || status === 'waiting_gate')) {
+      // recoverFromDroppedConnection → status='idle', sdk_session_id preserved.
+      status = 'idle'
+      healed = true
     }
-    return { ok: true }
+    const isResumable = !state.hasLiveRunner && status === 'idle' && Boolean(state.sdk_session_id)
+    if (!state.hasLiveRunner && !isResumable) {
+      return { ok: false, error: `Cannot send message: status is '${status}'`, healed }
+    }
+    return { ok: true, healed }
   }
 
   it('transitions state to idle (not error) on runner error event', () => {
@@ -3246,7 +3321,8 @@ describe('error event transitions session to idle (not error) so user can resume
       sdk_session_id: 'sdk-sess-abc',
       hasLiveRunner: false,
     })
-    expect(res).toEqual({ ok: true })
+    expect(res.ok).toBe(true)
+    expect(res.healed).toBe(false)
   })
 
   it('regression guard: never returns "Cannot send message: status is \'error\'"', () => {
@@ -3261,6 +3337,40 @@ describe('error event transitions session to idle (not error) so user can resume
     expect(errRes.ok).toBe(false)
     expect(errRes.error).toBe("Cannot send message: status is 'error'")
     // The post-error path MUST be idle, not error — proven above.
+  })
+
+  // Auto-heal for the stuck-running case: status='running' persisted in DO
+  // state, no gateway WS attached, sdk_session_id present. Before the fix,
+  // sendMessage returned "Cannot send message: status is 'running'"; after
+  // the fix it runs recovery inline, flipping to idle, and accepts the turn.
+  it('auto-heals stuck status:running with no runner (runs recovery inline)', () => {
+    const res = sendMessageAcceptsResume({
+      status: 'running',
+      sdk_session_id: 'sdk-sess-xyz',
+      hasLiveRunner: false,
+    })
+    expect(res.ok).toBe(true)
+    expect(res.healed).toBe(true)
+  })
+
+  it('auto-heals stuck status:waiting_gate with no runner', () => {
+    const res = sendMessageAcceptsResume({
+      status: 'waiting_gate',
+      sdk_session_id: 'sdk-sess-xyz',
+      hasLiveRunner: false,
+    })
+    expect(res.ok).toBe(true)
+    expect(res.healed).toBe(true)
+  })
+
+  it('does not auto-heal when the runner is attached (normal running path)', () => {
+    const res = sendMessageAcceptsResume({
+      status: 'running',
+      sdk_session_id: 'sdk-sess-xyz',
+      hasLiveRunner: true,
+    })
+    expect(res.ok).toBe(true)
+    expect(res.healed).toBe(false)
   })
 })
 

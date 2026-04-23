@@ -891,13 +891,10 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       this.lastGatewayActivity = Date.now()
 
       // GH#57: runner reconnected after a transient WS flap — cancel the
-      // pending recovery grace timer so we don't clear the callback token.
-      if (this.recoveryGraceTimer) {
-        console.log(
-          `[SessionDO:${this.ctx.id}] Runner reconnected — cancelling recovery grace timer`,
-        )
-        this.clearRecoveryGraceTimer()
-      }
+      // pending recovery grace so we don't clear the callback token. The grace
+      // lives as both an in-memory setTimeout (fast path) and a durable kv row
+      // consulted by alarm() after hibernation; clear both.
+      this.clearRecoveryGraceTimer()
 
       console.log(`[SessionDO:${this.ctx.id}] Gateway connected: conn=${connection.id}`)
 
@@ -1134,27 +1131,56 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     const result = await getSessionStatus(gatewayUrl, this.env.CC_GATEWAY_SECRET, sessionId, 5_000)
 
     if (result.kind === 'state') {
-      // GH#57: the runner is still alive on the VPS — its DialBackClient
-      // will attempt to reconnect (1s/3s/9s backoff). Give it a grace
-      // window before running recovery. If onConnectInner fires within
-      // the window, the timer is cancelled and the session resumes without
-      // clearing active_callback_token.
+      const runnerState = result.body.state
+      // Only 'running' runners can possibly reconnect via DialBackClient
+      // backoff. Terminal states (crashed/failed/aborted/completed) mean the
+      // runner process is gone — recover immediately instead of burning a
+      // 15s grace window waiting for a reconnect that will never happen.
+      if (runnerState !== 'running') {
+        console.log(
+          `[SessionDO:${this.ctx.id}] WS dropped, gateway reports terminal state=${runnerState} — running recovery immediately`,
+        )
+        await this.recoverFromDroppedConnection()
+        return
+      }
+
+      // GH#57: runner still alive on the VPS — its DialBackClient will retry
+      // (1s/3s/9s backoff). Grace the close to avoid clearing the callback
+      // token mid-reconnect (which would 4401 the runner and kill it).
       //
-      // This fixes the GH#50 B6 regression where unconditional recovery
-      // on any WS drop cleared the token and killed the runner's reconnect
-      // with 4401. The watchdog alarm (90s stale threshold) is the
-      // long-stop safety net if the runner never reconnects.
+      // Two-tier grace: the setTimeout is the fast path when the DO stays
+      // live for the full window; the persisted kv deadline is the
+      // hibernation-safe backstop checked in alarm(). Without the durable
+      // row, a DO eviction during the 15s window drops the timer and
+      // recovery never runs — status stays 'running' forever and the next
+      // sendMessage trips the gate at "Cannot send message: status is
+      // 'running'" with no attached runner.
+      const deadline = Date.now() + RECOVERY_GRACE_MS
       console.log(
-        `[SessionDO:${this.ctx.id}] WS dropped, gateway reports state=${result.body.state} — scheduling recovery grace (${RECOVERY_GRACE_MS}ms)`,
+        `[SessionDO:${this.ctx.id}] WS dropped, gateway reports state=running — scheduling recovery grace (${RECOVERY_GRACE_MS}ms, deadline=${deadline})`,
       )
       this.clearRecoveryGraceTimer()
+      try {
+        this
+          .sql`INSERT OR REPLACE INTO kv (key, value) VALUES ('recovery_grace_until', ${String(deadline)})`
+      } catch (err) {
+        console.warn(`[SessionDO:${this.ctx.id}] Failed to persist recovery_grace_until:`, err)
+      }
+      // Pull the alarm in to the grace deadline so a hibernation-wake post-
+      // deadline runs recovery on the first alarm tick rather than waiting
+      // for the next 30s watchdog cycle.
+      try {
+        this.ctx.storage.setAlarm(deadline)
+      } catch (err) {
+        console.warn(`[SessionDO:${this.ctx.id}] Failed to set recovery-grace alarm:`, err)
+      }
       this.recoveryGraceTimer = setTimeout(async () => {
         this.recoveryGraceTimer = null
-        // Double-check: if the runner reconnected in the meantime, skip.
         if (this.getGatewayConnectionId()) {
           console.log(
             `[SessionDO:${this.ctx.id}] Recovery grace expired but runner reconnected — skipping recovery`,
           )
+          this.clearRecoveryGraceTimer()
           return
         }
         console.log(
@@ -1294,12 +1320,18 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   }
 
   /** Schedule the next watchdog alarm. */
-  /** GH#57: cancel any pending recovery grace timer (runner reconnected or
-   * recovery running through another path). */
+  /** GH#57: cancel any pending recovery grace (runner reconnected or recovery
+   * running through another path). Clears both the in-memory setTimeout and
+   * the durable kv deadline consulted by alarm() after hibernation. */
   private clearRecoveryGraceTimer() {
     if (this.recoveryGraceTimer !== null) {
       clearTimeout(this.recoveryGraceTimer)
       this.recoveryGraceTimer = null
+    }
+    try {
+      this.sql`DELETE FROM kv WHERE key = 'recovery_grace_until'`
+    } catch {
+      // ignore — kv table may not exist on pre-migration DO instances
     }
   }
 
@@ -1330,8 +1362,38 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       return // Session not active, no need to watch
     }
 
-    const staleDuration = Date.now() - this.lastGatewayActivity
     const gwConnId = this.getGatewayConnectionId()
+
+    // Hibernation-safe grace expiry: the in-memory setTimeout in
+    // maybeRecoverAfterGatewayDrop is lost if the DO hibernates during the
+    // grace window. The alarm is durable, so check the persisted deadline
+    // here and run recovery if it has passed and no runner has reconnected.
+    try {
+      const graceRows = this.sql<{
+        value: string
+      }>`SELECT value FROM kv WHERE key = 'recovery_grace_until'`
+      const graceUntilRaw = graceRows[0]?.value
+      if (graceUntilRaw !== undefined) {
+        const graceUntil = Number(graceUntilRaw)
+        if (Number.isFinite(graceUntil) && Date.now() >= graceUntil) {
+          this.sql`DELETE FROM kv WHERE key = 'recovery_grace_until'`
+          if (!gwConnId) {
+            console.log(
+              `[SessionDO:${this.ctx.id}] Watchdog: recovery grace expired (deadline=${graceUntil}) — running recovery`,
+            )
+            await this.recoverFromDroppedConnection()
+            return
+          }
+          console.log(
+            `[SessionDO:${this.ctx.id}] Watchdog: recovery grace expired but runner reconnected — clearing marker`,
+          )
+        }
+      }
+    } catch (err) {
+      console.warn(`[SessionDO:${this.ctx.id}] Watchdog: recovery_grace read failed:`, err)
+    }
+
+    const staleDuration = Date.now() - this.lastGatewayActivity
     const staleThreshold = resolveStaleThresholdMs(this.env.STALE_THRESHOLD_MS)
 
     if (staleDuration > staleThreshold && !gwConnId) {
@@ -3409,6 +3471,26 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       }
     }
 
+    const hasLiveRunner = Boolean(this.getGatewayConnectionId())
+
+    // Auto-heal a stuck status='running' / 'waiting_gate' with no attached
+    // runner: this happens when maybeRecoverAfterGatewayDrop's grace path
+    // loses its setTimeout to hibernation and the watchdog alarm hasn't yet
+    // run recovery. Without this, the next user turn hits the isResumable
+    // gate below and returns "Cannot send message: status is 'running'" —
+    // the session is permanently wedged until manual intervention.
+    if (
+      !hasLiveRunner &&
+      (this.state.status === 'running' || this.state.status === 'waiting_gate')
+    ) {
+      console.warn(
+        `[SessionDO:${this.ctx.id}] sendMessage: auto-healing stuck status='${this.state.status}' with no runner — running recovery inline`,
+      )
+      await this.recoverFromDroppedConnection()
+      // recovery flipped status to 'idle' and preserved sdk_session_id;
+      // fall through to the resumable path below.
+    }
+
     const { status } = this.state
     // A session-runner stays alive through `type=result` and blocks waiting on
     // the next stream-input (see claude-runner.ts multi-turn loop). Route by
@@ -3416,7 +3498,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // attached, reuse that runner — dialling a fresh one would collide with
     // the existing sdk_session_id inside session-runner's hasLiveResume guard
     // and nothing would happen from the user's perspective.
-    const hasLiveRunner = Boolean(this.getGatewayConnectionId())
     const isResumable = !hasLiveRunner && status === 'idle' && this.state.sdk_session_id
 
     if (!hasLiveRunner && !isResumable) {
