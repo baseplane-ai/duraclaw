@@ -76,3 +76,32 @@ describe('deriveDisplayStateFromStatus', () => {
     expect(result.isInteractive).toBe(false)
   })
 })
+
+describe('deriveDisplayStateFromStatus — WS grace period (GH#69 B5)', () => {
+  it('(a) WS closed <5s ago returns server status, not DISCONNECTED', () => {
+    const now = 10_000
+    const wsCloseTs = now - 3_000
+    const result = deriveDisplayStateFromStatus('running', 3, wsCloseTs, now)
+    expect(result.status).toBe('running')
+  })
+  it('(b) WS closed >5s ago returns DISCONNECTED', () => {
+    const now = 10_000
+    const wsCloseTs = now - 6_000
+    expect(deriveDisplayStateFromStatus('running', 3, wsCloseTs, now).status).toBe('disconnected')
+  })
+  it('(c) WS reopened (wsCloseTs=null) returns server status', () => {
+    const result = deriveDisplayStateFromStatus('running', 1, null, 10_000)
+    expect(result.status).toBe('running')
+  })
+  it('(d) transitions to DISCONNECTED at exactly 5s boundary', () => {
+    const now = 10_000
+    // <5000ms inside grace
+    expect(deriveDisplayStateFromStatus('running', 3, now - 4_999, now).status).toBe('running')
+    // exactly 5000ms → grace expired (strict less-than)
+    expect(deriveDisplayStateFromStatus('running', 3, now - 5_000, now).status).toBe('disconnected')
+  })
+  it('wsCloseTs omitted → existing behavior unchanged', () => {
+    // No 3rd arg at all — default `null` → immediate DISCONNECTED.
+    expect(deriveDisplayStateFromStatus('running', 3).status).toBe('disconnected')
+  })
+})

@@ -103,25 +103,24 @@ describe('WS bridge in useCodingAgent', () => {
     expect(capturedOnStateUpdate).toBeUndefined()
   })
 
-  test('useCodingAgent writes only { wsReadyState } into sessionLocalCollection (Spec #37 B11)', () => {
+  test('useCodingAgent writes only { wsReadyState, wsCloseTs } into sessionLocalCollection (Spec #37 B11 + GH#69 B5)', () => {
     renderHook(() => useCodingAgent('test-session'))
     // wsReadyState mirror effect is the only write path into the local
-    // collection. Any insert payload must contain exactly `id` +
-    // `wsReadyState`; any update patcher must only touch `wsReadyState`.
+    // collection. GH#69 B5 extended the row with `wsCloseTs` (OPEN→!OPEN
+    // stamp). Any insert payload must contain exactly `id`,
+    // `wsReadyState`, and `wsCloseTs`; any update patcher must only
+    // touch `wsReadyState` and optionally `wsCloseTs`.
     for (const call of mockLocalInsert.mock.calls) {
       const row = call[0] as Record<string, unknown>
       const keys = Object.keys(row).sort()
-      expect(keys).toEqual(['id', 'wsReadyState'])
+      expect(keys).toEqual(['id', 'wsCloseTs', 'wsReadyState'])
     }
-    // Update patchers receive a draft they mutate in-place; ensure no
-    // unexpected keys get added (simulate by calling the patcher against
-    // a wsReadyState-only draft and asserting no extra keys appear).
     for (const call of mockLocalUpdate.mock.calls) {
-      const patcher = call[1] as (draft: { wsReadyState: number }) => void
-      const draft: Record<string, unknown> = { wsReadyState: 3 }
-      patcher(draft as { wsReadyState: number })
+      const patcher = call[1] as (draft: { wsReadyState: number; wsCloseTs: number | null }) => void
+      const draft: Record<string, unknown> = { wsReadyState: 3, wsCloseTs: null }
+      patcher(draft as { wsReadyState: number; wsCloseTs: number | null })
       const keys = Object.keys(draft).sort()
-      expect(keys).toEqual(['wsReadyState'])
+      expect(keys).toEqual(['wsCloseTs', 'wsReadyState'])
     }
   })
 })

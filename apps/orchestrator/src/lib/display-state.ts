@@ -82,22 +82,43 @@ const UNKNOWN: DisplayState = {
   isInteractive: false,
 }
 
+// GH#69 B5: grace window after a WS close during which we suppress the
+// DISCONNECTED label so the ConnectionManager reconnect cycle can finish
+// before the UI flashes "Reconnecting…".
+const WS_GRACE_MS = 5_000
+
 /**
  * Derive the UI display state for a session given its status and the
  * current WS `readyState`.
  *
  * - `status === undefined` → `unknown` (never connected / no D1 mirror in
  *   this browser).
- * - `wsReadyState !== 1` (WebSocket.OPEN) → `disconnected`.
+ * - `wsReadyState !== 1` (WebSocket.OPEN) → `disconnected`, unless
+ *   `wsCloseTs` is within the B5 grace window, in which case we fall
+ *   through to the server-status-derived path.
  * - Otherwise `status` is mapped to the matching variant; anything
  *   unexpected falls back to `unknown`.
+ *
+ * `wsCloseTs` + `nowTs` are optional so existing call sites that don't
+ * observe WS close timestamps keep today's semantics (immediate
+ * DISCONNECTED when `wsReadyState !== 1`).
  */
 export function deriveDisplayStateFromStatus(
   status: SessionStatus | undefined,
   wsReadyState: number,
+  wsCloseTs: number | null = null,
+  nowTs: number = Date.now(),
 ): DisplayState {
   if (status === undefined) return UNKNOWN
-  if (wsReadyState !== 1) return DISCONNECTED
+  if (wsReadyState !== 1) {
+    // GH#69 B5: suppress DISCONNECTED for 5s after WS close so the
+    // ConnectionManager reconnect cycle completes before the UI flashes
+    // "Reconnecting…". After the grace expires, fall through to DISCONNECTED.
+    // Strict less-than so the 5s boundary itself is DISCONNECTED.
+    const withinGrace = wsCloseTs != null && nowTs - wsCloseTs < WS_GRACE_MS
+    if (!withinGrace) return DISCONNECTED
+    // within grace — fall through to server-status-derived path below
+  }
 
   // Widen to string so forward-compatible statuses ('archived')
   // can be matched today even though the narrow `SessionStatus` union

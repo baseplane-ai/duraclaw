@@ -372,7 +372,11 @@ function ProjectTabInner({
   // `running` tabs degrade to `idle` in lockstep with StatusBar / sidebar.
   const nowTs = useNow()
   const sessionDerived = session ? deriveStatus(session, nowTs) : undefined
-  const tabDisplay = deriveDisplayStateFromStatus(sessionDerived, liveLocal?.wsReadyState ?? 3)
+  const tabDisplay = deriveDisplayStateFromStatus(
+    sessionDerived,
+    liveLocal?.wsReadyState ?? 3,
+    liveLocal?.wsCloseTs ?? null,
+  )
   const tabStatus = tabDisplay.status !== 'unknown' ? tabDisplay.status : (sessionDerived ?? 'idle')
   const tabNumTurns = session?.numTurns ?? 0
 

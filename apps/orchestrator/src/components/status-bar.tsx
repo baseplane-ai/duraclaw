@@ -6,7 +6,7 @@
  */
 
 import { GitBranchIcon } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ChainStatusItem } from '~/components/chain-status-item'
 import { useSessionLocalState } from '~/db/session-local-collection'
 import { useSession } from '~/hooks/use-sessions-collection'
@@ -237,17 +237,50 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
   const local = useSessionLocalState(sessionId)
   const nowTs = useNow()
 
-  if (!sessionId) return null
+  // GH#69 B6: tripwire for TTL idle override firing with WS OPEN. Must be
+  // declared before any early return so hook order stays stable across
+  // renders. Warns once per (sessionId, lastEventTs) transition when
+  // `deriveStatus` shadowed a server `running` row to `idle` even though
+  // the WS is healthy — strong signal of the drift class #69 exists to
+  // eliminate.
+  const overrideFiredRef = useRef<string | null>(null)
+
   const readyState = local?.wsReadyState ?? 3
   // GH#50: TTL-derived status — overrides stuck `running` rows to `idle`
   // after >45s of silence from the runner.
-  const status: SessionStatus = session ? deriveStatus(session, nowTs) : 'idle'
+  const status: SessionStatus | undefined = session ? deriveStatus(session, nowTs) : undefined
+
+  useEffect(() => {
+    if (!session) {
+      overrideFiredRef.current = null
+      return
+    }
+    const overrideActive =
+      status === 'idle' && (session.status as string) === 'running' && readyState === 1
+    const key = overrideActive ? `${sessionId}:${session.lastEventTs ?? 0}` : null
+    if (key && key !== overrideFiredRef.current) {
+      console.warn(
+        '[derive-status] TTL idle override fired with WS OPEN — lastEventTs:',
+        session.lastEventTs,
+        'age:',
+        nowTs - (session.lastEventTs ?? 0),
+        'ms',
+      )
+      overrideFiredRef.current = key
+    }
+    if (!overrideActive) {
+      overrideFiredRef.current = null
+    }
+  }, [session, status, readyState, sessionId, nowTs])
+
+  if (!sessionId) return null
+  const statusResolved: SessionStatus = status ?? 'idle'
   // Force `wsReadyState=1` when deriving the display label so it stays
   // anchored to the session's actual status (Running / Idle / Needs
   // Attention) regardless of WS health. Connection health is communicated
   // by `WsDot`'s color — the label shouldn't flicker to "Reconnecting…"
   // every time partysocket hiccups.
-  const display = deriveDisplayStateFromStatus(status, 1)
+  const display = deriveDisplayStateFromStatus(statusResolved, 1)
   const project = session?.project ?? ''
   const model = session?.model ?? null
   const numTurns = session?.numTurns ?? 0
@@ -261,7 +294,7 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
     <div
       className={cn(
         'flex w-full flex-wrap items-center gap-x-3 gap-y-0.5 px-2 py-1 font-mono text-xs',
-        getBarClasses(status),
+        getBarClasses(statusResolved),
       )}
       data-testid="status-bar"
       data-display-status={display.status}
@@ -297,7 +330,7 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
 
       {/* Right-aligned timer — action buttons moved to the composer footer */}
       <div className="ml-auto flex shrink-0 items-center gap-2">
-        <ElapsedTimer status={status} startedAt={session?.lastActivity ?? null} />
+        <ElapsedTimer status={statusResolved} startedAt={session?.lastActivity ?? null} />
         {durationMs != null && (
           <span className="text-muted-foreground">{formatDuration(durationMs)}</span>
         )}

@@ -69,7 +69,11 @@ export function SessionListItem({
   // funnel through `deriveStatus` so stuck `running` rows degrade to
   // `idle` after >45s of silence.
   const rawStatus = liveSession ? deriveStatus(liveSession, nowTs) : deriveStatus(session, nowTs)
-  const display = deriveDisplayStateFromStatus(rawStatus, local?.wsReadyState ?? 3)
+  const display = deriveDisplayStateFromStatus(
+    rawStatus,
+    local?.wsReadyState ?? 3,
+    local?.wsCloseTs ?? null,
+  )
   const status = display.status !== 'unknown' ? display.status : rawStatus
   const [menuOpen, setMenuOpen] = useState(false)
   const [renameOpen, setRenameOpen] = useState(false)

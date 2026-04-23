@@ -13,6 +13,13 @@ import { useLiveQuery } from '@tanstack/react-db'
 export interface SessionLocalState {
   id: string
   wsReadyState: number
+  /**
+   * GH#69 B5: epoch-ms of the last OPEN→!OPEN transition. Cleared to `null`
+   * when readyState transitions back to OPEN. Consumed by
+   * `deriveDisplayStateFromStatus` to suppress the DISCONNECTED flash during
+   * the 5s ConnectionManager reconnect window. Transient / not persisted.
+   */
+  wsCloseTs: number | null
 }
 
 export const sessionLocalCollection = createCollection(
