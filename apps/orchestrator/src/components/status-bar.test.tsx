@@ -11,7 +11,7 @@ import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 let sessionRow: Partial<SessionSummary> | undefined
-let localRow: { id: string; wsReadyState: number } | undefined
+let localRow: { id: string; wsReadyState: number; wsCloseTs: number | null } | undefined
 
 vi.mock('~/hooks/use-sessions-collection', () => ({
   useSession: () => sessionRow,
@@ -34,7 +34,7 @@ function setSession(overrides: Partial<SessionSummary> = {}) {
 }
 
 function setLocal(wsReadyState: number) {
-  localRow = { id: TEST_ID, wsReadyState }
+  localRow = { id: TEST_ID, wsReadyState, wsCloseTs: null }
 }
 
 describe('StatusBar', () => {

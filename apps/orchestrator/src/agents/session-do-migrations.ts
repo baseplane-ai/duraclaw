@@ -181,4 +181,19 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 11,
+    description: 'Add last_event_ts to session_meta for hibernation-safe liveness (GH#69 B1)',
+    up: (sql) => {
+      try {
+        sql.exec(`ALTER TABLE session_meta ADD COLUMN last_event_ts INTEGER NOT NULL DEFAULT 0`)
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (!msg.toLowerCase().includes('duplicate column')) {
+          console.warn('[migration v11] unexpected error adding last_event_ts column', e)
+          throw e
+        }
+      }
+    },
+  },
 ]

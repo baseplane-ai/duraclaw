@@ -233,10 +233,66 @@ describe('SESSION_DO_MIGRATIONS', () => {
     })
   })
 
+  describe('migration v11: session_meta.last_event_ts column (GH#69 B1)', () => {
+    it('exists as version 11', () => {
+      const v11 = SESSION_DO_MIGRATIONS.find((m) => m.version === 11)
+      expect(v11).toBeDefined()
+      expect(v11!.description.toLowerCase()).toContain('last_event_ts')
+    })
+
+    it('executes an ALTER TABLE session_meta ADD COLUMN last_event_ts', () => {
+      const v11 = SESSION_DO_MIGRATIONS.find((m) => m.version === 11)!
+      const executed: string[] = []
+      const fakeSql = {
+        exec(query: string) {
+          executed.push(query)
+          return { toArray: () => [] }
+        },
+      }
+
+      v11.up(fakeSql as any)
+
+      const alter = executed.find(
+        (q) =>
+          q.includes('ALTER TABLE') && q.includes('session_meta') && q.includes('last_event_ts'),
+      )
+      expect(alter).toBeTruthy()
+      expect(alter).toContain('INTEGER')
+    })
+
+    it('is idempotent — swallows "duplicate column" on second run', () => {
+      const v11 = SESSION_DO_MIGRATIONS.find((m) => m.version === 11)!
+      let call = 0
+      const fakeSql = {
+        exec(_query: string) {
+          call += 1
+          if (call === 2) {
+            throw new Error('duplicate column name: last_event_ts')
+          }
+          return { toArray: () => [] }
+        },
+      }
+
+      expect(() => v11.up(fakeSql as any)).not.toThrow()
+      expect(() => v11.up(fakeSql as any)).not.toThrow()
+      expect(call).toBe(2)
+    })
+
+    it('rethrows non-duplicate-column errors (surface real failures)', () => {
+      const v11 = SESSION_DO_MIGRATIONS.find((m) => m.version === 11)!
+      const fakeSql = {
+        exec(_query: string) {
+          throw new Error('disk full')
+        },
+      }
+      expect(() => v11.up(fakeSql as any)).toThrow(/disk full/)
+    })
+  })
+
   describe('migration chain integrity', () => {
-    it('has sequential version numbers from 1 to 9', () => {
+    it('has sequential version numbers', () => {
       const versions = SESSION_DO_MIGRATIONS.map((m) => m.version)
-      expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
+      expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
     })
 
     it('all migrations have descriptions', () => {
@@ -1234,18 +1290,15 @@ function createSessionMetaSql() {
   return { sql: fakeSql, row, writes }
 }
 
-// Kept in sync with MESSAGE_SEQ_PERSIST_EVERY in session-do.ts — streaming
-// `partial_assistant` frames would otherwise trigger per-frame SQL writes.
-const MESSAGE_SEQ_PERSIST_EVERY = 10
-
-describe('messageSeq persistence (session_meta B1)', () => {
+describe('messageSeq persistence (session_meta B4 — GH#69)', () => {
   /**
-   * Simulates SessionDO.broadcastMessages' seq+persist contract exactly:
+   * Simulates SessionDO.broadcastMessages' seq+persist contract exactly after
+   * the GH#69 B4 change (unconditional persist on every broadcast):
    *   if (!opts.targetClientId) {
    *     this.messageSeq += 1
-   *     if (this.messageSeq % MESSAGE_SEQ_PERSIST_EVERY === 0) {
+   *     try {
    *       this.sql`UPDATE session_meta SET message_seq = ${n}, updated_at = ${t} WHERE id = 1`
-   *     }
+   *     } catch { ... }
    *   }
    */
   function makeBroadcaster(sql: ReturnType<typeof createSessionMetaSql>['sql'], seed: number) {
@@ -1254,9 +1307,7 @@ describe('messageSeq persistence (session_meta B1)', () => {
       broadcast(opts: { targetClientId?: string } = {}): number {
         if (!opts.targetClientId) {
           messageSeq += 1
-          if (messageSeq % MESSAGE_SEQ_PERSIST_EVERY === 0) {
-            sql`UPDATE session_meta SET message_seq = ${messageSeq}, updated_at = ${Date.now()} WHERE id = 1`
-          }
+          sql`UPDATE session_meta SET message_seq = ${messageSeq}, updated_at = ${Date.now()} WHERE id = 1`
         }
         return messageSeq
       },
@@ -1264,62 +1315,57 @@ describe('messageSeq persistence (session_meta B1)', () => {
     }
   }
 
-  it('batches persistence to every Nth broadcast (streaming perf)', () => {
+  it('persists on every broadcast (no batching — hibernation-rewind safe)', () => {
     const { sql, row, writes } = createSessionMetaSql()
     const b = makeBroadcaster(sql, 0)
 
-    // First N-1 broadcasts advance the in-memory seq but do not hit SQLite.
-    for (let i = 1; i < MESSAGE_SEQ_PERSIST_EVERY; i++) {
-      expect(b.broadcast()).toBe(i)
-    }
-    expect(writes).toHaveLength(0)
-    expect(row.message_seq).toBe(0)
-
-    // Nth broadcast flushes to SQLite.
-    expect(b.broadcast()).toBe(MESSAGE_SEQ_PERSIST_EVERY)
-    expect(writes.map((w) => w.message_seq)).toEqual([MESSAGE_SEQ_PERSIST_EVERY])
-    expect(row.message_seq).toBe(MESSAGE_SEQ_PERSIST_EVERY)
+    // After 3 broadcasts we expect 3 writes, final seq = 3.
+    expect(b.broadcast()).toBe(1)
+    expect(b.broadcast()).toBe(2)
+    expect(b.broadcast()).toBe(3)
+    expect(writes).toHaveLength(3)
+    expect(writes.map((w) => w.message_seq)).toEqual([1, 2, 3])
+    expect(row.message_seq).toBe(3)
   })
 
-  it('rehydrates messageSeq across a DO restart from the last persisted Nth', () => {
+  it('rehydrates messageSeq across a DO restart from the last persisted seq', () => {
     const { sql, row } = createSessionMetaSql()
 
-    // First instance: enough broadcasts to cross two persist boundaries plus
-    // some un-persisted remainder (frame-precise recovery not required —
-    // clients snapshot on reconnect).
-    const total = MESSAGE_SEQ_PERSIST_EVERY * 2 + 3
+    // 7 broadcasts — crosses the old batch-of-10 boundary, simulating the
+    // B4 test case (DO eviction at <10 events should NOT rewind seq).
+    const total = 7
     const b1 = makeBroadcaster(sql, 0)
     for (let i = 0; i < total; i++) b1.broadcast()
-    expect(row.message_seq).toBe(MESSAGE_SEQ_PERSIST_EVERY * 2)
+    expect(row.message_seq).toBe(total)
 
     // Simulate onStart on a fresh DO instance — re-read persisted seq.
     const metaRows = sql<{
       message_seq: number
     }>`SELECT message_seq FROM session_meta WHERE id = 1`
     const rehydrated = metaRows[0]?.message_seq ?? 0
-    expect(rehydrated).toBe(MESSAGE_SEQ_PERSIST_EVERY * 2)
+    expect(rehydrated).toBe(total)
 
     // Next broadcast on the new instance continues from the persisted point.
     const b2 = makeBroadcaster(sql, rehydrated)
-    expect(b2.broadcast()).toBe(MESSAGE_SEQ_PERSIST_EVERY * 2 + 1)
+    expect(b2.broadcast()).toBe(total + 1)
   })
 
   it('targeted broadcasts do NOT increment or persist seq', () => {
     const { sql, row, writes } = createSessionMetaSql()
     const b = makeBroadcaster(sql, 0)
 
-    // Drive to the first persist boundary so we have something to observe.
-    for (let i = 0; i < MESSAGE_SEQ_PERSIST_EVERY; i++) b.broadcast()
-    expect(row.message_seq).toBe(MESSAGE_SEQ_PERSIST_EVERY)
-    expect(writes).toHaveLength(1)
+    // Drive the shared counter forward so we have something to observe.
+    for (let i = 0; i < 3; i++) b.broadcast()
+    expect(row.message_seq).toBe(3)
+    expect(writes).toHaveLength(3)
 
     // Targeted sends echo current seq — must not advance shared counter
     // and must not emit a SQL write.
-    expect(b.broadcast({ targetClientId: 'client-A' })).toBe(MESSAGE_SEQ_PERSIST_EVERY)
-    expect(b.broadcast({ targetClientId: 'client-B' })).toBe(MESSAGE_SEQ_PERSIST_EVERY)
+    expect(b.broadcast({ targetClientId: 'client-A' })).toBe(3)
+    expect(b.broadcast({ targetClientId: 'client-B' })).toBe(3)
 
-    expect(row.message_seq).toBe(MESSAGE_SEQ_PERSIST_EVERY)
-    expect(writes).toHaveLength(1)
+    expect(row.message_seq).toBe(3)
+    expect(writes).toHaveLength(3)
   })
 
   it('onStart falls back to 0 when the session_meta row is missing (defensive)', () => {

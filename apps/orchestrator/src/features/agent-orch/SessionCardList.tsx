@@ -97,7 +97,11 @@ function SwipeableCard({
   const isLive = local?.wsReadyState === 1
   // GH#50: derive via TTL predicate — stuck `running` degrades to `idle`.
   const rawStatus = liveSession ? deriveStatus(liveSession, nowTs) : deriveStatus(session, nowTs)
-  const display = deriveDisplayStateFromStatus(rawStatus, local?.wsReadyState ?? 3)
+  const display = deriveDisplayStateFromStatus(
+    rawStatus,
+    local?.wsReadyState ?? 3,
+    local?.wsCloseTs ?? null,
+  )
   const status = display.status !== 'unknown' ? display.status : rawStatus
   const displayName = session.title || getPreviewText(session) || session.id.slice(0, 8)
 
@@ -160,7 +164,11 @@ function OlderSessionRow({ session, onClick }: { session: SessionRecord; onClick
   const isLive = local?.wsReadyState === 1
   // GH#50: derive via TTL predicate.
   const rawStatus = liveSession ? deriveStatus(liveSession, nowTs) : deriveStatus(session, nowTs)
-  const display = deriveDisplayStateFromStatus(rawStatus, local?.wsReadyState ?? 3)
+  const display = deriveDisplayStateFromStatus(
+    rawStatus,
+    local?.wsReadyState ?? 3,
+    local?.wsCloseTs ?? null,
+  )
   const status = display.status !== 'unknown' ? display.status : rawStatus
   return (
     <button

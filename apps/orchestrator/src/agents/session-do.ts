@@ -101,14 +101,6 @@ export interface SessionMeta {
   lastKataMode?: string
 }
 
-/**
- * How often `messageSeq` is persisted to `session_meta`. Set > 1 so streaming
- * `partial_assistant` frames don't trigger per-frame SQL writes; the persisted
- * seq is only consulted on DO rehydrate after eviction, where reconnecting
- * clients fetch a snapshot anyway.
- */
-const MESSAGE_SEQ_PERSIST_EVERY = 10
-
 const DEFAULT_META: SessionMeta = {
   status: 'idle',
   session_id: null,
@@ -704,6 +696,11 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       }
 
       console.log(`[SessionDO:${this.ctx.id}] Gateway connected: conn=${connection.id}`)
+
+      // GH#69 B7: runner WS reconnected — immediately flush so D1 lastEventTs
+      // reflects liveness without waiting for the next debounce / watchdog tick.
+      void this.flushLastEventTsToD1()
+
       return // No replay, no protocol messages
     }
 
@@ -1097,6 +1094,18 @@ export class SessionDO extends Agent<Env, SessionMeta> {
    * have arrived recently and the WS is gone, attempt recovery.
    */
   async alarm() {
+    // GH#69 B3: piggyback D1 flush on every watchdog tick (30s). The DO
+    // `setTimeout` debounce in bumpLastEventTs() is destroyed by hibernation;
+    // the alarm survives and is the hibernation-safe backstop. Worst-case
+    // D1 staleness after hibernation is WATCHDOG_INTERVAL_MS (30s), safely
+    // within client TTL_MS (45s). No new alarm scheduled — single-alarm
+    // constraint preserved (see scheduleWatchdog at L1089).
+    //
+    // Guard: skip the async frame for sessions that never streamed events.
+    // `flushLastEventTsToD1` also early-returns on 0, but this avoids the
+    // promise allocation + clearTimer dance on idle sessions.
+    if (this.lastEventTs > 0) void this.flushLastEventTsToD1()
+
     if (this.state.status !== 'running' && this.state.status !== 'waiting_gate') {
       return // Session not active, no need to watch
     }
@@ -1246,11 +1255,24 @@ export class SessionDO extends Agent<Env, SessionMeta> {
           ;(patch as Record<string, unknown>)[key] = raw
         }
       }
-      if (Object.keys(patch).length === 0) return
-      this.setState({
-        ...this.state,
-        ...patch,
-      })
+      if (Object.keys(patch).length > 0) {
+        this.setState({
+          ...this.state,
+          ...patch,
+        })
+      }
+      // GH#69 B2: restore private liveness field (NOT part of SessionMeta / META_COLUMN_MAP).
+      const rawLastEventTs = row.last_event_ts
+      if (typeof rawLastEventTs === 'number' && rawLastEventTs > 0) {
+        this.lastEventTs = rawLastEventTs
+      }
+      // GH#69 Phase 1 task 3: best-effort D1 flush on wake if we already have a
+      // live runner WS. Typical wake-from-hibernation path sees no gateway conn
+      // yet (runner re-identifies via webSocketMessage after onStart); that path
+      // relies on the next bumpLastEventTs() + watchdog alarm (Phase 2).
+      if (this.state.status === 'running' && this.getGatewayConnectionId()) {
+        void this.flushLastEventTsToD1()
+      }
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] hydrateMetaFromSql failed:`, err)
     }
@@ -1519,14 +1541,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
 
     if (!opts.targetClientId) {
       this.messageSeq += 1
-      // Persist only every Nth increment — per-frame SQL writes during streaming
-      // `partial_assistant` turns are wasteful, and the persisted seq is only
-      // consulted on DO eviction / rehydrate, where clients reconnect with a
-      // snapshot anyway (frame-level precision unnecessary).
-      if (this.messageSeq % MESSAGE_SEQ_PERSIST_EVERY === 0) {
-        this
-          .sql`UPDATE session_meta SET message_seq = ${this.messageSeq}, updated_at = ${Date.now()} WHERE id = 1`
-      }
+      this.persistMessageSeq()
     }
     const frame: SyncedCollectionFrame<WireSessionMessage> = {
       type: 'synced-collection-delta',
@@ -1560,10 +1575,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     if (rows.length === 0 && !opts.targetClientId) return
     if (!opts.targetClientId) {
       this.messageSeq += 1
-      if (this.messageSeq % MESSAGE_SEQ_PERSIST_EVERY === 0) {
-        this
-          .sql`UPDATE session_meta SET message_seq = ${this.messageSeq}, updated_at = ${Date.now()} WHERE id = 1`
-      }
+      this.persistMessageSeq()
     }
     const ops: SyncedCollectionOp<BranchInfoRow>[] = rows.map((value) => ({
       type: 'insert' as const,
@@ -1580,6 +1592,22 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       this.sendToClient(opts.targetClientId, data)
     } else {
       this.broadcastToClients(data)
+    }
+  }
+
+  /**
+   * Persist the current `messageSeq` to `session_meta`. Called unconditionally
+   * from `broadcastMessages` / `broadcastBranchInfo` after incrementing
+   * `this.messageSeq` (GH#69 B4 — unconditional to eliminate hibernation-
+   * rewind risk). Fire-and-forget per the liveness-signal contract: a SQLite
+   * write failure must not crash the broadcast pipeline.
+   */
+  private persistMessageSeq(): void {
+    try {
+      this
+        .sql`UPDATE session_meta SET message_seq = ${this.messageSeq}, updated_at = ${Date.now()} WHERE id = 1`
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Failed to persist message_seq to SQLite:`, err)
     }
   }
 
@@ -1940,6 +1968,13 @@ export class SessionDO extends Agent<Env, SessionMeta> {
    */
   private bumpLastEventTs() {
     this.lastEventTs = Date.now()
+    // GH#69 B1: persist to DO SQLite (survives hibernation, ~0.1ms local write).
+    // Fire-and-forget — never crash the event pipeline for a liveness signal.
+    try {
+      this.sql`UPDATE session_meta SET last_event_ts = ${this.lastEventTs} WHERE id = 1`
+    } catch (err) {
+      console.error(`[SessionDO:${this.ctx.id}] Failed to persist last_event_ts to SQLite:`, err)
+    }
     if (this.lastEventFlushTimer) return
     this.lastEventFlushTimer = setTimeout(() => {
       this.lastEventFlushTimer = null

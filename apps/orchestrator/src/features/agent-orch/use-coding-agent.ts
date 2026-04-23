@@ -493,17 +493,42 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   // (Spec #37 B11). Insert on first observation, update on subsequent
   // transitions. On agentName change the effect cleanup leaves the prior
   // row untouched (tab switches preserve per-session state until unmount).
+  //
+  // GH#69 B5: stamp `wsCloseTs` on OPEN→!OPEN transitions and clear it on
+  // !OPEN→OPEN, so `deriveDisplayStateFromStatus` can suppress the
+  // DISCONNECTED flash for 5s while ConnectionManager reconnects. We
+  // maintain our own ref here rather than reuse `prevReadyStateRef`
+  // (which is overwritten by the reconnect-dispatch effect above on the
+  // same tick).
+  const wsCloseRef = useRef<number>(readyState)
   useEffect(() => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const coll = sessionLocalCollection as any
+    const prev = wsCloseRef.current
+    let wsCloseTsPatch: number | null | undefined
+    if (prev === 1 && readyState !== 1) {
+      wsCloseTsPatch = Date.now()
+    } else if (prev !== 1 && readyState === 1) {
+      wsCloseTsPatch = null
+    } // else: undefined → don't touch existing wsCloseTs
+    wsCloseRef.current = readyState
     try {
       // Prefer update; insert on duplicate-key throw (safe both ways).
       try {
-        coll.update(agentName, (draft: { wsReadyState: number }) => {
+        coll.update(agentName, (draft: { wsReadyState: number; wsCloseTs: number | null }) => {
           draft.wsReadyState = readyState
+          if (wsCloseTsPatch !== undefined) {
+            draft.wsCloseTs = wsCloseTsPatch
+          }
         })
       } catch {
-        coll.insert({ id: agentName, wsReadyState: readyState })
+        coll.insert({
+          id: agentName,
+          wsReadyState: readyState,
+          // On first observation, seed `wsCloseTs` from the transition:
+          // if already disconnected, stamp now; if open, null.
+          wsCloseTs: readyState === 1 ? null : Date.now(),
+        })
       }
     } catch {
       // collection not ready; next readyState change will retry

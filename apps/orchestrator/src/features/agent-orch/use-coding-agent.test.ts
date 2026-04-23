@@ -257,7 +257,10 @@ const bumpSessions = () => {
   for (const cb of sessionsSubs) cb()
 }
 
-const sessionLocalStore = new Map<string, { id: string; wsReadyState: number }>()
+const sessionLocalStore = new Map<
+  string,
+  { id: string; wsReadyState: number; wsCloseTs: number | null }
+>()
 
 const { mockInvalidateQueries } = vi.hoisted(() => ({
   mockInvalidateQueries: vi.fn(),
@@ -287,19 +290,24 @@ vi.mock('~/hooks/use-sessions-collection', async () => {
 
 vi.mock('~/db/session-local-collection', () => ({
   sessionLocalCollection: {
-    insert: vi.fn((row: { id: string; wsReadyState: number }) => {
+    insert: vi.fn((row: { id: string; wsReadyState: number; wsCloseTs: number | null }) => {
       if (sessionLocalStore.has(row.id)) {
         throw new Error(`duplicate key: ${row.id}`)
       }
       sessionLocalStore.set(row.id, row)
     }),
-    update: vi.fn((key: string, patcher: (draft: { wsReadyState: number }) => void) => {
-      const existing = sessionLocalStore.get(key)
-      if (!existing) throw new Error(`not found: ${key}`)
-      const draft = { ...existing }
-      patcher(draft)
-      sessionLocalStore.set(key, draft)
-    }),
+    update: vi.fn(
+      (
+        key: string,
+        patcher: (draft: { wsReadyState: number; wsCloseTs: number | null }) => void,
+      ) => {
+        const existing = sessionLocalStore.get(key)
+        if (!existing) throw new Error(`not found: ${key}`)
+        const draft = { ...existing }
+        patcher(draft)
+        sessionLocalStore.set(key, draft)
+      },
+    ),
     delete: vi.fn((key: string) => {
       sessionLocalStore.delete(key)
     }),
