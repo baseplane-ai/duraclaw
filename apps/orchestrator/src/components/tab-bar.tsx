@@ -372,9 +372,12 @@ function ProjectTabInner({
   // GH#50: feed TTL-derived status into the display mapper so stuck
   // `running` tabs degrade to `idle` in lockstep with StatusBar / sidebar.
   const nowTs = useNow()
-  // Prefer DO-pushed live status over D1 + TTL predicate for the active tab.
+  // Prefer DO-pushed live status → raw D1 (if WS not yet open) → TTL-derived.
+  const wsOpen = (liveLocal?.wsReadyState ?? 3) === 1
   const d1Derived = session ? deriveStatus(session, nowTs) : undefined
-  const sessionDerived = (liveLocal?.liveStatus as SessionStatus | undefined) ?? d1Derived
+  const rawD1 = session?.status as SessionStatus | undefined
+  const liveStatus = liveLocal?.liveStatus as SessionStatus | undefined
+  const sessionDerived = liveStatus ?? (!wsOpen ? rawD1 : undefined) ?? d1Derived
   const tabDisplay = deriveDisplayStateFromStatus(
     sessionDerived,
     liveLocal?.wsReadyState ?? 3,

@@ -44,9 +44,11 @@ export function DisconnectedBanner({
   const nowTs = useNow()
 
   const wsReadyState = local?.wsReadyState ?? 3
-  // Prefer DO-pushed live status over D1 + TTL predicate.
+  // Prefer DO-pushed live status → raw D1 (if WS not yet open) → TTL-derived.
   const d1Status = session ? deriveStatus(session, nowTs) : 'idle'
-  const status = (local?.liveStatus as SessionStatus) ?? d1Status
+  const rawD1Status = (session?.status as SessionStatus) ?? 'idle'
+  const liveStatus = local?.liveStatus as SessionStatus | undefined
+  const status = liveStatus ?? (wsReadyState !== 1 ? rawD1Status : undefined) ?? d1Status
   const hasSdkSession = Boolean(session?.sdkSessionId)
 
   // Baseline: eligible to eventually show if WS is not open, session is

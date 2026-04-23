@@ -249,8 +249,19 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
   // Prefer DO-pushed live status (zero-latency via agent WS) over D1 +
   // TTL predicate. Falls back to D1-derived when the WS is down or no
   // live push has arrived yet. Fixes the "idle while streaming" race.
+  //
+  // When the per-session WS hasn't connected yet (readyState !== 1) and
+  // liveStatus is unavailable, trust the raw D1 status — NOT the TTL-
+  // derived one. The TTL override is designed for "WS is open, we should
+  // be hearing events, but we're not." Before the WS opens, we haven't
+  // given the runner a chance to prove it's alive, so applying the TTL
+  // override is wrong (causes a 1-2s "idle" flash on page load / tab
+  // switch before the per-session WS catches up).
   const d1Status: SessionStatus | undefined = session ? deriveStatus(session, nowTs) : undefined
-  const status: SessionStatus | undefined = (local?.liveStatus as SessionStatus) ?? d1Status
+  const rawD1Status = session?.status as SessionStatus | undefined
+  const liveStatus = local?.liveStatus as SessionStatus | undefined
+  const status: SessionStatus | undefined =
+    liveStatus ?? (readyState !== 1 ? rawD1Status : undefined) ?? d1Status
 
   useEffect(() => {
     if (!session) {

@@ -115,11 +115,13 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
     [sendMessage],
   )
 
-  // Prefer DO-pushed live status (zero-latency via agent WS) over D1 +
-  // TTL predicate. Falls back to D1-derived when the WS is down.
+  // Prefer DO-pushed live status → raw D1 (if WS not yet open) → TTL-derived.
   const nowTs = useNow()
+  const wsOpen = (local?.wsReadyState ?? 3) === 1
   const d1Status = session ? deriveStatus(session, nowTs) : 'idle'
-  const status = (local?.liveStatus as SessionStatus) ?? d1Status
+  const rawD1Status = (session?.status as SessionStatus) ?? 'idle'
+  const liveStatus = local?.liveStatus as SessionStatus | undefined
+  const status = liveStatus ?? (!wsOpen ? rawD1Status : undefined) ?? d1Status
 
   // Draft key scopes localStorage drafts. Tabs ARE sessions (userTabsCollection
   // rows keyed by sessionId), so use sessionId directly — no separate tab ID.
