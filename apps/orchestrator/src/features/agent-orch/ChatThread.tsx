@@ -1119,10 +1119,10 @@ export function ChatThread({
         {/* Tailwind's @source scan of ai-elements/src isn't extracting
             this positional class from the shared component — declaring it
             here (inside orchestrator/src, which IS scanned) ensures the
-            CSS rule actually gets generated. `bottom-2` (8px) keeps the
-            button hugging the bottom of Conversation, sitting just above
-            the StatusBar that's directly below in ChatThread's column. */}
-        <ConversationScrollButton className="bottom-2" />
+            CSS rule actually gets generated. `bottom-0` flushes the
+            button against Conversation's bottom edge, which sits directly
+            on top of the StatusBar below in ChatThread's column. */}
+        <ConversationScrollButton className="bottom-0" />
       </Conversation>
     </div>
   )
