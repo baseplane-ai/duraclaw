@@ -121,8 +121,8 @@ describe('WS bridge in useCodingAgent', () => {
       const patcher = call[1] as (draft: Record<string, unknown>) => void
       const draft: Record<string, unknown> = { wsReadyState: 3, wsCloseTs: null }
       patcher(draft)
-      // Must always write wsReadyState; may also write wsCloseTs and
-      // live status clear fields (liveStatus, liveGate, liveError).
+      // Must always write wsReadyState; may also write wsCloseTs.
+      // The collection no longer carries liveStatus / liveGate / liveError.
       expect(draft).toHaveProperty('wsReadyState')
     }
   })

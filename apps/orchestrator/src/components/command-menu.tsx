@@ -12,9 +12,7 @@ import {
 } from '~/components/ui/command'
 import { useSearch } from '~/context/search-provider'
 import { useTheme } from '~/context/theme-provider'
-import { deriveStatus } from '~/lib/derive-status'
 import { apiUrl } from '~/lib/platform'
-import { useNow } from '~/lib/use-now'
 import { cn } from '~/lib/utils'
 import { sidebarData } from './layout/data/sidebar-data'
 import { ScrollArea } from './ui/scroll-area'
@@ -31,9 +29,6 @@ export function CommandMenu() {
       project: string
       status: string
       // Drizzle returns camelCase keys from `.select().from(agentSessions)`.
-      // GH#50: `lastEventTs` is the epoch-ms TTL anchor for client-side
-      // `deriveStatus()`.
-      lastEventTs?: number | null
     }>
   >([])
   const [projects, setProjects] = useState<Array<{ name: string; branch: string; dirty: boolean }>>(
@@ -64,8 +59,6 @@ export function CommandMenu() {
       .catch(() => {})
   }, [open])
 
-  const nowTs = useNow()
-
   const runCommand = React.useCallback(
     (command: () => unknown) => {
       setOpen(false)
@@ -83,12 +76,7 @@ export function CommandMenu() {
           {sessions.length > 0 && (
             <CommandGroup heading="Recent Sessions">
               {sessions.slice(0, 5).map((s) => {
-                // GH#50: TTL-derived status — falls through to `s.status`
-                // for rows without a `last_event_ts` (older deployments).
-                const derived = deriveStatus(
-                  { status: s.status, lastEventTs: s.lastEventTs ?? null },
-                  nowTs,
-                )
+                const status = s.status as string
                 return (
                   <CommandItem
                     key={s.id}
@@ -100,9 +88,9 @@ export function CommandMenu() {
                     <span
                       className={cn(
                         'mr-2 size-2 rounded-full',
-                        derived === 'running'
+                        status === 'running'
                           ? 'bg-green-500'
-                          : derived === 'waiting_gate'
+                          : status === 'waiting_gate'
                             ? 'bg-yellow-500'
                             : 'border border-gray-400',
                       )}

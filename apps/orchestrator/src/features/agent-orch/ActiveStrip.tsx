@@ -5,17 +5,14 @@
  */
 
 import type { SessionRecord } from '~/db/session-record'
-import { deriveStatus } from '~/lib/derive-status'
-import { useNow } from '~/lib/use-now'
+import type { SessionStatus } from '~/lib/types'
 import { cn } from '~/lib/utils'
 import { getPreviewText, getProjectInitials } from './session-utils'
 
 const ACTIVE_STATUSES = new Set(['running', 'waiting_gate', 'waiting_input', 'waiting_permission'])
 const IDLE_RECENCY_MS = 2 * 60 * 60 * 1000 // 2 hours
 
-// GH#50: `status` is the TTL-derived status (from `deriveStatus(session, nowTs)`),
-// so a stuck `running` row degrades to `idle` and drops out of the strip once
-// its recency window expires.
+// `status` is read directly from the D1-mirrored `session.status` column.
 export function isQualifyingSession(session: SessionRecord, status: string): boolean {
   if (ACTIVE_STATUSES.has(status)) return true
   if (status === 'idle' && session.updatedAt) {
@@ -41,9 +38,8 @@ interface ActiveStripProps {
 }
 
 export function ActiveStrip({ sessions, onSelectSession, selectedSessionId }: ActiveStripProps) {
-  const nowTs = useNow()
   const qualifying = sessions
-    .map((s) => ({ session: s, status: deriveStatus(s, nowTs) }))
+    .map((s) => ({ session: s, status: s.status as SessionStatus }))
     .filter(({ session, status }) => isQualifyingSession(session, status))
   if (qualifying.length === 0) return null
 

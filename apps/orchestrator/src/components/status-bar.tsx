@@ -8,16 +8,15 @@
 import type { ProjectInfo } from '@duraclaw/shared-types'
 import { useLiveQuery } from '@tanstack/react-db'
 import { GitBranchIcon } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { ChainStatusItem } from '~/components/chain-status-item'
 import { projectsCollection } from '~/db/projects-collection'
 import { useSessionLocalState } from '~/db/session-local-collection'
+import { useDerivedStatus } from '~/hooks/use-derived-status'
 import { useSession } from '~/hooks/use-sessions-collection'
-import { deriveStatus } from '~/lib/derive-status'
 import { deriveDisplayStateFromStatus } from '~/lib/display-state'
 import { parseJsonField } from '~/lib/json'
 import type { KataSessionState, PrInfo, SessionStatus } from '~/lib/types'
-import { useNow } from '~/lib/use-now'
 import { cn } from '~/lib/utils'
 import type { ContextUsage, WorktreeInfo } from '~/stores/status-bar'
 
@@ -256,59 +255,13 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
   // `status` column (DO-authoritative via messagesCollection fold).
   const session = useSession(sessionId)
   const local = useSessionLocalState(sessionId)
-  const nowTs = useNow()
   // Must be called unconditionally (before any early return) to preserve
   // hook order across the `if (!sessionId) return null` guard below.
   const worktreeInfoFromProjects = useWorktreeInfoFromProjects(session?.project ?? '')
 
-  // GH#69 B6: tripwire for TTL idle override firing with WS OPEN. Must be
-  // declared before any early return so hook order stays stable across
-  // renders. Warns once per (sessionId, lastEventTs) transition when
-  // `deriveStatus` shadowed a server `running` row to `idle` even though
-  // the WS is healthy — strong signal of the drift class #69 exists to
-  // eliminate.
-  const overrideFiredRef = useRef<string | null>(null)
-
   const readyState = local?.wsReadyState ?? 3
-  // Prefer DO-pushed live status (zero-latency via agent WS) over D1 +
-  // TTL predicate. Falls back to D1-derived when the WS is down or no
-  // live push has arrived yet. Fixes the "idle while streaming" race.
-  //
-  // When the per-session WS hasn't connected yet (readyState !== 1) and
-  // liveStatus is unavailable, trust the raw D1 status — NOT the TTL-
-  // derived one. The TTL override is designed for "WS is open, we should
-  // be hearing events, but we're not." Before the WS opens, we haven't
-  // given the runner a chance to prove it's alive, so applying the TTL
-  // override is wrong (causes a 1-2s "idle" flash on page load / tab
-  // switch before the per-session WS catches up).
-  const d1Status: SessionStatus | undefined = session ? deriveStatus(session, nowTs) : undefined
-  const rawD1Status = session?.status as SessionStatus | undefined
-  const liveStatus = local?.liveStatus as SessionStatus | undefined
-  const status: SessionStatus | undefined =
-    liveStatus ?? (readyState !== 1 ? rawD1Status : undefined) ?? d1Status
 
-  useEffect(() => {
-    if (!session) {
-      overrideFiredRef.current = null
-      return
-    }
-    const overrideActive =
-      status === 'idle' && (session.status as string) === 'running' && readyState === 1
-    const key = overrideActive ? `${sessionId}:${session.lastEventTs ?? 0}` : null
-    if (key && key !== overrideFiredRef.current) {
-      console.warn(
-        '[derive-status] TTL idle override fired with WS OPEN — lastEventTs:',
-        session.lastEventTs,
-        'age:',
-        nowTs - (session.lastEventTs ?? 0),
-        'ms',
-      )
-      overrideFiredRef.current = key
-    }
-    if (!overrideActive) {
-      overrideFiredRef.current = null
-    }
-  }, [session, status, readyState, sessionId, nowTs])
+  const status = useDerivedStatus(sessionId) ?? (session?.status as SessionStatus | undefined)
 
   if (!sessionId) return null
   const statusResolved: SessionStatus = status ?? 'idle'

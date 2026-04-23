@@ -61,8 +61,6 @@ import {
   getGatewayConnectionId,
   loadTurnState,
   resolveStaleThresholdMs,
-  shouldBumpLastEventTs,
-  shouldForceFlushLastEventTs,
 } from './session-do-helpers'
 import { SESSION_DO_MIGRATIONS } from './session-do-migrations'
 
@@ -89,11 +87,6 @@ export interface SessionMeta {
   num_turns: number
   total_cost_usd: number | null
   duration_ms: number | null
-  gate: {
-    id: string
-    type: 'permission_request' | 'ask_user'
-    detail: unknown
-  } | null
   created_at: string
   updated_at: string
   result: string | null
@@ -125,7 +118,6 @@ const DEFAULT_META: SessionMeta = {
   num_turns: 0,
   total_cost_usd: null,
   duration_ms: null,
-  gate: null,
   created_at: '',
   updated_at: '',
   result: null,
@@ -151,7 +143,6 @@ const META_COLUMN_MAP: Partial<Record<keyof SessionMeta, string>> = {
   num_turns: 'num_turns',
   total_cost_usd: 'total_cost_usd',
   duration_ms: 'duration_ms',
-  gate: 'gate_json',
   created_at: 'created_at',
   error: 'error',
   summary: 'summary',
@@ -171,11 +162,11 @@ const META_COLUMN_MAP: Partial<Record<keyof SessionMeta, string>> = {
  * Uses @callable RPC methods for spawn, resolveGate, sendMessage, etc.
  */
 /**
- * How often the watchdog alarm fires while a session is "running" (ms).
- * Also serves as the keepalive ping interval — alarms survive DO hibernation,
+ * Hibernation-safe alarm interval (ms) for periodic messageSeq D1 flush
+ * and recovery-grace deadline expiration. Alarms survive DO hibernation,
  * unlike setInterval which stops when the DO is evicted from memory.
  */
-const WATCHDOG_INTERVAL_MS = 30_000
+const ALARM_INTERVAL_MS = 30_000
 /** GH#57: grace period before running recovery when the gateway reports the
  * runner is still alive. Gives DialBackClient time to reconnect after a
  * transient CF WS flap. If the runner re-dials within this window (detected
@@ -240,31 +231,6 @@ export class SessionDO extends Agent<Env, SessionMeta> {
    */
   private lastSyncedStatus: SessionStatus | null = null
   private lastSyncedError: string | null = null
-
-  /**
-   * GH#50: epoch-ms of the last GatewayEvent received on this DO. Bumped
-   * synchronously in `handleGatewayEvent` (and by the legacy-drop branch
-   * in `onMessage`) before any other event handling — this is the
-   * runner-liveness signal the client TTL predicate reads via the
-   * `agent_sessions.last_event_ts` D1 column. The in-memory value is
-   * pushed to D1 by `flushLastEventTsToD1()` either immediately
-   * (lifecycle transitions) or after a 10s debounce (streaming bursts).
-   */
-  private lastEventTs = 0
-  private lastEventFlushTimer: ReturnType<typeof setTimeout> | null = null
-  private readonly LAST_EVENT_FLUSH_DEBOUNCE_MS = 10_000
-  /**
-   * GH#status-idle-while-streaming: epoch-ms of the most recent successful
-   * `flushLastEventTsToD1()`. Pairs with `LAST_EVENT_FLUSH_MAX_INTERVAL_MS`
-   * to bound D1 lag during a continuous `partial_assistant` burst — the
-   * 10s debounce above arms exactly once at the start of the burst and
-   * never re-arms (`if (this.lastEventFlushTimer) return`), so without a
-   * ceiling D1 can lag the in-memory value by the full turn duration and
-   * the client's 45s TTL predicate (derive-status.ts) wrongly flips
-   * running → idle mid-stream.
-   */
-  private lastEventFlushedAt = 0
-  private readonly LAST_EVENT_FLUSH_MAX_INTERVAL_MS = 20_000
 
   /**
    * GH#50 B9: legacy-event drop log dedupe set. Pre-P3 in-flight runners
@@ -942,10 +908,6 @@ export class SessionDO extends Agent<Env, SessionMeta> {
 
       console.log(`[SessionDO:${this.ctx.id}] Gateway connected: conn=${connection.id}`)
 
-      // GH#69 B7: runner WS reconnected — immediately flush so D1 lastEventTs
-      // reflects liveness without waiting for the next debounce / watchdog tick.
-      void this.flushLastEventTsToD1()
-
       return // No replay, no protocol messages
     }
 
@@ -958,23 +920,9 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     // `(session_id, created_at, id)` keyset — bounded, cheap — and
     // broadcast inserts targeted to just that connection.
 
-    // Re-emit gate if session is waiting
-    if (this.state.gate && this.state.status === 'waiting_gate') {
-      connection.send(
-        JSON.stringify({
-          type: 'gateway_event',
-          event: {
-            type: this.state.gate.type,
-            tool_call_id: this.state.gate.id,
-            ...(this.state.gate.detail as Record<string, unknown>),
-          },
-        }),
-      )
-    }
-
-    // Push current status to the newly-connected client so it hydrates
-    // immediately without waiting for the next D1 synced-collection delta.
-    this.broadcastSessionStatus(connection)
+    // Gate re-emit on reconnect is no longer needed: the
+    // messagesCollection snapshot (subscribe:messages) re-surfaces the
+    // pending gate via useDerivedGate. (#76 P3)
   }
 
   /**
@@ -1058,11 +1006,6 @@ export class SessionDO extends Agent<Env, SessionMeta> {
         } catch (err) {
           this.logError('onClose.deleteKv', err)
         }
-
-        // GH#50: gateway WS drop is itself a lifecycle transition — flush
-        // so the client picks up the last-known liveness marker before the
-        // (potentially long) recovery path completes.
-        void this.flushLastEventTsToD1()
 
         // If session was active, the connection dropped unexpectedly. Ask the
         // gateway for the runner's live state before running the local recovery
@@ -1380,7 +1323,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   }
 
   private scheduleWatchdog() {
-    this.ctx.storage.setAlarm(Date.now() + WATCHDOG_INTERVAL_MS)
+    this.ctx.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS)
   }
 
   /**
@@ -1390,18 +1333,6 @@ export class SessionDO extends Agent<Env, SessionMeta> {
    * have arrived recently and the WS is gone, attempt recovery.
    */
   async alarm() {
-    // GH#69 B3: piggyback D1 flush on every watchdog tick (30s). The DO
-    // `setTimeout` debounce in bumpLastEventTs() is destroyed by hibernation;
-    // the alarm survives and is the hibernation-safe backstop. Worst-case
-    // D1 staleness after hibernation is WATCHDOG_INTERVAL_MS (30s), safely
-    // within client TTL_MS (45s). No new alarm scheduled — single-alarm
-    // constraint preserved (see scheduleWatchdog at L1089).
-    //
-    // Guard: skip the async frame for sessions that never streamed events.
-    // `flushLastEventTsToD1` also early-returns on 0, but this avoids the
-    // promise allocation + clearTimer dance on idle sessions.
-    if (this.lastEventTs > 0) void this.flushLastEventTsToD1()
-
     if (this.state.status !== 'running' && this.state.status !== 'waiting_gate') {
       return // Session not active, no need to watch
     }
@@ -1485,14 +1416,10 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     // Clear active_callback_token — the runner that owned it is gone.
     this.updateState({
       status: 'idle',
-      gate: null,
       error: 'Gateway connection lost — session stopped. You can send a new message to resume.',
       active_callback_token: undefined,
     })
     this.syncStatusToD1(new Date().toISOString())
-    // GH#50: recovery completed — flush so client TTL has the final
-    // liveness marker for the now-idle row.
-    void this.flushLastEventTsToD1()
 
     // Notify connected clients
     this.broadcastToClients(
@@ -1514,11 +1441,6 @@ export class SessionDO extends Agent<Env, SessionMeta> {
    * clients no longer consume them and DO rehydrate pulls from SQLite.
    */
   private updateState(partial: Partial<SessionMeta>) {
-    // Capture pre-merge values for diff-based live status push.
-    const prevStatus = this.state.status
-    const prevGate = this.state.gate
-    const prevError = this.state.error
-
     this.setState({
       ...this.state,
       ...partial,
@@ -1526,41 +1448,8 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     })
     this.persistMetaPatch(partial)
 
-    // Push live status to connected browser clients (agent WS) whenever
-    // status / gate / error changed. This bypasses the D1 round-trip so
-    // active-session UI sees zero-latency transitions — fixes the
-    // "idle while streaming" race where D1 lastEventTs is stale during the
-    // first 10s debounce window.
-    if (
-      this.state.status !== prevStatus ||
-      this.state.gate !== prevGate ||
-      this.state.error !== prevError
-    ) {
-      this.broadcastSessionStatus()
-    }
-  }
-
-  /**
-   * Push the current session status/gate/error to all connected browser
-   * clients. Called on every status diff (via `updateState`) and on client
-   * hello (via `onConnectInner`) so new tabs hydrate immediately.
-   */
-  private broadcastSessionStatus(target?: Connection) {
-    const frame = JSON.stringify({
-      type: 'session_status',
-      status: this.state.status,
-      gate: this.state.gate ?? null,
-      error: this.state.error ?? null,
-    })
-    if (target) {
-      try {
-        target.send(frame)
-      } catch {
-        // connection already closed
-      }
-    } else {
-      this.broadcastToClients(frame)
-    }
+    // Patch-merge into the Agent's state blob and mirror the durable
+    // subset into session_meta.
   }
 
   private persistMetaPatch(partial: Partial<SessionMeta>) {
@@ -1571,10 +1460,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     >) {
       const col = META_COLUMN_MAP[key]
       if (!col) continue
-      if (key === 'gate') {
-        cols.push(`${col} = ?`)
-        vals.push(value ? JSON.stringify(value) : null)
-      } else if (key === 'lastRunEnded') {
+      if (key === 'lastRunEnded') {
         // INTEGER 0/1 column (migration v13). undefined → 0 so the default
         // "not yet ended" state is explicit rather than SQL NULL.
         cols.push(`${col} = ?`)
@@ -1616,14 +1502,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
         if (!(col in row)) continue
         const raw = row[col]
         if (raw === null || raw === undefined) continue
-        if (key === 'gate') {
-          try {
-            ;(patch as Record<string, unknown>)[key] =
-              typeof raw === 'string' ? JSON.parse(raw) : raw
-          } catch {
-            // Invalid gate JSON — skip.
-          }
-        } else if (key === 'lastRunEnded') {
+        if (key === 'lastRunEnded') {
           // INTEGER 0/1 → boolean. GH#73.
           ;(patch as Record<string, unknown>)[key] = raw === 1 || raw === '1' || raw === true
         } else {
@@ -1635,18 +1514,6 @@ export class SessionDO extends Agent<Env, SessionMeta> {
           ...this.state,
           ...patch,
         })
-      }
-      // GH#69 B2: restore private liveness field (NOT part of SessionMeta / META_COLUMN_MAP).
-      const rawLastEventTs = row.last_event_ts
-      if (typeof rawLastEventTs === 'number' && rawLastEventTs > 0) {
-        this.lastEventTs = rawLastEventTs
-      }
-      // GH#69 Phase 1 task 3: best-effort D1 flush on wake if we already have a
-      // live runner WS. Typical wake-from-hibernation path sees no gateway conn
-      // yet (runner re-identifies via webSocketMessage after onStart); that path
-      // relies on the next bumpLastEventTs() + watchdog alarm (Phase 2).
-      if (this.state.status === 'running' && this.getGatewayConnectionId()) {
-        void this.flushLastEventTsToD1()
       }
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] hydrateMetaFromSql failed:`, err)
@@ -2133,10 +2000,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
         this.safeUpdateMessage(updatedMsg)
         this.broadcastMessage(updatedMsg)
       } catch (err) {
-        console.error(`[SessionDO:${this.ctx.id}] Failed to promote gate part:`, err)
-        this.broadcastToClients(
-          JSON.stringify({ type: 'raw_event', event: { type: newType, tool_call_id: toolCallId } }),
-        )
+        console.error('[session-do] event persist failed', err)
       }
       promoted = true
       break
@@ -2212,6 +2076,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
         .set({
           status: newStatus,
           updatedAt,
+          messageSeq: this.messageSeq,
           ...(bumpLastActivity ? { lastActivity: updatedAt } : {}),
           ...(shouldClearError ? { error: null, errorCode: null } : {}),
         })
@@ -2263,6 +2128,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
           durationMs: this.state.duration_ms,
           totalCostUsd: this.state.total_cost_usd,
           numTurns: this.state.num_turns,
+          messageSeq: this.messageSeq,
           updatedAt,
           lastActivity: updatedAt,
         })
@@ -2278,7 +2144,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       const sessionId = this.name
       await this.d1
         .update(agentSessions)
-        .set({ sdkSessionId, updatedAt })
+        .set({ sdkSessionId, messageSeq: this.messageSeq, updatedAt })
         .where(eq(agentSessions.id, sessionId))
       await broadcastSessionRow(this.env, this.ctx, sessionId, 'update')
     } catch (err) {
@@ -2313,6 +2179,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
         .set({
           status,
           updatedAt,
+          messageSeq: this.messageSeq,
           lastActivity: updatedAt,
           ...errorFields,
         })
@@ -2346,6 +2213,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
           kataIssue: kataState?.issueNumber ?? null,
           kataPhase: kataState?.currentPhase ?? null,
           kataStateJson: kataState ? JSON.stringify(kataState) : null,
+          messageSeq: this.messageSeq,
           updatedAt,
         })
         .where(eq(agentSessions.id, sessionId))
@@ -2385,7 +2253,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       const sessionId = this.name
       await this.d1
         .update(agentSessions)
-        .set({ worktreeInfoJson, updatedAt })
+        .set({ worktreeInfoJson, messageSeq: this.messageSeq, updatedAt })
         .where(eq(agentSessions.id, sessionId))
       await broadcastSessionRow(this.env, this.ctx, sessionId, 'update')
     } catch (err) {
@@ -2412,7 +2280,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
           const updatedAt = new Date().toISOString()
           await this.d1
             .update(agentSessions)
-            .set({ contextUsageJson: pending, updatedAt })
+            .set({ contextUsageJson: pending, messageSeq: this.messageSeq, updatedAt })
             .where(eq(agentSessions.id, sessionId))
           await broadcastSessionRow(this.env, this.ctx, sessionId, 'update')
         } catch (err) {
@@ -2420,84 +2288,6 @@ export class SessionDO extends Agent<Env, SessionMeta> {
         }
       })()
     }, 5000)
-  }
-
-  /**
-   * GH#50: bump in-memory `lastEventTs` to now and arm the debounced
-   * flush. Called from the entry to `handleGatewayEvent` (B1) for every
-   * event EXCEPT legacy `heartbeat` / `session_state_changed` frames,
-   * which are dropped by B9 WITHOUT refreshing liveness — a pre-B7 zombie
-   * runner parked in `waitForNext()` must not be able to keep itself
-   * looking alive via heartbeats. The debounce ensures a 200-event burst
-   * yields at most one D1 write; lifecycle handlers call
-   * `flushLastEventTsToD1()` directly to bypass the debounce on
-   * meaningful state transitions.
-   */
-  private bumpLastEventTs() {
-    this.lastEventTs = Date.now()
-    // GH#69 B1: persist to DO SQLite (survives hibernation, ~0.1ms local write).
-    // Fire-and-forget — never crash the event pipeline for a liveness signal.
-    try {
-      this.sql`UPDATE session_meta SET last_event_ts = ${this.lastEventTs} WHERE id = 1`
-    } catch (err) {
-      console.error(`[SessionDO:${this.ctx.id}] Failed to persist last_event_ts to SQLite:`, err)
-    }
-    // Max-interval ceiling: during a continuous partial_assistant burst the
-    // 10s debounce arms once and every later event hits the early-return
-    // below, so D1 `last_event_ts` would otherwise stay pinned at "10s after
-    // turn start" for the full turn. Once the gap since the last successful
-    // flush exceeds the ceiling, force an immediate flush (which also
-    // re-pushes session_status so tabs that silently stayed OPEN across a
-    // refocus pick up fresh liveStatus).
-    if (
-      shouldForceFlushLastEventTs(
-        this.lastEventTs,
-        this.lastEventFlushedAt,
-        this.LAST_EVENT_FLUSH_MAX_INTERVAL_MS,
-      )
-    ) {
-      void this.flushLastEventTsToD1()
-      return
-    }
-    if (this.lastEventFlushTimer) return
-    this.lastEventFlushTimer = setTimeout(() => {
-      this.lastEventFlushTimer = null
-      void this.flushLastEventTsToD1()
-    }, this.LAST_EVENT_FLUSH_DEBOUNCE_MS)
-  }
-
-  /**
-   * GH#50: write the current in-memory `lastEventTs` to D1 and fan out
-   * a synced-collection delta so client `agent_sessions` rows pick up
-   * the new TTL marker. Bypasses the debounce timer if armed (clears it
-   * on entry). No-op if no event has ever been observed (lastEventTs ===
-   * 0) — protects pre-flush hydrate paths from writing 0.
-   */
-  private async flushLastEventTsToD1(): Promise<void> {
-    if (this.lastEventFlushTimer) {
-      clearTimeout(this.lastEventFlushTimer)
-      this.lastEventFlushTimer = null
-    }
-    if (this.lastEventTs === 0) return
-    try {
-      const sessionId = this.name
-      await this.d1
-        .update(agentSessions)
-        .set({ lastEventTs: this.lastEventTs })
-        .where(eq(agentSessions.id, sessionId))
-      await broadcastSessionRow(this.env, this.ctx, sessionId, 'update')
-      this.lastEventFlushedAt = this.lastEventTs
-      // Piggyback a zero-latency session_status push on the periodic flush.
-      // On tab refocus the ConnectionManager skips reconnect for sockets
-      // that are already OPEN with fresh lastSeenTs, so onConnectInner
-      // never fires and the client's cleared-on-close liveStatus is never
-      // refreshed. Re-broadcasting current status/gate/error alongside the
-      // liveness flush lets those tabs self-heal without waiting for the
-      // next status transition.
-      this.broadcastSessionStatus()
-    } catch (err) {
-      console.error(`[SessionDO:${this.ctx.id}] Failed to flush last_event_ts to D1:`, err)
-    }
   }
 
   /**
@@ -3085,11 +2875,8 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       }
     }
 
-    this.updateState({ status: 'running', gate: null, error: null })
+    this.updateState({ status: 'running', error: null })
     this.syncStatusToD1(new Date().toISOString())
-    // Co-flush lastEventTs so the TTL predicate doesn't override running → idle.
-    this.bumpLastEventTs()
-    void this.flushLastEventTsToD1()
     void this.triggerGatewayDial({
       type: 'resume',
       project: this.state.project,
@@ -3124,11 +2911,8 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // triggerGatewayDial handles token rotation internally — it closes
     // the old gateway WS with 4410 before POSTing to spawn a new runner.
     // That 4410 is what kills the orphan.
-    this.updateState({ status: 'running', gate: null, error: null })
+    this.updateState({ status: 'running', error: null })
     this.syncStatusToD1(new Date().toISOString())
-    // Co-flush lastEventTs so the TTL predicate doesn't override running → idle.
-    this.bumpLastEventTs()
-    void this.flushLastEventTsToD1()
     void this.triggerGatewayDial({
       type: 'resume',
       project: this.state.project,
@@ -3281,7 +3065,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // trusted to arrive, so we don't gate local recovery on it.
     this.updateState({
       status: 'idle',
-      gate: null,
       error: null,
       active_callback_token: undefined,
     })
@@ -3304,7 +3087,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
 
     this.updateState({
       status: 'idle',
-      gate: null,
       error: null,
       active_callback_token: undefined,
     })
@@ -3353,7 +3135,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     const sessionId = this.state.session_id
     this.updateState({
       status: 'idle',
-      gate: null,
       error: null,
       active_callback_token: undefined,
     })
@@ -3411,27 +3192,17 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // — if the part was already resolved, findPendingGatePart returns null and
     // we return a clean "not found" error instead of a status mismatch.
 
-    // Primary path: the scalar state.gate matches. Fallback: the scalar
-    // drifted (dropped broadcast, runner reconnect, multiple in-flight
-    // gates) but the caller is answering a real pending part. Accept any
-    // toolCallId that maps to a history part still in 'approval-requested'.
-    // Only clear the scalar state.gate when we resolved against it — if a
-    // newer gate is live, leave it so the UI keeps rendering the new
-    // question.
-    const scalarMatched = !!(this.state.gate && this.state.gate.id === gateId)
-    let gate: { id: string; type: 'ask_user' | 'permission_request' } | null = scalarMatched
-      ? (this.state.gate as { id: string; type: 'ask_user' | 'permission_request' })
+    // Look up the pending gate part directly from history (#76 P3 —
+    // scalar state.gate removed; messages are the sole source of truth).
+    const match = findPendingGatePart(this.session.getHistory(), gateId)
+    const gate: { id: string; type: 'ask_user' | 'permission_request' } | null = match
+      ? { id: gateId, type: match.type }
       : null
-
-    if (!gate) {
-      const match = findPendingGatePart(this.session.getHistory(), gateId)
-      if (match) gate = { id: gateId, type: match.type }
-    }
 
     if (!gate) {
       return {
         ok: false,
-        error: `Gate '${gateId}' not found (no pending part); current scalar='${this.state.gate?.id ?? 'none'}'`,
+        error: `Gate '${gateId}' not found (no pending part in history)`,
       }
     }
 
@@ -3530,15 +3301,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       }
     }
 
-    if (scalarMatched) {
-      this.updateState({ status: 'running', gate: null })
-      // GH#50: gate-close lifecycle transition.
-      void this.flushLastEventTsToD1()
-    }
-    // else: a newer gate is still live in state.gate — leave the scalar
-    // alone. The resolved part has already been flipped to
-    // output-available/denied above, so the UI will drop its GateResolver
-    // for this toolCallId while the live gate remains pending.
+    this.updateState({ status: 'running' })
     return { ok: true }
   }
 
@@ -3726,15 +3489,9 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     if (hasLiveRunner) {
       // Promote state back to running so the UI reflects the new turn.
       if (status !== 'running' && status !== 'waiting_gate') {
-        this.updateState({ status: 'running', gate: null, error: null })
+        this.updateState({ status: 'running', error: null })
         this.syncStatusToD1(new Date().toISOString())
       }
-      // Co-flush lastEventTs so the D1 row's TTL marker is fresh when the
-      // status=running delta lands on the client. Without this, the TTL
-      // predicate sees the stale marker from the prior turn and immediately
-      // overrides running → idle (the "idle while streaming" bug).
-      this.bumpLastEventTs()
-      void this.flushLastEventTsToD1()
       this.sendToGateway({
         type: 'stream-input',
         session_id: this.state.session_id ?? '',
@@ -3742,11 +3499,8 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         ...(opts?.client_message_id ? { client_message_id: opts.client_message_id } : {}),
       })
     } else if (isResumable) {
-      this.updateState({ status: 'running', gate: null, error: null })
+      this.updateState({ status: 'running', error: null })
       this.syncStatusToD1(new Date().toISOString())
-      // Co-flush lastEventTs — same rationale as the live-runner path.
-      this.bumpLastEventTs()
-      void this.flushLastEventTsToD1()
       void this.triggerGatewayDial({
         type: 'resume',
         project: this.state.project,
@@ -3840,7 +3594,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // (guarantees no hasLiveResume collision with any orphan).
     this.updateState({
       status: 'running',
-      gate: null,
       error: null,
       sdk_session_id: null,
     })
@@ -3861,10 +3614,8 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       return { ok: false, error: `Cannot interrupt: status is '${this.state.status}'` }
     }
 
-    // Release ALL pending gate parts, not just the one tracked in
-    // state.gate. The scalar and history can drift (dropped broadcast,
-    // multiple gates in flight), so the UI may be rendering a
-    // GateResolver for a tool_call_id that state.gate never tracked.
+    // Release ALL pending gate parts. The UI may be rendering a
+    // GateResolver for any tool_call_id with approval-requested state.
     // Flipping every approval-requested gate part to 'output-denied'
     // guarantees the UI clears its GateResolver(s) when the user hits
     // interrupt. The subsequent `interrupt` command to the runner aborts
@@ -3895,10 +3646,9 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       }
     }
 
-    // Always clear the scalar gate + flip status back to running so the
-    // watchdog and UI agree the session has left waiting_gate.
-    if (this.state.gate || this.state.status === 'waiting_gate') {
-      this.updateState({ status: 'running', gate: null })
+    // Flip status back to running so the watchdog and UI agree.
+    if (this.state.status === 'waiting_gate') {
+      this.updateState({ status: 'running' })
     }
 
     this.sendToGateway({ type: 'interrupt', session_id: this.state.session_id ?? '' })
@@ -4213,11 +3963,8 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     }
 
     // 4. Send to gateway for execution
-    this.updateState({ status: 'running', gate: null, error: null })
+    this.updateState({ status: 'running', error: null })
     this.syncStatusToD1(new Date().toISOString())
-    // Co-flush lastEventTs so the TTL predicate doesn't override running → idle.
-    this.bumpLastEventTs()
-    void this.flushLastEventTsToD1()
     void this.triggerGatewayDial({
       type: 'resume',
       project: this.state.project,
@@ -4315,15 +4062,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
   // ── Gateway Event Handling ─────────────────────────────────────
 
   handleGatewayEvent(event: GatewayEvent) {
-    // GH#50 B1: every REAL GatewayEvent refreshes runner-liveness for the
-    // client TTL predicate. Legacy heartbeat / session_state_changed frames
-    // from pre-B7 runners are EXCLUDED — a parked zombie runner sending a
-    // heartbeat every ~10s is precisely the signal the TTL is designed to
-    // expire, so bumping liveness on those frames would defeat the whole
-    // point of GH#50. Pure synchronous in-memory write.
-    if (shouldBumpLastEventTs((event as { type: string }).type)) {
-      this.bumpLastEventTs()
-    }
     switch (event.type) {
       // GH#75 B4: relay BufferedChannel gap sentinel from the runner →
       // DO → client. The runner stamps `{type:'gap', dropped_count,
@@ -4350,9 +4088,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         if (event.sdk_session_id) {
           this.syncSdkSessionIdToD1(event.sdk_session_id, new Date().toISOString())
         }
-        // GH#50: lifecycle transition — bypass debounce so new sessions
-        // populate `last_event_ts` immediately for the TTL predicate.
-        void this.flushLastEventTsToD1()
         break
 
       case 'partial_assistant': {
@@ -4377,8 +4112,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
               this.safeUpdateMessage(updatedMsg)
               this.broadcastMessage(updatedMsg)
             } catch (err) {
-              console.error(`[SessionDO:${this.ctx.id}] Failed to update partial assistant:`, err)
-              this.broadcastToClients(JSON.stringify({ type: 'raw_event', event }))
+              console.error('[session-do] event persist failed', err)
             }
           } else {
             // First partial of this turn — append new message. Parent defaults
@@ -4399,8 +4133,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
               this.persistTurnState()
               this.broadcastMessage(msg)
             } catch (err) {
-              console.error(`[SessionDO:${this.ctx.id}] Failed to persist partial assistant:`, err)
-              this.broadcastToClients(JSON.stringify({ type: 'raw_event', event }))
+              console.error('[session-do] event persist failed', err)
             }
           }
         } else {
@@ -4444,8 +4177,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
               this.safeUpdateMessage(updatedMsg)
               this.broadcastMessage(updatedMsg)
             } catch (err) {
-              console.error(`[SessionDO:${this.ctx.id}] Failed to update partial:`, err)
-              this.broadcastToClients(JSON.stringify({ type: 'raw_event', event }))
+              console.error('[session-do] event persist failed', err)
             }
           }
         }
@@ -4485,8 +4217,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           this.persistTurnState()
           this.broadcastMessage(msg)
         } catch (err) {
-          console.error(`[SessionDO:${this.ctx.id}] Failed to persist assistant:`, err)
-          this.broadcastToClients(JSON.stringify({ type: 'raw_event', event }))
+          console.error('[session-do] event persist failed', err)
         }
         this.updateState({ num_turns: this.state.num_turns + 1 })
         break
@@ -4503,8 +4234,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
             this.safeUpdateMessage(updatedMsg)
             this.broadcastMessage(updatedMsg)
           } catch (err) {
-            console.error(`[SessionDO:${this.ctx.id}] Failed to persist tool result:`, err)
-            this.broadcastToClients(JSON.stringify({ type: 'raw_event', event }))
+            console.error('[session-do] event persist failed', err)
           }
         }
         break
@@ -4523,12 +4253,10 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         // state is the single writer now; resolveGate → tool_result
         // advances it monotonically.
 
-        // Same race still applies to the scalar state.gate / status /
-        // push-notification side effects: if resolveGate has already
-        // advanced the matching part to a terminal state, announcing the
-        // gate now would leave status=waiting_gate dangling + fire a push
-        // for a gate that's already closed. Check the part state
-        // directly.
+        // Race guard: if resolveGate has already advanced the matching
+        // part to a terminal state, announcing the gate now would leave
+        // status=waiting_gate dangling + fire a push for a gate that's
+        // already closed. Check the part state directly.
         const alreadyResolved = this.session
           .getHistory()
           .some((m) =>
@@ -4544,22 +4272,12 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           )
         if (alreadyResolved) break
 
-        // The side effects below (status=waiting_gate, scalar state.gate,
-        // push notification) are still load-bearing: UI status indicators
-        // and notifications need to distinguish "running" from "blocked
-        // on user answer."
-        // PRESERVE existing side effects exactly
-        this.updateState({
-          status: 'waiting_gate',
-          gate: {
-            id: event.tool_call_id,
-            type: 'ask_user',
-            detail: { questions: event.questions },
-          },
-        })
+        // Status flip + push notification are still load-bearing: UI
+        // status indicators and notifications need to distinguish
+        // "running" from "blocked on user answer." (#76 P3: gate scalar
+        // removed — messages are the sole gate source.)
+        this.updateState({ status: 'waiting_gate' })
         this.syncStatusToD1(new Date().toISOString())
-        // GH#50: gate-open lifecycle transition.
-        void this.flushLastEventTsToD1()
         this.dispatchPush(
           {
             title: this.state.project || 'Duraclaw',
@@ -4589,18 +4307,10 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           break
         }
 
-        // PRESERVE all existing side effects (state update, D1 sync, action token, push)
-        this.updateState({
-          status: 'waiting_gate',
-          gate: {
-            id: event.tool_call_id,
-            type: 'permission_request',
-            detail: { tool_name: event.tool_name, input: event.input },
-          },
-        })
+        // Status flip + D1 sync + action token + push are still
+        // load-bearing. (#76 P3: gate scalar removed.)
+        this.updateState({ status: 'waiting_gate' })
         this.syncStatusToD1(new Date().toISOString())
-        // GH#50: gate-open lifecycle transition.
-        void this.flushLastEventTsToD1()
         ;(async () => {
           try {
             const actionToken = await generateActionToken(
@@ -4741,7 +4451,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
               num_turns: this.state.num_turns + (event.num_turns ?? 0),
               error: event.is_error ? event.result : null,
               summary: event.sdk_summary ?? this.state.summary,
-              gate: null,
             })
           },
           syncStatusToD1: () => {
@@ -4749,11 +4458,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           },
           syncResultToD1: () => {
             this.syncResultToD1(_now)
-          },
-          flushLastEventTsToD1: () => {
-            // GH#50: turn-complete lifecycle transition. Bypass debounce so
-            // the client sidebar resolves to its post-turn `idle` cleanly.
-            void this.flushLastEventTsToD1()
           },
         })
         // Spec #37 B9: the legacy per-turn summary WS frame is retired —
@@ -4807,7 +4511,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         // PRESERVE existing side effects; clear active_callback_token (terminal).
         this.updateState({
           status: 'idle',
-          gate: null,
           completed_at: new Date().toISOString(),
           active_callback_token: undefined,
         })
@@ -4819,8 +4522,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         void this.syncStatusToD1(new Date().toISOString())
           .then(() => this.maybeAutoAdvanceChain())
           .catch((err) => console.error('[session-do] post-stop chain:', err))
-        // GH#50: terminal lifecycle transition.
-        void this.flushLastEventTsToD1()
         break
       }
 
@@ -4918,8 +4619,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         {
           const _now = new Date().toISOString()
           this.syncStatusAndErrorToD1('idle', event.error ?? null, null, _now)
-          // GH#50: error lifecycle transition.
-          void this.flushLastEventTsToD1()
         }
         this.dispatchPush(
           {
@@ -4982,14 +4681,8 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       // Events that don't produce message parts — just broadcast raw
       default: {
         // GH#50 B9: tolerant drop for legacy events from in-flight pre-B7
-        // runners during the rollout window. We intentionally do NOT bump
-        // `lastEventTs` for these frames (see the guarded call at the top
-        // of handleGatewayEvent) — a zombie runner parked in
-        // `waitForNext()` will emit a heartbeat every ~10s for hours, and
-        // if that refreshed liveness, the client TTL would never fire and
-        // the row would show `running` forever. Dropping without bumping
-        // means the 45s TTL elapses and the UI flips to `idle` without
-        // needing the runner to exit.
+        // runners during the rollout window. These frames are logged once
+        // then silently dropped.
         const type = (event as { type: string }).type
         if (type === 'heartbeat' || type === 'session_state_changed') {
           const sid =

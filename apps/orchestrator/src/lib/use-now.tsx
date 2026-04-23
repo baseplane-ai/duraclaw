@@ -3,7 +3,7 @@
  *
  * Returns the current epoch ms, stable between ticks. A single
  * `setInterval(... , 10_000)` runs at the app root and writes through a
- * React context so all `deriveStatus()` callers re-render together
+ * React context so all time-dependent callers re-render together
  * (rather than each component spinning its own timer).
  *
  * Server-side rendering: `createContext<number>(Date.now())` snapshots
@@ -37,7 +37,7 @@ export function NowProvider({ children }: { children: ReactNode }) {
 /**
  * Read the latest tick value. Re-renders only when the shared interval
  * fires (~every 10s) — NOT on every Date.now() read. Pair with
- * `deriveStatus(row, useNow())` at component callsites.
+ * time-dependent computations at component callsites.
  */
 export function useNow(): number {
   return useContext(NowContext)

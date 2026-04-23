@@ -224,10 +224,7 @@ export function claimSubmitId(
 /**
  * GH#50 B9: legacy event types that pre-B7 session-runners still emit
  * while parked in `waitForNext()`. They are logged-once-then-dropped by
- * `SessionDO.handleGatewayEvent`'s default branch AND — critically —
- * must NOT bump `lastEventTs`. A zombie runner emitting a heartbeat
- * every ~10s would otherwise keep refreshing client-side liveness and
- * defeat the 45s TTL override that is the whole point of GH#50.
+ * `SessionDO.handleGatewayEvent`'s default branch.
  *
  * Extracted as a pure constant so the predicate is unit-testable without
  * importing SessionDO (the class uses TC39 decorators that vitest/oxc
@@ -236,49 +233,12 @@ export function claimSubmitId(
 export const LEGACY_DROPPED_EVENT_TYPES = ['heartbeat', 'session_state_changed'] as const
 export type LegacyDroppedEventType = (typeof LEGACY_DROPPED_EVENT_TYPES)[number]
 
-/**
- * True when `handleGatewayEvent` should bump `lastEventTs` for the given
- * event. Returns false for legacy frames (see `LEGACY_DROPPED_EVENT_TYPES`)
- * so TTL-derived status on the client can correctly flip a parked zombie
- * runner to `idle` after 45s of silence.
- */
-export function shouldBumpLastEventTs(eventType: string): boolean {
-  return !(LEGACY_DROPPED_EVENT_TYPES as readonly string[]).includes(eventType)
-}
-
-/**
- * True when the next `bumpLastEventTs()` call should skip the 10s debounce
- * and force an immediate `flushLastEventTsToD1()`. Fires once the gap
- * between the in-memory `lastEventTs` and the most recent D1 flush exceeds
- * `maxIntervalMs`.
- *
- * Exists because a continuous burst of `partial_assistant` deltas ≤ the
- * debounce window never re-arms the debounce timer (`bumpLastEventTs` has
- * an `if (this.lastEventFlushTimer) return` early-return), so without a
- * ceiling the D1 `last_event_ts` column can lag the in-memory value by
- * the full turn duration and the client's 45s TTL predicate
- * (`deriveStatus` in `~/lib/derive-status.ts`) wrongly flips
- * `running` → `idle` mid-stream.
- *
- * Extracted as a pure predicate so it is unit-testable without importing
- * SessionDO (TC39 decorators defeat vitest/oxc parsing on the class).
- */
-export function shouldForceFlushLastEventTs(
-  lastEventTs: number,
-  lastEventFlushedAt: number,
-  maxIntervalMs: number,
-): boolean {
-  return lastEventTs - lastEventFlushedAt > maxIntervalMs
-}
-
 export type PendingGateType = 'ask_user' | 'permission_request'
 
 /**
  * Walk message history newest-first looking for a still-pending gate part
- * whose `toolCallId` matches `gateId`. Used as the fallback in
- * `SessionDO.resolveGate` when the scalar `state.gate.id` has drifted from
- * what the client last rendered (dropped broadcasts, runner reconnect,
- * multiple in-flight gates).
+ * whose `toolCallId` matches `gateId`. This is the sole gate lookup used
+ * by `SessionDO.resolveGate` — no scalar involved.
  *
  * Returns `null` when no part with that id exists, or the matching part
  * has already moved past `approval-requested` (output-available /
@@ -342,8 +302,6 @@ export interface FinalizeResultTurnCallbacks {
   syncStatusToD1: () => void
   /** Fire-and-forget D1 sync of the result columns. */
   syncResultToD1: () => void
-  /** Fire-and-forget D1 flush of `last_event_ts` (GH#50). */
-  flushLastEventTsToD1: () => void
 }
 
 export function finalizeResultTurn(cbs: FinalizeResultTurnCallbacks): void {
@@ -351,5 +309,4 @@ export function finalizeResultTurn(cbs: FinalizeResultTurnCallbacks): void {
   cbs.updateStateIdle()
   cbs.syncStatusToD1()
   cbs.syncResultToD1()
-  cbs.flushLastEventTsToD1()
 }

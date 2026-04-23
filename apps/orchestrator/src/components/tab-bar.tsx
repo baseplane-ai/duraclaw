@@ -37,13 +37,12 @@ import {
 import { type SessionLocalState, sessionLocalCollection } from '~/db/session-local-collection'
 import type { SessionRecord } from '~/db/session-record'
 import { getPreviewText, StatusDot } from '~/features/agent-orch/session-utils'
+import { useDerivedStatus } from '~/hooks/use-derived-status'
 import { useIsMobile } from '~/hooks/use-mobile'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { isDraftTabId } from '~/hooks/use-tab-sync'
-import { deriveStatus } from '~/lib/derive-status'
 import { deriveDisplayStateFromStatus } from '~/lib/display-state'
 import type { SessionStatus } from '~/lib/types'
-import { useNow } from '~/lib/use-now'
 import { cn } from '~/lib/utils'
 
 interface TabBarProps {
@@ -372,13 +371,8 @@ function ProjectTabInner({
   // tab on any session delta.
   // GH#50: feed TTL-derived status into the display mapper so stuck
   // `running` tabs degrade to `idle` in lockstep with StatusBar / sidebar.
-  const nowTs = useNow()
-  // Prefer DO-pushed live status → raw D1 (if WS not yet open) → TTL-derived.
-  const wsOpen = (liveLocal?.wsReadyState ?? 3) === 1
-  const d1Derived = session ? deriveStatus(session, nowTs) : undefined
-  const rawD1 = session?.status as SessionStatus | undefined
-  const liveStatus = liveLocal?.liveStatus as SessionStatus | undefined
-  const sessionDerived = liveStatus ?? (!wsOpen ? rawD1 : undefined) ?? d1Derived
+  const sessionDerived =
+    useDerivedStatus(sessionId) ?? (session?.status as SessionStatus | undefined)
   const tabDisplay = deriveDisplayStateFromStatus(
     sessionDerived,
     liveLocal?.wsReadyState ?? 3,
