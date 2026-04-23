@@ -730,6 +730,10 @@ export class SessionDO extends Agent<Env, SessionMeta> {
         }),
       )
     }
+
+    // Push current status to the newly-connected client so it hydrates
+    // immediately without waiting for the next D1 synced-collection delta.
+    this.broadcastSessionStatus(connection)
   }
 
   /**
@@ -1192,12 +1196,53 @@ export class SessionDO extends Agent<Env, SessionMeta> {
    * clients no longer consume them and DO rehydrate pulls from SQLite.
    */
   private updateState(partial: Partial<SessionMeta>) {
+    // Capture pre-merge values for diff-based live status push.
+    const prevStatus = this.state.status
+    const prevGate = this.state.gate
+    const prevError = this.state.error
+
     this.setState({
       ...this.state,
       ...partial,
       updated_at: new Date().toISOString(),
     })
     this.persistMetaPatch(partial)
+
+    // Push live status to connected browser clients (agent WS) whenever
+    // status / gate / error changed. This bypasses the D1 round-trip so
+    // active-session UI sees zero-latency transitions — fixes the
+    // "idle while streaming" race where D1 lastEventTs is stale during the
+    // first 10s debounce window.
+    if (
+      this.state.status !== prevStatus ||
+      this.state.gate !== prevGate ||
+      this.state.error !== prevError
+    ) {
+      this.broadcastSessionStatus()
+    }
+  }
+
+  /**
+   * Push the current session status/gate/error to all connected browser
+   * clients. Called on every status diff (via `updateState`) and on client
+   * hello (via `onConnectInner`) so new tabs hydrate immediately.
+   */
+  private broadcastSessionStatus(target?: Connection) {
+    const frame = JSON.stringify({
+      type: 'session_status',
+      status: this.state.status,
+      gate: this.state.gate ?? null,
+      error: this.state.error ?? null,
+    })
+    if (target) {
+      try {
+        target.send(frame)
+      } catch {
+        // connection already closed
+      }
+    } else {
+      this.broadcastToClients(frame)
+    }
   }
 
   private persistMetaPatch(partial: Partial<SessionMeta>) {

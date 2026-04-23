@@ -41,6 +41,7 @@ import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { isDraftTabId } from '~/hooks/use-tab-sync'
 import { deriveStatus } from '~/lib/derive-status'
 import { deriveDisplayStateFromStatus } from '~/lib/display-state'
+import type { SessionStatus } from '~/lib/types'
 import { useNow } from '~/lib/use-now'
 import { cn } from '~/lib/utils'
 
@@ -371,7 +372,9 @@ function ProjectTabInner({
   // GH#50: feed TTL-derived status into the display mapper so stuck
   // `running` tabs degrade to `idle` in lockstep with StatusBar / sidebar.
   const nowTs = useNow()
-  const sessionDerived = session ? deriveStatus(session, nowTs) : undefined
+  // Prefer DO-pushed live status over D1 + TTL predicate for the active tab.
+  const d1Derived = session ? deriveStatus(session, nowTs) : undefined
+  const sessionDerived = (liveLocal?.liveStatus as SessionStatus | undefined) ?? d1Derived
   const tabDisplay = deriveDisplayStateFromStatus(
     sessionDerived,
     liveLocal?.wsReadyState ?? 3,

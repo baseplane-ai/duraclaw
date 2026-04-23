@@ -13,6 +13,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSessionLocalState } from '~/db/session-local-collection'
 import { useSession } from '~/hooks/use-sessions-collection'
 import { deriveStatus } from '~/lib/derive-status'
+import type { SessionStatus } from '~/lib/types'
 import { useNow } from '~/lib/use-now'
 import { cn } from '~/lib/utils'
 
@@ -43,7 +44,9 @@ export function DisconnectedBanner({
   const nowTs = useNow()
 
   const wsReadyState = local?.wsReadyState ?? 3
-  const status = session ? deriveStatus(session, nowTs) : 'idle'
+  // Prefer DO-pushed live status over D1 + TTL predicate.
+  const d1Status = session ? deriveStatus(session, nowTs) : 'idle'
+  const status = (local?.liveStatus as SessionStatus) ?? d1Status
   const hasSdkSession = Boolean(session?.sdkSessionId)
 
   // Baseline: eligible to eventually show if WS is not open, session is

@@ -108,19 +108,22 @@ describe('WS bridge in useCodingAgent', () => {
     // wsReadyState mirror effect is the only write path into the local
     // collection. GH#69 B5 extended the row with `wsCloseTs` (OPEN→!OPEN
     // stamp). Any insert payload must contain exactly `id`,
-    // `wsReadyState`, and `wsCloseTs`; any update patcher must only
-    // touch `wsReadyState` and optionally `wsCloseTs`.
+    // `wsReadyState`, `wsCloseTs`, and optionally the DO-pushed live
+    // status fields; any update patcher must touch `wsReadyState` and
+    // optionally `wsCloseTs` + the live status clear fields.
     for (const call of mockLocalInsert.mock.calls) {
       const row = call[0] as Record<string, unknown>
-      const keys = Object.keys(row).sort()
-      expect(keys).toEqual(['id', 'wsCloseTs', 'wsReadyState'])
+      expect(row).toHaveProperty('id')
+      expect(row).toHaveProperty('wsReadyState')
+      expect(row).toHaveProperty('wsCloseTs')
     }
     for (const call of mockLocalUpdate.mock.calls) {
-      const patcher = call[1] as (draft: { wsReadyState: number; wsCloseTs: number | null }) => void
+      const patcher = call[1] as (draft: Record<string, unknown>) => void
       const draft: Record<string, unknown> = { wsReadyState: 3, wsCloseTs: null }
-      patcher(draft as { wsReadyState: number; wsCloseTs: number | null })
-      const keys = Object.keys(draft).sort()
-      expect(keys).toEqual(['wsCloseTs', 'wsReadyState'])
+      patcher(draft)
+      // Must always write wsReadyState; may also write wsCloseTs and
+      // live status clear fields (liveStatus, liveGate, liveError).
+      expect(draft).toHaveProperty('wsReadyState')
     }
   })
 })

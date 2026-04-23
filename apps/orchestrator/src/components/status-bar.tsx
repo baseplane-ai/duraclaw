@@ -246,9 +246,11 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
   const overrideFiredRef = useRef<string | null>(null)
 
   const readyState = local?.wsReadyState ?? 3
-  // GH#50: TTL-derived status — overrides stuck `running` rows to `idle`
-  // after >45s of silence from the runner.
-  const status: SessionStatus | undefined = session ? deriveStatus(session, nowTs) : undefined
+  // Prefer DO-pushed live status (zero-latency via agent WS) over D1 +
+  // TTL predicate. Falls back to D1-derived when the WS is down or no
+  // live push has arrived yet. Fixes the "idle while streaming" race.
+  const d1Status: SessionStatus | undefined = session ? deriveStatus(session, nowTs) : undefined
+  const status: SessionStatus | undefined = (local?.liveStatus as SessionStatus) ?? d1Status
 
   useEffect(() => {
     if (!session) {

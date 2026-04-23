@@ -9,10 +9,12 @@ import { StatusBar } from '~/components/status-bar'
 import { VisibilityBadge } from '~/components/visibility-badge'
 import { type BranchInfoRow, createBranchInfoCollection } from '~/db/branch-info-collection'
 import { projectsCollection } from '~/db/projects-collection'
+import { useSessionLocalState } from '~/db/session-local-collection'
 import { useSession } from '~/hooks/use-sessions-collection'
 import { useSession as useAuthSession } from '~/lib/auth-client'
 import { deriveStatus } from '~/lib/derive-status'
 import { apiUrl } from '~/lib/platform'
+import type { SessionStatus } from '~/lib/types'
 import { useNow } from '~/lib/use-now'
 import { useStatusBarStore } from '~/stores/status-bar'
 import { ChatThread } from './ChatThread'
@@ -50,6 +52,7 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
   // Spec #37 P2b: read the D1-mirrored session row for status / project /
   // model / sdkSessionId. DO is authoritative — no client-side writes.
   const session = useSession(sessionId)
+  const local = useSessionLocalState(sessionId)
 
   // GH#14 B7: derive a Map<parentMsgId, {current,total,siblings}> from the
   // per-session `branchInfoCollection` (DO-authored). ChatThread accepts the
@@ -112,11 +115,11 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
     [sendMessage],
   )
 
-  // GH#50: TTL-derived status — stuck `running` rows degrade to `idle`
-  // client-side so the composer's `disabled={status === 'waiting_gate'}`
-  // gate stays consistent with StatusBar / sidebar.
+  // Prefer DO-pushed live status (zero-latency via agent WS) over D1 +
+  // TTL predicate. Falls back to D1-derived when the WS is down.
   const nowTs = useNow()
-  const status = session ? deriveStatus(session, nowTs) : 'idle'
+  const d1Status = session ? deriveStatus(session, nowTs) : 'idle'
+  const status = (local?.liveStatus as SessionStatus) ?? d1Status
 
   // Draft key scopes localStorage drafts. Tabs ARE sessions (userTabsCollection
   // rows keyed by sessionId), so use sessionId directly — no separate tab ID.
