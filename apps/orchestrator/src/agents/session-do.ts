@@ -99,6 +99,14 @@ export interface SessionMeta {
   sdk_session_id: string | null
   active_callback_token?: string
   lastKataMode?: string
+  /**
+   * GH#73: true when the runner has observed `run-end.json` for the current
+   * SDK session. Chain auto-advance gates on `status === 'idle' &&
+   * lastRunEnded === true` — kata's Stop hook writes the evidence file only
+   * when `can-exit` passes, so this becomes the authoritative "rung
+   * finished" signal (no more fragile spec/VP filesystem probes).
+   */
+  lastRunEnded?: boolean
 }
 
 const DEFAULT_META: SessionMeta = {
@@ -147,6 +155,7 @@ const META_COLUMN_MAP: Partial<Record<keyof SessionMeta, string>> = {
   sdk_session_id: 'sdk_session_id',
   active_callback_token: 'active_callback_token',
   lastKataMode: 'last_kata_mode',
+  lastRunEnded: 'last_run_ended',
 }
 
 /**
@@ -1291,6 +1300,11 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       if (key === 'gate') {
         cols.push(`${col} = ?`)
         vals.push(value ? JSON.stringify(value) : null)
+      } else if (key === 'lastRunEnded') {
+        // INTEGER 0/1 column (migration v13). undefined → 0 so the default
+        // "not yet ended" state is explicit rather than SQL NULL.
+        cols.push(`${col} = ?`)
+        vals.push(value ? 1 : 0)
       } else {
         cols.push(`${col} = ?`)
         vals.push(value ?? null)
@@ -1335,6 +1349,9 @@ export class SessionDO extends Agent<Env, SessionMeta> {
           } catch {
             // Invalid gate JSON — skip.
           }
+        } else if (key === 'lastRunEnded') {
+          // INTEGER 0/1 → boolean. GH#73.
+          ;(patch as Record<string, unknown>)[key] = raw === 1 || raw === '1' || raw === true
         } else {
           ;(patch as Record<string, unknown>)[key] = raw
         }
@@ -1421,6 +1438,11 @@ export class SessionDO extends Agent<Env, SessionMeta> {
           kataIssue,
           kataMode,
           project,
+          // GH#73: the authoritative "rung finished" signal. Persisted from
+          // `kata_state` events whenever the runner observes run-end.json —
+          // kata's Stop hook writes it on successful can-exit only, so this
+          // is the single source of truth for auto-advance.
+          runEnded: this.state.lastRunEnded === true,
         },
         this.ctx,
       )
@@ -4367,6 +4389,17 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         {
           const _now = new Date().toISOString()
           this.syncKataAllToD1(event.kata_state, _now)
+        }
+
+        // GH#73: persist the runEnded evidence bit whenever it changes.
+        // chain auto-advance reads this on the post-stop gate — the runner
+        // emits a fresh kata_state frame each time run-end.json appears, so
+        // by the time the session lands in 'idle' the bit is already durable.
+        {
+          const nextRunEnded = event.kata_state?.runEnded === true
+          if ((this.state.lastRunEnded ?? false) !== nextRunEnded) {
+            this.updateState({ lastRunEnded: nextRunEnded })
+          }
         }
 
         // Chain UX P4: detect mode transitions on chain-linked sessions and

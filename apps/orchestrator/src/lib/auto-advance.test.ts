@@ -13,11 +13,6 @@ vi.mock('~/lib/checkout-worktree', () => ({
   checkoutWorktree: vi.fn().mockResolvedValue({ ok: true }),
 }))
 
-vi.mock('~/lib/gateway-files', () => ({
-  getSpecStatus: vi.fn().mockResolvedValue({ exists: true, status: 'approved' }),
-  getVpStatus: vi.fn().mockResolvedValue({ exists: true }),
-}))
-
 import { checkoutWorktree } from '~/lib/checkout-worktree'
 import { createSession } from '~/lib/create-session'
 import { CORE_RUNGS, nextRung, tryAutoAdvance } from './auto-advance'
@@ -29,6 +24,8 @@ function makeEnv() {
   return { AUTH_DB: {} } as any
 }
 
+// GH#73: happy-path defaults to `runEnded: true` since most tests want to
+// exercise the post-gate flow. Failing-gate tests override explicitly.
 function baseParams(overrides: Partial<Parameters<typeof tryAutoAdvance>[1]> = {}) {
   return {
     sessionId: 'sess-1',
@@ -36,6 +33,7 @@ function baseParams(overrides: Partial<Parameters<typeof tryAutoAdvance>[1]> = {
     kataIssue: 42,
     kataMode: 'implementation',
     project: 'duraclaw',
+    runEnded: true,
     ...overrides,
   }
 }
@@ -116,44 +114,26 @@ describe('tryAutoAdvance', () => {
     expect(mockedCreateSession).not.toHaveBeenCalled()
   })
 
-  it('returns {action:"stalled"} when precondition fails (no completed prior rung)', async () => {
+  it('returns {action:"stalled"} when runEnded=false (kata can-exit did not pass)', async () => {
     fakeDb.data.queue = [
       [{ chainsJson: null, defaultChainAutoAdvance: 1 }], // prefs enabled
       [], // idempotency check — no existing successor
-      // chainSessions lookup for precondition: impl session exists but numTurns=0
-      [{ id: 's1', kataMode: 'implementation', status: 'idle', numTurns: 0 }],
     ]
-    const res = await tryAutoAdvance(env, baseParams({ kataMode: 'implementation' }))
+    const res = await tryAutoAdvance(
+      env,
+      baseParams({ kataMode: 'implementation', runEnded: false }),
+    )
     expect(res).toMatchObject({ action: 'stalled' })
     if (res.action === 'stalled') {
-      expect(res.reason).toMatch(/No completed implementation session/)
+      expect(res.reason).toMatch(/run-end/i)
     }
-  })
-
-  it('returns {action:"stalled"} when verify→close has no VP evidence', async () => {
-    const { getVpStatus } = await import('~/lib/gateway-files')
-    vi.mocked(getVpStatus).mockResolvedValueOnce({ exists: false } as any)
-
-    fakeDb.data.queue = [
-      [{ chainsJson: null, defaultChainAutoAdvance: 1 }],
-      [], // no existing successor
-      [{ id: 's1', kataMode: 'verify', status: 'idle', numTurns: 3 }],
-    ]
-    const res = await tryAutoAdvance(env, baseParams({ kataMode: 'verify' }))
-    expect(res).toMatchObject({ action: 'stalled' })
-    if (res.action === 'stalled') {
-      expect(res.reason).toMatch(/VP evidence not found/)
-    }
+    expect(mockedCreateSession).not.toHaveBeenCalled()
   })
 
   it('returns {action:"advanced"} on happy path (implementation → verify)', async () => {
     fakeDb.data.queue = [
       [{ chainsJson: null, defaultChainAutoAdvance: 1 }], // prefs enabled
       [], // no existing successor
-      [
-        // chain history — completed implementation session
-        { id: 's-impl', kataMode: 'implementation', status: 'idle', numTurns: 5 },
-      ],
     ]
     mockedCreateSession.mockResolvedValueOnce({ ok: true, sessionId: 'new-verify-sess' })
 
@@ -184,7 +164,6 @@ describe('tryAutoAdvance', () => {
         },
       ],
       [],
-      [{ id: 's-impl', kataMode: 'implementation', status: 'idle', numTurns: 1 }],
     ]
     mockedCreateSession.mockResolvedValueOnce({ ok: true, sessionId: 'new-sess' })
 
@@ -213,11 +192,7 @@ describe('tryAutoAdvance', () => {
   })
 
   it('returns {action:"error"} when createSession throws', async () => {
-    fakeDb.data.queue = [
-      [{ chainsJson: null, defaultChainAutoAdvance: 1 }],
-      [],
-      [{ id: 's-impl', kataMode: 'implementation', status: 'idle', numTurns: 1 }],
-    ]
+    fakeDb.data.queue = [[{ chainsJson: null, defaultChainAutoAdvance: 1 }], []]
     mockedCreateSession.mockRejectedValueOnce(new Error('spawn blew up'))
 
     const res = await tryAutoAdvance(env, baseParams({ kataMode: 'implementation' }))
@@ -228,11 +203,7 @@ describe('tryAutoAdvance', () => {
   })
 
   it('returns {action:"error"} when createSession returns {ok:false}', async () => {
-    fakeDb.data.queue = [
-      [{ chainsJson: null, defaultChainAutoAdvance: 1 }],
-      [],
-      [{ id: 's-impl', kataMode: 'implementation', status: 'idle', numTurns: 1 }],
-    ]
+    fakeDb.data.queue = [[{ chainsJson: null, defaultChainAutoAdvance: 1 }], []]
     mockedCreateSession.mockResolvedValueOnce({ ok: false, status: 500, error: 'boom' })
 
     const res = await tryAutoAdvance(env, baseParams({ kataMode: 'implementation' }))
@@ -240,11 +211,7 @@ describe('tryAutoAdvance', () => {
   })
 
   it('returns {action:"stalled"} when worktree is held by another chain (409 conflict)', async () => {
-    fakeDb.data.queue = [
-      [{ chainsJson: null, defaultChainAutoAdvance: 1 }],
-      [],
-      [{ id: 's-impl', kataMode: 'implementation', status: 'idle', numTurns: 1 }],
-    ]
+    fakeDb.data.queue = [[{ chainsJson: null, defaultChainAutoAdvance: 1 }], []]
     mockedCheckoutWorktree.mockResolvedValueOnce({
       ok: false,
       status: 409,
@@ -258,51 +225,29 @@ describe('tryAutoAdvance', () => {
     }
   })
 
-  describe('checkPreconditionServer parity (status==="idle" && numTurns>0)', () => {
-    // The server-side precondition is verified by driving tryAutoAdvance
-    // through the planning (research → planning) gate with various chain
-    // histories. Client parity reference: isCompletedSession in
-    // nav-sessions.tsx.
-
-    it('treats numTurns===0 as "not completed" (draft)', async () => {
-      fakeDb.data.queue = [
-        [{ chainsJson: null, defaultChainAutoAdvance: 1 }],
-        [],
-        [{ id: 's1', kataMode: 'research', status: 'idle', numTurns: 0 }],
-      ]
-      const res = await tryAutoAdvance(env, baseParams({ kataMode: 'research' }))
-      expect(res).toMatchObject({ action: 'stalled' })
-    })
-
-    it('treats numTurns>0 && status==="idle" as completed', async () => {
-      fakeDb.data.queue = [
-        [{ chainsJson: null, defaultChainAutoAdvance: 1 }],
-        [],
-        [{ id: 's1', kataMode: 'research', status: 'idle', numTurns: 2 }],
-      ]
+  describe('evidence-file gate (GH#73)', () => {
+    it('research → planning advances when runEnded=true', async () => {
+      fakeDb.data.queue = [[{ chainsJson: null, defaultChainAutoAdvance: 1 }], []]
       mockedCreateSession.mockResolvedValueOnce({ ok: true, sessionId: 'new-plan' })
-      const res = await tryAutoAdvance(env, baseParams({ kataMode: 'research' }))
+      const res = await tryAutoAdvance(env, baseParams({ kataMode: 'research', runEnded: true }))
       expect(res).toMatchObject({ action: 'advanced', nextMode: 'planning' })
     })
 
-    it('rejects non-idle statuses even with numTurns>0', async () => {
-      fakeDb.data.queue = [
-        [{ chainsJson: null, defaultChainAutoAdvance: 1 }],
-        [],
-        [{ id: 's1', kataMode: 'research', status: 'active', numTurns: 4 }],
-      ]
-      const res = await tryAutoAdvance(env, baseParams({ kataMode: 'research' }))
-      expect(res).toMatchObject({ action: 'stalled' })
+    it('verify → close advances when runEnded=true (no VP filesystem probe)', async () => {
+      fakeDb.data.queue = [[{ chainsJson: null, defaultChainAutoAdvance: 1 }], []]
+      mockedCreateSession.mockResolvedValueOnce({ ok: true, sessionId: 'new-close' })
+      const res = await tryAutoAdvance(env, baseParams({ kataMode: 'verify', runEnded: true }))
+      expect(res).toMatchObject({ action: 'advanced', nextMode: 'close' })
     })
 
-    it('rejects null/undefined numTurns (defaults to 0)', async () => {
-      fakeDb.data.queue = [
-        [{ chainsJson: null, defaultChainAutoAdvance: 1 }],
-        [],
-        [{ id: 's1', kataMode: 'research', status: 'idle', numTurns: null }],
-      ]
-      const res = await tryAutoAdvance(env, baseParams({ kataMode: 'research' }))
-      expect(res).toMatchObject({ action: 'stalled' })
+    it('stalls every rung when runEnded=false regardless of chain history', async () => {
+      for (const kataMode of ['research', 'planning', 'implementation', 'verify']) {
+        fakeDb.data.queue = [[{ chainsJson: null, defaultChainAutoAdvance: 1 }], []]
+        mockedCreateSession.mockClear()
+        const res = await tryAutoAdvance(env, baseParams({ kataMode, runEnded: false }))
+        expect(res, `mode=${kataMode}`).toMatchObject({ action: 'stalled' })
+        expect(mockedCreateSession).not.toHaveBeenCalled()
+      }
     })
   })
 })

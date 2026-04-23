@@ -524,6 +524,13 @@ export interface KataSessionState {
    * reset-on-enter).
    */
   continueSdk?: boolean
+  /**
+   * True when `.kata/sessions/<sessionId>/run-end.json` exists — kata's Stop
+   * hook writes it whenever `can-exit` succeeds (no-op modes or all stop
+   * conditions met). This is the authoritative "rung finished" signal that
+   * Duraclaw's chain auto-advance gates on. GH#73.
+   */
+  runEnded?: boolean
 }
 
 export interface KataStateEvent {

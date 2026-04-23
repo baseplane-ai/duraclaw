@@ -20,7 +20,6 @@ import * as schema from '~/db/schema'
 import { agentSessions, userPreferences } from '~/db/schema'
 import { checkoutWorktree } from '~/lib/checkout-worktree'
 import { createSession } from '~/lib/create-session'
-import { getSpecStatus, getVpStatus } from '~/lib/gateway-files'
 import type { Env } from '~/lib/types'
 
 /**
@@ -67,13 +66,6 @@ export function nextRung(current: string): string | null {
   }
 }
 
-/** Subset of a chain session row needed by the precondition gates. */
-interface SessionForGate {
-  kataMode?: string | null
-  status: string
-  numTurns?: number | null
-}
-
 export type AutoAdvanceResult =
   | { action: 'none' }
   | { action: 'stalled'; reason: string }
@@ -86,72 +78,16 @@ export interface TryAutoAdvanceParams {
   kataIssue: number
   kataMode: string
   project: string
-}
-
-/**
- * Server-side port of `checkPrecondition()` in
- * `~/hooks/use-chain-preconditions.ts`. No React. No same-worker fetch.
- * `issueState` lookups (for the backlog → research gate) are out of scope
- * here — the session just completed a core rung, so the issue was
- * demonstrably live enough to run. The full gate table is preserved for
- * all other transitions.
- */
-async function checkPreconditionServer(
-  env: Env,
-  sessionsForIssue: SessionForGate[],
-  nextMode: string,
-  project: string,
-  issueNumber: number,
-): Promise<{ canAdvance: boolean; reason: string }> {
-  if (nextMode === 'research') {
-    // `research` is the backlog → research rung — unreachable here because
-    // the trigger is a completed core rung. Accept defensively.
-    return { canAdvance: true, reason: '' }
-  }
-
-  if (nextMode === 'planning') {
-    // `agent_sessions.status` never holds 'completed' in this codebase —
-    // finished sessions land as 'idle' (SessionStatus union in
-    // packages/shared-types). Match `isCompletedSession` in
-    // apps/orchestrator/src/components/layout/nav-sessions.tsx: idle AND
-    // numTurns > 0 (so fresh drafts don't count).
-    const ok = sessionsForIssue.some(
-      (s) => s.kataMode === 'research' && s.status === 'idle' && (s.numTurns ?? 0) > 0,
-    )
-    return {
-      canAdvance: ok,
-      reason: ok ? '' : 'No completed research session',
-    }
-  }
-
-  if (nextMode === 'implementation') {
-    const spec = await getSpecStatus(env, project, issueNumber)
-    if (!spec.exists) return { canAdvance: false, reason: 'Spec not found' }
-    if (spec.status !== 'approved') {
-      return { canAdvance: false, reason: 'Spec not yet approved' }
-    }
-    return { canAdvance: true, reason: '' }
-  }
-
-  if (nextMode === 'verify') {
-    // See above — 'idle' is the D1 terminal marker; 'completed' is never
-    // stored. Mirror `isCompletedSession` in nav-sessions.tsx.
-    const ok = sessionsForIssue.some(
-      (s) => s.kataMode === 'implementation' && s.status === 'idle' && (s.numTurns ?? 0) > 0,
-    )
-    return {
-      canAdvance: ok,
-      reason: ok ? '' : 'No completed implementation session',
-    }
-  }
-
-  if (nextMode === 'close') {
-    const vp = await getVpStatus(env, project, issueNumber)
-    if (!vp.exists) return { canAdvance: false, reason: 'VP evidence not found' }
-    return { canAdvance: true, reason: '' }
-  }
-
-  return { canAdvance: false, reason: 'No next mode' }
+  /**
+   * GH#73: authoritative "rung finished" signal — `.kata/sessions/<sdk-
+   * session-id>/run-end.json` was observed for the current session. Kata's
+   * Stop hook writes it only when `can-exit` passes (no-op modes + all
+   * stop conditions met) and skips it on block / background-agents-running.
+   * This is the single gate; we no longer parse spec status or probe for
+   * VP evidence through the gateway (both were fragile — a gateway hiccup
+   * manifested as a permanent "spec not found" stall).
+   */
+  runEnded: boolean
 }
 
 /**
@@ -202,7 +138,7 @@ export async function tryAutoAdvance(
   params: TryAutoAdvanceParams,
   executionCtx?: { waitUntil: (p: Promise<unknown>) => void },
 ): Promise<AutoAdvanceResult> {
-  const { userId, kataIssue, kataMode, project } = params
+  const { userId, kataIssue, kataMode, project, runEnded } = params
 
   if (!CORE_RUNGS.has(kataMode)) return { action: 'none' }
   const nextMode = nextRung(kataMode)
@@ -229,26 +165,16 @@ export async function tryAutoAdvance(
     .limit(1)
   if (existing[0]) return { action: 'none' }
 
-  // 3. Precondition gate — need the chain's session history.
-  const chainSessions = await db
-    .select({
-      id: agentSessions.id,
-      kataMode: agentSessions.kataMode,
-      status: agentSessions.status,
-      numTurns: agentSessions.numTurns,
-    })
-    .from(agentSessions)
-    .where(eq(agentSessions.kataIssue, kataIssue))
-
-  const precondition = await checkPreconditionServer(
-    env,
-    chainSessions as SessionForGate[],
-    nextMode,
-    project,
-    kataIssue,
-  )
-  if (!precondition.canAdvance) {
-    return { action: 'stalled', reason: precondition.reason }
+  // 3. Evidence-file gate (GH#73). Kata's Stop hook writes
+  // `run-end.json` inside the SDK session folder when `can-exit` succeeds.
+  // If the runner never observed that file for this session, the rung
+  // didn't meet its stop conditions — don't advance. No spec/VP probes;
+  // kata itself owns those checks as stop-conditions on each mode.
+  if (!runEnded) {
+    return {
+      action: 'stalled',
+      reason: 'Rung did not signal run-end (kata can-exit not satisfied)',
+    }
   }
 
   // 4. Worktree checkout for code-touching successors.

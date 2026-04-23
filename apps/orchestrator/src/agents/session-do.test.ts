@@ -292,7 +292,7 @@ describe('SESSION_DO_MIGRATIONS', () => {
   describe('migration chain integrity', () => {
     it('has sequential version numbers', () => {
       const versions = SESSION_DO_MIGRATIONS.map((m) => m.version)
-      expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
+      expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
     })
 
     it('all migrations have descriptions', () => {

@@ -246,4 +246,20 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 14,
+    description:
+      'Add last_run_ended to session_meta for chain auto-advance evidence gate (GH#73). 0/1 boolean; mirrors whether the runner has observed `.kata/sessions/<sdk-session-id>/run-end.json` for the current session.',
+    up: (sql) => {
+      try {
+        sql.exec(`ALTER TABLE session_meta ADD COLUMN last_run_ended INTEGER NOT NULL DEFAULT 0`)
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (!msg.toLowerCase().includes('duplicate column')) {
+          console.warn('[migration v14] unexpected error adding last_run_ended column', e)
+          throw e
+        }
+      }
+    },
+  },
 ]

@@ -17,75 +17,108 @@ import type { RunnerSessionContext } from './types.js'
 /** Debounce interval for kata state file changes (ms). Matches gateway. */
 const KATA_DEBOUNCE_MS = 150
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-
 /**
- * Find the most recent kata session state for a project.
- * Same algorithm as packages/agent-gateway/src/kata.ts.
+ * Read the kata session state for a specific SDK session id.
+ *
+ * GH#73: replaces the previous "scan all sessions by mtime" algorithm. When
+ * multiple SDK sessions share a worktree (e.g. two chain rungs running in
+ * parallel), the newest-mtime heuristic propagated the wrong session's state
+ * to D1 — every chain card would flip between its two peers' modes. The
+ * runner already knows its own SDK session id via `ctx.meta.sdk_session_id`
+ * (set from `session.init`), and kata names its session folders by that id,
+ * so a direct read is both correct and cheaper.
+ *
+ * Also checks for `.kata/sessions/<sdkSessionId>/run-end.json` — kata's Stop
+ * hook writes it whenever `can-exit` succeeds (no-op modes or all stop
+ * conditions met) and skips it on block / background-agents-running. The
+ * `runEnded` flag is surfaced on the event so the DO can gate chain
+ * auto-advance on an authoritative signal instead of fragile spec/VP
+ * filesystem probes through the gateway.
+ *
+ * Returns `null` when the session folder has no state.json yet (very early
+ * in the session lifecycle, before kata's SessionStart hook lands).
  */
-async function findLatestKataState(projectPath: string): Promise<KataSessionState | null> {
-  const sessionsDir = nodePath.join(projectPath, '.kata', 'sessions')
-  let names: string[]
+async function readSessionKataState(
+  projectPath: string,
+  sdkSessionId: string,
+): Promise<KataSessionState | null> {
+  const sessionDir = nodePath.join(projectPath, '.kata', 'sessions', sdkSessionId)
+  let raw: string
   try {
-    names = await fs.readdir(sessionsDir)
+    raw = await fs.readFile(nodePath.join(sessionDir, 'state.json'), 'utf-8')
+  } catch {
+    // No state.json yet — kata hasn't initialised this session.
+    return null
+  }
+
+  let parsed: KataSessionState
+  try {
+    parsed = JSON.parse(raw) as KataSessionState
   } catch {
     return null
   }
 
-  let latest: { id: string; mtimeMs: number } | null = null
-  for (const name of names) {
-    if (!UUID_RE.test(name)) continue
-    const stateFile = nodePath.join(sessionsDir, name, 'state.json')
-    try {
-      const { mtimeMs } = await fs.stat(stateFile)
-      if (!latest || mtimeMs > latest.mtimeMs) {
-        latest = { id: name, mtimeMs }
-      }
-    } catch {
-      /* no state.json — skip */
-    }
-  }
-  if (!latest) return null
-
+  // Existence-only probe for run-end.json. Written by kata's Stop hook on
+  // successful can-exit; absence means either (a) kata hasn't finished the
+  // current rung yet, or (b) can-exit blocked. Either way, chain advance
+  // should wait.
+  let runEnded = false
   try {
-    const raw = await fs.readFile(nodePath.join(sessionsDir, latest.id, 'state.json'), 'utf-8')
-    return JSON.parse(raw) as KataSessionState
+    await fs.stat(nodePath.join(sessionDir, 'run-end.json'))
+    runEnded = true
   } catch {
-    return null
+    /* absent — runEnded stays false */
   }
+
+  return { ...parsed, runEnded }
 }
 
 /**
- * Watch `.kata/sessions/` for state.json changes and emit KataStateEvent
- * over the runner's dial-back channel. Also emits the initial state on startup.
+ * Watch `.kata/sessions/<sdk-session-id>/` for state.json / run-end.json
+ * changes and emit KataStateEvent over the runner's dial-back channel.
  *
- * Returns a cleanup function. Errors are swallowed — kata state is best-effort.
+ * GH#73: read is targeted at `ctx.meta.sdk_session_id` rather than scanning
+ * all sessions by mtime. `sdk_session_id` isn't set until the SDK emits
+ * `session.init`, so `emitState()` is a no-op until then; the caller pokes
+ * this watcher (via `emitKataStateNow`) from the init handler so the DO
+ * sees the first snapshot as soon as it's resolvable.
+ *
+ * Returns `{ stop, emitNow }` — `emitNow()` is used by the session.init
+ * handler to force a snapshot as soon as `sdk_session_id` is known, without
+ * waiting for the next filesystem event.
+ *
+ * Errors are swallowed — kata state is best-effort.
  */
 function startKataWatcher(
   projectPath: string,
   project: string,
   ch: BufferedChannel,
   ctx: RunnerSessionContext,
-): () => void {
+): { stop: () => void; emitNow: () => void } {
   let debounceTimer: ReturnType<typeof setTimeout> | null = null
   let watcher: FSWatcher | null = null
 
   const emitState = async () => {
+    const sdkSessionId = ctx.meta.sdk_session_id
+    // Pre-init: we don't know which kata session folder to read yet. Skip —
+    // emitNow() from the session.init handler will fire as soon as the id
+    // arrives.
+    if (!sdkSessionId) return
     try {
-      const state = await findLatestKataState(projectPath)
+      const state = await readSessionKataState(projectPath, sdkSessionId)
       send(ch, { type: 'kata_state', session_id: ctx.sessionId, project, kata_state: state }, ctx)
     } catch {
       /* best-effort */
     }
   }
 
-  // Emit initial state so the DO syncs immediately on connect.
-  emitState()
-
   const sessionsDir = nodePath.join(projectPath, '.kata', 'sessions')
   try {
     watcher = watch(sessionsDir, { recursive: true }, (_event, filename) => {
-      if (!filename?.endsWith('state.json')) return
+      // Only react to files the runner cares about. `state.json` is the
+      // live mode/phase snapshot; `run-end.json` is the GH#73 can-exit
+      // evidence file written by kata's Stop hook.
+      if (!filename?.endsWith('state.json') && !filename?.endsWith('run-end.json')) return
       if (debounceTimer) clearTimeout(debounceTimer)
       debounceTimer = setTimeout(() => {
         debounceTimer = null
@@ -96,12 +129,19 @@ function startKataWatcher(
     // .kata/sessions/ may not exist yet — that's fine.
   }
 
-  return () => {
-    if (debounceTimer) clearTimeout(debounceTimer)
-    if (watcher) {
-      watcher.close()
-      watcher = null
-    }
+  return {
+    stop: () => {
+      if (debounceTimer) clearTimeout(debounceTimer)
+      if (watcher) {
+        watcher.close()
+        watcher = null
+      }
+    },
+    emitNow: () => {
+      if (debounceTimer) clearTimeout(debounceTimer)
+      debounceTimer = null
+      void emitState()
+    },
   }
 }
 
@@ -356,7 +396,7 @@ export class ClaudeRunner {
     ctx.messageQueue = queue
 
     let sdkSessionId: string | null = null
-    const stopKataWatcher = startKataWatcher(projectPath, cmd.project, ch, ctx)
+    const kataWatcher = startKataWatcher(projectPath, cmd.project, ch, ctx)
 
     try {
       // Dynamic import -- the SDK is ESM-only
@@ -470,6 +510,13 @@ export class ClaudeRunner {
               },
               ctx,
             )
+
+            // GH#73: with the kata session id now known, push an initial
+            // kata_state snapshot so the DO syncs the mode/issue + runEnded
+            // fields for this session immediately. Prior to session.init the
+            // watcher can't pick the right folder, so this is the first
+            // viable emission point.
+            if (sdkSessionId) kataWatcher.emitNow()
 
             // Drain command queue now that Query is available
             if (ctx.commandQueue.length > 0) {
@@ -746,7 +793,7 @@ export class ClaudeRunner {
         ctx.meta.state = 'failed'
       }
     } finally {
-      stopKataWatcher()
+      kataWatcher.stop()
       // Clean up the message queue and query reference
       queue.done()
       ctx.messageQueue = null
