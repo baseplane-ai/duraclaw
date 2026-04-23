@@ -85,6 +85,17 @@ describe('useDerivedStatus', () => {
     expect(result.current).toBe('waiting_gate')
   })
 
+  it('returns undefined for null sessionId', () => {
+    mockUseMessagesCollection.mockReturnValue({
+      messages: [],
+      isLoading: false,
+      isFetching: false,
+    } as ReturnType<typeof useMessagesCollection>)
+    mockUseSession.mockReturnValue(undefined)
+    const { result } = renderHook(() => useDerivedStatus(null))
+    expect(result.current).toBeUndefined()
+  })
+
   it('returns undefined when D1 messageSeq has caught up (tiebreaker)', () => {
     mockUseMessagesCollection.mockReturnValue({
       messages: [
