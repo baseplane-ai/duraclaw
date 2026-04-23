@@ -669,7 +669,16 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         for (const [id, row] of coll as Iterable<[string, CachedMessage]>) {
           const parts = row.parts ?? []
           const idx = parts.findIndex(
-            (p) => p.toolCallId === gateId && p.state === 'approval-requested',
+            (p) =>
+              p.toolCallId === gateId &&
+              // Match both pending states: `approval-requested` is the
+              // DO-promoted shape (tool-ask_user / tool-permission);
+              // `input-available` is the SDK-native shape
+              // (tool-AskUserQuestion rendered directly without waiting for
+              // promotion). Without both, the optimistic write is skipped
+              // for native-shape gates and the Submit button flashes
+              // disabled until the server echo lands.
+              (p.state === 'approval-requested' || p.state === 'input-available'),
           )
           if (idx >= 0) {
             targetMsgId = id
@@ -693,7 +702,8 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
 
       if (targetMsgId && preMutationParts && optimisticOutput !== undefined) {
         const nextParts = preMutationParts.map((p) =>
-          p.toolCallId === gateId && p.state === 'approval-requested'
+          p.toolCallId === gateId &&
+          (p.state === 'approval-requested' || p.state === 'input-available')
             ? { ...p, state: 'output-available' as const, output: optimisticOutput }
             : p,
         )
