@@ -670,9 +670,11 @@ export class ClaudeRunner {
             const result = message as any
 
             // Idle stop — the model hit the interactive stop sequence with
-            // "No response requested." Don't forward to orchestrator; the
-            // outer loop will auto-nudge with "continue" to keep working.
-            if (isIdleStop(result)) {
+            // "No response requested." Normally suppress and auto-nudge.
+            // BUT if the user interrupted, forward the result so the DO
+            // transitions to idle (otherwise it stays stuck in 'running'
+            // with no runner).
+            if (isIdleStop(result) && !ctx.interrupted) {
               idleStop = true
               console.log(`[session-runner] executeSession: idle stop detected`)
               continue
@@ -745,10 +747,16 @@ export class ClaudeRunner {
       //
       // Normal results: forwarded to orchestrator, then wait for the next
       // user message (stream-input) before resuming.
-      while (!ac.signal.aborted && !ctx.interrupted && sdkSessionId) {
+      while (!ac.signal.aborted && sdkSessionId) {
+        // Reset interrupt flag after the turn completes so the runner
+        // can accept follow-up messages. The interrupt stopped the
+        // current turn; it doesn't kill the whole session.
+        const wasInterrupted = ctx.interrupted
+        if (wasInterrupted) ctx.interrupted = false
+
         let nextContent: string | ContentBlock[]
 
-        if (wasIdleStop) {
+        if (wasIdleStop && !wasInterrupted) {
           console.log(`[session-runner] executeSession: auto-nudging after idle stop`)
           nextContent = 'continue'
         } else {
