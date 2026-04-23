@@ -89,22 +89,28 @@ function groupByFilePath(parts: SessionMessagePart[]): {
 // Any ask_user / permission part with an id. Used to keep these parts OUT of
 // the ToolPillRow chip bucket — gate prompts must never have a collapsed-chip
 // alternative display path, otherwise a part whose state lags behind the
-// session gate (e.g. a state-update event that arrived while the tab was
-// blurred and got batched on refocus) silently renders as a badge instead of
-// the inline GateResolver UI.
+// session gate silently renders as a badge instead of the inline
+// GateResolver UI.
 //
-// Defense-in-depth (GH#59): the server-side `promoteToolPartToGate` renames
-// `tool-AskUserQuestion` / `tool-<Permission*>` into the promoted shapes
-// below. If a promotion broadcast is missed or a transcript-replay delta
-// re-introduces the un-promoted type, we still recognise it as a gate
-// candidate provided the state says so — i.e. treat
-// `tool-AskUserQuestion` with `approval-requested` + toolCallId as a gate.
-// With the server-side dedupe in place this fallback is rarely hit, but it
-// protects against latent brittleness in the append path.
+// `tool-AskUserQuestion` is the SDK-native part type emitted the instant the
+// assistant calls the AskUserQuestion tool; we treat it as a gate directly
+// instead of waiting for the DO's `promoteToolPartToGate` to flip it to
+// `tool-ask_user`. That second broadcast can silently drop on a half-closed
+// socket (session-do.ts broadcastToClients), which used to leave the gate
+// invisible on the active tab until a reconnect refreshed from SQL. Matching
+// on the native type removes the dependency on that second frame entirely.
+// `tool-ask_user` still matches for back-compat with history rows that were
+// persisted under the promoted type.
 function isGateCandidate(part: SessionMessagePart): boolean {
   if (!part.toolCallId) return false
-  if (part.type === 'tool-ask_user' || part.type === 'tool-permission') return true
-  return part.type === 'tool-AskUserQuestion' && part.state === 'approval-requested'
+  if (
+    part.type === 'tool-ask_user' ||
+    part.type === 'tool-permission' ||
+    part.type === 'tool-AskUserQuestion'
+  ) {
+    return true
+  }
+  return false
 }
 
 function isPendingGate(part: SessionMessagePart, readOnly: boolean | undefined): boolean {
@@ -113,9 +119,11 @@ function isPendingGate(part: SessionMessagePart, readOnly: boolean | undefined):
   // path (part.state + derivedGate pointer) caused flicker when the two
   // disagreed for a single render tick — GateResolver would unmount then
   // remount, losing local form state and producing the "flicker-no-send"
-  // symptom. The part state is authoritative and propagates atomically
-  // via TanStack DB upsert from the DO's broadcastMessage.
-  return part.state === 'approval-requested'
+  // symptom. `input-available` is the SDK-native "tool called, awaiting
+  // result" state (a pending AskUserQuestion means we're blocking on a
+  // human answer); `approval-requested` is the DO-promoted equivalent and
+  // is kept for history rows and the permission path.
+  return part.state === 'input-available' || part.state === 'approval-requested'
 }
 
 /**
@@ -524,7 +532,7 @@ function renderPart(
   // from 'approval-requested' via broadcastMessage so this stops rendering.
   if (isPendingGate(part, readOnly) && part.toolCallId) {
     const resolvedGate =
-      part.type === 'tool-ask_user'
+      part.type === 'tool-ask_user' || part.type === 'tool-AskUserQuestion'
         ? {
             id: part.toolCallId,
             type: 'ask_user' as const,
@@ -547,7 +555,9 @@ function renderPart(
   // holds the question(s), output holds the answer). Render as a
   // conversational block, not as a Tool with a JSON dump — the raw
   // structured-question blob was a meaningless artifact in history.
-  if (part.type === 'tool-ask_user') {
+  // Matches both the DO-promoted `tool-ask_user` (legacy history rows) and
+  // the SDK-native `tool-AskUserQuestion` (new direct-render path).
+  if (part.type === 'tool-ask_user' || part.type === 'tool-AskUserQuestion') {
     return <ResolvedAskUser key={index} part={part} />
   }
 

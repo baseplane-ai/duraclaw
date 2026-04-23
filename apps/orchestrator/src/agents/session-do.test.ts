@@ -1124,6 +1124,34 @@ describe('findPendingGatePart', () => {
   it('returns null for an empty history', () => {
     expect(findPendingGatePart([], 'toolu_A')).toBeNull()
   })
+
+  it('returns ask_user for a native tool-AskUserQuestion/input-available part', () => {
+    // SDK-native shape — the client can render and resolve the gate before
+    // promoteToolPartToGate has flipped the part to tool-ask_user, or if
+    // that promotion broadcast was silent-dropped on a half-closed socket.
+    const msg = mkMsg([
+      {
+        type: 'tool-AskUserQuestion',
+        toolCallId: 'toolu_NATIVE',
+        state: 'input-available',
+        toolName: 'AskUserQuestion',
+      },
+    ])
+    expect(findPendingGatePart([msg], 'toolu_NATIVE')).toEqual({ type: 'ask_user' })
+  })
+
+  it('returns null for a tool-AskUserQuestion part that already has output', () => {
+    const msg = mkMsg([
+      {
+        type: 'tool-AskUserQuestion',
+        toolCallId: 'toolu_DONE',
+        state: 'output-available',
+        toolName: 'AskUserQuestion',
+        output: { answers: [{ label: 'yes' }] },
+      },
+    ])
+    expect(findPendingGatePart([msg], 'toolu_DONE')).toBeNull()
+  })
 })
 
 // ── Simulated status-aware recovery (B7) ──────────────────────

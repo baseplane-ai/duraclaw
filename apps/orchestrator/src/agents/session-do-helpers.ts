@@ -267,6 +267,17 @@ export function findPendingGatePart(
     const msg = history[i]
     for (const p of msg.parts) {
       if (p.toolCallId !== gateId) continue
+      // `tool-AskUserQuestion` / `input-available` is the SDK-native
+      // shape before `promoteToolPartToGate` flips it; the client now
+      // renders the gate directly off this shape, so a resolve can
+      // arrive before the promotion (or if the promotion was
+      // silent-dropped on a half-closed socket). Match it too.
+      if (
+        p.type === 'tool-AskUserQuestion' &&
+        (p.state === 'input-available' || p.state === 'approval-requested')
+      ) {
+        return { type: 'ask_user' }
+      }
       if (p.state !== 'approval-requested') continue
       if (p.type === 'tool-ask_user') return { type: 'ask_user' }
       if (p.type === 'tool-permission') return { type: 'permission_request' }

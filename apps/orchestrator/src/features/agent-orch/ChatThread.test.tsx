@@ -744,12 +744,17 @@ describe('ChatThread pending-gate position', () => {
 })
 
 /**
- * Bug #63 A: the ChatMessageRow memo comparator must scan every part for
- * type / state / toolCallId changes — not just the trailing part — so that
- * `promoteToolPartToGate` flipping an interior part from
- * `tool-AskUserQuestion`/`input-available` to `tool-ask_user`/
- * `approval-requested` causes a re-render. Without the full-parts scan
- * the memo returns true and the gate stays invisible until a refresh.
+ * The ChatMessageRow memo comparator must scan every part for type / state /
+ * toolCallId changes — not just the trailing part — so that interior part
+ * transitions (e.g. an AskUserQuestion tool flipping from `input-available`
+ * → `output-available` when the user answers) cause a re-render. Without
+ * the full-parts scan the memo returns true and the UI stays stuck on the
+ * pre-resolution render until a refresh.
+ *
+ * Also locks in the direct-render path: a `tool-AskUserQuestion` part in
+ * `input-available` renders a gate immediately — no waiting for the DO's
+ * `promoteToolPartToGate` broadcast (which can silent-drop on a half-closed
+ * socket and used to leave the gate invisible until a tab-switch refresh).
  */
 describe('ChatThread message memo — interior part state change', () => {
   const defaultProps = {
@@ -759,7 +764,37 @@ describe('ChatThread message memo — interior part state change', () => {
     readOnly: false,
   }
 
-  it('re-renders when an interior part flips to approval-requested after initial render', () => {
+  it('renders the gate immediately for tool-AskUserQuestion/input-available', () => {
+    const messages: SessionMessage[] = [
+      {
+        id: 'msg-1',
+        role: 'assistant',
+        parts: [
+          { type: 'text', text: 'text-A', state: 'done' },
+          {
+            type: 'tool-AskUserQuestion',
+            toolCallId: 'ga-native',
+            toolName: 'AskUserQuestion',
+            state: 'input-available',
+            input: {
+              questions: [
+                { question: 'Proceed?', header: 'proceed', options: [], multiSelect: false },
+              ],
+            },
+          } as unknown as SessionMessage['parts'][number],
+        ],
+        createdAt: new Date(),
+      },
+    ]
+
+    render(<ChatThread {...defaultProps} messages={messages} />)
+
+    // SDK-native part type + input-available state is enough to show the
+    // gate — no server-side promotion required.
+    expect(screen.getByTestId('gate-resolver')).toBeTruthy()
+  })
+
+  it('re-renders when an interior part flips to output-available after answer', () => {
     const initialMessages: SessionMessage[] = [
       {
         id: 'msg-1',
@@ -785,12 +820,11 @@ describe('ChatThread message memo — interior part state change', () => {
 
     const { rerender } = render(<ChatThread {...defaultProps} messages={initialMessages} />)
 
-    // Gate prompt NOT shown initially — part is input-available, not
-    // approval-requested, so isPendingGate returns false.
-    expect(screen.queryByTestId('gate-resolver')).toBeNull()
+    // Gate prompt rendered from the SDK-native part directly.
+    expect(screen.getByTestId('gate-resolver')).toBeTruthy()
 
-    // Flip the interior part to the promoted gate shape. Same message id,
-    // same parts length — only the interior part's type+state change.
+    // User answers — interior part flips to output-available. Same message
+    // id, same parts length, only the interior part's state + output change.
     const updatedMessages: SessionMessage[] = [
       {
         id: 'msg-1',
@@ -798,15 +832,16 @@ describe('ChatThread message memo — interior part state change', () => {
         parts: [
           { type: 'text', text: 'text-A', state: 'done' },
           {
-            type: 'tool-ask_user',
+            type: 'tool-AskUserQuestion',
             toolCallId: 'ga-promo',
-            toolName: 'ask_user',
-            state: 'approval-requested',
+            toolName: 'AskUserQuestion',
+            state: 'output-available',
             input: {
               questions: [
                 { question: 'Proceed?', header: 'proceed', options: [], multiSelect: false },
               ],
             },
+            output: { answers: [{ label: 'yes' }] },
           } as unknown as SessionMessage['parts'][number],
           { type: 'text', text: 'text-B', state: 'done' },
         ],
@@ -816,7 +851,8 @@ describe('ChatThread message memo — interior part state change', () => {
 
     rerender(<ChatThread {...defaultProps} messages={updatedMessages} />)
 
-    // Memo comparator's full-parts scan must catch the interior promotion.
-    expect(screen.getByTestId('gate-resolver')).toBeTruthy()
+    // Memo comparator's full-parts scan must pick up the interior state
+    // flip — gate should be gone, replaced by the resolved Q/A display.
+    expect(screen.queryByTestId('gate-resolver')).toBeNull()
   })
 })
