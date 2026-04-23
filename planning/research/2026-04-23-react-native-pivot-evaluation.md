@@ -763,167 +763,175 @@ rather than a mobile pivot that drags along a web cost.
 
 ---
 
-## 11. Addendum — Expo Router swap evaluation (spoiler: don't)
+## 11. Addendum — Expo Router swap evaluation
 
-The suggested "swap TanStack for Expo Router" is worth surfacing
-because Expo Router is much more legitimate in 2026 than most docs
-admit — but the swap is wrong for *this specific repo's* shape.
+### 11.0 Correcting two bad arguments from the first pass of this section
 
-### 11.1 Correcting a wrong premise in prior sections
+An earlier draft of §11 argued against swapping TanStack Router for
+Expo Router on two grounds that don't hold up. Correcting on the
+record:
 
-**We are not on TanStack Start.** Prior sections of this doc
-implicitly assumed we were. Actual stack (verified in
-`apps/orchestrator/src/server.ts`, `vite.config.ts`, `api/index.ts`,
-`package.json`):
+1. **"Our Worker entry does custom WS dispatch to DOs" is not a
+   frontend-router argument.** The Worker `fetch` handler in
+   `apps/orchestrator/src/server.ts` is server-side. The frontend
+   router (TanStack Router vs Expo Router) renders the React tree
+   in the browser (or in the native runtime). They are independent
+   concerns. Swapping the frontend router doesn't touch WS
+   dispatch, DO bindings, or the Hono mount. Scratch that argument.
+2. **"Expo Router is for SSR" overweights SSR.** SSR is one feature.
+   Expo Router's actual pitch is: file-based routing that produces
+   one route tree for web + native, with React Navigation stack /
+   tabs / modal primitives mapped to platform-idiomatic transitions
+   on native and web-appropriate wrappers on web; typed routes;
+   deep-linking; push-notification routing; shared layouts across
+   platforms. Most of that is orthogonal to SSR.
 
-- **Bundler:** Vite 7 + `@cloudflare/vite-plugin`
-- **Router:** `@tanstack/react-router` v1.168.10 — file-based routes
-  under `apps/orchestrator/src/routes/`, **SPA-only, no SSR, no
-  loaders, no server functions, no `.server.ts` files**
-- **API layer:** Hono (`new Hono<ApiAppEnv>()`) with 53 handler
-  declarations in `apps/orchestrator/src/api/index.ts` gated by
-  `authMiddleware`
-- **Worker entry:** **hand-rolled custom `fetch` handler** in
-  `apps/orchestrator/src/server.ts:78–220` that:
-  1. Routes WS upgrades (`/api/sessions/:id/ws`,
-     `/agents/session-agent/:id`, `/api/collab/:id/ws`,
-     `/parties/*`) directly to `SESSION_AGENT`, `SESSION_COLLAB`,
-     `USER_SETTINGS` DOs via `idFromName()` / `idFromString()`
-  2. Dispatches `/api/*` to Hono
-  3. Falls back to `env.ASSETS.fetch()` for static
-- **DO classes exported** from Worker entry: `SessionDO`,
-  `SessionCollabDOv2`, `SessionCollabDO` (legacy), `UserSettingsDO`
-- **Auth:** Better Auth mounted at `/api/auth/*`, with `bearer()` +
-  `capacitor()` + `admin()` plugins
+Re-evaluating on the real axes.
 
-Implication: the swap question is not *"TanStack Start → Expo
-Router"* but *"Vite + TanStack Router + Hono + custom Worker entry
-→ Expo Router + expo-server + Metro."* That's a bigger surface area
-than the original framing suggested.
+### 11.1 What's actually on the table
 
-### 11.2 What Expo Router + expo-server actually is in 2026
+Three architectural choices, independent of each other:
 
-From the Expo docs + Cloudflare framework guide, as of SDK 54:
+| Axis | Keep current | Swap |
+|---|---|---|
+| Bundler (web) | Vite 7 + `@cloudflare/vite-plugin` | Metro-for-web |
+| Bundler (native) | N/A (no native today) | Metro |
+| Frontend router | TanStack Router (SPA) | Expo Router |
+| Backend API | Hono on CF Workers | `+api.ts` on CF Workers (via EAS Hosting or direct Wrangler) |
+| Worker entry | Hand-rolled `fetch` + DO dispatch | Same — unchanged either way |
 
-- **Expo Router** is a file-based router built on React Navigation,
-  typed routes, deep-linking, universal web via RNW. Long-standing
-  limitation that "server-side rendering currently requires custom
-  infrastructure" is now **obsolete** — `expo-server` ships SSR.
-- **API Routes** (`app/**/+api.ts`) are server-side route handlers
-  using standard Fetch `Request` / `Response`.
-- **EAS Hosting** is Expo's managed deploy target. From the
-  [worker runtime docs](https://docs.expo.dev/eas/hosting/reference/worker-runtime/):
-  *"EAS Hosting runs on Cloudflare Workers, a modern and powerful
-  platform for serverless APIs"*, *"small V8 isolates"*, with Node
-  compat shims for `fs` (in-memory), `http`/`https` (client-only),
-  `Buffer`, `EventEmitter`, `process.env`.
-- **Direct CF Workers deploy via Wrangler is supported** (per
-  community `expo-adapter-workers`, `expo-workers`, and the
-  Cloudflare React Router framework guide pattern — same
-  pattern applies).
+"Swap TanStack for Expo Router" is really a question about the
+*frontend router* and, downstream, the *web bundler*. The Worker
+entry, DO dispatch, and Hono mount are independent of it — any of
+them could stay or move without forcing the others.
 
-So Expo Router is a real full-stack-on-Workers framework. That's
-not the issue.
+### 11.2 The real constraint is bundler, not routing logic
 
-### 11.3 Why swapping is wrong for this repo specifically
+Expo Router's native habitat is Metro. The web story works but
+Metro-for-web is the happy path — `@expo/metro-runtime`, the
+Expo CLI's `expo export -p web`, and the Expo Router web
+configuration all assume Metro. Running Expo Router on Vite is
+not impossible (people have done it with glue), but it's off the
+supported path and gives up exactly the thing Vite is best at:
+fast HMR + the `@cloudflare/vite-plugin` integration that lets us
+run the Worker + DOs locally with Miniflare during `pnpm dev`.
 
-Four reasons, ranked by weight:
+So the real three options are:
 
-**1. Our Worker entry is load-bearing and doesn't fit Expo's
-framework-handler model.** The pattern Cloudflare documents for
-React Router / Expo Router on Workers is *"The framework handler
-delegates HTTP requests while developers can add Durable Objects
-and Workflows as supplementary exports in the same file."* That
-works when routes are HTTP-only. Our Worker:
-- Has **dedicated WS-upgrade dispatch** that runs *before* any
-  HTTP routing — any `Upgrade: websocket` request for
-  `/api/sessions/:id/ws`, `/agents/session-agent/:id`, or
-  `/parties/*` is routed directly to a DO stub, bypassing
-  framework routing entirely
-- Uses **different auth paths for WS vs HTTP** (Better Auth
-  cookie + Bearer token fallback, with gateway-token override
-  for `/api/gateway/*` routes)
-- Has **multiple DO binding dispatch patterns** per upgrade path
-  (`idFromString(hex64) || idFromName(uuid)` for SessionDO,
-  PartyKit's `routePartykitRequest()` for user-settings)
+- **(A) Keep Vite for web, add Metro for native, two routers.**
+  TanStack Router on web, React Navigation (or Expo Router used
+  native-only) on native. Shared screen components via RNW +
+  Tamagui. Two route trees.
+- **(B) Adopt Metro universally, Expo Router universally.** One
+  bundler, one router, one route tree. Lose Vite + `@cloudflare/
+  vite-plugin` HMR story for web dev. Migrate all routes under
+  `apps/orchestrator/src/routes/` to Expo Router file
+  conventions. Hono stays (mounted under Expo's Worker entry as
+  a fall-through), or migrate to `+api.ts`.
+- **(C) Hybrid: Vite web + Metro native, Expo Router on native
+  only.** TanStack Router on web, Expo Router on native. Two
+  route trees but native gets Expo Router's stack/tabs/deep-link
+  plumbing for free without touching web.
 
-Composing that custom dispatcher with Expo's Worker-entry output
-is possible (wrap expo-server's handler as a fall-through after
-our WS + DO dispatch) but offers zero architectural benefit and
-adds integration risk.
+### 11.3 Weighing A vs B vs C at this repo's velocity
 
-**2. Our SPA architecture doesn't use Expo Router's big wins.** The
-Expo Router features that justify the swap — SSR, server
-components, loaders, API Routes co-located with UI — are things
-we either don't use or already have cleaner solutions for:
-- **No SSR today** and we don't want it (authenticated SPA; SSR
-  would gate first paint behind auth check)
-- **No loaders** — TanStack Query + TanStack DB + WS pushes are
-  our data layer, tied to the collection system described in the
-  top-level CLAUDE.md
-- **Our API layer is 53 Hono routes** — Expo Router's
-  `+api.ts` convention doesn't compose with Hono; we'd be
-  migrating route definitions for ergonomics, not capability
+**(A) Vite + TanStack web / Metro + React Navigation native —
+two routers, two route trees**
 
-**3. We'd lose TanStack Router's ergonomics.** The current
-`apps/orchestrator/src/routes/` tree uses `createFileRoute()`
-with route-level type-safe search params, `beforeLoad` auth
-guards, and the route tree is statically analysed for typed
-`Link` props. Expo Router's typed routes cover the navigation
-cases but not TanStack Router's search-param + loader
-typing model. This is a downgrade, not a lateral move.
+- *Pro:* no migration cost on web. Everything that ships today
+  keeps shipping. React Navigation on native gives us iOS
+  swipe-back, Android hardware back, stack transitions, deep
+  links via `Linking` API.
+- *Pro:* TanStack Router's typed search params + `beforeLoad`
+  auth guards stay — these are genuinely richer than Expo
+  Router's typed-routes equivalent.
+- *Con:* two route trees. Every new screen has to be added
+  twice (web route + native nav config). At AI-coding velocity
+  this is a tax, not a wall, but it's ongoing drag.
+- *Con:* platform-specific deep-link wiring is manual.
 
-**4. TanStack React Router already works on RNW.** Router v1 is
-platform-agnostic — it needs a React tree, not a DOM.
-Per §10.4's P2 phase, once the orchestrator renders via
-react-native-web, TanStack Router keeps working. The only
-native-specific routing concern is **stack-style navigation with
-iOS swipe-back / Android hardware back / gesture transitions** —
-that's a presentation-layer concern, handled by wrapping screens
-in React Navigation primitives *under* TanStack Router, not by
-swapping the router.
+**(B) Metro + Expo Router universally — one router, one tree**
 
-### 11.4 What about unified file-based routing?
+- *Pro:* one file tree for web + native. Every new screen is
+  one file. Platform-idiomatic navigation primitives for free.
+  Deep-linking, push-notification routing, shared layouts all
+  just work.
+- *Pro:* the migration is a mechanical route-file rewrite — at
+  AI velocity measured in hours, not days. ~40-ish route files
+  in `apps/orchestrator/src/routes/` tree, each a direct
+  translation.
+- *Con:* lose Vite + `@cloudflare/vite-plugin` HMR. Metro web
+  dev experience is solid but not as fast, and the local
+  Worker + DO integration story moves from "first-class
+  Cloudflare Vite plugin" to "run Wrangler dev in parallel
+  with Metro dev." Workable, less elegant.
+- *Con:* lose TanStack Router's typed search-param model. Expo
+  Router has typed routes but the search-param typing is
+  weaker. Real DX downgrade for forms and filters.
+- *Neutral:* Hono can stay mounted under the existing Worker
+  entry, or routes can migrate to `+api.ts`. Independent call.
 
-Legitimate concern. The §10.4 plan leaves us with TanStack Router
-on web and (optionally) React Navigation primitives wrapping
-screens on native. That's *one route tree* rendered two ways —
-not two routers. Expo Router's pitch of "one file tree for both"
-sounds cleaner but isn't meaningfully different in practice once
-Tamagui + RNW are in place.
+**(C) Vite web + Metro native, TanStack web + Expo Router
+native — hybrid**
 
-### 11.5 When the swap WOULD be right
+- *Pro:* gets (A)'s "no web migration" with a better native
+  routing story than plain React Navigation.
+- *Con:* still two route trees. Arguably *worse* than (A)
+  because now the native tree has an Expo Router contract
+  (file-based) and the web tree has a TanStack contract — two
+  mental models. The "universal" win of Expo Router doesn't
+  land.
+- *Neutral:* shared screen components via RNW + Tamagui still
+  work, but routing is forked.
 
-- **If we were starting from zero.** Expo Router + expo-server +
-  EAS Hosting is a defensible default for a new universal app
-  in 2026 — less plumbing than Vite + CF plugin + Hono + custom
-  Worker entry + React Navigation.
-- **If we wanted SSR.** Not today.
-- **If we wanted native-first routing conventions (deep links,
-  platform-idiomatic stack navigation) and were willing to accept
-  the Worker entry rewrite.** Trade-off possible; not clearly
-  worth it here given the shipping-velocity-loss during the
-  rewrite.
+### 11.4 Recommendation — start with (A), keep the door open to (B)
 
-### 11.6 Recommendation — keep TanStack Router + Hono, add RNW + Tamagui on top
+(A) is the right first step for three reasons:
 
-Modify §10.4 plan to explicitly preserve the routing + API stack:
+1. **It's compatible with the §10.4 phase plan as written.** P1
+   (Tamagui web) and P2 (RNW universal rendering on web) don't
+   touch routing at all. P3 (native target) adds React
+   Navigation as the native presentation layer. No decision
+   forced yet.
+2. **It lets us measure.** Once we have a real native build with
+   real screens, we'll know whether the two-tree tax actually
+   hurts or whether Tamagui + RNW already collapses most of the
+   duplication (since the screens themselves are shared).
+3. **Reversibility.** Migrating from (A) to (B) later is a
+   bounded, mechanical transform — rewrite TanStack
+   `createFileRoute()` calls to Expo Router file conventions,
+   move Hono handlers to `+api.ts` or leave them in place. At
+   AI velocity, ~1–2 days. Going the other direction is also
+   possible but less natural because Expo Router's file tree is
+   richer (layouts, groups, platform extensions) than TanStack
+   Router's.
 
-| Phase | Changes from §10.4 |
+Pick (B) immediately only if: we know ahead of time that native
+is the primary target and web is secondary. That's not this
+app's posture — web is the deployed surface today, native is
+catching up.
+
+Pick (C) never. It has the downsides of both without the
+benefits.
+
+### 11.5 Revised §10.4 phase annotations
+
+| Phase | Router decision |
 |---|---|
-| P1 (Tamagui web) | Unchanged. Tamagui is orthogonal to router. |
-| P2 (RNW universal) | **Keep TanStack Router, keep Hono, keep custom Worker entry.** Add RNW as the rendering primitive layer. Vite stays for web; Metro runs in parallel for native. |
-| P3 (native target) | Add **React Navigation as a presentation-layer wrapper** on native so screens get stack transitions + swipe-back + hardware back. TanStack Router is still the route tree — React Navigation is just the screen renderer on native. |
+| P1 (Tamagui web) | Orthogonal. No change. |
+| P2 (RNW universal rendering on web) | TanStack Router stays. RNW is a primitive-library swap, not a router swap. |
+| P3 (native target) | Option (A) default: add React Navigation as the native route tree, with screens shared via RNW + Tamagui. Route tree is duplicated, screens are not. |
+| P3.5 (optional) | If the two-tree tax measurably hurts after P3, migrate to (B): Metro everywhere, Expo Router everywhere. Bounded rewrite, not a prerequisite. |
 | P4 (eval + ship) | Unchanged. |
 
-Net: we keep everything that's already working and load-bearing
-(Worker entry, DO dispatch, Hono, TanStack Router, Better Auth
-plugins) and layer universal rendering on top. The stack gets
-bigger by ~2 libraries (RNW + Tamagui), not smaller by one
-(Expo Router replacing TanStack).
+### 11.6 Open calls this surfaces for §7
 
-**Reserve Expo Router swap as a future refactor option** if/when
-we hit a specific pain point it uniquely solves — most likely
-deep-link handling or platform-native navigation transitions
-that React Navigation alone can't deliver inside the TanStack
-Router tree. Not a blocker for the §10 pivot.
+- **Do we deep-link?** If push notifications need to route to
+  specific screens, Expo Router's `expo-router/build/hooks`
+  + URL scheme config is materially better than hand-rolled
+  `Linking` subscribers. Pushes this toward (B).
+- **How stable is the route tree?** If new routes land weekly,
+  two-tree tax compounds. If the tree is nearly settled, (A)'s
+  drag is small.
+- **Do we care about Metro-for-web's slower HMR?** Worth
+  benchmarking before committing to (B).
