@@ -4450,31 +4450,43 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       }
 
       case 'ask_user': {
-        // Promote the existing tool-AskUserQuestion part (created by the
-        // `assistant` event's tool_use block) to a gate part.  The assistant
-        // event already persisted the part with the full input (including
-        // the questions array) and the correct toolCallId — we just flip its
-        // type + state so the UI renders a GateResolver instead of a pill.
-        //
-        // This avoids the old design's race: previously we appended a
-        // *second* part looked up via currentTurnMessageId which could miss
-        // if turnCounter drifted between the assistant and ask_user events.
-        const askPromoteResult = this.promoteToolPartToGate(
-          event.tool_call_id,
-          'tool-ask_user',
-          'ask_user',
-          { questions: event.questions },
-        )
+        // No part-type / state promotion here. The client renders a
+        // GateResolver directly off the SDK-native
+        // `tool-AskUserQuestion` / `input-available` shape already in the
+        // assistant message, so flipping to `tool-ask_user` /
+        // `approval-requested` would be a redundant second write to the
+        // same row — and produced a race where a fast user's resolveGate
+        // RPC beat this event to the DO, resolveGate advanced state to
+        // `output-available`, then this handler regressed it back to
+        // `approval-requested` and left the UI stuck. The part's own
+        // state is the single writer now; resolveGate → tool_result
+        // advances it monotonically.
 
-        // Race guard: with the SDK-native direct-render path, a fast user
-        // can submit before this event reaches the DO. If the part is
-        // already resolved (resolveGate ran first), skip the
-        // status/gate/push side effects — they'd re-open a closed gate in
-        // the UI and fire a duplicate notification.
-        if (askPromoteResult === 'already-resolved') {
-          break
-        }
+        // Same race still applies to the scalar state.gate / status /
+        // push-notification side effects: if resolveGate has already
+        // advanced the matching part to a terminal state, announcing the
+        // gate now would leave status=waiting_gate dangling + fire a push
+        // for a gate that's already closed. Check the part state
+        // directly.
+        const alreadyResolved = this.session
+          .getHistory()
+          .some((m) =>
+            m.parts.some(
+              (p) =>
+                p.toolCallId === event.tool_call_id &&
+                (p.state === 'output-available' ||
+                  p.state === 'output-error' ||
+                  p.state === 'output-denied' ||
+                  p.state === 'approval-given' ||
+                  p.state === 'approval-denied'),
+            ),
+          )
+        if (alreadyResolved) break
 
+        // The side effects below (status=waiting_gate, scalar state.gate,
+        // push notification) are still load-bearing: UI status indicators
+        // and notifications need to distinguish "running" from "blocked
+        // on user answer."
         // PRESERVE existing side effects exactly
         this.updateState({
           status: 'waiting_gate',
