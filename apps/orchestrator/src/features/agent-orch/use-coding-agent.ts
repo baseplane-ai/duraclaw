@@ -658,31 +658,34 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
    */
   const resolveGate = useCallback(
     async (gateId: string, response: GateResponse) => {
-      // Snapshot the current row so we can roll back on RPC failure. We
-      // iterate the live collection to find the message whose parts
-      // include a pending gate part with `toolCallId === gateId`.
+      // Find the target message + the mutated parts array. TanStack DB's
+      // native optimistic path (createTransaction + tx.mutate) needs the
+      // message id to call `collection.update` against, and the new parts
+      // to stage. We iterate the live collection because a gate can live
+      // in any assistant message — not necessarily the latest one.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const coll = messagesCollection as any
       let targetMsgId: string | undefined
-      let preMutationParts: SessionMessagePart[] | undefined
+      let nextParts: SessionMessagePart[] | undefined
       try {
         for (const [id, row] of coll as Iterable<[string, CachedMessage]>) {
           const parts = row.parts ?? []
           const idx = parts.findIndex(
             (p) =>
               p.toolCallId === gateId &&
-              // Match both pending states: `approval-requested` is the
-              // DO-promoted shape (tool-ask_user / tool-permission);
-              // `input-available` is the SDK-native shape
-              // (tool-AskUserQuestion rendered directly without waiting for
-              // promotion). Without both, the optimistic write is skipped
-              // for native-shape gates and the Submit button flashes
-              // disabled until the server echo lands.
+              // Match both pending shapes: `approval-requested` is the
+              // DO-promoted (tool-ask_user / tool-permission) shape;
+              // `input-available` is the SDK-native
+              // (tool-AskUserQuestion) shape the client now renders
+              // directly. Without both, the optimistic write is skipped
+              // for native-shape gates.
               (p.state === 'approval-requested' || p.state === 'input-available'),
           )
           if (idx >= 0) {
             targetMsgId = id
-            preMutationParts = parts
+            nextParts = parts.map((p, i) =>
+              i === idx ? { ...p, state: 'output-available' as const, output: undefined } : p,
+            )
             break
           }
         }
@@ -700,51 +703,65 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
               : 'Declined'
             : undefined
 
-      if (targetMsgId && preMutationParts && optimisticOutput !== undefined) {
-        const nextParts = preMutationParts.map((p) =>
-          p.toolCallId === gateId &&
-          (p.state === 'approval-requested' || p.state === 'input-available')
-            ? { ...p, state: 'output-available' as const, output: optimisticOutput }
-            : p,
+      // Stamp the computed output onto the mutated part now that we know
+      // the response shape. Kept out of the findIndex loop so the
+      // response-type switch only runs once.
+      if (nextParts && optimisticOutput !== undefined) {
+        nextParts = nextParts.map((p) =>
+          p.toolCallId === gateId ? { ...p, output: optimisticOutput } : p,
         )
-        try {
-          coll.utils.writeUpsert({
-            ...(coll.get?.(targetMsgId) ?? {}),
-            id: targetMsgId,
-            sessionId: agentName,
-            role: 'assistant',
-            parts: nextParts,
+      }
+
+      // Native TanStack DB optimistic path: createTransaction runs the
+      // async `mutationFn` (the RPC) and keeps the tx.mutate staged write
+      // visible to `useLiveQuery` readers as an optimistic layer merged
+      // *over* synced. Any WS delta that arrives for this row during the
+      // RPC window writes to synced — it does NOT overwrite the rendered
+      // view, so the UI stays on the resolved summary instead of flashing
+      // back to the pre-submit gate. On success, server echo reconciles
+      // via deepEquals; on mutationFn throw, the staged write auto-rolls
+      // back and the GateResolver re-mounts for retry.
+      //
+      // If we couldn't locate the target row (cold cache, row churn), we
+      // still fire the RPC — the server-side resolveGate broadcast will
+      // reconcile the state as soon as it lands.
+      if (targetMsgId && nextParts) {
+        const stagedParts = nextParts
+        const stagedId = targetMsgId
+        const tx = createTransaction<CachedMessage & Record<string, unknown>>({
+          mutationFn: async () => {
+            const result = (await connection.call('resolveGate', [gateId, response])) as {
+              ok?: boolean
+              error?: string
+            }
+            if (!result || result.ok !== true) {
+              throw new Error(result?.error ?? 'resolveGate failed')
+            }
+            return result
+          },
+        })
+        tx.mutate(() => {
+          coll.update(stagedId, (draft: CachedMessage) => {
+            draft.parts = stagedParts
           })
-        } catch {
-          // writeUpsert is best-effort; fall through to RPC regardless.
+        })
+        try {
+          await tx.isPersisted.promise
+          return { ok: true }
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) }
         }
       }
 
-      try {
-        const result = await connection.call('resolveGate', [gateId, response])
-        return result
-      } catch (err) {
-        // Roll back the optimistic mutation so the GateResolver reappears
-        // and the user can retry. The server echo won't arrive on RPC
-        // failure, so we have to re-assert the pre-state manually.
-        if (targetMsgId && preMutationParts) {
-          try {
-            coll.utils.writeUpsert({
-              ...(coll.get?.(targetMsgId) ?? {}),
-              id: targetMsgId,
-              sessionId: agentName,
-              role: 'assistant',
-              parts: preMutationParts,
-            })
-          } catch {
-            // If the collection is in a funky state, a reconnect snapshot
-            // will reconcile eventually.
-          }
-        }
-        throw err
+      // Fallback: no matching pending part found in the live collection
+      // — fire the RPC directly and let the server echo drive the UI.
+      const result = (await connection.call('resolveGate', [gateId, response])) as {
+        ok?: boolean
+        error?: string
       }
+      return result
     },
-    [agentName, connection, messagesCollection],
+    [connection, messagesCollection],
   )
 
   // Return the live WS readyState rather than a state-presence proxy: once
