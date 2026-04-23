@@ -1116,7 +1116,12 @@ export function ChatThread({
           branchInfo={branchInfo}
           onBranchNavigate={onBranchNavigate}
         />
-        <ConversationScrollButton />
+        {/* Tailwind's @source scan of ai-elements/src isn't extracting
+            this positional class from the shared component — declaring it
+            here (inside orchestrator/src, which IS scanned) ensures the
+            CSS rule actually gets generated so the floating button
+            clears the StatusBar + MessageInput stack below. */}
+        <ConversationScrollButton className="bottom-20" />
       </Conversation>
     </div>
   )
