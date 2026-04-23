@@ -104,11 +104,13 @@ export function MessageInput({
   const [images, setImages] = useState<ImagePreview[]>([])
   const [error, setError] = useState<string | null>(null)
 
-  // Open the collab room for this session. When no sessionId is provided
-  // (legacy callers / tests without a session), we fall back to a
-  // local-only "standalone" room so the hook's invariants still hold but
-  // there's nothing to sync.
-  const collab = useSessionCollab({ sessionId: sessionId ?? '__standalone' })
+  // Open the collab room. Real sessions key the room by `sessionId`.
+  // Draft tabs have no sessionId yet but do have a unique `draftKey`
+  // (e.g. `draft:<uuid>`), which keeps each draft in its own isolated
+  // room — otherwise every draft across every user would collapse onto
+  // one shared `__standalone` DO. The literal fallback stays for legacy
+  // callers / tests that pass neither prop.
+  const collab = useSessionCollab({ sessionId: sessionId ?? draftKey ?? '__standalone' })
   const {
     doc,
     ytext,
