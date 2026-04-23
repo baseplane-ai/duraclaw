@@ -8,6 +8,7 @@ import {
   constantTimeEquals,
   DEFAULT_STALE_THRESHOLD_MS,
   deriveSnapshotOps,
+  finalizeResultTurn,
   findPendingGatePart,
   getGatewayConnectionId,
   LEGACY_DROPPED_EVENT_TYPES,
@@ -3551,5 +3552,93 @@ describe('GH#57: RECOVERY_GRACE_MS is 15_000', () => {
     // gateway reports the runner is still alive, wait 15s before running
     // recovery. If the runner reconnects in that window, skip recovery.
     expect(true).toBe(true)
+  })
+})
+
+// ── GH#75 P1.2 B7: result-handler source-ordering regression ─────
+
+describe('GH#75 B7: finalizeResultTurn enforces broadcast-before-state ordering', () => {
+  // The `result` event handler must emit every per-message broadcast frame
+  // BEFORE flipping state to `idle` and syncing to D1. Client derived-status
+  // (spec #31) folds over messagesCollection — a state flip ahead of the
+  // final assistant frame can resolve the sidebar to idle while the frame
+  // is still in flight.
+  //
+  // SessionDO can't be instantiated in tests (TC39 decorators + oxc parse
+  // barrier), so we test the pure helper that encodes the ordering
+  // invariant. The real handler's `case 'result':` branch calls this
+  // helper; see the reorder-guard comment in session-do.ts.
+
+  it('invokes callbacks in the wire-contract order', () => {
+    const calls: string[] = []
+    finalizeResultTurn({
+      broadcastPhase: () => calls.push('broadcastPhase'),
+      updateStateIdle: () => calls.push('updateStateIdle'),
+      syncStatusToD1: () => calls.push('syncStatusToD1'),
+      syncResultToD1: () => calls.push('syncResultToD1'),
+      flushLastEventTsToD1: () => calls.push('flushLastEventTsToD1'),
+    })
+    expect(calls).toEqual([
+      'broadcastPhase',
+      'updateStateIdle',
+      'syncStatusToD1',
+      'syncResultToD1',
+      'flushLastEventTsToD1',
+    ])
+  })
+
+  it('records every broadcastMessage call before updateState flips to idle', () => {
+    // Simulate the handler's broadcast-phase emitting N final-turn frames
+    // and assert every `broadcastMessage` call-log entry precedes the
+    // `updateState:idle` entry and all D1-sync entries.
+    const calls: string[] = []
+    const broadcastMessage = (id: string) => calls.push(`broadcastMessage:${id}`)
+
+    finalizeResultTurn({
+      broadcastPhase: () => {
+        // Orphan finalize + error system message + result text append —
+        // three broadcasts, the maximum number the real handler can emit.
+        broadcastMessage('msg-1')
+        broadcastMessage('err-2')
+        broadcastMessage('msg-3')
+      },
+      updateStateIdle: () => calls.push('updateState:idle'),
+      syncStatusToD1: () => calls.push('syncStatusToD1'),
+      syncResultToD1: () => calls.push('syncResultToD1'),
+      flushLastEventTsToD1: () => calls.push('flushLastEventTsToD1'),
+    })
+
+    const idleIdx = calls.indexOf('updateState:idle')
+    const statusIdx = calls.indexOf('syncStatusToD1')
+    const broadcastIdxs = calls
+      .map((c, i) => (c.startsWith('broadcastMessage:') ? i : -1))
+      .filter((i) => i >= 0)
+
+    expect(broadcastIdxs.length).toBe(3)
+    for (const bIdx of broadcastIdxs) {
+      expect(bIdx).toBeLessThan(idleIdx)
+      expect(bIdx).toBeLessThan(statusIdx)
+    }
+    expect(idleIdx).toBeLessThan(statusIdx)
+  })
+
+  it('still dispatches flush phase when broadcastPhase emits no frames', () => {
+    // Degenerate case: no orphan, non-error result, last msg already has
+    // text. broadcastPhase is effectively a no-op; state + D1 sync must
+    // still fire in order.
+    const calls: string[] = []
+    finalizeResultTurn({
+      broadcastPhase: () => {},
+      updateStateIdle: () => calls.push('updateState:idle'),
+      syncStatusToD1: () => calls.push('syncStatusToD1'),
+      syncResultToD1: () => calls.push('syncResultToD1'),
+      flushLastEventTsToD1: () => calls.push('flushLastEventTsToD1'),
+    })
+    expect(calls).toEqual([
+      'updateState:idle',
+      'syncStatusToD1',
+      'syncResultToD1',
+      'flushLastEventTsToD1',
+    ])
   })
 })

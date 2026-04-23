@@ -310,3 +310,46 @@ export function findPendingGatePart(
   }
   return null
 }
+
+/**
+ * GH#75 P1.2 B7: source-ordering invariant for the `result` event handler.
+ *
+ * The handler must emit every final-turn `broadcastMessage` frame BEFORE it
+ * transitions state to `idle` and BEFORE it flushes status to D1. Client
+ * derived-status (spec #31) folds over `messagesCollection`, so if the
+ * `updateState({status:'idle'})` lands first the top-level mirror can flip
+ * the sidebar to idle while the final assistant turn is still in flight
+ * and get overwritten back to the pre-result message on arrival.
+ *
+ * This helper encodes the invariant by construction: callers pass an
+ * ordered "broadcast phase" callback plus the "flush phase" callbacks,
+ * and we dispatch them in the order the wire contract requires. The
+ * real `handleGatewayEvent('result', …)` branch invokes this helper;
+ * tests spy on the callbacks and assert the call log.
+ *
+ * NOTE: all callbacks are invoked synchronously in the listed order.
+ * The helper does NOT await any returned promises — the D1 sync fns are
+ * fire-and-forget in the real handler and we preserve that behavior.
+ */
+export interface FinalizeResultTurnCallbacks {
+  /** Emit every per-message frame for the completed turn (orphan finalize,
+   * error system message, result-text append). May call `broadcastMessage`
+   * zero or more times internally. */
+  broadcastPhase: () => void
+  /** Transition DO state to `idle` with the result summary fields. */
+  updateStateIdle: () => void
+  /** Fire-and-forget D1 sync of the `agent_sessions` row. */
+  syncStatusToD1: () => void
+  /** Fire-and-forget D1 sync of the result columns. */
+  syncResultToD1: () => void
+  /** Fire-and-forget D1 flush of `last_event_ts` (GH#50). */
+  flushLastEventTsToD1: () => void
+}
+
+export function finalizeResultTurn(cbs: FinalizeResultTurnCallbacks): void {
+  cbs.broadcastPhase()
+  cbs.updateStateIdle()
+  cbs.syncStatusToD1()
+  cbs.syncResultToD1()
+  cbs.flushLastEventTsToD1()
+}

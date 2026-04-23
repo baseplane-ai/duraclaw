@@ -18,6 +18,22 @@ export interface BufferedChannelOptions {
    * Overflow logs are always emitted regardless of this flag.
    */
   verbose?: boolean
+  /**
+   * Spec GH#75 B8 — sidecar persistence for the pending gap sentinel.
+   * Called with the current `pendingGap` after every `recordDrop`, and with
+   * `null` after a successful sentinel send on WS attach. Fire-and-forget:
+   * the channel awaits the returned promise inside an async IIFE so the
+   * sync send / attachWebSocket paths do not block; rejections are logged
+   * via the injected logger, never thrown.
+   */
+  persistGap?: (gap: GapSentinel | null) => void | Promise<void>
+  /**
+   * Spec GH#75 B8 — if a `.gap` sidecar was present from a prior crashed
+   * runner, pass the parsed sentinel here so it is seeded into pendingGap
+   * at construction. It will be sent as the first frame on the next
+   * successful `attachWebSocket`.
+   */
+  initialPendingGap?: GapSentinel | null
 }
 
 export interface GapSentinel {
@@ -49,6 +65,7 @@ export class BufferedChannel {
   private sessionId?: string
   private logger: BufferedChannelLogger
   private verbose: boolean
+  private persistGap?: (gap: GapSentinel | null) => void | Promise<void>
 
   constructor(options?: BufferedChannelOptions) {
     this.maxEvents = options?.maxEvents ?? 10_000
@@ -57,6 +74,31 @@ export class BufferedChannel {
     this.sessionId = options?.sessionId
     this.logger = options?.logger ?? console
     this.verbose = options?.verbose ?? false
+    this.persistGap = options?.persistGap
+    // Spec GH#75 B8 — seed any pre-crash sidecar sentinel so the next
+    // attachWebSocket sends it as the first frame.
+    if (options?.initialPendingGap) {
+      this.pendingGap = options.initialPendingGap
+    }
+  }
+
+  /**
+   * Spec GH#75 B8 — fire-and-forget invocation of the persistGap callback.
+   * Rejections are logged but never surfaced to the caller so send()/
+   * attachWebSocket() cannot be destabilized by a flaky sidecar write.
+   */
+  private schedulePersistGap(gap: GapSentinel | null): void {
+    if (!this.persistGap) return
+    const cb = this.persistGap
+    void (async () => {
+      try {
+        await cb(gap)
+      } catch (err) {
+        this.logger.warn(
+          `[buffered-channel] persistGap failed${this.sessionSuffix()} err=${(err as Error).message}`,
+        )
+      }
+    })()
   }
 
   get depth(): number {
@@ -137,6 +179,10 @@ export class BufferedChannel {
     if (this.pendingGap) {
       ws.send(JSON.stringify(this.pendingGap))
       this.pendingGap = null
+      // Spec GH#75 B8 — clear the sidecar only after a successful send. If
+      // ws.send threw above, we never reach here and the sidecar persists so
+      // the next attach/restart can still replay the sentinel.
+      this.schedulePersistGap(null)
     }
 
     // Then replay buffered events in order
@@ -180,5 +226,8 @@ export class BufferedChannel {
       `[buffered-channel] overflow${this.sessionSuffix()} dropped_count=${this.pendingGap.dropped_count} from_seq=${this.pendingGap.from_seq} to_seq=${this.pendingGap.to_seq}${isNewGap ? ' new_gap=true' : ''}`,
     )
     this.onOverflow?.(this.pendingGap)
+    // Spec GH#75 B8 — persist the (coalesced) sentinel so a runner crash
+    // between this drop and the next attachWebSocket does not swallow it.
+    this.schedulePersistGap(this.pendingGap)
   }
 }
