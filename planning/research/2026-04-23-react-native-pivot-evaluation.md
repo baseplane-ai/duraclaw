@@ -7,25 +7,57 @@ Status: decision-support doc, not a spec
 
 ## TL;DR
 
-The "Capacitor is janky" read is correct **about transport and lifecycle**,
-but the friction is concentrated in ~5 well-characterised pain points, not a
-broad runtime problem. A wholesale pivot to React Native would trade 5
-fixable bugs for a 3–6 month UI rewrite against a library surface that is
-only ~40% portable (~15.5k LOC of web UI, 19 Radix primitives, Tailwind,
-dnd-kit, @xyflow, Rive, media-chrome, react-jsx-parser, ansi-to-react all
-need replacements or rewrites). Issue #70 (native Android WebSocket plugin
-in a bound Service with OkHttp + `ConnectivityManager.NetworkCallback`) is
-already approved and eliminates the biggest real pain category
-(background transport) without touching the UI stack.
+The "Capacitor is janky" read is correct. The friction is five
+well-characterised pain points (mostly transport/lifecycle) and #70
+closes the biggest category without a framework swap.
 
-**Recommendation: do NOT pivot now.** Ship #70 first, measure what's left
-of "janky," and only then consider a React Native rewrite — and if one
-happens, scope it as an iterative *native surfaces* project, not a
-big-bang shell swap. A mid-path worth keeping on the table: **RN shell +
-WebView for the long tail**, where the chrome (status bar, navigation,
-gestures, keyboard, push, lifecycle) is native and the data-heavy
-interior (session chat, kanban, diagrams) stays React-in-WebView. That
-captures ~70% of the "feel" upgrade at ~20% of the rewrite cost.
+**Two recalibrations changed the recommendation across successive passes
+of this doc — see §9:**
+
+1. **2026 RN ecosystem is further along than I scored it.** Tamagui
+   (optimizing compiler, 100% RN parity, single component tree for web +
+   native) or Gluestack UI v3 + NativeWind collapse the "19 Radix
+   primitives to rewrite" cost to a library swap. Zeego v3 covers the
+   entire menu/dropdown/context-menu family with native iOS/Android
+   menus behind a unified Radix-shaped API.
+2. **This repo's shipping velocity is AI-coding speed, not human-dev
+   speed.** 443 commits in 6 days (Apr 17–22). Features of roughly the
+   scope of #68 (public/private visibility with full-collab shared
+   sessions, touching auth, D1, DO state, UI, Yjs) go research → spec
+   → impl → merge in ~1 day. Applying human-dev months to a repo that
+   ships in days was the wrong reference frame.
+
+**Revised envelope:** at this repo's cadence, an RN pivot scoped as
+Tamagui + Zeego + Maestro-backed AI-eval parity loop + parallel impl-
+agents is a **2–3 week wall-clock project**, not 6–10 weeks and
+definitely not 3–6 months. That is comparable to #70's 1–2 weeks and
+delivers dramatically more — iOS unlock, entire WebView bug class
+eliminated, single-codebase web+native via Tamagui's compiler.
+
+**Recommendation (revised):** **ship #70 AND start the RN spike in
+parallel.**
+
+- #70 protects the shipping Android app during the pivot — 1 week.
+- In parallel, a **3-day de-risking spike** on the actually-hard
+  constraints: `better-auth-react-native` adapter, op-sqlite vs
+  expo-sqlite under our workload, `@xyflow/react` → Skia port or
+  feature-gate, `react-jsx-parser` RN interpreter or scope-out, Rive
+  RN SDK port. If the spike lands clean → commit to the full pivot in
+  the following ~2 weeks. If a blocker emerges → fall back to #70 +
+  Option C (RN shell + WebView).
+- **Option C loses most of its appeal** under this recalibration —
+  Tamagui's one-codebase property already gives us the "native feel
+  with shared UI code" that C was approximating, without the WebView
+  bridge tax.
+- **Option D (iterative) is also less attractive** at AI-velocity —
+  the per-iteration setup cost dominates when each screen takes
+  hours, so a batched full migration is cheaper than drip-feed.
+
+Hard constraints that remain regardless of velocity and still gate the
+decision: `better-auth-react-native` doesn't exist — we own that and
+its auth-flow testing. `expo-sqlite` has documented production bugs
+(expo#37169). The Expo-Go-vs-production WebSocket mismatch is a known
+foot-gun. All three must pass the de-risking spike before committing.
 
 ---
 
@@ -389,3 +421,156 @@ External (2026):
 - [expo/expo#37169 — SQLite works on dev but has suspense/navigation bugs in production](https://github.com/expo/expo/issues/37169)
 - [Modern SQLite for React Native apps (Expo blog)](https://expo.dev/blog/modern-sqlite-for-react-native-apps)
 - [expo-sqlite (npm)](https://www.npmjs.com/package/expo-sqlite)
+- [Tamagui — 100% parity on React Native, optimizing compiler](https://github.com/tamagui/tamagui)
+- [Gluestack UI v3 — unstyled primitives + NativeWind](https://gluestack.io/ui/docs/home/performance/benchmarks)
+- [Zeego — native menus for React (Native) on Radix primitives](https://zeego.dev/)
+- [Maestro — YAML-driven E2E for RN (no native build)](https://maestro.dev/insights/best-react-native-testing-frameworks)
+- [Panto AI — React Native automated testing platform 2026](https://www.getpanto.ai/products/react-native-automated-testing)
+
+---
+
+## 9. Addendum (2026-04-23, mid-session) — two corrections that flipped the recommendation
+
+This doc was written in passes. Two reader pushbacks after the first
+draft exposed wrong reference frames. Keeping both corrections visible
+so the reasoning trail is auditable.
+
+### 9.1 Correction #1 — 2026 RN ecosystem was underscored
+
+**What I got wrong on pass 1:** treated Radix × React Native as a
+19-family hand-rewrite. In 2026 three libraries collapse that cost:
+
+- **Tamagui** — optimizing compiler with 100% RN parity; compiles to
+  atomic CSS on web + native Views on mobile; single component tree
+  covers both platforms. Fully compatible with Fabric/TurboModules.
+- **Gluestack UI v3** — unstyled accessible primitives styled via
+  NativeWind; optimized for Expo SDK 54 + New Architecture.
+- **Zeego v3** — native iOS/Android menus on mobile + pure Radix on
+  web, unified API; covers DropdownMenu, ContextMenu, etc. directly.
+
+The big Tamagui implication that I originally missed: **single
+codebase eliminates dual-shipping.** Every orchestrator feature
+(chains, voice, visibility) ships to web + RN from one component
+change. That was ~30% of the original "don't pivot" cost argument.
+
+**AI-eval parity loop** is also now mature: Maestro (YAML E2E, no
+native build) + Panto / Autonoma AI test platforms + visual
+regression on device-specific snapshots make "write parity spec →
+AI-generate RN → eval harness verifies against web baseline"
+tractable. Screen rewrites become codegen + eval, not typing.
+
+### 9.2 Correction #2 — wrong velocity reference frame
+
+**What I got wrong on pass 2 (after correction #1):** still quoted
+human-dev timelines (6–10 weeks). This repo does not ship at
+human-dev speed.
+
+Observed cadence from `git log --since="14 days ago"`:
+
+```
+2026-04-17: 118 commits
+2026-04-18:  69
+2026-04-19:  41
+2026-04-20:  69
+2026-04-21:  70
+2026-04-22:  59  (includes #68 full-collab visibility landing,
+                  #69 hibernation fix, #70 spec approved, #58
+                  chain StatusBar widget merged, #55 virtualization
+                  shipped+reverted+re-approached)
+```
+
+**443 commits across 6 days.** Feature landings at roughly daily
+cadence for issue-scale work like #68 (auth + D1 schema + DO state +
+UI + Yjs). At this velocity, applying human weeks to parallel-
+agent-capable work is the wrong unit.
+
+### 9.3 Recalibrated RN pivot envelope at observed velocity
+
+Work inventory, most items parallel-izable via impl-agents:
+
+| Work unit | Human-weeks est. | At repo velocity |
+|---|---|---|
+| Tamagui/Gluestack decision + primitive migration scaffold | 2 weeks | **0.5–1 day** |
+| `better-auth-react-native` adapter (bearer + secure-store wrap) | 1 week | **0.5–1 day** |
+| SQLite adapter (op-sqlite or expo-sqlite) + TanStack DB persistence | 1 week | **0.5–1 day** |
+| Lifecycle swap (Capacitor App/Network → AppState/NetInfo in connection-manager) | 3 days | **~0.5 day** |
+| WS transport (RN has native WebSocket; drop Capacitor native WS layer) | 2 days | **~0.25 day** |
+| Push (FCM via `@react-native-firebase/messaging`) | 3 days | **~0.5 day** |
+| OTA (Expo EAS Update replacing Capgo + APK fallback) | 3 days | **~0.5 day** |
+| Maestro + visual-regression + AI-codegen eval harness | 1 week | **1–2 days** |
+| 16 routes × screen migration via codegen + parity eval (parallel agents) | 4 weeks | **2–3 days** |
+| Hard-incompatible triage (xyflow → Skia/feature-gate, jsx-parser, Rive RN SDK, media-chrome → react-native-video) | 2 weeks | **2–3 days** |
+| iOS signing + App Store admin (human-gated) | 1 week | **1–2 days** (mostly non-code) |
+| Bug-hunt + polish on signed Android + iOS builds | 2 weeks | **2–3 days** |
+
+**Wall-clock envelope at this repo's velocity: ~2–3 weeks for
+Android parity, +~3–5 days for iOS submission.** Maybe 4 weeks all-in
+including dogfood + polish loops.
+
+That is **comparable to shipping #70** in wall-clock terms and
+delivers categorically more value:
+
+- entire WebView bug class eliminated (not patched)
+- iOS unlocked
+- single-codebase web + native via Tamagui's compiler
+- no `react-offscreen-patch.ts` equivalent needed
+- no bound-Service keepalive gymnastics needed
+- new Architecture (Fabric/TurboModules) performance
+
+### 9.4 Revised option ranking
+
+- **A (ship #70 only)** — still the right *immediate* move, 3–7 days.
+  Guards the shipping app during the pivot. But by itself, leaves
+  iOS locked, the react-offscreen patch in place, and the WebView
+  × React 19 scheduler interaction one bug away from reappearing.
+- **B (full RN pivot)** — **promoted to primary recommendation.**
+  At AI-velocity with Tamagui + Zeego + Maestro-eval, ~2–3 weeks
+  wall clock on top of #70 ships the pivot. Gates: the de-risking
+  spike in §9.5 must pass.
+- **C (RN shell + WebView)** — **demoted.** Tamagui already gives
+  the one-codebase-native-feel property that C approximated, so C
+  now carries WebView bridge tax without a corresponding upside.
+  Only revisit if the spike hits a blocker.
+- **D (iterative native surfaces)** — **demoted.** Per-iteration
+  scaffold cost dominates at AI-velocity — cheaper to batch the full
+  migration than drip-feed screens. Revisit only if iOS timeline
+  needs to slip well past the Android cutover.
+
+### 9.5 De-risking spike (run before committing to §9.4 B)
+
+Three concrete risks gate the full pivot. Answer them in a ~3-day
+spike before locking the direction:
+
+1. **`better-auth-react-native` adapter shape.** The Capacitor
+   sibling (`better-auth-capacitor`) embeds bearer-token replay,
+   token storage, and 4401 handling. RN adapter lives on
+   `expo-secure-store` + `AsyncStorage`. Write the minimal adapter;
+   verify sign-in + WS bearer + 4401 reconnect against the local
+   orchestrator. **Go/no-go:** round-trip sign-in + reconnect works
+   inside the spike, including after process kill.
+2. **SQLite backend choice under our workload.** `expo-sqlite` has
+   documented suspense/navigation bugs (expo#37169); `op-sqlite`
+   (JSI) is faster but its TanStack DB persistence adapter doesn't
+   exist yet. Port `persistence-capacitor.ts` to both; run a 10-min
+   session with the branch/rewind flow. **Go/no-go:** at least one
+   adapter keeps `messagesCollection` coherent through reconnect
+   without data loss.
+3. **`@xyflow/react`, `react-jsx-parser`, Rive, media-chrome.**
+   xyflow has no mature RN peer — decide Skia port vs feature-gate
+   on mobile. react-jsx-parser needs a bespoke RN JSX interpreter or
+   scope-out. Rive has an RN SDK with different API — port is
+   mechanical. media-chrome rebuilds on `react-native-video`.
+   **Go/no-go:** each has an accepted fallback (feature-gate,
+   rebuild, or Skia port with bounded cost).
+
+If all three pass: full RN pivot in the next ~2 weeks.
+If any blocks: fall back to #70 + Option C hybrid.
+
+### 9.6 What this means for #70
+
+**#70 still ships.** Even if the RN pivot starts immediately, the
+Android Capacitor app is the shipping build for ~2–3 more weeks
+while RN work lands. #70 keeps it stable during that window. If the
+pivot lands clean, #70's Kotlin plugin code is discardable — that's
+acceptable given its 1-week cost and the stability it buys during
+the transition.
