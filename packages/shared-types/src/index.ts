@@ -422,6 +422,8 @@ export interface ProjectInfo {
   ahead: number
   behind: number
   pr: PrInfo | null
+  /** Spec #68 — public projects (and their sessions) are visible to all authed users. */
+  visibility?: 'public' | 'private'
 }
 
 // ── SDK Session Info (on-disk session metadata) ─────────────────────
@@ -642,6 +644,7 @@ export interface SessionSummary {
   // Read by client `deriveStatus()` predicate to override stuck `running`
   // rows with `idle` after >45s of silence.
   lastEventTs?: number | null
+  visibility?: 'public' | 'private'
 }
 
 // ── Stored Message (for SQLite persistence) ─────────────────────────

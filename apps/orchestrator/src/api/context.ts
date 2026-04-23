@@ -4,5 +4,6 @@ export type ApiAppEnv = {
   Bindings: Env
   Variables: {
     userId: string
+    role: string
   }
 }

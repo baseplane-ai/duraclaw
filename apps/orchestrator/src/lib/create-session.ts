@@ -11,6 +11,7 @@
  *   - broadcasts the row via `broadcastSessionRow` (wrapped in waitUntil).
  */
 
+import { eq } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import * as schema from '~/db/schema'
 import { agentSessions } from '~/db/schema'
@@ -54,6 +55,18 @@ export async function createSession(
   }
 
   const projectPath = await resolveProjectPath(env, params.project)
+
+  // Spec #68 B6 — inherit the project's visibility at creation time. Projects
+  // default to 'private'; promoting to 'public' happens via the admin PATCH
+  // endpoint. New sessions adopt whatever the project is set to today.
+  const db = drizzle(env.AUTH_DB, { schema })
+  const projectRows = await db
+    .select({ visibility: schema.projects.visibility })
+    .from(schema.projects)
+    .where(eq(schema.projects.name, params.project))
+    .limit(1)
+  const visibility: 'public' | 'private' =
+    projectRows[0]?.visibility === 'public' ? 'public' : 'private'
 
   let sessionId: string
   let doId: DurableObjectId
@@ -99,7 +112,6 @@ export async function createSession(
 
   const now = new Date().toISOString()
   const promptText = promptToPreviewText(params.prompt)
-  const db = drizzle(env.AUTH_DB, { schema })
 
   const baseRow = {
     id: sessionId,
@@ -124,6 +136,7 @@ export async function createSession(
     kataMode: null as string | null,
     kataIssue: typeof params.kataIssue === 'number' ? params.kataIssue : (null as number | null),
     kataPhase: null as string | null,
+    visibility,
   }
 
   if (params.sdk_session_id) {

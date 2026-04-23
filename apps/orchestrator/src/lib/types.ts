@@ -124,6 +124,7 @@ export interface AgentSessionRow {
   kataMode: string | null
   kataIssue: number | null
   kataPhase: string | null
+  visibility: 'public' | 'private'
 }
 
 /**

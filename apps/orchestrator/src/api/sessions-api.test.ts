@@ -86,7 +86,11 @@ describe('GET /api/sessions/search', () => {
     const res = await app.request('/api/sessions/search?q=stuff')
 
     expect(res.status).toBe(200)
-    await expect(res.json()).resolves.toEqual({ sessions: mockSessions })
+    // Spec #68 P2: rows are annotated with `isOwner` (no userId on this fixture
+    // so the caller `user-1` is not the owner).
+    await expect(res.json()).resolves.toEqual({
+      sessions: mockSessions.map((s) => ({ ...s, isOwner: false })),
+    })
     expect(fakeDb.db.select).toHaveBeenCalled()
   })
 })

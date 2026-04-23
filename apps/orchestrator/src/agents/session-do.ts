@@ -490,6 +490,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
           content?: unknown
           clientId?: unknown
           createdAt?: unknown
+          senderId?: unknown
         }
         if (typeof body.content !== 'string' || body.content.length === 0) {
           return new Response(JSON.stringify({ error: 'content must be a non-empty string' }), {
@@ -515,6 +516,9 @@ export class SessionDO extends Agent<Env, SessionMeta> {
         const result = await this.sendMessage(body.content, {
           client_message_id: body.clientId,
           createdAt: body.createdAt,
+          // Spec #68 B14 — optional sender attribution (no-op today; see
+          // the note on sendMessage's opts).
+          ...(typeof body.senderId === 'string' ? { senderId: body.senderId } : {}),
         })
         if (!result.ok) {
           // Validation inside sendMessage (e.g. invalid createdAt is
@@ -3046,7 +3050,18 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
   @callable()
   async sendMessage(
     content: string | ContentBlock[],
-    opts?: { submitId?: string; client_message_id?: string; createdAt?: string },
+    opts?: {
+      submitId?: string
+      client_message_id?: string
+      createdAt?: string
+      // Spec #68 B14 — accepted for forward-compat when shared sessions
+      // need to attribute turns to the sender. The column exists on the
+      // SDK-owned `assistant_messages` table (migration v11) but message
+      // persistence flows through `Session.appendMessage`, not direct
+      // SQL, so this is a no-op today. Plumbed now so the wire shape is
+      // stable when UI attribution lands.
+      senderId?: string
+    },
   ): Promise<{
     ok: boolean
     error?: string

@@ -1,4 +1,5 @@
-import { and, asc, desc, eq, inArray, isNull, like, or, sql } from 'drizzle-orm'
+import type { SQL } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, isNull, like, ne, or, sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import { Hono } from 'hono'
 import { constantTimeEquals } from '~/agents/session-do-helpers'
@@ -183,29 +184,53 @@ async function getHiddenProjects(env: ApiAppEnv['Bindings'], userId: string): Pr
   return new Set()
 }
 
-async function getOwnedSession(
+/**
+ * Spec #68 B4 — compose the WHERE fragment that scopes a session-list
+ * query to what the caller is allowed to see.
+ *   - admin + filter=all → no restriction (see everything)
+ *   - filter=mine         → `user_id = :userId`
+ *   - filter=all (default)→ `user_id = :userId OR visibility = 'public'`
+ * Returns `undefined` when no restriction should be applied; callers
+ * must skip `.where()` in that case or drop the scope from an `and(...)`.
+ */
+function buildSessionScope(userId: string, role: string, filter: 'mine' | 'all'): SQL | undefined {
+  if (role === 'admin' && filter === 'all') return undefined
+  if (filter === 'mine') return eq(agentSessions.userId, userId)
+  return or(eq(agentSessions.userId, userId), eq(agentSessions.visibility, 'public'))
+}
+
+/**
+ * Stamp an `isOwner: boolean` flag on each row against the supplied
+ * caller userId. Centralises the pattern used by every
+ * session-listing endpoint so the ownership rule lives in one place.
+ */
+function annotateOwnership<T extends { userId: string }>(
+  rows: T[],
+  userId: string,
+): Array<T & { isOwner: boolean }> {
+  return rows.map((r) => ({ ...r, isOwner: r.userId === userId }))
+}
+
+export async function getAccessibleSession(
   env: ApiAppEnv['Bindings'],
   sessionId: string,
   userId: string,
-): Promise<{ ok: true; session: AgentSessionRow } | { ok: false; status: 403 | 404 }> {
+  role: string,
+): Promise<{ ok: true; session: AgentSessionRow; isOwner: boolean } | { ok: false; status: 404 }> {
   const db = getDb(env)
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1)
   const row = rows[0]
+  if (!row) return { ok: false, status: 404 }
 
-  if (!row) {
+  const isOwner = row.userId === userId || row.userId === 'system'
+  const isPublic = row.visibility === 'public'
+  const isAdmin = role === 'admin'
+
+  if (!isOwner && !isPublic && !isAdmin) {
     return { ok: false, status: 404 }
   }
 
-  // Ownership check: reject sessions that belong to a different real user.
-  // "system" is a placeholder used by the 5-min discovery alarm (which has no
-  // user context) — treat those as shared since duraclaw is single-user per VPS.
-  // Per B-API-1, real-user mismatches return 404 (not 403) to avoid existence
-  // disclosure.
-  if (row.userId && row.userId !== userId && row.userId !== 'system') {
-    return { ok: false, status: 404 }
-  }
-
-  return { ok: true, session: row as AgentSessionRow }
+  return { ok: true, session: row as AgentSessionRow, isOwner }
 }
 
 // ── GH#16 P3 Unit 1 — chain list + precondition helpers ────────────
@@ -413,26 +438,25 @@ export function createApiApp() {
 
     const userId = session.userId
 
-    const ownership = await getOwnedSession(c.env, sessionId, userId)
-    if (!ownership.ok) {
-      return c.json(
-        { error: ownership.status === 404 ? 'Session not found' : 'Forbidden' },
-        ownership.status,
-      )
+    // Spec #68 B10 — tool approval is a write action on a live session;
+    // public sessions allow any authed user to respond to a pending gate.
+    const access = await getAccessibleSession(c.env, sessionId, userId, session.role)
+    if (!access.ok) {
+      return c.json({ error: 'Session not found' }, 404)
     }
 
     if (typeof body.toolCallId !== 'string') {
       return c.json({ error: 'Invalid tool approval payload' }, 400)
     }
 
-    const doId = getSessionDoId(c.env, ownership.session.id)
+    const doId = getSessionDoId(c.env, access.session.id)
     const sessionDO = c.env.SESSION_AGENT.get(doId)
     const response = await sessionDO.fetch(
       new Request('https://session/tool-approval', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-partykit-room': ownership.session.id,
+          'x-partykit-room': access.session.id,
           'x-user-id': userId,
         },
         body: JSON.stringify({
@@ -1482,59 +1506,68 @@ export function createApiApp() {
 
   app.get('/api/sessions', async (c) => {
     const userId = c.get('userId')
+    const role = c.get('role')
+    const filter = (c.req.query('filter') === 'mine' ? 'mine' : 'all') as 'mine' | 'all'
+    const scope = buildSessionScope(userId, role, filter)
     const db = getDb(c.env)
-    const rows = await db
-      .select()
-      .from(agentSessions)
-      .where(eq(agentSessions.userId, userId))
+    const baseQuery = db.select().from(agentSessions)
+    const rows = await (scope ? baseQuery.where(scope) : baseQuery)
       .orderBy(desc(agentSessions.lastActivity))
       .limit(200)
-    return c.json({ sessions: rows as AgentSessionRow[] })
+    const sessions = annotateOwnership(rows as AgentSessionRow[], userId)
+    return c.json({ sessions })
   })
 
   app.get('/api/sessions/active', async (c) => {
     const userId = c.get('userId')
+    const role = c.get('role')
+    const filter = (c.req.query('filter') === 'mine' ? 'mine' : 'all') as 'mine' | 'all'
+    const scope = buildSessionScope(userId, role, filter)
+    const statusFilter = inArray(agentSessions.status, [...ACTIVE_STATUSES])
+    const whereExpr = scope ? and(scope, statusFilter) : statusFilter
     const db = getDb(c.env)
     const rows = await db
       .select()
       .from(agentSessions)
-      .where(
-        and(eq(agentSessions.userId, userId), inArray(agentSessions.status, [...ACTIVE_STATUSES])),
-      )
+      .where(whereExpr)
       .orderBy(desc(agentSessions.lastActivity))
-    return c.json({ sessions: rows as AgentSessionRow[] })
+    const sessions = annotateOwnership(rows as AgentSessionRow[], userId)
+    return c.json({ sessions })
   })
 
   app.get('/api/sessions/search', async (c) => {
     const q = c.req.query('q')
     if (!q) return c.json({ sessions: [] })
     const userId = c.get('userId')
+    const role = c.get('role')
+    const filter = (c.req.query('filter') === 'mine' ? 'mine' : 'all') as 'mine' | 'all'
+    const scope = buildSessionScope(userId, role, filter)
     const needle = `%${q}%`
+    const likeExpr = or(
+      like(agentSessions.prompt, needle),
+      like(agentSessions.project, needle),
+      like(agentSessions.id, needle),
+      like(agentSessions.title, needle),
+      like(agentSessions.summary, needle),
+      like(agentSessions.agent, needle),
+      like(agentSessions.sdkSessionId, needle),
+    )
+    const whereExpr = scope ? and(scope, likeExpr) : likeExpr
     const db = getDb(c.env)
     const rows = await db
       .select()
       .from(agentSessions)
-      .where(
-        and(
-          eq(agentSessions.userId, userId),
-          or(
-            like(agentSessions.prompt, needle),
-            like(agentSessions.project, needle),
-            like(agentSessions.id, needle),
-            like(agentSessions.title, needle),
-            like(agentSessions.summary, needle),
-            like(agentSessions.agent, needle),
-            like(agentSessions.sdkSessionId, needle),
-          ),
-        ),
-      )
+      .where(whereExpr)
       .orderBy(desc(agentSessions.lastActivity))
       .limit(200)
-    return c.json({ sessions: rows as AgentSessionRow[] })
+    const sessions = annotateOwnership(rows as AgentSessionRow[], userId)
+    return c.json({ sessions })
   })
 
   app.get('/api/sessions/history', async (c) => {
     const userId = c.get('userId')
+    const role = c.get('role')
+    const filter = (c.req.query('filter') === 'mine' ? 'mine' : 'all') as 'mine' | 'all'
     const sortByParam = c.req.query('sortBy')
     const sortDirParam = c.req.query('sortDir')
     const status = c.req.query('status')
@@ -1562,24 +1595,87 @@ export function createApiApp() {
     })()
     const orderExpr = sortDirParam === 'asc' ? asc(sortColumn) : desc(sortColumn)
 
-    const filters = [eq(agentSessions.userId, userId)]
+    const scope = buildSessionScope(userId, role, filter)
+    const filters: SQL[] = []
+    if (scope) filters.push(scope)
     if (status) filters.push(eq(agentSessions.status, status))
     if (project) filters.push(eq(agentSessions.project, project))
     if (model) filters.push(eq(agentSessions.model, model))
 
     const db = getDb(c.env)
-    const rows = await db
-      .select()
-      .from(agentSessions)
-      .where(and(...filters))
+    const baseQuery = db.select().from(agentSessions)
+    const rows = await (filters.length > 0 ? baseQuery.where(and(...filters)) : baseQuery)
       .orderBy(orderExpr)
       .limit(limit)
       .offset(offset)
 
+    const sessions = annotateOwnership(rows as AgentSessionRow[], userId)
     return c.json({
-      sessions: rows as AgentSessionRow[],
+      sessions,
       nextOffset: rows.length === limit ? offset + limit : null,
     })
+  })
+
+  app.get('/api/sessions/shared', async (c) => {
+    const userId = c.get('userId')
+    const db = getDb(c.env)
+    const rows = await db
+      .select()
+      .from(agentSessions)
+      .where(and(eq(agentSessions.visibility, 'public'), ne(agentSessions.userId, userId)))
+      .orderBy(desc(agentSessions.lastActivity))
+      .limit(200)
+    const sessions = (rows as AgentSessionRow[]).map((r) => ({ ...r, isOwner: false }))
+    return c.json({ sessions })
+  })
+
+  app.patch('/api/sessions/:id/visibility', async (c) => {
+    const role = c.get('role')
+    if (role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
+
+    const sessionId = c.req.param('id')
+    const body = (await c.req.json().catch(() => ({}))) as { visibility?: string }
+    if (body.visibility !== 'public' && body.visibility !== 'private') {
+      return c.json({ error: 'invalid_visibility' }, 400)
+    }
+
+    const db = getDb(c.env)
+    const existing = await db
+      .select()
+      .from(agentSessions)
+      .where(eq(agentSessions.id, sessionId))
+      .limit(1)
+    if (!existing[0]) return c.json({ error: 'Session not found' }, 404)
+
+    await db
+      .update(agentSessions)
+      .set({ visibility: body.visibility, updatedAt: new Date().toISOString() })
+      .where(eq(agentSessions.id, sessionId))
+
+    c.executionCtx.waitUntil(broadcastSessionRow(c.env, c.executionCtx, sessionId, 'update'))
+    return c.json({ ok: true, visibility: body.visibility })
+  })
+
+  app.patch('/api/projects/:name/visibility', async (c) => {
+    const role = c.get('role')
+    if (role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
+
+    const name = c.req.param('name')
+    const body = (await c.req.json().catch(() => ({}))) as { visibility?: string }
+    if (body.visibility !== 'public' && body.visibility !== 'private') {
+      return c.json({ error: 'invalid_visibility' }, 400)
+    }
+
+    const db = getDb(c.env)
+    const now = new Date().toISOString()
+    const result = await db
+      .update(projectsTable)
+      .set({ visibility: body.visibility, updatedAt: now })
+      .where(eq(projectsTable.name, name))
+      .returning({ name: projectsTable.name })
+    if (!result[0]) return c.json({ error: 'Project not found' }, 404)
+
+    return c.json({ ok: true, visibility: body.visibility })
   })
 
   app.post('/api/sessions/sync', async (c) => {
@@ -1693,22 +1789,20 @@ export function createApiApp() {
 
   app.get('/api/sessions/:id', async (c) => {
     const userId = c.get('userId')
-    const ownership = await getOwnedSession(c.env, c.req.param('id'), userId)
-    if (!ownership.ok) {
-      return c.json(
-        { error: ownership.status === 404 ? 'Session not found' : 'Forbidden' },
-        ownership.status,
-      )
+    // Spec #68 B3 — read access widens to public + admin.
+    const access = await getAccessibleSession(c.env, c.req.param('id'), userId, c.get('role'))
+    if (!access.ok) {
+      return c.json({ error: 'Session not found' }, 404)
     }
 
     // Merge: D1 metadata + DO runtime state. The DO owns live fields like
     // pending gates, current turn message id, etc. that are not in agent_sessions.
-    const doId = getSessionDoId(c.env, ownership.session.id)
+    const doId = getSessionDoId(c.env, access.session.id)
     const sessionDO = c.env.SESSION_AGENT.get(doId)
     const response = await sessionDO.fetch(
       new Request('https://session/state', {
         headers: {
-          'x-partykit-room': ownership.session.id,
+          'x-partykit-room': access.session.id,
           'x-user-id': userId,
         },
       }),
@@ -1719,17 +1813,16 @@ export function createApiApp() {
     }
 
     const doState = (await response.json()) as Record<string, unknown>
-    return c.json({ session: { ...ownership.session, ...doState } })
+    return c.json({ session: { ...access.session, ...doState } })
   })
 
   app.get('/api/sessions/:id/messages', async (c) => {
     const userId = c.get('userId')
-    const ownership = await getOwnedSession(c.env, c.req.param('id'), userId)
-    if (!ownership.ok) {
-      return c.json(
-        { error: ownership.status === 404 ? 'Session not found' : 'Forbidden' },
-        ownership.status,
-      )
+    // Spec #68 B10 — read-access widens: public sessions + admin can view
+    // message history, not just the owner.
+    const access = await getAccessibleSession(c.env, c.req.param('id'), userId, c.get('role'))
+    if (!access.ok) {
+      return c.json({ error: 'Session not found' }, 404)
     }
 
     // GH#38 P1.2: cursor-REST forwarding. Both `sinceCreatedAt` and
@@ -1741,12 +1834,12 @@ export function createApiApp() {
     if (sinceCreatedAt !== undefined) doUrl.searchParams.set('sinceCreatedAt', sinceCreatedAt)
     if (sinceId !== undefined) doUrl.searchParams.set('sinceId', sinceId)
 
-    const doId = getSessionDoId(c.env, ownership.session.id)
+    const doId = getSessionDoId(c.env, access.session.id)
     const sessionDO = c.env.SESSION_AGENT.get(doId)
     const response = await sessionDO.fetch(
       new Request(doUrl.toString(), {
         headers: {
-          'x-partykit-room': ownership.session.id,
+          'x-partykit-room': access.session.id,
           'x-user-id': userId,
         },
       }),
@@ -1786,12 +1879,11 @@ export function createApiApp() {
     const sessionId = c.req.param('id')
     try {
       const userId = c.get('userId')
-      const ownership = await getOwnedSession(c.env, sessionId, userId)
-      if (!ownership.ok) {
-        return c.json(
-          { error: ownership.status === 404 ? 'Session not found' : 'Forbidden' },
-          ownership.status,
-        )
+      // Spec #68 B10 — sendMessage is a collaborative write action: public
+      // sessions + admin may send turns; private sessions stay owner-only.
+      const access = await getAccessibleSession(c.env, sessionId, userId, c.get('role'))
+      if (!access.ok) {
+        return c.json({ error: 'Session not found' }, 404)
       }
 
       let rawBody: unknown
@@ -1815,20 +1907,24 @@ export function createApiApp() {
         return c.json({ error: 'createdAt must be a valid ISO 8601 string' }, 400)
       }
 
-      const doId = getSessionDoId(c.env, ownership.session.id)
+      const doId = getSessionDoId(c.env, access.session.id)
       const sessionDO = c.env.SESSION_AGENT.get(doId)
       const response = await sessionDO.fetch(
         new Request('https://session/messages', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'x-partykit-room': ownership.session.id,
+            'x-partykit-room': access.session.id,
             'x-user-id': userId,
           },
           body: JSON.stringify({
             content: body.content,
             clientId: body.clientId,
             createdAt: body.createdAt,
+            // Spec #68 B14 — stamp the turn with the sender's user id so
+            // shared sessions can attribute user turns. The DO accepts
+            // this as an optional opt for future multi-user display.
+            senderId: userId,
           }),
         }),
       )
@@ -1852,19 +1948,17 @@ export function createApiApp() {
   // is deferred to a separate issue per spec Non-Goals.
   app.get('/api/sessions/:id/context-usage', async (c) => {
     const userId = c.get('userId')
-    const ownership = await getOwnedSession(c.env, c.req.param('id'), userId)
-    if (!ownership.ok) {
-      return c.json(
-        { error: ownership.status === 404 ? 'Session not found' : 'Forbidden' },
-        ownership.status,
-      )
+    // Spec #68 B10 — context usage is read-only; widen to public + admin.
+    const access = await getAccessibleSession(c.env, c.req.param('id'), userId, c.get('role'))
+    if (!access.ok) {
+      return c.json({ error: 'Session not found' }, 404)
     }
-    const doId = getSessionDoId(c.env, ownership.session.id)
+    const doId = getSessionDoId(c.env, access.session.id)
     const sessionDO = c.env.SESSION_AGENT.get(doId)
     const response = await sessionDO.fetch(
       new Request('https://session/context-usage', {
         headers: {
-          'x-partykit-room': ownership.session.id,
+          'x-partykit-room': access.session.id,
           'x-user-id': userId,
         },
       }),
@@ -1884,19 +1978,17 @@ export function createApiApp() {
   // runner teardown — the D1 row persists even when the runner is dead.
   app.get('/api/sessions/:id/kata-state', async (c) => {
     const userId = c.get('userId')
-    const ownership = await getOwnedSession(c.env, c.req.param('id'), userId)
-    if (!ownership.ok) {
-      return c.json(
-        { error: ownership.status === 404 ? 'Session not found' : 'Forbidden' },
-        ownership.status,
-      )
+    // Spec #68 B10 — kata state is read-only; widen to public + admin.
+    const access = await getAccessibleSession(c.env, c.req.param('id'), userId, c.get('role'))
+    if (!access.ok) {
+      return c.json({ error: 'Session not found' }, 404)
     }
-    const doId = getSessionDoId(c.env, ownership.session.id)
+    const doId = getSessionDoId(c.env, access.session.id)
     const sessionDO = c.env.SESSION_AGENT.get(doId)
     const response = await sessionDO.fetch(
       new Request('https://session/kata-state', {
         headers: {
-          'x-partykit-room': ownership.session.id,
+          'x-partykit-room': access.session.id,
           'x-user-id': userId,
         },
       }),
@@ -1949,9 +2041,14 @@ export function createApiApp() {
       const projects = await fetchGatewayProjects(c.env)
       const userId = c.get('userId')
       const hiddenSet = await getHiddenProjects(c.env, userId)
+      const db = getDb(c.env)
+      const d1Rows = await db
+        .select({ name: projectsTable.name, visibility: projectsTable.visibility })
+        .from(projectsTable)
+      const visMap = new Map(d1Rows.map((r) => [r.name, r.visibility]))
       const filtered =
         hiddenSet.size > 0 ? projects.filter((p) => !hiddenSet.has(p.name)) : projects
-      return c.json(filtered)
+      return c.json(filtered.map((p) => ({ ...p, visibility: visMap.get(p.name) ?? 'private' })))
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Gateway unreachable'
       return c.json({ error: message }, 502)
@@ -1963,7 +2060,18 @@ export function createApiApp() {
       const projects = await fetchGatewayProjects(c.env)
       const userId = c.get('userId')
       const hiddenSet = await getHiddenProjects(c.env, userId)
-      return c.json(projects.map((p) => ({ ...p, hidden: hiddenSet.has(p.name) })))
+      const db = getDb(c.env)
+      const d1Rows = await db
+        .select({ name: projectsTable.name, visibility: projectsTable.visibility })
+        .from(projectsTable)
+      const visMap = new Map(d1Rows.map((r) => [r.name, r.visibility]))
+      return c.json(
+        projects.map((p) => ({
+          ...p,
+          hidden: hiddenSet.has(p.name),
+          visibility: visMap.get(p.name) ?? 'private',
+        })),
+      )
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Gateway unreachable'
       return c.json({ error: message }, 502)
@@ -1972,16 +2080,16 @@ export function createApiApp() {
 
   app.post('/api/sessions/:id/fork', async (c) => {
     const userId = c.get('userId')
-    const ownership = await getOwnedSession(c.env, c.req.param('id'), userId)
-    if (!ownership.ok) {
-      return c.json(
-        { error: ownership.status === 404 ? 'Session not found' : 'Forbidden' },
-        ownership.status,
-      )
+    // Spec #68 B10 — fork is a collaborative write action: any user with
+    // access (owner, public viewer, admin) may fork into a new session
+    // they own.
+    const access = await getAccessibleSession(c.env, c.req.param('id'), userId, c.get('role'))
+    if (!access.ok) {
+      return c.json({ error: 'Session not found' }, 404)
     }
 
     const body = (await c.req.json()) as { up_to_message_id?: string; title?: string }
-    const projectName = ownership.session.project
+    const projectName = access.session.project
     const httpBase = (c.env.CC_GATEWAY_URL ?? '')
       .replace(/^wss:/, 'https:')
       .replace(/^ws:/, 'http:')
@@ -1995,12 +2103,12 @@ export function createApiApp() {
     }
 
     // Find the SDK session ID from the SessionDO state
-    const doId = getSessionDoId(c.env, ownership.session.id)
+    const doId = getSessionDoId(c.env, access.session.id)
     const sessionDO = c.env.SESSION_AGENT.get(doId)
     const stateResp = await sessionDO.fetch(
       new Request('https://session/state', {
         headers: {
-          'x-partykit-room': ownership.session.id,
+          'x-partykit-room': access.session.id,
           'x-user-id': userId,
         },
       }),
@@ -2042,21 +2150,20 @@ export function createApiApp() {
 
   app.post('/api/sessions/:id/abort', async (c) => {
     const userId = c.get('userId')
-    const ownership = await getOwnedSession(c.env, c.req.param('id'), userId)
-    if (!ownership.ok) {
-      return c.json(
-        { error: ownership.status === 404 ? 'Session not found' : 'Forbidden' },
-        ownership.status,
-      )
+    // Spec #68 B10 — interrupt is a collaborative write action; widen to
+    // public + admin.
+    const access = await getAccessibleSession(c.env, c.req.param('id'), userId, c.get('role'))
+    if (!access.ok) {
+      return c.json({ error: 'Session not found' }, 404)
     }
 
-    const doId = getSessionDoId(c.env, ownership.session.id)
+    const doId = getSessionDoId(c.env, access.session.id)
     const sessionDO = c.env.SESSION_AGENT.get(doId)
     const response = await sessionDO.fetch(
       new Request('https://session/abort', {
         method: 'POST',
         headers: {
-          'x-partykit-room': ownership.session.id,
+          'x-partykit-room': access.session.id,
           'x-user-id': userId,
         },
       }),
@@ -2420,12 +2527,11 @@ export function createApiApp() {
 
   app.post('/api/sessions/:id/answers', async (c) => {
     const userId = c.get('userId')
-    const ownership = await getOwnedSession(c.env, c.req.param('id'), userId)
-    if (!ownership.ok) {
-      return c.json(
-        { error: ownership.status === 404 ? 'Session not found' : 'Forbidden' },
-        ownership.status,
-      )
+    // Spec #68 B10 — resolve-gate is a collaborative write action on a
+    // pending gate; any user with access can respond.
+    const access = await getAccessibleSession(c.env, c.req.param('id'), userId, c.get('role'))
+    if (!access.ok) {
+      return c.json({ error: 'Session not found' }, 404)
     }
 
     const body = (await c.req.json()) as {
@@ -2436,14 +2542,14 @@ export function createApiApp() {
       return c.json({ error: 'Invalid answers payload' }, 400)
     }
 
-    const doId = getSessionDoId(c.env, ownership.session.id)
+    const doId = getSessionDoId(c.env, access.session.id)
     const sessionDO = c.env.SESSION_AGENT.get(doId)
     const response = await sessionDO.fetch(
       new Request('https://session/answers', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-partykit-room': ownership.session.id,
+          'x-partykit-room': access.session.id,
           'x-user-id': userId,
         },
         body: JSON.stringify({
