@@ -33,7 +33,6 @@ interface GateResolverProps {
 export function GateResolver({ gate, onResolve }: GateResolverProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [answer, setAnswer] = useState('')
-  const [resolving, setResolving] = useState(false)
   const [selections, setSelections] = useState<Map<number, Set<string>>>(new Map())
   const [notesByQuestion, setNotesByQuestion] = useState<Map<number, string>>(new Map())
 
@@ -52,20 +51,24 @@ export function GateResolver({ gate, onResolve }: GateResolverProps) {
   }, []) // mount-only
 
   const handleResolve = async (response: GateResponse) => {
-    setResolving(true)
+    // No `resolving` state / button-disable: the optimistic write in
+    // use-coding-agent `resolveGate` flips the underlying part to
+    // output-available synchronously, so this GateResolver unmounts on
+    // the very next render tick. Setting a local `resolving` flag to
+    // disable the Submit button between click and unmount just made the
+    // button visibly flash dimmed for a frame. On RPC failure the
+    // rollback re-mounts a fresh GateResolver (with empty form state)
+    // and the toast surfaces the error, so nothing is lost by skipping
+    // the in-flight spinner.
+    setAnswer('')
     try {
       const raw = await onResolve(gate.id, response)
       const result = raw as { ok?: boolean; error?: string } | null | undefined
-      // Anything except an explicit {ok: true} is a failure — surface it so
-      // the user knows their answer didn't land and can retry.
       if (!result || result.ok !== true) {
         toast.error(result?.error || 'Failed to submit response — try again')
       }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to submit response')
-    } finally {
-      setResolving(false)
-      setAnswer('')
     }
   }
 
@@ -86,7 +89,6 @@ export function GateResolver({ gate, onResolve }: GateResolverProps) {
           <Button
             size="sm"
             variant="default"
-            disabled={resolving}
             className="flex-1 sm:flex-none"
             onClick={() => handleResolve({ approved: true })}
           >
@@ -95,7 +97,6 @@ export function GateResolver({ gate, onResolve }: GateResolverProps) {
           <Button
             size="sm"
             variant="destructive"
-            disabled={resolving}
             className="flex-1 sm:flex-none"
             onClick={() => handleResolve({ approved: false })}
           >
@@ -147,7 +148,7 @@ export function GateResolver({ gate, onResolve }: GateResolverProps) {
             <Button
               size="sm"
               className="w-full sm:w-auto"
-              disabled={resolving || !answer.trim()}
+              disabled={!answer.trim()}
               onClick={() => handleAskUserResolve(answer.trim())}
             >
               Submit
@@ -229,7 +230,6 @@ export function GateResolver({ gate, onResolve }: GateResolverProps) {
                     key={opt.label}
                     variant="outline"
                     size="sm"
-                    disabled={resolving}
                     aria-pressed={selected}
                     className={cn(
                       'h-auto min-h-8 w-full justify-start whitespace-normal px-3 py-2 text-left sm:w-auto sm:max-w-xs',
@@ -252,7 +252,6 @@ export function GateResolver({ gate, onResolve }: GateResolverProps) {
               className="min-w-0"
               placeholder="Add notes (optional) — adds to your choice, or use instead of one"
               value={notesByQuestion.get(qIndex) ?? ''}
-              disabled={resolving}
               onChange={(e) => setNoteFor(qIndex, e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && canSubmit) {
@@ -267,7 +266,7 @@ export function GateResolver({ gate, onResolve }: GateResolverProps) {
           <Button
             size="sm"
             className="w-full sm:w-auto"
-            disabled={resolving || !canSubmit}
+            disabled={!canSubmit}
             onClick={handleStructuredSubmit}
           >
             Submit
