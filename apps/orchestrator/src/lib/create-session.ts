@@ -85,31 +85,6 @@ export async function createSession(
   }
   const sessionDO = env.SESSION_AGENT.get(doId)
 
-  const createResponse = await sessionDO.fetch(
-    new Request('https://session/create', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-partykit-room': sessionId,
-        'x-user-id': userId,
-      },
-      body: JSON.stringify({
-        project: params.project,
-        project_path: projectPath,
-        prompt: params.prompt,
-        model: params.model,
-        system_prompt: params.system_prompt,
-        sdk_session_id: params.sdk_session_id,
-        agent: params.agent,
-        userId,
-      }),
-    }),
-  )
-
-  if (!createResponse.ok) {
-    return { ok: false, status: 500, error: 'Failed to create session' }
-  }
-
   const now = new Date().toISOString()
   const promptText = promptToPreviewText(params.prompt)
 
@@ -139,6 +114,12 @@ export async function createSession(
     visibility,
   }
 
+  // ── D1 INSERT FIRST ──────────────────────────────────────────────────
+  // The D1 row MUST exist before the DO spawns the runner. Without it,
+  // every API route gates on getAccessibleSession() → 404, so the client
+  // can never fetch messages for a session that ran successfully.
+  // See: GH incident sess-d62bb777 — DO ran, D1 INSERT failed silently,
+  // session became permanently unreachable.
   if (params.sdk_session_id) {
     await db
       .insert(agentSessions)
@@ -158,6 +139,41 @@ export async function createSession(
       })
   } else {
     await db.insert(agentSessions).values(baseRow)
+  }
+
+  // ── Now spawn the DO ─────────────────────────────────────────────────
+  // If this fails, the D1 row exists with status='running' but no runner.
+  // The next sendMessage will see no gateway conn and re-trigger spawn,
+  // or the reaper will eventually mark it idle — both are recoverable.
+  const createResponse = await sessionDO.fetch(
+    new Request('https://session/create', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-partykit-room': sessionId,
+        'x-user-id': userId,
+      },
+      body: JSON.stringify({
+        project: params.project,
+        project_path: projectPath,
+        prompt: params.prompt,
+        model: params.model,
+        system_prompt: params.system_prompt,
+        sdk_session_id: params.sdk_session_id,
+        agent: params.agent,
+        userId,
+      }),
+    }),
+  )
+
+  if (!createResponse.ok) {
+    // DO spawn failed — mark the D1 row as errored so it doesn't sit
+    // as a phantom 'running' session forever.
+    await db
+      .update(agentSessions)
+      .set({ status: 'error', updatedAt: new Date().toISOString() })
+      .where(eq(agentSessions.id, sessionId))
+    return { ok: false, status: 500, error: 'Failed to create session' }
   }
 
   await broadcastSessionRow(env, executionCtx, sessionId, 'insert')
