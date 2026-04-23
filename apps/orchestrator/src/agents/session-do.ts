@@ -2643,6 +2643,9 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
 
     this.updateState({ status: 'running', gate: null, error: null })
     this.syncStatusToD1(new Date().toISOString())
+    // Co-flush lastEventTs so the TTL predicate doesn't override running → idle.
+    this.bumpLastEventTs()
+    void this.flushLastEventTsToD1()
     void this.triggerGatewayDial({
       type: 'resume',
       project: this.state.project,
@@ -2679,6 +2682,9 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // That 4410 is what kills the orphan.
     this.updateState({ status: 'running', gate: null, error: null })
     this.syncStatusToD1(new Date().toISOString())
+    // Co-flush lastEventTs so the TTL predicate doesn't override running → idle.
+    this.bumpLastEventTs()
+    void this.flushLastEventTsToD1()
     void this.triggerGatewayDial({
       type: 'resume',
       project: this.state.project,
@@ -3260,6 +3266,12 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         this.updateState({ status: 'running', gate: null, error: null })
         this.syncStatusToD1(new Date().toISOString())
       }
+      // Co-flush lastEventTs so the D1 row's TTL marker is fresh when the
+      // status=running delta lands on the client. Without this, the TTL
+      // predicate sees the stale marker from the prior turn and immediately
+      // overrides running → idle (the "idle while streaming" bug).
+      this.bumpLastEventTs()
+      void this.flushLastEventTsToD1()
       this.sendToGateway({
         type: 'stream-input',
         session_id: this.state.session_id ?? '',
@@ -3269,6 +3281,9 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     } else if (isResumable) {
       this.updateState({ status: 'running', gate: null, error: null })
       this.syncStatusToD1(new Date().toISOString())
+      // Co-flush lastEventTs — same rationale as the live-runner path.
+      this.bumpLastEventTs()
+      void this.flushLastEventTsToD1()
       void this.triggerGatewayDial({
         type: 'resume',
         project: this.state.project,
@@ -3737,6 +3752,9 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // 4. Send to gateway for execution
     this.updateState({ status: 'running', gate: null, error: null })
     this.syncStatusToD1(new Date().toISOString())
+    // Co-flush lastEventTs so the TTL predicate doesn't override running → idle.
+    this.bumpLastEventTs()
+    void this.flushLastEventTsToD1()
     void this.triggerGatewayDial({
       type: 'resume',
       project: this.state.project,
