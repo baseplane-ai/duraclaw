@@ -267,7 +267,11 @@ export const ConversationScrollButton = ({
     !isAtBottom && (
       <Button
         className={cn(
-          'absolute bottom-4 left-[50%] translate-x-[-50%] rounded-full dark:bg-background dark:hover:bg-muted',
+          // `bottom-6` keeps the floating button clear of the StatusBar /
+          // MessageInput stack that sits directly below the Conversation in
+          // ChatThread's flex column — the old `bottom-4` visually kissed
+          // the top border of the input panel.
+          'absolute bottom-6 left-[50%] translate-x-[-50%] rounded-full dark:bg-background dark:hover:bg-muted',
           className,
         )}
         onClick={scrollToBottom}
