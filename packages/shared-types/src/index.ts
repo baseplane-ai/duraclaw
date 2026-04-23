@@ -672,6 +672,16 @@ export interface SessionMessage {
   parts: unknown[]
   createdAt?: string | number | Date
   /**
+   * Wall-clock of the last in-place mutation of this row (ISO 8601). Stamped
+   * by SessionDO on every append (= createdAt) and update (= now()) and
+   * mirrored into the `assistant_messages.modified_at` column. Drives the
+   * client's `subscribe:messages` tail cursor so a warm reconnect only
+   * replays rows whose `modified_at` strictly exceeds the cached tail —
+   * unifying insert and update semantics on a single monotonic key. Optional
+   * on the wire for back-compat with older server bundles.
+   */
+  modifiedAt?: string
+  /**
    * Optional canonical turn id (`usr-N`). Populated by SessionDO on user
    * turns; absent on assistant and tool rows. Introduced in P3 (B6); safe to
    * declare now as an optional field so P1 MessagesFrame types compile.

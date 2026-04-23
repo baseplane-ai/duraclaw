@@ -432,8 +432,12 @@ export class SessionDO extends Agent<Env, SessionMeta> {
           // Each DO has its own isolated SQLite, so scoping by the DO name
           // is redundant anyway — we match on the literal `''` the SDK
           // actually stores. Querying by `this.name` returned zero rows.
-          const rows = this.sql<{ content: string }>`
-            SELECT content FROM assistant_messages
+          const rows = this.sql<{
+            content: string
+            created_at: string
+            modified_at: string | null
+          }>`
+            SELECT content, created_at, modified_at FROM assistant_messages
             WHERE session_id = ''
               AND (
                 (created_at > ${sinceCreatedAt as string})
@@ -445,7 +449,13 @@ export class SessionDO extends Agent<Env, SessionMeta> {
           const messages: unknown[] = []
           for (const row of rows) {
             try {
-              messages.push(JSON.parse(row.content))
+              // v13: enrich the REST cold-load payload with `modifiedAt` so
+              // the client seeds a correct tail cursor for its next
+              // subscribe:messages. Without this, cold-loaded rows fall
+              // back to createdAt in computeTailCursor and over-replay.
+              const parsed = JSON.parse(row.content) as Record<string, unknown>
+              parsed.modifiedAt = row.modified_at ?? row.created_at
+              messages.push(parsed)
             } catch {
               // Skip unparseable rows — defensive; Session writes valid JSON.
             }
@@ -596,7 +606,20 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       messageId: msg.id,
       r2Bucket: this.env.SESSION_MEDIA,
     })
-    return this.session.appendMessage(msg, parentId)
+    const result = this.session.appendMessage(msg, parentId)
+    // v13: seed modified_at = created_at on every new row so the unified
+    // modified_at cursor in replayMessagesFromCursor can advance past it.
+    // Without this seed, freshly-appended rows sit at modified_at=NULL and
+    // the strict `modified_at > cursor` predicate excludes them on warm
+    // reconnect — symmetric with the inverse bug (excluded update replay)
+    // that motivated v10. Best-effort: pre-v10 DOs silently no-op.
+    try {
+      this
+        .sql`UPDATE assistant_messages SET modified_at = created_at WHERE id = ${msg.id} AND session_id = '' AND modified_at IS NULL`
+    } catch {
+      // Pre-v10 DO — column does not yet exist. Safe to ignore.
+    }
+    return result
   }
 
   /**
@@ -769,15 +792,27 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       // GH#57: intercept cursor-aware sync subscribe BEFORE the @callable
       // dispatcher. The browser advertises its tail cursor so we only
       // replay the gap — cold clients pass null and get everything, warm
-      // clients send `(createdAt, id)` and get only what they're missing.
-      // Frame shape: `{type: 'subscribe:messages', sinceCursor: {createdAt,id} | null}`.
+      // clients send `(modifiedAt, id)` and get only what they're missing.
+      // Frame shape: `{type:'subscribe:messages', sinceCursor: {modifiedAt,id}|null}`.
+      //
+      // v13 cursor unification: the canonical key is `modifiedAt` (unified
+      // insert+update stamp on every row). A legacy client bundle may still
+      // send `{createdAt, id}` — in that case we treat createdAt as the
+      // modifiedAt floor. This is strictly conservative (it over-replays
+      // rather than under-replays) because the legacy client's tail
+      // createdAt is always ≤ that row's modifiedAt.
       if (typeof data === 'string' && data.startsWith('{"type":"subscribe:messages"')) {
         try {
           const parsed = JSON.parse(data) as {
             type: 'subscribe:messages'
-            sinceCursor?: { createdAt: string; id: string } | null
+            sinceCursor?: { modifiedAt?: string; createdAt?: string; id: string } | null
           }
-          void this.replayMessagesFromCursor(connection, parsed.sinceCursor ?? null)
+          const raw = parsed.sinceCursor ?? null
+          const cursor =
+            raw && (raw.modifiedAt || raw.createdAt)
+              ? { modifiedAt: (raw.modifiedAt ?? raw.createdAt) as string, id: raw.id }
+              : null
+          void this.replayMessagesFromCursor(connection, cursor)
           return
         } catch (err) {
           this.logError('onMessage.subscribe:messages', err, { connId: connection.id })
@@ -1521,28 +1556,47 @@ export class SessionDO extends Agent<Env, SessionMeta> {
    */
   private async replayMessagesFromCursor(
     connection: Connection,
-    sinceCursor: { createdAt: string; id: string } | null,
+    sinceCursor: { modifiedAt: string; id: string } | null,
   ): Promise<void> {
-    let cursor = sinceCursor ?? { createdAt: '1970-01-01T00:00:00.000Z', id: '' }
+    // v13 unification: cursor keyset is `(modified_at, id)` — the single
+    // monotonic "last touch" timestamp stamped by safeAppendMessage
+    // (= created_at) and safeUpdateMessage (= now()). The previous
+    // created_at cursor with a bolted-on `OR modified_at > cursor.createdAt`
+    // clause re-emitted every historically-modified row on every warm
+    // reconnect because the cursor never advanced past `modified_at`. See
+    // migration v13 description.
+    let cursor = sinceCursor ?? { modifiedAt: '1970-01-01T00:00:00.000Z', id: '' }
     try {
       // eslint-disable-next-line no-constant-condition
       while (true) {
-        const rows = this.sql<{ id: string; created_at: string; content: string }>`
-          SELECT id, created_at, content FROM assistant_messages
+        const rows = this.sql<{
+          id: string
+          created_at: string
+          modified_at: string | null
+          content: string
+        }>`
+          SELECT id, created_at, modified_at, content FROM assistant_messages
           WHERE session_id = ''
+            AND modified_at IS NOT NULL
             AND (
-              (created_at > ${cursor.createdAt})
-              OR (created_at = ${cursor.createdAt} AND id > ${cursor.id})
-              OR (modified_at IS NOT NULL AND modified_at > ${cursor.createdAt})
+              (modified_at > ${cursor.modifiedAt})
+              OR (modified_at = ${cursor.modifiedAt} AND id > ${cursor.id})
             )
-          ORDER BY created_at ASC, id ASC
+          ORDER BY modified_at ASC, id ASC
           LIMIT 500
         `
         if (rows.length === 0) return
         const msgs: WireSessionMessage[] = []
         for (const row of rows) {
           try {
-            msgs.push(JSON.parse(row.content) as WireSessionMessage)
+            const parsed = JSON.parse(row.content) as WireSessionMessage
+            // Stamp wire modifiedAt from the SQL column so the client's
+            // tail cursor advances exactly to the server-authoritative
+            // timestamp — no drift, no re-replay on the next reconnect.
+            msgs.push({
+              ...parsed,
+              modifiedAt: row.modified_at ?? row.created_at,
+            })
           } catch {
             // Unparseable row — skip; defensive, SDK writes valid JSON.
           }
@@ -1558,7 +1612,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
         }
         if (rows.length < 500) return
         const last = rows[rows.length - 1]
-        cursor = { createdAt: last.created_at, id: last.id }
+        cursor = { modifiedAt: last.modified_at ?? last.created_at, id: last.id }
       }
     } catch (err) {
       this.logError('replayMessagesFromCursor', err, { connId: connection.id })
@@ -1583,10 +1637,28 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     rowsOrOps: WireSessionMessage[] | { ops: SyncedCollectionOp<WireSessionMessage>[] },
     opts: { targetClientId?: string } = {},
   ): void {
-    const ops: SyncedCollectionOp<WireSessionMessage>[] = Array.isArray(rowsOrOps)
+    const rawOps: SyncedCollectionOp<WireSessionMessage>[] = Array.isArray(rowsOrOps)
       ? rowsOrOps.map((r) => ({ type: 'insert' as const, value: r }))
       : rowsOrOps.ops
-    if (ops.length === 0) return
+    if (rawOps.length === 0) return
+
+    // v13: stamp `modifiedAt` on every insert/update wire value that doesn't
+    // already carry one. The replay path (replayMessagesFromCursor) pre-
+    // stamps values from the SQL `modified_at` column; all other live and
+    // snapshot paths land here unstamped. Using `new Date().toISOString()`
+    // at emit time keeps the invariant `T_wire >= T_sql` — the SQL UPDATEs
+    // in safeAppendMessage / safeUpdateMessage run sequentially before the
+    // broadcast, so a client cursor advanced to T_wire can never cause the
+    // same row to re-qualify on the next subscribe:messages.
+    const now = new Date().toISOString()
+    const ops: SyncedCollectionOp<WireSessionMessage>[] = rawOps.map((op) => {
+      if (op.type === 'delete') return op
+      const value = op.value
+      if (value && typeof value === 'object' && !value.modifiedAt) {
+        return { ...op, value: { ...value, modifiedAt: now } }
+      }
+      return op
+    })
 
     if (!opts.targetClientId) {
       this.messageSeq += 1

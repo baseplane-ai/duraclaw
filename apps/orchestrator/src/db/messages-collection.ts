@@ -63,6 +63,14 @@ export interface CachedMessage {
   parts: SessionMessagePart[]
   createdAt?: Date | string
   /**
+   * Wall-clock of the last in-place mutation (ISO 8601) — stamped by the DO
+   * on every append and update. Unified-cursor key for the subscribe:messages
+   * tail so a warm reconnect only replays rows whose `modifiedAt` strictly
+   * exceeds the cached tail. Optional for legacy wire compatibility; when
+   * absent we fall back to `createdAt` when computing the tail cursor.
+   */
+  modifiedAt?: string
+  /**
    * Canonical turn ordinal (`usr-N`) for user rows. Populated server-side on
    * user-message persistence; absent on assistant/tool rows. Drives the
    * messages-collection sort-key so user turns stay in monotonic order even
@@ -207,26 +215,39 @@ export function createMessagesCollection(sessionId: string): MessagesCollection 
 export const messagesCollection = createMessagesCollection('__legacy__')
 
 /**
- * Compute the tail `(createdAt, id)` cursor for a messages collection —
+ * Compute the tail `(modifiedAt, id)` cursor for a messages collection —
  * used by the WS-open hook to send a `subscribe:messages` frame so the
  * DO only replays rows newer than what we already have.
  *
+ * v13 cursor unification: the DO's replay now keys off `modified_at` — the
+ * single monotonic "last touch" column stamped on every append and update.
+ * For each row we prefer its server-stamped `modifiedAt` and fall back to
+ * `createdAt` only for cached rows authored before v13 (back-compat).
+ *
  * Returns `null` for an empty collection (cold client; DO replays from
- * epoch) or when no row carries a `createdAt` (degraded mode; treat as
+ * epoch) or when no row carries any timestamp (degraded mode; treat as
  * cold).
  */
 export function computeTailCursor(
   collection: MessagesCollection,
-): { createdAt: string; id: string } | null {
-  let maxCreatedAt = ''
+): { modifiedAt: string; id: string } | null {
+  let maxModifiedAt = ''
   let maxId = ''
   try {
     for (const [id, msg] of collection as Iterable<[string, CachedMessage]>) {
-      const raw = msg.createdAt
-      const ts = typeof raw === 'string' ? raw : raw instanceof Date ? raw.toISOString() : ''
+      const rawModified = msg.modifiedAt
+      const rawCreated = msg.createdAt
+      const modifiedTs = typeof rawModified === 'string' ? rawModified : ''
+      const createdTs =
+        typeof rawCreated === 'string'
+          ? rawCreated
+          : rawCreated instanceof Date
+            ? rawCreated.toISOString()
+            : ''
+      const ts = modifiedTs || createdTs
       if (!ts) continue
-      if (ts > maxCreatedAt || (ts === maxCreatedAt && id > maxId)) {
-        maxCreatedAt = ts
+      if (ts > maxModifiedAt || (ts === maxModifiedAt && id > maxId)) {
+        maxModifiedAt = ts
         maxId = id
       }
     }
@@ -234,7 +255,7 @@ export function computeTailCursor(
     // Collection may not be ready yet — fall back to cold cursor.
     return null
   }
-  return maxCreatedAt === '' ? null : { createdAt: maxCreatedAt, id: maxId }
+  return maxModifiedAt === '' ? null : { modifiedAt: maxModifiedAt, id: maxId }
 }
 
 /** Evict messages older than 30 days across every cached collection. */

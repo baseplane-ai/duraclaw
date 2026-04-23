@@ -902,7 +902,7 @@ describe('WS open → getMessages hydrate (GH#42 regression guard)', () => {
     expect(subscribeCalls).toHaveLength(1)
     const payload = JSON.parse(subscribeCalls[0][0] as string) as {
       type: string
-      sinceCursor: { createdAt: string; id: string } | null
+      sinceCursor: { modifiedAt: string; id: string } | null
     }
     expect(payload.sinceCursor).toBeNull()
   })

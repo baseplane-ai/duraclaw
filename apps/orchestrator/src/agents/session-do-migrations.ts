@@ -215,4 +215,35 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 13,
+    description:
+      'Unify cursor replay on modified_at: backfill modified_at = created_at for legacy rows and add composite (session_id, modified_at, id) index. Fixes: warm reconnect re-emitted every historically-modified row because replayMessagesFromCursor WHERE matched `modified_at > cursor.createdAt` but advanced cursor on `created_at` — so any row whose modified_at ticked forward during a past streaming burst kept re-qualifying forever. After v13, modified_at is non-null on every row and the replay cursor tracks it monotonically.',
+    up: (sql) => {
+      try {
+        sql.exec(`UPDATE assistant_messages SET modified_at = created_at WHERE modified_at IS NULL`)
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (
+          !msg.toLowerCase().includes('no such table') &&
+          !msg.toLowerCase().includes('no such column')
+        ) {
+          console.warn('[migration v13] unexpected error backfilling modified_at', e)
+          throw e
+        }
+      }
+      try {
+        sql.exec(
+          `CREATE INDEX IF NOT EXISTS idx_assistant_messages_session_modified_id
+            ON assistant_messages (session_id, modified_at, id)`,
+        )
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (!msg.toLowerCase().includes('no such table')) {
+          console.warn('[migration v13] unexpected error creating composite index', e)
+          throw e
+        }
+      }
+    },
+  },
 ]
