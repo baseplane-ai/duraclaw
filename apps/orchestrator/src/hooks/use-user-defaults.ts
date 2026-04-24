@@ -3,12 +3,20 @@ import { apiUrl } from '~/lib/platform'
 import type { UserPreferences } from '~/lib/types'
 
 const DEFAULTS: UserPreferences = {
-  permission_mode: 'default',
+  permissionMode: 'default',
   model: 'claude-opus-4-7',
-  max_budget: null,
-  thinking_mode: 'adaptive',
+  maxBudget: null,
+  thinkingMode: 'adaptive',
   effort: 'xhigh',
 }
+
+// Bumped from `user-preferences` → `user-preferences-v2` so stale snake_case
+// caches from the pre-camelCase schema don't mask the camelCase fields after
+// this fix ships. Without the bump, the server's camelCase response would
+// merge onto an old snake_case cache and the UI — which now reads camelCase —
+// would see undefined/default values until the user manually touched every
+// field.
+const STORAGE_KEY = 'user-preferences-v2'
 
 export function useUserDefaults() {
   const [preferences, setPreferences] = useState<UserPreferences>(DEFAULTS)
@@ -16,7 +24,7 @@ export function useUserDefaults() {
 
   // Load from localStorage cache first, then fetch from server
   useEffect(() => {
-    const cached = localStorage.getItem('user-preferences')
+    const cached = localStorage.getItem(STORAGE_KEY)
     if (cached) {
       try {
         setPreferences({ ...DEFAULTS, ...JSON.parse(cached) })
@@ -32,7 +40,7 @@ export function useUserDefaults() {
         if (data && Object.keys(data).length > 0) {
           const merged = { ...DEFAULTS, ...data }
           setPreferences(merged)
-          localStorage.setItem('user-preferences', JSON.stringify(merged))
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(merged))
         }
       })
       .catch(() => {})
@@ -43,7 +51,7 @@ export function useUserDefaults() {
     async (patch: Partial<UserPreferences>) => {
       const updated = { ...preferences, ...patch }
       setPreferences(updated)
-      localStorage.setItem('user-preferences', JSON.stringify(updated))
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(updated))
 
       await fetch(apiUrl('/api/preferences'), {
         method: 'PUT',

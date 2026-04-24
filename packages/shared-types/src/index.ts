@@ -779,10 +779,10 @@ export interface BranchInfoRow {
 // ── User Preferences ────────────────────────────────────────────────
 
 export interface UserPreferences {
-  permission_mode: string
+  permissionMode: string
   model: string
-  max_budget: number | null
-  thinking_mode: string
+  maxBudget: number | null
+  thinkingMode: string
   effort: string
 }
 
