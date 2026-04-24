@@ -13,74 +13,81 @@ describe('Conversation component', () => {
     expect(content).toContain('export const ConversationScrollButton')
   })
 
-  it('uses custom auto-scroll context (not use-stick-to-bottom)', () => {
+  it('pin-to-bottom primitive is use-stick-to-bottom (not a custom hook)', () => {
+    // Regression guard against re-rolling a custom ResizeObserver + scroll
+    // + wheel/touch listener design. The library (StackBlitz, MIT, powers
+    // bolt.new / Vercel AI Elements / shadcn / prompt-kit) owns spring
+    // animation, text-selection guard, content-shrink anchoring, and a
+    // scroll-value tokenizer for programmatic writes — all four are edge
+    // cases the old in-tree design either missed or got wrong.
+    // See planning/research/2026-04-24-chat-autoscroll-library-evaluation.md.
     const conversationPath = join(__dirname, 'conversation.tsx')
     const content = readFileSync(conversationPath, 'utf-8')
 
-    // Should NOT depend on use-stick-to-bottom
-    expect(content).not.toContain("from 'use-stick-to-bottom'")
-    // Should use our own context
-    expect(content).toContain('useAutoScroll')
-    expect(content).toContain('useAutoScrollContext')
+    expect(content).toContain("from 'use-stick-to-bottom'")
+    expect(content).toContain('useStickToBottom')
   })
 
-  it('auto-scroll uses ResizeObserver for content growth', () => {
+  it('initial scroll uses `initial: instant` (pre-paint jump to bottom)', () => {
+    // OPFS-cached history must render already-scrolled, not flash from the
+    // top. The library's `initial: 'instant'` runs a useLayoutEffect that
+    // writes scrollTop before the first paint — equivalent to the old
+    // hand-rolled useLayoutEffect, minus the 430ms-refire Android WebView
+    // failure mode, which the library's internal mount tracking avoids.
     const conversationPath = join(__dirname, 'conversation.tsx')
     const content = readFileSync(conversationPath, 'utf-8')
 
-    expect(content).toContain('ResizeObserver')
+    expect(content).toMatch(/initial:\s*['"]instant['"]/)
   })
 
-  it('no `escaped` ref (regression guard for the flag-based snap-back trap)', () => {
+  it('resize uses spring animation, not discrete jumps', () => {
+    // Under fast streaming token bursts a raw `scrollTop = scrollHeight`
+    // assignment on every delta reads as visible jitter. The library's
+    // velocity-based spring animation (damping 0.7, stiffness 0.05, mass
+    // 1.25) adapts to variable-size content and caps each resize response
+    // at 350ms so it can't accumulate lag.
     const conversationPath = join(__dirname, 'conversation.tsx')
     const content = readFileSync(conversationPath, 'utf-8')
 
-    // Regression guard (mobile WebView foreground-resume): the flag-based
-    // `escaped.current` design raced repeated growth events and trapped
-    // the user inside the 70px near-bottom zone. The new design either
-    // uses live scrollTop (pinned check) or disables RO snap entirely —
-    // both are acceptable; what's NOT acceptable is re-introducing a
-    // sticky escape flag.
-    expect(content).not.toContain('escaped.current')
+    expect(content).toMatch(/resize:\s*['"]smooth['"]/)
   })
 
-  it('mount layout-effect is guarded against re-fire', () => {
+  it('exposes the stable `useAutoScrollContext` API', () => {
+    // Consumers (ChatThread VirtualizedMessageList, ConversationScrollButton,
+    // test mocks) read `{ scrollRef, contentRef, sentinelRef, isAtBottom,
+    // scrollToBottom }`. Keep this surface stable across the migration.
     const conversationPath = join(__dirname, 'conversation.tsx')
     const content = readFileSync(conversationPath, 'utf-8')
 
-    // On Android WebView, a React concurrent-commit edge case re-invokes
-    // this effect on a persisted fiber+DOM roughly every 430ms. Without
-    // the `scrollTop === 0` guard, each re-fire writes scrollTop back to
-    // the bottom and fights the user's drag. The guard turns every
-    // re-invocation into a no-op while still handling the genuine first-
-    // mount case where scrollTop starts at 0.
-    expect(content).toContain('useLayoutEffect')
-    expect(content).toContain('el.scrollTop === 0')
-    expect(content).toContain('el.scrollTop = el.scrollHeight - el.clientHeight')
+    expect(content).toContain('export function useAutoScrollContext')
+    for (const key of ['scrollRef', 'contentRef', 'sentinelRef', 'isAtBottom', 'scrollToBottom']) {
+      expect(content).toContain(key)
+    }
   })
 
-  it('user-intent detection uses a scroll listener (not IntersectionObserver)', () => {
+  it('no in-tree ResizeObserver / IntersectionObserver / wheel+touch listeners', () => {
+    // The library owns content observation, scroll-intent detection, and
+    // the programmatic-vs-user scroll distinction. Re-adding our own
+    // observers would fight the library's scroll writes and bring back
+    // the race conditions this migration was meant to kill.
     const conversationPath = join(__dirname, 'conversation.tsx')
     const content = readFileSync(conversationPath, 'utf-8')
 
-    // IntersectionObserver on a bottom sentinel conflates "content grew
-    // and shoved the sentinel out" with "user scrolled up" — both flip
-    // the same signal. The scroll event is the only primitive that
-    // fires uniformly for every real user-input path (wheel, trackpad,
-    // touch-swipe, scrollbar drag, keyboard) without firing for growth.
-    expect(content).toContain("addEventListener('scroll'")
+    expect(content).not.toContain('new ResizeObserver')
     expect(content).not.toContain('IntersectionObserver')
+    expect(content).not.toMatch(/addEventListener\(\s*['"]wheel['"]/)
+    expect(content).not.toMatch(/addEventListener\(\s*['"]touchstart['"]/)
+    expect(content).not.toMatch(/addEventListener\(\s*['"]touchmove['"]/)
   })
 
-  it('programmatic scroll writes are flagged so they do not flip pin state', () => {
+  it('no stale custom programmatic-write guard (use-stick-to-bottom owns the tokenizer)', () => {
+    // The library flags its own programmatic scrolls via a scroll-value
+    // tokenizer (`state.ignoreScrollToTop`) — race-free regardless of main
+    // thread contention. A rAF-cleared boolean `programmaticRef` of the
+    // kind the old code used is strictly worse and should not come back.
     const conversationPath = join(__dirname, 'conversation.tsx')
     const content = readFileSync(conversationPath, 'utf-8')
 
-    // Our own `scrollTop = scrollHeight - clientHeight` writes dispatch
-    // a scroll event synchronously on the same element. Without a
-    // programmatic-write guard the scroll listener would re-interpret
-    // every auto-pin as a user scroll and immediately un-pin.
-    expect(content).toContain('programmaticRef')
-    expect(content).toMatch(/programmaticRef\.current\s*=\s*true/)
+    expect(content).not.toContain('programmaticRef')
   })
 })

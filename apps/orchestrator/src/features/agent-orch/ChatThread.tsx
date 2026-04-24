@@ -35,7 +35,6 @@ import {
   memo,
   type ReactNode,
   useCallback,
-  useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -898,12 +897,6 @@ interface VirtualizedMessageListProps {
   awaitingReason?: AwaitingReason
 }
 
-// Hard cap on the settle window — if the virtualizer hasn't converged in
-// this many ms we reveal anyway so a pathological thread doesn't stay
-// invisible forever. 100ms is well above any realistic settle on
-// modern hardware (typically ~16–32ms = 1–2 rAFs).
-const SETTLE_FALLBACK_MS = 100
-
 function VirtualizedMessageList({
   messages,
   readOnly,
@@ -948,10 +941,14 @@ function VirtualizedMessageList({
     count: itemCount,
     getScrollElement: () => scrollElRef.current,
     // 160px is a ballpark "short text turn" estimate. measureElement
-    // replaces it with the real height as each row paints. The
-    // visibility gate below hides the list until `scrollHeight` is
-    // stable, so the estimate→measurement swap is invisible to the
-    // user.
+    // replaces it with the real height as each row paints. The old
+    // settle gate that hid the list until scrollHeight stabilised has
+    // been removed — use-stick-to-bottom's `initial: 'instant'` runs
+    // inside a useLayoutEffect before first paint so the list renders
+    // already-scrolled to the estimated bottom, and its ResizeObserver
+    // re-anchors (spring animation, capped at 350ms) as measurements
+    // replace estimates. Our mount-only `scrollToIndex` below is a
+    // belt-and-suspenders correction for estimated-total drift.
     estimateSize: () => 160,
     overscan: 6,
     getItemKey,
@@ -964,74 +961,40 @@ function VirtualizedMessageList({
     gap: 16,
   })
 
+  // When a row ABOVE the viewport re-measures (stream delta grew it
+  // from the 160px estimate to real height, or a tool-result bubble
+  // expanded), only adjust scroll position if the user is actively
+  // scrolling backward through history. Otherwise the re-measurement
+  // shoves the user's focus out from under their cursor. Per TanStack
+  // Virtual #730 — this knob is exposed as an instance property, not
+  // an option, so we assign it after hook construction. Idempotent
+  // across renders; the reference identity of the function doesn't
+  // matter because the virtualizer reads it lazily on each measure.
+  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) =>
+    item.start < (instance.scrollOffset ?? 0) && instance.scrollDirection === 'backward'
+
   const virtualItems = virtualizer.getVirtualItems()
   const totalSize = virtualizer.getTotalSize()
 
-  // --------------------------------------------------------------------
-  // Settle gate — hide the list until the virtualizer's `scrollHeight`
-  // is stable for two consecutive rAFs, then reveal.
-  //
-  // The virtualizer's estimate→measurement cycle (rows render at 160px
-  // estimates on paint #1, `measureElement` fires, real heights replace
-  // the estimates, rows reposition on paint #2) is the source of the
-  // visible "fast text shift like a rerender with slightly different
-  // positions" jitter on every mount — including the first mount after
-  // a hard reload, which no in-memory cache can fix.
-  //
-  // `visibility: hidden` still lets the virtualizer mount rows and
-  // `measureElement` fire; only paint is suppressed, so the settle
-  // completes while the user sees nothing, and reveal shows the final
-  // layout directly.
-  //
-  // Mount-only effect: after settle we NEVER re-hide. Streaming deltas,
-  // new turns, branch navigation all proceed visibly — otherwise every
-  // `partial_assistant` tick would flicker the whole chat.
-  // --------------------------------------------------------------------
-  const [isSettled, setIsSettled] = useState(false)
+  // Mount-only correction for estimated-total drift. `<Conversation>`'s
+  // library-backed `initial: 'instant'` already jumps to the estimated
+  // bottom before first paint; this call tells the virtualizer to
+  // measure backward from the last index and land at the real bottom.
+  // Safe to run alongside the library's ResizeObserver-driven
+  // re-anchoring — they agree on the target once measurements settle.
+  // Mount-only — ChatThread's subtree is keyed by `activeSessionId`, so
+  // a session switch remounts and re-fires this effect. Subsequent
+  // growth within the same session (streaming deltas, new turns) is
+  // handled by the library's ResizeObserver spring-animation path.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only anchor; intentional `[]`.
   useLayoutEffect(() => {
-    const el = scrollElRef.current
-    if (!el) {
-      // No scroll element on first layout effect — reveal immediately so
-      // we don't lock the empty state invisible.
-      setIsSettled(true)
-      return
-    }
-    let lastHeight = 0
-    let stableFrames = 0
-    let rafId = 0
-    const tick = () => {
-      const h = el.scrollHeight
-      if (h > 0 && h === lastHeight) {
-        stableFrames += 1
-        if (stableFrames >= 2) {
-          setIsSettled(true)
-          return
-        }
-      } else {
-        stableFrames = 0
-        lastHeight = h
-      }
-      rafId = requestAnimationFrame(tick)
-    }
-    rafId = requestAnimationFrame(tick)
-    const timeoutId = window.setTimeout(() => setIsSettled(true), SETTLE_FALLBACK_MS)
-    return () => {
-      if (rafId) cancelAnimationFrame(rafId)
-      window.clearTimeout(timeoutId)
-    }
+    if (itemCount === 0) return
+    virtualizer.scrollToIndex(itemCount - 1, { align: 'end' })
   }, [])
 
-  // After the settle gate reveals the list, force a virtualizer-aware
-  // scroll to the last item. The generic `conversation.tsx` scroll-to-
-  // bottom uses `el.scrollTop = el.scrollHeight` which reads the
-  // virtualizer's *estimated* total size — for long sessions with many
-  // off-screen rows still at 160px estimates, that "bottom" is wrong.
-  // `scrollToIndex` tells the virtualizer to measure backward from the
-  // target, so it lands at the true bottom regardless of estimate drift.
-  useEffect(() => {
-    if (!isSettled || itemCount === 0) return
-    virtualizer.scrollToIndex(itemCount - 1, { align: 'end' })
-  }, [isSettled, itemCount, virtualizer.scrollToIndex])
+  // Index of the final rendered slot — either the last message row or,
+  // when present, the synthetic awaiting-response slot at messages.length.
+  const lastIndex = itemCount - 1
 
   return (
     <div
@@ -1040,7 +1003,6 @@ function VirtualizedMessageList({
         height: '100%',
         width: '100%',
         overflowY: 'auto',
-        visibility: isSettled ? undefined : 'hidden',
       }}
     >
       <div
@@ -1052,6 +1014,7 @@ function VirtualizedMessageList({
           const isAwaitingSlot = showAwaiting && item.index === messages.length
           const msg = isAwaitingSlot ? null : messages[item.index]
           if (!isAwaitingSlot && !msg) return null
+          const isLast = item.index === lastIndex
           return (
             <div
               key={item.key}
@@ -1064,6 +1027,11 @@ function VirtualizedMessageList({
                 right: 0,
                 paddingLeft: 16,
                 paddingRight: 16,
+                // 50vh breathing room below the last message so streaming
+                // text never hugs the compose bar and the user can keep
+                // their eye at a comfortable mid-viewport line while
+                // tokens arrive (Hakim pattern, prompt-kit adoption).
+                paddingBottom: isLast ? '50vh' : undefined,
                 transform: `translateY(${item.start}px)`,
               }}
             >

@@ -8,35 +8,30 @@ import {
   type RefCallback,
   useCallback,
   useContext,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
 } from 'react'
+import { useStickToBottom } from 'use-stick-to-bottom'
 import { cn } from '../lib/utils'
 import { Button } from '../ui/button'
 
 // ---------------------------------------------------------------------------
-// Pin-to-bottom with explicit user-intent tracking.
+// Pin-to-bottom, backed by `use-stick-to-bottom` (StackBlitz, MIT).
 //
-// Single source of truth: `pinnedRef`. Transitions on exactly three paths:
-//   1. Mount — starts true. A `useLayoutEffect` jumps `scrollTop` to the
-//      bottom before first paint so OPFS-cached history renders already-
-//      scrolled rather than flashing from the top.
-//   2. User scroll — a `scroll` event listener on the scroll container
-//      recomputes distance-from-bottom and flips `pinnedRef`. This is the
-//      one signal that fires uniformly across every input path: wheel,
-//      trackpad, touch-swipe, scrollbar drag, arrow/PageUp keys.
-//   3. Scroll-button click — `scrollToBottom()` snaps and re-pins.
+// Replaces a hand-rolled ResizeObserver + scroll-event + wheel/touch-race
+// design that accreted 8+ iterations of fixes and still had rough edges:
+//   - no text-selection guard (cross-message highlight was yanked on every delta)
+//   - no content-shrink anchoring (rewind / branch-navigate broke pinning)
+//   - discrete `scrollTop = scrollHeight` jumps during streaming (jitter)
+//   - rAF-cleared programmatic-write flag raced on contended main thread
 //
-// Our own auto-scroll writes are gated via `programmaticRef` so they don't
-// flip the user-intent signal off. A ResizeObserver on the content pins to
-// bottom on every growth tick while `pinnedRef` is true — this covers
-// streaming deltas, OPFS hydration bursts, and late history arrivals
-// without needing an observer-sentinel or settle-window hacks.
+// `use-stick-to-bottom` solves all four natively via velocity-based spring
+// animation, selection detection, a scroll-value tokenizer for programmatic
+// writes, and scroll-anchoring math for positive AND negative resize.
+// See `planning/research/2026-04-24-chat-autoscroll-library-evaluation.md`.
+//
+// The public API (`useAutoScrollContext`, `<Conversation>`, `<ConversationContent>`,
+// `<ConversationScrollButton>`) is preserved so no call-sites change.
+// `sentinelRef` is retained as a no-op for legacy API compat.
 // ---------------------------------------------------------------------------
-
-const NEAR_BOTTOM_PX = 70
 
 interface AutoScrollContext {
   scrollRef: RefCallback<HTMLDivElement>
@@ -54,183 +49,49 @@ export function useAutoScrollContext() {
   return ctx
 }
 
-function useAutoScroll() {
-  const [isAtBottom, setIsAtBottom] = useState(true)
-  // Mirror of `isAtBottom` for synchronous reads in imperative callbacks.
-  const pinnedRef = useRef(true)
-  // Set to true around our own `scrollTop` writes so the scroll listener
-  // doesn't mistake auto-scroll for user scroll. Instant writes dispatch
-  // their scroll event synchronously on the same element, so by the time
-  // the rAF clear runs the event has already been filtered.
-  const programmaticRef = useRef(false)
-  const scrollEl = useRef<HTMLDivElement | null>(null)
-  const contentEl = useRef<HTMLDivElement | null>(null)
-  const prevHeightRef = useRef(0)
-  const lastScrollTopRef = useRef(0)
+function useAutoScroll(): AutoScrollContext {
+  // `initial: 'instant'` — library jumps to bottom inside a useLayoutEffect
+  //   before first paint, so OPFS-cached history renders already-scrolled.
+  // `resize: 'smooth'` — spring animation for streaming deltas; avoids the
+  //   visible discrete jitter of a raw scrollTop assignment under fast token
+  //   bursts. The library caps its resize animation at 350ms so it won't
+  //   accumulate lag under sustained high-frequency growth.
+  const stb = useStickToBottom({ initial: 'instant', resize: 'smooth' })
 
-  const setPinned = useCallback((next: boolean) => {
-    pinnedRef.current = next
-    setIsAtBottom((cur) => (cur === next ? cur : next))
-  }, [])
-
-  const pinNow = useCallback(() => {
-    const el = scrollEl.current
-    if (!el) return
-    programmaticRef.current = true
-    el.scrollTop = el.scrollHeight - el.clientHeight
-    requestAnimationFrame(() => {
-      programmaticRef.current = false
-    })
-  }, [])
-
+  // Library's scrollToBottom returns Promise<boolean>|boolean — our API is
+  // fire-and-forget, so discard.
   const scrollToBottom = useCallback(() => {
-    pinNow()
-    setPinned(true)
-  }, [pinNow, setPinned])
+    stb.scrollToBottom()
+  }, [stb])
 
-  // Scroll listener — fires for every user input path (wheel, trackpad,
-  // touch-swipe, scrollbar drag, keyboard). Our own writes are gated out
-  // by `programmaticRef`. Direction-aware: only re-pins when the user
-  // scrolls *down* and lands near the bottom. Scrolling up while near
-  // the bottom (common during streaming, since `pinNow` just wrote
-  // `scrollTop` to the bottom) unpins immediately.
-  const onScroll = useCallback(() => {
-    if (programmaticRef.current) return
-    const el = scrollEl.current
-    if (!el) return
-    const scrollTop = el.scrollTop
-    const distance = el.scrollHeight - scrollTop - el.clientHeight
-    const scrolledDown = scrollTop >= lastScrollTopRef.current
-    lastScrollTopRef.current = scrollTop
-    if (!scrolledDown) {
-      // User scrolled up — unpin unconditionally.
-      setPinned(false)
-    } else if (distance <= NEAR_BOTTOM_PX) {
-      // User scrolled down and landed near bottom — re-pin.
-      setPinned(true)
-    }
-  }, [setPinned])
-
-  // Direct user-input listeners. Wheel / touchstart / touchmove fire
-  // synchronously with the actual user action — before the browser
-  // updates scrollTop and before the scroll event. This lets us flip
-  // pinnedRef off the instant the user expresses intent to scroll up,
-  // winning the race against any programmatic pin that's in flight.
-  // On mobile WebViews the scroll event also lags the compositor,
-  // making these listeners the only reliable signal during active drag.
-  const touchStartYRef = useRef(0)
-
-  const onWheel = useCallback(
-    (e: WheelEvent) => {
-      if (e.deltaY < 0) setPinned(false)
-    },
-    [setPinned],
-  )
-
-  const onTouchStart = useCallback((e: TouchEvent) => {
-    touchStartYRef.current = e.touches[0]?.clientY ?? 0
-  }, [])
-
-  const onTouchMove = useCallback(
-    (e: TouchEvent) => {
-      const y = e.touches[0]?.clientY
-      if (y === undefined) return
-      // Finger moving downward (y grows) = content scrolling up = unpin.
-      // 8px threshold absorbs micro-jitter / tap-recognition slop.
-      if (y - touchStartYRef.current > 8) setPinned(false)
-    },
-    [setPinned],
-  )
-
-  // Initial pin: on first mount / tab-switch remount, jump to the bottom
-  // before paint so OPFS-cached messages render already-scrolled. The
-  // `el.scrollTop === 0` guard protects against an Android WebView
-  // concurrent-commit edge case where this effect re-invokes on a
-  // persisted fiber+DOM roughly every 430ms — without the guard each
-  // re-fire snaps the user back down while they're trying to scroll up.
-  // At genuine first-mount `scrollTop` is 0; after that the guard makes
-  // every re-fire a no-op.
-  useLayoutEffect(() => {
-    const el = scrollEl.current
-    if (!el) return
-    if (el.scrollTop === 0) {
-      programmaticRef.current = true
-      el.scrollTop = el.scrollHeight - el.clientHeight
-      requestAnimationFrame(() => {
-        programmaticRef.current = false
-      })
-    }
-  })
-
-  // ResizeObserver — content growth (streaming deltas, OPFS hydration,
-  // history burst) pins to bottom while `pinnedRef` is true. `pinnedRef`
-  // is the sole gate — the old `userWasNearBottom` fallback read
-  // `scrollTop` that `pinNow` had just clobbered to the bottom, so it
-  // always evaluated true and re-pinned a user who had scrolled up.
-  useEffect(() => {
-    const content = contentEl.current
-    if (!content) return
-    let rafId: number | null = null
-    const ro = new ResizeObserver((entries) => {
-      const entry = entries[0]
-      if (!entry) return
-      const newHeight = entry.contentRect.height
-      const growth = newHeight - prevHeightRef.current
-      prevHeightRef.current = newHeight
-      if (growth <= 0) return
-      if (!pinnedRef.current) return
-
-      if (rafId !== null) return
-      rafId = requestAnimationFrame(() => {
-        rafId = null
-        // Re-check: wheel / touch / scroll handlers may have flipped
-        // pinnedRef off between the RO callback and this rAF tick.
-        if (!pinnedRef.current) return
-        pinNow()
-      })
-    })
-    ro.observe(content)
-    return () => {
-      if (rafId !== null) cancelAnimationFrame(rafId)
-      ro.disconnect()
-    }
-  }, [pinNow])
-
-  // Scroll-element ref callback: stores the node AND attaches the scroll
-  // listener plus the direct user-input listeners. Swapping nodes
-  // (rare — only on full remount) cleans up the previous listeners
-  // first.
+  // Library's refs are MutableRefObject & RefCallback — pass through the
+  // callback surface, which is what our consumers (including the composite
+  // ref in ChatThread's VirtualizedMessageList) expect.
   const scrollRef: RefCallback<HTMLDivElement> = useCallback(
     (node) => {
-      const prev = scrollEl.current
-      if (prev && prev !== node) {
-        prev.removeEventListener('scroll', onScroll)
-        prev.removeEventListener('wheel', onWheel)
-        prev.removeEventListener('touchstart', onTouchStart)
-        prev.removeEventListener('touchmove', onTouchMove)
-      }
-      scrollEl.current = node
-      if (node) {
-        node.addEventListener('scroll', onScroll, { passive: true })
-        node.addEventListener('wheel', onWheel, { passive: true })
-        node.addEventListener('touchstart', onTouchStart, { passive: true })
-        node.addEventListener('touchmove', onTouchMove, { passive: true })
-      }
+      stb.scrollRef(node)
     },
-    [onScroll, onWheel, onTouchStart, onTouchMove],
+    [stb.scrollRef],
+  )
+  const contentRef: RefCallback<HTMLDivElement> = useCallback(
+    (node) => {
+      stb.contentRef(node)
+    },
+    [stb.contentRef],
   )
 
-  const contentRef: RefCallback<HTMLDivElement> = useCallback((node) => {
-    contentEl.current = node
-  }, [])
-
-  // Retained for API compatibility — the old IO-based design needed a
-  // DOM sentinel; the new scroll-listener design reads distance from the
-  // scroll element directly. Callers that still pass a `sentinelRef` to
-  // a zero-height div get a harmless no-op.
+  // Legacy API surface — older call-sites may pass a sentinel div's ref
+  // callback. The library tracks bottom position via scrollHeight math,
+  // not a DOM sentinel, so this is a harmless no-op.
   const sentinelRef: RefCallback<HTMLDivElement> = useCallback(() => {}, [])
 
-  return { scrollRef, contentRef, sentinelRef, isAtBottom, scrollToBottom }
+  return {
+    scrollRef,
+    contentRef,
+    sentinelRef,
+    isAtBottom: stb.isAtBottom,
+    scrollToBottom,
+  }
 }
 
 // ---------------------------------------------------------------------------
