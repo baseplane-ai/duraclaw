@@ -28,6 +28,20 @@ export type DisplayState =
       isInteractive: true
     }
   | { status: 'idle'; label: 'Idle'; color: 'gray'; icon: 'circle'; isInteractive: true }
+  // Tab-scoped derived state: the session has reached `idle` (a turn
+  // completed) but the user has not activated this tab since. Flipped on
+  // by `deriveTabDisplayState` when `session.messageSeq > tab.lastSeenSeq`
+  // and cleared the moment the tab becomes active (see
+  // `use-tab-sync.setActive` / the mark-seen effect in `tab-bar.tsx`).
+  // Sky is the next color in the spec-#80 preference order
+  // (amber → violet → sky) and is otherwise unused.
+  | {
+      status: 'completed_unseen'
+      label: 'Done'
+      color: 'sky'
+      icon: 'check'
+      isInteractive: true
+    }
   | {
       status: 'waiting_gate'
       label: 'Needs Attention'
@@ -67,6 +81,14 @@ const IDLE: DisplayState = {
   label: 'Idle',
   color: 'gray',
   icon: 'circle',
+  isInteractive: true,
+}
+
+const COMPLETED_UNSEEN: DisplayState = {
+  status: 'completed_unseen',
+  label: 'Done',
+  color: 'sky',
+  icon: 'check',
   isInteractive: true,
 }
 
@@ -191,9 +213,56 @@ export const DISPLAY_STATES = {
   running: RUNNING,
   pending: PENDING,
   idle: IDLE,
+  completed_unseen: COMPLETED_UNSEEN,
   waiting_gate: WAITING_GATE,
   error: ERROR,
   archived: ARCHIVED,
   disconnected: DISCONNECTED,
   unknown: UNKNOWN,
 } as const
+
+/**
+ * Tab-scoped display-state derivation. Upgrades the base server status
+ * (`deriveDisplayStateFromStatus`) to `completed_unseen` when all of these
+ * hold:
+ *
+ *   - The base-derived state is `idle` — i.e. server says the session's
+ *     current turn has wrapped. We deliberately don't promote from
+ *     `running` / `pending` / `waiting_gate` / `error`: those already draw
+ *     the user's eye via their own colors and upgrading them to "Done"
+ *     would be a lie.
+ *   - The tab is NOT the currently-active tab — if the user is looking
+ *     at it, it can't be unseen.
+ *   - `sessionMessageSeq > lastSeenSeq`. `messageSeq` is D1-mirrored from
+ *     the SessionDO's broadcast envelope counter (bumped on every event
+ *     frame). `lastSeenSeq` is stamped by the mark-seen effect on tab
+ *     activation / status transition. Strict `>` so freshly-seeded tabs
+ *     (equal values) don't spuriously show "Done".
+ *
+ * When any condition is false, returns the base state unchanged. Intended
+ * to be called per-tab from the tab strip — the sidebar / status-bar
+ * deliberately stay on the unadorned server status since they aren't
+ * tab-scoped.
+ */
+export function deriveTabDisplayState(args: {
+  status: SessionStatus | undefined
+  wsReadyState: number
+  wsCloseTs?: number | null
+  nowTs?: number
+  isActive: boolean
+  sessionMessageSeq: number | undefined
+  lastSeenSeq: number | undefined
+}): DisplayState {
+  const base = deriveDisplayStateFromStatus(
+    args.status,
+    args.wsReadyState,
+    args.wsCloseTs ?? null,
+    args.nowTs ?? Date.now(),
+  )
+  if (base.status !== 'idle') return base
+  if (args.isActive) return base
+  const sessionSeq = args.sessionMessageSeq ?? -1
+  const lastSeen = args.lastSeenSeq ?? -1
+  if (sessionSeq > lastSeen) return COMPLETED_UNSEEN
+  return base
+}

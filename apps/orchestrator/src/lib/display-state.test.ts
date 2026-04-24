@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { SessionStatus } from '~/lib/types'
-import { deriveDisplayStateFromStatus } from './display-state'
+import { deriveDisplayStateFromStatus, deriveTabDisplayState } from './display-state'
 
 describe('deriveDisplayStateFromStatus', () => {
   it('returns unknown when status is undefined (regardless of wsReadyState)', () => {
@@ -117,5 +117,90 @@ describe('deriveDisplayStateFromStatus — WS grace period (GH#69 B5)', () => {
   it('wsCloseTs omitted → existing behavior unchanged', () => {
     // No 3rd arg at all — default `null` → immediate DISCONNECTED.
     expect(deriveDisplayStateFromStatus('running', 3).status).toBe('disconnected')
+  })
+})
+
+describe('deriveTabDisplayState — completed_unseen promotion', () => {
+  it('idle + background + session ahead of lastSeen → completed_unseen', () => {
+    const result = deriveTabDisplayState({
+      status: 'idle',
+      wsReadyState: 1,
+      isActive: false,
+      sessionMessageSeq: 42,
+      lastSeenSeq: 30,
+    })
+    expect(result.status).toBe('completed_unseen')
+    expect(result.label).toBe('Done')
+    expect(result.color).toBe('sky')
+    expect(result.icon).toBe('check')
+    expect(result.isInteractive).toBe(true)
+  })
+
+  it('idle + background + session == lastSeen → plain idle (no promotion)', () => {
+    const result = deriveTabDisplayState({
+      status: 'idle',
+      wsReadyState: 1,
+      isActive: false,
+      sessionMessageSeq: 42,
+      lastSeenSeq: 42,
+    })
+    expect(result.status).toBe('idle')
+  })
+
+  it('idle + ACTIVE tab → plain idle (active can never be unseen)', () => {
+    const result = deriveTabDisplayState({
+      status: 'idle',
+      wsReadyState: 1,
+      isActive: true,
+      sessionMessageSeq: 42,
+      lastSeenSeq: 30,
+    })
+    expect(result.status).toBe('idle')
+  })
+
+  it('running + background + session ahead → running (no promotion off of running)', () => {
+    // Promotion is scoped to `idle`: a tab mid-turn isn't "done".
+    const result = deriveTabDisplayState({
+      status: 'running',
+      wsReadyState: 1,
+      isActive: false,
+      sessionMessageSeq: 42,
+      lastSeenSeq: 30,
+    })
+    expect(result.status).toBe('running')
+  })
+
+  it('waiting_gate + background + session ahead → waiting_gate (amber wins over sky)', () => {
+    const result = deriveTabDisplayState({
+      status: 'waiting_gate',
+      wsReadyState: 1,
+      isActive: false,
+      sessionMessageSeq: 42,
+      lastSeenSeq: 30,
+    })
+    expect(result.status).toBe('waiting_gate')
+  })
+
+  it('undefined lastSeenSeq is treated as -1 — never promotes from a fresh seq -1 session', () => {
+    // Both default to -1 → sessionSeq > lastSeen is false, stay idle.
+    const result = deriveTabDisplayState({
+      status: 'idle',
+      wsReadyState: 1,
+      isActive: false,
+      sessionMessageSeq: undefined,
+      lastSeenSeq: undefined,
+    })
+    expect(result.status).toBe('idle')
+  })
+
+  it('unknown status (no server row yet) stays unknown, not promoted', () => {
+    const result = deriveTabDisplayState({
+      status: undefined as unknown as SessionStatus,
+      wsReadyState: 1,
+      isActive: false,
+      sessionMessageSeq: 42,
+      lastSeenSeq: 30,
+    })
+    expect(result.status).toBe('unknown')
   })
 })

@@ -37,9 +37,11 @@ import {
 } from '~/components/ui/sheet'
 import { projectsCollection } from '~/db/projects-collection'
 import type { SessionRecord } from '~/db/session-record'
+import { userTabsCollection } from '~/db/user-tabs-collection'
 import { useIsMobile } from '~/hooks/use-mobile'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { isDraftTabId } from '~/hooks/use-tab-sync'
+import { deriveTabDisplayState } from '~/lib/display-state'
 import {
   deriveProjectAbbrev,
   deriveProjectColorSlot,
@@ -49,7 +51,7 @@ import {
   parseWorktreeSuffix,
   statusRingClass,
 } from '~/lib/project-display'
-import type { SessionStatus } from '~/lib/types'
+import type { SessionStatus, TabMeta, UserTabRow } from '~/lib/types'
 import { cn } from '~/lib/utils'
 
 interface TabBarProps {
@@ -73,6 +75,8 @@ interface TabBarProps {
 interface TabRow {
   sessionId: string
   session: SessionRecord | undefined
+  /** From `user_tabs.meta.lastSeenSeq`; undefined for draft/unsynced rows. */
+  lastSeenSeq: number | undefined
 }
 
 export function TabBar({
@@ -97,14 +101,90 @@ export function TabBar({
     return m
   }, [allSessions])
 
+  // Tab meta subscription — drives the `completed_unseen` derivation.
+  // Each `user_tabs` row carries a `TabMeta` JSON blob; we project it to
+  // `{sessionId → {rowId, lastSeenSeq}}` so the render loop can look up
+  // per-tab state in O(1) without parsing JSON on every tab.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: rawTabRows } = useLiveQuery((q) => q.from({ t: userTabsCollection as any }))
+  const tabMetaByRef = useMemo(() => {
+    const m = new Map<string, { rowId: string; lastSeenSeq: number | undefined }>()
+    for (const r of (rawTabRows ?? []) as unknown as UserTabRow[]) {
+      if ((r as { deletedAt?: string | null }).deletedAt) continue
+      if (!r.sessionId) continue
+      let parsed: TabMeta = {}
+      if (r.meta) {
+        try {
+          const v = JSON.parse(r.meta)
+          if (v && typeof v === 'object') parsed = v as TabMeta
+        } catch {
+          /* keep default */
+        }
+      }
+      m.set(r.sessionId, { rowId: r.id, lastSeenSeq: parsed.lastSeenSeq })
+    }
+    return m
+  }, [rawTabRows])
+
+  // Mark-seen effect — when the active tab changes OR its backing session
+  // transitions (most importantly running → idle while you're watching),
+  // bump `meta.lastSeenSeq` to the session's current `messageSeq` so the
+  // tab does NOT flip to `completed_unseen` after you switch away.
+  //
+  // Deps list is narrow on purpose: `[activeSessionId, activeStatus,
+  // activeRowId, activeLastSeen]`. We deliberately do NOT depend on the
+  // raw `messageSeq` — during a streaming turn it ticks on every event
+  // frame, and PATCHing once per frame would be ~50 writes per turn. Only
+  // re-firing on status transitions bounds PATCHes to O(turns). When
+  // status flips to `idle`, the session's messageSeq has already advanced
+  // to its terminal value by definition, so the snapshot is accurate.
+  const activeSession = activeSessionId ? sessionsMap.get(activeSessionId) : undefined
+  const activeStatus = activeSession?.status
+  const activeSessionSeq = activeSession?.messageSeq ?? -1
+  const activeTabMeta = activeSessionId ? tabMetaByRef.get(activeSessionId) : undefined
+  const activeRowId = activeTabMeta?.rowId
+  const activeLastSeen = activeTabMeta?.lastSeenSeq ?? -1
+  useEffect(() => {
+    if (!activeSessionId || !activeRowId) return
+    // Gate on `status === 'idle'` so we only PATCH at turn-boundaries.
+    // During a streaming turn messageSeq bumps per event frame (~50/turn);
+    // deferring the snapshot to idle clamps writes to O(turns). The user
+    // is watching the active tab while it's running, so everything
+    // through the idle transition is implicitly "seen" — we just need to
+    // commit the terminal seq when it lands.
+    if (activeStatus !== 'idle') return
+    if (activeSessionSeq <= activeLastSeen) return
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const coll = userTabsCollection as any
+    coll.update(activeRowId, (draft: UserTabRow) => {
+      // Re-parse so we don't clobber sibling meta fields (project, kind).
+      let current: TabMeta = {}
+      if (draft.meta) {
+        try {
+          const v = JSON.parse(draft.meta)
+          if (v && typeof v === 'object') current = v as TabMeta
+        } catch {
+          /* keep default */
+        }
+      }
+      const next: TabMeta = { ...current, lastSeenSeq: activeSessionSeq }
+      const out: TabMeta = {}
+      if (next.kind) out.kind = next.kind
+      if (next.project !== undefined) out.project = next.project
+      if (typeof next.lastSeenSeq === 'number') out.lastSeenSeq = next.lastSeenSeq
+      draft.meta = JSON.stringify(out)
+    })
+  }, [activeSessionId, activeStatus, activeRowId, activeSessionSeq, activeLastSeen])
+
   // Build tab rows by joining openTabs with sessions.
   const rows = useMemo<TabRow[]>(
     () =>
       openTabs.map((tabId) => ({
         sessionId: tabId,
         session: sessionsMap.get(tabId),
+        lastSeenSeq: tabMetaByRef.get(tabId)?.lastSeenSeq,
       })),
-    [openTabs, sessionsMap],
+    [openTabs, sessionsMap, tabMetaByRef],
   )
 
   // Projects map: project name → repo_origin. Used to key the color slot
@@ -290,6 +370,7 @@ export function TabBar({
                     row.session ? (repoOriginByProject.get(row.session.project) ?? null) : null
                   }
                   isActive={row.sessionId === activeSessionId}
+                  lastSeenSeq={row.lastSeenSeq}
                   onSelect={() => onSelectSession(row.sessionId)}
                   onClose={() => onCloseTab(row.sessionId)}
                   onNewSessionInTab={
@@ -347,6 +428,7 @@ export function TabBar({
                   : null
               }
               isActive={activeDragRow.sessionId === activeSessionId}
+              lastSeenSeq={activeDragRow.lastSeenSeq}
               onSelect={() => {}}
               onClose={() => {}}
             />
@@ -371,6 +453,11 @@ interface ProjectTabProps {
   repoOrigin?: string | null
   isActive: boolean
   isDragging?: boolean
+  /** Highest `messageSeq` the user has acknowledged for this tab (from
+   *  `user_tabs.meta.lastSeenSeq`). Undefined for draft tabs / rows not
+   *  yet synced. Together with `session.messageSeq` + `session.status`
+   *  drives the `completed_unseen` ring color. */
+  lastSeenSeq?: number
   onSelect: () => void
   onClose: () => void
   onNewSessionInTab?: () => void
@@ -404,6 +491,7 @@ function ProjectTabInner({
   repoOrigin,
   isActive,
   isDragging,
+  lastSeenSeq,
   onSelect,
   onClose,
   onNewSessionInTab,
@@ -422,7 +510,23 @@ function ProjectTabInner({
   // signal belongs to the active session's StatusBar / DisconnectedBanner,
   // not the N-tab fleet view. This also removes N `useMessagesCollection`
   // subscriptions (previously opened via `useDerivedStatus`) from the bar.
-  const tabStatus = (session?.status as SessionStatus | undefined) ?? 'idle'
+  //
+  // Promotion to `completed_unseen` — when the server says `idle` but the
+  // user hasn't activated this tab since the session's last event, the
+  // ring recolors sky ("Done — hasn't been viewed"). Derivation is purely
+  // local; the server stores only `messageSeq` + `lastSeenSeq`. wsReadyState
+  // is passed as `1` (OPEN) because the per-tab WS doesn't gate the fleet
+  // view (see comment above) — we deliberately short-circuit the
+  // disconnect grace logic in `deriveDisplayStateFromStatus`.
+  const rawStatus = (session?.status as SessionStatus | undefined) ?? 'idle'
+  const tabDisplay = deriveTabDisplayState({
+    status: rawStatus,
+    wsReadyState: 1,
+    isActive,
+    sessionMessageSeq: session?.messageSeq,
+    lastSeenSeq,
+  })
+  const tabStatus = tabDisplay.status
 
   // Dense label — abbrev + worktree-N + optional a/b suffix.
   // Project color keyed by `repo_origin` so sibling worktrees of the same
