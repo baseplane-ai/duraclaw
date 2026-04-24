@@ -3,6 +3,7 @@ import {
   applyToolResult,
   assistantContentToParts,
   finalizeStreamingParts,
+  isAssistantContentEmpty,
   mergeFinalAssistantParts,
   partialAssistantToParts,
   upsertParts,
@@ -577,5 +578,54 @@ describe('upsertParts', () => {
     const bash = merged.find((p) => p.toolCallId === 'tc-bash')!
     expect(bash.state).toBe('output-available')
     expect(bash.output).toBe('x')
+  })
+})
+
+describe('isAssistantContentEmpty', () => {
+  it('treats an empty content array as empty', () => {
+    expect(isAssistantContentEmpty([])).toBe(true)
+  })
+
+  it('treats a single ZWS-only text block as empty (runaway-loop signature)', () => {
+    expect(isAssistantContentEmpty([{ type: 'text', text: '\u200B' }])).toBe(true)
+  })
+
+  it('treats whitespace-only text as empty', () => {
+    expect(isAssistantContentEmpty([{ type: 'text', text: '   \n\t  ' }])).toBe(true)
+  })
+
+  it('treats thinking-only, no substantive text content as empty', () => {
+    // Pathological: thinking block with only whitespace + no other blocks.
+    expect(isAssistantContentEmpty([{ type: 'thinking', thinking: '  ' }])).toBe(true)
+  })
+
+  it('treats a substantive text block as non-empty', () => {
+    expect(isAssistantContentEmpty([{ type: 'text', text: 'Hello' }])).toBe(false)
+  })
+
+  it('treats a tool_use block as non-empty even with empty sibling text', () => {
+    const content = [
+      { type: 'text', text: '' },
+      { type: 'tool_use', id: 'tc-1', name: 'Bash', input: {} },
+    ]
+    expect(isAssistantContentEmpty(content)).toBe(false)
+  })
+
+  it('treats substantive thinking as non-empty', () => {
+    const content = [{ type: 'thinking', thinking: 'The user asked...' }]
+    expect(isAssistantContentEmpty(content)).toBe(false)
+  })
+
+  it('treats unknown block types as non-empty (conservative — never interrupt unrecognised turns)', () => {
+    expect(isAssistantContentEmpty([{ type: 'server_tool_use', id: 'x' }])).toBe(false)
+    expect(isAssistantContentEmpty([{ type: 'image', source: {} }])).toBe(false)
+  })
+
+  it('empty text + empty thinking together is still empty', () => {
+    const content = [
+      { type: 'text', text: '\u200B' },
+      { type: 'thinking', thinking: '' },
+    ]
+    expect(isAssistantContentEmpty(content)).toBe(true)
   })
 })

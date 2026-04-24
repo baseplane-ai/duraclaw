@@ -47,6 +47,7 @@ import {
   applyToolResult,
   assistantContentToParts,
   finalizeStreamingParts,
+  isAssistantContentEmpty,
   mergeFinalAssistantParts,
   partialAssistantToParts,
   upsertParts,
@@ -213,6 +214,16 @@ function parseTurnOrdinal(id?: string): number | undefined {
   return m ? Number.parseInt(m[1], 10) : undefined
 }
 
+/**
+ * Runaway-turn guard threshold. When the SDK emits this many consecutive
+ * `assistant` events whose content is "effectively empty" (no tool_use and
+ * only whitespace / ZWS text), the DO interrupts the runner and flips the
+ * session to idle with a visible system-error message. See prod incident
+ * 2026-04-24, session `sess-ffca0374-...`, where the model emitted 500+
+ * single-U+200B assistant turns before a human interrupted it.
+ */
+const RUNAWAY_EMPTY_TURN_THRESHOLD = 10
+
 // Stale threshold is resolved per-alarm via resolveStaleThresholdMs(env) so
 // config changes take effect on the next DO wake without a code change.
 // Default is 90s — see DEFAULT_STALE_THRESHOLD_MS in session-do-helpers.
@@ -222,6 +233,15 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   private session!: Session
   private turnCounter = 0
   private currentTurnMessageId: string | null = null
+  /**
+   * Count of consecutive "effectively empty" assistant turns observed on this
+   * DO instance. Reset on any substantive assistant content. When it reaches
+   * `RUNAWAY_EMPTY_TURN_THRESHOLD`, the `case 'assistant'` handler interrupts
+   * the runner and surfaces a system error. Memory-only — no need to persist
+   * across rehydrate since the counter is meaningful only within a live SDK
+   * turn loop.
+   */
+  private consecutiveEmptyAssistantTurns = 0
   /** Cached gateway connection ID — avoids SQLite reads on every message. */
   private cachedGatewayConnId: string | null = null
   /** Timestamp of the last gateway event received on the WS connection. */
@@ -4485,6 +4505,57 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
 
       case 'assistant': {
         this.clearAwaitingResponse()
+
+        // Runaway-turn guard: detect the "empty assistant loop" failure mode
+        // (prod incident 2026-04-24 — 500+ single-ZWS turns). Increment the
+        // counter on effectively-empty content; reset on any substantive
+        // turn. When the threshold fires, interrupt the runner, append a
+        // visible system error, flip to idle, and skip further persistence
+        // for this empty event so we don't spam the transcript with one more
+        // blank bubble before stopping.
+        if (isAssistantContentEmpty(event.content as unknown[])) {
+          this.consecutiveEmptyAssistantTurns++
+          if (this.consecutiveEmptyAssistantTurns >= RUNAWAY_EMPTY_TURN_THRESHOLD) {
+            console.warn('[session-do] runaway empty-assistant-turn loop detected', {
+              sessionId: this.state.session_id,
+              consecutive: this.consecutiveEmptyAssistantTurns,
+            })
+            this.sendToGateway({
+              type: 'interrupt',
+              session_id: this.state.session_id ?? '',
+            })
+            this.turnCounter++
+            const errorMsgId = `err-${this.turnCounter}`
+            const errorMsg: SessionMessage = {
+              id: errorMsgId,
+              role: 'system',
+              parts: [
+                {
+                  type: 'text',
+                  text: '⚠ Session auto-stopped: detected repeated empty assistant turns (model runaway).',
+                },
+              ],
+              createdAt: new Date(),
+            }
+            try {
+              this.safeAppendMessage(errorMsg)
+              this.broadcastMessage(errorMsg)
+            } catch (err) {
+              console.error('[session-do] runaway-guard persist failed', err)
+            }
+            this.updateState({
+              status: 'idle',
+              error: 'runaway_empty_assistant_turns',
+            })
+            this.consecutiveEmptyAssistantTurns = 0
+            this.currentTurnMessageId = null
+            this.persistTurnState()
+            break
+          }
+        } else {
+          this.consecutiveEmptyAssistantTurns = 0
+        }
+
         // Final assistant message — finalize streaming parts with final content
         const newParts = assistantContentToParts(event.content as unknown[])
         const msgId = this.currentTurnMessageId ?? `msg-${this.turnCounter}`
