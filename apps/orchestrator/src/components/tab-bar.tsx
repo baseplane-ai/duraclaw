@@ -532,7 +532,6 @@ function ProjectTabInner({
           <span className={cn('font-mono tracking-tight', isActive && 'font-semibold')}>
             {denseLabel || '--'}
           </span>
-          {!isMobile && <span className="italic opacity-75 font-normal">New session</span>}
         </>
       ) : (
         <div className="flex items-center gap-1 py-0.5">
