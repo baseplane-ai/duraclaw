@@ -178,12 +178,17 @@ export function TabBar({
 
   const activeDragRow = activeDragId ? rows.find((r) => r.sessionId === activeDragId) : null
 
-  // Detect overflow on scroll + resize
+  // Detect overflow on scroll + resize.
+  // Floor/ceil the scroll extents before comparing because HiDPI displays and
+  // CSS zoom leave `scrollLeft` / `clientWidth` sub-pixel rounded such that
+  // `scrollLeft + clientWidth` settles ~0.5–1.5 px short of `scrollWidth` at
+  // the true scroll end — the prior `- 1` tolerance wasn't enough and the
+  // right chevron kept rendering when nothing more could scroll into view.
   const updateOverflow = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
-    setCanScrollLeft(el.scrollLeft > 1)
-    setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 1)
+    setCanScrollLeft(Math.floor(el.scrollLeft) > 0)
+    setCanScrollRight(Math.ceil(el.scrollLeft + el.clientWidth) < el.scrollWidth - 1)
   }, [])
 
   useEffect(() => {
