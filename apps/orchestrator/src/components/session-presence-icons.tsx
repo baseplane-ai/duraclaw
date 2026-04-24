@@ -1,14 +1,15 @@
 /**
- * SessionPresenceIcons — compact "who else is in this session" row, sized
- * to fit next to a status dot on a tab or sidebar entry.
+ * SessionPresenceIcons — minimal "someone else is here" indicator for a
+ * session tab or sidebar row.
  *
- * Reads from `SessionPresenceProvider` via `useSessionPresence`. Renders
- * nothing when the session has no other peers, so idle rows look
- * identical to before this feature shipped.
+ * Renders a single small dot when `useSessionPresence(sessionId)` returns
+ * one or more peers. The tooltip enumerates peer names. No avatars, no
+ * overflow chip — the prior multi-avatar layout fought the dense tab's
+ * colored-fill look, and all we actually need is "is anyone else here?".
  *
- * Sizing is intentionally smaller than the main `PresenceBar`:
- * 14px avatars vs 24px, so two avatars + overflow fit comfortably beside
- * a StatusDot without pushing the title off the tab.
+ * The dot's color is the first peer's color (stable per-user via
+ * `colorForUserId`), so two tabs shared with different people look
+ * subtly distinct on hover without requiring a legend.
  */
 
 import { Tooltip, TooltipContent, TooltipTrigger } from '~/components/ui/tooltip'
@@ -16,51 +17,31 @@ import { useSessionPresence } from '~/hooks/use-session-presence'
 
 interface Props {
   sessionId: string
-  /** Max avatars to show before collapsing into a `+N` chip. Default 2. */
-  max?: number
 }
 
-function initial(name: string): string {
-  const trimmed = name.trim()
-  return trimmed.length > 0 ? trimmed[0].toUpperCase() : '?'
-}
-
-export function SessionPresenceIcons({ sessionId, max = 2 }: Props) {
+export function SessionPresenceIcons({ sessionId }: Props) {
   const peers = useSessionPresence(sessionId)
   if (peers.length === 0) return null
 
-  const visible = peers.length > max ? peers.slice(0, max - 1) : peers
-  const overflow = peers.length - visible.length
+  const label =
+    peers.length === 1
+      ? peers[0].name
+      : `${peers.length} others: ${peers.map((p) => p.name).join(', ')}`
 
   return (
-    <span
-      className="inline-flex shrink-0 items-center gap-0.5"
-      data-testid="session-presence-icons"
-      data-session-id={sessionId}
-    >
-      {visible.map((peer) => (
-        <Tooltip key={peer.id}>
-          <TooltipTrigger asChild>
-            <span
-              className="inline-flex size-3.5 items-center justify-center rounded-full text-[8px] font-medium text-white ring-1 ring-background"
-              style={{ backgroundColor: peer.color }}
-              data-testid="session-presence-avatar"
-              data-user-id={peer.id}
-            >
-              {initial(peer.name)}
-            </span>
-          </TooltipTrigger>
-          <TooltipContent>{peer.name}</TooltipContent>
-        </Tooltip>
-      ))}
-      {overflow > 0 && (
+    <Tooltip>
+      <TooltipTrigger asChild>
         <span
-          className="inline-flex size-3.5 items-center justify-center rounded-full bg-muted text-[8px] font-medium text-muted-foreground ring-1 ring-background"
-          data-testid="session-presence-overflow"
-        >
-          +{overflow}
-        </span>
-      )}
-    </span>
+          role="img"
+          aria-label={label}
+          className="inline-block size-1.5 shrink-0 rounded-full ring-1 ring-background"
+          style={{ backgroundColor: peers[0].color }}
+          data-testid="session-presence-dot"
+          data-session-id={sessionId}
+          data-peer-count={peers.length}
+        />
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
   )
 }

@@ -24,16 +24,17 @@ describe('SessionPresenceIcons', () => {
     expect(container.innerHTML).toBe('')
   })
 
-  it('renders one avatar for a single peer', () => {
-    const map = new Map([['s-1', [{ id: 'u-alice', name: 'Alice', color: '#0f0' }]]])
+  it('renders a single dot for one peer, tinted with their color', () => {
+    const map = new Map([['s-1', [{ id: 'u-alice', name: 'Alice', color: '#00ff00' }]]])
     render(<SessionPresenceIcons sessionId="s-1" />, { wrapper: withPresence(map) })
-    const avatars = screen.getAllByTestId('session-presence-avatar')
-    expect(avatars.length).toBe(1)
-    expect(avatars[0].textContent).toBe('A')
-    expect(avatars[0].getAttribute('data-user-id')).toBe('u-alice')
+    const dot = screen.getByTestId('session-presence-dot')
+    expect(dot.getAttribute('data-peer-count')).toBe('1')
+    expect(dot.getAttribute('aria-label')).toBe('Alice')
+    // style is inline; jsdom normalizes to rgb()
+    expect(dot.getAttribute('style')).toContain('background-color')
   })
 
-  it('collapses > max peers into avatars + overflow badge', () => {
+  it('still renders a single dot for multiple peers and summarizes them in the label', () => {
     const map = new Map([
       [
         's-1',
@@ -41,21 +42,20 @@ describe('SessionPresenceIcons', () => {
           { id: 'u-a', name: 'Alice', color: '#0f0' },
           { id: 'u-b', name: 'Bob', color: '#00f' },
           { id: 'u-c', name: 'Carol', color: '#f0f' },
-          { id: 'u-d', name: 'Dan', color: '#ff0' },
         ],
       ],
     ])
-    render(<SessionPresenceIcons sessionId="s-1" max={2} />, { wrapper: withPresence(map) })
-    const avatars = screen.getAllByTestId('session-presence-avatar')
-    // With max=2 and 4 peers, visible = max - 1 = 1 avatar, overflow = 3.
-    expect(avatars.length).toBe(1)
-    expect(screen.getByTestId('session-presence-overflow').textContent).toBe('+3')
+    render(<SessionPresenceIcons sessionId="s-1" />, { wrapper: withPresence(map) })
+    const dots = screen.getAllByTestId('session-presence-dot')
+    expect(dots.length).toBe(1)
+    expect(dots[0].getAttribute('data-peer-count')).toBe('3')
+    expect(dots[0].getAttribute('aria-label')).toBe('3 others: Alice, Bob, Carol')
   })
 
-  it('exposes data-session-id on the wrapper for UI queries', () => {
+  it('exposes data-session-id on the dot for UI queries', () => {
     const map = new Map([['s-42', [{ id: 'u-a', name: 'A', color: '#000' }]]])
     render(<SessionPresenceIcons sessionId="s-42" />, { wrapper: withPresence(map) })
-    const wrap = screen.getByTestId('session-presence-icons')
-    expect(wrap.getAttribute('data-session-id')).toBe('s-42')
+    const dot = screen.getByTestId('session-presence-dot')
+    expect(dot.getAttribute('data-session-id')).toBe('s-42')
   })
 })
