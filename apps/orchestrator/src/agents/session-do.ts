@@ -1749,6 +1749,17 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     // reconnect because the cursor never advanced past `modified_at`. See
     // migration v13 description.
     let cursor = sinceCursor ?? { modifiedAt: '1970-01-01T00:00:00.000Z', id: '' }
+    // Diagnostic (GH#78 addendum B): track replay totals so we can tell on
+    // an idle-session reconnect whether the cursor was stale. If the
+    // session is genuinely idle, `modified_at` shouldn't advance while the
+    // client is disconnected — so `rowCount > 0` here means the client's
+    // sent cursor lagged the server-authoritative max, implicating the
+    // client-side cursor-staleness axis (hypotheses B1/B2/B4 in
+    // `planning/research/2026-04-23-streaming-reconnect-burst-smoothing.md`).
+    // Emit once on exit (any exit path) rather than per-page.
+    let totalRows = 0
+    let firstModifiedAt: string | null = null
+    let lastModifiedAt: string | null = null
     try {
       // eslint-disable-next-line no-constant-condition
       while (true) {
@@ -1769,6 +1780,11 @@ export class SessionDO extends Agent<Env, SessionMeta> {
           LIMIT 500
         `
         if (rows.length === 0) return
+        if (firstModifiedAt === null) {
+          firstModifiedAt = rows[0].modified_at ?? rows[0].created_at
+        }
+        lastModifiedAt = rows[rows.length - 1].modified_at ?? rows[rows.length - 1].created_at
+        totalRows += rows.length
         const msgs: WireSessionMessage[] = []
         for (const row of rows) {
           try {
@@ -1799,6 +1815,15 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       }
     } catch (err) {
       this.logError('replayMessagesFromCursor', err, { connId: connection.id })
+    } finally {
+      const cursorStr = sinceCursor ? `${sinceCursor.modifiedAt}|${sinceCursor.id}` : 'null'
+      console.log(
+        `[SessionDO:replay-cursor] sessionId=${this.name} connId=${connection.id} cursor=${cursorStr} rowCount=${totalRows}${
+          firstModifiedAt !== null
+            ? ` firstModifiedAt=${firstModifiedAt} lastModifiedAt=${lastModifiedAt}`
+            : ''
+        }`,
+      )
     }
   }
 

@@ -719,6 +719,23 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       })
       try {
         const sinceCursor = computeTailCursor(messagesCollection)
+        // Diagnostic (GH#78 addendum B): log the cursor we're about to
+        // send + the in-memory collection size so we can correlate with
+        // the DO's `[SessionDO:replay-cursor]` log on the next
+        // idle-reconnect duplicate-replay occurrence. If the server logs
+        // `rowCount > 0` for a cursor that matched our in-memory max, the
+        // staleness is in the cache's `modifiedAt` round-trip, not the
+        // send path. See
+        // `planning/research/2026-04-23-streaming-reconnect-burst-smoothing.md`.
+        try {
+          const size = (messagesCollection as unknown as { size?: number }).size ?? 0
+          const cursorStr = sinceCursor ? `${sinceCursor.modifiedAt}|${sinceCursor.id}` : 'null'
+          console.log(
+            `[client:subscribe-messages] sessionId=${agentName} cursor=${cursorStr} collectionSize=${size}`,
+          )
+        } catch {
+          // Never let diagnostics break the subscribe path.
+        }
         connection.send(JSON.stringify({ type: 'subscribe:messages', sinceCursor }))
       } catch {
         // computeTailCursor is defensive; any throw falls back to a
@@ -728,7 +745,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     }
     agentAdapter.addEventListener('open', onOpen)
     return () => agentAdapter.removeEventListener('open', onOpen)
-  }, [agentAdapter, connection, messagesCollection])
+  }, [agentAdapter, connection, messagesCollection, agentName])
 
   const spawn = useCallback(
     (config: SpawnConfig) => connection.call('spawn', [config]),
