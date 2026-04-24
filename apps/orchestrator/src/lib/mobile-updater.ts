@@ -8,7 +8,14 @@ interface ManifestResponse {
 }
 
 const NATIVE_PROMPT_KEY = 'duraclaw.apk-prompt.dismissed-version'
-const OTA_APPLIED_KEY = 'duraclaw.ota.last-applied-version'
+
+// Throttle OTA checks so foregrounding/visibility bursts don't hammer the
+// manifest endpoint. 10 min is long enough to avoid flapping, short enough
+// that a user who foregrounds the app after a publish picks up the update
+// on a subsequent resume.
+const MIN_RECHECK_INTERVAL_MS = 10 * 60 * 1000
+let lastCheckTs = 0
+let listenersInstalled = false
 
 async function checkWebBundleUpdate(currentVersion: string): Promise<void> {
   const { CapacitorUpdater } = await import('@capgo/capacitor-updater')
@@ -23,19 +30,27 @@ async function checkWebBundleUpdate(currentVersion: string): Promise<void> {
   if (!manifest.version || !manifest.url) return
   if (manifest.version === currentVersion) return
 
-  // Capgo's own live state — after a `set()` + reload, the active bundle's
-  // `version` field is the authoritative "what's running", even before the
-  // baked-at-build `VITE_APP_VERSION` in the new bundle gets a chance to
-  // disagree. Checking this prevents the download-set-reload-download loop
-  // we saw when the freshly-loaded bundle re-triggered an update on itself.
+  // Capgo's own live state is the authoritative "what's running" — after a
+  // `set()` + reload, the active bundle's `version` field reflects the
+  // swapped bundle even before the baked-at-build `VITE_APP_VERSION` in
+  // the new JS gets a chance to disagree. Checking this prevents the
+  // download-set-reload-download loop we saw when the freshly-loaded
+  // bundle re-triggered an update on itself.
+  //
+  // NOTE: we used to also short-circuit on a localStorage flag
+  // `duraclaw.ota.last-applied-version`, but that flag was written BEFORE
+  // `next()` + `reload()` resolved — so a download that succeeded but
+  // failed to activate (WebView killed mid-flash, reload throw, etc.)
+  // left the flag set for a version that was never actually running,
+  // permanently locking the user onto the old bundle until the next
+  // publish. Relying solely on `CapacitorUpdater.current()` removes that
+  // stuck-state trap; Capgo only reports a bundle as `current` after it
+  // has genuinely activated.
   try {
     const { bundle } = await CapacitorUpdater.current()
     if (bundle?.version === manifest.version) return
   } catch {
     // `current()` can throw on the first-ever install; fall through.
-  }
-  if (typeof localStorage !== 'undefined') {
-    if (localStorage.getItem(OTA_APPLIED_KEY) === manifest.version) return
   }
 
   const bundle = await CapacitorUpdater.download({
@@ -43,9 +58,6 @@ async function checkWebBundleUpdate(currentVersion: string): Promise<void> {
     url: manifest.url,
     ...(manifest.checksum ? { checksum: manifest.checksum } : {}),
   })
-  try {
-    localStorage.setItem(OTA_APPLIED_KEY, manifest.version)
-  } catch {}
   // Queue the new bundle as "next" and then explicitly reload the WebView.
   //
   // Capgo docs say `set()` self-reloads, but on Android we've observed the
@@ -95,18 +107,28 @@ async function checkNativeApkUpdate(): Promise<void> {
   window.location.href = manifest.url
 }
 
-export async function initMobileUpdater(): Promise<void> {
+/**
+ * Run both update checks (web-bundle + APK). Throttled by
+ * `MIN_RECHECK_INTERVAL_MS` so rapid foreground/visibility/online bursts
+ * don't hammer the manifest endpoint. Pass `force: true` for the initial
+ * launch check so the throttle doesn't swallow it.
+ */
+async function runUpdateChecks({
+  force = false,
+  reason,
+}: {
+  force?: boolean
+  reason: string
+}): Promise<void> {
   if (!isNative()) return
-
-  const { CapacitorUpdater } = await import('@capgo/capacitor-updater')
-  try {
-    await CapacitorUpdater.notifyAppReady()
-  } catch (err) {
-    console.warn('[updater] notifyAppReady failed', err)
+  const now = Date.now()
+  if (!force && now - lastCheckTs < MIN_RECHECK_INTERVAL_MS) {
+    return
   }
+  lastCheckTs = now
 
   const currentVersion = import.meta.env.VITE_APP_VERSION ?? '0.0.0'
-  console.log('[updater] init — active bundle version', currentVersion)
+  console.log(`[updater] check (${reason}) — active bundle version`, currentVersion)
   try {
     await checkWebBundleUpdate(currentVersion)
   } catch (err) {
@@ -117,4 +139,69 @@ export async function initMobileUpdater(): Promise<void> {
   } catch (err) {
     console.warn('[updater] apk check failed', err)
   }
+}
+
+/**
+ * Install OS-level lifecycle listeners that re-run the OTA check whenever
+ * the user returns to the app or regains connectivity. Without this, the
+ * check only ran once per cold start — users who kept the app warm-cached
+ * in the background could miss several releases in a row until Android
+ * evicted the process.
+ *
+ * Listeners are idempotent (install-once guard). All three sources are
+ * coalesced through the throttle in `runUpdateChecks()` so a single
+ * resume that fires multiple events doesn't trigger multiple manifest
+ * POSTs.
+ */
+async function installLifecycleListeners(): Promise<void> {
+  if (listenersInstalled) return
+  listenersInstalled = true
+
+  // Capacitor `App.appStateChange` — the canonical "user came back"
+  // signal on Android. Fires with `{ isActive: true }` on resume.
+  try {
+    const { App } = await import('@capacitor/app')
+    App.addListener('appStateChange', ({ isActive }) => {
+      if (isActive) {
+        void runUpdateChecks({ reason: 'app-resume' })
+      }
+    })
+  } catch (err) {
+    console.warn('[updater] failed to install App.appStateChange listener', err)
+  }
+
+  // Belt-and-braces: WebView visibility + browser `online` events. On
+  // some Android OEM builds `appStateChange` can be flaky after long
+  // backgrounding — these catch the slack. Throttled to the same window
+  // so they won't double-fire with `appStateChange`.
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        void runUpdateChecks({ reason: 'visibility' })
+      }
+    })
+  }
+  if (typeof window !== 'undefined') {
+    window.addEventListener('online', () => {
+      void runUpdateChecks({ reason: 'online' })
+    })
+  }
+}
+
+export async function initMobileUpdater(): Promise<void> {
+  if (!isNative()) return
+
+  const { CapacitorUpdater } = await import('@capgo/capacitor-updater')
+  try {
+    await CapacitorUpdater.notifyAppReady()
+  } catch (err) {
+    console.warn('[updater] notifyAppReady failed', err)
+  }
+
+  // Install lifecycle listeners BEFORE the initial check so we don't
+  // miss a resume that races with cold-start network latency.
+  await installLifecycleListeners()
+
+  // `force: true` — bypass the throttle for the initial launch check.
+  await runUpdateChecks({ force: true, reason: 'launch' })
 }
