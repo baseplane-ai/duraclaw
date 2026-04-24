@@ -23,6 +23,7 @@ import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { useSwipeTabs } from '~/hooks/use-swipe-tabs'
 import { getTabSyncSnapshot, isDraftTabId, newDraftTabId, useTabSync } from '~/hooks/use-tab-sync'
 import { useUserDefaults } from '~/hooks/use-user-defaults'
+import { consumePendingDeepLink } from '~/lib/native-push-deep-link'
 import { apiUrl } from '~/lib/platform'
 import { promptToPreviewText } from '~/lib/prompt-preview'
 import type { ContentBlock } from '~/lib/types'
@@ -79,11 +80,31 @@ function AgentOrchContent() {
     // re-runs when `sessions` changes and picks it up then.
   }, [searchSessionId, openTab, setActive, sessions, openTabs])
 
+  // Native push tap deep-link: if the user got here by tapping a push
+  // notification, the @capacitor/push-notifications listener stashed the
+  // target session id in a module-level pending slot before React mounted.
+  // Consume it here, BEFORE the cold-start effect, so the deep-link wins
+  // the race against "restore last-active tab".
+  const coldStartedRef = useRef(false)
+  const deepLinkConsumedRef = useRef(false)
+  // One-shot via deepLinkConsumedRef: the pending slot is only populated
+  // by a pre-mount tap, so we only need to consume once on first render.
+  // Listing deps satisfies exhaustive-deps; any re-run is a no-op.
+  useEffect(() => {
+    if (deepLinkConsumedRef.current) return
+    deepLinkConsumedRef.current = true
+    const pending = consumePendingDeepLink()
+    if (pending && !searchSessionId) {
+      // Block cold-start so it doesn't also navigate.
+      coldStartedRef.current = true
+      navigate({ to: '/', search: { session: pending }, replace: true })
+    }
+  }, [navigate, searchSessionId])
+
   // Cold-start: page loaded at "/" with no ?session — restore the last
   // active tab from localStorage, or fall back to the first open tab.
   // One-shot on mount so a later in-app nav to "/" (e.g. sidebar "New
   // session") isn't bounced back.
-  const coldStartedRef = useRef(false)
   useEffect(() => {
     if (coldStartedRef.current) return
     if (searchSessionId) {

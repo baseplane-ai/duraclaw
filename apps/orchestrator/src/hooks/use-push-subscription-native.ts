@@ -42,6 +42,11 @@ async function postTokenToServer(fcmToken: string): Promise<boolean> {
  * on mount when permission is already granted (Android 13+ runtime permission
  * is pre-granted if the user accepted the OS prompt). Listens for registration
  * events so token rotation is captured automatically.
+ *
+ * Note: the `pushNotificationActionPerformed` (tap-to-deep-link) handler is
+ * NOT registered here — it lives in `~/lib/native-push-deep-link` and is
+ * installed at boot from `entry-client.tsx`, BEFORE React mounts, so it
+ * captures cold-start taps without racing AgentOrchPage's cold-start effect.
  */
 export function usePushSubscriptionNative() {
   const [permission, setPermission] = useState<Permission>('prompt')
@@ -67,36 +72,9 @@ export function usePushSubscriptionNative() {
           setIsSubscribed(false)
         })
 
-        const actionHandle = await PushNotifications.addListener(
-          'pushNotificationActionPerformed',
-          (action) => {
-            const data = (action.notification.data ?? {}) as {
-              url?: string
-              sessionId?: string
-            }
-            let target: string | null = null
-            if (data.url) {
-              target = data.url
-            } else if (data.sessionId) {
-              target = `/?session=${data.sessionId}`
-            }
-            if (!target) return
-            if (/^https?:\/\//i.test(target)) {
-              try {
-                if (new URL(target).origin !== window.location.origin) return
-              } catch {
-                return
-              }
-            }
-            console.info('[push] notification tap → navigating to', target)
-            window.location.assign(target)
-          },
-        )
-
         cleanup = () => {
           regHandle.remove()
           errHandle.remove()
-          actionHandle.remove()
         }
 
         // Auto-subscribe on native: if permission is already granted, register

@@ -6,6 +6,7 @@ import { evictOldMessages } from '~/db/messages-collection'
 import { installAriaHiddenPatch } from '~/lib/aria-hidden-patch'
 import { authClientReady } from '~/lib/auth-client'
 import { initMobileUpdater } from '~/lib/mobile-updater'
+import { initNativePushDeepLink } from '~/lib/native-push-deep-link'
 import { installNativeFetchInterceptor } from '~/lib/platform'
 import { installReactOffscreenPatch } from '~/lib/react-offscreen-patch'
 import { getRouter } from './router'
@@ -27,6 +28,13 @@ async function bootstrap() {
   // token from Preferences. Must run after authClientReady so the
   // better-auth-capacitor module is loaded.
   await installNativeFetchInterceptor()
+
+  // Register the native push tap listener BEFORE React mounts so the
+  // Capacitor plugin's retainUntilConsumed buffer hands us the cold-start
+  // tap event the instant subscription resolves — well ahead of
+  // AgentOrchPage's cold-start "restore last-active tab" effect.
+  // Fire-and-forget: the dynamic import shouldn't block React mount.
+  void initNativePushDeepLink()
 
   try {
     evictOldMessages()
