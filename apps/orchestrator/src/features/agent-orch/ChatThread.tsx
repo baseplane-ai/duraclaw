@@ -1058,24 +1058,39 @@ function VirtualizedMessageList({
 }
 
 /**
- * Spec #80 B9 — detect the tail user message's awaiting_response@pending
- * part and surface its `reason` so `VirtualizedMessageList` can render
- * `<AwaitingBubble>` in the slot the next assistant row will occupy.
- * Scans backwards so intermediate assistant rows (mid-turn tool results
- * etc.) are skipped — the relevant signal lives on the most-recent user
- * row only.
+ * Spec #80 B9 — surface the awaiting reason so `VirtualizedMessageList`
+ * renders `<AwaitingBubble>` in the slot the next assistant row will
+ * occupy.
+ *
+ * The DO's `partial_assistant` handler fires TWO broadcasts in sequence:
+ *   1. `clearAwaitingResponse()` → updated user msg (awaiting part
+ *      stripped)
+ *   2. `broadcastMessage(assistantMsg)` → new assistant row appended
+ *
+ * If we gate purely on `awaiting_response@pending`, frame (1) arrives and
+ * flips the bubble off one tick before frame (2) mounts the assistant
+ * row. That produces a one-frame gap where the virtualizer's itemCount
+ * drops by 1, totalSize shrinks, stick-to-bottom corrects, and then
+ * immediately re-corrects when the assistant row appends — visible as a
+ * scroll jitter. To close the gap we treat "tail is still a user row"
+ * as the primary signal: while no assistant row exists past the latest
+ * user turn, the bubble stays visible, regardless of whether the
+ * awaiting part has been stripped yet. Once the assistant row arrives,
+ * the tail flips to assistant and the bubble disappears in the same
+ * frame the assistant content mounts — a true content swap.
  */
 function findAwaitingReason(messages: SessionMessage[]): AwaitingReason | undefined {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i]
-    if (msg.role !== 'user') continue
-    const awaiting = (msg.parts as SessionMessagePart[] | undefined)?.find(
-      (p): p is SessionMessagePart & AwaitingResponsePart =>
-        p.type === 'awaiting_response' && (p as { state?: string }).state === 'pending',
-    )
-    return awaiting?.reason
-  }
-  return undefined
+  const tail = messages[messages.length - 1]
+  if (!tail || tail.role !== 'user') return undefined
+  const awaiting = (tail.parts as SessionMessagePart[] | undefined)?.find(
+    (p): p is SessionMessagePart & AwaitingResponsePart =>
+      p.type === 'awaiting_response' && (p as { state?: string }).state === 'pending',
+  )
+  // Hold through the DO's two-frame window (awaiting cleared → assistant
+  // appended). If the tail is still a user row, no assistant has
+  // responded yet — default to `first_token`, which is the only reason
+  // actually emitted in v1.
+  return awaiting?.reason ?? 'first_token'
 }
 
 export function ChatThread({

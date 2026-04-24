@@ -63,13 +63,14 @@ function ContextBar({ contextUsage }: { contextUsage: ContextUsage }) {
 function getBarClasses(status: string | undefined): string {
   if (!status) return 'bg-background border-t'
   switch (status) {
+    // `pending` collapses into the RUNNING tint so the StatusBar shows
+    // a single in-flight color for the whole turn. The inline
+    // AwaitingBubble distinguishes the pre-first-token phase in-thread;
+    // the chrome doesn't need a second violet flash that flickers off on
+    // the first partial_assistant delta.
     case 'running':
-      return 'bg-info/20 border-t border-info/50'
-    // Spec #80 P1: `pending` = runner stamped, pre-first-event. Violet
-    // tint mirrors the display-state color token so StatusBar reads the
-    // same as the tab / list badge.
     case 'pending':
-      return 'bg-violet-500/20 border-t border-violet-500/50'
+      return 'bg-info/20 border-t border-info/50'
     case 'waiting_gate':
     case 'waiting_input':
     case 'waiting_permission':

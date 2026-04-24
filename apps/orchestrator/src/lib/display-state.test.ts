@@ -35,6 +35,20 @@ describe('deriveDisplayStateFromStatus', () => {
     expect(result.isInteractive).toBe(true)
   })
 
+  it('collapses status="pending" → running display (no separate "Thinking" surface)', () => {
+    // `pending` (runner stamped, pre-first-event) folds into the RUNNING
+    // display so StatusBar / tab / list badges show a single in-flight
+    // state across the whole turn. The inline AwaitingBubble in the
+    // thread distinguishes the pre-first-token phase; the chrome
+    // surfaces don't re-represent it.
+    const result = deriveDisplayStateFromStatus('pending', 1)
+    expect(result.status).toBe('running')
+    expect(result.label).toBe('Running')
+    expect(result.color).toBe('green')
+    expect(result.icon).toBe('spinner')
+    expect(result.isInteractive).toBe(true)
+  })
+
   it('maps status="idle" → idle when ws is open', () => {
     const result = deriveDisplayStateFromStatus('idle', 1)
     expect(result.status).toBe('idle')

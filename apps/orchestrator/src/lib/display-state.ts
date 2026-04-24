@@ -153,8 +153,18 @@ export function deriveDisplayStateFromStatus(
   // doesn't currently include them.
   const s = status as string
   switch (s) {
+    // `pending` (runner stamped, pre-first-event) collapses into the
+    // RUNNING display so the StatusBar / tab / list badge shows a single
+    // "Running" state across the entire in-flight turn. The inline
+    // `AwaitingBubble` in the thread already distinguishes the
+    // pre-first-token phase; the chrome surfaces don't need a second
+    // "Thinking" indicator that flickers off on the first delta (and lags
+    // D1 either direction). External-wait reasons (subagent / task /
+    // monitor) are the remaining StatusBar-worthy signals — they're not
+    // yet emitted, so `pending` folding into `running` is the full
+    // StatusBar surface for now.
     case 'pending':
-      return PENDING
+      return RUNNING
     case 'running':
       return RUNNING
     case 'idle':
