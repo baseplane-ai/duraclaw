@@ -3475,15 +3475,15 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // Look up the pending gate part directly from history (#76 P3 —
     // scalar state.gate removed; messages are the sole source of truth).
     const match = findPendingGatePart(this.session.getHistory(), gateId)
-    const gate: { id: string; type: 'ask_user' | 'permission_request' } | null = match
-      ? { id: gateId, type: match.type }
-      : null
-
-    if (!gate) {
+    if (!match) {
       return {
         ok: false,
         error: `Gate '${gateId}' not found (no pending part in history)`,
       }
+    }
+    const gate: { id: string; type: 'ask_user' | 'permission_request' } = {
+      id: gateId,
+      type: match.type,
     }
 
     if (gate.type === 'permission_request' && response.approved !== undefined) {
@@ -3494,26 +3494,79 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         allowed: response.approved,
       })
     } else if (gate.type === 'ask_user') {
-      let flatAnswer: string | undefined
-      if (response.declined === true) {
-        // User dismissed the question by typing a new message. Feed the
-        // SDK a placeholder tool-result so its pending AskUserQuestion
-        // callback completes and the runner unblocks to accept the next
-        // stream-input turn.
-        flatAnswer = '[User declined to answer. See subsequent message for next instruction.]'
-      } else if (response.answers !== undefined) {
-        flatAnswer = this.flattenStructuredAnswers(response.answers)
-      } else if (response.answer !== undefined) {
-        flatAnswer = response.answer
+      // Build a question-keyed answer record. The SDK's AskUserQuestion
+      // tool serializes results as `User has answered your questions:
+      // "<questionText>"="<answer>", ...` — so the key MUST be the full
+      // question text (input.questions[i].question, not header).
+      const partInput = (match.part as { input?: { questions?: unknown } }).input
+      const rawQuestions = Array.isArray(partInput?.questions) ? partInput.questions : []
+      const questions = rawQuestions as Array<{ question?: string; header?: string }>
+      const declinedPlaceholder =
+        '[User declined to answer. See subsequent message for next instruction.]'
+
+      const buildPerQuestionValue = (i: number): string => {
+        if (response.declined === true) return declinedPlaceholder
+        if (response.answers !== undefined) {
+          const a = response.answers[i]
+          if (!a) return ''
+          return this.flattenStructuredAnswers([a])
+        }
+        if (response.answer !== undefined) {
+          // Legacy single-string path: apply to the first question only;
+          // subsequent questions get empty strings.
+          return i === 0 ? response.answer : ''
+        }
+        return ''
       }
-      if (flatAnswer === undefined) {
-        return { ok: false, error: 'Invalid response for gate type' }
+
+      let answersRecord: Record<string, string>
+      if (questions.length === 0) {
+        // Legacy / SDK-native fallback: no `input.questions` array. Pick a
+        // single key from anywhere reasonable on the part, falling back to
+        // the literal 'question' so the answer string isn't lost.
+        const partAny = match.part as {
+          input?: { question?: string }
+        }
+        const fallbackKey =
+          (typeof partAny.input?.question === 'string' && partAny.input.question.trim()) ||
+          'question'
+        let value: string
+        if (response.declined === true) value = declinedPlaceholder
+        else if (response.answers !== undefined)
+          value = this.flattenStructuredAnswers(response.answers)
+        else if (response.answer !== undefined) value = response.answer
+        else {
+          return { ok: false, error: 'Invalid response for gate type' }
+        }
+        console.warn(
+          `[SessionDO:${this.ctx.id}] resolveGate: ask_user part missing input.questions, falling back to single-key '${fallbackKey}'`,
+        )
+        answersRecord = { [fallbackKey]: value }
+      } else {
+        // Validate that we have a usable response for at least one branch.
+        if (
+          response.declined !== true &&
+          response.answers === undefined &&
+          response.answer === undefined
+        ) {
+          return { ok: false, error: 'Invalid response for gate type' }
+        }
+        answersRecord = {}
+        for (let i = 0; i < questions.length; i++) {
+          const q = questions[i]
+          const key =
+            (typeof q?.question === 'string' && q.question.trim()) ||
+            (typeof q?.header === 'string' && q.header.trim()) ||
+            `question_${i}`
+          answersRecord[key] = buildPerQuestionValue(i)
+        }
       }
+
       this.sendToGateway({
         type: 'answer',
         session_id: this.state.session_id ?? '',
         tool_call_id: gateId,
-        answers: { answer: flatAnswer },
+        answers: answersRecord,
       })
     } else {
       return { ok: false, error: 'Invalid response for gate type' }

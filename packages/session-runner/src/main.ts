@@ -196,8 +196,17 @@ function handleIncomingCommand(msg: unknown, ctx: RunnerSessionContext, ch: Buff
     }
     case 'answer': {
       if (ctx.pendingAnswer) {
+        const keyCount =
+          m.answers && typeof m.answers === 'object' ? Object.keys(m.answers).length : 0
+        console.log(
+          `[session-runner] answer received tool_call_id=${m.tool_call_id} keys=${keyCount}`,
+        )
         ctx.pendingAnswer.resolve((m.answers as Record<string, string>) ?? {})
         ctx.pendingAnswer = null
+      } else {
+        console.warn(
+          `[session-runner] answer received but no pendingAnswer tool_call_id=${m.tool_call_id}`,
+        )
       }
       break
     }

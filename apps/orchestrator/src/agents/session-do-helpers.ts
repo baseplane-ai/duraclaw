@@ -1,7 +1,7 @@
 import { timingSafeEqual } from 'node:crypto'
 
 import type { SyncedCollectionOp } from '@duraclaw/shared-types'
-import type { SessionMessage } from 'agents/experimental/memory/session'
+import type { SessionMessage, SessionMessagePart } from 'agents/experimental/memory/session'
 
 /**
  * Pure op-derivation helper for snapshot emitters (GH#38 P1.4).
@@ -247,7 +247,7 @@ export type PendingGateType = 'ask_user' | 'permission_request'
 export function findPendingGatePart(
   history: SessionMessage[],
   gateId: string,
-): { type: PendingGateType } | null {
+): { type: PendingGateType; part: SessionMessagePart } | null {
   for (let i = history.length - 1; i >= 0; i--) {
     const msg = history[i]
     for (const p of msg.parts) {
@@ -261,11 +261,11 @@ export function findPendingGatePart(
         p.type === 'tool-AskUserQuestion' &&
         (p.state === 'input-available' || p.state === 'approval-requested')
       ) {
-        return { type: 'ask_user' }
+        return { type: 'ask_user', part: p }
       }
       if (p.state !== 'approval-requested') continue
-      if (p.type === 'tool-ask_user') return { type: 'ask_user' }
-      if (p.type === 'tool-permission') return { type: 'permission_request' }
+      if (p.type === 'tool-ask_user') return { type: 'ask_user', part: p }
+      if (p.type === 'tool-permission') return { type: 'permission_request', part: p }
     }
   }
   return null

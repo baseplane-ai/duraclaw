@@ -1020,14 +1020,18 @@ describe('findPendingGatePart', () => {
     const msg = mkMsg([
       { type: 'tool-ask_user', toolCallId: 'toolu_A', state: 'approval-requested' },
     ])
-    expect(findPendingGatePart([msg], 'toolu_A')).toEqual({ type: 'ask_user' })
+    const result = findPendingGatePart([msg], 'toolu_A')
+    expect(result?.type).toBe('ask_user')
+    expect(result?.part?.toolCallId).toBe('toolu_A')
   })
 
   it('returns permission_request when a tool-permission part is approval-requested', () => {
     const msg = mkMsg([
       { type: 'tool-permission', toolCallId: 'toolu_B', state: 'approval-requested' },
     ])
-    expect(findPendingGatePart([msg], 'toolu_B')).toEqual({ type: 'permission_request' })
+    const result = findPendingGatePart([msg], 'toolu_B')
+    expect(result?.type).toBe('permission_request')
+    expect(result?.part?.toolCallId).toBe('toolu_B')
   })
 
   it('returns null for a part that has moved past approval-requested', () => {
@@ -1051,8 +1055,8 @@ describe('findPendingGatePart', () => {
     const newer = mkMsg([
       { type: 'tool-ask_user', toolCallId: 'toolu_NEW', state: 'approval-requested' },
     ])
-    expect(findPendingGatePart([older, newer], 'toolu_OLD')).toEqual({ type: 'ask_user' })
-    expect(findPendingGatePart([older, newer], 'toolu_NEW')).toEqual({ type: 'ask_user' })
+    expect(findPendingGatePart([older, newer], 'toolu_OLD')?.type).toBe('ask_user')
+    expect(findPendingGatePart([older, newer], 'toolu_NEW')?.type).toBe('ask_user')
   })
 
   it('ignores non-gate tool parts with matching toolCallId', () => {
@@ -1083,7 +1087,7 @@ describe('findPendingGatePart', () => {
         toolName: 'AskUserQuestion',
       },
     ])
-    expect(findPendingGatePart([msg], 'toolu_NATIVE')).toEqual({ type: 'ask_user' })
+    expect(findPendingGatePart([msg], 'toolu_NATIVE')?.type).toBe('ask_user')
   })
 
   it('returns null for a tool-AskUserQuestion part that already has output', () => {
@@ -1097,6 +1101,165 @@ describe('findPendingGatePart', () => {
       },
     ])
     expect(findPendingGatePart([msg], 'toolu_DONE')).toBeNull()
+  })
+})
+
+// ── resolveGate ask_user: question-keyed answers ─────────────────────
+//
+// Regression: resolveGate was sending `{answers: {answer: '<flat>'}}` to
+// the runner — the SDK's AskUserQuestion tool expects answers keyed by
+// the full question text. The harness below mirrors the exact ask_user
+// branch of SessionDO.resolveGate (post-fix shape) so we can witness
+// the wire payload without instantiating the decorator class.
+
+interface FakeAnswerSent {
+  type: 'answer'
+  session_id: string
+  tool_call_id: string
+  answers: Record<string, string>
+}
+
+type AskUserResolveResponse = {
+  approved?: boolean
+  answer?: string
+  answers?: Array<{ label: string; note?: string }>
+  declined?: boolean
+}
+
+function flattenStructuredAnswersForTest(answers: Array<{ label: string; note?: string }>): string {
+  const parts: string[] = []
+  for (const a of answers) {
+    const label = (a.label ?? '').trim()
+    const note = (a.note ?? '').trim()
+    if (label && note) parts.push(`${label} (note: ${note})`)
+    else if (label) parts.push(label)
+    else if (note) parts.push(note)
+  }
+  return parts.join('; ')
+}
+
+function simulateResolveAskUser(args: {
+  gateId: string
+  sessionId: string
+  questions: Array<{ question?: string; header?: string }>
+  response: AskUserResolveResponse
+}): { sent: FakeAnswerSent | null; warnings: string[] } {
+  const warnings: string[] = []
+  let sent: FakeAnswerSent | null = null
+  const declinedPlaceholder =
+    '[User declined to answer. See subsequent message for next instruction.]'
+
+  const buildPerQuestionValue = (i: number): string => {
+    if (args.response.declined === true) return declinedPlaceholder
+    if (args.response.answers !== undefined) {
+      const a = args.response.answers[i]
+      if (!a) return ''
+      return flattenStructuredAnswersForTest([a])
+    }
+    if (args.response.answer !== undefined) {
+      return i === 0 ? args.response.answer : ''
+    }
+    return ''
+  }
+
+  let answersRecord: Record<string, string>
+  if (args.questions.length === 0) {
+    let value: string
+    if (args.response.declined === true) value = declinedPlaceholder
+    else if (args.response.answers !== undefined)
+      value = flattenStructuredAnswersForTest(args.response.answers)
+    else if (args.response.answer !== undefined) value = args.response.answer
+    else throw new Error('Invalid response for gate type')
+    warnings.push('fallback')
+    answersRecord = { question: value }
+  } else {
+    if (
+      args.response.declined !== true &&
+      args.response.answers === undefined &&
+      args.response.answer === undefined
+    ) {
+      throw new Error('Invalid response for gate type')
+    }
+    answersRecord = {}
+    for (let i = 0; i < args.questions.length; i++) {
+      const q = args.questions[i]
+      const key =
+        (typeof q?.question === 'string' && q.question.trim()) ||
+        (typeof q?.header === 'string' && q.header.trim()) ||
+        `question_${i}`
+      answersRecord[key] = buildPerQuestionValue(i)
+    }
+  }
+
+  sent = {
+    type: 'answer',
+    session_id: args.sessionId,
+    tool_call_id: args.gateId,
+    answers: answersRecord,
+  }
+  return { sent, warnings }
+}
+
+describe('SessionDO.resolveGate ask_user payload', () => {
+  it('keys structured answers by question text (not header) and pairs them with input.questions order', () => {
+    const { sent } = simulateResolveAskUser({
+      gateId: 'toolu_GATE1',
+      sessionId: 'sess-1',
+      questions: [
+        {
+          question: 'Slide 4 ship?',
+          header: 'Slide 4',
+        },
+        {
+          question: 'Slide 5 style?',
+          header: 'Slide 5',
+        },
+      ],
+      response: {
+        answers: [{ label: 'Ship' }, { label: '', note: 'current is good, just upscale' }],
+      },
+    })
+    expect(sent).not.toBeNull()
+    expect(sent?.tool_call_id).toBe('toolu_GATE1')
+    expect(sent?.answers).toEqual({
+      'Slide 4 ship?': 'Ship',
+      'Slide 5 style?': 'current is good, just upscale',
+    })
+  })
+
+  it('applies the declined placeholder to every question key', () => {
+    const { sent } = simulateResolveAskUser({
+      gateId: 'toolu_GATE2',
+      sessionId: 'sess-2',
+      questions: [{ question: 'Q1?' }, { question: 'Q2?' }],
+      response: { declined: true },
+    })
+    const placeholder = '[User declined to answer. See subsequent message for next instruction.]'
+    expect(sent?.answers).toEqual({
+      'Q1?': placeholder,
+      'Q2?': placeholder,
+    })
+  })
+
+  it('legacy single-string response keys on the first question only', () => {
+    const { sent } = simulateResolveAskUser({
+      gateId: 'toolu_GATE3',
+      sessionId: 'sess-3',
+      questions: [{ question: 'What color?' }, { question: 'What size?' }],
+      response: { answer: 'red' },
+    })
+    expect(sent?.answers).toEqual({ 'What color?': 'red', 'What size?': '' })
+  })
+
+  it('falls back to a single key when input.questions is missing/empty', () => {
+    const { sent, warnings } = simulateResolveAskUser({
+      gateId: 'toolu_GATE4',
+      sessionId: 'sess-4',
+      questions: [],
+      response: { answer: 'just answer' },
+    })
+    expect(warnings).toContain('fallback')
+    expect(sent?.answers).toEqual({ question: 'just answer' })
   })
 })
 
