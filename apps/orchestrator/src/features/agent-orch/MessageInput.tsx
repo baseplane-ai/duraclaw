@@ -269,7 +269,13 @@ export function MessageInput({
             ref={textareaRef}
             placeholder={textareaPlaceholder}
             disabled={textareaDisabled}
-            yText={collabReady ? ytext : undefined}
+            // Bind to the Y.Text unconditionally while collab is in play. The
+            // provider's connection status flaps on deploy / reconnect; toggling
+            // yText off during those windows makes the draft text briefly
+            // disappear because the textarea falls through to an empty controller
+            // state. Y.Text edits buffer offline and merge on reconnect, so keeping
+            // the binding stable across status transitions is safe.
+            yText={collabActive ? ytext : undefined}
             onInput={collabReady ? notifyTyping : undefined}
             onCursorChange={collabReady ? setCursor : undefined}
           />

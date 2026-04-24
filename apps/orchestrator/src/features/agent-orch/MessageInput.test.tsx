@@ -11,6 +11,18 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 // mutate this before render to simulate a non-empty draft.
 const mockControllerState = { value: '' }
 
+// Shared mock collab state — tests can flip `status` to simulate a WS
+// reconnect and inspect the `yText` prop that MessageInput forwards to
+// PromptInputTextarea. Using a module-scoped object keeps re-renders
+// cheap and avoids re-wiring vi.mock() per case.
+const mockCollabState: {
+  status: 'connecting' | 'connected' | 'disconnected' | 'auth-failed'
+} = { status: 'connecting' }
+
+// Captures the yText prop on every PromptInputTextarea render so we can
+// assert that a yText binding stays live across status transitions.
+const capturedYTextProps: Array<unknown> = []
+
 // Mock ai-elements to verify compound structure
 vi.mock('@duraclaw/ai-elements', () => ({
   PromptInput: ({ children, className, onPaste, ...props }: Record<string, unknown>) => (
@@ -63,13 +75,17 @@ vi.mock('@duraclaw/ai-elements', () => ({
       {children as React.ReactNode}
     </button>
   ),
-  PromptInputTextarea: ({ placeholder, disabled }: Record<string, unknown>) => (
-    <textarea
-      data-testid="prompt-input-textarea"
-      placeholder={placeholder as string}
-      disabled={disabled as boolean}
-    />
-  ),
+  PromptInputTextarea: ({ placeholder, disabled, yText }: Record<string, unknown>) => {
+    capturedYTextProps.push(yText)
+    return (
+      <textarea
+        data-testid="prompt-input-textarea"
+        placeholder={placeholder as string}
+        disabled={disabled as boolean}
+        data-has-ytext={yText ? 'true' : 'false'}
+      />
+    )
+  },
   usePromptInputController: () => ({
     textInput: {
       value: mockControllerState.value,
@@ -87,23 +103,31 @@ vi.mock('@duraclaw/ai-elements', () => ({
 // collab wiring at the unit level. With no sessionId prop the hook's
 // return is ignored at render time, but we still need the import to
 // resolve without making a real WS connection.
+// Stable Y.Text-ish stub — identity must not change across status flips
+// so we can assert the prop `yText` remains the same reference across
+// reconnects (rather than flipping to undefined).
+const mockYText = {
+  toString: () => '',
+  insert: () => {},
+  delete: () => {},
+  observe: () => {},
+  unobserve: () => {},
+  length: 0,
+  doc: null,
+}
+
 vi.mock('~/hooks/use-session-collab', () => ({
   useSessionCollab: () => ({
     doc: { destroy: () => {} },
     provider: null,
-    status: 'connecting',
-    ytext: {
-      toString: () => '',
-      insert: () => {},
-      delete: () => {},
-      observe: () => {},
-      unobserve: () => {},
-      length: 0,
-      doc: null,
+    get status() {
+      return mockCollabState.status
     },
+    ytext: mockYText,
     awareness: null,
     selfClientId: null,
     notifyTyping: () => {},
+    setCursor: () => {},
   }),
 }))
 
@@ -112,6 +136,8 @@ import { MessageInput } from './MessageInput'
 afterEach(() => {
   cleanup()
   mockControllerState.value = ''
+  mockCollabState.status = 'connecting'
+  capturedYTextProps.length = 0
 })
 
 describe('MessageInput compound structure', () => {
@@ -308,5 +334,53 @@ describe('MessageInput force-stop escalation (state-driven relabel)', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('MessageInput draft stability across collab status transitions', () => {
+  it('keeps yText bound while collab status cycles through disconnected/connecting', () => {
+    // Render with a sessionId so collabActive=true. Status starts as 'connected'.
+    mockCollabState.status = 'connected'
+    capturedYTextProps.length = 0
+
+    const { rerender } = render(<MessageInput onSend={vi.fn()} sessionId="test-session" />)
+
+    // Baseline: yText should be bound (truthy) when connected.
+    const initialYText = capturedYTextProps[capturedYTextProps.length - 1]
+    expect(initialYText).toBeTruthy()
+
+    // Simulate WS disconnect (deploy / reconnect).
+    mockCollabState.status = 'disconnected'
+    capturedYTextProps.length = 0
+    rerender(<MessageInput onSend={vi.fn()} sessionId="test-session" />)
+    const disconnectedYText = capturedYTextProps[capturedYTextProps.length - 1]
+    expect(disconnectedYText).toBeTruthy()
+    expect(disconnectedYText).toBe(initialYText) // same Y.Text reference
+
+    // Simulate reconnecting phase.
+    mockCollabState.status = 'connecting'
+    capturedYTextProps.length = 0
+    rerender(<MessageInput onSend={vi.fn()} sessionId="test-session" />)
+    const connectingYText = capturedYTextProps[capturedYTextProps.length - 1]
+    expect(connectingYText).toBeTruthy()
+    expect(connectingYText).toBe(initialYText)
+
+    // Back to connected — still the same reference.
+    mockCollabState.status = 'connected'
+    capturedYTextProps.length = 0
+    rerender(<MessageInput onSend={vi.fn()} sessionId="test-session" />)
+    const reconnectedYText = capturedYTextProps[capturedYTextProps.length - 1]
+    expect(reconnectedYText).toBeTruthy()
+    expect(reconnectedYText).toBe(initialYText)
+  })
+
+  it('does not bind yText when no sessionId is provided (legacy/standalone mode)', () => {
+    mockCollabState.status = 'connected'
+    capturedYTextProps.length = 0
+
+    render(<MessageInput onSend={vi.fn()} />)
+    const yTextProp = capturedYTextProps[capturedYTextProps.length - 1]
+    // collabActive is false (no sessionId), so yText should be undefined.
+    expect(yTextProp).toBeFalsy()
   })
 })
