@@ -36,6 +36,8 @@ export interface ExecuteCommand {
   user_id?: string
   /** Which agent to use. Defaults to 'claude' if omitted. */
   agent?: string
+  /** GH#86: enable Haiku-based session titler in the runner. Default false. */
+  titler_enabled?: boolean
 }
 
 // Content block types matching Anthropic API format
@@ -135,6 +137,8 @@ export interface ResumeCommand {
   sdk_session_id: string
   /** Which agent to use for resume. Defaults to 'claude' if omitted. */
   agent?: string
+  /** GH#86: enable Haiku-based session titler in the runner. Default false. */
+  titler_enabled?: boolean
 }
 
 // ── Gateway Events (Gateway → Orchestrator) ────────────────────────────
@@ -164,6 +168,7 @@ export type GatewayEvent =
   | ChainAdvanceEvent
   | ChainStalledEvent
   | GapSentinelEvent
+  | TitleUpdateEvent
 
 /**
  * GH#75 B4: BufferedChannel gap sentinel relayed from the session-runner.
@@ -178,6 +183,25 @@ export interface GapSentinelEvent {
   dropped_count?: number
   from_seq?: number
   to_seq?: number
+}
+
+/**
+ * GH#86: Haiku-generated session title update.
+ *
+ * Emitted by the session-runner's `SessionTitler` after a successful
+ * Haiku call (initial title or pivot-gated retitle). The DO applies it
+ * iff `title_source !== 'user'` (never-clobber invariant), persists to
+ * `session_meta` + D1 `agent_sessions`, and broadcasts via
+ * `broadcastSessionRow`.
+ */
+export interface TitleUpdateEvent {
+  type: 'title_update'
+  session_id: string
+  title: string
+  confidence: number
+  did_pivot: boolean
+  /** `num_turns` snapshot at the moment the title was generated. */
+  turn_stamp: number
 }
 
 // ── Mode transition events (DO-synthesised for chain UX) ────────────

@@ -152,6 +152,13 @@ function handleIncomingCommand(msg: unknown, ctx: RunnerSessionContext, ch: Buff
       if (!m.message) break
       const msg = m.message as { role: 'user'; content: string }
 
+      // GH#86: fire pivot-retitle in parallel with the main query —
+      // zero added latency, fire-and-forget, errors swallowed in titler.
+      if (ctx.titler) {
+        const userText = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)
+        ctx.titler.maybePivotRetitle([], userText).catch(() => {})
+      }
+
       // Mid-flight steering: if the SDK query is actively running (not
       // between turns waiting on waitForNext), inject directly via
       // streamInput() so the model sees the user message immediately —
@@ -388,6 +395,7 @@ async function main(): Promise<void> {
     messageQueue: null,
     query: null,
     commandQueue: [],
+    titler: null,
     nextSeq: 0,
     meta: {
       sdk_session_id: null,

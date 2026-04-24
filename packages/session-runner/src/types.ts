@@ -5,6 +5,7 @@ import type {
   SetModelCommand,
   SetPermissionModeCommand,
 } from '@duraclaw/shared-types'
+import type { SessionTitler } from './titler.js'
 
 /**
  * Per-session context owned by the session-runner process.
@@ -43,6 +44,10 @@ export interface RunnerSessionContext {
   commandQueue: Array<
     InterruptCommand | SetModelCommand | SetPermissionModeCommand | GetContextUsageCommand
   >
+  /** GH#86: Haiku session titler. Set by ClaudeRunner.runSession() when
+   * `cmd.titler_enabled` is true. Read by handleIncomingCommand for pivot
+   * retitle on `stream-input`. */
+  titler: SessionTitler | null
   /** Monotonic sequence stamped on every outbound event. Part B populates this. */
   nextSeq: number
   /** In-memory snapshot of live session state; the meta-file dumper reads this. */
