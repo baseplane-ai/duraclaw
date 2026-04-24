@@ -756,11 +756,24 @@ in `planning/research/2026-04-18-verify-infra-issue-8.md`.
 - Commit messages: `type(scope): description` (feat, fix, chore, refactor, docs, test)
 - Biome formatting: 2-space indent, 100 char line width, LF endings
 - Path alias: `~/` maps to `./src/` in orchestrator
-- Git workflow: commit and push to **the currently checked-out branch**
-  on `origin` (github.com/baseplane-ai/duraclaw). Never switch branches to
-  push elsewhere — respect whatever branch the human/session left you on.
-  On `main` this means direct-to-main (no PR workflow, CI runs remotely
-  after push); on any feature branch (e.g. `feature/3-yjs-...`,
-  `feat/...`, `fix/...`) push to that branch so the open PR updates in
-  place. If a rebase has rewritten branch history, push with
-  `--force-with-lease` (never plain `--force`).
+- Git workflow — **scope determines whether a PR is involved**, not habit.
+  Always commit and push to **the currently checked-out branch** on
+  `origin` (github.com/baseplane-ai/duraclaw); never switch branches to
+  push elsewhere. Respect whatever branch the human/session left you on.
+  - **Task-scoped work** (task / debug / freeform mode, small fixes,
+    docs, chores, quick refactors): commit directly to `main` and push.
+    No branch, no PR. CI runs remotely after push. Do NOT open a PR for
+    task-scoped work — stale PRs pile up when commits have already
+    landed on `main` directly, and they have to be closed manually.
+  - **Feature-scoped work** (implementation mode off an approved spec,
+    multi-commit epics, anything that needs review before landing): work
+    on a feature branch (`feature/<issue>-...`, `feat/...`, `fix/...`),
+    push to that branch, open a PR, and land via a proper merge (squash
+    or merge-commit). Never push a feature branch's commits to `main`
+    out-of-band while its PR is open — that strands the PR as
+    superseded-but-not-closed, which is exactly the stale-PR failure
+    mode this rule exists to prevent. If a rebase has rewritten branch
+    history, push with `--force-with-lease` (never plain `--force`).
+  - If you're unsure which bucket a change falls into, ask before
+    opening a PR. A PR that duplicates commits already on `main` is
+    worse than no PR.
