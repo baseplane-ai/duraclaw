@@ -9,13 +9,11 @@ import { StatusBar } from '~/components/status-bar'
 import { VisibilityBadge } from '~/components/visibility-badge'
 import { type BranchInfoRow, createBranchInfoCollection } from '~/db/branch-info-collection'
 import { projectsCollection } from '~/db/projects-collection'
-import { useSessionLocalState } from '~/db/session-local-collection'
+import { useDerivedStatus } from '~/hooks/use-derived-status'
 import { useSession } from '~/hooks/use-sessions-collection'
 import { useSession as useAuthSession } from '~/lib/auth-client'
-import { deriveStatus } from '~/lib/derive-status'
 import { apiUrl } from '~/lib/platform'
 import type { SessionStatus } from '~/lib/types'
-import { useNow } from '~/lib/use-now'
 import { useStatusBarStore } from '~/stores/status-bar'
 import { ChatThread } from './ChatThread'
 import { MessageInput } from './MessageInput'
@@ -52,7 +50,6 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
   // Spec #37 P2b: read the D1-mirrored session row for status / project /
   // model / sdkSessionId. DO is authoritative — no client-side writes.
   const session = useSession(sessionId)
-  const local = useSessionLocalState(sessionId)
 
   // GH#14 B7: derive a Map<parentMsgId, {current,total,siblings}> from the
   // per-session `branchInfoCollection` (DO-authored). ChatThread accepts the
@@ -115,13 +112,8 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
     [sendMessage],
   )
 
-  // Prefer DO-pushed live status → raw D1 (if WS not yet open) → TTL-derived.
-  const nowTs = useNow()
-  const wsOpen = (local?.wsReadyState ?? 3) === 1
-  const d1Status = session ? deriveStatus(session, nowTs) : 'idle'
-  const rawD1Status = (session?.status as SessionStatus) ?? 'idle'
-  const liveStatus = local?.liveStatus as SessionStatus | undefined
-  const status = liveStatus ?? (!wsOpen ? rawD1Status : undefined) ?? d1Status
+  const status =
+    useDerivedStatus(sessionId) ?? (session?.status as SessionStatus | undefined) ?? 'idle'
 
   // Draft key scopes localStorage drafts. Tabs ARE sessions (userTabsCollection
   // rows keyed by sessionId), so use sessionId directly — no separate tab ID.

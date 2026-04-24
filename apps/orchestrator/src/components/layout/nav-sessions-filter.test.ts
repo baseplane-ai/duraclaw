@@ -26,7 +26,6 @@ function mkSession(id: string, userId: string | null): SessionRecord {
     kataMode: null,
     kataIssue: null,
     kataPhase: null,
-    lastEventTs: null,
   } as SessionRecord
 }
 

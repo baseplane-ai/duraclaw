@@ -529,35 +529,6 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           return
         }
 
-        // DO-pushed live status — zero-latency status/gate/error for the
-        // active session. Bypasses the D1 round-trip so we never show
-        // "idle" while streaming is arriving.
-        if (parsed && parsed.type === 'session_status') {
-          try {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const coll = sessionLocalCollection as any
-            try {
-              coll.update(agentName, (draft: Record<string, unknown>) => {
-                draft.liveStatus = parsed.status ?? null
-                draft.liveGate = parsed.gate ?? null
-                draft.liveError = parsed.error ?? null
-              })
-            } catch {
-              coll.insert({
-                id: agentName,
-                wsReadyState: 1,
-                wsCloseTs: null,
-                liveStatus: parsed.status ?? null,
-                liveGate: parsed.gate ?? null,
-                liveError: parsed.error ?? null,
-              })
-            }
-          } catch {
-            // collection not ready
-          }
-          return
-        }
-
         // Spec #37 P2b B16: the legacy per-turn summary frame handler is
         // retired. The DO now broadcasts per-turn state changes as
         // `agent_sessions` synced deltas (numTurns, totalCostUsd,
@@ -696,28 +667,12 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     try {
       // Prefer update; insert on duplicate-key throw (safe both ways).
       try {
-        coll.update(
-          agentName,
-          (draft: {
-            wsReadyState: number
-            wsCloseTs: number | null
-            liveStatus?: unknown
-            liveGate?: unknown
-            liveError?: unknown
-          }) => {
-            draft.wsReadyState = readyState
-            if (wsCloseTsPatch !== undefined) {
-              draft.wsCloseTs = wsCloseTsPatch
-            }
-            // Clear DO-pushed live status on WS close so display falls
-            // back to D1 + TTL predicate for disconnected sessions.
-            if (readyState !== 1) {
-              draft.liveStatus = null
-              draft.liveGate = null
-              draft.liveError = null
-            }
-          },
-        )
+        coll.update(agentName, (draft: { wsReadyState: number; wsCloseTs: number | null }) => {
+          draft.wsReadyState = readyState
+          if (wsCloseTsPatch !== undefined) {
+            draft.wsCloseTs = wsCloseTsPatch
+          }
+        })
       } catch {
         coll.insert({
           id: agentName,

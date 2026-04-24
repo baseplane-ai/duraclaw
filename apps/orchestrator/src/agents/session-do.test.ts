@@ -11,11 +11,8 @@ import {
   finalizeResultTurn,
   findPendingGatePart,
   getGatewayConnectionId,
-  LEGACY_DROPPED_EVENT_TYPES,
   loadTurnState,
   resolveStaleThresholdMs,
-  shouldBumpLastEventTs,
-  shouldForceFlushLastEventTs,
   validateGatewayToken,
 } from './session-do-helpers'
 import { SESSION_DO_MIGRATIONS } from './session-do-migrations'
@@ -232,62 +229,6 @@ describe('SESSION_DO_MIGRATIONS', () => {
       ).toArray()
       expect(rows).toEqual([{ name: 'session_meta' }])
       expect(sessionMetaRows).toEqual([{ id: 1, message_seq: 0, updated_at: 0 }])
-    })
-  })
-
-  describe('migration v11: session_meta.last_event_ts column (GH#69 B1)', () => {
-    it('exists as version 11', () => {
-      const v11 = SESSION_DO_MIGRATIONS.find((m) => m.version === 11)
-      expect(v11).toBeDefined()
-      expect(v11!.description.toLowerCase()).toContain('last_event_ts')
-    })
-
-    it('executes an ALTER TABLE session_meta ADD COLUMN last_event_ts', () => {
-      const v11 = SESSION_DO_MIGRATIONS.find((m) => m.version === 11)!
-      const executed: string[] = []
-      const fakeSql = {
-        exec(query: string) {
-          executed.push(query)
-          return { toArray: () => [] }
-        },
-      }
-
-      v11.up(fakeSql as any)
-
-      const alter = executed.find(
-        (q) =>
-          q.includes('ALTER TABLE') && q.includes('session_meta') && q.includes('last_event_ts'),
-      )
-      expect(alter).toBeTruthy()
-      expect(alter).toContain('INTEGER')
-    })
-
-    it('is idempotent — swallows "duplicate column" on second run', () => {
-      const v11 = SESSION_DO_MIGRATIONS.find((m) => m.version === 11)!
-      let call = 0
-      const fakeSql = {
-        exec(_query: string) {
-          call += 1
-          if (call === 2) {
-            throw new Error('duplicate column name: last_event_ts')
-          }
-          return { toArray: () => [] }
-        },
-      }
-
-      expect(() => v11.up(fakeSql as any)).not.toThrow()
-      expect(() => v11.up(fakeSql as any)).not.toThrow()
-      expect(call).toBe(2)
-    })
-
-    it('rethrows non-duplicate-column errors (surface real failures)', () => {
-      const v11 = SESSION_DO_MIGRATIONS.find((m) => m.version === 11)!
-      const fakeSql = {
-        exec(_query: string) {
-          throw new Error('disk full')
-        },
-      }
-      expect(() => v11.up(fakeSql as any)).toThrow(/disk full/)
     })
   })
 
@@ -1968,7 +1909,6 @@ describe('session_meta persists across rehydrate (P5 B10)', () => {
     num_turns: 'num_turns',
     total_cost_usd: 'total_cost_usd',
     duration_ms: 'duration_ms',
-    gate: 'gate_json',
     created_at: 'created_at',
     error: 'error',
     summary: 'summary',
@@ -1979,8 +1919,7 @@ describe('session_meta persists across rehydrate (P5 B10)', () => {
 
   /**
    * Mirrors `hydrateMetaFromSql`: read the single `session_meta` row and
-   * apply any non-null columns back onto a fresh default meta. `gate` is
-   * the only JSON-encoded column.
+   * apply any non-null columns back onto a fresh default meta.
    */
   function hydrateFromRow(
     row: Record<string, unknown> | undefined,
@@ -1992,15 +1931,7 @@ describe('session_meta persists across rehydrate (P5 B10)', () => {
       if (!(col in row)) continue
       const raw = row[col]
       if (raw === null || raw === undefined) continue
-      if (key === 'gate') {
-        try {
-          out[key] = typeof raw === 'string' ? JSON.parse(raw as string) : raw
-        } catch {
-          // invalid json — skip
-        }
-      } else {
-        out[key] = raw
-      }
+      out[key] = raw
     }
     return out
   }
@@ -2018,7 +1949,6 @@ describe('session_meta persists across rehydrate (P5 B10)', () => {
     num_turns: 0,
     total_cost_usd: null,
     duration_ms: null,
-    gate: null,
     created_at: '',
     error: null,
     summary: null,
@@ -2039,7 +1969,6 @@ describe('session_meta persists across rehydrate (P5 B10)', () => {
       num_turns: 3,
       created_at: '2026-01-01T00:00:00Z',
       sdk_session_id: 'sdk-abc',
-      gate_json: null,
     }
 
     const rehydrated = hydrateFromRow(persisted, DEFAULTS)
@@ -2053,25 +1982,6 @@ describe('session_meta persists across rehydrate (P5 B10)', () => {
     expect(rehydrated.userId).toBe('u1')
     expect(rehydrated.num_turns).toBe(3)
     expect(rehydrated.sdk_session_id).toBe('sdk-abc')
-    expect(rehydrated.gate).toBeNull()
-  })
-
-  it('deserialises a persisted gate JSON blob back into an object', () => {
-    const gate = {
-      id: 'tool-use-xyz',
-      type: 'permission_request',
-      detail: { tool: 'Write', path: '/tmp/foo' },
-    }
-    const persisted = {
-      status: 'waiting_gate',
-      session_id: 's1',
-      gate_json: JSON.stringify(gate),
-    }
-
-    const rehydrated = hydrateFromRow(persisted, DEFAULTS)
-
-    expect(rehydrated.status).toBe('waiting_gate')
-    expect(rehydrated.gate).toEqual(gate)
   })
 
   it('no-ops when the session_meta row is missing (cold-start, pre-migration data)', () => {
@@ -2090,16 +2000,6 @@ describe('session_meta persists across rehydrate (P5 B10)', () => {
     expect(rehydrated.status).toBe('idle') // default preserved
     expect(rehydrated.project).toBe('only-this-field')
     expect(rehydrated.session_id).toBeNull()
-  })
-
-  it('silently skips an unparseable gate_json instead of throwing', () => {
-    const persisted = {
-      status: 'running',
-      gate_json: '{this is not valid json',
-    }
-    const rehydrated = hydrateFromRow(persisted, DEFAULTS)
-    expect(rehydrated.status).toBe('running')
-    expect(rehydrated.gate).toBeNull() // fell back to default
   })
 })
 
@@ -3451,95 +3351,6 @@ describe('error event transitions session to idle (not error) so user can resume
   })
 })
 
-describe('GH#50 B1/B9: shouldBumpLastEventTs — legacy-drop does NOT refresh liveness', () => {
-  // Real GatewayEvents (runner is doing SDK work) DO bump liveness. A
-  // per-event bump here is what keeps `deriveStatus` returning `running`
-  // while a turn is actively streaming.
-  it.each([
-    'session.init',
-    'partial_assistant',
-    'assistant',
-    'tool_use_summary',
-    'tool_result',
-    'ask_user',
-    'permission_request',
-    'task_started',
-    'task_progress',
-    'task_notification',
-    'rate_limit',
-    'result',
-    'error',
-    'context_usage',
-    'rewind_result',
-  ])('bumps liveness for real event type %s', (type) => {
-    expect(shouldBumpLastEventTs(type)).toBe(true)
-  })
-
-  // A pre-B7 session-runner parked in `waitForNext()` emits a heartbeat
-  // every ~10s forever. If that bumped liveness, the 45s TTL override
-  // would never fire and GH#50's whole premise collapses. Same for the
-  // older `session_state_changed` frame from Agents-SDK state mirroring.
-  it.each(LEGACY_DROPPED_EVENT_TYPES)('does NOT bump liveness for legacy type %s', (type) => {
-    expect(shouldBumpLastEventTs(type)).toBe(false)
-  })
-
-  it('pins the exact legacy-drop list (spec B9)', () => {
-    // If this assertion breaks, a new legacy event type was added. Update
-    // the list AND the switch-default branch in session-do.ts together.
-    expect([...LEGACY_DROPPED_EVENT_TYPES]).toEqual(['heartbeat', 'session_state_changed'])
-  })
-})
-
-// ── Idle-while-streaming regression: max-interval flush ceiling ──
-//
-// Bug: during a long assistant turn, `bumpLastEventTs` armed the 10s debounce
-// on the first event and early-returned on every subsequent one, so D1
-// `last_event_ts` only flushed at turn start + turn end. For any turn longer
-// than TTL_MS=45s, the client's `deriveStatus()` predicate wrongly flipped
-// `running` → `idle` mid-stream. The fix is a max-interval ceiling that
-// force-flushes once the in-memory `lastEventTs` is more than 20s ahead of
-// the last successful D1 flush.
-
-describe('shouldForceFlushLastEventTs: max-interval ceiling during streaming', () => {
-  const MAX = 20_000
-
-  it('returns false before the ceiling (debounce-only regime)', () => {
-    // A burst where the last flush just happened — well under 20s elapsed.
-    expect(shouldForceFlushLastEventTs(10_000, 5_000, MAX)).toBe(false)
-  })
-
-  it('returns false at exactly the ceiling boundary (strict >)', () => {
-    // `>` not `>=` so the 10s debounce retains exclusive ownership of
-    // the [0, 20s] window — the ceiling only fires once the gap has
-    // strictly exceeded the max.
-    expect(shouldForceFlushLastEventTs(20_000, 0, MAX)).toBe(false)
-  })
-
-  it('returns true once the gap strictly exceeds the ceiling', () => {
-    // First bump of a streaming burst that has been running past the
-    // ceiling without the debounce getting a chance to re-arm — force
-    // flush now so D1 can't lag forever.
-    expect(shouldForceFlushLastEventTs(20_001, 0, MAX)).toBe(true)
-  })
-
-  it('returns true for a long continuous partial_assistant burst (60s turn)', () => {
-    // Realistic scenario: turn started at t=0, first flush at t=10s
-    // (debounce fired once), then partial_assistant deltas every ~100ms
-    // for 60s. At t=60_000 the gap (60_000 - 10_000 = 50_000) exceeds
-    // MAX so the ceiling kicks in — the cause of the "Idle while
-    // streaming" StatusBar flip is now bounded.
-    expect(shouldForceFlushLastEventTs(60_000, 10_000, MAX)).toBe(true)
-  })
-
-  it('returns false immediately after a fresh flush (flushedAt = lastEventTs)', () => {
-    // After `flushLastEventTsToD1` succeeds it sets
-    // `lastEventFlushedAt = lastEventTs`. The next bump must not
-    // re-trigger the ceiling — otherwise every event would force-flush
-    // and we'd lose the debounce entirely.
-    expect(shouldForceFlushLastEventTs(12_345, 12_345, MAX)).toBe(false)
-  })
-})
-
 // ── GH#57: recovery grace timer contract ─────────────────────────
 
 describe('GH#57: RECOVERY_GRACE_MS is 15_000', () => {
@@ -3576,15 +3387,8 @@ describe('GH#75 B7: finalizeResultTurn enforces broadcast-before-state ordering'
       updateStateIdle: () => calls.push('updateStateIdle'),
       syncStatusToD1: () => calls.push('syncStatusToD1'),
       syncResultToD1: () => calls.push('syncResultToD1'),
-      flushLastEventTsToD1: () => calls.push('flushLastEventTsToD1'),
     })
-    expect(calls).toEqual([
-      'broadcastPhase',
-      'updateStateIdle',
-      'syncStatusToD1',
-      'syncResultToD1',
-      'flushLastEventTsToD1',
-    ])
+    expect(calls).toEqual(['broadcastPhase', 'updateStateIdle', 'syncStatusToD1', 'syncResultToD1'])
   })
 
   it('records every broadcastMessage call before updateState flips to idle', () => {
@@ -3605,7 +3409,6 @@ describe('GH#75 B7: finalizeResultTurn enforces broadcast-before-state ordering'
       updateStateIdle: () => calls.push('updateState:idle'),
       syncStatusToD1: () => calls.push('syncStatusToD1'),
       syncResultToD1: () => calls.push('syncResultToD1'),
-      flushLastEventTsToD1: () => calls.push('flushLastEventTsToD1'),
     })
 
     const idleIdx = calls.indexOf('updateState:idle')
@@ -3632,13 +3435,7 @@ describe('GH#75 B7: finalizeResultTurn enforces broadcast-before-state ordering'
       updateStateIdle: () => calls.push('updateState:idle'),
       syncStatusToD1: () => calls.push('syncStatusToD1'),
       syncResultToD1: () => calls.push('syncResultToD1'),
-      flushLastEventTsToD1: () => calls.push('flushLastEventTsToD1'),
     })
-    expect(calls).toEqual([
-      'updateState:idle',
-      'syncStatusToD1',
-      'syncResultToD1',
-      'flushLastEventTsToD1',
-    ])
+    expect(calls).toEqual(['updateState:idle', 'syncStatusToD1', 'syncResultToD1'])
   })
 })

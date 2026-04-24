@@ -16,8 +16,8 @@ function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
   }
 }
 
-// GH#50: `isQualifyingSession` now takes the TTL-derived status as its
-// second argument (caller threads in `deriveStatus(session, nowTs)`).
+// GH#50: `isQualifyingSession` takes the session status as its
+// second argument (caller passes `session.status`).
 describe('isQualifyingSession', () => {
   it('returns true for running sessions', () => {
     expect(isQualifyingSession(makeSession({ status: 'running' }), 'running')).toBe(true)

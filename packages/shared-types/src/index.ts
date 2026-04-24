@@ -646,6 +646,7 @@ export interface SessionSummary {
   durationMs?: number | null
   totalCostUsd?: number | null
   numTurns?: number | null
+  messageSeq?: number
   prompt?: string
   summary?: string
   title?: string | null
@@ -663,10 +664,6 @@ export interface SessionSummary {
   kataStateJson?: string | null
   contextUsageJson?: string | null
   worktreeInfoJson?: string | null
-  // GH#50: epoch-ms of the last GatewayEvent received by the SessionDO.
-  // Read by client `deriveStatus()` predicate to override stuck `running`
-  // rows with `idle` after >45s of silence.
-  lastEventTs?: number | null
   visibility?: 'public' | 'private'
 }
 

@@ -38,10 +38,8 @@ import { getPreviewText, StatusDot } from '~/features/agent-orch/session-utils'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { newDraftTabId, useTabSync } from '~/hooks/use-tab-sync'
 import { useSession as useAuthSession } from '~/lib/auth-client'
-import { deriveStatus } from '~/lib/derive-status'
 import { apiUrl } from '~/lib/platform'
-import type { PrInfo, ProjectInfo } from '~/lib/types'
-import { useNow } from '~/lib/use-now'
+import type { PrInfo, ProjectInfo, SessionStatus } from '~/lib/types'
 import { cn } from '~/lib/utils'
 import { filterSessionsByMode, type SessionFilterMode } from './nav-sessions-filter'
 
@@ -263,7 +261,6 @@ export function NavSessions() {
   const location = useLocation()
   const navigate = useNavigate()
   const { openTab } = useTabSync()
-  const nowTs = useNow()
 
   // Spec #68 B11: client-side "All / Mine" filter. Default 'all' — server
   // list already widens to `user_id = ? OR visibility = 'public'`.
@@ -493,7 +490,7 @@ export function NavSessions() {
                   onClick={() => handleSelect(session)}
                 >
                   <StatusDot
-                    status={deriveStatus(session, nowTs)}
+                    status={session.status as SessionStatus}
                     numTurns={session.numTurns ?? 0}
                   />
                   <SessionPresenceIcons sessionId={session.id} />
@@ -670,7 +667,6 @@ function WorktreeNode({
   const hasSessions = sessions.length > 0
   const isHidden = project.hidden === true
   const [maxVisible, setMaxVisible] = useState(5)
-  const nowTs = useNow()
 
   // Partition sessions into kataIssue chain groups and orphan rows.
   const chainGroups = new Map<number, SessionRecord[]>()
@@ -771,7 +767,7 @@ function WorktreeNode({
                     onClick={() => onSelect(session)}
                   >
                     <StatusDot
-                      status={deriveStatus(session, nowTs)}
+                      status={session.status as SessionStatus}
                       numTurns={session.numTurns ?? 0}
                     />
                     <TruncatedText>{getDisplayName(session)}</TruncatedText>
@@ -820,18 +816,15 @@ function isLiveStatus(status: string | null | undefined): boolean {
 function isCompletedSession(session: SessionRecord, derivedStatus: string): boolean {
   // Backend parks finished sessions as `idle` (FilterChipBar: 'completed'
   // → s.status === 'idle'). Require at least one turn so fresh drafts
-  // don't light up the dot. GH#50: read from TTL-derived status so a
-  // stuck `running` row lights the "completed" dot once it falls stale.
+  // don't light up the dot.
   if (derivedStatus === 'completed') return true
   return derivedStatus === 'idle' && (session.numTurns ?? 0) > 0
 }
 
 export function PipelineDots({ sessions }: { sessions: SessionRecord[] }) {
-  const nowTs = useNow()
   const parts = CHAIN_STAGES.map((stage) => {
     const inStage = sessions.filter((s) => (s.kataMode ? stage.match(s.kataMode) : false))
-    // GH#50: derive TTL-aware status once per row.
-    const inStageDerived = inStage.map((s) => ({ session: s, status: deriveStatus(s, nowTs) }))
+    const inStageDerived = inStage.map((s) => ({ session: s, status: s.status as SessionStatus }))
     if (inStageDerived.some(({ status }) => isLiveStatus(status))) {
       return { char: '*', className: 'text-blue-400' }
     }
@@ -875,7 +868,6 @@ function ChainNode({
   const hasActive = sessions.some((s) => s.id === activeSessionId)
   const sorted = [...sessions].sort(byActivity)
   const title = sorted[0]?.title?.trim() || ''
-  const nowTs = useNow()
 
   const handleDoubleClick = useCallback(
     (e: React.MouseEvent) => {
@@ -909,7 +901,7 @@ function ChainNode({
                     title={session.id}
                   >
                     <StatusDot
-                      status={deriveStatus(session, nowTs)}
+                      status={session.status as SessionStatus}
                       numTurns={session.numTurns ?? 0}
                     />
                     <TruncatedText tooltip={getDisplayName(session)}>
@@ -947,7 +939,6 @@ function OrphanProjectGroup({
   const [maxVisible, setMaxVisible] = useState(5)
   const displayed = sessions.slice(0, maxVisible)
   const hasMore = sessions.length > maxVisible
-  const nowTs = useNow()
 
   return (
     <Collapsible
@@ -975,7 +966,7 @@ function OrphanProjectGroup({
                     onClick={() => onSelect(session)}
                   >
                     <StatusDot
-                      status={deriveStatus(session, nowTs)}
+                      status={session.status as SessionStatus}
                       numTurns={session.numTurns ?? 0}
                     />
                     <TruncatedText>{getDisplayName(session)}</TruncatedText>

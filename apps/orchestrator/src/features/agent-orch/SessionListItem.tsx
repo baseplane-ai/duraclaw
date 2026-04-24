@@ -31,9 +31,8 @@ import { Input } from '~/components/ui/input'
 import { useSessionLocalState } from '~/db/session-local-collection'
 import type { SessionRecord } from '~/db/session-record'
 import { useSession } from '~/hooks/use-sessions-collection'
-import { deriveStatus } from '~/lib/derive-status'
 import { deriveDisplayStateFromStatus } from '~/lib/display-state'
-import { useNow } from '~/lib/use-now'
+import type { SessionStatus } from '~/lib/types'
 import { cn } from '~/lib/utils'
 import { formatCost, formatTimeAgo, getPreviewText, StatusDot } from './session-utils'
 
@@ -61,14 +60,9 @@ export function SessionListItem({
   // sessionsCollection-backed) for callers that pass a prefetched record.
   const liveSession = useSession(session.id)
   const local = useSessionLocalState(session.id)
-  const nowTs = useNow()
   const numTurns = liveSession?.numTurns ?? session.numTurns ?? 0
   const isLive = local?.wsReadyState === 1
-  // GH#50: TTL-derived status — prefers the live synced row, falling
-  // back to the prop only when the row hasn't hydrated yet. Both paths
-  // funnel through `deriveStatus` so stuck `running` rows degrade to
-  // `idle` after >45s of silence.
-  const rawStatus = liveSession ? deriveStatus(liveSession, nowTs) : deriveStatus(session, nowTs)
+  const rawStatus = (liveSession ?? session).status as SessionStatus
   const display = deriveDisplayStateFromStatus(
     rawStatus,
     local?.wsReadyState ?? 3,

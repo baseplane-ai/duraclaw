@@ -1,0 +1,1 @@
+ALTER TABLE agent_sessions ADD COLUMN message_seq INTEGER NOT NULL DEFAULT -1;

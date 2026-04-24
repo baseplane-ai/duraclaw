@@ -139,6 +139,7 @@ export const agentSessions = sqliteTable(
     updatedAt: text('updated_at').notNull(),
     lastActivity: text('last_activity'),
     numTurns: integer('num_turns'),
+    messageSeq: integer('message_seq').notNull().default(-1),
     prompt: text('prompt'),
     summary: text('summary'),
     title: text('title'),
@@ -160,12 +161,6 @@ export const agentSessions = sqliteTable(
     kataStateJson: text('kata_state_json'),
     contextUsageJson: text('context_usage_json'),
     worktreeInfoJson: text('worktree_info_json'),
-    // GH#50: epoch-ms timestamp of the last GatewayEvent received for this
-    // session. Bumped in-memory on every event, debounce-flushed every 10s
-    // and on lifecycle transitions. Read by the client TTL predicate
-    // `deriveStatus()` to override stuck `running` rows after >45s of
-    // silence. Distinct from `lastActivity` (TEXT ISO, sidebar sort).
-    lastEventTs: integer('last_event_ts'),
     visibility: text('visibility').notNull().default('private'),
   },
   (t) => ({

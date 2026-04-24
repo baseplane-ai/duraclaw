@@ -31,6 +31,7 @@ Key invariants:
 - `agent-gateway` never runs the SDK. It's a spawn/list/reap control plane.
 - `session-runner` never embeds the DO. It dials `CC_GATEWAY_URL`'s partner `WORKER_PUBLIC_URL` (`wss://dura…/agents/session-agent/<do-id>?role=gateway&token=…`).
 - Gateway restart / CF Worker redeploy are non-events for an in-flight runner; the BufferedChannel buffers while the WS is down, replays on reconnect, emits a single gap sentinel only on overflow.
+- Session status derives from `messagesCollection` via `useDerivedStatus`; D1 `agent_sessions` is the idle/background fallback, not a truth-gate.
 
 ### Client data flow (session live state)
 
@@ -47,14 +48,14 @@ on the Agents SDK `setState` JSON blob surviving eviction.
 The browser has three render sources for per-session state, all TanStack DB
 collections (OPFS-persisted, reactive via `useLiveQuery`):
 
-1. `sessionLiveStateCollection` — per-session summary (`project`, `model`,
+1. `sessionsCollection` — per-session summary (`project`, `model`,
    `numTurns`, `totalCostUsd`, `durationMs`, `contextUsage`, `kataState`,
-   `worktreeInfo`, `wsReadyState`, and a top-level `status` mirror for
-   non-active callers like the sidebar). The `state: SessionState` blob
-   and `sessionResult` column are gone. Summary fields are D1-mirrored by
-   `useSessionsCollection`; active sessions get `contextUsage` / `kataState`
-   from `gateway_event` WS handlers in `use-coding-agent.ts`. Components
-   read via `useSessionLiveState(sessionId)`.
+   `worktreeInfo`, `messageSeq`, and `status`). D1-mirrored via
+   `broadcastSessionRow`. Session status derives from
+   `useDerivedStatus(sessionId) ?? session?.status` — the hook folds
+   over `messagesCollection` and uses `messageSeq` as a tiebreaker to
+   detect stale D1 cache. The transient `sessionLocalCollection` carries
+   only `{id, wsReadyState, wsCloseTs}` (memory-only, no persistence).
 2. `messagesCollection` — per-session message history, one collection per
    agentName (memoised by `createMessagesCollection`). Query-backed with a
    REST fallback (`GET /api/sessions/:id/messages`) for cold-start and

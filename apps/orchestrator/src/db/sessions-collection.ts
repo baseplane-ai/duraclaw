@@ -31,7 +31,7 @@ export const sessionsCollection = createSyncedCollection<SessionSummary, string>
   },
   getKey: (row) => row.id,
   persistence,
-  schemaVersion: 3, // GH#50: added lastEventTs field for client TTL predicate
+  schemaVersion: 4, // GH#76 P4: removed lastEventTs field (TTL predicate retired)
 
   onInsert: async ({ transaction }) => {
     for (const m of transaction.mutations) {
