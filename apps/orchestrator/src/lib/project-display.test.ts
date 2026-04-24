@@ -8,6 +8,7 @@ import {
   PROJECT_COLOR_SLOTS,
   parseWorktreeSuffix,
   statusRingClass,
+  UNASSIGNED_COLOR_SLOT,
 } from './project-display'
 
 describe('deriveRepoBase', () => {
@@ -99,16 +100,52 @@ describe('deriveProjectColorSlot', () => {
   it('same input → same slot', () => {
     expect(deriveProjectColorSlot('duraclaw')).toEqual(deriveProjectColorSlot('duraclaw'))
   })
-  it('null / empty falls back to first slot', () => {
-    expect(deriveProjectColorSlot('')).toEqual(PROJECT_COLOR_SLOTS[0])
-    expect(deriveProjectColorSlot(null)).toEqual(PROJECT_COLOR_SLOTS[0])
-    expect(deriveProjectColorSlot(undefined)).toEqual(PROJECT_COLOR_SLOTS[0])
+  it('stable across repeated calls', () => {
+    const first = deriveProjectColorSlot('duraclaw')
+    for (let i = 0; i < 10; i++) {
+      expect(deriveProjectColorSlot('duraclaw')).toEqual(first)
+    }
+  })
+  it('null / empty returns the dedicated unassigned slot (not a palette slot)', () => {
+    expect(deriveProjectColorSlot('')).toEqual(UNASSIGNED_COLOR_SLOT)
+    expect(deriveProjectColorSlot(null)).toEqual(UNASSIGNED_COLOR_SLOT)
+    expect(deriveProjectColorSlot(undefined)).toEqual(UNASSIGNED_COLOR_SLOT)
+    // And the unassigned slot must not appear in the hashable pool.
+    for (const slot of PROJECT_COLOR_SLOTS) {
+      expect(slot).not.toEqual(UNASSIGNED_COLOR_SLOT)
+    }
+  })
+  it('literal string "undefined" hashes to a palette slot (not the fallback)', () => {
+    const slot = deriveProjectColorSlot('undefined')
+    expect(slot).not.toEqual(UNASSIGNED_COLOR_SLOT)
+    expect(PROJECT_COLOR_SLOTS).toContainEqual(slot)
+  })
+  it('distinct repo keys typically map to distinct slots', () => {
+    // duraclaw vs kata — chosen because their FNV-1a hashes land in
+    // different palette buckets under the 10-slot pool.
+    expect(deriveProjectColorSlot('duraclaw')).not.toEqual(deriveProjectColorSlot('kata'))
   })
   it('spreads distinct inputs across multiple slots', () => {
     const names = ['alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta', 'theta']
     const slots = new Set(names.map((n) => deriveProjectColorSlot(n).bg))
     // Not all identical — bucket distribution worked.
     expect(slots.size).toBeGreaterThanOrEqual(4)
+  })
+})
+
+describe('PROJECT_COLOR_SLOTS palette', () => {
+  it('has exactly 10 slots', () => {
+    expect(PROJECT_COLOR_SLOTS.length).toBe(10)
+  })
+  it('every slot uses a distinct Tailwind color family (no hue collisions)', () => {
+    // Parse the `bg-<family>-200` token out of each slot's bg classes.
+    const families = PROJECT_COLOR_SLOTS.map((slot) => {
+      const match = /bg-([a-z]+)-200\b/.exec(slot.bg)
+      if (!match) throw new Error(`slot missing bg-*-200 token: ${slot.bg}`)
+      return match[1]
+    })
+    const uniq = new Set(families)
+    expect(uniq.size).toBe(families.length)
   })
 })
 

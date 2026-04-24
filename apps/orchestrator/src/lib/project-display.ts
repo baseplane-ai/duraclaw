@@ -10,23 +10,36 @@
  */
 
 /**
- * Curated 8-slot muted palette for project fills. Chosen to read clearly
- * under a saturated status ring (green/amber/red/gray) without fighting it.
- * Each slot supplies both a `bg` class (tab fill) and a `text` class
- * (legible label on that fill) for light + dark mode.
+ * Curated 10-slot chroma-distinct palette for project fills. All slots use
+ * distinct Tailwind color families (no two greys adjacent, no two slots
+ * sharing a hue family) so any two projects differ in hue, not just
+ * luminance. `dark:bg-*-800` / `dark:text-*-50` give saturated fills with
+ * legible labels on dark mode.
  */
 export const PROJECT_COLOR_SLOTS = [
-  { bg: 'bg-slate-200 dark:bg-slate-700', text: 'text-slate-900 dark:text-slate-100' },
-  { bg: 'bg-stone-200 dark:bg-stone-700', text: 'text-stone-900 dark:text-stone-100' },
-  { bg: 'bg-rose-200 dark:bg-rose-900', text: 'text-rose-900 dark:text-rose-100' },
-  { bg: 'bg-teal-200 dark:bg-teal-900', text: 'text-teal-900 dark:text-teal-100' },
-  { bg: 'bg-violet-200 dark:bg-violet-900', text: 'text-violet-900 dark:text-violet-100' },
-  { bg: 'bg-sky-200 dark:bg-sky-900', text: 'text-sky-900 dark:text-sky-100' },
-  { bg: 'bg-orange-200 dark:bg-orange-900', text: 'text-orange-900 dark:text-orange-100' },
-  { bg: 'bg-fuchsia-200 dark:bg-fuchsia-900', text: 'text-fuchsia-900 dark:text-fuchsia-100' },
+  { bg: 'bg-sky-200 dark:bg-sky-800', text: 'text-sky-900 dark:text-sky-50' },
+  { bg: 'bg-rose-200 dark:bg-rose-800', text: 'text-rose-900 dark:text-rose-50' },
+  { bg: 'bg-emerald-200 dark:bg-emerald-800', text: 'text-emerald-900 dark:text-emerald-50' },
+  { bg: 'bg-amber-200 dark:bg-amber-800', text: 'text-amber-900 dark:text-amber-50' },
+  { bg: 'bg-violet-200 dark:bg-violet-800', text: 'text-violet-900 dark:text-violet-50' },
+  { bg: 'bg-fuchsia-200 dark:bg-fuchsia-800', text: 'text-fuchsia-900 dark:text-fuchsia-50' },
+  { bg: 'bg-teal-200 dark:bg-teal-800', text: 'text-teal-900 dark:text-teal-50' },
+  { bg: 'bg-orange-200 dark:bg-orange-800', text: 'text-orange-900 dark:text-orange-50' },
+  { bg: 'bg-indigo-200 dark:bg-indigo-800', text: 'text-indigo-900 dark:text-indigo-50' },
+  { bg: 'bg-lime-200 dark:bg-lime-800', text: 'text-lime-900 dark:text-lime-50' },
 ] as const
 
-export type ProjectColorSlot = (typeof PROJECT_COLOR_SLOTS)[number]
+export type ProjectColorSlot = { readonly bg: string; readonly text: string }
+
+/**
+ * Neutral fallback slot for sessions with no project-color key (null/empty).
+ * Deliberately outline-only so it visually reads as "unassigned" rather
+ * than colliding with any hashable project slot.
+ */
+export const UNASSIGNED_COLOR_SLOT: ProjectColorSlot = {
+  bg: 'bg-transparent border border-dashed border-muted-foreground/40',
+  text: 'text-muted-foreground',
+}
 
 /** FNV-1a 32-bit hash — small, stable, non-crypto. */
 function fnv1a(s: string): number {
@@ -41,10 +54,12 @@ function fnv1a(s: string): number {
 /**
  * Stable color slot for a project, keyed by any string that's shared
  * across its worktrees (typically `repo_origin`, falling back to the repo
- * base name). Same key → same slot across renders and sessions.
+ * base name). Same key → same slot across renders and sessions. Null /
+ * empty keys return the dedicated `UNASSIGNED_COLOR_SLOT` so they don't
+ * collide with any hashable project slot.
  */
 export function deriveProjectColorSlot(key: string | null | undefined): ProjectColorSlot {
-  if (!key) return PROJECT_COLOR_SLOTS[0]
+  if (!key) return UNASSIGNED_COLOR_SLOT
   return PROJECT_COLOR_SLOTS[fnv1a(key) % PROJECT_COLOR_SLOTS.length]
 }
 

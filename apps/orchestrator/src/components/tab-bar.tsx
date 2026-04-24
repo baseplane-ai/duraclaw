@@ -495,12 +495,13 @@ function ProjectTabInner({
     <button
       type="button"
       className={cn(
-        'relative flex items-center gap-1.5 px-2 py-1 m-0.5 text-xs font-medium rounded-sm',
+        'relative flex items-center justify-center gap-1.5 min-w-12 px-2 py-1 m-0.5 text-xs font-medium rounded-sm',
         'transition-all',
         colorSlot.bg,
         colorSlot.text,
-        ringClass,
-        isActive ? 'ring-offset-1 ring-offset-background' : 'opacity-75 hover:opacity-100',
+        isActive
+          ? 'ring-2 ring-primary ring-offset-2 ring-offset-background'
+          : cn(ringClass, 'opacity-75 hover:opacity-100'),
       )}
       onClick={handleSelectClick}
       onContextMenu={handleContextMenu}
