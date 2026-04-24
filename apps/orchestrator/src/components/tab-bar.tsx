@@ -179,16 +179,26 @@ export function TabBar({
   const activeDragRow = activeDragId ? rows.find((r) => r.sessionId === activeDragId) : null
 
   // Detect overflow on scroll + resize.
-  // Floor/ceil the scroll extents before comparing because HiDPI displays and
-  // CSS zoom leave `scrollLeft` / `clientWidth` sub-pixel rounded such that
-  // `scrollLeft + clientWidth` settles ~0.5–1.5 px short of `scrollWidth` at
-  // the true scroll end — the prior `- 1` tolerance wasn't enough and the
-  // right chevron kept rendering when nothing more could scroll into view.
+  //
+  // Two sources of residue push `scrollLeft + clientWidth` below `scrollWidth`
+  // even when no further scrolling is possible, so the naive `<` comparison
+  // strands the right chevron at the true scroll end:
+  //
+  //   1. Every `ProjectTab` has `m-0.5` (2 px margin on all sides). Chrome
+  //      includes the last tab's 2 px trailing margin in `scrollWidth` but
+  //      clamps max `scrollLeft` so that margin never scrolls into the
+  //      viewport — `scrollLeft + clientWidth` tops out 2 px short.
+  //   2. HiDPI displays and CSS zoom leave the extents sub-pixel rounded,
+  //      adding up to ~1 px of residue on top.
+  //
+  // A 4 px tolerance is wider than any real "scroll nudge" would be, so it
+  // only triggers a false negative when the user genuinely can't scroll
+  // further — the "more" chevron then reliably hides at scroll end.
   const updateOverflow = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
     setCanScrollLeft(Math.floor(el.scrollLeft) > 0)
-    setCanScrollRight(Math.ceil(el.scrollLeft + el.clientWidth) < el.scrollWidth - 1)
+    setCanScrollRight(Math.ceil(el.scrollLeft + el.clientWidth) < el.scrollWidth - 4)
   }, [])
 
   useEffect(() => {
