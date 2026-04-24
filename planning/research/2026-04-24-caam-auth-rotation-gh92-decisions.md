@@ -99,7 +99,7 @@ explicitly so a future review can flip any of them cheaply.
   single-active-Claude, this default is correct; if it isn't, D4's
   peer-check skips rotation and we learn from the telemetry.
 
-### D7. Observability surface: **runner logs + `caam status` on VPS, no new admin endpoint in Phase 1**
+### D7. Observability surface: **runner logs + `caam status` on VPS, admin dashboard added 2026-04-24 revision**
 - Runner logs structured rotation events to stderr (captured into the
   per-session `.log` by the gateway):
   - `[caam] active profile=work1 at startup`
@@ -108,8 +108,11 @@ explicitly so a future review can flip any of them cheaply.
   - `[caam] all profiles cooling, earliest clear=<ts>`
 - Rotation events also stamped into the DO's session system messages
   (D3) — auditable from the browser transcript.
-- Deferred to a follow-up: `/api/admin/caam/*` endpoints, web UI for
-  profile health. Keeps this issue scoped.
+- **Originally** deferred to a follow-up: `/api/admin/caam/*` endpoints,
+  web UI for profile health. **Superseded 2026-04-24 revision:** user
+  asked for the admin UI in-scope after all. Pulled back in as B8/B9/B10
+  and P5. Read-only dashboard only — interactive controls ("clear
+  cooldown", "force activate") remain deferred.
 
 ### D8. Pinned profile in cooldown at spawn (`DURACLAW_CLAUDE_PROFILE=work2` but work2 is cooling): **fail spawn with clear error**
 - `caam activate claude work2` without `--force` errors out; runner

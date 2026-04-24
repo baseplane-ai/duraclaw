@@ -125,6 +125,39 @@ phases:
       - id: "e2e-build-green"
         description: "pnpm build, pnpm typecheck, pnpm test all green"
         type: "smoke"
+  - id: p5
+    name: "admin dashboard: caam status + per-profile cooldown + live rotation view"
+    tasks:
+      - "Add GET /admin/caam/status to packages/agent-gateway/src/server.ts, bearer-auth-protected via the existing CC_GATEWAY_API_TOKEN matcher (NOT env-gated like /debug/reap — this is a production admin endpoint, not a dev knob). Implementation shells three caam subcommands in parallel via execFile with --json flags, each 2s-timed-out: (a) 'caam status --json' (b) 'caam cooldown list --json' (c) 'caam ls claude --json'. Merge into a single response: {active_profile, profiles: [{name, active, system, health:{status,error_count}, cooldown_until?}], warnings: [...], last_rotation?: {from, to, at_ms, session_id}, caam_configured: boolean, fetched_at_ms}. caam_configured=false + stub payload when the binary is missing (same degraded-mode semantics as B7). Parallel execution means a slow caam call doesn't stack — 2s cap per call + 3s total-endpoint budget enforced."
+      - "Add a last-rotation finder: scanPeerMeta's existing glob of *.meta.json in SESSIONS_DIR, extended to also surface the meta with the most-recent rotation field. Returns {from, to, at_ms, session_id} or null. No new persistence — ephemeral across runner lifetimes is intentional for Phase 1. Document the limitation in the admin UI ('Last rotation reflects currently-retained session artifacts only; cleared when sessions are reaped')."
+      - "Add GET /api/admin/caam/status to apps/orchestrator/src/api/index.ts. Role gate: copy the inline pattern from /api/admin/feature-flags at line ~1772 verbatim — `if (c.get('role') !== 'admin') return c.json({ error: 'Forbidden' }, 403)`. Fetch from CC_GATEWAY_URL/admin/caam/status with Authorization: Bearer CC_GATEWAY_SECRET. Return the gateway payload unchanged with Cache-Control: no-store (polling dashboard, don't want stale reads)."
+      - "Add TanStack Start route apps/orchestrator/src/routes/_authenticated/admin.caam.tsx following the admin.users.tsx pattern exactly. Inside _authenticated (auth boundary already enforced); add a second-layer admin check in the route loader using the same session.role === 'admin' helper the users page uses (if there's no shared helper, inline the check and note it as a follow-up refactor)."
+      - "Implement the admin-caam component: React Query useQuery({queryKey:['admin-caam'], queryFn: () => fetch('/api/admin/caam/status').then(r=>r.json()), refetchInterval: 5000, refetchOnWindowFocus: true}). Render: (1) Active profile card — large profile name + health badge. (2) Profile grid — one card per profile with name, active badge, health status, countdown timer to cooldown_until (use date-fns or native Intl.RelativeTimeFormat — the project likely already has one; reuse, don't add a dep). (3) Warnings list if warnings[].length > 0 — yellow alert styling. (4) Last rotation row at the bottom — 'work1 → work2 · 2 min ago · session abc123'. (5) Degraded-state banner when caam_configured=false. (6) Refreshed-at timestamp in the footer with a subtle pulsing dot while refetch is in-flight."
+      - "Add a 'caam not configured' graceful state: when caam_configured=false, render a muted info card with text 'caam is not installed on this VPS. Rotation is disabled; sessions run against ~/.claude directly.' No error styling — this is the dev-box default and it's fine."
+      - "Add a link to /admin/caam from the existing admin users page (or wherever admin users navigate from) so this isn't a discovery-by-URL-only feature. If there's a sidebar with admin-only items, add the link there; otherwise a small nav stub at the top of /admin/users is OK."
+      - "Add a smoke test: GET /api/admin/caam/status as a non-admin returns 403; as an admin returns a body matching the documented shape with caam_configured=true (against a real VPS) or =false (against CI / dev box without caam)."
+    test_cases:
+      - id: "gateway-admin-caam-json-merge"
+        description: "Gateway /admin/caam/status with a stub CAAM_BIN returns the merged shape {active_profile, profiles, warnings, last_rotation, caam_configured:true, fetched_at_ms}; verifies the three caam --json calls were made in parallel (mtime assertion via busy stub) and that cooldown_until values are mapped onto the right profile entries"
+        type: "integration"
+      - id: "gateway-admin-caam-no-binary"
+        description: "CAAM_BIN=/nonexistent: gateway endpoint returns 200 with {caam_configured:false, profiles:[], active_profile:null, warnings:['caam binary not found on this host']}; does not 500"
+        type: "integration"
+      - id: "gateway-admin-caam-bearer-required"
+        description: "GET /admin/caam/status without Authorization header → 401; with wrong token → 401; with correct token → 200"
+        type: "integration"
+      - id: "gateway-admin-caam-budget"
+        description: "Stub caam that sleeps 10s on one subcommand: endpoint still returns within 3s total with the timed-out subcommand represented as null / empty in the merged response; other subcommands' data is preserved"
+        type: "integration"
+      - id: "worker-admin-caam-role-gate"
+        description: "GET /api/admin/caam/status as a logged-in user with role='user' returns 403 {error:'Forbidden'}; as role='admin' returns the gateway-proxied payload; as unauthenticated returns the standard auth-middleware redirect"
+        type: "integration"
+      - id: "ui-admin-caam-renders"
+        description: "React Query mock returns a canned payload with 3 profiles (one active, one in cooldown 10min future, one healthy): UI renders the active card, the countdown updates on a 1s tick (via setInterval inside the component, not by re-fetching), and the cooldown profile shows '9m 59s' → '9m 58s' → …"
+        type: "unit"
+      - id: "ui-admin-caam-degraded"
+        description: "Payload with caam_configured=false: UI renders the muted info card and hides the profile grid; no console errors"
+        type: "unit"
 ---
 
 # caam Claude auth profile rotation in session-runner
@@ -472,6 +505,163 @@ Reuses `pending_resume_json` column from B4.
 
 ---
 
+### B8: Gateway exposes `/admin/caam/status` merged-JSON endpoint
+
+**Core:**
+- **ID:** gateway-admin-caam-status
+- **Trigger:** HTTP `GET /admin/caam/status` on the agent-gateway,
+  bearer-auth-validated against the existing `CC_GATEWAY_API_TOKEN`
+  matcher (same gate as `POST /sessions/start`). **Not** `DURACLAW_DEBUG_ENDPOINTS`-gated —
+  this is a production admin endpoint.
+- **Expected:** Gateway runs three caam subcommands in parallel
+  (`caam status --json`, `caam cooldown list --json`, `caam ls claude --json`),
+  each with a 2-second `execFile` timeout. Total endpoint budget is 3
+  seconds — if any subcommand times out or exits non-zero, its data is
+  represented as `null` / empty in the merged response; other
+  subcommands' data is preserved. Additionally scans
+  `$SESSIONS_DIR/*.meta.json` for the newest entry carrying a
+  `rotation` field to surface `last_rotation`.
+
+  Response shape:
+  ```ts
+  {
+    active_profile: string | null
+    profiles: Array<{
+      name: string
+      active: boolean
+      system: boolean                    // true for '_original' built-in
+      health: { status: string; error_count: number } | null
+      cooldown_until?: number            // ms epoch, omitted if not cooling
+    }>
+    warnings: string[]
+    last_rotation: {
+      from: string
+      to: string
+      at_ms: number
+      session_id: string
+    } | null
+    caam_configured: boolean             // false → degraded-mode stub payload
+    fetched_at_ms: number
+  }
+  ```
+  When `caamIsConfigured()` is false, response is `{caam_configured: false,
+  active_profile: null, profiles: [], warnings: ['caam binary not found on
+  this host'], last_rotation: null, fetched_at_ms: <ts>}` with status `200`
+  (NOT 503 — the endpoint is informational; the UI renders the degraded
+  banner).
+- **Verify:** Four integration tests in P5 phase table
+  (`gateway-admin-caam-json-merge`, `gateway-admin-caam-no-binary`,
+  `gateway-admin-caam-bearer-required`, `gateway-admin-caam-budget`)
+  using a stub `$CAAM_BIN` shell script for canned JSON.
+- **Source:** new handler in
+  `packages/agent-gateway/src/handlers.ts`, routed from `server.ts:~130`
+  where other HTTP endpoints live.
+
+#### UI Layer
+N/A (backend endpoint — UI is B10).
+
+#### API Layer
+New HTTP route on the gateway. Shape documented above.
+
+#### Data Layer
+None. Reads from `caam` via subprocess + scans `$SESSIONS_DIR` in-process.
+No new persistence.
+
+---
+
+### B9: Worker proxies `/api/admin/caam/status` with admin role gate
+
+**Core:**
+- **ID:** worker-admin-caam-status
+- **Trigger:** HTTP `GET /api/admin/caam/status` on the orchestrator.
+- **Expected:** Handler runs through `authMiddleware` as usual (rejects
+  unauthenticated with the standard redirect). Then inline:
+  `if (c.get('role') !== 'admin') return c.json({ error: 'Forbidden' }, 403)`
+  — verbatim copy of the pattern already used by
+  `/api/admin/feature-flags` at `apps/orchestrator/src/api/index.ts:~1772`.
+  On pass-through: `fetch(\`${env.CC_GATEWAY_URL}/admin/caam/status\`,
+  { headers: { Authorization: \`Bearer ${env.CC_GATEWAY_SECRET}\` } })`,
+  return the gateway's JSON unchanged with headers
+  `Cache-Control: no-store` and `Content-Type: application/json`.
+  Gateway failure (non-200 or network) surfaces as a 502 with
+  `{error: 'gateway_unavailable', gateway_status: <code>}`.
+- **Verify:** `worker-admin-caam-role-gate` integration test in P5
+  phase table.
+- **Source:** `apps/orchestrator/src/api/index.ts` — new route
+  registered near the existing `/api/admin/*` handlers.
+
+#### UI Layer
+N/A (handler only — UI is B10).
+
+#### API Layer
+New route. Shape is pass-through of B8's response.
+
+#### Data Layer
+None.
+
+---
+
+### B10: Admin dashboard at `/admin/caam` with 5-second polling
+
+**Core:**
+- **ID:** admin-caam-dashboard
+- **Trigger:** Admin user navigates to
+  `/admin/caam` in the browser (TanStack Start route under
+  `_authenticated/admin.caam.tsx`).
+- **Expected:** Page renders a read-only dashboard driven by a React
+  Query `useQuery` with `refetchInterval: 5000` and
+  `refetchOnWindowFocus: true` against `/api/admin/caam/status`.
+  Sections, top to bottom:
+  1. **Active profile card.** Large profile name; colored health badge
+     (`green` for `healthy`, `yellow` for `warning`, `red` for `error`).
+     When `active_profile === null`, shows `no active profile` muted.
+  2. **Profile grid.** One card per entry in `profiles[]`. Name,
+     `active` star icon if true, `system` badge if true (for
+     `_original`), health status chip, and a live countdown
+     (`9m 58s` → `9m 57s`, updated by a 1-second `setInterval` inside
+     the component — NOT by re-fetching) to `cooldown_until` when
+     present. When `cooldown_until` is past, the countdown is replaced
+     with a green "ready" chip and the next poll will have dropped the
+     field.
+  3. **Warnings list.** Yellow alert card with bullet items when
+     `warnings[].length > 0`. Hidden when empty.
+  4. **Last rotation row.** `work1 → work2 · 2 min ago · session
+     abc123` with a Link to `/sessions/<id>` (opens the session). Uses
+     `Intl.RelativeTimeFormat` for the "2 min ago" rendering (no new
+     deps). Hidden when `last_rotation === null`.
+  5. **Degraded-state banner.** When `caam_configured === false`,
+     replace the profile grid with a muted info card: `caam is not
+     installed on this VPS. Rotation is disabled; sessions run against
+     ~/.claude directly.`
+  6. **Footer.** `Refreshed <ts>` with a subtle pulsing dot while a
+     refetch is in-flight (React Query `isFetching`).
+
+  Auth: the `_authenticated` layout already enforces login; the route
+  loader adds a second `session.user.role === 'admin'` check. If not
+  admin, redirect to `/` with a 403-flash (or a `throw notFound()` to
+  avoid leaking endpoint existence — pick one and stay consistent with
+  `admin.users.tsx`; if `admin.users.tsx` uses `throw notFound()`, so
+  does this).
+- **Verify:** Two unit tests (`ui-admin-caam-renders`,
+  `ui-admin-caam-degraded`) using React Query `QueryClientProvider` +
+  a mocked fetcher; plus VP6 below for live smoke.
+- **Source:** new route file
+  `apps/orchestrator/src/routes/_authenticated/admin.caam.tsx`
+  (pattern: copy `admin.users.tsx`).
+
+#### UI Layer
+Full read-only dashboard. No interactive controls in Phase 1 — a
+future issue can add "clear cooldown" / "force activate" buttons.
+
+#### API Layer
+Consumes B9's endpoint. No new API surface.
+
+#### Data Layer
+None — all state is ephemeral React Query cache + the server's
+per-request caam shell.
+
+---
+
 ## Non-Goals
 
 Explicitly **out of scope** for this issue. Each has a follow-up ticket or a
@@ -483,9 +673,17 @@ documented "we'll revisit if telemetry says so":
   path fires often in telemetry, we open a Phase 2 issue.
 - **UI to choose profile policy per session** (pin / auto / off chip in
   the session settings). Env knobs ship first. UI is a follow-up.
-- **Admin endpoint / web UI for caam status** (`/api/admin/caam/*`).
-  Phase 1 uses runner stderr logs + `caam status` on the VPS +
-  transcript breadcrumbs. If ops wants more, it's a separate issue.
+- **Interactive admin controls** on the new `/admin/caam` dashboard —
+  "clear cooldown", "force activate `<profile>`", "rotate now", etc.
+  B10 is deliberately read-only for Phase 1. Operators manipulate
+  state via SSH + `caam` CLI (see Rollback section). A follow-up issue
+  will add buttons once the read-only dashboard has proven its
+  observability value.
+- **Structured time-series of rotation history** beyond "last rotation
+  from live `.meta.json` artifacts." B8's `last_rotation` field shows
+  whatever is still on disk in `$SESSIONS_DIR` at scan time — once a
+  session is reaped, its rotation is no longer surfaced. A D1 table
+  for rotation audit history is a separate issue.
 - **Rate-limit-aware concurrency control** (e.g., pausing new session
   spawns while we're mid-rotation). Out of scope; the single-runner
   assumption makes it moot for Phase 1.
@@ -544,8 +742,14 @@ See YAML frontmatter `phases:` above. Summary:
    `useDerivedStatus` extension, `metadata.caam` wiring.
 4. **P4 (verification + rollout)** — 1–2 h. Real-binary integration
    against local dev stack. Update CLAUDE.md.
+5. **P5 (admin dashboard)** — 2–3 h. Gateway merged-JSON endpoint,
+   Worker admin-gated proxy, TanStack route + React Query + component.
+   Ships B8–B10. Independent of P1–P4 on the data path (the endpoint
+   works without any of the runtime rotation changes), but needs P1's
+   `MetaFile.rotation` field for the `last_rotation` surfacing — so
+   sequence P5 after P1 at minimum; can run in parallel with P2–P4.
 
-Total: 7–11 h, single implementer.
+Total: 9–14 h, single implementer.
 
 ## Verification Strategy
 
@@ -695,6 +899,40 @@ Steps:
    code produces; no rotation breadcrumb, no respawn. `.exit` state on
    the runner is whatever the current behavior produces (most likely
    session stays alive and later times out via reaper at 30 min idle).
+
+### VP6: Admin dashboard end-to-end
+
+Steps:
+1. `scripts/verify/dev-up.sh` (gateway + orchestrator).
+2. Login as an admin test user via `scripts/verify/axi-a`:
+   ```
+   scripts/verify/axi-login a agent.verify+duraclaw@example.com duraclaw-test-password
+   ```
+   (Ensure the seeded user has `role='admin'` — `/api/bootstrap` promotes by default; otherwise `UPDATE user SET role='admin' WHERE email = ...` via wrangler d1 execute.)
+3. Navigate to `http://127.0.0.1:$VERIFY_ORCH_PORT/admin/caam`.
+   Expected: dashboard renders within 2 s; active profile card shows
+   `caam which`'s current active profile; profile grid shows one card
+   per `caam ls claude` entry with correct health badges; footer shows
+   `Refreshed <ts>`.
+4. `caam cooldown set claude/work3 --minutes 10` on the VPS.
+5. Wait ~6 s (one poll cycle + safety).
+   Expected: `work3`'s card now shows a live countdown (`9m 54s` →
+   `9m 53s` → … updated by setInterval, not by refetch).
+6. Open a fresh incognito window, login as a **non-admin** user (or
+   flip the admin user's role to `user` temporarily) and navigate to
+   `/admin/caam`.
+   Expected: either a 403 response from `/api/admin/caam/status` +
+   a client-side error state, OR (preferably, matching `admin.users.tsx`
+   behaviour) a `notFound` redirect so the endpoint's existence is
+   not leaked to non-admins.
+7. With the admin session still open, simulate a rotation (reuse VP1's
+   dev-synth endpoint on another session).
+8. Within ~6 s, the `Last rotation` row at the bottom of the dashboard
+   updates to `work1 → work2 · just now · session <sid>`.
+9. On the VPS: `sudo systemctl stop duraclaw-agent-gateway` (break the
+   gateway).
+   Expected: within ~6 s the dashboard shows a 502 error banner at the
+   top; next poll after `systemctl start` clears it.
 
 ## Implementation Hints
 
