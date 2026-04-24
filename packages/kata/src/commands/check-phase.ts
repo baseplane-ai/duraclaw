@@ -3,10 +3,15 @@
 import { execSync, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { getCurrentSessionId, findProjectDir, getStateFilePath, getVerificationDir } from '../session/lookup.js'
-import { readState } from '../state/reader.js'
 import { loadKataConfig } from '../config/kata-config.js'
 import { getProvider } from '../providers/index.js'
+import {
+  findProjectDir,
+  getCurrentSessionId,
+  getStateFilePath,
+  getVerificationDir,
+} from '../session/lookup.js'
+import { readState } from '../state/reader.js'
 
 interface StepResult {
   name: string
@@ -93,7 +98,10 @@ function runStep(name: string, command: string | null | undefined): StepResult {
  * Get test file patterns from config (comma-separated glob list)
  */
 function getTestFilePatterns(pattern: string): string[] {
-  return pattern.split(',').map((p) => p.trim()).filter(Boolean)
+  return pattern
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean)
 }
 
 /**
@@ -105,10 +113,10 @@ function getChangedTestFiles(diffBase: string, testPatterns: string[]): string[]
       `git diff --name-only "${diffBase}...HEAD" 2>/dev/null || true`,
       { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
     ).trim()
-    const workingTree = execSync(
-      'git diff --name-only 2>/dev/null || true',
-      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
-    ).trim()
+    const workingTree = execSync('git diff --name-only 2>/dev/null || true', {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim()
 
     const allFiles = new Set<string>()
     for (const line of [...stagedAndCommitted.split('\n'), ...workingTree.split('\n')]) {
@@ -160,10 +168,10 @@ function runAssertionDelta(diffBase: string, testPatterns: string[], force: bool
   for (const file of changedFiles) {
     try {
       // Count assertions in base version
-      const beforeContent = execSync(
-        `git show "${diffBase}:${file}" 2>/dev/null || echo ""`,
-        { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
-      )
+      const beforeContent = execSync(`git show "${diffBase}:${file}" 2>/dev/null || echo ""`, {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      })
       totalBefore += countAssertions(beforeContent)
     } catch {
       // File is new — before count is 0
@@ -212,10 +220,7 @@ function getSpecSection(specPath: string, issueNumber: number, phaseId: string):
 
     // Match: ### Phase p1 or ### Phase 1 (case-insensitive)
     const numericId = phaseId.replace(/^p/i, '')
-    const regex = new RegExp(
-      `^###\\s+Phase\\s+(?:p?${numericId}|${phaseId})[\\s:]`,
-      'im',
-    )
+    const regex = new RegExp(`^###\\s+Phase\\s+(?:p?${numericId}|${phaseId})[\\s:]`, 'im')
     const match = regex.exec(specContent)
     if (!match || match.index === undefined) return ''
 
@@ -252,7 +257,7 @@ function readdirSyncGlob(dir: string, issueNumber: number): string[] {
  */
 async function runMicroReview(
   phaseId: string,
-  issueNumber: number,
+  _issueNumber: number,
   diffBase: string,
   testPatterns: string[],
   specSection: string,
@@ -272,10 +277,13 @@ async function runMicroReview(
     const provider = getProvider(reviewer)
 
     // Get diff of non-test files
-    const allChanged = execSync(
-      `git diff --name-only "${diffBase}...HEAD" 2>/dev/null || true`,
-      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
-    ).trim().split('\n').filter(Boolean)
+    const allChanged = execSync(`git diff --name-only "${diffBase}...HEAD" 2>/dev/null || true`, {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+      .trim()
+      .split('\n')
+      .filter(Boolean)
 
     const prodFiles = allChanged.filter(
       (f) => !testPatterns.some((p) => f.endsWith(p.replace(/^\*/, ''))),
@@ -298,7 +306,8 @@ async function runMicroReview(
     const MAX_DIFF_LINES = 500
     const diffLines = diff.split('\n')
     if (diffLines.length > MAX_DIFF_LINES) {
-      diff = diffLines.slice(0, MAX_DIFF_LINES).join('\n') +
+      diff =
+        diffLines.slice(0, MAX_DIFF_LINES).join('\n') +
         '\n\n[Diff truncated at 500 lines — review remaining files manually]'
     }
 
@@ -337,7 +346,7 @@ ${diff}`
 }
 
 /**
- * Write per-phase evidence file to .claude/verification-evidence/phase-<id>-<issue>.json
+ * Write per-phase evidence file to .kata/verification-evidence/phase-<id>-<issue>.json
  * Does NOT touch {issue}.json — that file is owned by the configured code reviewer.
  */
 function writeEvidenceFile(
@@ -401,9 +410,7 @@ export async function checkPhase(args: string[]): Promise<void> {
 
   const issueNumber = await resolveIssueNumber(parsed.issueNumber, parsed.session)
   if (issueNumber === undefined) {
-    console.error(
-      'Error: Issue number required. Pass --issue=<N> or link session: kata link <N>',
-    )
+    console.error('Error: Issue number required. Pass --issue=<N> or link session: kata link <N>')
     process.exit(1)
   }
 
@@ -423,8 +430,14 @@ export async function checkPhase(args: string[]): Promise<void> {
 
   const steps: StepResult[] = []
 
+  // check_phase overrides: project.check_phase.X takes precedence over project.X
+  const cp = project.check_phase ?? {}
+
   // Step 1: Build
-  const buildStep = runStep('build', project.build_command)
+  const buildStep = runStep(
+    'build',
+    cp.build_command !== undefined ? cp.build_command : project.build_command,
+  )
   steps.push(buildStep)
   printStep(buildStep)
   if (!buildStep.passed) {
@@ -433,7 +446,10 @@ export async function checkPhase(args: string[]): Promise<void> {
   }
 
   // Step 2: Typecheck
-  const typecheckStep = runStep('typecheck', project.typecheck_command)
+  const typecheckStep = runStep(
+    'typecheck',
+    cp.typecheck_command !== undefined ? cp.typecheck_command : project.typecheck_command,
+  )
   steps.push(typecheckStep)
   printStep(typecheckStep)
   if (!typecheckStep.passed) {
@@ -442,7 +458,10 @@ export async function checkPhase(args: string[]): Promise<void> {
   }
 
   // Step 3: Tests
-  const testStep = runStep('tests', project.test_command)
+  const testStep = runStep(
+    'tests',
+    cp.test_command !== undefined ? cp.test_command : project.test_command,
+  )
   steps.push(testStep)
   printStep(testStep)
   if (!testStep.passed) {
@@ -451,7 +470,10 @@ export async function checkPhase(args: string[]): Promise<void> {
   }
 
   // Step 4: Smoke
-  const smokeStep = runStep('smoke', project.smoke_command)
+  const smokeStep = runStep(
+    'smoke',
+    cp.smoke_command !== undefined ? cp.smoke_command : project.smoke_command,
+  )
   steps.push(smokeStep)
   printStep(smokeStep)
   if (!smokeStep.passed) {

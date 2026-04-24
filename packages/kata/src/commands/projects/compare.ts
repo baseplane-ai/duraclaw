@@ -1,8 +1,13 @@
 import { join } from 'node:path'
+import {
+  diffModesYaml,
+  diffTemplates,
+  diffWmYaml,
+  loadYamlFile,
+} from '../../manager/config-diff.js'
 import { isManagerInitialized } from '../../manager/paths.js'
-import { readIndex, findProject } from '../../manager/registry.js'
-import { diffWmYaml, diffModesYaml, diffTemplates, loadYamlFile } from '../../manager/config-diff.js'
 import type { ProjectEntry } from '../../manager/registry.js'
+import { findProject, readIndex } from '../../manager/registry.js'
 
 /**
  * Get config directory path for a project.
@@ -147,7 +152,11 @@ export async function compareProjects(args: string[]): Promise<void> {
       // biome-ignore lint/suspicious/noConsole: CLI output
       console.log(`  modes with differences: ${modesDiff.different_modes.join(', ')}`)
     }
-    if (modesDiff.only_a.length === 0 && modesDiff.only_b.length === 0 && modesDiff.different_modes.length === 0) {
+    if (
+      modesDiff.only_a.length === 0 &&
+      modesDiff.only_b.length === 0 &&
+      modesDiff.different_modes.length === 0
+    ) {
       // biome-ignore lint/suspicious/noConsole: CLI output
       console.log('  (identical)')
     }

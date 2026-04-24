@@ -1,16 +1,17 @@
 // YAML parsing module
+
+export type { YamlParseResult } from './parser.js'
 export {
   parseYamlFrontmatter,
   parseYamlFrontmatterFromString,
   parseYamlFrontmatterWithError,
   readFullTemplateContent,
 } from './parser.js'
-export type { YamlParseResult } from './parser.js'
 export type {
-  TemplateYaml,
-  SpecYaml,
   PhaseDefinition,
-  SpecPhase,
   SpecBead,
+  SpecPhase,
+  SpecYaml,
   SubphasePattern,
+  TemplateYaml,
 } from './types.js'

@@ -29,9 +29,9 @@ import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import jsYaml from 'js-yaml'
 import { z } from 'zod'
+import { withRetry } from './retry.js'
 import type { AgentProvider, AgentRunOptions, ModelOption, ProviderCapabilities } from './types.js'
 import { isAllTools } from './types.js'
-import { withRetry } from './retry.js'
 
 // ─── Schema ──────────────────────────────────────────────────────────────────
 
@@ -52,12 +52,14 @@ const CliProviderConfigSchema = z.object({
   bypass_flags: z.array(z.string()).default([]),
   default_model: z.string().optional(),
   models: z.array(CliProviderModelSchema).default([]),
-  capabilities: z.object({
-    tool_filtering: z.boolean().default(false),
-    max_turns: z.boolean().default(false),
-    text_only: z.boolean().default(true),
-    permission_bypass: z.enum(['sdk', 'cli-flag', 'always']).default('always'),
-  }).default({}),
+  capabilities: z
+    .object({
+      tool_filtering: z.boolean().default(false),
+      max_turns: z.boolean().default(false),
+      text_only: z.boolean().default(true),
+      permission_bypass: z.enum(['sdk', 'cli-flag', 'always']).default('always'),
+    })
+    .default({}),
 })
 
 export type CliProviderConfig = z.infer<typeof CliProviderConfigSchema>
@@ -75,7 +77,7 @@ export function createCliProvider(config: CliProviderConfig): AgentProvider {
     permissionBypass: config.capabilities.permission_bypass,
   }
 
-  const models: ModelOption[] = config.models.map(m => ({
+  const models: ModelOption[] = config.models.map((m) => ({
     id: m.id,
     description: m.description,
     default: m.default,
@@ -92,7 +94,11 @@ export function createCliProvider(config: CliProviderConfig): AgentProvider {
       const timeoutMs = options.timeoutMs ?? 300_000
 
       // Warn about unsupported per-tool filtering
-      if (options.allowedTools?.length && !isAllTools(options.allowedTools) && !capabilities.toolFiltering) {
+      if (
+        options.allowedTools?.length &&
+        !isAllTools(options.allowedTools) &&
+        !capabilities.toolFiltering
+      ) {
         process.stderr.write(
           `${config.name}: per-tool filtering not supported, running with default tool access\n`,
         )
@@ -119,9 +125,11 @@ export function createCliProvider(config: CliProviderConfig): AgentProvider {
         args.push(config.prompt_flag, prompt)
       }
 
-      const runner = config.output_format === 'jsonl'
-        ? () => runJsonl(config.command, args, prompt, config.prompt_delivery, timeoutMs, options)
-        : async () => runText(config.command, args, prompt, config.prompt_delivery, timeoutMs, options)
+      const runner =
+        config.output_format === 'jsonl'
+          ? () => runJsonl(config.command, args, prompt, config.prompt_delivery, timeoutMs, options)
+          : async () =>
+              runText(config.command, args, prompt, config.prompt_delivery, timeoutMs, options)
       return withRetry(runner, { label: config.name })
     },
   }
@@ -143,7 +151,7 @@ function runText(
     stdio: [delivery === 'stdin' ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     encoding: 'utf-8',
     timeout: timeoutMs,
-    env: options.env ?? process.env as Record<string, string>,
+    env: options.env ?? (process.env as Record<string, string>),
   })
 
   if (result.error) {
@@ -155,9 +163,7 @@ function runText(
 
   if (result.status !== 0 && result.status !== null) {
     const stderr = result.stderr?.trim() || ''
-    throw new Error(
-      `${command} exited with code ${result.status}${stderr ? `: ${stderr}` : ''}`,
-    )
+    throw new Error(`${command} exited with code ${result.status}${stderr ? `: ${stderr}` : ''}`)
   }
 
   return result.stdout || ''
@@ -176,7 +182,7 @@ function runJsonl(
 
     try {
       const proc = spawn(command, args, {
-        env: options.env ?? process.env as Record<string, string>,
+        env: options.env ?? (process.env as Record<string, string>),
         stdio: ['pipe', 'pipe', 'pipe'],
       })
 
@@ -208,7 +214,9 @@ function runJsonl(
                 messages.push(item.text as string)
               }
             }
-          } catch { /* not JSON */ }
+          } catch {
+            /* not JSON */
+          }
         }
       })
 
@@ -266,7 +274,9 @@ export function loadProviderPlugins(dir: string): AgentProvider[] {
       const result = CliProviderConfigSchema.safeParse(parsed)
 
       if (!result.success) {
-        const issues = result.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join(', ')
+        const issues = result.error.issues
+          .map((i) => `${i.path.join('.')}: ${i.message}`)
+          .join(', ')
         process.stderr.write(`kata: invalid provider plugin ${file}: ${issues}\n`)
         continue
       }

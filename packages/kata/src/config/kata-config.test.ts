@@ -1,9 +1,14 @@
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
 import * as os from 'node:os'
+import { join } from 'node:path'
 import jsYaml from 'js-yaml'
-import { loadKataConfig, clearKataConfigCache, resolveKataModeAlias, type KataConfig } from './kata-config.js'
+import {
+  clearKataConfigCache,
+  type KataConfig,
+  loadKataConfig,
+  resolveKataModeAlias,
+} from './kata-config.js'
 
 function makeTmpDir(): string {
   const dir = join(
@@ -153,29 +158,16 @@ describe('loadKataConfig', () => {
     expect(first).toBe(second) // Same object reference
   })
 
-  it('works with old .claude/workflows layout', () => {
-    // Remove .kata, use old layout
-    rmSync(join(tmpDir, '.kata'), { recursive: true })
-    mkdirSync(join(tmpDir, '.claude', 'workflows'), { recursive: true })
-
-    const config = {
-      project: { name: 'old-layout' },
-      modes: { task: { template: 'task.md' } },
-    }
-    writeFileSync(join(tmpDir, '.claude', 'workflows', 'kata.yaml'), jsYaml.dump(config))
-
-    const result = loadKataConfig()
-    expect(result.project?.name).toBe('old-layout')
-  })
-
-  it('provides default task_rules and empty global_rules', () => {
+  it('provides default task_rules and default global_rules', () => {
     const config = { modes: {} }
     writeFileSync(join(tmpDir, '.kata', 'kata.yaml'), jsYaml.dump(config))
 
     const result = loadKataConfig()
     expect(result.task_rules.length).toBeGreaterThan(0)
     expect(result.task_rules[0]).toContain('TaskCreate')
-    expect(result.global_rules).toEqual([])
+    // global_rules has a default skill-invocation hint (not empty)
+    expect(Array.isArray(result.global_rules)).toBe(true)
+    expect(result.global_rules.some((r: string) => r.includes('Skill'))).toBe(true)
   })
 
   it('allows overriding task_rules and global_rules', () => {

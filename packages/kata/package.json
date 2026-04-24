@@ -1,0 +1,26 @@
+{
+  "name": "@duraclaw/kata",
+  "version": "0.5.1",
+  "private": true,
+  "description": "Structured workflow kata for Claude Code — modes, phases, tasks, and stop hooks for disciplined AI coding sessions",
+  "type": "module",
+  "bin": {
+    "kata": "kata"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test src/"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "js-yaml": "^4.1.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.50",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "~5.8.3"
+  }
+}

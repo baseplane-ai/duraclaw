@@ -1,8 +1,14 @@
 // kata config — display resolved configuration
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { findProjectDir, getPackageRoot, getProjectTemplatesDir } from '../session/lookup.js'
-import { loadKataConfig, getKataConfigPath } from '../config/kata-config.js'
+import { getKataConfigPath, loadKataConfig } from '../config/kata-config.js'
+import {
+  findProjectDir,
+  getPackageRoot,
+  getProjectSkillsDir,
+  getProjectTemplatesDir,
+  getUserSkillsDir,
+} from '../session/lookup.js'
 
 /**
  * kata config --show
@@ -11,10 +17,12 @@ import { loadKataConfig, getKataConfigPath } from '../config/kata-config.js'
  * Single file, no merge — provenance is always "project".
  */
 export async function config(args: string[]): Promise<void> {
-  if (args.includes('--show') || args.length === 0) {
+  if (args[0] === 'get' && args[1]) {
+    getConfigValue(args[1])
+  } else if (args.includes('--show') || args.length === 0) {
     showConfig()
   } else {
-    process.stdout.write('Usage: kata config --show\n')
+    process.stdout.write('Usage: kata config [--show | get <key>]\n')
   }
 }
 
@@ -24,7 +32,7 @@ function showConfig(): void {
   const configPath = getKataConfigPath(projectRoot)
 
   process.stdout.write('kata config (resolved)\n')
-  process.stdout.write('═'.repeat(60) + '\n')
+  process.stdout.write(`${'═'.repeat(60)}\n`)
   process.stdout.write(`source: ${configPath}\n\n`)
 
   // Scalar fields
@@ -49,9 +57,7 @@ function showConfig(): void {
 
   // Modes summary
   process.stdout.write('\n')
-  const modeNames = Object.keys(cfg.modes).filter(
-    (m) => !cfg.modes[m].deprecated,
-  )
+  const modeNames = Object.keys(cfg.modes).filter((m) => !cfg.modes[m].deprecated)
   process.stdout.write(`modes: ${modeNames.length} active modes\n`)
 
   // Template resolution summary
@@ -59,9 +65,66 @@ function showConfig(): void {
   const packageTemplateDir = join(getPackageRoot(), 'batteries', 'templates')
   try {
     const projTmplDir = getProjectTemplatesDir(projectRoot)
-    process.stdout.write(`  project:  ${projTmplDir} ${existsSync(projTmplDir) ? '(exists)' : '(not found)'}\n`)
+    process.stdout.write(
+      `  project:  ${projTmplDir} ${existsSync(projTmplDir) ? '(exists)' : '(not found)'}\n`,
+    )
   } catch {
     process.stdout.write('  project:  (no project)\n')
   }
-  process.stdout.write(`  package:  ${packageTemplateDir} ${existsSync(packageTemplateDir) ? '(exists)' : '(not found)'}\n`)
+  process.stdout.write(
+    `  package:  ${packageTemplateDir} ${existsSync(packageTemplateDir) ? '(exists)' : '(not found)'}\n`,
+  )
+
+  // Skills resolution summary
+  process.stdout.write('\nskills (lookup order: project → user):\n')
+  try {
+    const projSkillsDir = getProjectSkillsDir(projectRoot)
+    process.stdout.write(
+      `  project:  ${projSkillsDir} ${existsSync(projSkillsDir) ? '(exists)' : '(not found)'}\n`,
+    )
+  } catch {
+    process.stdout.write('  project:  (no project)\n')
+  }
+  const userSkillsDir = getUserSkillsDir()
+  process.stdout.write(
+    `  user:     ${userSkillsDir} ${existsSync(userSkillsDir) ? '(exists)' : '(not found)'}\n`,
+  )
+}
+
+function getConfigValue(key: string): void {
+  const cfg = loadKataConfig()
+
+  // Walk the dot-separated path
+  const parts = key.split('.')
+  let value: unknown = cfg
+
+  for (const part of parts) {
+    if (value === null || value === undefined || typeof value !== 'object') {
+      process.stderr.write(`Key not found: ${key}\n`)
+      process.exitCode = 1
+      return
+    }
+    value = (value as Record<string, unknown>)[part]
+  }
+
+  if (value === undefined) {
+    process.stderr.write(`Key not found: ${key}\n`)
+    process.exitCode = 1
+    return
+  }
+
+  // Output formatting
+  if (value === null) {
+    process.stdout.write('\n')
+  } else if (typeof value === 'boolean') {
+    process.stdout.write(`${value}\n`)
+  } else if (typeof value === 'string' || typeof value === 'number') {
+    process.stdout.write(`${value}\n`)
+  } else if (Array.isArray(value)) {
+    for (const item of value) {
+      process.stdout.write(`${item}\n`)
+    }
+  } else if (typeof value === 'object') {
+    process.stdout.write(`${JSON.stringify(value, null, 2)}\n`)
+  }
 }

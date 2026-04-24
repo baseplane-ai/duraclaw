@@ -1,14 +1,11 @@
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
 import * as os from 'node:os'
-import { diffWmYaml, diffModesYaml, diffTemplates } from './config-diff.js'
+import { join } from 'node:path'
+import { diffModesYaml, diffTemplates, diffWmYaml } from './config-diff.js'
 
 function makeTmpDir(): string {
-  const dir = join(
-    os.tmpdir(),
-    `wm-diff-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-  )
+  const dir = join(os.tmpdir(), `wm-diff-test-${Date.now()}-${Math.random().toString(36).slice(2)}`)
   mkdirSync(dir, { recursive: true })
   return dir
 }

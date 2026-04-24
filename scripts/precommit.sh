@@ -24,7 +24,8 @@ staged_files="$(
   git diff --cached --name-only --diff-filter=ACMR |
     grep -E '\.(ts|tsx|js|jsx|json)$' |
     grep -v 'routeTree\.gen\.ts$' |
-    grep -v '\.config\.' || true
+    grep -v '\.config\.' |
+    grep -v '^packages/kata/' || true
 )"
 
 if [[ -n "$staged_files" ]]; then

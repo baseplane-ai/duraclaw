@@ -5,25 +5,31 @@
  * Project-level plugins: .kata/providers/*.yaml (loaded on first access).
  */
 
-export type { AgentProvider, AgentRunOptions, ModelOption, ThinkingLevel, ProviderCapabilities } from './types.js'
-export { CANONICAL_TOOLS, isAllTools } from './types.js'
-export { preparePrompt, loadPrompt, listPrompts } from './prompt.js'
-export type { PreparedPrompt } from './prompt.js'
 export { claudeProvider } from './claude.js'
-export { geminiProvider } from './gemini.js'
-export { codexProvider } from './codex.js'
-export { createCliProvider, loadProviderPlugins } from './cli-provider.js'
 export type { CliProviderConfig } from './cli-provider.js'
-export { runAgentStep, extractScore } from './step-runner.js'
+export { createCliProvider, loadProviderPlugins } from './cli-provider.js'
+export { codexProvider } from './codex.js'
+export { geminiProvider } from './gemini.js'
+export type { PreparedPrompt } from './prompt.js'
+export { listPrompts, loadPrompt, preparePrompt } from './prompt.js'
+export { isRateLimitError, withRetry } from './retry.js'
 export type { StepContext, StepRunResult } from './step-runner.js'
-export { withRetry, isRateLimitError } from './retry.js'
+export { extractScore, runAgentStep } from './step-runner.js'
+export type {
+  AgentProvider,
+  AgentRunOptions,
+  ModelOption,
+  ProviderCapabilities,
+  ThinkingLevel,
+} from './types.js'
+export { CANONICAL_TOOLS, isAllTools } from './types.js'
 
-import type { AgentProvider } from './types.js'
-import { claudeProvider } from './claude.js'
-import { geminiProvider } from './gemini.js'
-import { codexProvider } from './codex.js'
-import { loadProviderPlugins } from './cli-provider.js'
 import { getProjectProvidersDir } from '../session/lookup.js'
+import { claudeProvider } from './claude.js'
+import { loadProviderPlugins } from './cli-provider.js'
+import { codexProvider } from './codex.js'
+import { geminiProvider } from './gemini.js'
+import type { AgentProvider } from './types.js'
 
 const providers: Record<string, AgentProvider> = {
   claude: claudeProvider,
@@ -64,9 +70,7 @@ export function getProvider(name: string): AgentProvider {
   ensurePluginsLoaded()
   const p = providers[name]
   if (!p) {
-    throw new Error(
-      `Unknown provider: ${name}. Available: ${Object.keys(providers).join(', ')}`,
-    )
+    throw new Error(`Unknown provider: ${name}. Available: ${Object.keys(providers).join(', ')}`)
   }
   return p
 }

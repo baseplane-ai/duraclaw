@@ -1,10 +1,10 @@
-import { existsSync, readFileSync, writeFileSync, copyFileSync, mkdirSync } from 'node:fs'
-import { resolve, basename, join } from 'node:path'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { basename, join, resolve } from 'node:path'
 import jsYaml from 'js-yaml'
-import { findProjectDir, getProjectTemplatesDir } from '../session/lookup.js'
 import { getKataConfigPath } from '../config/kata-config.js'
-import { validatePhases } from '../validation/index.js'
+import { findProjectDir, getProjectTemplatesDir } from '../session/lookup.js'
 import { VALID_CATEGORIES } from '../state/schema.js'
+import { validatePhases } from '../validation/index.js'
 
 interface RegisterModeOptions {
   templatePath: string
@@ -84,13 +84,13 @@ Options:
   --category=CATEGORY       One of: ${VALID_CATEGORIES.join(', ')} (default: special)
   --keywords=K1,K2          Intent keywords (comma-separated)
   --aliases=A1,A2           Aliases for the mode (comma-separated)
-  --copy                    Copy template to .claude/workflows/templates/
+  --copy                    Copy template to .kata/templates/
   --dry-run                 Preview what would be registered
   --help, -h                Show this help message
 
 Examples:
-  # Register template in-place (for templates already in .claude/workflows/templates/)
-  kata register-mode .claude/workflows/templates/my-workflow.md
+  # Register template in-place (for templates already in .kata/templates/)
+  kata register-mode .kata/templates/my-workflow.md
 
   # Register and copy external template
   kata register-mode /tmp/my-workflow.md --copy
@@ -143,7 +143,7 @@ export async function registerModeCommand(args: string[]): Promise<void> {
   const projectDir = findProjectDir()
   if (!projectDir) {
     // biome-ignore lint/suspicious/noConsole: CLI output
-    console.error('Error: Could not find .claude directory')
+    console.error('Error: Could not find .kata directory')
     process.exit(1)
   }
 

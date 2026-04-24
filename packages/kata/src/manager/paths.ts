@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
 import { homedir } from 'node:os'
+import { join } from 'node:path'
 
 /**
  * Root directory for the kata manager project.
@@ -22,10 +22,7 @@ export function ensureManagerDir(): string {
   // Create minimal wm.yaml if it doesn't exist
   const wmYamlPath = join(kataDir, 'wm.yaml')
   if (!existsSync(wmYamlPath)) {
-    writeFileSync(
-      wmYamlPath,
-      `# kata manager project config\nproject:\n  name: kata-manager\n`,
-    )
+    writeFileSync(wmYamlPath, `# kata manager project config\nproject:\n  name: kata-manager\n`)
   }
 
   return MANAGER_ROOT

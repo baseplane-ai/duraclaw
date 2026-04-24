@@ -1,8 +1,7 @@
-import { isManagerInitialized } from '../../manager/paths.js'
-import { readIndex, findProject } from '../../manager/registry.js'
 import { ALL_HEALTH_CHECKS } from '../../manager/health-checks.js'
+import { isManagerInitialized } from '../../manager/paths.js'
 import type { ProjectEntry } from '../../manager/registry.js'
-import type { HealthResult } from '../../manager/health-checks.js'
+import { findProject, readIndex } from '../../manager/registry.js'
 
 interface ProjectReport {
   name: string

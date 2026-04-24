@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import jsYaml from 'js-yaml'
 
@@ -31,10 +31,7 @@ function deepEqual(a: unknown, b: unknown): boolean {
 /**
  * Diff two wm.yaml config objects.
  */
-export function diffWmYaml(
-  a: Record<string, unknown>,
-  b: Record<string, unknown>,
-): ConfigDiff {
+export function diffWmYaml(a: Record<string, unknown>, b: Record<string, unknown>): ConfigDiff {
   const shared: Record<string, unknown> = {}
   const different: Record<string, { a: unknown; b: unknown }> = {}
   const only_a: Record<string, unknown> = {}
@@ -65,10 +62,7 @@ export function diffWmYaml(
 /**
  * Diff two modes.yaml config objects.
  */
-export function diffModesYaml(
-  a: Record<string, unknown>,
-  b: Record<string, unknown>,
-): ModesDiff {
+export function diffModesYaml(a: Record<string, unknown>, b: Record<string, unknown>): ModesDiff {
   const modesA = Object.keys((a.modes as Record<string, unknown>) || {})
   const modesB = Object.keys((b.modes as Record<string, unknown>) || {})
 

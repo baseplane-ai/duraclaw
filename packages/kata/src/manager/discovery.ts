@@ -1,6 +1,6 @@
 import { existsSync, readdirSync } from 'node:fs'
-import { join } from 'node:path'
 import { homedir } from 'node:os'
+import { join } from 'node:path'
 
 /**
  * De-canonicalize a Claude Code project directory name back to a filesystem path.
@@ -14,13 +14,13 @@ import { homedir } from 'node:os'
  */
 export function decanonPath(dirName: string): string {
   // Direct replacement: leading - becomes /, rest - become /
-  const candidate = '/' + dirName.slice(1).replace(/-/g, '/')
+  const candidate = `/${dirName.slice(1).replace(/-/g, '/')}`
   if (existsSync(candidate)) return candidate
 
   // Ambiguity handling: try shorter segments for longest existing prefix
   const parts = dirName.slice(1).split('-')
   for (let i = parts.length; i >= 1; i--) {
-    const prefix = '/' + parts.slice(0, i).join('/')
+    const prefix = `/${parts.slice(0, i).join('/')}`
     if (existsSync(prefix)) {
       const rest = parts.slice(i).join('-')
       const full = rest ? join(prefix, rest) : prefix
@@ -35,15 +35,9 @@ export function decanonPath(dirName: string): string {
  * Check if a directory is a kata-enabled project.
  * Returns the layout type if enabled, or null if not.
  */
-export function isKataEnabled(projectPath: string): { enabled: boolean; layout: '.kata' | '.claude' } {
-  // Check for new .kata/ layout first
-  if (existsSync(join(projectPath, '.kata', 'wm.yaml'))) {
+export function isKataEnabled(projectPath: string): { enabled: boolean; layout: '.kata' } {
+  if (existsSync(join(projectPath, '.kata', 'kata.yaml'))) {
     return { enabled: true, layout: '.kata' }
-  }
-
-  // Check for old .claude/workflows/wm.yaml layout
-  if (existsSync(join(projectPath, '.claude', 'workflows', 'wm.yaml'))) {
-    return { enabled: true, layout: '.claude' }
   }
 
   return { enabled: false, layout: '.kata' }
@@ -56,7 +50,7 @@ export function isKataEnabled(projectPath: string): { enabled: boolean; layout: 
 export function scanClaudeProjects(): Array<{
   path: string
   name: string
-  kata_layout: '.kata' | '.claude'
+  kata_layout: '.kata'
   discovered_from: 'auto'
 }> {
   const claudeProjectsDir = join(homedir(), '.claude', 'projects')
@@ -65,7 +59,7 @@ export function scanClaudeProjects(): Array<{
   const entries: Array<{
     path: string
     name: string
-    kata_layout: '.kata' | '.claude'
+    kata_layout: '.kata'
     discovered_from: 'auto'
   }> = []
 

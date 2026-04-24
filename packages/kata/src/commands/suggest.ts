@@ -325,6 +325,7 @@ export async function suggest(args: string[]): Promise<void> {
   const message = args.join(' ')
 
   if (!message) {
+    // biome-ignore lint/suspicious/noConsole: intentional CLI output
     console.log(JSON.stringify({ mode: null, confidence: null, guidance: '', command: null }))
     return
   }
@@ -339,7 +340,7 @@ export async function suggest(args: string[]): Promise<void> {
       command: searchIntent.commands[0] || null,
       searchIntent,
     }
-
+    // biome-ignore lint/suspicious/noConsole: intentional CLI output
     console.log(JSON.stringify(result))
     return
   }
@@ -373,6 +374,7 @@ ${modeList}`,
       command: null,
     }
 
+    // biome-ignore lint/suspicious/noConsole: intentional CLI output
     console.log(JSON.stringify(result))
     return
   }
@@ -394,7 +396,7 @@ Redirecting to **${redirectConfig.name ?? modeConfig.redirect_to}** mode.
 \`kata enter ${modeConfig.redirect_to}\``,
         command: `kata enter ${modeConfig.redirect_to}`,
       }
-
+      // biome-ignore lint/suspicious/noConsole: intentional CLI output
       console.log(JSON.stringify(result))
       return
     }
@@ -410,5 +412,6 @@ Redirecting to **${redirectConfig.name ?? modeConfig.redirect_to}** mode.
     command,
   }
 
+  // biome-ignore lint/suspicious/noConsole: intentional CLI output
   console.log(JSON.stringify(result))
 }

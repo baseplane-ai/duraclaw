@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import { resolve, dirname, basename } from 'node:path'
+import { basename, dirname, resolve } from 'node:path'
 import { findProjectDir } from '../session/lookup.js'
 
 interface InitTemplateOptions {
@@ -160,7 +160,9 @@ export async function initTemplateCommand(args: string[]): Promise<void> {
     // biome-ignore lint/suspicious/noConsole: CLI output
     console.error('  kata init-template /tmp/my-workflow.md')
     // biome-ignore lint/suspicious/noConsole: CLI output
-    console.error('  kata init-template packages/workflow-management/templates/custom.md --phases=5')
+    console.error(
+      '  kata init-template packages/workflow-management/templates/custom.md --phases=5',
+    )
     // biome-ignore lint/suspicious/noConsole: CLI output
     console.error('')
     // biome-ignore lint/suspicious/noConsole: CLI output

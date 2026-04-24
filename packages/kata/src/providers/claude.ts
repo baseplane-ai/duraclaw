@@ -18,7 +18,9 @@ import { isAllTools } from './types.js'
 function resolveClaudeExecutable(): string | undefined {
   try {
     const require = createRequire(import.meta.url)
-    const sdkDir = require.resolve('@anthropic-ai/claude-agent-sdk/package.json').replace('/package.json', '')
+    const sdkDir = require
+      .resolve('@anthropic-ai/claude-agent-sdk/package.json')
+      .replace('/package.json', '')
     return `${sdkDir}/cli.js`
   } catch {
     return undefined
@@ -40,9 +42,22 @@ export const claudeProvider: AgentProvider = {
     permissionBypass: 'sdk',
   },
   models: [
-    { id: 'claude-opus-4-6', description: 'Flagship model, deep reasoning, 1M context', thinkingLevels: claudeThinking },
-    { id: 'claude-sonnet-4-6', description: 'Best balance of speed and intelligence', default: true, thinkingLevels: claudeThinking },
-    { id: 'claude-haiku-4-5', description: 'Fast and cheap for routine tasks', thinkingLevels: claudeThinking },
+    {
+      id: 'claude-opus-4-6',
+      description: 'Flagship model, deep reasoning, 1M context',
+      thinkingLevels: claudeThinking,
+    },
+    {
+      id: 'claude-sonnet-4-6',
+      description: 'Best balance of speed and intelligence',
+      default: true,
+      thinkingLevels: claudeThinking,
+    },
+    {
+      id: 'claude-haiku-4-5',
+      description: 'Fast and cheap for routine tasks',
+      thinkingLevels: claudeThinking,
+    },
   ],
 
   async fetchModels(): Promise<ModelOption[]> {
@@ -130,7 +145,9 @@ export const claudeProvider: AgentProvider = {
 
 /** Returns true if the env var key is a Claude nesting-related variable. */
 function isClaudeNestingVar(key: string): boolean {
-  return key.startsWith('CLAUDECODE') || key.startsWith('CLAUDE_CODE_') || key === 'CLAUDE_PROJECT_DIR'
+  return (
+    key.startsWith('CLAUDECODE') || key.startsWith('CLAUDE_CODE_') || key === 'CLAUDE_PROJECT_DIR'
+  )
 }
 
 /** Build a filtered env stripping Claude-internal vars for the spawned process. */

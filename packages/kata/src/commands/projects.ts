@@ -1,14 +1,15 @@
 // kata projects - Multi-project management dispatcher
+
+import { addProject } from './projects/add.js'
+import { backupProjects } from './projects/backup.js'
+import { compareProjects } from './projects/compare.js'
+import { doctorProjects } from './projects/doctor.js'
+import { initProject } from './projects/init.js'
 import { initManager } from './projects/init-manager.js'
 import { listProjects } from './projects/list.js'
-import { addProject } from './projects/add.js'
 import { removeProject } from './projects/remove.js'
-import { initProject } from './projects/init.js'
-import { doctorProjects } from './projects/doctor.js'
-import { upgradeProjects } from './projects/upgrade.js'
-import { compareProjects } from './projects/compare.js'
 import { syncProjects } from './projects/sync.js'
-import { backupProjects } from './projects/backup.js'
+import { upgradeProjects } from './projects/upgrade.js'
 
 const SUBCOMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   'init-manager': initManager,

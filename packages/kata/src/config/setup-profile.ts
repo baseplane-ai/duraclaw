@@ -1,6 +1,6 @@
 // Setup profile for kata setup
 // Handles auto-detection of project settings and default profile generation
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 
 /**
@@ -19,7 +19,6 @@ export interface SetupProfile {
     code_review: boolean
     code_reviewer: string | null
   }
-  strict: boolean
 }
 
 /**
@@ -148,6 +147,5 @@ export function getDefaultProfile(cwd?: string): SetupProfile {
       code_review: false,
       code_reviewer: null,
     },
-    strict: false,
   }
 }

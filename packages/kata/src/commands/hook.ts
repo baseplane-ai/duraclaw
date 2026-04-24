@@ -2,13 +2,36 @@
 // Core of hooks-as-commands architecture: each hook event has a handler function
 // that reads stdin JSON, performs the check, and outputs Claude Code hook JSON.
 import { execSync } from 'node:child_process'
-import { appendFileSync, mkdirSync } from 'node:fs'
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { getStateFilePath, findProjectDir, getSessionsDir } from '../session/lookup.js'
+import {
+  findProjectDir,
+  getSessionsDir,
+  getStateFilePath,
+  resolveTemplatePath,
+} from '../session/lookup.js'
 import { readState, stateExists } from '../state/reader.js'
-import { readNativeTaskFiles } from './enter/task-factory.js'
 import type { SessionState } from '../state/schema.js'
+import {
+  appendEdit,
+  parseGitStatusPaths,
+  readEditsSet,
+  toGitRelative,
+} from '../tracking/edits-log.js'
 import { isNativeTasksEnabled } from '../utils/tasks-check.js'
+import type { Gate } from '../validation/schemas.js'
+import { type PlaceholderContext, resolvePlaceholders } from './enter/placeholder.js'
+import { readNativeTaskFiles } from './enter/task-factory.js'
+import { parseTemplateYaml } from './enter/template.js'
 
 /**
  * Claude Code hook output format
@@ -131,37 +154,53 @@ async function captureConsoleLog(fn: () => Promise<void>): Promise<string> {
 export async function handleSessionStart(input: Record<string, unknown>): Promise<void> {
   const sessionId = input.session_id as string | undefined
 
-  // Import and run init (silently capture its output)
-  // No --force: session_id handles lifecycle naturally.
-  // New session or /clear → new session_id → fresh state created.
-  // Compact or resume → same session_id → existing state preserved.
-  const { init } = await import('./init.js')
-  const initArgs: string[] = []
-  if (sessionId) initArgs.push(`--session=${sessionId}`)
-  await captureConsoleLog(() => init(initArgs))
+  try {
+    // Import and run init (silently capture its output)
+    // No --force: session_id handles lifecycle naturally.
+    // New session or /clear → new session_id → fresh state created.
+    // Compact or resume → same session_id → existing state preserved.
+    const { init } = await import('./init.js')
+    const initArgs: string[] = []
+    if (sessionId) initArgs.push(`--session=${sessionId}`)
+    await captureConsoleLog(() => init(initArgs))
 
-  // Delegate to prime for the full kata hints context
-  const { prime } = await import('./prime.js')
-  const primeArgs: string[] = []
-  if (sessionId) primeArgs.push(`--session=${sessionId}`)
-  const additionalContext = await captureConsoleLog(() => prime(primeArgs))
+    // Delegate to prime for the full kata hints context
+    const { prime } = await import('./prime.js')
+    const primeArgs: string[] = []
+    if (sessionId) primeArgs.push(`--session=${sessionId}`)
+    const additionalContext = await captureConsoleLog(() => prime(primeArgs))
 
-  if (sessionId) {
-    const source = (input.source as string) ?? 'unknown'
-    logHook(sessionId, { hook: 'session-start', decision: 'context', source })
+    if (sessionId) {
+      const source = (input.source as string) ?? 'unknown'
+      logHook(sessionId, { hook: 'session-start', decision: 'context', source })
+    }
+
+    // Prepend tasks-disabled warning when CLAUDE_CODE_ENABLE_TASKS=false
+    const tasksWarning = isNativeTasksEnabled()
+      ? ''
+      : '\n⚠️ WARNING: CLAUDE_CODE_ENABLE_TASKS is disabled. kata workflow tracking (TaskList, TaskUpdate) will not work. To enable: set env.CLAUDE_CODE_ENABLE_TASKS to "true" in ~/.claude/settings.json, then restart Claude Code.\n'
+
+    outputJson({
+      hookSpecificOutput: {
+        hookEventName: 'SessionStart',
+        additionalContext: tasksWarning + additionalContext,
+      },
+    })
+  } catch (err) {
+    // Config errors (missing kata.yaml, invalid config) should not crash the hook.
+    // Suggest freeform mode so the user can fix the config without being blocked.
+    const errorMsg = err instanceof Error ? err.message : String(err)
+    outputJson({
+      hookSpecificOutput: {
+        hookEventName: 'SessionStart',
+        additionalContext:
+          `⚠️ **kata config error:** ${errorMsg}\n\n` +
+          `**To fix:** enter freeform mode to bypass mode-gate and repair the config:\n` +
+          '```\nkata enter freeform\n```\n' +
+          `Or run \`kata setup\` to reinitialize.`,
+      },
+    })
   }
-
-  // Prepend tasks-disabled warning when CLAUDE_CODE_ENABLE_TASKS=false
-  const tasksWarning = isNativeTasksEnabled()
-    ? ''
-    : '\n⚠️ WARNING: CLAUDE_CODE_ENABLE_TASKS is disabled. kata workflow tracking (TaskList, TaskUpdate) will not work. To enable: set env.CLAUDE_CODE_ENABLE_TASKS to "true" in ~/.claude/settings.json, then restart Claude Code.\n'
-
-  outputJson({
-    hookSpecificOutput: {
-      hookEventName: 'SessionStart',
-      additionalContext: tasksWarning + additionalContext,
-    },
-  })
 }
 
 // ── Handler: user-prompt ──
@@ -178,20 +217,33 @@ export async function handleUserPrompt(input: Record<string, unknown>): Promise<
   if (session) {
     const activeMode = session.state.currentMode || session.state.sessionType || 'default'
     if (activeMode !== 'default') {
-      const { loadKataConfig } = await import('../config/kata-config.js')
-      const kataConfig = loadKataConfig()
-      const availableModes = Object.keys(kataConfig.modes)
-        .filter((id) => !kataConfig.modes[id].deprecated)
-        .join(', ')
-      if (sessionId) logHook(sessionId, { hook: 'user-prompt', decision: 'context', active_mode: activeMode })
-      outputJson({
-        hookSpecificOutput: {
-          hookEventName: 'UserPromptSubmit',
-          additionalContext:
-            `Currently in **${activeMode}** mode. ` +
-            `To switch modes: \`kata enter <mode>\` (available: ${availableModes}).`,
-        },
-      })
+      try {
+        const { loadKataConfig } = await import('../config/kata-config.js')
+        const kataConfig = loadKataConfig()
+        const availableModes = Object.keys(kataConfig.modes)
+          .filter((id) => !kataConfig.modes[id].deprecated)
+          .join(', ')
+        if (sessionId)
+          logHook(sessionId, { hook: 'user-prompt', decision: 'context', active_mode: activeMode })
+        outputJson({
+          hookSpecificOutput: {
+            hookEventName: 'UserPromptSubmit',
+            additionalContext:
+              `Currently in **${activeMode}** mode. ` +
+              `To switch modes: \`kata enter <mode>\` (available: ${availableModes}).`,
+          },
+        })
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err)
+        outputJson({
+          hookSpecificOutput: {
+            hookEventName: 'UserPromptSubmit',
+            additionalContext:
+              `⚠️ **kata config error:** ${errorMsg}\n\n` +
+              `Enter freeform mode to bypass and fix: \`kata enter freeform\``,
+          },
+        })
+      }
       return
     }
   }
@@ -216,7 +268,8 @@ export async function handleUserPrompt(input: Record<string, unknown>): Promise<
     // Could not parse suggest output
   }
 
-  if (sessionId) logHook(sessionId, { hook: 'user-prompt', decision: 'context', suggested_mode: suggestedMode })
+  if (sessionId)
+    logHook(sessionId, { hook: 'user-prompt', decision: 'context', suggested_mode: suggestedMode })
 
   outputJson({
     hookSpecificOutput: {
@@ -264,7 +317,9 @@ export async function handleModeGate(input: Record<string, unknown>): Promise<vo
     const command = (toolInput.command as string) ?? ''
     // Match `kata` as a top-level command: at start, or after ;/&&/||/|
     // Supports bare `kata`, `./kata`, or absolute path `/some/path/kata`
-    const kataAsCommand = /(?:^|[;&|]\s*)((?:\.\/|(?:\/\S+\/)*)kata(?:-\S*)?)(?=\s+\w)/.exec(command)
+    const kataAsCommand = /(?:^|[;&|]\s*)((?:\.\/|(?:\/\S+\/)*)kata(?:-\S*)?)(?=\s+\w)/.exec(
+      command,
+    )
     if (kataAsCommand && !command.includes('--session=') && !/kata\s+hook\b/.test(command)) {
       // Inject --session after the matched kata subcommand (e.g. `kata enter` → `kata enter --session=ID`)
       const kataPath = kataAsCommand[1]
@@ -315,15 +370,19 @@ export async function handleTaskDeps(input: Record<string, unknown>): Promise<vo
   try {
     const session = await getSessionState(input.session_id as string | undefined)
     if (!session) {
-      outputJson({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' } })
+      outputJson({
+        hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' },
+      })
       return
     }
 
     const tasks = readNativeTaskFiles(session.sessionId)
     const task = tasks.find((t) => t.id === taskId)
 
-    if (!task || !task.blockedBy?.length) {
-      outputJson({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' } })
+    if (!task?.blockedBy?.length) {
+      outputJson({
+        hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' },
+      })
       return
     }
 
@@ -340,7 +399,13 @@ export async function handleTaskDeps(input: Record<string, unknown>): Promise<vo
           return dep ? `[${dep.id}] ${dep.subject}` : depId
         })
         .join(', ')
-      if (input.session_id) logHook(input.session_id as string, { hook: 'task-deps', decision: 'deny', task: taskId, blocked_by: incomplete })
+      if (input.session_id)
+        logHook(input.session_id as string, {
+          hook: 'task-deps',
+          decision: 'deny',
+          task: taskId,
+          blocked_by: incomplete,
+        })
       outputJson({
         hookSpecificOutput: {
           hookEventName: 'PreToolUse',
@@ -354,7 +419,8 @@ export async function handleTaskDeps(input: Record<string, unknown>): Promise<vo
     // On any error, allow — don't block on infra failures
   }
 
-  if (input.session_id) logHook(input.session_id as string, { hook: 'task-deps', decision: 'allow', task: taskId })
+  if (input.session_id)
+    logHook(input.session_id as string, { hook: 'task-deps', decision: 'allow', task: taskId })
   outputJson({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' } })
 }
 
@@ -373,11 +439,13 @@ export async function handleTaskEvidence(_input: Record<string, unknown>): Promi
     } catch {
       // No .claude/ found — fall back to hook runner's cwd
     }
+    // Strip trailing newlines only — consistent with other porcelain call sites
+    // so that the leading space of " M path" status lines is preserved.
     const gitStatus = execSync('git status --porcelain 2>/dev/null || true', {
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
       ...(cwd ? { cwd } : {}),
-    }).trim()
+    }).replace(/\n+$/, '')
 
     if (gitStatus) {
       // There are uncommitted changes — remind agent to commit before marking done
@@ -392,7 +460,12 @@ export async function handleTaskEvidence(_input: Record<string, unknown>): Promi
     // Git unavailable — no advisory needed
   }
 
-  if (_input.session_id) logHook(_input.session_id as string, { hook: 'task-evidence', decision: 'allow', uncommitted: !!additionalContext })
+  if (_input.session_id)
+    logHook(_input.session_id as string, {
+      hook: 'task-evidence',
+      decision: 'allow',
+      uncommitted: !!additionalContext,
+    })
   outputJson({
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
@@ -454,6 +527,237 @@ function logStopHook(
   }
 }
 
+/**
+ * Write a `run-end.json` artifact in the session folder when a Stop event
+ * results in a successful can-exit decision (i.e. the run is cleanly ending).
+ *
+ * Overwrites on each successful stop event so the file always reflects the
+ * latest clean exit snapshot. Downstream tooling (evals, audits, post-run
+ * checks) can detect a successful run end by the presence + freshness of
+ * this artifact, without having to grep through hooks.log.jsonl.
+ *
+ * Skipped for the "background agents active" deferral branch since that is
+ * a permissive override, not a true clean exit.
+ *
+ * Best-effort: any failure (git unavailable, fs error, etc.) is swallowed
+ * so the hook itself never fails on artifact write.
+ */
+function writeRunEndArtifact(
+  sessionId: string,
+  state: SessionState,
+  payload: {
+    note: string
+    stopConditions: Array<string | { condition: string; stage?: string }>
+    advisories?: string[]
+  },
+): void {
+  try {
+    const projectDir = findProjectDir()
+    const sessionsDir = getSessionsDir(projectDir)
+    const sessionDir = join(sessionsDir, sessionId)
+    mkdirSync(sessionDir, { recursive: true })
+
+    // Capture branch + HEAD commit (best-effort; missing values left undefined)
+    let branch: string | undefined
+    let commit: string | undefined
+    try {
+      branch =
+        execSync('git rev-parse --abbrev-ref HEAD 2>/dev/null', {
+          encoding: 'utf-8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+          cwd: projectDir,
+        }).trim() || undefined
+    } catch {
+      /* ignore */
+    }
+    try {
+      commit =
+        execSync('git rev-parse HEAD 2>/dev/null', {
+          encoding: 'utf-8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+          cwd: projectDir,
+        }).trim() || undefined
+    } catch {
+      /* ignore */
+    }
+
+    // Normalize stop conditions to plain string list (drop optional stage scoping)
+    const stopConditions = payload.stopConditions.map((c) =>
+      typeof c === 'string' ? c : c.condition,
+    )
+
+    const artifact = {
+      ts: new Date().toISOString(),
+      sessionId,
+      workflowId: state.workflowId,
+      mode: state.currentMode || state.sessionType,
+      issueNumber: state.issueNumber ?? null,
+      branch,
+      commit,
+      completedPhases: state.completedPhases ?? [],
+      stopConditions,
+      advisories: payload.advisories ?? [],
+      note: payload.note,
+    }
+    writeFileSync(join(sessionDir, 'run-end.json'), `${JSON.stringify(artifact, null, 2)}\n`)
+  } catch {
+    // Best-effort — never fail the hook
+  }
+}
+
+/**
+ * Resolve the transcript path for a session.
+ * Claude Code stores transcripts at ~/.claude/projects/<encoded-dir>/<session-id>.jsonl
+ * where <encoded-dir> is the project path with / replaced by -.
+ */
+function resolveTranscriptPath(sessionId: string): string | undefined {
+  try {
+    const projectDir = findProjectDir()
+    if (!projectDir) return undefined
+    const encoded = projectDir.replace(/\//g, '-')
+    const transcriptDir = join(homedir(), '.claude', 'projects', encoded)
+    const transcriptPath = join(transcriptDir, `${sessionId}.jsonl`)
+    if (existsSync(transcriptPath)) return transcriptPath
+
+    // Fallback: scan the projects dir for any file matching the session ID
+    const projectsDir = join(homedir(), '.claude', 'projects')
+    if (!existsSync(projectsDir)) return undefined
+    for (const dir of readdirSync(projectsDir)) {
+      const candidate = join(projectsDir, dir, `${sessionId}.jsonl`)
+      if (existsSync(candidate)) return candidate
+    }
+    return undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Default recency window for background-agent detection. An unmatched Agent
+ * tool_use whose transcript timestamp is older than this is treated as
+ * abandoned, not active. Required for SDK-driven sessions that sometimes
+ * never emit a matching tool_result (issue #60, #68).
+ */
+const AGENT_ACTIVE_WINDOW_MS = 120_000
+
+/**
+ * Normalize a transcript `message.content` field into an array of content
+ * blocks. Claude Code (CLI) stores typed user prompts as
+ * `[{type:'text', text:'...'}]`, but SDK sessions (`entrypoint: "sdk-ts"`)
+ * store them as a bare string. Without this normalization, `for...of` over
+ * a string iterates characters and the text-block detection silently
+ * fails — see issue #68.
+ */
+function normalizeContentBlocks(raw: unknown): Array<Record<string, unknown>> {
+  if (Array.isArray(raw)) {
+    return raw as Array<Record<string, unknown>>
+  }
+  if (typeof raw === 'string' && raw.trim()) {
+    return [{ type: 'text', text: raw }]
+  }
+  return []
+}
+
+/**
+ * Check if there are active background agents by scanning the session transcript.
+ * An Agent tool_use without a matching tool_result means the agent is still running.
+ *
+ * Two layered heuristics decide whether an unmatched Agent ID is still active:
+ *
+ * 1. **User-prompt staleness clear** (issue #60): when the user sends a new
+ *    prompt (a `user` entry carrying text content, not just tool_results),
+ *    all still-unmatched Agent IDs from before that prompt are abandoned.
+ *    Handles both array-of-blocks and SDK string-form content (issue #68).
+ *
+ * 2. **Recency window** (issue #68): an unmatched Agent whose tool_use
+ *    timestamp is older than `AGENT_ACTIVE_WINDOW_MS` is treated as
+ *    abandoned. Required for SDK orchestrators that never emit another
+ *    user prompt, so the staleness clear alone can't fire.
+ *
+ * Also recognizes `"name":"Task"` in addition to `"name":"Agent"` — older
+ * Claude Code versions (≤2.1.50) and SDK tool-allowlists name the subagent
+ * tool `Task`.
+ *
+ * @param transcriptPath  path to the session transcript `.jsonl` file
+ * @param now             current time in ms (override for tests)
+ */
+export function hasActiveBackgroundAgents(
+  transcriptPath: string | undefined,
+  now: number = Date.now(),
+): boolean {
+  if (!transcriptPath) return false
+  try {
+    const content = readFileSync(transcriptPath, 'utf-8')
+    const lines = content.split('\n').filter((l) => l.trim())
+
+    // Track unmatched Agent tool_use IDs along with their transcript timestamps.
+    // Missing timestamp → undefined (no recency filter applies to that entry).
+    const agentToolUseIds = new Map<string, number | undefined>()
+
+    for (const line of lines) {
+      try {
+        const msg = JSON.parse(line) as Record<string, unknown>
+
+        if (msg.type === 'assistant') {
+          const message = (msg.message as Record<string, unknown>) ?? msg
+          const contentBlocks = normalizeContentBlocks(message.content)
+          const tsRaw = msg.timestamp
+          const ts = typeof tsRaw === 'string' ? Date.parse(tsRaw) : undefined
+          const tsValid = typeof ts === 'number' && !Number.isNaN(ts) ? ts : undefined
+          for (const block of contentBlocks) {
+            if (
+              block.type === 'tool_use' &&
+              (block.name === 'Agent' || block.name === 'Task') &&
+              typeof block.id === 'string'
+            ) {
+              agentToolUseIds.set(block.id, tsValid)
+            }
+          }
+        }
+
+        if (msg.type === 'user') {
+          const message = (msg.message as Record<string, unknown>) ?? msg
+          const contentBlocks = normalizeContentBlocks(message.content)
+
+          let hasToolResult = false
+          let hasUserText = false
+          for (const block of contentBlocks) {
+            if (block.type === 'tool_result' && typeof block.tool_use_id === 'string') {
+              agentToolUseIds.delete(block.tool_use_id)
+              hasToolResult = true
+            }
+            if (block.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
+              hasUserText = true
+            }
+          }
+
+          // A new user prompt (not just tool_results) means the conversation moved on.
+          // Any still-unmatched Agent IDs from before this point are stale.
+          if (hasUserText && !hasToolResult) {
+            agentToolUseIds.clear()
+          }
+        }
+      } catch {
+        // Skip unparseable lines
+      }
+    }
+
+    // Recency filter: an unmatched Agent older than the window is abandoned.
+    // Entries without a timestamp fall back to "assume fresh" — the
+    // user-prompt staleness clear is the only guard for them.
+    for (const [id, ts] of agentToolUseIds) {
+      if (typeof ts === 'number' && now - ts > AGENT_ACTIVE_WINDOW_MS) {
+        agentToolUseIds.delete(id)
+      }
+    }
+
+    return agentToolUseIds.size > 0
+  } catch {
+    // Transcript unreadable — assume no active agents
+    return false
+  }
+}
+
 // ── Handler: stop-conditions ──
 // Calls canExit to check if session can be stopped
 export async function handleStopConditions(input: Record<string, unknown>): Promise<void> {
@@ -475,8 +779,16 @@ export async function handleStopConditions(input: Record<string, unknown>): Prom
 
   // No stop conditions for this mode = allow exit
   if (stopConditions.length === 0) {
-    logHook(sessionId, { hook: 'stop-conditions', decision: 'allow', note: 'no stop conditions for mode' })
+    logHook(sessionId, {
+      hook: 'stop-conditions',
+      decision: 'allow',
+      note: 'no stop conditions for mode',
+    })
     logStopHook(sessionId, 'allow', [], 'no stop conditions for mode')
+    writeRunEndArtifact(sessionId, state, {
+      note: 'no stop conditions for mode',
+      stopConditions: [],
+    })
     return
   }
 
@@ -490,9 +802,25 @@ export async function handleStopConditions(input: Record<string, unknown>): Prom
     const result = JSON.parse(exitOutput) as {
       canExit: boolean
       reasons: string[]
+      advisories?: string[]
       guidance?: { nextStepMessage?: string; escapeHatch?: string }
     }
     if (!result.canExit) {
+      // If background agents are active, allow exit — trust agent completion notifications.
+      // The transcript records every tool_use/tool_result; unmatched Agent calls = active agents.
+      // Derive transcript path from session ID + project dir.
+      // Claude Code stores transcripts at ~/.claude/projects/<encoded-dir>/<session-id>.jsonl
+      const transcriptPath = resolveTranscriptPath(sessionId)
+      if (hasActiveBackgroundAgents(transcriptPath)) {
+        logHook(sessionId, {
+          hook: 'stop-conditions',
+          decision: 'allow',
+          note: 'background agents active — deferring to agent notifications',
+        })
+        logStopHook(sessionId, 'allow', result.reasons, 'background agents active')
+        return
+      }
+
       const parts: string[] = ['Session has incomplete work:']
       for (const reason of result.reasons) {
         parts.push(`- ${reason}`)
@@ -513,6 +841,11 @@ export async function handleStopConditions(input: Record<string, unknown>): Prom
     } else {
       logHook(sessionId, { hook: 'stop-conditions', decision: 'allow', note: 'all conditions met' })
       logStopHook(sessionId, 'allow', [], 'all conditions met')
+      writeRunEndArtifact(sessionId, state, {
+        note: 'all conditions met',
+        stopConditions,
+        advisories: result.advisories,
+      })
     }
     // canExit === true: output nothing (allows stop)
   } catch {
@@ -522,14 +855,437 @@ export async function handleStopConditions(input: Record<string, unknown>): Prom
   }
 }
 
+// ── Gate evaluation ──
+
+/**
+ * Run a bash gate command and check its output against expectations.
+ * Returns pass/fail, captured output, exit code, and resolved on_fail message.
+ */
+function evaluateBashGate(
+  gate: Gate,
+  placeholderContext: PlaceholderContext,
+  sessionId?: string,
+): { passed: boolean; output: string; exitCode: number; onFail?: string } {
+  // 1. Resolve placeholders in gate.bash and gate.on_fail
+  const resolvedBash = resolvePlaceholders(gate.bash, placeholderContext)
+
+  // 2. Run the command (pass KATA_SESSION_ID so child kata commands resolve the session)
+  let output = ''
+  let exitCode = 0
+  try {
+    let cwd: string | undefined
+    try {
+      cwd = findProjectDir()
+    } catch {
+      /* use hook runner cwd */
+    }
+    const env = sessionId ? { ...process.env, KATA_SESSION_ID: sessionId } : process.env
+    output = execSync(resolvedBash, {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 30000,
+      env,
+      ...(cwd ? { cwd } : {}),
+    }).trim()
+  } catch (err: unknown) {
+    const execErr = err as { status?: number; stdout?: Buffer | string }
+    exitCode = execErr.status ?? 1
+    output = (execErr.stdout ?? '').toString().trim()
+  }
+
+  // 3. Check pass/fail (AND semantics: both must pass if both specified)
+  let passed = true
+  if (gate.expect !== undefined) {
+    passed = passed && output.includes(gate.expect)
+  }
+  if (gate.expect_exit !== undefined) {
+    passed = passed && exitCode === gate.expect_exit
+  }
+
+  // 4. Resolve on_fail with gate-local placeholders
+  let onFail = gate.on_fail
+  if (onFail) {
+    onFail = resolvePlaceholders(onFail, placeholderContext)
+    onFail = onFail.replace(/\{exit_code\}/g, String(exitCode))
+    onFail = onFail.replace(/\{output\}/g, output)
+  }
+
+  return { passed, output, exitCode, onFail }
+}
+
+/**
+ * Find a gate definition for a task by its originalId.
+ * Checks step-level gates first, then subphase pattern gates.
+ */
+function findGateForTask(originalId: string, templatePath: string): Gate | null {
+  try {
+    const fullPath = resolveTemplatePath(templatePath)
+    const template = parseTemplateYaml(fullPath)
+    if (!template?.phases) return null
+
+    const [phaseId, stepId] = originalId.split(':')
+    if (!phaseId || !stepId) return null
+
+    // Try step-level gate first (e.g., p0:read-spec)
+    for (const phase of template.phases) {
+      if (phase.id === phaseId && phase.steps) {
+        const step = phase.steps.find((s) => s.id === stepId)
+        if (step?.gate) return step.gate
+      }
+    }
+
+    // Try subphase pattern gate (e.g., p2.1:test -> id_suffix "test")
+    for (const phase of template.phases) {
+      if (
+        (phase as Record<string, unknown>).expansion === 'spec' &&
+        (phase as Record<string, unknown>).subphase_pattern &&
+        Array.isArray((phase as Record<string, unknown>).subphase_pattern)
+      ) {
+        const patterns = (phase as Record<string, unknown>).subphase_pattern as Array<{
+          id_suffix: string
+          gate?: Gate
+        }>
+        const pattern = patterns.find((p) => p.id_suffix === stepId)
+        if (pattern?.gate) return pattern.gate
+      }
+    }
+  } catch {
+    // Template not found or parse error — no gate
+  }
+
+  return null
+}
+
+// ── Handler: pre-tool-use (consolidated) ──
+// Single PreToolUse handler that combines mode-gate, task-deps, and task-evidence checks.
+// For TaskUpdate completions, runs: deps -> gates -> evidence (in sequence, short-circuiting on deny).
+export async function handlePreToolUse(input: Record<string, unknown>): Promise<void> {
+  const sessionId = input.session_id as string | undefined
+  const toolName = (input.tool_name as string) ?? ''
+  const toolInput = (input.tool_input as Record<string, unknown>) ?? {}
+
+  // 1. Always: mode-gate checks (session injection + write blocking)
+  const session = await getSessionState(sessionId)
+
+  if (session) {
+    const { state } = session
+
+    // Block write operations when no mode is active
+    if (state.currentMode === 'default' || !state.currentMode) {
+      const writeTools = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit']
+      if (writeTools.includes(toolName)) {
+        if (sessionId)
+          logHook(sessionId, { hook: 'pre-tool-use', decision: 'deny', tool: toolName })
+        outputJson({
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'deny',
+            permissionDecisionReason:
+              'Enter a mode first: kata enter <mode>. Write operations are blocked until a mode is active.',
+          },
+        })
+        return
+      }
+    }
+  }
+
+  // 2. Always: inject --session=<id> into kata bash commands
+  if (toolName === 'Bash' && sessionId) {
+    const command = (toolInput.command as string) ?? ''
+    const kataAsCommand = /(?:^|[;&|]\s*)((?:\.\/|(?:\/\S+\/)*)kata(?:-\S*)?)(?=\s+\w)/.exec(
+      command,
+    )
+    if (kataAsCommand && !command.includes('--session=') && !/kata\s+hook\b/.test(command)) {
+      const kataPath = kataAsCommand[1]
+      const escapedPath = kataPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const injected = command.replace(
+        new RegExp(`(${escapedPath}\\s+\\S+)`),
+        `$1 --session=${sessionId}`,
+      )
+      outputJson({
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'allow',
+          updatedInput: {
+            ...toolInput,
+            command: injected,
+          },
+        },
+      })
+      return
+    }
+  }
+
+  // Bash pre-snapshot: capture git status before suspicious commands
+  if (toolName === 'Bash' && sessionId) {
+    const command = (toolInput.command as string) ?? ''
+    // Safe-list checked first — skip snapshot entirely
+    const safeList =
+      /^(git\s|bun\s+test|ls\b|cat\b|echo\b[^>]*$|cd\b|pwd\b|which\b|head\b|tail\b|wc\b|diff\b|grep\b|find\b)/
+    if (!safeList.test(command)) {
+      // Suspicious regex checked second
+      const suspicious =
+        /sed\s.*-i|>\s|>>\s|\btee\b|\bcp\b|\bmv\b|\brm\b|\bchmod\b|\bchown\b|\bpatch\b|\bcurl\b.*-o/
+      if (suspicious.test(command)) {
+        try {
+          const projectDir = findProjectDir()
+          const sessionDir = join(getSessionsDir(projectDir), sessionId)
+          // Strip trailing newlines only — `.trim()` would eat the leading space
+          // of the first porcelain line, corrupting diff parsing in PostToolUse.
+          const snapshot = execSync('git status --porcelain 2>/dev/null || true', {
+            encoding: 'utf-8',
+            stdio: ['pipe', 'pipe', 'pipe'],
+            cwd: projectDir,
+          }).replace(/\n+$/, '')
+          mkdirSync(sessionDir, { recursive: true })
+          writeFileSync(join(sessionDir, 'bash-pre-snapshot.txt'), snapshot)
+        } catch {
+          // Pre-snapshot failure must not block tool execution
+        }
+      }
+    }
+  }
+
+  // 3. TaskUpdate(status: "completed") — run deps, gates, evidence in sequence
+  if (toolName === 'TaskUpdate') {
+    const taskId = (toolInput.taskId as string) ?? ''
+    const newStatus = (toolInput.status as string) ?? ''
+
+    if (taskId && newStatus === 'completed') {
+      // 3a. Check task dependencies (hard block)
+      try {
+        if (session) {
+          const tasks = readNativeTaskFiles(session.sessionId)
+          const task = tasks.find((t) => t.id === taskId)
+
+          if (task?.blockedBy?.length) {
+            const incomplete = task.blockedBy.filter((depId) => {
+              const dep = tasks.find((t) => t.id === depId)
+              return dep && dep.status !== 'completed'
+            })
+
+            if (incomplete.length > 0) {
+              const depTasks = incomplete
+                .map((depId) => {
+                  const dep = tasks.find((t) => t.id === depId)
+                  return dep ? `[${dep.id}] ${dep.subject}` : depId
+                })
+                .join(', ')
+              if (sessionId)
+                logHook(sessionId, {
+                  hook: 'pre-tool-use',
+                  decision: 'deny',
+                  check: 'task-deps',
+                  task: taskId,
+                  blocked_by: incomplete,
+                })
+              outputJson({
+                hookSpecificOutput: {
+                  hookEventName: 'PreToolUse',
+                  permissionDecision: 'deny',
+                  permissionDecisionReason: `Task [${taskId}] is blocked by incomplete task(s): ${depTasks}`,
+                },
+              })
+              return
+            }
+          }
+
+          // 3b. Evaluate gate if step has one (hard block)
+          const originalId = (task?.metadata?.originalId as string) ?? ''
+          const templatePath = session.state.template
+
+          if (originalId && templatePath) {
+            const gate = findGateForTask(originalId, templatePath)
+            if (gate) {
+              // Build placeholder context
+              const placeholderContext: PlaceholderContext = {
+                session: session.state,
+                extra: {},
+              }
+              try {
+                const { loadKataConfig } = await import('../config/kata-config.js')
+                placeholderContext.config = loadKataConfig()
+              } catch {
+                // No config available
+              }
+
+              const result = evaluateBashGate(gate, placeholderContext, session.sessionId)
+              if (!result.passed) {
+                const reason =
+                  result.onFail ??
+                  `Gate failed for task [${taskId}] (exit code: ${result.exitCode})`
+                if (sessionId)
+                  logHook(sessionId, {
+                    hook: 'pre-tool-use',
+                    decision: 'deny',
+                    check: 'gate',
+                    task: taskId,
+                    originalId,
+                    exitCode: result.exitCode,
+                  })
+                outputJson({
+                  hookSpecificOutput: {
+                    hookEventName: 'PreToolUse',
+                    permissionDecision: 'deny',
+                    permissionDecisionReason: reason,
+                  },
+                })
+                return
+              }
+            }
+          }
+        }
+      } catch {
+        // On any error, don't block — fall through to evidence check
+      }
+
+      // 3c. Check git evidence (advisory warning, always allow)
+      let additionalContext = ''
+      try {
+        let projectDir: string | undefined
+        try {
+          projectDir = findProjectDir()
+        } catch {
+          // No .kata/ found
+        }
+        // Strip trailing newlines only — `.trim()` would eat the leading space
+        // of the first porcelain line (e.g. " M file.ts"), corrupting parseGitStatusPaths.
+        const gitStatus = execSync('git status --porcelain 2>/dev/null || true', {
+          encoding: 'utf-8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+          ...(projectDir ? { cwd: projectDir } : {}),
+        }).replace(/\n+$/, '')
+
+        if (gitStatus) {
+          const evidenceSessionDir = sessionId
+            ? join(getSessionsDir(projectDir ?? process.cwd()), sessionId)
+            : undefined
+          const sessionEdits = evidenceSessionDir ? readEditsSet(evidenceSessionDir) : null
+
+          const changedFiles = gitStatus.split('\n').filter((l) => {
+            if (l.startsWith('??')) return false
+            if (sessionEdits) {
+              const paths = parseGitStatusPaths(l)
+              return paths.some((p) => sessionEdits.has(p))
+            }
+            return true
+          })
+          if (changedFiles.length > 0) {
+            additionalContext =
+              `⚠️ You have ${changedFiles.length} uncommitted change(s). ` +
+              'Commit your work before marking this task completed.'
+          }
+        }
+      } catch {
+        // Git unavailable
+      }
+
+      if (sessionId)
+        logHook(sessionId, {
+          hook: 'pre-tool-use',
+          decision: 'allow',
+          check: 'task-complete',
+          task: taskId,
+          uncommitted: !!additionalContext,
+        })
+      outputJson({
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'allow',
+          ...(additionalContext ? { additionalContext } : {}),
+        },
+      })
+      return
+    }
+  }
+
+  // Default: allow
+  if (sessionId) logHook(sessionId, { hook: 'pre-tool-use', decision: 'allow', tool: toolName })
+  outputJson({
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'allow',
+    },
+  })
+}
+
+// ── Handler: post-tool-use ──
+// Tracks files modified by Edit, Write, NotebookEdit, and Bash tools
+export async function handlePostToolUse(input: Record<string, unknown>): Promise<void> {
+  const sessionId = input.session_id as string | undefined
+  if (!sessionId) return
+
+  try {
+    const projectDir = findProjectDir()
+    const sessionDir = join(getSessionsDir(projectDir), sessionId)
+
+    // Guard: only track if session exists
+    if (!existsSync(join(sessionDir, 'state.json'))) return
+
+    const toolName = (input.tool_name as string) ?? ''
+    const toolInput = (input.tool_input as Record<string, unknown>) ?? {}
+
+    if (toolName === 'Edit' || toolName === 'Write' || toolName === 'NotebookEdit') {
+      const filePath = toolInput.file_path as string | undefined
+      if (filePath) {
+        const gitRelative = toGitRelative(filePath)
+        appendEdit(sessionDir, { file: gitRelative, tool: toolName, ts: new Date().toISOString() })
+      }
+    } else if (toolName === 'Bash') {
+      // Compare post-execution git status against pre-snapshot
+      const snapshotPath = join(sessionDir, 'bash-pre-snapshot.txt')
+      if (existsSync(snapshotPath)) {
+        try {
+          // Strip trailing newlines only — `.trim()` would eat the leading space
+          // of the first porcelain line, corrupting parseGitStatusPaths.
+          const preSnapshot = readFileSync(snapshotPath, 'utf-8').replace(/\n+$/, '')
+          const postSnapshot = execSync('git status --porcelain 2>/dev/null || true', {
+            encoding: 'utf-8',
+            stdio: ['pipe', 'pipe', 'pipe'],
+            cwd: projectDir,
+          }).replace(/\n+$/, '')
+
+          // Find new dirty files
+          const preFiles = new Set(
+            preSnapshot.split('\n').filter(Boolean).flatMap(parseGitStatusPaths),
+          )
+          const postLines = postSnapshot.split('\n').filter(Boolean)
+          for (const line of postLines) {
+            const paths = parseGitStatusPaths(line)
+            for (const p of paths) {
+              if (!preFiles.has(p)) {
+                appendEdit(sessionDir, { file: p, tool: 'Bash', ts: new Date().toISOString() })
+              }
+            }
+          }
+
+          // Clean up snapshot file
+          try {
+            unlinkSync(snapshotPath)
+          } catch {
+            /* ignore */
+          }
+        } catch {
+          // Diff failure — silently ignore
+        }
+      }
+    }
+  } catch {
+    // PostToolUse must never fail — silent no-op
+  }
+}
+
 // ── Hook name -> handler map ──
 const hookHandlers: Record<string, (input: Record<string, unknown>) => Promise<void>> = {
   'session-start': handleSessionStart,
   'user-prompt': handleUserPrompt,
-  'mode-gate': handleModeGate,
-  'task-deps': handleTaskDeps,
-  'task-evidence': handleTaskEvidence,
+  'pre-tool-use': handlePreToolUse,
   'stop-conditions': handleStopConditions,
+  'post-tool-use': handlePostToolUse,
+  // Backwards-compat aliases for transition period
+  'mode-gate': handlePreToolUse,
+  'task-deps': handlePreToolUse,
+  'task-evidence': handlePreToolUse,
 }
 
 /**
@@ -548,10 +1304,13 @@ function parseHookArgs(args: string[]): { hookName: string; remaining: string[] 
  * Supported hooks:
  *   session-start    - Initialize session and output context (SessionStart)
  *   user-prompt      - Detect mode from user message (UserPromptSubmit)
- *   mode-gate        - Check mode state for tool gating (PreToolUse)
- *   task-deps        - Check task dependencies (PreToolUse:TaskUpdate)
- *   task-evidence    - Check git status for task evidence (PreToolUse:TaskUpdate)
+ *   pre-tool-use     - Consolidated PreToolUse handler: mode-gate, task-deps, gate evaluation, task-evidence
  *   stop-conditions  - Check if session can be stopped (Stop)
+ *
+ * Backwards-compat aliases (all route to pre-tool-use):
+ *   mode-gate        - Check mode state for tool gating
+ *   task-deps        - Check task dependencies
+ *   task-evidence    - Check git status for task evidence
  */
 export async function hook(args: string[]): Promise<void> {
   const { hookName } = parseHookArgs(args)

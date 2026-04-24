@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test'
-import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import * as os from 'node:os'
+import { join } from 'node:path'
 
 function makeTmpDir(): string {
   const dir = join(
@@ -49,11 +49,10 @@ describe('integration: full hook dispatch simulation', () => {
 
   beforeEach(() => {
     tmpDir = makeTmpDir()
-    mkdirSync(join(tmpDir, '.claude', 'sessions'), { recursive: true })
-    mkdirSync(join(tmpDir, '.claude', 'workflows'), { recursive: true })
-    // Write kata.yaml so loadKataConfig() finds it (no longer reads wm.yaml/modes.yaml)
+    mkdirSync(join(tmpDir, '.kata', 'sessions'), { recursive: true })
+    // Write kata.yaml so loadKataConfig() finds it at .kata/kata.yaml
     writeFileSync(
-      join(tmpDir, '.claude', 'workflows', 'kata.yaml'),
+      join(tmpDir, '.kata', 'kata.yaml'),
       'spec_path: planning/specs\nresearch_path: planning/research\nmodes: {}\n',
     )
     process.env.CLAUDE_PROJECT_DIR = tmpDir
@@ -63,7 +62,7 @@ describe('integration: full hook dispatch simulation', () => {
     // Hooks receive session_id from stdin JSON in production, but in tests stdin is a TTY.
     // Pre-creating the state allows getCurrentSessionId() to find it via sessions directory scan.
     const sessionId = '00000000-0000-0000-0000-000000000010'
-    const sessionDir = join(tmpDir, '.claude', 'sessions', sessionId)
+    const sessionDir = join(tmpDir, '.kata', 'sessions', sessionId)
     mkdirSync(sessionDir, { recursive: true })
     writeFileSync(
       join(sessionDir, 'state.json'),
@@ -94,12 +93,14 @@ describe('integration: full hook dispatch simulation', () => {
     } else {
       delete process.env.CLAUDE_SESSION_ID
     }
-    process.exitCode = undefined
+    process.exitCode = 0
   })
 
   it('session-start -> user-prompt -> stop-conditions lifecycle', async () => {
     const sessionId = process.env.CLAUDE_SESSION_ID!
-    const { handleSessionStart, handleUserPrompt, handleStopConditions } = await import('../commands/hook.js')
+    const { handleSessionStart, handleUserPrompt, handleStopConditions } = await import(
+      '../commands/hook.js'
+    )
     const restoreStderr = suppressStderr()
 
     function captureHandlerStdout(fn: () => Promise<void>): Promise<string> {
@@ -120,7 +121,9 @@ describe('integration: full hook dispatch simulation', () => {
     try {
       // Step 1: session-start hook (initializes session)
       // Pass session_id directly to bypass stdin (stdin is TTY in tests).
-      const startOutput = await captureHandlerStdout(() => handleSessionStart({ session_id: sessionId }))
+      const startOutput = await captureHandlerStdout(() =>
+        handleSessionStart({ session_id: sessionId }),
+      )
       const startResult = JSON.parse(startOutput.trim()) as {
         hookSpecificOutput: { hookEventName: string; additionalContext: string }
       }
@@ -128,7 +131,7 @@ describe('integration: full hook dispatch simulation', () => {
       expect(startResult.hookSpecificOutput.additionalContext).toBeDefined()
 
       // After session-start, state.json should exist
-      const stateFile = join(tmpDir, '.claude', 'sessions', sessionId, 'state.json')
+      const stateFile = join(tmpDir, '.kata', 'sessions', sessionId, 'state.json')
       expect(existsSync(stateFile)).toBe(true)
 
       // Step 2: user-prompt hook (suggest mode from user message)
@@ -143,9 +146,14 @@ describe('integration: full hook dispatch simulation', () => {
 
       // Step 3: stop-conditions hook (check if can exit)
       // Empty output = allow (no blocking). Block decision = output with decision: 'block'.
-      const stopOutput = await captureHandlerStdout(() => handleStopConditions({ session_id: sessionId }))
+      const stopOutput = await captureHandlerStdout(() =>
+        handleStopConditions({ session_id: sessionId }),
+      )
       if (stopOutput.trim()) {
-        const stopResult = JSON.parse(stopOutput.trim()) as { decision?: string; hookSpecificOutput?: unknown }
+        const stopResult = JSON.parse(stopOutput.trim()) as {
+          decision?: string
+          hookSpecificOutput?: unknown
+        }
         expect(stopResult.decision).toBe('block')
       }
       // Empty output = allow is correct behavior
@@ -157,7 +165,7 @@ describe('integration: full hook dispatch simulation', () => {
   it('mode-gate allows after mode is entered via state', async () => {
     const sessionId = process.env.CLAUDE_SESSION_ID!
     // beforeEach already creates the session dir; just overwrite state.json with active mode
-    const sessionDir = join(tmpDir, '.claude', 'sessions', sessionId)
+    const sessionDir = join(tmpDir, '.kata', 'sessions', sessionId)
 
     // Create state with active mode
     writeFileSync(
@@ -215,12 +223,12 @@ describe('integration: full hook dispatch simulation', () => {
   it('stop-conditions reports incomplete work for active session', async () => {
     const sessionId = process.env.CLAUDE_SESSION_ID!
     // Use the pre-created session dir from beforeEach, just overwrite state.json
-    const sessionDir = join(tmpDir, '.claude', 'sessions', sessionId)
+    const sessionDir = join(tmpDir, '.kata', 'sessions', sessionId)
 
     // Create state with implementation mode and linked issue
     // Also need kata.yaml with implementation mode stop_conditions
     writeFileSync(
-      join(tmpDir, '.claude', 'workflows', 'kata.yaml'),
+      join(tmpDir, '.kata', 'kata.yaml'),
       [
         'spec_path: planning/specs',
         'research_path: planning/research',

@@ -25,11 +25,11 @@
  *   codex:   all-or-nothing (bypass), no per-tool filtering
  */
 
-import { runAgentStep } from '../providers/step-runner.js'
-import { listPrompts } from '../providers/prompt.js'
 import { getProvider } from '../providers/index.js'
-import { findProjectDir } from '../session/lookup.js'
+import { listPrompts } from '../providers/prompt.js'
+import { runAgentStep } from '../providers/step-runner.js'
 import { CANONICAL_TOOLS } from '../providers/types.js'
+import { findProjectDir } from '../session/lookup.js'
 
 interface AgentRunArgs {
   prompt?: string
@@ -186,14 +186,18 @@ Options:
       const provider = getProvider(parsed.provider)
       const c = provider.capabilities
       caps = ` [tools: ${c.toolFiltering ? 'per-tool' : 'all-or-nothing'}, text-only: ${c.textOnly ? 'yes' : 'no'}]`
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
 
     // biome-ignore lint/suspicious/noConsole: intentional CLI output
     console.log(`Provider:  ${parsed.provider}${caps}`)
     // biome-ignore lint/suspicious/noConsole: intentional CLI output
     console.log(`Model:     ${parsed.model ?? '(default)'}`)
     // biome-ignore lint/suspicious/noConsole: intentional CLI output
-    console.log(`Prompt:    ${parsed.custom ? `(custom) ${parsed.custom.slice(0, 80)}${parsed.custom.length > 80 ? '...' : ''}` : parsed.prompt}`)
+    console.log(
+      `Prompt:    ${parsed.custom ? `(custom) ${parsed.custom.slice(0, 80)}${parsed.custom.length > 80 ? '...' : ''}` : parsed.prompt}`,
+    )
     // biome-ignore lint/suspicious/noConsole: intentional CLI output
     console.log(`Context:   ${parsed.context.join(', ') || '(none)'}`)
     // biome-ignore lint/suspicious/noConsole: intentional CLI output
@@ -213,7 +217,9 @@ Options:
 
   const promptLabel = parsed.custom ? '(custom)' : parsed.prompt
   // biome-ignore lint/suspicious/noConsole: intentional CLI output
-  console.error(`Running ${promptLabel} via ${parsed.provider} (tools: ${formatTools(parsed.allowedTools)})...`)
+  console.error(
+    `Running ${promptLabel} via ${parsed.provider} (tools: ${formatTools(parsed.allowedTools)})...`,
+  )
 
   const result = await runAgentStep(
     {
@@ -223,8 +229,6 @@ Options:
       raw_prompt: parsed.custom,
       context: parsed.context.length > 0 ? parsed.context : undefined,
       output: parsed.output,
-      gate: parsed.gate || undefined,
-      threshold: parsed.threshold,
       allowed_tools: parsed.allowedTools,
       max_turns: parsed.maxTurns,
       timeout: parsed.timeout,
@@ -233,7 +237,7 @@ Options:
   )
 
   // Output the result
-  process.stdout.write(result.output + '\n')
+  process.stdout.write(`${result.output}\n`)
 
   if (result.score !== undefined) {
     // biome-ignore lint/suspicious/noConsole: intentional CLI output

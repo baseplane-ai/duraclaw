@@ -1,11 +1,11 @@
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { join, basename } from 'node:path'
 import * as os from 'node:os'
+import { basename, join } from 'node:path'
 import {
+  detectCI,
   detectProjectName,
   detectTestCommand,
-  detectCI,
   getDefaultProfile,
 } from './setup-profile.js'
 
@@ -175,7 +175,6 @@ describe('getDefaultProfile', () => {
     expect(profile.reviews.spec_review).toBe(false)
     expect(profile.reviews.code_review).toBe(false)
     expect(profile.reviews.code_reviewer).toBeNull()
-    expect(profile.strict).toBe(false)
   })
 
   it('auto-detects project name from package.json', () => {
@@ -214,6 +213,5 @@ describe('getDefaultProfile', () => {
     expect(typeof profile.research_path).toBe('string')
     expect(typeof profile.session_retention_days).toBe('number')
     expect(typeof profile.reviews).toBe('object')
-    expect(typeof profile.strict).toBe('boolean')
   })
 })

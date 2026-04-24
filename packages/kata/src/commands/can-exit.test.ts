@@ -1,8 +1,31 @@
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { execSync } from 'node:child_process'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
 import * as os from 'node:os'
+import { join, resolve } from 'node:path'
 import jsYaml from 'js-yaml'
+
+/**
+ * Create a minimal git repo in the given dir with a committed file and a
+ * dirty working tree on a feature branch. This ensures can-exit's
+ * "on base branch with no diff" short-circuit (skipGitChecks) stays off,
+ * so git-dependent checks (tests_pass, feature_tests_added, committed, pushed)
+ * actually run.
+ */
+function initDirtyGitRepo(dir: string): void {
+  const run = (cmd: string) => execSync(cmd, { cwd: dir, stdio: 'pipe', encoding: 'utf-8' })
+  run('git init -q -b main')
+  run('git config user.email test@test')
+  run('git config user.name test')
+  writeFileSync(join(dir, 'base.txt'), 'base\n')
+  run('git add base.txt')
+  run('git -c commit.gpgsign=false commit -q -m base')
+  // Switch to a feature branch and add a dirty file so there is a diff vs main.
+  run('git checkout -q -b feature/test')
+  writeFileSync(join(dir, 'feature.txt'), 'feature\n')
+  run('git add feature.txt')
+  run('git -c commit.gpgsign=false commit -q -m feature')
+}
 
 function makeTmpDir(): string {
   const dir = join(
@@ -20,6 +43,7 @@ async function captureCanExit(args: string[]): Promise<string> {
   const { canExit } = await import('./can-exit.js')
   let captured = ''
   const origLog = console.log
+  const origExitCode = process.exitCode
   console.log = (...logArgs: unknown[]) => {
     captured += logArgs.map(String).join(' ')
   }
@@ -27,6 +51,7 @@ async function captureCanExit(args: string[]): Promise<string> {
     await canExit(args)
   } finally {
     console.log = origLog
+    process.exitCode = origExitCode
   }
   return captured
 }
@@ -38,13 +63,12 @@ describe('canExit', () => {
 
   beforeEach(() => {
     tmpDir = makeTmpDir()
-    mkdirSync(join(tmpDir, '.claude', 'sessions'), { recursive: true })
-    mkdirSync(join(tmpDir, '.claude', 'workflows'), { recursive: true })
+    mkdirSync(join(tmpDir, '.kata', 'sessions'), { recursive: true })
     // Write baseline kata.yaml so loadKataConfig() finds it (no longer reads wm.yaml/modes.yaml)
     // Include implementation + freeform modes with the stop_conditions used by test scenarios.
     // Individual tests that need specific review config overwrite this file before calling canExit.
     writeFileSync(
-      join(tmpDir, '.claude', 'workflows', 'kata.yaml'),
+      join(tmpDir, '.kata', 'kata.yaml'),
       [
         'spec_path: planning/specs',
         'research_path: planning/research',
@@ -74,12 +98,12 @@ describe('canExit', () => {
     } else {
       delete process.env.CLAUDE_SESSION_ID
     }
-    process.exitCode = undefined
+    process.exitCode = 0
   })
 
   function createSessionState(state: Record<string, unknown>): void {
     const sessionId = process.env.CLAUDE_SESSION_ID!
-    const sessionDir = join(tmpDir, '.claude', 'sessions', sessionId)
+    const sessionDir = join(tmpDir, '.kata', 'sessions', sessionId)
     mkdirSync(sessionDir, { recursive: true })
     writeFileSync(
       join(sessionDir, 'state.json'),
@@ -124,7 +148,7 @@ describe('canExit', () => {
     // Regression: "on base branch / no diff" used to short-circuit ALL checks including
     // tasks_complete, allowing exit at session start before any work was done.
     writeFileSync(
-      join(tmpDir, '.claude', 'workflows', 'kata.yaml'),
+      join(tmpDir, '.kata', 'kata.yaml'),
       jsYaml.dump({
         modes: {
           research: { template: 'research.md', stop_conditions: ['tasks_complete', 'committed'] },
@@ -144,7 +168,13 @@ describe('canExit', () => {
     mkdirSync(tasksDir, { recursive: true })
     writeFileSync(
       join(tasksDir, '1.json'),
-      JSON.stringify({ id: '1', subject: 'RE-test-0303: do something', status: 'pending', blocks: [], blockedBy: [] }),
+      JSON.stringify({
+        id: '1',
+        subject: 'RE-test-0303: do something',
+        status: 'pending',
+        blocks: [],
+        blockedBy: [],
+      }),
     )
 
     const output = await captureCanExit(['--json', `--session=${sessionId}`])
@@ -157,10 +187,19 @@ describe('canExit', () => {
 
   it('checkTestsPass: blocks when no phase evidence files exist', async () => {
     writeFileSync(
-      join(tmpDir, '.claude', 'workflows', 'kata.yaml'),
+      join(tmpDir, '.kata', 'kata.yaml'),
       jsYaml.dump({
         modes: {
-          implementation: { template: 'implementation.md', stop_conditions: ['tasks_complete', 'committed', 'pushed', 'tests_pass', 'feature_tests_added'] },
+          implementation: {
+            template: 'implementation.md',
+            stop_conditions: [
+              'tasks_complete',
+              'committed',
+              'pushed',
+              'tests_pass',
+              'feature_tests_added',
+            ],
+          },
         },
       }),
     )
@@ -171,7 +210,17 @@ describe('canExit', () => {
       issueNumber: 444,
     })
 
-    const output = await captureCanExit(['--json', `--session=${process.env.CLAUDE_SESSION_ID}`])
+    // can-exit inspects git via process.cwd(); put a dirty feature branch in tmpDir
+    // so skipGitChecks stays off and checkTestsPass actually runs.
+    initDirtyGitRepo(tmpDir)
+    const origCwd = process.cwd()
+    process.chdir(tmpDir)
+    let output: string
+    try {
+      output = await captureCanExit(['--json', `--session=${process.env.CLAUDE_SESSION_ID}`])
+    } finally {
+      process.chdir(origCwd)
+    }
     const result = JSON.parse(output) as { canExit: boolean; reasons: string[] }
 
     const blockedByVerify = result.reasons.some((r) => r.includes('check-phase has not been run'))
@@ -180,10 +229,19 @@ describe('canExit', () => {
 
   it('checkTestsPass: passes when phase evidence file exists with overallPassed true', async () => {
     writeFileSync(
-      join(tmpDir, '.claude', 'workflows', 'kata.yaml'),
+      join(tmpDir, '.kata', 'kata.yaml'),
       jsYaml.dump({
         modes: {
-          implementation: { template: 'implementation.md', stop_conditions: ['tasks_complete', 'committed', 'pushed', 'tests_pass', 'feature_tests_added'] },
+          implementation: {
+            template: 'implementation.md',
+            stop_conditions: [
+              'tasks_complete',
+              'committed',
+              'pushed',
+              'tests_pass',
+              'feature_tests_added',
+            ],
+          },
         },
       }),
     )
@@ -194,7 +252,7 @@ describe('canExit', () => {
       issueNumber: 333,
     })
 
-    const evidenceDir = join(tmpDir, '.claude', 'verification-evidence')
+    const evidenceDir = join(tmpDir, '.kata', 'verification-evidence')
     mkdirSync(evidenceDir, { recursive: true })
     writeFileSync(
       join(evidenceDir, 'phase-p1-333.json'),
@@ -215,10 +273,19 @@ describe('canExit', () => {
 
   it('checkTestsPass: blocks when phase evidence overallPassed is false', async () => {
     writeFileSync(
-      join(tmpDir, '.claude', 'workflows', 'kata.yaml'),
+      join(tmpDir, '.kata', 'kata.yaml'),
       jsYaml.dump({
         modes: {
-          implementation: { template: 'implementation.md', stop_conditions: ['tasks_complete', 'committed', 'pushed', 'tests_pass', 'feature_tests_added'] },
+          implementation: {
+            template: 'implementation.md',
+            stop_conditions: [
+              'tasks_complete',
+              'committed',
+              'pushed',
+              'tests_pass',
+              'feature_tests_added',
+            ],
+          },
         },
       }),
     )
@@ -229,7 +296,7 @@ describe('canExit', () => {
       issueNumber: 222,
     })
 
-    const evidenceDir = join(tmpDir, '.claude', 'verification-evidence')
+    const evidenceDir = join(tmpDir, '.kata', 'verification-evidence')
     mkdirSync(evidenceDir, { recursive: true })
     writeFileSync(
       join(evidenceDir, 'phase-p1-222.json'),
@@ -241,11 +308,20 @@ describe('canExit', () => {
       }),
     )
 
-    const output = await captureCanExit(['--json', `--session=${process.env.CLAUDE_SESSION_ID}`])
+    // can-exit inspects git via process.cwd(); put a dirty feature branch in tmpDir
+    // so skipGitChecks stays off and checkTestsPass actually runs.
+    initDirtyGitRepo(tmpDir)
+    const origCwd = process.cwd()
+    process.chdir(tmpDir)
+    let output: string
+    try {
+      output = await captureCanExit(['--json', `--session=${process.env.CLAUDE_SESSION_ID}`])
+    } finally {
+      process.chdir(origCwd)
+    }
     const result = JSON.parse(output) as { canExit: boolean; reasons: string[] }
 
     const blockedByFailed = result.reasons.some((r) => r.includes('failed check-phase'))
     expect(blockedByFailed).toBe(true)
   })
-
 })

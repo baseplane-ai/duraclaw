@@ -6,35 +6,38 @@
  * Type-safe state management for Claude Code workflow sessions.
  */
 
-import { enter } from './commands/enter.js'
-import { status } from './commands/status.js'
-import { exit } from './commands/exit.js'
-import { canExit } from './commands/can-exit.js'
-import { prompt } from './commands/prompt.js'
-import { init } from './commands/init.js'
-import { prime } from './commands/prime.js'
-import { validateSpecCommand } from './commands/validate-spec.js'
-import { validateTemplateCommand } from './commands/validate-template.js'
-import { initTemplateCommand } from './commands/init-template.js'
-import { initModeCommand } from './commands/init-mode.js'
-import { registerModeCommand } from './commands/register-mode.js'
-import { doctor } from './commands/doctor.js'
-import { link } from './commands/link.js'
-import { suggest } from './commands/suggest.js'
-import { setup } from './commands/setup.js'
-import { teardown } from './commands/teardown.js'
-import { hook } from './commands/hook.js'
-import { batteries } from './commands/batteries.js'
-import { projects } from './commands/projects.js'
-import { config as configCommand } from './commands/config.js'
-import { modes } from './commands/modes.js'
-import { checkPhase } from './commands/check-phase.js'
-import { providers as providersCommand } from './commands/providers.js'
-import { review as reviewCommand } from './commands/review.js'
-import { agentRun as agentRunCommand } from './commands/agent-run.js'
-import { postmortem } from './commands/postmortem.js'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { agentRun as agentRunCommand } from './commands/agent-run.js'
+import { canExit } from './commands/can-exit.js'
+import { checkPhase } from './commands/check-phase.js'
+import { config as configCommand } from './commands/config.js'
+import { doctor } from './commands/doctor.js'
+import { enter } from './commands/enter.js'
+import { exit } from './commands/exit.js'
+import { hook } from './commands/hook.js'
+import { init } from './commands/init.js'
+import { initModeCommand } from './commands/init-mode.js'
+import { initTemplateCommand } from './commands/init-template.js'
+import { interview } from './commands/interview.js'
+import { link } from './commands/link.js'
+import { migrate } from './commands/migrate.js'
+import { modes } from './commands/modes.js'
+import { postmortem } from './commands/postmortem.js'
+import { prime } from './commands/prime.js'
+import { projects } from './commands/projects.js'
+import { prompt } from './commands/prompt.js'
+import { providers as providersCommand } from './commands/providers.js'
+import { registerModeCommand } from './commands/register-mode.js'
+import { review as reviewCommand } from './commands/review.js'
+import { setup } from './commands/setup.js'
+import { status } from './commands/status.js'
+import { suggest } from './commands/suggest.js'
+import { teardown } from './commands/teardown.js'
+import { testBaseline } from './commands/test-baseline.js'
+import { update } from './commands/update.js'
+import { validateSpecCommand } from './commands/validate-spec.js'
+import { validateTemplateCommand } from './commands/validate-template.js'
 import { getPackageRoot } from './session/lookup.js'
 
 /**
@@ -139,8 +142,12 @@ async function main() {
         await teardown(commandArgs)
         break
 
-      case 'batteries':
-        await batteries(commandArgs)
+      case 'update':
+        await update(commandArgs)
+        break
+
+      case 'migrate':
+        await migrate(commandArgs)
         break
 
       case 'config':
@@ -155,6 +162,10 @@ async function main() {
         await checkPhase(commandArgs)
         break
 
+      case 'test-baseline':
+        await testBaseline(commandArgs)
+        break
+
       case 'verify-phase':
         // Deprecated alias — use check-phase instead
         console.error('DEPRECATED: kata verify-phase is renamed to kata check-phase')
@@ -165,7 +176,9 @@ async function main() {
         // Removed: verify-run used SDK nesting which caused silent failures.
         // Use `kata enter verify` for standalone verification instead.
         // biome-ignore lint/suspicious/noConsole: intentional CLI output
-        console.error('verify-run has been removed. Use `kata enter verify` for standalone verification.')
+        console.error(
+          'verify-run has been removed. Use `kata enter verify` for standalone verification.',
+        )
         process.exitCode = 1
         break
 
@@ -187,6 +200,10 @@ async function main() {
 
       case 'projects':
         await projects(commandArgs)
+        break
+
+      case 'interview':
+        await interview(commandArgs)
         break
 
       case 'hook':
@@ -245,8 +262,9 @@ Usage:
   kata register-mode <template-path> [options]   Register existing template as mode
   kata suggest <message>                         Detect mode from message, output guidance
   kata doctor [--fix] [--json]                   Diagnose and fix session state
-  kata setup [--yes] [--strict] [--batteries]    Setup kata in a project
-  kata batteries [--update] [--cwd=PATH]           Scaffold batteries-included starter content
+  kata setup [--yes]                               Setup kata in a project
+  kata update                                      Update templates to latest package version
+  kata migrate [--dry-run]                         Convert old-format templates to gate/hint format
   kata config [--show]                            Show resolved config with provenance
   kata providers [list|setup] [--json]             Check/configure agent providers
   kata agent-run --prompt=<name> [options]           Run agent with named prompt
@@ -254,6 +272,8 @@ Usage:
   kata review --prompt=<name> [--provider=P]       Review shortcut (auto-context)
   kata projects <subcommand> [options]             Multi-project management
   kata teardown [--yes] [--all] [--dry-run]      Remove kata from a project
+  kata interview <category>                       Run structured interview (outputs JSON)
+  kata interview --list                          List available interview categories
   kata hook <name>                               Dispatch hook event (for settings.json)
   kata --version                                 Show version
   kata help                                      Show this help
@@ -267,13 +287,11 @@ Hook Dispatch:
   kata hook stop-conditions       Check exit conditions (Stop)
 
 Setup:
-  kata setup --yes                Quick setup with auto-detected defaults
-  kata setup --yes --strict       Setup with PreToolUse gate hooks
-  kata setup --batteries          Setup + scaffold batteries-included starter content (implies --yes)
-  kata setup --batteries --strict Setup + batteries + strict PreToolUse hooks
-  kata enter onboard                Guided setup interview (interactive, agent-driven)
-  kata batteries                  Scaffold batteries content only (idempotent, skips existing)
-  kata batteries --update         Re-scaffold batteries, overwriting with latest versions
+  kata setup --yes                Quick setup (config, hooks, templates, skills)
+  /kata-setup                       Guided setup (interactive, in Claude Code)
+  kata update                     Update templates + stamp kata_version
+  kata migrate                    Convert old-format templates to new gate/hint format
+  kata migrate --dry-run          Preview migration without writing files
   kata teardown --yes             Remove kata hooks and config
   kata teardown --dry-run         Preview what would be removed
 
@@ -319,45 +337,43 @@ Troubleshooting:
   - Task issues? Use TaskList to see native tasks
 
 Notes:
-  - If --session not provided, uses current session from .claude/current-session-id
+  - If --session not provided, uses current session from .kata/sessions/
   - JSON output is for hooks, human-readable output is default
-  - State stored at .claude/sessions/{SESSION_ID}/state.json
+  - State stored at .kata/sessions/{SESSION_ID}/state.json
   - Native tasks stored at ~/.claude/tasks/{SESSION_ID}/
 `)
 }
 
 main()
 
-// Export types and utilities for programmatic use
-export * from './state/schema.js'
-export * from './state/reader.js'
-export * from './state/writer.js'
-export * from './state/validator.js'
-export * from './utils/workflow-id.js'
-export * from './utils/timestamp.js'
+export * from './commands/interview.js'
 export * from './config/kata-config.js'
-export * from './config/interviews.js'
-export * from './config/subphase-patterns.js'
-export * from './session/lookup.js'
-export * from './validation/index.js'
-
+export type { CliProviderConfig } from './providers/cli-provider.js'
+export { createCliProvider, loadProviderPlugins } from './providers/cli-provider.js'
 // Agent providers
 export {
-  getProvider,
-  registerProvider,
-  listProviders,
-  preparePrompt,
-  loadPrompt,
-  listPrompts,
   claudeProvider,
-  geminiProvider,
   codexProvider,
-  runAgentStep,
   extractScore,
+  geminiProvider,
+  getProvider,
+  listPrompts,
+  listProviders,
+  loadPrompt,
+  preparePrompt,
+  registerProvider,
+  runAgentStep,
 } from './providers/index.js'
-export type { AgentProvider, AgentRunOptions, ProviderCapabilities } from './providers/types.js'
-export { CANONICAL_TOOLS, isAllTools } from './providers/types.js'
-export { createCliProvider, loadProviderPlugins } from './providers/cli-provider.js'
-export type { CliProviderConfig } from './providers/cli-provider.js'
 export type { PreparedPrompt } from './providers/prompt.js'
 export type { StepContext, StepRunResult } from './providers/step-runner.js'
+export type { AgentProvider, AgentRunOptions, ProviderCapabilities } from './providers/types.js'
+export { CANONICAL_TOOLS, isAllTools } from './providers/types.js'
+export * from './session/lookup.js'
+export * from './state/reader.js'
+// Export types and utilities for programmatic use
+export * from './state/schema.js'
+export * from './state/validator.js'
+export * from './state/writer.js'
+export * from './utils/timestamp.js'
+export * from './utils/workflow-id.js'
+export * from './validation/index.js'

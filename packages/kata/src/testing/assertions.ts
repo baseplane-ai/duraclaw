@@ -5,8 +5,8 @@
  * session state transitions, and workflow conditions.
  */
 
-import type { HookResult } from './mock-hooks'
 import type { SessionState } from '../state/schema'
+import type { HookResult } from './mock-hooks'
 
 /**
  * Assert that a hook blocked the tool call

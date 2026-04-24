@@ -2,9 +2,9 @@
 import { execSync } from 'node:child_process'
 import { readdirSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { loadKataConfig } from '../../config/kata-config.js'
 import { findProjectDir } from '../../session/lookup.js'
 import { parseYamlFrontmatter, type SpecYaml } from '../../yaml/index.js'
-import { loadKataConfig } from '../../config/kata-config.js'
 
 /**
  * Issue types that require spec files for implementation mode

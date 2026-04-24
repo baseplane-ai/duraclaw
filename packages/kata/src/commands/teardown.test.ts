@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test'
-import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import * as os from 'node:os'
+import { join } from 'node:path'
 
 function makeTmpDir(): string {
   const dir = join(
@@ -47,18 +47,18 @@ describe('teardown', () => {
     } else {
       delete process.env.CLAUDE_PROJECT_DIR
     }
-    process.exitCode = undefined
+    process.exitCode = 0
   })
 
   /**
    * Create a fully configured kata project at tmpDir
    */
   function createWmProject(): void {
-    mkdirSync(join(tmpDir, '.claude', 'sessions', 'some-session'), { recursive: true })
-    mkdirSync(join(tmpDir, '.claude', 'workflows'), { recursive: true })
+    mkdirSync(join(tmpDir, '.kata', 'sessions', 'some-session'), { recursive: true })
+    mkdirSync(join(tmpDir, '.claude'), { recursive: true })
 
     // Write kata.yaml (teardown deletes kata.yaml, not wm.yaml)
-    writeFileSync(join(tmpDir, '.claude', 'workflows', 'kata.yaml'), 'spec_path: planning/specs\n')
+    writeFileSync(join(tmpDir, '.kata', 'kata.yaml'), 'spec_path: planning/specs\n')
 
     // Write settings.json with kata hooks and a non-kata hook
     writeFileSync(
@@ -158,7 +158,7 @@ describe('teardown', () => {
 
   it('deletes kata.yaml', async () => {
     createWmProject()
-    const kataYamlPath = join(tmpDir, '.claude', 'workflows', 'kata.yaml')
+    const kataYamlPath = join(tmpDir, '.kata', 'kata.yaml')
     expect(existsSync(kataYamlPath)).toBe(true)
 
     await captureTeardown(['--yes'], tmpDir)
@@ -168,7 +168,7 @@ describe('teardown', () => {
 
   it('preserves sessions/', async () => {
     createWmProject()
-    const sessionsDir = join(tmpDir, '.claude', 'sessions')
+    const sessionsDir = join(tmpDir, '.kata', 'sessions')
     expect(existsSync(sessionsDir)).toBe(true)
 
     await captureTeardown(['--yes'], tmpDir)
@@ -199,7 +199,7 @@ describe('teardown', () => {
 
   it('dry-run shows planned actions without making changes', async () => {
     createWmProject()
-    const kataYamlPath = join(tmpDir, '.claude', 'workflows', 'kata.yaml')
+    const kataYamlPath = join(tmpDir, '.kata', 'kata.yaml')
 
     const output = await captureTeardown(['--yes', '--dry-run'], tmpDir)
     expect(output).toContain('[DRY RUN]')
@@ -215,9 +215,10 @@ describe('teardown', () => {
     const output = await captureTeardown([], tmpDir)
     expect(output).toContain('--yes to confirm')
     expect(process.exitCode).toBe(1)
+    process.exitCode = 0
 
     // Files should still exist
-    const kataYamlPath = join(tmpDir, '.claude', 'workflows', 'kata.yaml')
+    const kataYamlPath = join(tmpDir, '.kata', 'kata.yaml')
     expect(existsSync(kataYamlPath)).toBe(true)
   })
 })

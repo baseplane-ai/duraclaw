@@ -1,7 +1,12 @@
-import { isManagerInitialized } from '../../manager/paths.js'
 import { scanClaudeProjects } from '../../manager/discovery.js'
-import { readIndex, writeIndex, addProject as addToIndex, refreshProject } from '../../manager/registry.js'
+import { isManagerInitialized } from '../../manager/paths.js'
 import type { ProjectsIndex } from '../../manager/registry.js'
+import {
+  addProject as addToIndex,
+  readIndex,
+  refreshProject,
+  writeIndex,
+} from '../../manager/registry.js'
 
 /**
  * kata projects list [--json] [--refresh]

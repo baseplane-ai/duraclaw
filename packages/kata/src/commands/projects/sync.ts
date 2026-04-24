@@ -1,8 +1,8 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync, cpSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { isManagerInitialized } from '../../manager/paths.js'
-import { readIndex, findProject } from '../../manager/registry.js'
 import type { ProjectEntry } from '../../manager/registry.js'
+import { findProject, readIndex } from '../../manager/registry.js'
 
 function getConfigDir(project: ProjectEntry): string {
   return project.kata_layout === '.kata'
@@ -38,7 +38,9 @@ export async function syncProjects(args: string[]): Promise<void> {
 
   if (positional.length < 2) {
     // biome-ignore lint/suspicious/noConsole: CLI output
-    console.error('Usage: kata projects sync <source> <target> [--wm-yaml] [--modes] [--templates] [--dry-run]')
+    console.error(
+      'Usage: kata projects sync <source> <target> [--wm-yaml] [--modes] [--templates] [--dry-run]',
+    )
     process.exitCode = 1
     return
   }

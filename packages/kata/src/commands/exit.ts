@@ -1,8 +1,8 @@
 // kata exit - Exit current mode
 import { getCurrentSessionId, getStateFilePath } from '../session/lookup.js'
 import { readState } from '../state/reader.js'
-import { writeState } from '../state/writer.js'
 import type { SessionState } from '../state/schema.js'
+import { writeState } from '../state/writer.js'
 
 /**
  * Parse command line arguments for exit command

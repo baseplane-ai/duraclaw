@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test'
-import { mkdirSync, rmSync, writeFileSync, existsSync, utimesSync } from 'node:fs'
-import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { existsSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import * as os from 'node:os'
+import { join } from 'node:path'
 import { cleanupOldSessions } from './session-cleanup.js'
 
 function makeTmpDir(): string {

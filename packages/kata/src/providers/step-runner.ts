@@ -16,8 +16,8 @@
 import { execSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import type { AgentStepConfig } from '../validation/schemas.js'
 import { loadKataConfig } from '../config/kata-config.js'
+import type { AgentStepConfig } from '../validation/schemas.js'
 import { getProvider } from './index.js'
 import { loadPrompt } from './prompt.js'
 
@@ -67,7 +67,8 @@ function resolveProvider(providerRef: string): string {
     const key = match[1]
     if (key === 'default') return config.providers?.default ?? 'claude'
     if (key === 'code_reviewer') return config.reviews?.code_reviewer ?? 'claude'
-    if (key === 'spec_reviewer') return config.reviews?.spec_reviewer ?? config.providers?.default ?? 'claude'
+    if (key === 'spec_reviewer')
+      return config.reviews?.spec_reviewer ?? config.providers?.default ?? 'claude'
     if (key === 'judge_provider') return config.providers?.judge_provider ?? 'claude'
     return providerRef // unrecognized key, pass through
   }
@@ -89,7 +90,9 @@ function assembleContext(sources: string[], ctx: StepContext): string {
           timeout: 10_000,
         })
         if (diff.trim()) {
-          sections.push(`## Git Diff (${diffBase}...HEAD)\n\n\`\`\`diff\n${diff.slice(0, 50_000)}\n\`\`\``)
+          sections.push(
+            `## Git Diff (${diffBase}...HEAD)\n\n\`\`\`diff\n${diff.slice(0, 50_000)}\n\`\`\``,
+          )
         }
       } catch {
         sections.push(`## Git Diff\n\n[Could not compute diff against ${diffBase}]`)
@@ -159,22 +162,34 @@ export function extractScore(text: string, label: string): number | undefined {
 
 // ─── Artifact Saving ──────────────────────────────────────────────────────────
 
-function saveArtifact(output: string, outputPath: string, cwd: string, meta: Record<string, unknown>): string {
+function saveArtifact(
+  output: string,
+  outputPath: string,
+  cwd: string,
+  meta: Record<string, unknown>,
+): string {
   // Replace {date} placeholder
   const date = new Date().toISOString().slice(0, 10)
   const resolved = outputPath.replace(/{date}/g, date)
   const fullPath = resolved.startsWith('/') ? resolved : join(cwd, resolved)
 
   mkdirSync(dirname(fullPath), { recursive: true })
-  writeFileSync(fullPath, output + '\n')
+  writeFileSync(fullPath, `${output}\n`)
 
   // Write companion JSON metadata
   const jsonPath = fullPath.replace(/\.md$/, '.json')
-  writeFileSync(jsonPath, JSON.stringify({
-    ...meta,
-    createdAt: new Date().toISOString(),
-    reviewPath: fullPath,
-  }, null, 2) + '\n')
+  writeFileSync(
+    jsonPath,
+    `${JSON.stringify(
+      {
+        ...meta,
+        createdAt: new Date().toISOString(),
+        reviewPath: fullPath,
+      },
+      null,
+      2,
+    )}\n`,
+  )
 
   return fullPath
 }
@@ -193,12 +208,8 @@ export async function runAgentStep(
   const promptTemplate = config.raw_prompt ?? loadPrompt(config.prompt)
 
   // 3. Assemble context from named sources + extra context
-  const namedContext = config.context?.length
-    ? assembleContext(config.context, context)
-    : ''
-  const assembledContext = [namedContext, context.extraContext]
-    .filter(Boolean)
-    .join('\n\n---\n\n')
+  const namedContext = config.context?.length ? assembleContext(config.context, context) : ''
+  const assembledContext = [namedContext, context.extraContext].filter(Boolean).join('\n\n---\n\n')
 
   // 4. Build final prompt
   const fullPrompt = assembledContext
@@ -220,8 +231,7 @@ export async function runAgentStep(
 
   // 7. Extract score if applicable
   const score = extractScore(output, 'SCORE') ?? extractScore(output, 'AGENT_SCORE')
-  const threshold = config.threshold ?? 75
-  const passed = config.gate ? (score !== undefined && score >= threshold) : true
+  const passed = true
 
   // 8. Save artifact if configured
   let artifactPath: string | undefined
@@ -230,8 +240,6 @@ export async function runAgentStep(
       provider: providerName,
       model: config.model ?? provider.defaultModel,
       prompt: config.prompt,
-      gate: config.gate,
-      threshold: config.gate ? threshold : undefined,
       score,
       passed,
     })

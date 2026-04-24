@@ -24,5 +24,5 @@ export async function modes(_args: string[]): Promise<void> {
   lines.push('')
   lines.push('Enter the mode first, then respond.')
 
-  process.stdout.write(lines.join('\n') + '\n')
+  process.stdout.write(`${lines.join('\n')}\n`)
 }

@@ -1,8 +1,8 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import jsYaml from 'js-yaml'
-import { findProjectDir, getProjectTemplatesDir } from '../session/lookup.js'
 import { getKataConfigPath } from '../config/kata-config.js'
+import { findProjectDir, getProjectTemplatesDir } from '../session/lookup.js'
 import { VALID_CATEGORIES } from '../state/schema.js'
 
 interface InitModeOptions {

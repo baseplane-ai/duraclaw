@@ -2,10 +2,17 @@
  * Prompt helpers — temp file delivery for large prompts, saved prompt loading.
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, unlinkSync } from 'node:fs'
-import { join } from 'node:path'
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
-import { getPackageRoot, getProjectPromptsDir, findProjectDir } from '../session/lookup.js'
+import { join } from 'node:path'
+import { getPackageRoot, getProjectPromptsDir } from '../session/lookup.js'
 
 const DEFAULT_THRESHOLD = 4000
 
@@ -22,10 +29,7 @@ export interface PreparedPrompt {
  * Write prompt to a temp file if it exceeds the char threshold.
  * All providers should use this for uniform large-prompt handling.
  */
-export function preparePrompt(
-  prompt: string,
-  opts?: { thresholdChars?: number },
-): PreparedPrompt {
+export function preparePrompt(prompt: string, opts?: { thresholdChars?: number }): PreparedPrompt {
   const threshold = opts?.thresholdChars ?? DEFAULT_THRESHOLD
 
   if (prompt.length <= threshold) {
@@ -34,7 +38,10 @@ export function preparePrompt(
 
   const tempDir = join(tmpdir(), 'kata-prompts')
   mkdirSync(tempDir, { recursive: true })
-  const filePath = join(tempDir, `prompt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.md`)
+  const filePath = join(
+    tempDir,
+    `prompt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.md`,
+  )
   writeFileSync(filePath, prompt, 'utf-8')
 
   return {
@@ -59,7 +66,7 @@ function getBatteriesPromptsDir(): string {
 
 /**
  * Load a saved prompt template by name.
- * Checks project-level prompts first (.kata/prompts/ or .claude/workflows/prompts/),
+ * Checks project-level prompts first (.kata/prompts/),
  * then falls back to package batteries/prompts/.
  */
 export function loadPrompt(name: string): string {
@@ -78,9 +85,7 @@ export function loadPrompt(name: string): string {
   const batteriesPath = join(getBatteriesPromptsDir(), `${name}.md`)
   if (!existsSync(batteriesPath)) {
     const available = listPrompts()
-    throw new Error(
-      `Prompt not found: ${name}. Available: ${available.join(', ')}`,
-    )
+    throw new Error(`Prompt not found: ${name}. Available: ${available.join(', ')}`)
   }
   return readFileSync(batteriesPath, 'utf-8')
 }

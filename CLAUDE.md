@@ -473,9 +473,14 @@ silencer and pipe through `/usr/bin/grep -E 'cm|ws:|Capacitor|chromium'`.
 
 ### packages/kata (Workflow CLI)
 
+- Full source lives in `packages/kata/` (migrated from external `kata-wm` repo).
+  Not published to npm — clone-and-run-from-source via Bun.
 - 8 modes: planning, implementation, research, task, debug, verify, freeform, onboard
 - Phase tracking, stop condition gates, session persistence
 - Run via `kata enter <mode>`
+- **CLI install**: `scripts/link-kata.sh` creates `~/.local/bin/kata` symlink
+  + runs `bun install` for deps. Called automatically by `setup-clone.sh`.
+- Dependencies: `js-yaml`, `zod` (runtime); `bun` (execution)
 
 ## Session lifecycle & resume
 

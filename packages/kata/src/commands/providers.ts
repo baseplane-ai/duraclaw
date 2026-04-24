@@ -83,9 +83,7 @@ function printProviderStatus(statuses: ProviderStatus[]): void {
 
   for (const s of statuses) {
     const installed = s.installed ? '✅ installed' : '❌ not found'
-    process.stdout.write(
-      `  ${s.name.padEnd(10)} ${installed}\n`,
-    )
+    process.stdout.write(`  ${s.name.padEnd(10)} ${installed}\n`)
     if (s.installed) {
       process.stdout.write(`             Auth: ${s.authMethod}\n`)
     }
@@ -156,7 +154,7 @@ export async function providers(args: string[]): Promise<void> {
   switch (subcommand) {
     case 'list': {
       if (jsonMode) {
-        process.stdout.write(JSON.stringify(statuses, null, 2) + '\n')
+        process.stdout.write(`${JSON.stringify(statuses, null, 2)}\n`)
       } else {
         printProviderStatus(statuses)
       }
@@ -165,7 +163,7 @@ export async function providers(args: string[]): Promise<void> {
 
     case 'setup': {
       if (jsonMode) {
-        process.stdout.write(JSON.stringify(statuses, null, 2) + '\n')
+        process.stdout.write(`${JSON.stringify(statuses, null, 2)}\n`)
       } else {
         printProviderStatus(statuses)
       }

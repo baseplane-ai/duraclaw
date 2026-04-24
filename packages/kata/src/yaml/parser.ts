@@ -18,9 +18,7 @@ export function parseYamlFrontmatter<T>(filePath: string): T | null {
   }
 }
 
-export type YamlParseResult<T> =
-  | { ok: true; data: T }
-  | { ok: false; error: string }
+export type YamlParseResult<T> = { ok: true; data: T } | { ok: false; error: string }
 
 /**
  * Parse YAML frontmatter with error details instead of silently returning null.

@@ -1,7 +1,7 @@
 // Workflow guidance generation for enter command
-import { loadKataConfig } from '../../config/kata-config.js'
 import type { PhaseDefinition, SubphasePattern } from '../../validation/index.js'
 import type { SpecPhase } from '../../yaml/index.js'
+import { resolvePlaceholders } from './placeholder.js'
 
 export interface PhaseTitle {
   id: string
@@ -26,28 +26,13 @@ export interface WorkflowGuidance {
 }
 
 /**
- * Apply template placeholders to a string
- * Supports: {task_summary}, {phase_name}, {phase_label}
- */
-export function applyPlaceholders(
-  template: string,
-  vars: { taskSummary: string; phaseName: string; phaseLabel: string; reviewers?: string },
-): string {
-  return template
-    .replace(/{task_summary}/g, vars.taskSummary)
-    .replace(/{phase_name}/g, vars.phaseName)
-    .replace(/{phase_label}/g, vars.phaseLabel)
-    .replace(/{reviewers}/g, vars.reviewers ?? 'review-agent')
-}
-
-/**
  * Build workflow guidance with required todos and commands
  * Works for ALL modes - spec-based (implementation) and template-based (planning, etc.)
  * Reads phase titles and subphase patterns from templates dynamically instead of hardcoding.
  */
 export function buildWorkflowGuidance(
   _workflowId: string,
-  mode: string,
+  _mode: string,
   specPhases: SpecPhase[] | null,
   phaseTitles: PhaseTitle[],
   templatePhases?: PhaseDefinition[],
@@ -56,30 +41,34 @@ export function buildWorkflowGuidance(
 ): WorkflowGuidance {
   const requiredTodos: RequiredTodo[] = []
 
-  // Compute container phase early to drive behavior from template structure
-  const containerPhase = templatePhases?.find((p) => p.container === true)
-  const hasContainerPhase = containerPhase !== undefined
+  // Compute spec expansion phase early to drive behavior from template structure
+  const specExpansionPhase = templatePhases?.find((p) => p.expansion === 'spec')
+  const hasSpecExpansion = specExpansionPhase !== undefined
 
-  if (hasContainerPhase && specPhases?.length) {
-    // Container phase mode: orchestration tasks + spec tasks with P2.X numbering
+  if (hasSpecExpansion && specPhases?.length) {
+    // Spec expansion mode: orchestration tasks + spec tasks with P2.X numbering
     // Reads orchestration phase titles and subphase pattern from template
-    const containerPhaseNum = containerPhase
-      ? Number.parseInt(containerPhase.id.replace('p', ''), 10)
+    const specExpansionPhaseNum = specExpansionPhase
+      ? Number.parseInt(specExpansionPhase.id.replace('p', ''), 10)
       : 2 // Default to p2 for backwards compatibility
-    const subphasePattern = resolvedSubphasePattern ?? (Array.isArray(containerPhase?.subphase_pattern) ? containerPhase.subphase_pattern : [])
+    const subphasePattern =
+      resolvedSubphasePattern ??
+      (Array.isArray(specExpansionPhase?.subphase_pattern)
+        ? specExpansionPhase.subphase_pattern
+        : [])
 
-    // Add orchestration phases BEFORE container (e.g., P0: Baseline, P1: Claim)
-    const beforeContainer =
+    // Add orchestration phases BEFORE expansion (e.g., P0: Baseline, P1: Claim)
+    const beforeExpansion =
       templatePhases?.filter((p) => {
         const phaseNum = Number.parseInt(p.id.replace('p', ''), 10)
-        return phaseNum < containerPhaseNum && p.task_config?.title
+        return phaseNum < specExpansionPhaseNum && p.task_config?.title
       }) ?? []
 
-    for (const phase of beforeContainer) {
+    for (const phase of beforeExpansion) {
+      // biome-ignore lint/style/noNonNullAssertion: filter above guarantees task_config.title exists
       requiredTodos.push({
         content: phase.task_config!.title,
         status: 'pending',
-        // Use task_config title for activeForm (more descriptive than just phase name)
         activeForm: phase.task_config!.title,
       })
     }
@@ -88,7 +77,7 @@ export function buildWorkflowGuidance(
     for (let i = 0; i < specPhases.length; i++) {
       const phase = specPhases[i]
       const phaseNum = i + 1
-      const phaseLabel = `P${containerPhaseNum}.${phaseNum}`
+      const phaseLabel = `P${specExpansionPhaseNum}.${phaseNum}`
       const phaseName = phase.name || phase.id.toUpperCase()
       const taskSummary =
         phase.tasks?.length === 1
@@ -99,15 +88,11 @@ export function buildWorkflowGuidance(
 
       // Generate todos from subphase pattern
       for (const patternItem of subphasePattern) {
-        const todoContent = applyPlaceholders(patternItem.todo_template, {
-          taskSummary,
-          phaseName,
-          phaseLabel,
+        const todoContent = resolvePlaceholders(patternItem.todo_template, {
+          extra: { task_summary: taskSummary, phase_name: phaseName, phase_label: phaseLabel },
         })
-        const activeForm = applyPlaceholders(patternItem.active_form, {
-          taskSummary,
-          phaseName,
-          phaseLabel,
+        const activeForm = resolvePlaceholders(patternItem.active_form, {
+          extra: { task_summary: taskSummary, phase_name: phaseName, phase_label: phaseLabel },
         })
 
         requiredTodos.push({
@@ -118,25 +103,27 @@ export function buildWorkflowGuidance(
       }
     }
 
-    // Add orchestration phases AFTER container (e.g., P3: Codex Gate, P4: Gemini Gate, P5: Close)
-    const afterContainer =
+    // Add orchestration phases AFTER expansion (e.g., P3: Codex Gate, P4: Gemini Gate, P5: Close)
+    const afterExpansion =
       templatePhases?.filter((p) => {
         const phaseNum = Number.parseInt(p.id.replace('p', ''), 10)
-        return phaseNum > containerPhaseNum && p.task_config?.title
+        return phaseNum > specExpansionPhaseNum && p.task_config?.title
       }) ?? []
 
-    for (const phase of afterContainer) {
+    for (const phase of afterExpansion) {
+      // biome-ignore lint/style/noNonNullAssertion: filter above guarantees task_config.title exists
       requiredTodos.push({
         content: phase.task_config!.title,
         status: 'pending',
-        // Use task_config title for activeForm (more descriptive than just phase name)
         activeForm: phase.task_config!.title,
       })
     }
   } else if (specPhases?.length && templatePhases) {
     // Non-implementation mode with spec phases - use subphase pattern if available
-    const containerPhase = templatePhases.find((p) => p.container === true)
-    const subphasePattern = resolvedSubphasePattern ?? (Array.isArray(containerPhase?.subphase_pattern) ? containerPhase.subphase_pattern : [])
+    const expansionPhase = templatePhases.find((p) => p.expansion === 'spec')
+    const subphasePattern =
+      resolvedSubphasePattern ??
+      (Array.isArray(expansionPhase?.subphase_pattern) ? expansionPhase.subphase_pattern : [])
 
     for (const phase of specPhases) {
       const phaseLabel = phase.id.toUpperCase()
@@ -150,15 +137,11 @@ export function buildWorkflowGuidance(
 
       // Generate todos from subphase pattern
       for (const patternItem of subphasePattern) {
-        const todoContent = applyPlaceholders(patternItem.todo_template, {
-          taskSummary,
-          phaseName,
-          phaseLabel,
+        const todoContent = resolvePlaceholders(patternItem.todo_template, {
+          extra: { task_summary: taskSummary, phase_name: phaseName, phase_label: phaseLabel },
         })
-        const activeForm = applyPlaceholders(patternItem.active_form, {
-          taskSummary,
-          phaseName,
-          phaseLabel,
+        const activeForm = resolvePlaceholders(patternItem.active_form, {
+          extra: { task_summary: taskSummary, phase_name: phaseName, phase_label: phaseLabel },
         })
 
         requiredTodos.push({
@@ -179,45 +162,14 @@ export function buildWorkflowGuidance(
     }
   }
 
-  // Build workflow instructions based on mode
-  // Note: Detailed workflow comes from template/spec, not hardcoded here
-  // Tasks are managed via Claude Code's native task system (TaskUpdate/TaskList)
-  const workflow: string[] = []
-  if (mode === 'implementation') {
-    const specPath = loadKataConfig().spec_path
-    workflow.push(
-      'Follow the tasks closely - they define your workflow.',
-      `Reference the spec for detailed requirements: ${specPath}/<issue>-*.md`,
-      '',
-      'Commands:',
-      '  kata status                           # Check current mode and phase',
-      '  kata can-exit                         # Check if exit conditions met',
-    )
-  } else if (mode === 'planning') {
-    workflow.push(
-      'Follow the tasks closely - they define your workflow.',
-      'Reference template: packages/workflow-management/templates/planning-feature.md',
-      '',
-      'Commands:',
-      '  kata status                           # Check current mode and phase',
-      '  kata can-exit                         # Check if exit conditions met',
-    )
-  } else {
-    workflow.push(
-      'Follow the tasks closely - they define your workflow.',
-      `Reference template: packages/workflow-management/templates/${mode}.md`,
-      '',
-      'Commands:',
-      '  kata status                           # Check current mode and phase',
-      '  kata can-exit                         # Check if exit conditions met',
-    )
+  return {
+    requiredTodos,
+    workflow: [] as string[],
+    taskSystem: taskSystemRules ?? [],
+    commands: {
+      listTasks: 'kata status',
+      pendingTasks: 'kata can-exit',
+      completeWithEvidence: 'TaskUpdate(taskId="X", status="completed")',
+    },
   }
-
-  const commands = {
-    listTasks: 'kata status',
-    pendingTasks: 'kata can-exit',
-    completeWithEvidence: 'TaskUpdate(taskId="X", status="completed")',
-  }
-
-  return { requiredTodos, workflow, taskSystem: taskSystemRules ?? [], commands }
 }

@@ -1,11 +1,12 @@
 // kata setup - Configure kata in a project (pure config, flag-driven)
-// For the guided setup interview, use: kata enter onboard
+// For guided setup, use the /kata-config skill in Claude Code.
 // Hook registration uses 'kata hook <name>' commands in .claude/settings.json.
 import { execSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import jsYaml from 'js-yaml'
 import { getDefaultProfile, type SetupProfile } from '../config/setup-profile.js'
+
 // WmConfig inlined — setup.ts generates kata.yaml
 type WmConfig = Record<string, unknown> & {
   project?: { name?: string; test_command?: string; ci?: string | null }
@@ -15,17 +16,22 @@ type WmConfig = Record<string, unknown> & {
   reviews?: { spec_review?: boolean; code_review?: boolean; code_reviewer?: string | null }
   wm_version?: string
 }
-import { getPackageRoot, findProjectDir, getKataDir, getSessionsDir, getProjectTemplatesDir } from '../session/lookup.js'
-import { getKataConfigPath } from '../config/kata-config.js'
+
+import { getKataConfigPath, loadKataConfig } from '../config/kata-config.js'
+import { findProjectDir, getPackageRoot, getSessionsDir } from '../session/lookup.js'
+import { installUserSkills, scaffoldBatteries } from './scaffold-batteries.js'
 
 /**
  * Resolve the absolute path to the kata binary.
  *
- * Prefers `which kata` so hooks point to the bin symlink that npm/pnpm update on
- * upgrade (e.g. /usr/local/bin/kata). Falls back to the package-relative path for
- * workspace / pnpm-link scenarios where `kata` is not yet in PATH.
+ * Resolution order:
+ * 1. Explicit override (kata_binary from kata.yaml) — for A/B testing branches
+ * 2. `which kata` — bin symlink that npm/pnpm update on upgrade
+ * 3. Package-relative path — workspace / pnpm-link fallback
  */
-export function resolveWmBin(): string {
+export function resolveWmBin(override?: string): string {
+  if (override) return override
+
   try {
     const which = execSync('which kata 2>/dev/null || command -v kata 2>/dev/null', {
       encoding: 'utf-8',
@@ -43,14 +49,12 @@ export function resolveWmBin(): string {
  */
 function parseArgs(args: string[]): {
   yes: boolean
-  strict: boolean
   batteries: boolean
   cwd: string
   explicitCwd: boolean
   session: string | undefined
 } {
   let yes = false
-  let strict = false
   let batteries = false
   let cwd = process.cwd()
   let explicitCwd = false
@@ -59,8 +63,6 @@ function parseArgs(args: string[]): {
   for (const arg of args) {
     if (arg === '--yes' || arg === '-y') {
       yes = true
-    } else if (arg === '--strict') {
-      strict = true
     } else if (arg === '--batteries' || arg === '-b') {
       batteries = true
       yes = true // --batteries implies --yes (skips interview)
@@ -72,7 +74,7 @@ function parseArgs(args: string[]): {
     }
   }
 
-  return { yes, strict, batteries, cwd, explicitCwd, session }
+  return { yes, batteries, cwd, explicitCwd, session }
 }
 
 /**
@@ -99,10 +101,10 @@ export interface SettingsJson {
  * Build kata hook entries for .claude/settings.json.
  * Uses an absolute path to the kata binary so hooks work regardless of PATH
  * (both for globally-installed and locally-installed packages).
- * Default: SessionStart, UserPromptSubmit, Stop, PreToolUse (mode-gate)
- * With --strict: also PreToolUse task-deps + task-evidence hooks
+ * Registers a single consolidated PreToolUse hook (pre-tool-use) that handles
+ * mode-gate, task-deps, gate evaluation, and task-evidence internally.
  */
-export function buildHookEntries(strict: boolean, wmBin: string): Record<string, HookEntry[]> {
+export function buildHookEntries(wmBin: string): Record<string, HookEntry[]> {
   // Quote the binary path so spaces in the path are handled correctly
   const bin = `"${wmBin}"`
   const hooks: Record<string, HookEntry[]> = {
@@ -137,44 +139,29 @@ export function buildHookEntries(strict: boolean, wmBin: string): Record<string,
         ],
       },
     ],
-    // mode-gate is always registered: it injects --session=ID into kata bash
-    // commands so session resolution works correctly (not just a strict feature)
+    // Consolidated PreToolUse handler: mode-gate + task-deps + gate evaluation + task-evidence
     PreToolUse: [
       {
         hooks: [
           {
             type: 'command',
-            command: `${bin} hook mode-gate`,
-            timeout: 10,
+            command: `${bin} hook pre-tool-use`,
+            timeout: 30,
           },
         ],
       },
     ],
-  }
-
-  if (strict) {
-    hooks.PreToolUse.push(
+    // PostToolUse: track file mutations for session-scoped stop conditions
+    PostToolUse: [
       {
-        matcher: 'TaskUpdate',
         hooks: [
           {
             type: 'command',
-            command: `${bin} hook task-deps`,
-            timeout: 10,
+            command: `${bin} hook post-tool-use`,
           },
         ],
       },
-      {
-        matcher: 'TaskUpdate',
-        hooks: [
-          {
-            type: 'command',
-            command: `${bin} hook task-evidence`,
-            timeout: 10,
-          },
-        ],
-      },
-    )
+    ],
   }
 
   return hooks
@@ -182,7 +169,7 @@ export function buildHookEntries(strict: boolean, wmBin: string): Record<string,
 
 /**
  * Read existing .claude/settings.json or return empty structure
- * Uses cwd-based path since .claude/sessions/ may not exist yet
+ * Uses cwd-based path since .kata/ may not exist yet
  */
 export function readSettings(cwd: string): SettingsJson {
   const settingsPath = join(cwd, '.claude', 'settings.json')
@@ -229,7 +216,7 @@ export function mergeHooksIntoSettings(
     // Tolerates both bare `kata hook …` and quoted `"/path/kata" hook …` forms while
     // avoiding false positives from unrelated tools like lefthook or husky.
     const wmHookPattern =
-      /\bhook (session-start|user-prompt|stop-conditions|mode-gate|task-deps|task-evidence)\b/
+      /\bhook (session-start|user-prompt|stop-conditions|mode-gate|task-deps|task-evidence|pre-tool-use|post-tool-use)\b/
     const nonWmEntries = existing.filter((entry) => {
       return !entry.hooks?.some(
         (h) => typeof h.command === 'string' && wmHookPattern.test(h.command),
@@ -287,13 +274,31 @@ function buildKataConfig(projectRoot: string, profile: SetupProfile): Record<str
         return {
           ...fromProfile,
           ...existing,
-          project: { ...(fromProfile.project as Record<string, unknown>), ...((existing.project as Record<string, unknown>) ?? {}) },
+          project: {
+            ...(fromProfile.project as Record<string, unknown>),
+            ...((existing.project as Record<string, unknown>) ?? {}),
+          },
           reviews: { ...profileReviews, ...((existing.reviews as Record<string, unknown>) ?? {}) },
         }
       }
     } catch {
-      process.stderr.write(`kata setup: warning: could not parse existing kata.yaml; using defaults\n`)
+      process.stderr.write(
+        `kata setup: warning: could not parse existing kata.yaml; using defaults\n`,
+      )
     }
+  }
+
+  // Stamp kata_version from package.json
+  try {
+    const pkgPath = join(getPackageRoot(), 'package.json')
+    if (existsSync(pkgPath)) {
+      const pkgJson = JSON.parse(readFileSync(pkgPath, 'utf-8')) as { version?: string }
+      if (pkgJson.version) {
+        fromProfile.kata_version = pkgJson.version
+      }
+    }
+  } catch {
+    // Version stamp is best-effort
   }
 
   // Seed modes from batteries/kata.yaml
@@ -312,7 +317,6 @@ function buildKataConfig(projectRoot: string, profile: SetupProfile): Record<str
 
   return fromProfile
 }
-
 
 /**
  * Write kata.yaml to the project config directory.
@@ -351,40 +355,34 @@ function applySetup(cwd: string, profile: SetupProfile, explicitCwd: boolean): v
   const config = buildKataConfig(projectRoot, profile)
   writeKataYaml(projectRoot, generateKataYaml(config))
 
-  // For fresh projects (no .kata/ or .claude/ yet), create .kata/ (new layout).
-  // For existing projects, getKataDir() detects the active layout.
-  if (!existsSync(join(projectRoot, '.kata')) && !existsSync(join(projectRoot, '.claude', 'workflows'))) {
-    mkdirSync(join(projectRoot, '.kata'), { recursive: true })
-  }
+  // Ensure .kata/ directory exists
+  mkdirSync(join(projectRoot, '.kata'), { recursive: true })
 
   // Ensure sessions directory exists
   mkdirSync(getSessionsDir(projectRoot), { recursive: true })
 
-  // Seed onboard.md so `kata enter onboard` works without --batteries
-  const templatesDir = getProjectTemplatesDir(projectRoot)
-  const onboardDest = join(templatesDir, 'onboard.md')
-  if (!existsSync(onboardDest)) {
-    const onboardSrc = join(getPackageRoot(), 'templates', 'onboard.md')
-    if (existsSync(onboardSrc)) {
-      mkdirSync(templatesDir, { recursive: true })
-      copyFileSync(onboardSrc, onboardDest)
-    }
-  }
-
   // Register hooks in settings.json using absolute kata binary path
-  const wmBin = resolveWmBin()
+  // If kata_binary is set in kata.yaml, use it (for A/B testing branches)
+  let binaryOverride: string | undefined
+  try {
+    const kataConfig = loadKataConfig(projectRoot)
+    binaryOverride = kataConfig.kata_binary
+  } catch {
+    // Config may not exist yet during first setup
+  }
+  const wmBin = resolveWmBin(binaryOverride)
   const settings = readSettings(projectRoot)
-  const wmHooks = buildHookEntries(profile.strict, wmBin)
+  const wmHooks = buildHookEntries(wmBin)
   writeSettings(projectRoot, mergeHooksIntoSettings(settings, wmHooks))
 }
 
 /**
- * kata setup [--yes] [--strict] [--batteries] [--cwd=PATH]
+ * kata setup [--yes] [--cwd=PATH]
  *
  * Pure configuration — writes kata.yaml, registers hooks, scaffolds content.
  * Always flag-driven; never enters an interactive session.
  *
- * For the guided setup interview, use: kata enter onboard
+ * For guided setup, use the /kata-config skill in Claude Code.
  *
  * Installs hooks in PROJECT-LEVEL .claude/settings.json only.
  * Bypasses findProjectDir() since .claude/ may not exist yet.
@@ -396,63 +394,32 @@ export async function setup(args: string[]): Promise<void> {
   // into kata.yaml when .claude/ already exists at a higher level.
   const projectRoot = resolveProjectRoot(parsed.cwd, parsed.explicitCwd)
   const profile = getDefaultProfile(projectRoot)
-  profile.strict = parsed.strict
-
   if (parsed.yes) {
-    // --yes / --batteries: write everything with auto-detected defaults
+    // --yes: write everything with auto-detected defaults
     applySetup(parsed.cwd, profile, parsed.explicitCwd)
 
-    // --batteries: scaffold full mode templates, agents, and spec templates
+    // Deprecation notice for --batteries flag
     if (parsed.batteries) {
-      const { scaffoldBatteries } = await import('./scaffold-batteries.js')
-      const result = scaffoldBatteries(projectRoot)
-
-      const kd = getKataDir(projectRoot)
-      process.stdout.write('kata setup --batteries complete:\n')
-      process.stdout.write(`  Project: ${profile.project_name}\n`)
-      process.stdout.write(`  Config: ${kd === '.kata' ? '.kata/kata.yaml' : '.claude/workflows/kata.yaml'}\n`)
-      process.stdout.write(`  Hooks: .claude/settings.json\n`)
-      process.stdout.write('\nBatteries scaffolded:\n')
-      if (result.templates.length > 0) {
-        const tmplRelDir = kd === '.kata' ? '.kata/templates' : '.claude/workflows/templates'
-        process.stdout.write(`  Mode templates (${result.templates.length}):\n`)
-        for (const t of result.templates) {
-          process.stdout.write(`    ${tmplRelDir}/${t}\n`)
-        }
-      }
-      if (result.agents.length > 0) {
-        process.stdout.write(`  Agents (${result.agents.length}):\n`)
-        for (const a of result.agents) {
-          process.stdout.write(`    .claude/agents/${a}\n`)
-        }
-      }
-      if (result.specTemplates.length > 0) {
-        process.stdout.write(`  Spec templates (${result.specTemplates.length}):\n`)
-        for (const s of result.specTemplates) {
-          process.stdout.write(`    planning/spec-templates/${s}\n`)
-        }
-      }
-      if (result.skipped.length > 0) {
-        process.stdout.write(`  Skipped (already exist): ${result.skipped.join(', ')}\n`)
-      }
-    } else {
-      // Plain --yes summary
-      const kd2 = getKataDir(projectRoot)
-      process.stdout.write('kata setup complete:\n')
-      process.stdout.write(`  Project: ${profile.project_name}\n`)
-      process.stdout.write(`  Test command: ${profile.test_command ?? 'none detected'}\n`)
-      process.stdout.write(`  CI: ${profile.ci ?? 'none detected'}\n`)
-      process.stdout.write(`  Config: ${kd2 === '.kata' ? '.kata/kata.yaml' : '.claude/workflows/kata.yaml'}\n`)
-      process.stdout.write(`  Hooks: .claude/settings.json\n`)
-      process.stdout.write(`    - SessionStart\n`)
-      process.stdout.write(`    - UserPromptSubmit\n`)
-      process.stdout.write(`    - Stop\n`)
-      process.stdout.write(`    - PreToolUse (mode-gate)\n`)
-      if (parsed.strict) {
-        process.stdout.write(`    - PreToolUse (task-deps)\n`)
-        process.stdout.write(`    - PreToolUse (task-evidence)\n`)
-      }
+      process.stderr.write(
+        'Note: --batteries is deprecated. kata setup --yes now includes all content.\n',
+      )
     }
+
+    // Always scaffold batteries content (templates, skills, spec templates, etc.)
+    const result = scaffoldBatteries(projectRoot)
+
+    // Install user-scoped skills
+    const userSkillsResult = installUserSkills()
+
+    // Unified output summary
+    process.stdout.write('kata setup complete:\n')
+    process.stdout.write(`  Project: ${profile.project_name}\n`)
+    process.stdout.write(`  Config: .kata/kata.yaml\n`)
+    process.stdout.write(`  Hooks: .claude/settings.json\n`)
+    process.stdout.write(`  Spec templates: ${result.specTemplates.length}\n`)
+    process.stdout.write(
+      `  User skills: ${userSkillsResult.installed.length} installed to ~/.claude/skills/\n`,
+    )
 
     process.stdout.write('\nOptional: add shorthand to package.json scripts:\n')
     process.stdout.write('  "kata": "kata"\n')
@@ -466,18 +433,11 @@ export async function setup(args: string[]): Promise<void> {
 
 Usage:
   kata setup --yes                Quick setup with auto-detected defaults
-  kata setup --yes --strict       Setup + PreToolUse task enforcement hooks
-  kata setup --batteries          Setup + scaffold batteries-included starter content
-  kata setup --batteries --strict Setup + batteries + strict hooks
 
 Flags:
-  --yes         Write config and register hooks using auto-detected defaults
-  --batteries   Scaffold mode templates, agents, spec templates, and GitHub issue templates
-                (implies --yes)
-  --strict      Also register PreToolUse hooks: task-deps, task-evidence
+  --yes         Write config, register hooks, scaffold templates and skills
   --cwd=PATH    Run setup in a different directory
 
-For the guided setup interview, run:
-  kata enter onboard
+For guided setup, use the /kata-config skill in Claude Code.
 `)
 }

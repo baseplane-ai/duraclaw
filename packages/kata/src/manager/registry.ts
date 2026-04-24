@@ -1,9 +1,9 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { z } from 'zod'
 import jsYaml from 'js-yaml'
-import { getProjectsIndexPath } from './paths.js'
+import { z } from 'zod'
 import { isKataEnabled } from './discovery.js'
+import { getProjectsIndexPath } from './paths.js'
 
 /**
  * Schema for a single project entry in the registry.
@@ -72,7 +72,7 @@ export function writeIndex(index: ProjectsIndex): void {
     updated_at: new Date().toISOString(),
   }
 
-  writeFileSync(indexPath, JSON.stringify(updated, null, 2) + '\n')
+  writeFileSync(indexPath, `${JSON.stringify(updated, null, 2)}\n`)
 }
 
 /**
@@ -155,11 +155,6 @@ export function refreshProject(entry: ProjectEntry): ProjectEntry {
 /**
  * Find a project by alias, path, or name.
  */
-export function findProject(
-  index: ProjectsIndex,
-  query: string,
-): ProjectEntry | undefined {
-  return index.projects.find(
-    (p) => p.path === query || p.alias === query || p.name === query,
-  )
+export function findProject(index: ProjectsIndex, query: string): ProjectEntry | undefined {
+  return index.projects.find((p) => p.path === query || p.alias === query || p.name === query)
 }

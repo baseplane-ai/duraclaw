@@ -1,15 +1,16 @@
-import { describe, it, expect } from 'bun:test'
-import { STOP_CONDITION_TYPES, VALID_CATEGORIES } from './schema.js'
+import { describe, expect, it } from 'bun:test'
 import { KataModeConfigSchema } from '../config/kata-config.js'
+import { STOP_CONDITION_TYPES, VALID_CATEGORIES } from './schema.js'
 
 describe('STOP_CONDITION_TYPES', () => {
   it('contains expected conditions', () => {
     expect(STOP_CONDITION_TYPES).toContain('tasks_complete')
     expect(STOP_CONDITION_TYPES).toContain('committed')
     expect(STOP_CONDITION_TYPES).toContain('pushed')
-    expect(STOP_CONDITION_TYPES).toContain('verification')
     expect(STOP_CONDITION_TYPES).toContain('tests_pass')
     expect(STOP_CONDITION_TYPES).toContain('feature_tests_added')
+    expect(STOP_CONDITION_TYPES).toContain('spec_valid')
+    expect(STOP_CONDITION_TYPES).toContain('doc_created')
   })
 })
 

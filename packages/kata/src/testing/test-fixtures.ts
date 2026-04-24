@@ -6,9 +6,9 @@
  */
 
 import type { HookInput } from './mock-hooks'
+import { ToolInputs, UserPromptInputs } from './mock-hooks'
 import type { MockSessionOptions } from './mock-session'
 import { SessionFixtures } from './mock-session'
-import { ToolInputs, UserPromptInputs } from './mock-hooks'
 
 /**
  * Complete test scenario including session setup and expected behavior

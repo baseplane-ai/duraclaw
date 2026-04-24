@@ -12,15 +12,15 @@
  *   kata postmortem --list-transcripts         # list available eval transcripts
  */
 
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
-import { join, sep } from 'node:path'
-import { homedir } from 'node:os'
 import { spawnSync } from 'node:child_process'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join, sep } from 'node:path'
+import { loadPrompt } from '../providers/prompt.js'
+import { runAgentStep } from '../providers/step-runner.js'
 import { findProjectDir, getSessionsDir } from '../session/lookup.js'
 import { readState } from '../state/reader.js'
 import type { SessionState } from '../state/schema.js'
-import { runAgentStep } from '../providers/step-runner.js'
-import { loadPrompt } from '../providers/prompt.js'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -74,7 +74,7 @@ function readHookLog(sessionDir: string, filename: string): HookEvent[] {
       .trim()
       .split('\n')
       .filter(Boolean)
-      .map(line => JSON.parse(line) as HookEvent)
+      .map((line) => JSON.parse(line) as HookEvent)
   } catch {
     return []
   }
@@ -126,10 +126,11 @@ function summarizeTranscriptFile(transcriptPath: string, maxEvents = 150): strin
       const msg = event.message as { role?: string; content?: unknown[] } | undefined
 
       // Resolve content array from either format
-      const content: unknown[] | undefined =
-        Array.isArray(msg?.content) ? msg!.content :
-        Array.isArray(event.content) ? event.content as unknown[] :
-        undefined
+      const content: unknown[] | undefined = Array.isArray(msg?.content)
+        ? msg?.content
+        : Array.isArray(event.content)
+          ? (event.content as unknown[])
+          : undefined
 
       if ((type === 'assistant' || msg?.role === 'assistant') && content) {
         for (const block of content) {
@@ -145,8 +146,12 @@ function summarizeTranscriptFile(transcriptPath: string, maxEvents = 150): strin
         for (const block of content) {
           const b = block as Record<string, unknown>
           if (b.type === 'tool_result') {
-            const resultText = typeof b.content === 'string' ? b.content :
-              Array.isArray(b.content) ? (b.content[0] as Record<string, unknown>)?.text as string ?? '' : ''
+            const resultText =
+              typeof b.content === 'string'
+                ? b.content
+                : Array.isArray(b.content)
+                  ? (((b.content[0] as Record<string, unknown>)?.text as string) ?? '')
+                  : ''
             events.push(`[tool_result] ${resultText.slice(0, 200)}`)
           } else if (b.type === 'text' && typeof b.text === 'string') {
             events.push(`[user] ${b.text.slice(0, 300)}`)
@@ -204,7 +209,7 @@ async function listSessions(projectDir: string): Promise<void> {
     const phases =
       completedPhases.length > 0
         ? completedPhases.join(',') + (currentPhase ? `+${currentPhase}` : '')
-        : currentPhase ?? '—'
+        : (currentPhase ?? '—')
     const updated = shortDate(state?.updatedAt)
 
     // biome-ignore lint/suspicious/noConsole: intentional CLI output
@@ -225,7 +230,7 @@ async function sessionPostmortem(
   opts: { judge?: string; transcript?: string },
 ): Promise<void> {
   const sessions = scanSessions(projectDir)
-  const match = sessions.find(s => s.id === sessionId || s.id.startsWith(sessionId))
+  const match = sessions.find((s) => s.id === sessionId || s.id.startsWith(sessionId))
 
   if (!match) {
     // biome-ignore lint/suspicious/noConsole: intentional CLI output
@@ -312,7 +317,9 @@ async function sessionPostmortem(
   const hookEvents = readHookLog(match.sessionDir, 'hooks.log.jsonl')
   if (hookEvents.length > 0) {
     // biome-ignore lint/suspicious/noConsole: intentional CLI output
-    console.log(`\n── HOOK EVENTS (${hookEvents.length} total) ${'─'.repeat(47 - String(hookEvents.length).length)}`)
+    console.log(
+      `\n── HOOK EVENTS (${hookEvents.length} total) ${'─'.repeat(47 - String(hookEvents.length).length)}`,
+    )
 
     const counts = new Map<string, number>()
     for (const e of hookEvents) {
@@ -328,7 +335,7 @@ async function sessionPostmortem(
     }
 
     // Highlight mode-gate denials by tool
-    const denials = hookEvents.filter(e => e.hook === 'mode-gate' && e.decision === 'deny')
+    const denials = hookEvents.filter((e) => e.hook === 'mode-gate' && e.decision === 'deny')
     if (denials.length > 0) {
       const toolCounts = new Map<string, number>()
       for (const d of denials) {
@@ -347,8 +354,8 @@ async function sessionPostmortem(
   // ─── Stop Conditions ────────────────────────────────────────────────────
   const stopEvents = readHookLog(match.sessionDir, 'stop-hook.log.jsonl')
   if (stopEvents.length > 0) {
-    const blocked = stopEvents.filter(e => e.decision === 'block')
-    const allowed = stopEvents.filter(e => e.decision !== 'block')
+    const blocked = stopEvents.filter((e) => e.decision === 'block')
+    const allowed = stopEvents.filter((e) => e.decision !== 'block')
     // biome-ignore lint/suspicious/noConsole: intentional CLI output
     console.log(
       `\n── STOP CONDITIONS (${stopEvents.length} checks: ${blocked.length} blocked, ${allowed.length} allowed) ${'─'.repeat(Math.max(0, 22 - String(stopEvents.length).length))}`,
@@ -419,7 +426,7 @@ async function runJudge(
     const transcriptDir = join(projectDir, 'eval-transcripts')
     if (existsSync(transcriptDir)) {
       const files = readdirSync(transcriptDir)
-        .filter(f => f.endsWith('.jsonl'))
+        .filter((f) => f.endsWith('.jsonl'))
         .sort()
         .reverse()
       for (const f of files) {
@@ -447,7 +454,12 @@ async function runJudge(
   }
 
   const size = Math.round(statSync(transcriptPath).size / 1024)
-  const label = transcriptSource === 'cc-native' ? 'CC native' : transcriptSource === 'eval' ? 'eval harness' : 'explicit'
+  const label =
+    transcriptSource === 'cc-native'
+      ? 'CC native'
+      : transcriptSource === 'eval'
+        ? 'eval harness'
+        : 'explicit'
   // biome-ignore lint/suspicious/noConsole: intentional CLI output
   console.log(`  Transcript: ${transcriptPath.split('/').slice(-1)[0]} (${size}KB, ${label})`)
   // biome-ignore lint/suspicious/noConsole: intentional CLI output
@@ -460,7 +472,7 @@ async function runJudge(
   const templatePath = [
     join(projectDir, '.kata', 'templates', `${modeName}.md`),
     join(projectDir, '.claude', 'workflows', 'templates', `${modeName}.md`),
-  ].find(p => existsSync(p))
+  ].find((p) => existsSync(p))
 
   try {
     // Summarize transcript to avoid context overflow
@@ -469,7 +481,9 @@ async function runJudge(
     // Build context: mode template + summarized transcript
     const sections: string[] = []
     if (templatePath && existsSync(templatePath)) {
-      sections.push(`## Mode Template\n\n\`\`\`markdown\n${readFileSync(templatePath, 'utf-8')}\n\`\`\``)
+      sections.push(
+        `## Mode Template\n\n\`\`\`markdown\n${readFileSync(templatePath, 'utf-8')}\n\`\`\``,
+      )
     }
     sections.push(`## Session Transcript (summarized)\n\n\`\`\`\n${summary}\n\`\`\``)
     const promptText = `${loadPrompt('transcript-review')}\n\n---\n\n${sections.join('\n\n---\n\n')}`
@@ -481,9 +495,12 @@ async function runJudge(
       // Use `claude -p` (print mode) — uses CC's own auth, avoids SDK nesting
       // Pass prompt via stdin with cleaned env (unset CLAUDECODE* to allow nested invocation)
       const cleanedEnv = Object.fromEntries(
-        Object.entries(process.env).filter(([k]) =>
-          !k.startsWith('CLAUDECODE') && !k.startsWith('CLAUDE_CODE_') && k !== 'CLAUDE_PROJECT_DIR'
-        )
+        Object.entries(process.env).filter(
+          ([k]) =>
+            !k.startsWith('CLAUDECODE') &&
+            !k.startsWith('CLAUDE_CODE_') &&
+            k !== 'CLAUDE_PROJECT_DIR',
+        ),
       ) as Record<string, string>
       const result = spawnSync('claude', ['-p', '--allowedTools', ''], {
         input: promptText,
@@ -500,7 +517,11 @@ async function runJudge(
       // Non-claude providers: use runAgentStep (e.g. gemini via CLI subprocess)
       const result = await runAgentStep(
         { provider, prompt: 'transcript-review', context: templatePath ? ['template'] : [] },
-        { cwd: projectDir, templatePath, extraContext: `## Session Transcript (summarized)\n\n\`\`\`\n${summary}\n\`\`\`` },
+        {
+          cwd: projectDir,
+          templatePath,
+          extraContext: `## Session Transcript (summarized)\n\n\`\`\`\n${summary}\n\`\`\``,
+        },
       )
       output = result.output
       modelUsed = result.model
@@ -512,12 +533,14 @@ async function runJudge(
     const systemScore = extractScore(result.output, 'SYSTEM_SCORE')
     // Match "VERDICT: PASS", "FAIL (agent)", "[x] PASS", or derive from scores
     const verdictMatch = result.output.match(
-      /VERDICT:\s*(PASS|FAIL[_\s]\w+)|\[x\]\s*\*\*(PASS|FAIL[^*]+)\*\*/i
+      /VERDICT:\s*(PASS|FAIL[_\s]\w+)|\[x\]\s*\*\*(PASS|FAIL[^*]+)\*\*/i,
     )
     const rawVerdict = verdictMatch?.[1] ?? verdictMatch?.[2] ?? ''
     const verdict = rawVerdict
       ? rawVerdict.replace(/\s+/g, '_').toUpperCase()
-      : agentScore >= 75 && systemScore >= 75 ? 'PASS' : 'FAIL'
+      : agentScore >= 75 && systemScore >= 75
+        ? 'PASS'
+        : 'FAIL'
 
     // biome-ignore lint/suspicious/noConsole: intentional CLI output
     console.log(`\n  Agent score:  ${agentScore}/100`)
@@ -540,17 +563,25 @@ async function runJudge(
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 export async function postmortem(args: string[]): Promise<void> {
-  const projectArg = args.find(a => a.startsWith('--project='))?.split('=').slice(1).join('=')
+  const projectArg = args
+    .find((a) => a.startsWith('--project='))
+    ?.split('=')
+    .slice(1)
+    .join('=')
   const projectDir = projectArg ?? findProjectDir()
 
   const lastFlag = args.includes('--last')
-  const judgeArg = args.find(a => a === '--judge' || a.startsWith('--judge='))
+  const judgeArg = args.find((a) => a === '--judge' || a.startsWith('--judge='))
   const judgeProvider = judgeArg
     ? judgeArg.includes('=')
       ? judgeArg.split('=')[1]
       : 'claude'
     : undefined
-  const transcriptArg = args.find(a => a.startsWith('--transcript='))?.split('=').slice(1).join('=')
+  const transcriptArg = args
+    .find((a) => a.startsWith('--transcript='))
+    ?.split('=')
+    .slice(1)
+    .join('=')
 
   // --list-transcripts: show available eval transcripts
   if (args.includes('--list-transcripts')) {
@@ -561,7 +592,7 @@ export async function postmortem(args: string[]): Promise<void> {
       return
     }
     const files = readdirSync(transcriptDir)
-      .filter(f => f.endsWith('.jsonl'))
+      .filter((f) => f.endsWith('.jsonl'))
       .sort()
       .reverse()
     // biome-ignore lint/suspicious/noConsole: intentional CLI output
@@ -587,15 +618,24 @@ export async function postmortem(args: string[]): Promise<void> {
     }
     // Run judge standalone — create a minimal synthetic state
     const syntheticState: Partial<SessionState> = { currentMode: 'task' }
-    await runJudge('standalone', projectDir, syntheticState as SessionState, judgeProvider, resolvedPath)
+    await runJudge(
+      'standalone',
+      projectDir,
+      syntheticState as SessionState,
+      judgeProvider,
+      resolvedPath,
+    )
     return
   }
 
   // First non-flag arg is session-id or prefix
-  const sessionIdArg = args.find(a => !a.startsWith('--'))
+  const sessionIdArg = args.find((a) => !a.startsWith('--'))
 
   if (sessionIdArg) {
-    await sessionPostmortem(sessionIdArg, projectDir, { judge: judgeProvider, transcript: transcriptArg })
+    await sessionPostmortem(sessionIdArg, projectDir, {
+      judge: judgeProvider,
+      transcript: transcriptArg,
+    })
     return
   }
 
@@ -606,7 +646,10 @@ export async function postmortem(args: string[]): Promise<void> {
       console.log('No sessions found.')
       return
     }
-    await sessionPostmortem(sessions[0].id, projectDir, { judge: judgeProvider, transcript: transcriptArg })
+    await sessionPostmortem(sessions[0].id, projectDir, {
+      judge: judgeProvider,
+      transcript: transcriptArg,
+    })
     return
   }
 

@@ -1,8 +1,8 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
-import { join, basename } from 'node:path'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import jsYaml from 'js-yaml'
-import type { ProjectEntry } from './registry.js'
 import { getPackageRoot } from '../session/lookup.js'
+import type { ProjectEntry } from './registry.js'
 
 export interface HealthResult {
   status: 'ok' | 'warn' | 'error'
@@ -36,7 +36,7 @@ export const templateFreshness: HealthCheck = {
   fixable: true,
 
   run(project) {
-    const configDir = getConfigDir(project)
+    const _configDir = getConfigDir(project)
     const templatesDir =
       project.kata_layout === '.kata'
         ? join(project.path, '.kata', 'templates')
@@ -158,7 +158,10 @@ export const configValidation: HealthCheck = {
     try {
       jsYaml.load(readFileSync(kataYamlPath, 'utf-8'))
     } catch (e) {
-      return { status: 'error', message: `kata.yaml parse error: ${e instanceof Error ? e.message : e}` }
+      return {
+        status: 'error',
+        message: `kata.yaml parse error: ${e instanceof Error ? e.message : e}`,
+      }
     }
 
     return { status: 'ok', message: 'config valid' }
@@ -185,8 +188,9 @@ export const staleSessions: HealthCheck = {
     }
 
     try {
-      const entries = readdirSync(sessionsDir, { withFileTypes: true })
-        .filter((d) => d.isDirectory())
+      const entries = readdirSync(sessionsDir, { withFileTypes: true }).filter((d) =>
+        d.isDirectory(),
+      )
       const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000
       let staleCount = 0
 

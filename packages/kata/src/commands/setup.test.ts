@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test'
-import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import * as os from 'node:os'
+import { join } from 'node:path'
 import jsYaml from 'js-yaml'
 
 function makeTmpDir(): string {
@@ -59,7 +59,7 @@ describe('setup --yes', () => {
     expect(output).toContain('kata setup complete')
 
     // Check kata.yaml was created
-    const kataYamlPath = join(tmpDir, '.claude', 'workflows', 'kata.yaml')
+    const kataYamlPath = join(tmpDir, '.kata', 'kata.yaml')
     expect(existsSync(kataYamlPath)).toBe(true)
 
     // Parse and verify kata.yaml content
@@ -70,7 +70,7 @@ describe('setup --yes', () => {
     expect(config.research_path).toBe('planning/research')
 
     // Check sessions directory was created
-    expect(existsSync(join(tmpDir, '.claude', 'sessions'))).toBe(true)
+    expect(existsSync(join(tmpDir, '.kata', 'sessions'))).toBe(true)
   })
 
   it('creates settings.json with 3 default hooks', async () => {
@@ -88,26 +88,25 @@ describe('setup --yes', () => {
     expect(settings.hooks.Stop).toBeDefined()
   })
 
-  it('--strict adds 3 PreToolUse hooks', async () => {
-    await captureSetup(['--yes', '--strict'], tmpDir)
+  it('registers PreToolUse hook by default', async () => {
+    await captureSetup(['--yes'], tmpDir)
 
     const settingsPath = join(tmpDir, '.claude', 'settings.json')
     const settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) as {
       hooks: Record<string, unknown[]>
     }
 
-    // Should have PreToolUse hooks
+    // PreToolUse is always registered (consolidated into a single entry)
     expect(settings.hooks.PreToolUse).toBeDefined()
     expect(Array.isArray(settings.hooks.PreToolUse)).toBe(true)
-    // mode-gate + task-deps + task-evidence = 3 entries
-    expect(settings.hooks.PreToolUse.length).toBe(3)
+    expect(settings.hooks.PreToolUse.length).toBe(1)
   })
 
   it('is idempotent (re-run preserves existing)', async () => {
     // First setup
     await captureSetup(['--yes'], tmpDir)
 
-    const kataYamlPath = join(tmpDir, '.claude', 'workflows', 'kata.yaml')
+    const kataYamlPath = join(tmpDir, '.kata', 'kata.yaml')
     const firstContent = readFileSync(kataYamlPath, 'utf-8')
 
     // Second setup
@@ -168,11 +167,11 @@ describe('setup --yes', () => {
     expect(hasWmHook).toBe(true)
   })
 
-  it('works without .claude/sessions/ existing', async () => {
-    // Don't pre-create .claude/sessions/ - setup should create it
+  it('works without .kata/sessions/ existing', async () => {
+    // Don't pre-create .kata/sessions/ - setup should create it
     const output = await captureSetup(['--yes'], tmpDir)
     expect(output).toContain('kata setup complete')
-    expect(existsSync(join(tmpDir, '.claude', 'sessions'))).toBe(true)
+    expect(existsSync(join(tmpDir, '.kata', 'sessions'))).toBe(true)
   })
 
   it('auto-detects package.json name and test command', async () => {
@@ -186,7 +185,12 @@ describe('setup --yes', () => {
 
     const output = await captureSetup(['--yes'], tmpDir)
     expect(output).toContain('my-detected-project')
-    expect(output).toContain('vitest run')
+
+    // test_command should be saved in kata.yaml config
+    const kataYamlPath = join(tmpDir, '.kata', 'kata.yaml')
+    const config = jsYaml.load(readFileSync(kataYamlPath, 'utf-8')) as Record<string, unknown>
+    const project = config.project as Record<string, unknown>
+    expect(project.test_command).toBe('vitest run')
   })
 
   it('auto-detects CI config', async () => {
@@ -194,27 +198,86 @@ describe('setup --yes', () => {
     writeFileSync(join(tmpDir, '.github', 'workflows', 'ci.yml'), 'name: CI')
 
     const output = await captureSetup(['--yes'], tmpDir)
-    expect(output).toContain('github-actions')
+    expect(output).toContain('kata setup complete')
+
+    // CI should be saved in kata.yaml config
+    const kataYamlPath = join(tmpDir, '.kata', 'kata.yaml')
+    const config = jsYaml.load(readFileSync(kataYamlPath, 'utf-8')) as Record<string, unknown>
+    const project = config.project as Record<string, unknown>
+    expect(project.ci).toBe('github-actions')
+  })
+
+  it('setup --yes scaffolds spec-templates and github templates (no project templates)', async () => {
+    const output = await captureSetup(['--yes'], tmpDir)
+    expect(output).toContain('kata setup complete')
+
+    // Mode templates should NOT exist in .kata/templates/ (dual resolution from batteries)
+    const templatesDir = join(tmpDir, '.kata', 'templates')
+    expect(existsSync(templatesDir)).toBe(false)
+
+    // Spec templates should exist in planning/spec-templates/
+    const specTemplatesDir = join(tmpDir, 'planning', 'spec-templates')
+    expect(existsSync(specTemplatesDir)).toBe(true)
+    const specFiles = readdirSync(specTemplatesDir) as string[]
+    expect(specFiles.length).toBeGreaterThan(0)
+
+    // GitHub issue templates should exist in .github/ISSUE_TEMPLATE/
+    const issueTemplateDir = join(tmpDir, '.github', 'ISSUE_TEMPLATE')
+    expect(existsSync(issueTemplateDir)).toBe(true)
+    const issueFiles = readdirSync(issueTemplateDir) as string[]
+    expect(issueFiles.length).toBeGreaterThan(0)
+  })
+
+  it('setup --yes is idempotent with batteries content', async () => {
+    // First setup
+    await captureSetup(['--yes'], tmpDir)
+
+    // Second setup should not error
+    const output = await captureSetup(['--yes'], tmpDir)
+    expect(output).toContain('kata setup complete')
+
+    // Spec templates should still exist
+    const specTemplatesDir = join(tmpDir, 'planning', 'spec-templates')
+    expect(existsSync(specTemplatesDir)).toBe(true)
   })
 })
 
-describe('onboard template', () => {
-  it('onboard template has 6 phases with AskUserQuestion steps', async () => {
-    // Read the onboard template to verify it has the expected structure
+describe('kata-config skill', () => {
+  it('batteries includes kata-config skill', async () => {
+    const { getPackageRoot } = await import('../session/lookup.js')
+    const skillPath = join(getPackageRoot(), 'batteries', 'skills', 'kata-config', 'SKILL.md')
+    expect(existsSync(skillPath)).toBe(true)
+  })
+
+  it('kata-config skill has valid frontmatter with description', async () => {
     const { parseYamlFrontmatter } = await import('../yaml/parser.js')
     const { getPackageRoot } = await import('../session/lookup.js')
-
-    const templatePath = join(getPackageRoot(), 'templates', 'onboard.md')
-    const frontmatter = parseYamlFrontmatter<{
-      phases: Array<{ id: string; tasks: string[] }>
-    }>(templatePath)
-
+    const skillPath = join(getPackageRoot(), 'batteries', 'skills', 'kata-config', 'SKILL.md')
+    const frontmatter = parseYamlFrontmatter<{ description: string }>(skillPath)
     expect(frontmatter).not.toBeNull()
-    expect(frontmatter!.phases).toHaveLength(7)
+    expect(frontmatter!.description).toBeDefined()
+    expect(typeof frontmatter!.description).toBe('string')
+  })
 
-    // Verify phases have AskUserQuestion steps
-    const allTasks = frontmatter!.phases.flatMap((p) => p.tasks || [])
-    const askQuestionTasks = allTasks.filter((t) => t.includes('AskUserQuestion'))
-    expect(askQuestionTasks.length).toBeGreaterThan(0)
+  it('kata-config skill covers all 3 scenarios', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { getPackageRoot } = await import('../session/lookup.js')
+    const skillPath = join(getPackageRoot(), 'batteries', 'skills', 'kata-config', 'SKILL.md')
+    const content = readFileSync(skillPath, 'utf-8')
+    expect(content).toContain('Kata Source Repo')
+    expect(content).toContain('Fresh Project')
+    expect(content).toContain('Reconfigure')
+  })
+
+  it('setup --yes does not scaffold skills to project (user-scoped instead)', async () => {
+    const tmpDir = makeTmpDir()
+    try {
+      await captureSetup(['--yes'], tmpDir)
+      // Skills should NOT be in project .claude/skills/ (they go to ~/.claude/skills/kata-config/)
+      const skillDest = join(tmpDir, '.claude', 'skills', 'kata-config', 'SKILL.md')
+      expect(existsSync(skillDest)).toBe(false)
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
   })
 })

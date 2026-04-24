@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, rmSync, statSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 export interface CleanupResult {

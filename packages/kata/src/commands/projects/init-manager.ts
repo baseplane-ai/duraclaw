@@ -1,6 +1,6 @@
-import { MANAGER_ROOT, ensureManagerDir, isManagerInitialized, getProjectsIndexPath } from '../../manager/paths.js'
 import { scanClaudeProjects } from '../../manager/discovery.js'
-import { readIndex, writeIndex, addProject as addToIndex } from '../../manager/registry.js'
+import { ensureManagerDir, isManagerInitialized, MANAGER_ROOT } from '../../manager/paths.js'
+import { addProject as addToIndex, readIndex, writeIndex } from '../../manager/registry.js'
 
 /**
  * kata projects init-manager [--force]

@@ -1,5 +1,5 @@
 import { isManagerInitialized } from '../../manager/paths.js'
-import { readIndex, writeIndex, removeProject as removeFromIndex } from '../../manager/registry.js'
+import { readIndex, removeProject as removeFromIndex, writeIndex } from '../../manager/registry.js'
 
 /**
  * kata projects remove <alias-or-path>
@@ -36,7 +36,5 @@ export async function removeProject(args: string[]): Promise<void> {
   writeIndex(result.index)
 
   // biome-ignore lint/suspicious/noConsole: CLI output
-  console.log(
-    JSON.stringify({ action: 'removed', query }, null, 2),
-  )
+  console.log(JSON.stringify({ action: 'removed', query }, null, 2))
 }

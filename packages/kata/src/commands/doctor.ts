@@ -1,10 +1,12 @@
 // kata doctor - Diagnose and fix session state issues
+
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { loadKataConfig } from '../config/kata-config.js'
 import { findProjectDir, getPackageRoot, getSessionsDir } from '../session/lookup.js'
-import { resolveWmBin } from './setup.js'
 import { isNativeTasksEnabled } from '../utils/tasks-check.js'
+import { resolveWmBin } from './setup.js'
 
 interface DiagnosticResult {
   check: string
@@ -38,7 +40,7 @@ async function fileExists(filePath: string): Promise<boolean> {
 
 /**
  * Get Claude project dir, falling back to cwd for bootstrap scenarios
- * (when .claude/sessions/ or .claude/workflows/ may not exist yet)
+ * (when .kata/ may not exist yet)
  */
 function getProjectDir(useFallback: boolean): string {
   if (useFallback) {
@@ -64,6 +66,7 @@ function checkHooksRegistered(claudeDir: string): {
   const requiredHooks: Record<string, string> = {
     SessionStart: 'hook session-start',
     UserPromptSubmit: 'hook user-prompt',
+    PreToolUse: 'hook pre-tool-use',
     Stop: 'hook stop-conditions',
   }
 
@@ -119,7 +122,13 @@ function fixMissingHooks(claudeDir: string, missingHooks: string[]): void {
   const hooks = (settings.hooks ?? {}) as Record<string, unknown[]>
 
   // Use absolute path to kata binary (same as setup.ts) so hooks work regardless of PATH
-  const wmBin = `"${resolveWmBin()}"`
+  let binaryOverride: string | undefined
+  try {
+    binaryOverride = loadKataConfig().kata_binary
+  } catch {
+    /* config may not exist */
+  }
+  const wmBin = `"${resolveWmBin(binaryOverride)}"`
   const hookCommands: Record<string, { command: string; timeout?: number }> = {
     SessionStart: { command: `${wmBin} hook session-start` },
     UserPromptSubmit: { command: `${wmBin} hook user-prompt` },
@@ -226,7 +235,6 @@ export async function doctor(args: string[]): Promise<void> {
     })
   }
 
-
   // Check 6: Hooks registered in .claude/settings.json
   const hookCheck = checkHooksRegistered(claudeDir)
   if (hookCheck.missing.length > 0) {
@@ -278,7 +286,9 @@ export async function doctor(args: string[]): Promise<void> {
       envBlock.CLAUDE_CODE_ENABLE_TASKS = 'true'
       userSettings.env = envBlock
       writeFileSync(userSettingsPath, `${JSON.stringify(userSettings, null, 2)}\n`, 'utf-8')
-      fixed.push('Set CLAUDE_CODE_ENABLE_TASKS=true in ~/.claude/settings.json — restart Claude Code to activate')
+      fixed.push(
+        'Set CLAUDE_CODE_ENABLE_TASKS=true in ~/.claude/settings.json — restart Claude Code to activate',
+      )
     }
   } else {
     diagnostics.push({

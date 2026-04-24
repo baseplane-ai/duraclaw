@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, cpSync, readdirSync, readFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { MANAGER_ROOT, isManagerInitialized } from '../../manager/paths.js'
-import { readIndex, findProject } from '../../manager/registry.js'
+import { isManagerInitialized, MANAGER_ROOT } from '../../manager/paths.js'
 import type { ProjectEntry } from '../../manager/registry.js'
+import { findProject, readIndex } from '../../manager/registry.js'
 
 function getConfigDir(project: ProjectEntry): string {
   return project.kata_layout === '.kata'
@@ -21,7 +21,7 @@ function getTemplatesDir(project: ProjectEntry): string {
  */
 function backupProject(project: ProjectEntry): { backupDir: string; files: string[] } {
   const name = project.alias || project.name
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '').replace('T', 'T').slice(0, 15) + 'Z'
+  const timestamp = `${new Date().toISOString().replace(/[:.]/g, '').replace('T', 'T').slice(0, 15)}Z`
   const backupDir = join(MANAGER_ROOT, 'backups', name, timestamp)
 
   mkdirSync(backupDir, { recursive: true })
@@ -84,8 +84,7 @@ export async function backupProjects(args: string[]): Promise<void> {
       return
     }
 
-    const projects = readdirSync(backupsDir, { withFileTypes: true })
-      .filter((d) => d.isDirectory())
+    const projects = readdirSync(backupsDir, { withFileTypes: true }).filter((d) => d.isDirectory())
 
     if (projects.length === 0) {
       // biome-ignore lint/suspicious/noConsole: CLI output
@@ -165,7 +164,9 @@ export async function backupProjects(args: string[]): Promise<void> {
     }
 
     // biome-ignore lint/suspicious/noConsole: CLI output
-    console.log(JSON.stringify({ action: 'restored', project: name, timestamp: restoreTimestamp }, null, 2))
+    console.log(
+      JSON.stringify({ action: 'restored', project: name, timestamp: restoreTimestamp }, null, 2),
+    )
     return
   }
 

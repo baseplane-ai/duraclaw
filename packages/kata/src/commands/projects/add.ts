@@ -1,8 +1,8 @@
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { isManagerInitialized } from '../../manager/paths.js'
 import { isKataEnabled } from '../../manager/discovery.js'
-import { readIndex, writeIndex, addProject as addToIndex } from '../../manager/registry.js'
+import { isManagerInitialized } from '../../manager/paths.js'
+import { addProject as addToIndex, readIndex, writeIndex } from '../../manager/registry.js'
 
 /**
  * kata projects add <path> [--alias=<name>]
@@ -49,7 +49,7 @@ export async function addProject(args: string[]): Promise<void> {
     // biome-ignore lint/suspicious/noConsole: CLI output
     console.error(`Path is not kata-enabled: ${absPath}`)
     // biome-ignore lint/suspicious/noConsole: CLI output
-    console.error('Expected .kata/wm.yaml or .claude/workflows/wm.yaml')
+    console.error('Expected .kata/kata.yaml')
     process.exitCode = 1
     return
   }
@@ -77,7 +77,5 @@ export async function addProject(args: string[]): Promise<void> {
   writeIndex(result.index)
 
   // biome-ignore lint/suspicious/noConsole: CLI output
-  console.log(
-    JSON.stringify({ action: 'added', path: absPath, alias: alias || name }, null, 2),
-  )
+  console.log(JSON.stringify({ action: 'added', path: absPath, alias: alias || name }, null, 2))
 }

@@ -98,9 +98,20 @@ export interface AgentRunOptions {
  * These are the names users pass to --tools; each provider maps them internally.
  */
 export const CANONICAL_TOOLS = [
-  'Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep',
-  'Agent', 'NotebookEdit', 'WebFetch', 'WebSearch',
-  'TaskCreate', 'TaskUpdate', 'TaskGet', 'TaskList',
+  'Read',
+  'Edit',
+  'Write',
+  'Bash',
+  'Glob',
+  'Grep',
+  'Agent',
+  'NotebookEdit',
+  'WebFetch',
+  'WebSearch',
+  'TaskCreate',
+  'TaskUpdate',
+  'TaskGet',
+  'TaskList',
   'AskUserQuestion',
 ] as const
 

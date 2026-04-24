@@ -3,8 +3,8 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import jsYaml from 'js-yaml'
 import { z } from 'zod'
+import { findProjectDir } from '../session/lookup.js'
 import { STOP_CONDITION_TYPES } from '../state/schema.js'
-import { findProjectDir, getKataDir } from '../session/lookup.js'
 
 /**
  * Per-mode config schema for kata.yaml `modes:` section.
@@ -12,7 +12,17 @@ import { findProjectDir, getKataDir } from '../session/lookup.js'
  */
 export const KataModeConfigSchema = z.object({
   template: z.string(),
-  stop_conditions: z.array(z.enum(STOP_CONDITION_TYPES)).default([]),
+  stop_conditions: z
+    .array(
+      z.union([
+        z.enum(STOP_CONDITION_TYPES),
+        z.object({
+          condition: z.enum(STOP_CONDITION_TYPES),
+          stage: z.enum(['setup', 'work', 'close']).optional(),
+        }),
+      ]),
+    )
+    .default([]),
   issue_handling: z.enum(['required', 'none']).optional(),
   issue_label: z.string().optional(),
   intent_keywords: z.array(z.string()).optional(),
@@ -20,6 +30,8 @@ export const KataModeConfigSchema = z.object({
   workflow_prefix: z.string().optional(),
   name: z.string().optional(),
   description: z.string().optional(),
+  rules: z.array(z.string()).optional(),
+  deliverable_path: z.string().optional(),
   deprecated: z.boolean().optional(),
   redirect_to: z.string().optional(),
 })
@@ -33,6 +45,7 @@ export const KataProjectSchema = z.object({
   name: z.string().optional(),
   build_command: z.string().nullable().optional(),
   test_command: z.string().optional(),
+  test_command_changed: z.string().optional(),
   typecheck_command: z.string().nullable().optional(),
   smoke_command: z.string().nullable().optional(),
   diff_base: z.string().optional(),
@@ -40,6 +53,16 @@ export const KataProjectSchema = z.object({
   ci: z.string().nullable().optional(),
   dev_server_command: z.string().nullable().optional(),
   dev_server_health: z.string().nullable().optional(),
+  // Per-step overrides for check-phase. Each key overrides the default
+  // command for that step. Unset keys fall back to the top-level project commands.
+  check_phase: z
+    .object({
+      build_command: z.string().nullable().optional(),
+      typecheck_command: z.string().nullable().optional(),
+      test_command: z.string().nullable().optional(),
+      smoke_command: z.string().nullable().optional(),
+    })
+    .optional(),
 })
 
 /**
@@ -71,6 +94,12 @@ export const KataProvidersSchema = z.object({
 export const KataConfigSchema = z.object({
   project: KataProjectSchema.optional(),
 
+  // Binary override — point hooks at a different kata build for A/B testing
+  kata_binary: z.string().optional(),
+
+  // Version stamp — set by kata setup / kata update
+  kata_version: z.string().optional(),
+
   // Paths
   spec_path: z.string().default('planning/specs'),
   research_path: z.string().default('planning/research'),
@@ -88,15 +117,21 @@ export const KataConfigSchema = z.object({
   providers: KataProvidersSchema.optional(),
 
   // Global rules — injected into every mode's context
-  global_rules: z.array(z.string()).default([]),
+  global_rules: z
+    .array(z.string())
+    .default([
+      "When a task instruction says 'Invoke /skill-name', use the Skill tool to invoke that skill before starting work on the task.",
+    ]),
 
   // Task system rules — injected when mode has phases (tasks)
-  task_rules: z.array(z.string()).default([
-    'Tasks are pre-created by kata enter. Do NOT create new tasks with TaskCreate.',
-    'Run TaskList FIRST to discover pre-created tasks and their dependency chains.',
-    'Use TaskUpdate to mark tasks in_progress/completed. Never use TaskCreate.',
-    'Follow the dependency chain — blocked tasks cannot start until dependencies complete.',
-  ]),
+  task_rules: z
+    .array(z.string())
+    .default([
+      'Tasks are pre-created by kata enter. Do NOT create new tasks with TaskCreate.',
+      'Run TaskList FIRST to discover pre-created tasks and their dependency chains.',
+      'Use TaskUpdate to mark tasks in_progress/completed. Never use TaskCreate.',
+      'Follow the dependency chain — blocked tasks cannot start until dependencies complete.',
+    ]),
 
   // Modes — the core section
   modes: z.record(KataModeConfigSchema).default({}),
@@ -113,15 +148,9 @@ let cachedPath: string | null = null
 
 /**
  * Get the path to kata.yaml for a project.
- * Returns .kata/kata.yaml for new layout, .claude/workflows/kata.yaml for old layout.
  */
 export function getKataConfigPath(projectRoot: string): string {
-  const kataDir = getKataDir(projectRoot)
-  if (kataDir === '.kata') {
-    return join(projectRoot, '.kata', 'kata.yaml')
-  }
-  // Old layout: .claude/workflows/kata.yaml
-  return join(projectRoot, '.claude', 'workflows', 'kata.yaml')
+  return join(projectRoot, '.kata', 'kata.yaml')
 }
 
 /**
@@ -143,22 +172,20 @@ export function loadKataConfig(projectRoot?: string): KataConfig {
 
   if (!existsSync(configPath)) {
     // Check for legacy config files to give a helpful migration hint
-    const hasLegacyWm = existsSync(join(root, '.kata', 'wm.yaml')) ||
-      existsSync(join(root, '.claude', 'workflows', 'wm.yaml'))
-    const hasLegacyModes = existsSync(join(root, '.kata', 'modes.yaml')) ||
-      existsSync(join(root, '.claude', 'workflows', 'modes.yaml'))
+    const hasLegacyWm = existsSync(join(root, '.kata', 'wm.yaml'))
+    const hasLegacyModes = existsSync(join(root, '.kata', 'modes.yaml'))
 
     if (hasLegacyWm || hasLegacyModes) {
       throw new Error(
         `kata: no kata.yaml found at ${configPath}\n` +
-        `Found legacy wm.yaml/modes.yaml. Merge them into a single kata.yaml.\n` +
-        `See: https://github.com/codevibesmatter/kata-wm/issues/30`
+          `Found legacy wm.yaml/modes.yaml. Merge them into a single kata.yaml.\n` +
+          `See: https://github.com/codevibesmatter/kata-wm/issues/30`,
       )
     }
 
     throw new Error(
       `kata: no kata.yaml found. Run 'kata setup' to initialize this project.\n` +
-      `Expected: ${configPath}`
+        `Expected: ${configPath}`,
     )
   }
 
@@ -166,20 +193,15 @@ export function loadKataConfig(projectRoot?: string): KataConfig {
   const parsed = jsYaml.load(raw, { schema: jsYaml.CORE_SCHEMA })
 
   if (!parsed || typeof parsed !== 'object') {
-    throw new Error(
-      `kata: kata.yaml is empty or not a valid YAML object.\n` +
-      `File: ${configPath}`
-    )
+    throw new Error(`kata: kata.yaml is empty or not a valid YAML object.\nFile: ${configPath}`)
   }
 
   const result = KataConfigSchema.safeParse(parsed)
   if (!result.success) {
     const issues = result.error.issues
-      .map(i => `  - ${i.path.join('.')}: ${i.message}`)
+      .map((i) => `  - ${i.path.join('.')}: ${i.message}`)
       .join('\n')
-    throw new Error(
-      `kata: invalid kata.yaml at ${configPath}\n${issues}`
-    )
+    throw new Error(`kata: invalid kata.yaml at ${configPath}\n${issues}`)
   }
 
   // Cache and return

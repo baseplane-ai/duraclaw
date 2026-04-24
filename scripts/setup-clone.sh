@@ -115,7 +115,13 @@ else
   (cd "$ROOT" && pnpm install --frozen-lockfile 2>&1 | tail -5)
 fi
 
-# ---- Step 5: Print summary ----
+# ---- Step 5: Link kata CLI ----
+
+echo ""
+echo "[kata] Linking kata CLI..."
+"$ROOT/scripts/link-kata.sh"
+
+# ---- Step 6: Print summary ----
 
 echo ""
 echo "=== Setup complete ==="

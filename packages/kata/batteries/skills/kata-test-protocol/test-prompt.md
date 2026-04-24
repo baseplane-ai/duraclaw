@@ -1,9 +1,3 @@
----
-name: test-agent
-description: Use when you need to write tests for a feature or verify that existing tests cover a behavior. Reads the spec and implementation, writes targeted tests, runs them, and reports pass/fail. Use for: writing unit tests, writing integration tests, verifying test coverage for a spec behavior.
-tools: Read, Glob, Grep, Bash, Edit, Write
----
-
 You are a **test agent** — your job is to write and run tests that verify spec behaviors.
 
 ## Your Workflow

@@ -1,8 +1,13 @@
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
 import * as os from 'node:os'
-import { resolveTemplatePath, resolveSpecTemplatePath, getCurrentSessionId, getStateFilePath } from './lookup.js'
+import { join } from 'node:path'
+import {
+  getCurrentSessionId,
+  getStateFilePath,
+  resolveSpecTemplatePath,
+  resolveTemplatePath,
+} from './lookup.js'
 
 function makeTmpDir(label: string): string {
   const dir = join(
@@ -30,18 +35,18 @@ describe('resolveTemplatePath', () => {
   it('resolves project-level template first', () => {
     const tmpDir = makeTmpDir('proj-tmpl')
     tmpDirs.push(tmpDir)
-    mkdirSync(join(tmpDir, '.claude', 'workflows', 'templates'), { recursive: true })
-    writeFileSync(join(tmpDir, '.claude', 'workflows', 'templates', 'task.md'), '# project task')
+    mkdirSync(join(tmpDir, '.kata', 'templates'), { recursive: true })
+    writeFileSync(join(tmpDir, '.kata', 'templates', 'task.md'), '# project task')
     process.env.CLAUDE_PROJECT_DIR = tmpDir
 
     const result = resolveTemplatePath('task.md')
-    expect(result).toBe(join(tmpDir, '.claude', 'workflows', 'templates', 'task.md'))
+    expect(result).toBe(join(tmpDir, '.kata', 'templates', 'task.md'))
   })
 
   it('falls back to package batteries template', () => {
     const tmpDir = makeTmpDir('pkg-fallback')
     tmpDirs.push(tmpDir)
-    mkdirSync(join(tmpDir, '.claude', 'sessions'), { recursive: true })
+    mkdirSync(join(tmpDir, '.kata'), { recursive: true })
     process.env.CLAUDE_PROJECT_DIR = tmpDir
 
     // task.md exists in batteries/templates/ (package level)
@@ -52,7 +57,7 @@ describe('resolveTemplatePath', () => {
   it('throws when template not found at any tier', () => {
     const tmpDir = makeTmpDir('not-found')
     tmpDirs.push(tmpDir)
-    mkdirSync(join(tmpDir, '.claude', 'sessions'), { recursive: true })
+    mkdirSync(join(tmpDir, '.kata'), { recursive: true })
     process.env.CLAUDE_PROJECT_DIR = tmpDir
 
     expect(() => resolveTemplatePath('does-not-exist.md')).toThrow('Template not found')
@@ -86,7 +91,7 @@ describe('resolveSpecTemplatePath', () => {
   it('resolves project-level spec template first', () => {
     const tmpDir = makeTmpDir('proj-spec')
     tmpDirs.push(tmpDir)
-    mkdirSync(join(tmpDir, '.claude', 'sessions'), { recursive: true })
+    mkdirSync(join(tmpDir, '.kata'), { recursive: true })
     mkdirSync(join(tmpDir, 'planning', 'spec-templates'), { recursive: true })
     writeFileSync(join(tmpDir, 'planning', 'spec-templates', 'feature.md'), '# project feature')
     process.env.CLAUDE_PROJECT_DIR = tmpDir
@@ -95,35 +100,83 @@ describe('resolveSpecTemplatePath', () => {
     expect(result).toBe(join(tmpDir, 'planning', 'spec-templates', 'feature.md'))
   })
 
-  it('falls back to package batteries spec template', () => {
+  it('throws when spec template not found in project (no batteries fallback)', () => {
     const tmpDir = makeTmpDir('pkg-spec')
     tmpDirs.push(tmpDir)
-    mkdirSync(join(tmpDir, '.claude', 'sessions'), { recursive: true })
+    mkdirSync(join(tmpDir, '.kata'), { recursive: true })
     process.env.CLAUDE_PROJECT_DIR = tmpDir
 
-    // feature.md exists in batteries/spec-templates/
-    const result = resolveSpecTemplatePath('feature.md')
-    expect(result).toMatch(/batteries\/spec-templates\/feature\.md$/)
+    // resolveSpecTemplatePath only checks project planning/spec-templates/ — no batteries fallback
+    expect(() => resolveSpecTemplatePath('feature.md')).toThrow('Spec template not found')
   })
 
   it('throws when spec template not found at any tier', () => {
     const tmpDir = makeTmpDir('spec-not-found')
     tmpDirs.push(tmpDir)
-    mkdirSync(join(tmpDir, '.claude', 'sessions'), { recursive: true })
+    mkdirSync(join(tmpDir, '.kata'), { recursive: true })
     process.env.CLAUDE_PROJECT_DIR = tmpDir
 
     expect(() => resolveSpecTemplatePath('nonexistent.md')).toThrow('Spec template not found')
   })
 })
 
-describe('getCurrentSessionId — layout-shift resilience', () => {
+describe('resolveTemplatePath — batteries fallback', () => {
+  const origProjectDir = process.env.CLAUDE_PROJECT_DIR
+  let tmpDirs: string[] = []
+
+  afterEach(() => {
+    for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true })
+    tmpDirs = []
+    if (origProjectDir !== undefined) {
+      process.env.CLAUDE_PROJECT_DIR = origProjectDir
+    } else {
+      delete process.env.CLAUDE_PROJECT_DIR
+    }
+  })
+
+  it('returns project template when .kata/templates/ has the file', () => {
+    const tmpDir = makeTmpDir('proj-override')
+    tmpDirs.push(tmpDir)
+    mkdirSync(join(tmpDir, '.kata', 'templates'), { recursive: true })
+    writeFileSync(
+      join(tmpDir, '.kata', 'templates', 'implementation.md'),
+      '---\nid: custom\n---\n# custom',
+    )
+    process.env.CLAUDE_PROJECT_DIR = tmpDir
+
+    const result = resolveTemplatePath('implementation.md')
+    expect(result).toBe(join(tmpDir, '.kata', 'templates', 'implementation.md'))
+  })
+
+  it('falls back to batteries when project template does not exist', () => {
+    const tmpDir = makeTmpDir('batteries-fb')
+    tmpDirs.push(tmpDir)
+    // Create .kata/ dir but NO templates subdir
+    mkdirSync(join(tmpDir, '.kata'), { recursive: true })
+    process.env.CLAUDE_PROJECT_DIR = tmpDir
+
+    // implementation.md exists in batteries/templates/
+    const result = resolveTemplatePath('implementation.md')
+    expect(result).toMatch(/batteries\/templates\/implementation\.md$/)
+  })
+
+  it('error message lists both checked paths', () => {
+    const tmpDir = makeTmpDir('err-msg')
+    tmpDirs.push(tmpDir)
+    mkdirSync(join(tmpDir, '.kata'), { recursive: true })
+    process.env.CLAUDE_PROJECT_DIR = tmpDir
+
+    expect(() => resolveTemplatePath('nonexistent-xyz.md')).toThrow(/Checked:/)
+  })
+})
+
+describe('getCurrentSessionId', () => {
   const origProjectDir = process.env.CLAUDE_PROJECT_DIR
   let tmpDir: string
 
   beforeEach(() => {
     tmpDir = makeTmpDir('session-layout')
-    // Create .claude/sessions/ (old layout) with a valid session
-    mkdirSync(join(tmpDir, '.claude', 'sessions'), { recursive: true })
+    mkdirSync(join(tmpDir, '.kata', 'sessions'), { recursive: true })
     process.env.CLAUDE_PROJECT_DIR = tmpDir
   })
 
@@ -136,17 +189,13 @@ describe('getCurrentSessionId — layout-shift resilience', () => {
     }
   })
 
-  it('finds session in .claude/sessions/ when .kata/ also exists but has no sessions', async () => {
-    // Simulate layout shift: .kata/ created mid-session (e.g. by writing VP evidence)
-    // but state.json remains in .claude/sessions/
+  it('finds session in .kata/sessions/', async () => {
     const sessionId = '12345678-1234-4234-8234-123456789abc'
-    mkdirSync(join(tmpDir, '.claude', 'sessions', sessionId), { recursive: true })
+    mkdirSync(join(tmpDir, '.kata', 'sessions', sessionId), { recursive: true })
     writeFileSync(
-      join(tmpDir, '.claude', 'sessions', sessionId, 'state.json'),
+      join(tmpDir, '.kata', 'sessions', sessionId, 'state.json'),
       JSON.stringify({ updatedAt: new Date().toISOString() }),
     )
-    // Create .kata/ dir (triggers layout detection to prefer .kata/)
-    mkdirSync(join(tmpDir, '.kata', 'sessions'), { recursive: true })
 
     const result = await getCurrentSessionId()
     expect(result).toBe(sessionId)
@@ -171,7 +220,7 @@ describe('getStateFilePath — layout-shift resilience', () => {
 
   beforeEach(() => {
     tmpDir = makeTmpDir('state-path')
-    mkdirSync(join(tmpDir, '.claude', 'sessions'), { recursive: true })
+    mkdirSync(join(tmpDir, '.kata', 'sessions'), { recursive: true })
     process.env.CLAUDE_PROJECT_DIR = tmpDir
   })
 
@@ -184,17 +233,32 @@ describe('getStateFilePath — layout-shift resilience', () => {
     }
   })
 
-  it('returns .claude/ path when state.json exists only there despite .kata/ existing', async () => {
+  it('returns .kata/ path for session state', async () => {
     const sessionId = '12345678-1234-4234-8234-123456789abc'
-    mkdirSync(join(tmpDir, '.claude', 'sessions', sessionId), { recursive: true })
-    writeFileSync(
-      join(tmpDir, '.claude', 'sessions', sessionId, 'state.json'),
-      JSON.stringify({ updatedAt: new Date().toISOString() }),
-    )
-    // .kata/ exists but has no sessions
-    mkdirSync(join(tmpDir, '.kata', 'sessions'), { recursive: true })
 
     const result = await getStateFilePath(sessionId)
-    expect(result).toBe(join(tmpDir, '.claude', 'sessions', sessionId, 'state.json'))
+    expect(result).toBe(join(tmpDir, '.kata', 'sessions', sessionId, 'state.json'))
+  })
+})
+
+describe('ceremony.md scaffolding', () => {
+  it('scaffoldBatteries does not create .kata/ceremony.md', () => {
+    const { scaffoldBatteries } =
+      require('../commands/scaffold-batteries.js') as typeof import('../commands/scaffold-batteries.js')
+    const tmpDir = join(
+      os.tmpdir(),
+      `wm-ceremony-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    )
+    mkdirSync(join(tmpDir, '.kata'), { recursive: true })
+    const origEnv = process.env.CLAUDE_PROJECT_DIR
+    process.env.CLAUDE_PROJECT_DIR = tmpDir
+    try {
+      scaffoldBatteries(tmpDir)
+      expect(existsSync(join(tmpDir, '.kata', 'ceremony.md'))).toBe(false)
+    } finally {
+      if (origEnv !== undefined) process.env.CLAUDE_PROJECT_DIR = origEnv
+      else delete process.env.CLAUDE_PROJECT_DIR
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
   })
 })

@@ -1,7 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test'
+import { afterAll, afterEach, beforeEach, describe, expect, it } from 'bun:test'
+
+afterAll(() => {
+  process.exitCode = 0
+})
+
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
 import * as os from 'node:os'
+import { join } from 'node:path'
 
 function makeTmpDir(): string {
   const dir = join(os.tmpdir(), `wm-hook-test-${Date.now()}-${Math.random().toString(36).slice(2)}`)
@@ -51,7 +56,7 @@ function writeSessionState(
   sessionId: string,
   overrides: Record<string, unknown> = {},
 ): void {
-  const sessionDir = join(tmpDir, '.claude', 'sessions', sessionId)
+  const sessionDir = join(tmpDir, '.kata', 'sessions', sessionId)
   mkdirSync(sessionDir, { recursive: true })
   writeFileSync(
     join(sessionDir, 'state.json'),
@@ -72,7 +77,7 @@ function writeSessionState(
 
 /** Parse hook log entries from hooks.log.jsonl */
 function readHookLog(tmpDir: string, sessionId: string): Array<Record<string, unknown>> {
-  const logPath = join(tmpDir, '.claude', 'sessions', sessionId, 'hooks.log.jsonl')
+  const logPath = join(tmpDir, '.kata', 'sessions', sessionId, 'hooks.log.jsonl')
   if (!existsSync(logPath)) return []
   return readFileSync(logPath, 'utf-8')
     .trim()
@@ -89,6 +94,7 @@ describe('hook dispatch', () => {
     tmpDir = makeTmpDir()
     mkdirSync(join(tmpDir, '.claude', 'sessions'), { recursive: true })
     mkdirSync(join(tmpDir, '.claude', 'workflows'), { recursive: true })
+    mkdirSync(join(tmpDir, '.kata'), { recursive: true })
     process.env.CLAUDE_PROJECT_DIR = tmpDir
   })
 
@@ -99,13 +105,14 @@ describe('hook dispatch', () => {
     } else {
       delete process.env.CLAUDE_PROJECT_DIR
     }
-    process.exitCode = undefined
+    process.exitCode = 0
   })
 
   it('unknown hook name sets exit code 1', async () => {
     const { hook } = await import('./hook.js')
     const stderr = await captureStderr(() => hook(['nonexistent-hook']))
     expect(process.exitCode).toBe(1)
+    process.exitCode = 0
     expect(stderr).toContain('Unknown hook')
   })
 
@@ -113,6 +120,7 @@ describe('hook dispatch', () => {
     const { hook } = await import('./hook.js')
     const stderr = await captureStderr(() => hook([]))
     expect(process.exitCode).toBe(1)
+    process.exitCode = 0
     expect(stderr).toContain('Usage: kata hook <name>')
   })
 })
@@ -126,6 +134,7 @@ describe('handleModeGate', () => {
     tmpDir = makeTmpDir()
     mkdirSync(join(tmpDir, '.claude', 'sessions'), { recursive: true })
     mkdirSync(join(tmpDir, '.claude', 'workflows'), { recursive: true })
+    mkdirSync(join(tmpDir, '.kata'), { recursive: true })
     process.env.CLAUDE_PROJECT_DIR = tmpDir
   })
 
@@ -299,6 +308,7 @@ describe('handleTaskEvidence', () => {
     tmpDir = makeTmpDir()
     mkdirSync(join(tmpDir, '.claude', 'sessions'), { recursive: true })
     mkdirSync(join(tmpDir, '.claude', 'workflows'), { recursive: true })
+    mkdirSync(join(tmpDir, '.kata'), { recursive: true })
     process.env.CLAUDE_PROJECT_DIR = tmpDir
   })
 
@@ -341,6 +351,7 @@ describe('handleTaskDeps', () => {
     tmpDir = makeTmpDir()
     mkdirSync(join(tmpDir, '.claude', 'sessions'), { recursive: true })
     mkdirSync(join(tmpDir, '.claude', 'workflows'), { recursive: true })
+    mkdirSync(join(tmpDir, '.kata'), { recursive: true })
     process.env.CLAUDE_PROJECT_DIR = tmpDir
   })
 
@@ -399,6 +410,7 @@ describe('logHook', () => {
     tmpDir = makeTmpDir()
     mkdirSync(join(tmpDir, '.claude', 'sessions'), { recursive: true })
     mkdirSync(join(tmpDir, '.claude', 'workflows'), { recursive: true })
+    mkdirSync(join(tmpDir, '.kata'), { recursive: true })
     process.env.CLAUDE_PROJECT_DIR = tmpDir
   })
 
@@ -434,5 +446,393 @@ describe('logHook', () => {
     const log = readHookLog(tmpDir, sessionId)
     expect(log).toHaveLength(3)
     expect(log.map((e) => e.hook)).toEqual(['hook-1', 'hook-2', 'hook-3'])
+  })
+})
+
+describe('hasActiveBackgroundAgents', () => {
+  let tmpDir: string
+
+  beforeEach(() => {
+    tmpDir = makeTmpDir()
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  function writeTranscript(lines: Array<Record<string, unknown>>): string {
+    const path = join(tmpDir, 'transcript.jsonl')
+    writeFileSync(path, lines.map((l) => JSON.stringify(l)).join('\n'))
+    return path
+  }
+
+  it('returns false for undefined transcript path', async () => {
+    const { hasActiveBackgroundAgents } = await import('./hook.js')
+    expect(hasActiveBackgroundAgents(undefined)).toBe(false)
+  })
+
+  it('returns false for nonexistent transcript', async () => {
+    const { hasActiveBackgroundAgents } = await import('./hook.js')
+    expect(hasActiveBackgroundAgents('/nonexistent/path.jsonl')).toBe(false)
+  })
+
+  it('returns false when all Agent calls have matching results', async () => {
+    const { hasActiveBackgroundAgents } = await import('./hook.js')
+    const path = writeTranscript([
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Agent', id: 'agent-1' }] },
+      },
+      { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'agent-1' }] } },
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Agent', id: 'agent-2' }] },
+      },
+      { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'agent-2' }] } },
+    ])
+    expect(hasActiveBackgroundAgents(path)).toBe(false)
+  })
+
+  it('returns true when Agent call has no matching result', async () => {
+    const { hasActiveBackgroundAgents } = await import('./hook.js')
+    const path = writeTranscript([
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Agent', id: 'agent-1' }] },
+      },
+      { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'agent-1' }] } },
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Agent', id: 'agent-2' }] },
+      },
+      // No tool_result for agent-2 — still active
+    ])
+    expect(hasActiveBackgroundAgents(path)).toBe(true)
+  })
+
+  it('returns false when no Agent calls exist (other tools matched)', async () => {
+    const { hasActiveBackgroundAgents } = await import('./hook.js')
+    const path = writeTranscript([
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Bash', id: 'bash-1' }] },
+      },
+      { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'bash-1' }] } },
+    ])
+    expect(hasActiveBackgroundAgents(path)).toBe(false)
+  })
+
+  it('ignores non-Agent unmatched tool calls', async () => {
+    const { hasActiveBackgroundAgents } = await import('./hook.js')
+    const path = writeTranscript([
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Bash', id: 'bash-1' }] },
+      },
+      // No result for bash-1, but it's not an Agent call
+    ])
+    expect(hasActiveBackgroundAgents(path)).toBe(false)
+  })
+
+  it('handles multiple active agents', async () => {
+    const { hasActiveBackgroundAgents } = await import('./hook.js')
+    const path = writeTranscript([
+      {
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'tool_use', name: 'Agent', id: 'agent-1' },
+            { type: 'tool_use', name: 'Agent', id: 'agent-2' },
+            { type: 'tool_use', name: 'Agent', id: 'agent-3' },
+          ],
+        },
+      },
+      { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'agent-1' }] } },
+      // agent-2 and agent-3 still active
+    ])
+    expect(hasActiveBackgroundAgents(path)).toBe(true)
+  })
+
+  it('returns false for empty transcript', async () => {
+    const { hasActiveBackgroundAgents } = await import('./hook.js')
+    const path = writeTranscript([])
+    expect(hasActiveBackgroundAgents(path)).toBe(false)
+  })
+
+  it('returns false when unmatched Agents are followed by a new user prompt', async () => {
+    const { hasActiveBackgroundAgents } = await import('./hook.js')
+    const path = writeTranscript([
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Agent', id: 'agent-1' }] },
+      },
+      // User sends a new message (not a tool_result) — agent-1 is now stale
+      { type: 'user', message: { content: [{ type: 'text', text: 'do something else' }] } },
+    ])
+    expect(hasActiveBackgroundAgents(path)).toBe(false)
+  })
+
+  it('returns true for unmatched Agent with no subsequent user prompt', async () => {
+    const { hasActiveBackgroundAgents } = await import('./hook.js')
+    const path = writeTranscript([
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Agent', id: 'agent-1' }] },
+      },
+      // Only tool_results follow, no new user prompt — agent is still active
+      { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'other-tool' }] } },
+    ])
+    expect(hasActiveBackgroundAgents(path)).toBe(true)
+  })
+
+  it('reproduces issue #60: stale unmatched Agents cleared by user prompt, recent matched Agent → false', async () => {
+    const { hasActiveBackgroundAgents } = await import('./hook.js')
+    const path = writeTranscript([
+      // Stale agents from earlier conversation
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Agent', id: 'stale-1' }] },
+      },
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Agent', id: 'stale-2' }] },
+      },
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Agent', id: 'stale-3' }] },
+      },
+      // User sent a new prompt — clears all stale agent IDs
+      { type: 'user', message: { content: [{ type: 'text', text: 'continue' }] } },
+      // New agent spawned and completed
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Agent', id: 'recent-1' }] },
+      },
+      { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'recent-1' }] } },
+    ])
+    expect(hasActiveBackgroundAgents(path)).toBe(false)
+  })
+
+  it('returns true when current-turn Agent is active alongside stale ones cleared by user prompt', async () => {
+    const { hasActiveBackgroundAgents } = await import('./hook.js')
+    const path = writeTranscript([
+      // Stale agent
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Agent', id: 'stale-1' }] },
+      },
+      // User prompt clears stale
+      { type: 'user', message: { content: [{ type: 'text', text: 'now do this' }] } },
+      // New agent still running
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Agent', id: 'recent-1' }] },
+      },
+    ])
+    expect(hasActiveBackgroundAgents(path)).toBe(true)
+  })
+
+  it('untimestamped long-running agent stays active (recency filter cannot apply)', async () => {
+    const { hasActiveBackgroundAgents } = await import('./hook.js')
+    // Agent spawned with no user prompt after and no timestamp — recency filter can't decide → stays active
+    const path = writeTranscript([
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Agent', id: 'agent-1' }] },
+      },
+    ])
+    expect(hasActiveBackgroundAgents(path)).toBe(true)
+  })
+
+  // ── Issue #68: SDK session transcript compatibility ──
+
+  it('reproduces issue #68: string-form user prompt clears stale SDK Agent IDs', async () => {
+    const { hasActiveBackgroundAgents } = await import('./hook.js')
+    // SDK sessions emit typed user prompts as bare strings, not array-of-blocks.
+    // Before fix: for...of over the string iterated characters, hasUserText stayed false,
+    // stale IDs persisted forever.
+    const path = writeTranscript([
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Agent', id: 'stale-sdk-1' }] },
+      },
+      // SDK-shape user prompt: content is a bare string
+      { type: 'user', message: { role: 'user', content: 'next task please' } },
+    ])
+    expect(hasActiveBackgroundAgents(path)).toBe(false)
+  })
+
+  it('recognizes "Task" tool_use as a subagent call (older CC versions)', async () => {
+    const { hasActiveBackgroundAgents } = await import('./hook.js')
+    // Claude Code ≤2.1.50 and harness allowedTools use "Task" as the subagent tool name
+    const path = writeTranscript([
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Task', id: 'task-1' }] },
+      },
+    ])
+    expect(hasActiveBackgroundAgents(path)).toBe(true)
+  })
+
+  it('clears stale "Task"-named calls via user-prompt staleness heuristic', async () => {
+    const { hasActiveBackgroundAgents } = await import('./hook.js')
+    const path = writeTranscript([
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Task', id: 'stale-task-1' }] },
+      },
+      { type: 'user', message: { content: [{ type: 'text', text: 'continue' }] } },
+    ])
+    expect(hasActiveBackgroundAgents(path)).toBe(false)
+  })
+
+  it('recency filter: Agent older than 120s is abandoned even with no user prompt', async () => {
+    const { hasActiveBackgroundAgents } = await import('./hook.js')
+    const now = Date.parse('2026-04-23T20:00:00.000Z')
+    const oldTs = new Date(now - 200_000).toISOString() // 200s ago, past the 120s window
+    const path = writeTranscript([
+      {
+        type: 'assistant',
+        timestamp: oldTs,
+        message: { content: [{ type: 'tool_use', name: 'Agent', id: 'old-agent' }] },
+      },
+    ])
+    expect(hasActiveBackgroundAgents(path, now)).toBe(false)
+  })
+
+  it('recency filter: Agent within 120s window is still active', async () => {
+    const { hasActiveBackgroundAgents } = await import('./hook.js')
+    const now = Date.parse('2026-04-23T20:00:00.000Z')
+    const recentTs = new Date(now - 30_000).toISOString() // 30s ago, within window
+    const path = writeTranscript([
+      {
+        type: 'assistant',
+        timestamp: recentTs,
+        message: { content: [{ type: 'tool_use', name: 'Agent', id: 'recent-agent' }] },
+      },
+    ])
+    expect(hasActiveBackgroundAgents(path, now)).toBe(true)
+  })
+
+  it('recency filter: boundary — exactly at window is still active', async () => {
+    const { hasActiveBackgroundAgents } = await import('./hook.js')
+    const now = Date.parse('2026-04-23T20:00:00.000Z')
+    const boundaryTs = new Date(now - 120_000).toISOString() // exactly 120s ago
+    const path = writeTranscript([
+      {
+        type: 'assistant',
+        timestamp: boundaryTs,
+        message: { content: [{ type: 'tool_use', name: 'Agent', id: 'boundary-agent' }] },
+      },
+    ])
+    // strictly greater-than window → at boundary, still active
+    expect(hasActiveBackgroundAgents(path, now)).toBe(true)
+  })
+
+  it('SDK full scenario: stale agents from hours ago + string user prompt → guard returns false', async () => {
+    const { hasActiveBackgroundAgents } = await import('./hook.js')
+    const now = Date.parse('2026-04-23T20:00:00.000Z')
+    const longAgo = new Date(now - 7 * 3600 * 1000).toISOString()
+    // Mirrors the issue #60 duraclaw evidence: stale unmatched Agents from 7h ago,
+    // followed by SDK string-form user prompts
+    const path = writeTranscript([
+      {
+        type: 'assistant',
+        timestamp: longAgo,
+        message: { content: [{ type: 'tool_use', name: 'Agent', id: 's1' }] },
+      },
+      {
+        type: 'assistant',
+        timestamp: longAgo,
+        message: { content: [{ type: 'tool_use', name: 'Agent', id: 's2' }] },
+      },
+      {
+        type: 'assistant',
+        timestamp: longAgo,
+        message: { content: [{ type: 'tool_use', name: 'Agent', id: 's3' }] },
+      },
+      { type: 'user', message: { role: 'user', content: 'keep going' } },
+    ])
+    expect(hasActiveBackgroundAgents(path, now)).toBe(false)
+  })
+})
+
+describe('handleStopConditions run-end artifact', () => {
+  let tmpDir: string
+  const sessionId = '00000000-0000-0000-0000-000000000099'
+  const origEnv = process.env.CLAUDE_PROJECT_DIR
+
+  beforeEach(() => {
+    tmpDir = makeTmpDir()
+    mkdirSync(join(tmpDir, '.kata', 'sessions'), { recursive: true })
+    // Empty modes → mode lookup returns undefined → stop_conditions defaults to []
+    // → handleStopConditions hits the "no stop conditions for mode" branch.
+    writeFileSync(
+      join(tmpDir, '.kata', 'kata.yaml'),
+      'spec_path: planning/specs\nresearch_path: planning/research\nmodes: {}\n',
+    )
+    process.env.CLAUDE_PROJECT_DIR = tmpDir
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+    if (origEnv !== undefined) {
+      process.env.CLAUDE_PROJECT_DIR = origEnv
+    } else {
+      delete process.env.CLAUDE_PROJECT_DIR
+    }
+  })
+
+  it('writes run-end.json when no stop conditions for mode', async () => {
+    writeSessionState(tmpDir, sessionId, {
+      currentMode: 'task',
+      sessionType: 'task',
+      workflowId: 'TK-test-0001',
+      completedPhases: ['p0', 'p1'],
+    })
+    const { handleStopConditions } = await import('./hook.js')
+
+    await captureStdout(() => handleStopConditions({ session_id: sessionId }))
+
+    const artifactPath = join(tmpDir, '.kata', 'sessions', sessionId, 'run-end.json')
+    expect(existsSync(artifactPath)).toBe(true)
+    const artifact = JSON.parse(readFileSync(artifactPath, 'utf-8'))
+    expect(artifact.sessionId).toBe(sessionId)
+    expect(artifact.workflowId).toBe('TK-test-0001')
+    expect(artifact.mode).toBe('task')
+    expect(artifact.note).toBe('no stop conditions for mode')
+    expect(artifact.stopConditions).toEqual([])
+    expect(artifact.completedPhases).toEqual(['p0', 'p1'])
+    expect(typeof artifact.ts).toBe('string')
+  })
+
+  it('does not write run-end.json when no session state exists', async () => {
+    const { handleStopConditions } = await import('./hook.js')
+
+    await captureStdout(() => handleStopConditions({ session_id: 'nonexistent-session-id' }))
+
+    const artifactPath = join(tmpDir, '.kata', 'sessions', 'nonexistent-session-id', 'run-end.json')
+    expect(existsSync(artifactPath)).toBe(false)
+  })
+
+  it('overwrites run-end.json on each successful stop event', async () => {
+    writeSessionState(tmpDir, sessionId, {
+      currentMode: 'task',
+      sessionType: 'task',
+      workflowId: 'TK-test-0001',
+    })
+    const { handleStopConditions } = await import('./hook.js')
+
+    await captureStdout(() => handleStopConditions({ session_id: sessionId }))
+    const artifactPath = join(tmpDir, '.kata', 'sessions', sessionId, 'run-end.json')
+    const firstTs = JSON.parse(readFileSync(artifactPath, 'utf-8')).ts as string
+
+    // Wait a tick so the timestamp differs deterministically
+    await new Promise((r) => setTimeout(r, 5))
+    await captureStdout(() => handleStopConditions({ session_id: sessionId }))
+    const secondTs = JSON.parse(readFileSync(artifactPath, 'utf-8')).ts as string
+
+    expect(secondTs).not.toBe(firstTs)
+    expect(new Date(secondTs).getTime()).toBeGreaterThan(new Date(firstTs).getTime())
   })
 })

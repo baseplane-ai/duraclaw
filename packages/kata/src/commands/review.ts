@@ -25,11 +25,11 @@ const REVIEW_DEFAULTS: Record<string, string[]> = {
 
 export async function review(args: string[]): Promise<void> {
   // Inject default context if none provided
-  const hasContext = args.some(a => a.startsWith('--context='))
+  const hasContext = args.some((a) => a.startsWith('--context='))
   if (!hasContext) {
-    const promptName = args.find(a => a.startsWith('--prompt='))?.split('=')[1]
+    const promptName = args.find((a) => a.startsWith('--prompt='))?.split('=')[1]
     if (promptName && REVIEW_DEFAULTS[promptName]) {
-      args = [...args, ...REVIEW_DEFAULTS[promptName].map(c => `--context=${c}`)]
+      args = [...args, ...REVIEW_DEFAULTS[promptName].map((c) => `--context=${c}`)]
     }
   }
 
