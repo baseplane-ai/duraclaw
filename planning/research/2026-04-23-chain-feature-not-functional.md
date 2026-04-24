@@ -550,6 +550,110 @@ advance. The feature has effectively one set of reports — UI stall
 messages — and those reports are dominated by Bug #1 regardless of
 which server path you're on.
 
+## Addendum B — `run-end.json` is never written (auto-advance permanently dead)
+
+**Critical finding:** The entire auto-advance evidence-file gate (GH#73)
+is based on a file that **nothing in the codebase creates**.
+
+### Evidence
+
+```bash
+# Zero run-end.json files anywhere in the project
+find /data/projects/duraclaw-dev2 -name "run-end*" \
+  -not -path "*/node_modules/*" -not -path "*/.git/*" 2>/dev/null
+# (empty — zero results)
+```
+
+The GH#73 commit message states:
+
+> Kata's Stop hook already writes `run-end.json` inside the session
+> folder whenever `can-exit` succeeds (no-op modes + all stop conditions
+> met; skipped on block / background-agents-running).
+
+This is **false**. Kata's Stop hook handler (`packages/kata/src/commands/hook.ts:458-523`)
+either outputs `{decision: "block"}` JSON on stdout (when canExit fails)
+or outputs nothing (when canExit passes). It never writes a file. There
+is no `writeFile`, `touch`, or `fs.stat` call targeting `run-end.json`
+anywhere in `packages/kata/`.
+
+### Impact
+
+Since `run-end.json` is never created:
+- The runner's watcher never detects it
+  (`packages/session-runner/src/claude-runner.ts:121`)
+- `readSessionKataState()` always returns `runEnded: false`
+  (`packages/session-runner/src/claude-runner.ts:65-71`)
+- The `kata_state` event always carries `runEnded: false`
+- The DO's `lastRunEnded` is always `false`
+- `tryAutoAdvance()` always reaches the gate at `auto-advance.ts:173`:
+  ```ts
+  if (!runEnded) {
+    return {
+      action: 'stalled',
+      reason: 'Rung did not signal run-end (kata can-exit not satisfied)',
+    }
+  }
+  ```
+- Auto-advance is **permanently stalled** for every chain, every rung,
+  regardless of whether can-exit actually passes.
+
+### Why this wasn't caught
+
+- GH#73's `auto-advance.test.ts` tests set `runEnded: true` in test
+  fixtures — they test the happy path with the bit pre-set, never
+  testing the real pipeline where the file has to actually exist.
+- There is no integration test that runs a session through kata close,
+  verifies `run-end.json` is written, and checks auto-advance fires.
+- The session-runner unit tests don't test the watcher against real
+  kata output.
+
+### Why the user's suggestion is exactly right
+
+The user suggested **replacing the file-based system with direct API
+calls from kata CLI to Duraclaw endpoints**. This is now not just an
+improvement — it's a necessity, because the file-based path is dead
+code. The evidence:
+
+1. `run-end.json` writer was never implemented in kata.
+2. `state.json` works (kata does write it), but the file-watch pipeline
+   adds 150ms+ latency, debounce jitter, fs.watch race conditions, and
+   fails silently when the runner crashes or the watcher misses events.
+3. The runner is the unnecessary intermediary — it exists because kata
+   historically had no network path to the DO. But kata already runs
+   inside a project where the runner set up the environment, and the
+   runner could trivially inject `DURACLAW_SESSION_ID` +
+   `DURACLAW_CALLBACK_URL` + `DURACLAW_AUTH_TOKEN` via
+   `buildCleanEnv()` (`packages/session-runner/src/env.ts`).
+
+### Proposed dual-write architecture
+
+```
+CURRENT (broken):
+  kata writes state.json → runner fs.watch → runner reads → WS to DO
+  kata DOES NOT write run-end.json → runEnded always false → auto-advance dead
+
+PROPOSED (dual-write):
+  kata writes state.json (backward compat)
+  kata POST $DURACLAW_CALLBACK_URL/kata-state { sessionId, state, runEnded }
+    → DO receives directly, zero latency, explicit ACK
+    → file-watch path becomes fallback/redundancy, not primary
+
+MINIMAL FIX (just run-end.json):
+  kata hook stop-conditions: when canExit=true, write run-end.json:
+    await writeFile(join(sessionDir, 'run-end.json'), '{}')
+  → unblocks existing pipeline without new API surface
+```
+
+The minimal fix (write the file) is a 3-line patch. The dual-write
+approach is better long-term but requires:
+1. Runner injects 3 env vars into `buildCleanEnv()` (sessionId, URL, token)
+2. Kata adds an HTTP POST helper that fires-and-forgets to the callback URL
+3. SessionDO exposes a `kata-state` endpoint on its WS or HTTP RPC surface
+4. Keep file writes for backward compat / offline / non-Duraclaw usage
+
+Either way: the current system is not "fragile" — it is **non-functional**.
+The auto-advance gate depends on a file that is never created.
+
 ## Open questions (for follow-up specs, not answered here)
 
 - Should backlog → research need a project picker, or should it default
