@@ -1,0 +1,12 @@
+# Vendored UncommonRoute — keep build/runtime state out of git.
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+~/.uncommon-route/
+node_modules/
