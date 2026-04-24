@@ -4482,16 +4482,18 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         // removed — messages are the sole gate source.)
         this.updateState({ status: 'waiting_gate' })
         this.syncStatusToD1(new Date().toISOString())
-        this.dispatchPush(
-          {
-            title: this.state.project || 'Duraclaw',
-            body: `Asking: ${((event.questions?.[0] as Record<string, unknown>)?.question as string)?.slice(0, 100) || 'Question'}`,
-            url: `/?session=${this.state.session_id}`,
-            tag: `session-${this.state.session_id}`,
-            sessionId: this.state.session_id ?? '',
-            actions: [{ action: 'open', title: 'Open' }],
-          },
-          'blocked',
+        this.ctx.waitUntil(
+          this.dispatchPush(
+            {
+              title: this.state.project || 'Duraclaw',
+              body: `Asking: ${((event.questions?.[0] as Record<string, unknown>)?.question as string)?.slice(0, 100) || 'Question'}`,
+              url: `/?session=${this.state.session_id}`,
+              tag: `session-${this.state.session_id}`,
+              sessionId: this.state.session_id ?? '',
+              actions: [{ action: 'open', title: 'Open' }],
+            },
+            'blocked',
+          ),
         )
         break
       }
@@ -4516,32 +4518,34 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         // load-bearing. (#76 P3: gate scalar removed.)
         this.updateState({ status: 'waiting_gate' })
         this.syncStatusToD1(new Date().toISOString())
-        ;(async () => {
-          try {
-            const actionToken = await generateActionToken(
-              this.state.session_id ?? '',
-              event.tool_call_id,
-              this.env.BETTER_AUTH_SECRET,
-            )
-            this.dispatchPush(
-              {
-                title: this.state.project || 'Duraclaw',
-                body: `Needs permission: ${event.tool_name}`,
-                url: `/?session=${this.state.session_id}`,
-                tag: `session-${this.state.session_id}`,
-                sessionId: this.state.session_id ?? '',
-                actionToken,
-                actions: [
-                  { action: 'approve', title: 'Allow' },
-                  { action: 'deny', title: 'Deny' },
-                ],
-              },
-              'blocked',
-            )
-          } catch (err) {
-            console.error(`[SessionDO:${this.ctx.id}] Failed to generate action token:`, err)
-          }
-        })()
+        this.ctx.waitUntil(
+          (async () => {
+            try {
+              const actionToken = await generateActionToken(
+                this.state.session_id ?? '',
+                event.tool_call_id,
+                this.env.BETTER_AUTH_SECRET,
+              )
+              await this.dispatchPush(
+                {
+                  title: this.state.project || 'Duraclaw',
+                  body: `Needs permission: ${event.tool_name}`,
+                  url: `/?session=${this.state.session_id}`,
+                  tag: `session-${this.state.session_id}`,
+                  sessionId: this.state.session_id ?? '',
+                  actionToken,
+                  actions: [
+                    { action: 'approve', title: 'Allow' },
+                    { action: 'deny', title: 'Deny' },
+                  ],
+                },
+                'blocked',
+              )
+            } catch (err) {
+              console.error(`[SessionDO:${this.ctx.id}] Failed to generate action token:`, err)
+            }
+          })(),
+        )
         break
       }
 
@@ -4673,30 +4677,34 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         // Discovered-session fan-out is now owned by the cron in
         // src/api/scheduled.ts (#7 p6); SessionDO no longer mirrors here.
         if (!event.is_error) {
-          this.dispatchPush(
-            {
-              title: this.state.project || 'Duraclaw',
-              body: `Completed (${this.state.num_turns} turns, $${(this.state.total_cost_usd ?? 0).toFixed(2)})`,
-              url: `/?session=${this.state.session_id}`,
-              tag: `session-${this.state.session_id}`,
-              sessionId: this.state.session_id ?? '',
-              actions: [
-                { action: 'open', title: 'Open' },
-                { action: 'new-session', title: 'New Session' },
-              ],
-            },
-            'completed',
+          this.ctx.waitUntil(
+            this.dispatchPush(
+              {
+                title: this.state.project || 'Duraclaw',
+                body: `Completed (${this.state.num_turns} turns, $${(this.state.total_cost_usd ?? 0).toFixed(2)})`,
+                url: `/?session=${this.state.session_id}`,
+                tag: `session-${this.state.session_id}`,
+                sessionId: this.state.session_id ?? '',
+                actions: [
+                  { action: 'open', title: 'Open' },
+                  { action: 'new-session', title: 'New Session' },
+                ],
+              },
+              'completed',
+            ),
           )
         } else {
-          this.dispatchPush(
-            {
-              title: this.state.project || 'Duraclaw',
-              body: `Failed: ${event.result || 'Session failed'}`,
-              url: `/?session=${this.state.session_id}`,
-              tag: `session-${this.state.session_id}`,
-              sessionId: this.state.session_id ?? '',
-            },
-            'error',
+          this.ctx.waitUntil(
+            this.dispatchPush(
+              {
+                title: this.state.project || 'Duraclaw',
+                body: `Failed: ${event.result || 'Session failed'}`,
+                url: `/?session=${this.state.session_id}`,
+                tag: `session-${this.state.session_id}`,
+                sessionId: this.state.session_id ?? '',
+              },
+              'error',
+            ),
           )
         }
         break
@@ -4828,15 +4836,17 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           const _now = new Date().toISOString()
           this.syncStatusAndErrorToD1('idle', event.error ?? null, null, _now)
         }
-        this.dispatchPush(
-          {
-            title: this.state.project || 'Duraclaw',
-            body: `Error: ${event.error}`,
-            url: `/?session=${this.state.session_id}`,
-            tag: `session-${this.state.session_id}`,
-            sessionId: this.state.session_id ?? '',
-          },
-          'error',
+        this.ctx.waitUntil(
+          this.dispatchPush(
+            {
+              title: this.state.project || 'Duraclaw',
+              body: `Error: ${event.error}`,
+              url: `/?session=${this.state.session_id}`,
+              tag: `session-${this.state.session_id}`,
+              sessionId: this.state.session_id ?? '',
+            },
+            'error',
+          ),
         )
         break
       }
