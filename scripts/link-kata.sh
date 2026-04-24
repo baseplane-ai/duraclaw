@@ -20,7 +20,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 KATA_DIR="$ROOT/packages/kata"
-KATA_BIN="$KATA_DIR/kata"
+KATA_BIN="$KATA_DIR/src/index.ts"
 LINK_TARGET="$HOME/.local/bin/kata"
 
 if [[ ! -x "$KATA_BIN" ]]; then
