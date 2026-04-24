@@ -1,4 +1,7 @@
+import type { ProjectInfo } from '@duraclaw/shared-types'
+import { useLiveQuery } from '@tanstack/react-db'
 import { createFileRoute } from '@tanstack/react-router'
+import { useCallback, useState } from 'react'
 import { Header } from '~/components/layout/header'
 import { Main } from '~/components/layout/main'
 import { NotificationPreferences } from '~/components/notification-preferences'
@@ -14,11 +17,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from '~/components/ui/select'
+import { VisibilityBadge } from '~/components/visibility-badge'
 import { useLayout } from '~/context/layout-provider'
 import { useTheme } from '~/context/theme-provider'
+import { projectsCollection } from '~/db/projects-collection'
 import { useSwUpdate } from '~/hooks/use-sw-update'
 import { useUserDefaults } from '~/hooks/use-user-defaults'
-import { signOut } from '~/lib/auth-client'
+import { signOut, useSession as useAuthSession } from '~/lib/auth-client'
+import { apiUrl } from '~/lib/platform'
 
 const MODEL_OPTIONS = [
   { value: 'claude-opus-4-7', label: 'claude-opus-4-7' },
@@ -70,6 +76,7 @@ function SettingsPage() {
         <div className="mx-auto max-w-3xl space-y-6">
           <AccountSection />
           <DefaultsSection />
+          <ProjectsSection />
           <NotificationsSection />
           <AppearanceSection />
           <SystemSection />
@@ -290,6 +297,102 @@ function AppearanceSection() {
             </SelectContent>
           </Select>
         </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function ProjectsSection() {
+  const { data: authSession } = useAuthSession()
+  const role = (authSession as { user?: { role?: string } } | null)?.user?.role ?? 'user'
+  const isAdmin = role === 'admin'
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: projectRows } = useLiveQuery(projectsCollection as any)
+  const [pending, setPending] = useState<Set<string>>(new Set())
+  const [errors, setErrors] = useState<Record<string, string>>({})
+
+  const handleToggle = useCallback(async (name: string, current: 'public' | 'private') => {
+    const next = current === 'public' ? 'private' : 'public'
+    setPending((prev) => new Set(prev).add(name))
+    setErrors((prev) => {
+      const { [name]: _, ...rest } = prev
+      return rest
+    })
+    try {
+      const resp = await fetch(apiUrl(`/api/projects/${encodeURIComponent(name)}/visibility`), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ visibility: next }),
+      })
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => '')
+        setErrors((prev) => ({ ...prev, [name]: `Failed (${resp.status}) ${body}` }))
+      }
+      // Synced-collection delta from the PATCH handler updates the row
+      // reactively — no manual refresh.
+    } catch (err) {
+      setErrors((prev) => ({
+        ...prev,
+        [name]: err instanceof Error ? err.message : String(err),
+      }))
+    } finally {
+      setPending((prev) => {
+        const next = new Set(prev)
+        next.delete(name)
+        return next
+      })
+    }
+  }, [])
+
+  if (!isAdmin) return null
+
+  const projects = (projectRows ?? []) as ProjectInfo[]
+  const sorted = [...projects].sort((a, b) => a.name.localeCompare(b.name))
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Projects</CardTitle>
+        <CardDescription>
+          Toggle project visibility. Public projects — and the sessions inside them — are visible to
+          every authenticated user. Private projects are scoped to their owner. New projects default
+          to public.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {sorted.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No projects yet.</p>
+        ) : (
+          <ul className="divide-y">
+            {sorted.map((p) => {
+              const visibility: 'public' | 'private' =
+                p.visibility === 'private' ? 'private' : 'public'
+              const busy = pending.has(p.name)
+              const err = errors[p.name]
+              return (
+                <li key={p.name} className="flex items-center justify-between gap-3 py-2 text-sm">
+                  <div className="flex min-w-0 flex-1 items-center gap-2">
+                    <span className="truncate font-mono">{p.name}</span>
+                    <VisibilityBadge visibility={visibility} showLabel />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {err && <span className="text-xs text-destructive">{err}</span>}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={busy}
+                      onClick={() => handleToggle(p.name, visibility)}
+                    >
+                      {busy ? 'Saving…' : visibility === 'public' ? 'Make private' : 'Make public'}
+                    </Button>
+                  </div>
+                </li>
+              )
+            })}
+          </ul>
+        )}
       </CardContent>
     </Card>
   )

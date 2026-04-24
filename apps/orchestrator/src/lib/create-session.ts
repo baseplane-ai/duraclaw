@@ -57,8 +57,11 @@ export async function createSession(
   const projectPath = await resolveProjectPath(env, params.project)
 
   // Spec #68 B6 — inherit the project's visibility at creation time. Projects
-  // default to 'private'; promoting to 'public' happens via the admin PATCH
-  // endpoint. New sessions adopt whatever the project is set to today.
+  // default to 'public'; restricting to 'private' happens via the admin
+  // PATCH endpoint. New sessions adopt whatever the project is set to today,
+  // falling back to 'public' when the project row is missing (fresh project
+  // the gateway hasn't synced yet, etc.) — matches the project default so
+  // cold-start doesn't silently collapse to 'private'.
   const db = drizzle(env.AUTH_DB, { schema })
   const projectRows = await db
     .select({ visibility: schema.projects.visibility })
@@ -66,7 +69,7 @@ export async function createSession(
     .where(eq(schema.projects.name, params.project))
     .limit(1)
   const visibility: 'public' | 'private' =
-    projectRows[0]?.visibility === 'public' ? 'public' : 'private'
+    projectRows[0]?.visibility === 'private' ? 'private' : 'public'
 
   let sessionId: string
   let doId: DurableObjectId

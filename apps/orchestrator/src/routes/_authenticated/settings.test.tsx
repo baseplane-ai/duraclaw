@@ -21,10 +21,39 @@ vi.mock('~/components/layout/main', () => ({
   Main: ({ children }: { children: React.ReactNode }) => <div data-testid="main">{children}</div>,
 }))
 
-// Mock auth-client
+// Mock auth-client — non-admin by default so the ProjectsSection renders null
+// and doesn't disturb the existing section-structure assertions. The admin
+// case gets its own describe block below.
 const mockSignOut = vi.fn(() => Promise.resolve())
+let mockAuthSessionReturn: {
+  data: { user: { role?: string } } | null
+  error: null
+  isPending: boolean
+} = {
+  data: { user: { role: 'user' } },
+  error: null,
+  isPending: false,
+}
 vi.mock('~/lib/auth-client', () => ({
   signOut: () => mockSignOut(),
+  useSession: () => mockAuthSessionReturn,
+}))
+
+// Mock platform apiUrl
+vi.mock('~/lib/platform', () => ({
+  apiUrl: (p: string) => p,
+  isNative: () => false,
+}))
+
+// Mock projectsCollection — the live query just needs to resolve; in the
+// non-admin default case ProjectsSection returns null before subscribing.
+vi.mock('~/db/projects-collection', () => ({
+  projectsCollection: {},
+}))
+
+const mockLiveQueryData: { current: unknown[] } = { current: [] }
+vi.mock('@tanstack/react-db', () => ({
+  useLiveQuery: () => ({ data: mockLiveQueryData.current }),
 }))
 
 // Mock useUserDefaults
@@ -295,5 +324,99 @@ describe('SettingsPage', () => {
       screen.getByText('Default values for new sessions. These can be overridden per session.'),
     ).toBeDefined()
     expect(screen.getByText('Customize the look and feel of the application.')).toBeDefined()
+  })
+
+  // ── Projects section (admin-gated) ───────────────────────────────
+
+  it('hides the Projects section for non-admin users', () => {
+    mockAuthSessionReturn = {
+      data: { user: { role: 'user' } },
+      error: null,
+      isPending: false,
+    }
+    renderPage()
+    expect(screen.queryByText('Projects')).toBeNull()
+  })
+
+  it('shows the Projects section for admin users with a per-project toggle', () => {
+    mockAuthSessionReturn = {
+      data: { user: { role: 'admin' } },
+      error: null,
+      isPending: false,
+    }
+    mockLiveQueryData.current = [
+      {
+        name: 'alpha',
+        path: '/a',
+        branch: 'main',
+        dirty: false,
+        active_session: null,
+        repo_origin: null,
+        ahead: 0,
+        behind: 0,
+        pr: null,
+        visibility: 'public',
+      },
+      {
+        name: 'beta',
+        path: '/b',
+        branch: 'main',
+        dirty: false,
+        active_session: null,
+        repo_origin: null,
+        ahead: 0,
+        behind: 0,
+        pr: null,
+        visibility: 'private',
+      },
+    ]
+    renderPage()
+    expect(screen.getByText('Projects')).toBeDefined()
+    expect(screen.getByText('alpha')).toBeDefined()
+    expect(screen.getByText('beta')).toBeDefined()
+    // Toggle labels reflect current state — public projects offer "Make private"
+    expect(screen.getByRole('button', { name: 'Make private' })).toBeDefined()
+    expect(screen.getByRole('button', { name: 'Make public' })).toBeDefined()
+  })
+
+  it('PATCHes the visibility endpoint when the admin clicks a toggle', async () => {
+    mockAuthSessionReturn = {
+      data: { user: { role: 'admin' } },
+      error: null,
+      isPending: false,
+    }
+    mockLiveQueryData.current = [
+      {
+        name: 'alpha',
+        path: '/a',
+        branch: 'main',
+        dirty: false,
+        active_session: null,
+        repo_origin: null,
+        ahead: 0,
+        behind: 0,
+        pr: null,
+        visibility: 'public',
+      },
+    ]
+
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(JSON.stringify({ ok: true, visibility: 'private' })))
+
+    renderPage()
+    const btn = screen.getByRole('button', { name: 'Make private' })
+    await act(async () => {
+      fireEvent.click(btn)
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/projects/alpha/visibility',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ visibility: 'private' }),
+      }),
+    )
+    fetchMock.mockRestore()
   })
 })
