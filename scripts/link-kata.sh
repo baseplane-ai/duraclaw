@@ -42,9 +42,15 @@ else
   echo "Warning: bun not found — kata deps not installed. Install bun: https://bun.sh" >&2
 fi
 
-# Create/overwrite symlink
-/usr/bin/ln -sf "$KATA_BIN" "$LINK_TARGET"
-echo "Linked: $LINK_TARGET → $KATA_BIN"
+# Create symlink — only if it doesn't already exist.
+# The main worktree (/data/projects/duraclaw) should own the symlink;
+# dev worktrees install deps but skip re-pointing the global link.
+if [[ -L "$LINK_TARGET" ]]; then
+  echo "Symlink already exists: $LINK_TARGET → $(readlink "$LINK_TARGET") (keeping)"
+else
+  /usr/bin/ln -sf "$KATA_BIN" "$LINK_TARGET"
+  echo "Linked: $LINK_TARGET → $KATA_BIN"
+fi
 
 # Verify
 if "$LINK_TARGET" help &>/dev/null; then

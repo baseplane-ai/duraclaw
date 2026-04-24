@@ -11,11 +11,11 @@ bun run typecheck    # Type-check without emitting
 
 Test files live alongside source with `.test.ts` suffixes (e.g. `src/commands/can-exit.test.ts`). Bun's test runner discovers and runs them directly from TypeScript source.
 
-The `kata` shell script at the repo root is the CLI entry point. It runs `bun src/index.ts` directly — no build step required.
+The CLI entry point is `src/index.ts` with a `#!/usr/bin/env bun` shebang — runs TypeScript directly, no build step. A symlink at `~/.local/bin/kata` points to the main worktree's copy (installed by `scripts/link-kata.sh`).
 
 ## Architecture
 
-**kata-wm** is a TypeScript CLI published as an npm package (`@codevibesmatter/kata`). It wraps Claude Code projects with structured session modes, phase task enforcement, and stop hooks.
+**kata** is a TypeScript CLI that lives in the duraclaw monorepo at `packages/kata/`. It wraps Claude Code projects with structured session modes, phase task enforcement, and stop hooks. Runs directly from TypeScript source via Bun — no build step required.
 
 ### Source layout (`src/`)
 
