@@ -15,6 +15,7 @@ export type GatewayCommand =
   | SetPermissionModeCommand
   | StopTaskCommand
   | PingCommand
+  | SynthRateLimitCommand
 
 export interface ExecuteCommand {
   type: 'execute'
@@ -120,6 +121,26 @@ export interface StopTaskCommand {
 
 export interface PingCommand {
   type: 'ping'
+}
+
+/**
+ * GH#92 — dev-only synthetic rate_limit_event trigger. Routed from the
+ * DO's `POST /api/__dev__/synth-ratelimit/:sessionId` endpoint through
+ * the existing dial-back WS. The runner's handler is gated on
+ * `DURACLAW_DEBUG_ENDPOINTS === '1'` and synthesizes an SDK-shape
+ * rate_limit_event into its own message loop, so all B3 gates fire
+ * and produce real .exit / .meta / caam side effects.
+ *
+ * The `rate_limit_info` payload mirrors the Claude SDK's
+ * `rate_limit_event.rate_limit_info` shape (loosely typed by the SDK).
+ * When omitted, the runner synthesizes a canned default with a
+ * 45-minute `resetsAt` so VP1's derived-minutes math has a nonround
+ * number to verify against.
+ */
+export interface SynthRateLimitCommand {
+  type: 'synth-rate-limit'
+  session_id: string
+  rate_limit_info?: Record<string, unknown>
 }
 
 export interface AnswerCommand {
@@ -299,10 +320,28 @@ export interface RewindResultEvent {
   deletions?: number
 }
 
+/**
+ * GH#92: runner → DO rate-limit relay. `rate_limit_info` is the raw
+ * SDK passthrough; the new optional top-level fields are added by the
+ * runner's caam-rotation branch so the DO doesn't have to re-parse the
+ * loosely-typed SDK blob.
+ *
+ * - `exit_reason` distinguishes the three rotation outcomes. Absent
+ *   on dev boxes without caam (B7 degraded-mode relay).
+ * - `rotation` is non-null only on `rate_limited` success.
+ * - `earliest_clear_ts` is populated only on `rate_limited_no_profile`
+ *   (DO uses it to schedule a delayed resume alarm — see B6).
+ * - `resets_at` mirrors `rate_limit_info.resetsAt` lifted to a typed
+ *   top-level field; null when the SDK payload didn't carry it.
+ */
 export interface RateLimitEvent {
   type: 'rate_limit'
   session_id: string
   rate_limit_info: Record<string, unknown>
+  exit_reason?: 'rate_limited' | 'rate_limited_no_rotate' | 'rate_limited_no_profile'
+  rotation?: { from: string; to: string } | null
+  earliest_clear_ts?: number
+  resets_at?: number | null
 }
 
 export interface TaskStartedEvent {
