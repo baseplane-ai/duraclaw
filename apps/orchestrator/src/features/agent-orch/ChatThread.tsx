@@ -926,10 +926,11 @@ function VirtualizedMessageList({
     getItemKey,
     // Top / bottom breathing room around the list (previously the
     // `p-4` on <ConversationContent>).
-    paddingStart: 16,
-    paddingEnd: 16,
-    // 32px inter-row gap (previously `gap-8` on <ConversationContent>).
-    gap: 32,
+    paddingStart: 8,
+    paddingEnd: 8,
+    // 16px inter-row gap — tighter than the original `gap-8` which
+    // wasted a lot of vertical space on mobile.
+    gap: 16,
   })
 
   const virtualItems = virtualizer.getVirtualItems()
@@ -1069,9 +1070,9 @@ export function ChatThread({
   if (messages.length === 0) {
     return (
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" role="log">
-        <div className="flex-1 overflow-y-auto overflow-x-hidden p-4">
+        <div className="flex-1 overflow-y-auto overflow-x-hidden p-2">
           {isConnecting ? (
-            <div className="space-y-6 p-2">
+            <div className="space-y-6">
               <div className="flex items-start gap-3">
                 <Skeleton className="size-8 rounded-full" />
                 <div className="flex-1 space-y-2">
