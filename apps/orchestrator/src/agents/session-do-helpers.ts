@@ -589,14 +589,27 @@ export function planPendingResumeDispatch(input: {
  * — caller uses that to decide whether to emit the `<prior_conversation>`
  * wrapper or send the new prompt as-is.
  */
+/**
+ * Local narrowing shape for the wire-level `parts: unknown[]` array.
+ * `WireSessionMessage.parts` is intentionally `unknown[]` on the wire
+ * (see `packages/shared-types/src/index.ts`); this alias documents the
+ * subset of fields the serializer reads and lets callers see the duck-
+ * typed contract without re-asserting on every access.
+ */
+type MessagePart = {
+  type?: string
+  text?: string
+  toolName?: string
+}
+
 export function serializeHistoryForFork(history: readonly WireSessionMessage[]): string {
   const filtered = history.filter((m) => m.metadata?.caam === undefined)
   return filtered
     .map((m) => {
       const role = m.role === 'user' ? 'User' : m.role === 'assistant' ? 'Assistant' : m.role
-      const text = (m.parts as unknown[])
+      const text = m.parts
         .map((rawPart) => {
-          const p = rawPart as { type?: string; text?: string; toolName?: string }
+          const p = rawPart as MessagePart
           if (p.type === 'text') return p.text ?? ''
           if (p.type === 'reasoning') return `[thinking] ${p.text ?? ''}`
           if (typeof p.type === 'string' && p.type.startsWith('tool-')) {

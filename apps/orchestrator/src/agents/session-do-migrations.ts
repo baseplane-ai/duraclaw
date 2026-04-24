@@ -308,6 +308,12 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
     description:
       'Add pending_resume_json to session_meta for GH#92 caam rotation (P3). JSON-encoded `{kind:"rotation",at:<ms>}` set when the rate_limit handler schedules a delayed resume across DO eviction; the alarm watchdog reads it, fires `triggerGatewayDial({type:"resume",...})` once `Date.now() >= at` with no live runner attached, and clears the field. NULL means no pending resume — the default for every existing row.',
     up: (sql) => {
+      // Defensively idempotent: dev worktrees may have run an earlier
+      // GH#92 P3 build that added this column before the v17 version
+      // bump landed (the spec churned across several revisions). Match
+      // the v7/v11/v14/v15/v16 pattern of swallowing only the
+      // "duplicate column" case so re-running the migration on those
+      // boxes is a no-op rather than a hard failure.
       try {
         sql.exec(`ALTER TABLE session_meta ADD COLUMN pending_resume_json TEXT`)
       } catch (e: unknown) {

@@ -1,5 +1,5 @@
 import type { CaamProfileStatus, CaamStatus } from '@duraclaw/shared-types'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Badge } from '~/components/ui/badge'
 import { Button } from '~/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '~/components/ui/card'
@@ -7,6 +7,27 @@ import { cn } from '~/lib/utils'
 
 const POLL_MS = 5000
 const TICK_MS = 1000
+const CAAM_STATUS_URL = '/api/admin/caam/status'
+
+/**
+ * Module-scope fetch helper shared by both the polling effect and the
+ * manual refetch button. Throws on non-OK responses or malformed payload;
+ * the caller is responsible for try/catch + state reduction.
+ */
+async function fetchStatus(signal?: AbortSignal): Promise<CaamStatus> {
+  const resp = await fetch(CAAM_STATUS_URL, { credentials: 'include', signal })
+  if (!resp.ok) {
+    // 200 + caam_configured:false is the degraded-mode path. Anything
+    // non-OK is an actual failure (5xx, 401/403) — surface it.
+    const body = await resp.text().catch(() => '')
+    throw new Error(`HTTP ${resp.status}: ${body || resp.statusText}`)
+  }
+  const body = (await resp.json()) as unknown
+  if (!isCaamStatus(body)) {
+    throw new Error('Malformed response payload')
+  }
+  return body
+}
 
 const RELATIVE_FORMATTER =
   typeof Intl !== 'undefined' && 'RelativeTimeFormat' in Intl
@@ -94,28 +115,25 @@ export function CaamDashboard() {
     isFetching: false,
   })
   const [now, setNow] = useState<number>(() => Date.now())
+  // Overlap guard for the polling timer: if a fetch takes longer than
+  // POLL_MS the next interval tick must skip rather than stack a second
+  // in-flight request. The manual `refetch` button is intentionally NOT
+  // gated on this — user intent always wins over a scheduled poll.
+  const isFetchingRef = useRef(false)
 
   // Polling fetch — 5s interval. Subsequent refetches don't unmount; we
   // only flip a transient `isFetching` so the footer can pulse.
   useEffect(() => {
     let cancelled = false
 
-    const load = async () => {
+    const loadPolled = async () => {
       if (cancelled) return
+      if (isFetchingRef.current) return
+      isFetchingRef.current = true
       setState((prev) => ({ ...prev, isFetching: true }))
       try {
-        const resp = await fetch('/api/admin/caam/status', { credentials: 'include' })
-        if (!resp.ok) {
-          // 200 + caam_configured:false is the degraded-mode path. Anything
-          // non-OK is an actual failure (5xx, 401/403) — surface it.
-          const body = await resp.text().catch(() => '')
-          throw new Error(`HTTP ${resp.status}: ${body || resp.statusText}`)
-        }
-        const body = (await resp.json()) as unknown
+        const body = await fetchStatus()
         if (cancelled) return
-        if (!isCaamStatus(body)) {
-          throw new Error('Malformed response payload')
-        }
         setState({ data: body, error: null, isFetching: false })
       } catch (err) {
         if (cancelled) return
@@ -124,13 +142,15 @@ export function CaamDashboard() {
           error: err instanceof Error ? err : new Error(String(err)),
           isFetching: false,
         }))
+      } finally {
+        isFetchingRef.current = false
       }
     }
 
-    void load()
-    const handle = window.setInterval(load, POLL_MS)
+    void loadPolled()
+    const handle = window.setInterval(loadPolled, POLL_MS)
     const onFocus = () => {
-      void load()
+      void loadPolled()
     }
     window.addEventListener('focus', onFocus)
     return () => {
@@ -148,15 +168,11 @@ export function CaamDashboard() {
   }, [])
 
   const refetch = () => {
+    // Manual refetch is NOT gated on isFetchingRef — a user click should
+    // always trigger a fresh request even if a scheduled poll is mid-flight.
     setState((prev) => ({ ...prev, isFetching: true, error: null }))
-    void fetch('/api/admin/caam/status', { credentials: 'include' })
-      .then(async (resp) => {
-        if (!resp.ok) {
-          const body = await resp.text().catch(() => '')
-          throw new Error(`HTTP ${resp.status}: ${body || resp.statusText}`)
-        }
-        const body = (await resp.json()) as unknown
-        if (!isCaamStatus(body)) throw new Error('Malformed response payload')
+    void fetchStatus()
+      .then((body) => {
         setState({ data: body, error: null, isFetching: false })
       })
       .catch((err) => {

@@ -55,7 +55,8 @@ describe('CaamDashboard', () => {
       fetched_at_ms: Date.now(),
     }
 
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(payload)))
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(payload))
+    vi.stubGlobal('fetch', fetchMock)
 
     render(<CaamDashboard />)
 
@@ -63,6 +64,13 @@ describe('CaamDashboard', () => {
     await waitFor(() => {
       expect(screen.getAllByText('work1').length).toBeGreaterThan(0)
     })
+
+    // Confirm the component hits the admin status endpoint with cookie
+    // credentials (admin gate relies on Better Auth session cookie).
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/admin/caam/status',
+      expect.objectContaining({ credentials: 'include' }),
+    )
 
     expect(screen.getByText('work2')).toBeTruthy()
     expect(screen.getByText('work3')).toBeTruthy()
