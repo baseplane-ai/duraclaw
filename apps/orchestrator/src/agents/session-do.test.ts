@@ -3258,7 +3258,10 @@ describe('error event transitions session to idle (not error) so user can resume
       status = 'idle'
       healed = true
     }
-    const isResumable = !state.hasLiveRunner && status === 'idle' && Boolean(state.sdk_session_id)
+    const isResumable =
+      !state.hasLiveRunner &&
+      (status === 'idle' || status === 'error') &&
+      Boolean(state.sdk_session_id)
     if (!state.hasLiveRunner && !isResumable) {
       return { ok: false, error: `Cannot send message: status is '${status}'`, healed }
     }
@@ -3305,18 +3308,17 @@ describe('error event transitions session to idle (not error) so user can resume
     expect(res.healed).toBe(false)
   })
 
-  it('regression guard: never returns "Cannot send message: status is \'error\'"', () => {
-    // If a future refactor re-introduces a terminal 'error' status, the
-    // resumable gate trips and the user sees this error. Snapshot the
-    // string so a reintroduction is caught here, not in a prod bug report.
+  it('sendMessage accepts the next user turn from terminal status=error (spec #80 B7 resumable contract)', () => {
+    // `failAwaitingTurn()` flips to status='error' as a terminal-UI marker
+    // but the same block's own comment promises "the session remains
+    // resumable via sdk_session_id". The gate honours that: a live
+    // sdk_session_id + no attached runner resumes on the next user turn.
     const errRes = sendMessageAcceptsResume({
       status: 'error',
       sdk_session_id: 'sdk-sess-abc',
       hasLiveRunner: false,
     })
-    expect(errRes.ok).toBe(false)
-    expect(errRes.error).toBe("Cannot send message: status is 'error'")
-    // The post-error path MUST be idle, not error — proven above.
+    expect(errRes.ok).toBe(true)
   })
 
   // Auto-heal for the stuck-running case: status='running' persisted in DO

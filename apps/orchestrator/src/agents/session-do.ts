@@ -3567,7 +3567,12 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // attached, reuse that runner — dialling a fresh one would collide with
     // the existing sdk_session_id inside session-runner's hasLiveResume guard
     // and nothing would happen from the user's perspective.
-    const isResumable = !hasLiveRunner && status === 'idle' && this.state.sdk_session_id
+    // `'error'` is a terminal-UI state set by `failAwaitingTurn()` (spec
+    // #80 B7) but per its own contract "the session remains resumable via
+    // sdk_session_id" — the next user turn must reopen the resume path,
+    // not get wedged behind the gate below.
+    const isResumable =
+      !hasLiveRunner && (status === 'idle' || status === 'error') && this.state.sdk_session_id
 
     if (!hasLiveRunner && !isResumable) {
       return { ok: false, error: `Cannot send message: status is '${status}'` }
