@@ -2330,6 +2330,75 @@ export function createApiApp() {
     return c.json({ status: 'idle' })
   })
 
+  // GH#92 P3: dev-only synthetic rate-limit injector. Two targets:
+  //   - target: 'runner' → forwards a {type:'synth-rate-limit'} GatewayCommand
+  //     down the existing dial-back WS to the live session-runner; the
+  //     runner's own gate (also `DURACLAW_DEBUG_ENDPOINTS=1`) decides whether
+  //     to honour it (LAYER A — VP1 path).
+  //   - target: 'do' → bypasses the runner; the DO synthesizes a
+  //     RateLimitEvent and runs it through `handleGatewayEvent` directly
+  //     (LAYER B — exercises the rate_limit branches without a subprocess).
+  // 404 when DURACLAW_DEBUG_ENDPOINTS != '1' so production deploys behave
+  // as if the route doesn't exist. Lives inside the authed block — any
+  // logged-in user with access to the session may invoke (no admin role
+  // required for a dev synth tool).
+  app.post('/api/__dev__/synth-ratelimit/:sessionId', async (c) => {
+    if (c.env.DURACLAW_DEBUG_ENDPOINTS !== '1') {
+      return c.json({ error: 'Not found' }, 404)
+    }
+    const userId = c.get('userId')
+    const sessionId = c.req.param('sessionId')
+    const access = await getAccessibleSession(c.env, sessionId, userId, c.get('role'))
+    if (!access.ok) {
+      return c.json({ error: 'Session not found' }, 404)
+    }
+
+    let body: {
+      target?: unknown
+      exit_reason?: unknown
+      rotation?: unknown
+      earliest_clear_ts?: unknown
+      resets_at?: unknown
+      rate_limit_info?: unknown
+    }
+    try {
+      body = (await c.req.json()) as typeof body
+    } catch {
+      return c.json({ error: 'Invalid JSON body' }, 400)
+    }
+
+    if (body.target !== 'runner' && body.target !== 'do') {
+      return c.json({ error: "target must be 'runner' or 'do'" }, 400)
+    }
+    const validReasons = new Set([
+      'rate_limited',
+      'rate_limited_no_rotate',
+      'rate_limited_no_profile',
+    ])
+    if (body.exit_reason !== undefined && typeof body.exit_reason !== 'string') {
+      return c.json({ error: 'exit_reason must be a string' }, 400)
+    }
+    if (typeof body.exit_reason === 'string' && !validReasons.has(body.exit_reason)) {
+      return c.json({ error: `Invalid exit_reason: ${body.exit_reason}` }, 400)
+    }
+
+    const doId = getSessionDoId(c.env, access.session.id)
+    const sessionDO = c.env.SESSION_AGENT.get(doId)
+    const doResp = await sessionDO.fetch(
+      new Request('https://session/__dev__/synth-rate-limit', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-partykit-room': access.session.id,
+          'x-user-id': userId,
+        },
+        body: JSON.stringify(body),
+      }),
+    )
+    const json = (await doResp.json().catch(() => ({}))) as Record<string, unknown>
+    return c.json(json, doResp.status as Parameters<typeof c.json>[1])
+  })
+
   // ── Chain worktree reservations (GH#16 Feature 3E / U2) ──────────
   //
   // Concurrency: D1's single-writer SQLite semantics + the `worktree`

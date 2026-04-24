@@ -50,6 +50,30 @@ export type DisplayState =
       isInteractive: true
     }
   | { status: 'error'; label: 'Error'; color: 'red'; icon: 'alert'; isInteractive: true }
+  // GH#92 P3: caam rotation transient — runner is being respawned on a
+  // fresh profile. Violet (already used by `pending`) signals "we're
+  // waiting on a non-user event that isn't normal inference"; spinner
+  // because something is actively happening; `isInteractive: true` so
+  // the user can still queue input.
+  | {
+      status: 'rotating'
+      label: 'Rotating'
+      color: 'violet'
+      icon: 'spinner'
+      isInteractive: true
+    }
+  // GH#92 P3: caam rotation persistent — every profile in cooldown,
+  // resume scheduled at earliest_clear_ts. Gray/circle for the muted
+  // "waiting on a timer" feel; interactive so the user can still type
+  // queued input. TODO: a dedicated `clock` icon would convey
+  // "scheduled wait" better than the generic `circle` fallback.
+  | {
+      status: 'waiting_profile'
+      label: 'Waiting for auth'
+      color: 'gray'
+      icon: 'circle'
+      isInteractive: true
+    }
   | { status: 'archived'; label: 'Archived'; color: 'gray'; icon: 'archive'; isInteractive: false }
   | {
       status: 'disconnected'
@@ -105,6 +129,24 @@ const ERROR: DisplayState = {
   label: 'Error',
   color: 'red',
   icon: 'alert',
+  isInteractive: true,
+}
+
+const ROTATING: DisplayState = {
+  status: 'rotating',
+  label: 'Rotating',
+  color: 'violet',
+  icon: 'spinner',
+  isInteractive: true,
+}
+
+const WAITING_PROFILE: DisplayState = {
+  status: 'waiting_profile',
+  label: 'Waiting for auth',
+  color: 'gray',
+  // TODO: a `clock` icon would be nicer here than the generic `circle`
+  // fallback — extend the icon-name union when the icon set grows.
+  icon: 'circle',
   isInteractive: true,
 }
 
@@ -200,6 +242,11 @@ export function deriveDisplayStateFromStatus(
       return WAITING_GATE
     case 'error':
       return ERROR
+    // GH#92 P3: caam rotation states.
+    case 'rotating':
+      return ROTATING
+    case 'waiting_profile':
+      return WAITING_PROFILE
     case 'archived':
       return ARCHIVED
     default:
@@ -216,6 +263,8 @@ export const DISPLAY_STATES = {
   completed_unseen: COMPLETED_UNSEEN,
   waiting_gate: WAITING_GATE,
   error: ERROR,
+  rotating: ROTATING,
+  waiting_profile: WAITING_PROFILE,
   archived: ARCHIVED,
   disconnected: DISCONNECTED,
   unknown: UNKNOWN,

@@ -651,6 +651,13 @@ export interface ContextUsage {
 
 // ── Session State ────────────────────────────────────────────────────
 
+/**
+ * GH#92 B4/B6: caam rotation adds two new transient/persistent states.
+ *  - 'rotating'        : transient — caam profile rotation in progress,
+ *                        runner is about to be respawned on a fresh profile.
+ *  - 'waiting_profile' : persistent — every caam profile is in cooldown;
+ *                        runner will resume after the earliest-clear ts.
+ */
 export type SessionStatus =
   | 'idle'
   | 'pending'
@@ -658,6 +665,8 @@ export type SessionStatus =
   | 'waiting_input'
   | 'waiting_permission'
   | 'waiting_gate'
+  | 'rotating'
+  | 'waiting_profile'
   | 'error'
 
 // SessionState deleted (#31 P5 / B10). Status / gate / result are now derived
@@ -766,6 +775,36 @@ export interface StoredMessage {
 // ── Messages Frame (SessionDO → Browser, unified {type:'messages'} channel) ──
 
 /**
+ * GH#92 B4/B5/B6: optional per-message metadata bag. Currently carries the
+ * caam rotation breadcrumb stamped onto system-role messages by the DO; new
+ * keys can be added here without growing the top-level `SessionMessage`
+ * surface.
+ */
+export interface SessionMessageMetadata {
+  /**
+   * GH#92 B4/B5/B6: caam rotation breadcrumb — present on system-role
+   * messages inserted by the DO when a rate-limit rotation happens.
+   *   - kind 'rotated'  : successful rotation from → to
+   *   - kind 'skipped'  : rotation suppressed (peer runner live or
+   *                       DURACLAW_CLAUDE_ROTATION=off)
+   *   - kind 'waiting'  : every profile cooling; resume scheduled at
+   *                       earliest_clear_ts + 30s slop
+   * Client-side `useDerivedStatus` keys off this metadata (never body
+   * text) to surface the 'rotating' / 'waiting_profile' status.
+   * DO history → SDK resume-prompt serializer also filters on
+   * `metadata?.caam !== undefined` so these breadcrumbs are not
+   * replayed as user/assistant turns.
+   */
+  caam?: {
+    kind: 'rotated' | 'skipped' | 'waiting'
+    from?: string
+    to?: string
+    at: number
+    earliest_clear_ts?: number
+  }
+}
+
+/**
  * Wire-level shape of a session message. Mirrors the SDK's `SessionMessage`
  * (from `agents/experimental/memory/session`) as serialised over the
  * DO→browser WS channel. Additional fields may be present on the wire; this
@@ -776,6 +815,12 @@ export interface SessionMessage {
   sessionId?: string
   role: 'user' | 'assistant' | 'tool' | string
   parts: unknown[]
+  /**
+   * GH#92 B4–B6: optional metadata bag. See `SessionMessageMetadata`.
+   * Currently used by the DO to stamp caam rotation breadcrumbs on
+   * system-role messages.
+   */
+  metadata?: SessionMessageMetadata
   createdAt?: string | number | Date
   /**
    * Wall-clock of the last in-place mutation of this row (ISO 8601). Stamped
