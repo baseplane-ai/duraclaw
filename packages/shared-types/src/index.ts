@@ -762,6 +762,43 @@ export interface SessionSummary {
   visibility?: 'public' | 'private'
 }
 
+// ── Admin: caam status (GH#92 P5) ───────────────────────────────────
+//
+// Shape returned by `GET /admin/caam/status` on the agent-gateway, and
+// proxied verbatim by the worker's admin route. The admin React
+// component imports this same type so wire / proxy / render all agree.
+//
+// `caam_configured: false` is the degraded mode (binary missing or not
+// executable) — every other field empties out and `warnings` carries
+// the human-readable reason. Endpoint never 500s; per-subcommand failures
+// surface as additional `warnings[]` entries with partial data.
+
+export interface CaamProfileStatus {
+  name: string
+  active: boolean
+  /** Tool / system bucket — always 'claude' on Duraclaw today. */
+  system: string
+  health: { status: string; error_count: number }
+  /** Cooldown clear time in ms-epoch; absent when profile is not cooling. */
+  cooldown_until?: number
+}
+
+export interface CaamLastRotation {
+  from: string
+  to: string
+  at_ms: number
+  session_id: string
+}
+
+export interface CaamStatus {
+  active_profile: string | null
+  profiles: CaamProfileStatus[]
+  warnings: string[]
+  last_rotation?: CaamLastRotation | null
+  caam_configured: boolean
+  fetched_at_ms: number
+}
+
 // ── Stored Message (for SQLite persistence) ─────────────────────────
 
 export interface StoredMessage {

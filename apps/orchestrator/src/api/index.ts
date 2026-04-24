@@ -1,3 +1,4 @@
+import type { CaamStatus } from '@duraclaw/shared-types'
 import type { SQL } from 'drizzle-orm'
 import { and, asc, desc, eq, inArray, isNull, like, ne, or, sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
@@ -1793,6 +1794,42 @@ export function createApiApp() {
         set: { enabled: body.enabled, updatedAt: now },
       })
     return c.json({ ok: true, id: flagId, enabled: body.enabled })
+  })
+
+  // ── caam profile rotation status (GH#92) ─────────────────────────
+  app.get('/api/admin/caam/status', async (c) => {
+    if (c.get('role') !== 'admin') return c.json({ error: 'Forbidden' }, 403)
+    c.header('Cache-Control', 'no-store')
+
+    const degraded = (reason: string): CaamStatus => ({
+      caam_configured: false,
+      profiles: [],
+      active_profile: null,
+      warnings: [`Gateway unreachable: ${reason}`],
+      last_rotation: null,
+      fetched_at_ms: Date.now(),
+    })
+
+    if (!c.env.CC_GATEWAY_URL) return c.json(degraded('CC_GATEWAY_URL not configured'), 200)
+
+    const httpBase = c.env.CC_GATEWAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+    const url = new URL('/admin/caam/status', httpBase)
+    const headers: Record<string, string> = {}
+    if (c.env.CC_GATEWAY_SECRET) headers.Authorization = `Bearer ${c.env.CC_GATEWAY_SECRET}`
+
+    const ac = new AbortController()
+    const timer = setTimeout(() => ac.abort(), 5000)
+    try {
+      const resp = await fetch(url.toString(), { headers, signal: ac.signal })
+      if (!resp.ok) return c.json({ error: `Gateway returned ${resp.status}` }, 502)
+      const payload = (await resp.json()) as CaamStatus
+      return c.json(payload)
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : 'unknown'
+      return c.json(degraded(reason), 200)
+    } finally {
+      clearTimeout(timer)
+    }
   })
 
   app.post('/api/sessions/sync', async (c) => {
