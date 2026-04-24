@@ -96,7 +96,11 @@ describe('useDerivedStatus', () => {
     expect(result.current).toBeUndefined()
   })
 
-  it('returns undefined when D1 messageSeq has caught up (tiebreaker)', () => {
+  it('returns running even when D1 messageSeq has caught up (live evidence wins)', () => {
+    // Live-evidence signals (running, waiting_gate, pending) are direct
+    // proof of current state and should NOT be suppressed by seq comparison.
+    // This prevents the B1/B2 stale-status edge cases where D1 status
+    // arrives (via UserSettingsDO) before the final message deltas land.
     mockUseMessagesCollection.mockReturnValue({
       messages: [
         { id: 'msg-1', seq: 1, parts: [{ type: 'text', state: 'complete' }] },
@@ -110,7 +114,26 @@ describe('useDerivedStatus', () => {
       messageSeq: 2,
     } as ReturnType<typeof useSession>)
     const { result } = renderHook(() => useDerivedStatus('session-1'))
-    // D1 serverSeq (2) >= localMaxSeq (2) → fall through to undefined
+    expect(result.current).toBe('running')
+  })
+
+  it('returns undefined when D1 has caught up and derived is idle (tiebreaker for non-live signals)', () => {
+    // For idle / undefined, the tiebreaker still applies: if D1 seq has
+    // caught up, return undefined so callers fall through to session?.status.
+    mockUseMessagesCollection.mockReturnValue({
+      messages: [
+        { id: 'msg-1', seq: 1, parts: [{ type: 'text', state: 'complete' }] },
+        { id: 'msg-2', seq: 2, parts: [{ type: 'result' }] },
+      ],
+      isLoading: false,
+      isFetching: false,
+    } as ReturnType<typeof useMessagesCollection>)
+    mockUseSession.mockReturnValue({
+      id: 'session-1',
+      messageSeq: 2,
+    } as ReturnType<typeof useSession>)
+    const { result } = renderHook(() => useDerivedStatus('session-1'))
+    // D1 serverSeq (2) >= localMaxSeq (2) + derived is idle → undefined
     expect(result.current).toBeUndefined()
   })
 

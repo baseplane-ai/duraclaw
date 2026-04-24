@@ -12,11 +12,19 @@
  * `undefined` when the collection is empty or no recognisable marker is
  * found (e.g. session just created, no turns yet).
  *
- * GH#76 P5 tiebreaker: compares the local max `seq` from the messages
- * collection against `session.messageSeq` (D1-mirrored). If D1 has
- * caught up (serverSeq >= localMaxSeq), returns `undefined` so callers
- * fall through to `session?.status`. This prevents stale local messages
- * from overriding a fresher D1 status after reconnect.
+ * GH#76 P5 tiebreaker (revised): live-evidence signals (`running`,
+ * `waiting_gate`, `pending`) always win over the D1 seq comparison —
+ * they indicate active streaming / gating that can't be stale. Only
+ * `idle` / `undefined` fall through to `session?.status` when D1 has
+ * caught up (serverSeq >= localMaxSeq). This prevents two stale-status
+ * edge cases:
+ *   B1 — status-broadcast race: D1 flips to `idle` (via
+ *        broadcastSessionRow through UserSettingsDO) before the final
+ *        messages delta arrives on the session WS, causing the tiebreaker
+ *        to suppress a valid `running` fold.
+ *   B2 — new-turn seq gap: user sends turn N+1, D1 `messageSeq` bumps
+ *        optimistically before `text@streaming` for N+1 lands locally;
+ *        tiebreaker triggers, falls through to D1 `idle`.
  */
 
 import { useMemo } from 'react'
@@ -31,27 +39,19 @@ export function useDerivedStatus(sessionId: string | null): SessionStatus | unde
   return useMemo(() => {
     if (!messages || messages.length === 0) return undefined
 
-    // Compute max seq from local messages
-    let localMaxSeq = -1
-    for (const msg of messages) {
-      const seq = (msg as { seq?: number }).seq ?? -1
-      if (seq > localMaxSeq) localMaxSeq = seq
-    }
-
-    // If the D1 row has caught up (or leads), fall through to session?.status
-    const serverSeq = (session?.messageSeq ?? -1) as number
-    if (serverSeq >= localMaxSeq) return undefined
-
-    // D1 is stale — derive from messages
+    // Scan messages tail-first — first terminal or in-flight marker wins.
+    let derived: SessionStatus | undefined
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i]
       for (const part of (msg.parts as SessionMessagePart[] | undefined) ?? []) {
         if (part.type === 'awaiting_response' && (part as { state?: string }).state === 'pending') {
-          return 'pending'
+          derived = 'pending'
+          break
         }
 
         if (part.type === 'result') {
-          return 'idle'
+          derived = 'idle'
+          break
         }
 
         const state = (part as { state?: string }).state
@@ -59,15 +59,36 @@ export function useDerivedStatus(sessionId: string | null): SessionStatus | unde
           (part.type === 'tool-permission' || part.type === 'tool-ask_user') &&
           state === 'approval-requested'
         ) {
-          return 'waiting_gate'
+          derived = 'waiting_gate'
+          break
         }
 
         if (part.type === 'text' && state === 'streaming') {
-          return 'running'
+          derived = 'running'
+          break
         }
       }
+      if (derived !== undefined) break
     }
 
-    return undefined
+    // Live-evidence signals are direct proof of current state — trust them
+    // unconditionally regardless of D1 seq comparison.
+    if (derived === 'running' || derived === 'waiting_gate' || derived === 'pending') {
+      return derived
+    }
+
+    // For `idle` / `undefined` — apply the tiebreaker: if D1 has caught up
+    // (or leads), return undefined so callers fall through to session?.status.
+    // This prevents stale local `idle` from overriding a fresher D1 status
+    // after reconnect.
+    let localMaxSeq = -1
+    for (const msg of messages) {
+      const seq = (msg as { seq?: number }).seq ?? -1
+      if (seq > localMaxSeq) localMaxSeq = seq
+    }
+    const serverSeq = (session?.messageSeq ?? -1) as number
+    if (serverSeq >= localMaxSeq) return undefined
+
+    return derived
   }, [messages, session])
 }

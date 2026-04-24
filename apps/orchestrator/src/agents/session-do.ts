@@ -1156,11 +1156,17 @@ export class SessionDO extends Agent<Env, SessionMeta> {
           this.logError('onClose.deleteKv', err)
         }
 
-        // If session was active, the connection dropped unexpectedly. Ask the
-        // gateway for the runner's live state before running the local recovery
-        // path — if the runner is still alive, its DialBackClient will reconnect
-        // and we should wait rather than finalizing the DO prematurely.
-        if (this.state.status === 'running' || this.state.status === 'waiting_gate') {
+        // If session was active or a runner is expected (idle between turns
+        // with active_callback_token), the connection dropped unexpectedly.
+        // Ask the gateway for the runner's live state before running the
+        // local recovery path — if the runner is still alive, its
+        // DialBackClient will reconnect and we should wait rather than
+        // finalizing the DO prematurely.
+        const shouldRecover =
+          this.state.status === 'running' ||
+          this.state.status === 'waiting_gate' ||
+          !!this.state.active_callback_token
+        if (shouldRecover) {
           this.maybeRecoverAfterGatewayDrop().catch((err) => {
             this.logError('maybeRecoverAfterGatewayDrop', err)
           })
@@ -1521,16 +1527,23 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   /**
    * DO alarm handler — watchdog for stale gateway connections.
    *
-   * Fires periodically while a session is "running". If no gateway events
-   * have arrived recently and the WS is gone, attempt recovery.
+   * Fires periodically while a runner is expected to be attached. The guard
+   * checks both explicit in-flight status AND the presence of an
+   * `active_callback_token` (set when a runner is spawned, cleared only on
+   * recovery or terminal transition). This catches the "idle-between-turns"
+   * case: after a `result` event, status flips to `idle` but the runner
+   * stays alive waiting on `stream-input`. If the runner then dies silently,
+   * the old status-only guard would skip the alarm and status would stay
+   * `idle` forever — the DO would never notice the runner is gone.
    */
   async alarm() {
-    if (
-      this.state.status !== 'running' &&
-      this.state.status !== 'waiting_gate' &&
-      this.state.status !== 'pending'
-    ) {
-      return // Session not active, no need to watch
+    const isActiveStatus =
+      this.state.status === 'running' ||
+      this.state.status === 'waiting_gate' ||
+      this.state.status === 'pending'
+    const hasRunner = !!this.state.active_callback_token
+    if (!isActiveStatus && !hasRunner) {
+      return // Truly idle — no runner expected, nothing to watch
     }
 
     const gwConnId = this.getGatewayConnectionId()
@@ -5043,7 +5056,13 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         // runners during the rollout window. These frames are logged once
         // then silently dropped.
         const type = (event as { type: string }).type
-        if (type === 'heartbeat' || type === 'session_state_changed') {
+        if (type === 'heartbeat') {
+          // Runner heartbeat — liveness proof. `lastGatewayActivity` was
+          // already bumped by the generic `onMessage` handler; nothing else
+          // to do. Not broadcast to clients.
+          break
+        }
+        if (type === 'session_state_changed') {
           const sid =
             (event as { session_id?: string | null }).session_id ?? this.state.session_id ?? null
           this.handleLegacyEvent(type, sid)

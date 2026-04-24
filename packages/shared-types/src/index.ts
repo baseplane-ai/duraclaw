@@ -169,6 +169,18 @@ export type GatewayEvent =
   | ChainStalledEvent
   | GapSentinelEvent
   | TitleUpdateEvent
+  | HeartbeatEvent
+
+/**
+ * Runner heartbeat — emitted every 15s by session-runner to prove liveness.
+ * The DO uses this to bump `lastGatewayActivity`; the watchdog alarm detects
+ * a stale session when heartbeats stop arriving. Not forwarded to clients.
+ */
+export interface HeartbeatEvent {
+  type: 'heartbeat'
+  session_id: string
+  seq: number
+}
 
 /**
  * GH#75 B4: BufferedChannel gap sentinel relayed from the session-runner.
