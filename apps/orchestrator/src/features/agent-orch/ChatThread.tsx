@@ -178,8 +178,13 @@ function ResolvedAskUser({ part }: { part: SessionMessagePart }) {
   const denied = part.state === 'output-denied'
   const structuredAnswers = denied ? null : parseStructuredAnswers(part.output)
 
-  // Declined path — preserve existing single-line "Declined" rendering.
+  // Declined path — preserve existing single-line "Declined" rendering,
+  // but honor a server-stamped `output` string when present so the
+  // "User declined to answer" bypass case (sendMessage while gated)
+  // surfaces its own label instead of the generic "Declined".
   if (denied) {
+    const deniedAnswer =
+      typeof part.output === 'string' && part.output.length > 0 ? part.output : 'Declined'
     return (
       <div className="min-w-0 space-y-1 rounded-lg border-l-2 border-info/30 bg-info/5 p-3">
         {questions.map((q, i) => (
@@ -189,7 +194,7 @@ function ResolvedAskUser({ part }: { part: SessionMessagePart }) {
           </p>
         ))}
         <p className="break-words text-sm">
-          <span className="font-medium text-muted-foreground">A:</span> Declined
+          <span className="font-medium text-muted-foreground">A:</span> {deniedAnswer}
         </p>
       </div>
     )

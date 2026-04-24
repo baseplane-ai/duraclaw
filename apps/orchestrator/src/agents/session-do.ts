@@ -3348,7 +3348,13 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       })
     } else if (gate.type === 'ask_user') {
       let flatAnswer: string | undefined
-      if (response.answers !== undefined) {
+      if (response.declined === true) {
+        // User dismissed the question by typing a new message. Feed the
+        // SDK a placeholder tool-result so its pending AskUserQuestion
+        // callback completes and the runner unblocks to accept the next
+        // stream-input turn.
+        flatAnswer = '[User declined to answer. See subsequent message for next instruction.]'
+      } else if (response.answers !== undefined) {
         flatAnswer = this.flattenStructuredAnswers(response.answers)
       } else if (response.answer !== undefined) {
         flatAnswer = response.answer
@@ -3379,6 +3385,11 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
 
       const updatedParts = msg.parts.map((p) => {
         if (p.toolCallId !== gateId) return p
+        if (response.declined === true) {
+          // ask_user dismissed by a follow-up user message — render as
+          // "User declined to answer" via ResolvedAskUser's denied branch.
+          return { ...p, state: 'output-denied', output: 'User declined to answer' }
+        }
         if (response.approved !== undefined) {
           return {
             ...p,

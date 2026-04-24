@@ -634,6 +634,15 @@ export interface GateResponse {
    * expects a single string).
    */
   answers?: StructuredAnswer[]
+  /**
+   * ask_user only: the user chose to send a new message instead of
+   * answering. Server sends a placeholder answer to the runner to unblock
+   * the SDK tool callback, and persists the part as `output-denied` with
+   * `output = 'User declined to answer'` so `ResolvedAskUser` collapses the
+   * question block to a "User declined to answer" summary in place of the
+   * usual Q/A pairs. Ignored for permission_request gates.
+   */
+  declined?: boolean
 }
 
 export interface SessionSummary {

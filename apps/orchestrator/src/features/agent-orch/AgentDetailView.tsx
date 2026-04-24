@@ -190,7 +190,13 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
         onSend={sendMessage}
         submitDraft={submitDraft}
         sessionId={sessionId}
-        disabled={status === 'waiting_gate'}
+        // Composer stays active during `waiting_gate` — sending a message
+        // while an ask_user gate is pending auto-declines the gate
+        // (see use-coding-agent's sendMessage / submitDraft: they call
+        // `declinePendingAskUserGate()` before the send). Input is never
+        // gate-disabled; interrupt remains available via the status check
+        // inside MessageInput.
+        disabled={false}
         status={status}
         onInterrupt={interrupt}
         onForceStop={forceStop}

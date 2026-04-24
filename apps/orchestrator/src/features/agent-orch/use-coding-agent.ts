@@ -807,8 +807,15 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           )
           if (idx >= 0) {
             targetMsgId = id
+            // Declined ask_user (user sent a follow-up message while the
+            // gate was pending) flips straight to `output-denied` so the
+            // ResolvedAskUser denied branch renders the "User declined to
+            // answer" summary without a render-tick flash through the
+            // normal `output-available` state.
+            const optimisticState: 'output-available' | 'output-denied' =
+              response.declined === true ? 'output-denied' : 'output-available'
             nextParts = parts.map((p, i) =>
-              i === idx ? { ...p, state: 'output-available' as const, output: undefined } : p,
+              i === idx ? { ...p, state: optimisticState, output: undefined } : p,
             )
             break
           }
@@ -817,15 +824,18 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         // collection not iterable yet — skip optimistic write entirely.
       }
 
-      const optimisticOutput: unknown = Array.isArray(response.answers)
-        ? { answers: response.answers }
-        : typeof response.answer === 'string'
-          ? response.answer
-          : typeof response.approved === 'boolean'
-            ? response.approved
-              ? 'Approved'
-              : 'Declined'
-            : undefined
+      const optimisticOutput: unknown =
+        response.declined === true
+          ? 'User declined to answer'
+          : Array.isArray(response.answers)
+            ? { answers: response.answers }
+            : typeof response.answer === 'string'
+              ? response.answer
+              : typeof response.approved === 'boolean'
+                ? response.approved
+                  ? 'Approved'
+                  : 'Declined'
+                : undefined
 
       // Stamp the computed output onto the mutated part now that we know
       // the response shape. Kept out of the findIndex loop so the
@@ -887,6 +897,45 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     },
     [connection, messagesCollection],
   )
+
+  /**
+   * Scan the live messages collection synchronously for a pending
+   * `ask_user` gate. Returns the gate's `toolCallId` when found so the
+   * caller can await `resolveGate(…, { declined: true })` before
+   * proceeding with a send — resolving unblocks the SDK's pending
+   * AskUserQuestion tool callback and collapses the question block to a
+   * "User declined to answer" summary in history. Returns null in the
+   * (overwhelmingly common) no-gate case — kept sync so the
+   * sendMessage / submitDraft fast path stays in the same microtask as
+   * the optimistic row insert (the existing tests rely on sync insert).
+   * Scoped to ask_user / AskUserQuestion only; permission_request gates
+   * are never auto-declined by a send.
+   */
+  const findPendingAskUserGateId = useCallback((): string | null => {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const coll = messagesCollection as any
+      for (const [, row] of coll as Iterable<[string, CachedMessage]>) {
+        const parts = (row.parts ?? []) as SessionMessagePart[]
+        for (const p of parts) {
+          const partType = (p as { type?: string }).type
+          const state = (p as { state?: string }).state
+          const toolCallId = (p as { toolCallId?: string }).toolCallId
+          if (
+            (partType === 'tool-ask_user' || partType === 'tool-AskUserQuestion') &&
+            (state === 'approval-requested' || state === 'input-available') &&
+            toolCallId
+          ) {
+            return toolCallId
+          }
+        }
+      }
+    } catch {
+      // Collection not iterable yet (cold cache): no visible pending
+      // gate, nothing to decline. Fall through and let the send proceed.
+    }
+    return null
+  }, [messagesCollection])
 
   // Return the live WS readyState rather than a state-presence proxy: once
   // `state` arrives and the socket later closes we want consumers to see the
@@ -976,6 +1025,17 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
    */
   const sendMessage = useCallback(
     async (content: string | ContentBlock[], opts?: { submitId?: string }) => {
+      // If an ask_user gate is currently pending, treat this send as a
+      // dismissal: decline the gate first (unblocks the SDK callback,
+      // collapses the question block to "User declined to answer") then
+      // proceed with the normal send. Only the found-a-gate branch goes
+      // async so the no-gate fast path stays in the same microtask as
+      // the optimistic insert below.
+      const pendingGateId = findPendingAskUserGateId()
+      if (pendingGateId !== null) {
+        await resolveGate(pendingGateId, { declined: true })
+      }
+
       const clientMessageId = newClientMessageId()
 
       // String path — route through messagesCollection.insert so the
@@ -1039,7 +1099,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         return { ok: false, error: err instanceof Error ? err.message : String(err) }
       }
     },
-    [agentName, connection, messagesCollection],
+    [agentName, connection, messagesCollection, findPendingAskUserGateId, resolveGate],
   )
 
   /** Draft submit: optimistically clear a shared Y.Text, send, restore on failure. */
@@ -1047,6 +1107,13 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     async (yText: Y.Text) => {
       const text = yText.toString()
       if (text.length === 0) return { ok: true, sent: false }
+      // Pending ask_user gate auto-declines on send — see sendMessage
+      // for the full rationale. Only awaits when a gate is actually
+      // pending so the no-gate path stays sync-equivalent.
+      const pendingGateId = findPendingAskUserGateId()
+      if (pendingGateId !== null) {
+        await resolveGate(pendingGateId, { declined: true })
+      }
       const doc = yText.doc
       // Snapshot + optimistic clear; restore no-ops if peers have typed since.
       const clear = () => {
@@ -1102,7 +1169,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         }
       }
     },
-    [agentName, messagesCollection],
+    [agentName, messagesCollection, findPendingAskUserGateId, resolveGate],
   )
 
   const forkWithHistory = useCallback(
