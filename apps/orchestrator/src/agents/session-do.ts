@@ -3912,9 +3912,15 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       }
     }
 
-    // Hydrate from VPS gateway — syncs any messages we don't have yet.
-    // Safe to call when messages already exist (skips already-persisted ones).
-    if (this.state.sdk_session_id && this.state.project) {
+    // Hydrate from VPS gateway — only for discovered sessions with empty
+    // local history (cold DO that has never received live events). Sessions
+    // that already have messages don't need re-hydration — the cursor-aware
+    // `subscribe:messages` replay fills any gap. Running hydrateFromGateway
+    // unconditionally was the root cause of idle-reconnect duplicate replay:
+    // the merge path calls safeUpdateMessage on existing rows, which bumps
+    // modified_at to now(), making them appear "newer than cursor" on the
+    // immediately-following subscribe replay. See GH#78 addendum B.
+    if (this.state.sdk_session_id && this.state.project && this.session.getPathLength() === 0) {
       await this.hydrateFromGateway()
     }
 
