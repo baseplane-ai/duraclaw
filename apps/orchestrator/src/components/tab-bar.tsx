@@ -20,6 +20,7 @@ import type { ProjectInfo } from '@duraclaw/shared-types'
 import { useLiveQuery } from '@tanstack/react-db'
 import { ChevronLeftIcon, ChevronRightIcon, CopyPlusIcon, PlusIcon, X } from 'lucide-react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { SidebarTriggerWithUnread } from '~/components/layout/sidebar-trigger-with-unread'
 import { SessionPresenceIcons } from '~/components/session-presence-icons'
 import {
   DropdownMenu,
@@ -88,6 +89,7 @@ export function TabBar({
   onNewSessionInTab,
   onNewTabForProject,
 }: TabBarProps) {
+  const isMobile = useIsMobile()
   // Include archived sessions so historical tabs (sessions the user archived
   // but still has open in their tab strip) continue to label correctly.
   const { sessions: allSessions } = useSessionsCollection({ includeArchived: true })
@@ -272,68 +274,72 @@ export function TabBar({
       onDragStart={handleDragStart}
       onDragEnd={handleDragEnd}
     >
-      <div className="relative" data-testid="tab-bar">
-        <div
-          ref={scrollCallbackRef}
-          className="flex items-center border-b bg-background overflow-x-auto scrollbar-none"
-        >
-          <SortableContext items={openTabs} strategy={horizontalListSortingStrategy}>
-            {rows.map((row) => {
-              const draftProject = isDraftTabId(row.sessionId)
-                ? tabProjects?.[row.sessionId]
-                : undefined
-              const menuProject = row.session?.project ?? draftProject
-              return (
-                <SortableProjectTab
-                  key={row.sessionId}
-                  sessionId={row.sessionId}
-                  session={row.session}
-                  liveLocal={sessionLocalsMap.get(row.sessionId)}
-                  draftProject={draftProject}
-                  siblingIds={siblingsBySession.get(row.sessionId) ?? [row.sessionId]}
-                  repoOrigin={
-                    row.session ? (repoOriginByProject.get(row.session.project) ?? null) : null
-                  }
-                  isActive={row.sessionId === activeSessionId}
-                  onSelect={() => onSelectSession(row.sessionId)}
-                  onClose={() => onCloseTab(row.sessionId)}
-                  onNewSessionInTab={
-                    onNewSessionInTab && menuProject
-                      ? () => onNewSessionInTab(menuProject)
-                      : undefined
-                  }
-                  onNewTabForProject={
-                    onNewTabForProject && menuProject
-                      ? () => onNewTabForProject(menuProject)
-                      : undefined
-                  }
-                />
-              )
-            })}
-          </SortableContext>
-        </div>
+      <div className="relative flex items-stretch border-b bg-background" data-testid="tab-bar">
+        {isMobile && (
+          <div className="flex items-center border-r px-1 shrink-0">
+            <SidebarTriggerWithUnread />
+          </div>
+        )}
+        <div className="relative flex-1 min-w-0">
+          <div ref={scrollCallbackRef} className="flex items-center overflow-x-auto scrollbar-none">
+            <SortableContext items={openTabs} strategy={horizontalListSortingStrategy}>
+              {rows.map((row) => {
+                const draftProject = isDraftTabId(row.sessionId)
+                  ? tabProjects?.[row.sessionId]
+                  : undefined
+                const menuProject = row.session?.project ?? draftProject
+                return (
+                  <SortableProjectTab
+                    key={row.sessionId}
+                    sessionId={row.sessionId}
+                    session={row.session}
+                    liveLocal={sessionLocalsMap.get(row.sessionId)}
+                    draftProject={draftProject}
+                    siblingIds={siblingsBySession.get(row.sessionId) ?? [row.sessionId]}
+                    repoOrigin={
+                      row.session ? (repoOriginByProject.get(row.session.project) ?? null) : null
+                    }
+                    isActive={row.sessionId === activeSessionId}
+                    onSelect={() => onSelectSession(row.sessionId)}
+                    onClose={() => onCloseTab(row.sessionId)}
+                    onNewSessionInTab={
+                      onNewSessionInTab && menuProject
+                        ? () => onNewSessionInTab(menuProject)
+                        : undefined
+                    }
+                    onNewTabForProject={
+                      onNewTabForProject && menuProject
+                        ? () => onNewTabForProject(menuProject)
+                        : undefined
+                    }
+                  />
+                )
+              })}
+            </SortableContext>
+          </div>
 
-        {/* Scroll overflow arrows */}
-        {canScrollLeft && (
-          <button
-            type="button"
-            aria-label="Scroll tabs left"
-            className="absolute left-0 top-0 bottom-0 z-10 flex items-center pl-0.5 pr-1 bg-gradient-to-r from-background via-background/80 to-transparent"
-            onClick={() => scrollBy('left')}
-          >
-            <ChevronLeftIcon className="size-3.5 text-muted-foreground" />
-          </button>
-        )}
-        {canScrollRight && (
-          <button
-            type="button"
-            aria-label="Scroll tabs right"
-            className="absolute right-0 top-0 bottom-0 z-10 flex items-center pr-0.5 pl-1 bg-gradient-to-l from-background via-background/80 to-transparent"
-            onClick={() => scrollBy('right')}
-          >
-            <ChevronRightIcon className="size-3.5 text-muted-foreground" />
-          </button>
-        )}
+          {/* Scroll overflow arrows */}
+          {canScrollLeft && (
+            <button
+              type="button"
+              aria-label="Scroll tabs left"
+              className="absolute left-0 top-0 bottom-0 z-10 flex items-center pl-0.5 pr-1 bg-gradient-to-r from-background via-background/80 to-transparent"
+              onClick={() => scrollBy('left')}
+            >
+              <ChevronLeftIcon className="size-3.5 text-muted-foreground" />
+            </button>
+          )}
+          {canScrollRight && (
+            <button
+              type="button"
+              aria-label="Scroll tabs right"
+              className="absolute right-0 top-0 bottom-0 z-10 flex items-center pr-0.5 pl-1 bg-gradient-to-l from-background via-background/80 to-transparent"
+              onClick={() => scrollBy('right')}
+            >
+              <ChevronRightIcon className="size-3.5 text-muted-foreground" />
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Drag preview overlay */}
