@@ -224,6 +224,26 @@ describe('useSessionsCollection', () => {
     expect(result.current.sessions).toEqual([])
   })
 
+  // Regression: the SessionSummary → SessionRecord projector must preserve
+  // `messageSeq`. Dropping it makes `deriveTabDisplayState` see `undefined`,
+  // fold it to -1, and never promote an idle background tab to
+  // `completed_unseen` (the sky "Done" ring from feat #87).
+  it('preserves messageSeq from the synced SessionSummary row', () => {
+    mockLiveQueryData = [
+      makeSummaryRow({ id: 's1', messageSeq: 42 }),
+      makeSummaryRow({ id: 's2', messageSeq: 0 }),
+      makeSummaryRow({ id: 's3' /* messageSeq absent */ }),
+    ]
+
+    const { result } = renderHook(() => useSessionsCollection())
+
+    const byId = new Map(result.current.sessions.map((s) => [s.id, s]))
+    expect(byId.get('s1')?.messageSeq).toBe(42)
+    expect(byId.get('s2')?.messageSeq).toBe(0)
+    // Absent → undefined survives so callers defaulting to -1 still work.
+    expect(byId.get('s3')?.messageSeq).toBeUndefined()
+  })
+
   describe('createSession', () => {
     it('optimistically inserts into sessionsCollection and POSTs to server', async () => {
       vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }))

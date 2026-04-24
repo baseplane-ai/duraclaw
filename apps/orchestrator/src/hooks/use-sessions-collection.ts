@@ -58,6 +58,11 @@ function rowToSessionRecord(row: SessionSummary): SessionRecord {
     durationMs: row.durationMs ?? null,
     totalCostUsd: row.totalCostUsd ?? null,
     numTurns: row.numTurns ?? 0,
+    // `messageSeq` drives `deriveTabDisplayState`'s `completed_unseen`
+    // promotion (spec #87) — if we drop it here the tab strip sees
+    // `undefined`, folds to -1, and never flips the sky ring even when
+    // the server row is far ahead of `lastSeenSeq`.
+    messageSeq: row.messageSeq,
     prompt: row.prompt,
     summary: row.summary,
     title: row.title ?? null,
