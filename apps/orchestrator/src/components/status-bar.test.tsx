@@ -66,7 +66,21 @@ describe('StatusBar', () => {
     expect(screen.getByText('Running')).toBeDefined()
     expect(screen.getByText('duraclaw')).toBeDefined()
     expect(screen.getByText('opus-4')).toBeDefined()
-    expect(screen.getByText('12 turns')).toBeDefined()
+  })
+
+  it('does not render turns, cost, or duration (removed from status bar)', () => {
+    setSession({
+      project: 'duraclaw',
+      model: 'opus-4',
+      numTurns: 12,
+      totalCostUsd: 0.1234,
+      durationMs: 5000,
+      status: 'idle',
+    })
+    render(<StatusBar sessionId={TEST_ID} />)
+    expect(screen.queryByText('12 turns')).toBeNull()
+    expect(screen.queryByText('$0.1234')).toBeNull()
+    expect(screen.queryByText('5s')).toBeNull()
   })
 
   it('shows "--" for missing project and model', () => {
@@ -96,17 +110,6 @@ describe('StatusBar', () => {
     setLocal(3)
     render(<StatusBar sessionId={TEST_ID} />)
     expect(screen.getByTitle('Reconnecting…')).toBeDefined()
-  })
-
-  it('shows cost and duration from top-level SessionSummary fields', () => {
-    setSession({
-      totalCostUsd: 0.1234,
-      durationMs: 5000,
-      status: 'idle',
-    })
-    render(<StatusBar sessionId={TEST_ID} />)
-    expect(screen.getByText('$0.1234')).toBeDefined()
-    expect(screen.getByText('5s')).toBeDefined()
   })
 
   it('shows context usage bar when contextUsage is provided via JSON column', () => {

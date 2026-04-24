@@ -8,7 +8,7 @@
 import type { ProjectInfo } from '@duraclaw/shared-types'
 import { useLiveQuery } from '@tanstack/react-db'
 import { GitBranchIcon } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { ChainStatusItem } from '~/components/chain-status-item'
 import { projectsCollection } from '~/db/projects-collection'
 import { useSessionLocalState } from '~/db/session-local-collection'
@@ -19,14 +19,6 @@ import { parseJsonField } from '~/lib/json'
 import type { KataSessionState, PrInfo, SessionStatus } from '~/lib/types'
 import { cn } from '~/lib/utils'
 import type { ContextUsage, WorktreeInfo } from '~/stores/status-bar'
-
-function formatDuration(ms: number): string {
-  const seconds = Math.floor(ms / 1000)
-  const minutes = Math.floor(seconds / 60)
-  const remainingSeconds = seconds % 60
-  if (minutes === 0) return `${remainingSeconds}s`
-  return `${minutes}m ${remainingSeconds}s`
-}
 
 function WsDot({ readyState }: { readyState: number }) {
   // Any non-OPEN state (CONNECTING/CLOSING/CLOSED) is surfaced as yellow —
@@ -66,35 +58,6 @@ function ContextBar({ contextUsage }: { contextUsage: ContextUsage }) {
       <span className="text-muted-foreground">{Math.round(contextUsage.percentage)}%</span>
     </div>
   )
-}
-
-function ElapsedTimer({
-  status,
-  startedAt,
-}: {
-  status: SessionStatus
-  startedAt: string | null | undefined
-}) {
-  const [elapsedMs, setElapsedMs] = useState(0)
-
-  useEffect(() => {
-    if (status !== 'running' || !startedAt) {
-      setElapsedMs(0)
-      return
-    }
-    const startTime = new Date(startedAt).getTime()
-    if (Number.isNaN(startTime)) return
-
-    setElapsedMs(Date.now() - startTime)
-
-    const interval = setInterval(() => {
-      setElapsedMs(Date.now() - startTime)
-    }, 1000)
-    return () => clearInterval(interval)
-  }, [status, startedAt])
-
-  if (status !== 'running' || !startedAt || elapsedMs <= 0) return null
-  return <span className="text-muted-foreground">{formatDuration(elapsedMs)}</span>
 }
 
 function getBarClasses(status: string | undefined): string {
@@ -273,9 +236,6 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
   const display = deriveDisplayStateFromStatus(statusResolved, 1)
   const project = session?.project ?? ''
   const model = session?.model ?? null
-  const numTurns = session?.numTurns ?? 0
-  const totalCostUsd = session?.totalCostUsd ?? null
-  const durationMs = session?.durationMs ?? null
   const contextUsage = parseJsonField<ContextUsage>(session?.contextUsageJson ?? null)
   const kataState = parseJsonField<KataSessionState>(session?.kataStateJson ?? null)
   // DO-side `syncWorktreeInfoToD1` is defined but unwired (see
@@ -309,11 +269,7 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
       {worktreeInfo && <WorktreeStatusItem info={worktreeInfo} />}
       <span className="truncate text-muted-foreground">{model || '--'}</span>
 
-      {/* Row 2 (wraps on mobile): turns + cost + ctx + kata + timer + actions */}
-      <span className="text-muted-foreground">{numTurns} turns</span>
-      {totalCostUsd != null && (
-        <span className="text-muted-foreground">${totalCostUsd.toFixed(4)}</span>
-      )}
+      {/* Row 2 (wraps on mobile): ctx + kata */}
       {contextUsage && <ContextBar contextUsage={contextUsage} />}
       {kataState && session?.kataIssue != null ? (
         <ChainStatusItem
@@ -324,14 +280,6 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
       ) : (
         kataState && <KataStatusItem kataState={kataState} />
       )}
-
-      {/* Right-aligned timer — action buttons moved to the composer footer */}
-      <div className="ml-auto flex shrink-0 items-center gap-2">
-        <ElapsedTimer status={statusResolved} startedAt={session?.lastActivity ?? null} />
-        {durationMs != null && (
-          <span className="text-muted-foreground">{formatDuration(durationMs)}</span>
-        )}
-      </div>
     </div>
   )
 }
