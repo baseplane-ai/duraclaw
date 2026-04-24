@@ -46,6 +46,9 @@ logs/
 .env.vapid
 .kata/sessions/
 .kata/.cleanup-ran
+.kata/verification-evidence/
+.kata/batteries-backup/
+.kata/review-*
 
 # Cutover artefacts (generated locally during rehearsal or prod runs)
 apps/orchestrator/dump.json

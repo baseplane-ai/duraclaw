@@ -9,8 +9,9 @@
  *
  * Exits on SIGINT.
  */
-import WebSocket from '/data/projects/duraclaw-dev3/node_modules/.pnpm/ws@8.18.0/node_modules/ws/wrapper.mjs'
 import fs from 'node:fs'
+
+// Use Node 22+ built-in WebSocket — avoids depending on the `ws` npm package.
 
 const cdpPort = Number(process.argv[2] ?? '11537')
 const outPath = process.argv[3] ?? '/tmp/ws-tap.ndjson'
@@ -29,7 +30,7 @@ if (!page) {
 console.error(`[ws-tap] attaching to ${page.id} ${page.url}`)
 
 const out = fs.createWriteStream(outPath, { flags: 'a' })
-const write = (obj) => out.write(JSON.stringify(obj) + '\n')
+const write = (obj) => out.write(`${JSON.stringify(obj)}\n`)
 
 const ws = new WebSocket(page.webSocketDebuggerUrl)
 let nextId = 1
@@ -44,15 +45,15 @@ const call = (method, params = {}) =>
 // Map of Network.requestId -> url
 const wsRequests = new Map()
 
-ws.on('open', async () => {
+ws.addEventListener('open', async () => {
   await call('Network.enable')
   await call('Page.enable')
   console.error('[ws-tap] Network enabled')
   write({ _event: 'tap-started', timestamp: Date.now() })
 })
 
-ws.on('message', (raw) => {
-  const msg = JSON.parse(String(raw))
+ws.addEventListener('message', (event) => {
+  const msg = JSON.parse(String(event.data))
   if (msg.id && inflight.has(msg.id)) {
     const { resolve, reject } = inflight.get(msg.id)
     inflight.delete(msg.id)
@@ -69,7 +70,11 @@ ws.on('message', (raw) => {
     const { requestId, timestamp, response } = msg.params
     const url = wsRequests.get(requestId)
     let parsed
-    try { parsed = JSON.parse(response.payloadData) } catch { parsed = { _raw: response.payloadData?.slice(0, 300) } }
+    try {
+      parsed = JSON.parse(response.payloadData)
+    } catch {
+      parsed = { _raw: response.payloadData?.slice(0, 300) }
+    }
     write({ _event: 'recv', requestId, url, timestamp, frame: parsed })
     return
   }
@@ -77,7 +82,11 @@ ws.on('message', (raw) => {
     const { requestId, timestamp, response } = msg.params
     const url = wsRequests.get(requestId)
     let parsed
-    try { parsed = JSON.parse(response.payloadData) } catch { parsed = { _raw: response.payloadData?.slice(0, 300) } }
+    try {
+      parsed = JSON.parse(response.payloadData)
+    } catch {
+      parsed = { _raw: response.payloadData?.slice(0, 300) }
+    }
     write({ _event: 'sent', requestId, url, timestamp, frame: parsed })
     return
   }
@@ -87,7 +96,7 @@ ws.on('message', (raw) => {
   }
 })
 
-ws.on('close', () => {
+ws.addEventListener('close', () => {
   console.error('[ws-tap] cdp closed')
   out.end()
 })
