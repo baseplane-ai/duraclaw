@@ -50,8 +50,10 @@ import {
   SheetTitle,
 } from '~/components/ui/sheet'
 import { Skeleton } from '~/components/ui/skeleton'
+import type { AwaitingReason, AwaitingResponsePart } from '~/lib/awaiting-response'
 import { getImagePartDataUrl, isImageTruncated } from '~/lib/message-parts'
 import type { GateResponse, SessionMessage, SessionMessagePart } from '~/lib/types'
+import { AwaitingBubble } from './AwaitingBubble'
 import { GateResolver } from './GateResolver'
 
 function getToolName(part: SessionMessagePart): string {
@@ -878,6 +880,17 @@ interface VirtualizedMessageListProps {
   onRewind?: (turnIndex: number) => void
   branchInfo?: Map<string, { current: number; total: number; siblings: string[] }>
   onBranchNavigate?: (messageId: string, direction: 'prev' | 'next') => void
+  /**
+   * Spec #80 B9 — when the tail user message carries an
+   * `awaiting_response@pending` part, `ChatThread` surfaces the reason
+   * here so the list appends a single synthetic trailing slot rendering
+   * `<AwaitingBubble>`. The bubble shares the assistant-row outer
+   * wrapper shape so, when the first runner event lands and the
+   * awaiting part is cleared (and an assistant message row takes its
+   * place), React does a content swap in the same virtualized slot
+   * rather than a layout jump.
+   */
+  awaitingReason?: AwaitingReason
 }
 
 // Hard cap on the settle window — if the virtualizer hasn't converged in
@@ -893,6 +906,7 @@ function VirtualizedMessageList({
   onRewind,
   branchInfo,
   onBranchNavigate,
+  awaitingReason,
 }: VirtualizedMessageListProps) {
   const { scrollRef, contentRef } = useAutoScrollContext()
   const scrollElRef = useRef<HTMLDivElement | null>(null)
@@ -908,13 +922,25 @@ function VirtualizedMessageList({
     [scrollRef],
   )
 
+  // When awaiting is pending, append one synthetic trailing item so the
+  // virtualizer lays out a real slot for `<AwaitingBubble>`. When the
+  // runner's first event clears the awaiting part, `awaitingReason` goes
+  // undefined, count drops back to `messages.length`, and the next
+  // assistant message (appended in the same broadcast tick) takes the
+  // slot's index — React content-swaps rather than reflowing the list.
+  const showAwaiting = awaitingReason !== undefined
+  const itemCount = showAwaiting ? messages.length + 1 : messages.length
+
   const getItemKey = useCallback(
-    (index: number) => messages[index]?.id ?? `idx-${index}`,
+    (index: number) => {
+      if (index >= messages.length) return 'awaiting-bubble'
+      return messages[index]?.id ?? `idx-${index}`
+    },
     [messages],
   )
 
   const virtualizer = useVirtualizer({
-    count: messages.length,
+    count: itemCount,
     getScrollElement: () => scrollElRef.current,
     // 160px is a ballpark "short text turn" estimate. measureElement
     // replaces it with the real height as each row paints. The
@@ -997,9 +1023,9 @@ function VirtualizedMessageList({
   // `scrollToIndex` tells the virtualizer to measure backward from the
   // target, so it lands at the true bottom regardless of estimate drift.
   useEffect(() => {
-    if (!isSettled || messages.length === 0) return
-    virtualizer.scrollToIndex(messages.length - 1, { align: 'end' })
-  }, [isSettled, messages.length, virtualizer.scrollToIndex])
+    if (!isSettled || itemCount === 0) return
+    virtualizer.scrollToIndex(itemCount - 1, { align: 'end' })
+  }, [isSettled, itemCount, virtualizer.scrollToIndex])
 
   return (
     <div
@@ -1017,8 +1043,9 @@ function VirtualizedMessageList({
         style={{ height: totalSize, width: '100%', position: 'relative' }}
       >
         {virtualItems.map((item) => {
-          const msg = messages[item.index]
-          if (!msg) return null
+          const isAwaitingSlot = showAwaiting && item.index === messages.length
+          const msg = isAwaitingSlot ? null : messages[item.index]
+          if (!isAwaitingSlot && !msg) return null
           return (
             <div
               key={item.key}
@@ -1034,21 +1061,46 @@ function VirtualizedMessageList({
                 transform: `translateY(${item.start}px)`,
               }}
             >
-              <ChatMessageRow
-                msg={msg}
-                turnIndex={item.index}
-                readOnly={readOnly}
-                onResolveGate={onResolveGate}
-                onRewind={onRewind}
-                branch={branchInfo?.get(msg.id)}
-                onBranchNavigate={onBranchNavigate}
-              />
+              {isAwaitingSlot ? (
+                <AwaitingBubble reason={awaitingReason as AwaitingReason} />
+              ) : msg ? (
+                <ChatMessageRow
+                  msg={msg}
+                  turnIndex={item.index}
+                  readOnly={readOnly}
+                  onResolveGate={onResolveGate}
+                  onRewind={onRewind}
+                  branch={branchInfo?.get(msg.id)}
+                  onBranchNavigate={onBranchNavigate}
+                />
+              ) : null}
             </div>
           )
         })}
       </div>
     </div>
   )
+}
+
+/**
+ * Spec #80 B9 — detect the tail user message's awaiting_response@pending
+ * part and surface its `reason` so `VirtualizedMessageList` can render
+ * `<AwaitingBubble>` in the slot the next assistant row will occupy.
+ * Scans backwards so intermediate assistant rows (mid-turn tool results
+ * etc.) are skipped — the relevant signal lives on the most-recent user
+ * row only.
+ */
+function findAwaitingReason(messages: SessionMessage[]): AwaitingReason | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]
+    if (msg.role !== 'user') continue
+    const awaiting = (msg.parts as SessionMessagePart[] | undefined)?.find(
+      (p): p is SessionMessagePart & AwaitingResponsePart =>
+        p.type === 'awaiting_response' && (p as { state?: string }).state === 'pending',
+    )
+    return awaiting?.reason
+  }
+  return undefined
 }
 
 export function ChatThread({
@@ -1062,6 +1114,7 @@ export function ChatThread({
   onBranchNavigate,
   onSendSuggestion,
 }: ChatThreadProps) {
+  const awaitingReason = useMemo(() => findAwaitingReason(messages), [messages])
   // Empty / connecting placeholder path — bypass the Conversation wrapper
   // entirely. There's no content to auto-scroll and no message list to
   // render, so mounting the IntersectionObserver + ResizeObserver pair would
@@ -1128,6 +1181,7 @@ export function ChatThread({
           onRewind={onRewind}
           branchInfo={branchInfo}
           onBranchNavigate={onBranchNavigate}
+          awaitingReason={awaitingReason}
         />
         {/* Tailwind's @source scan of ai-elements/src isn't extracting
             this positional class from the shared component — declaring it

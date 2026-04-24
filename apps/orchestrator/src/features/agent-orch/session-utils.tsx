@@ -26,10 +26,17 @@ export function StatusDot({ status, numTurns }: { status: string; numTurns: numb
   switch (status) {
     case 'running':
       return <span className="size-2 shrink-0 rounded-full bg-green-500" />
+    // Spec #80 P1: pending = runner stamped, pre-first-event. Violet
+    // mirrors the display-state color token.
+    case 'pending':
+      return <span className="size-2 shrink-0 rounded-full bg-violet-500" />
     case 'waiting_gate':
     case 'waiting_input':
     case 'waiting_permission':
       return <span className="size-2 shrink-0 rounded-full bg-yellow-500" />
+    // Spec #80 B7: watchdog terminal state — red.
+    case 'error':
+      return <span className="size-2 shrink-0 rounded-full bg-red-500" />
     default:
       return <span className="size-2 shrink-0 rounded-full border border-gray-400" />
   }

@@ -12,6 +12,9 @@ import {
   findPendingGatePart,
   getGatewayConnectionId,
   loadTurnState,
+  planAwaitingTimeout,
+  planClearAwaiting,
+  RECOVERY_GRACE_MS,
   resolveStaleThresholdMs,
   validateGatewayToken,
 } from './session-do-helpers'
@@ -3437,5 +3440,202 @@ describe('GH#75 B7: finalizeResultTurn enforces broadcast-before-state ordering'
       syncResultToD1: () => calls.push('syncResultToD1'),
     })
     expect(calls).toEqual(['updateState:idle', 'syncStatusToD1', 'syncResultToD1'])
+  })
+})
+
+// ── Spec #80: awaiting-response helpers ───────────────────────────────
+
+// Minimal shape that mirrors the subset of `SessionMessage` the helpers read.
+// Narrowed so tests don't have to satisfy the full SDK message interface.
+interface TestMsg {
+  id: string
+  role: 'user' | 'assistant' | 'system'
+  parts: Array<Record<string, unknown>>
+  createdAt: Date
+}
+
+function userMsg(id: string, parts: Array<Record<string, unknown>>): TestMsg {
+  return { id, role: 'user', parts, createdAt: new Date(0) }
+}
+
+function assistantMsg(id: string, parts: Array<Record<string, unknown>>): TestMsg {
+  return { id, role: 'assistant', parts, createdAt: new Date(0) }
+}
+
+describe('planClearAwaiting', () => {
+  it('returns null for empty history', () => {
+    expect(planClearAwaiting([])).toBeNull()
+  })
+
+  it('returns null when there is no user message', () => {
+    const history = [assistantMsg('a1', [{ type: 'text', text: 'hi' }])]
+    expect(planClearAwaiting(history as never)).toBeNull()
+  })
+
+  it('returns null when the tail user has no awaiting part (no-op / already cleared)', () => {
+    const history = [
+      userMsg('u1', [{ type: 'text', text: 'hello' }]),
+      assistantMsg('a1', [{ type: 'text', text: 'hi' }]),
+    ]
+    expect(planClearAwaiting(history as never)).toBeNull()
+  })
+
+  it('strips the trailing awaiting part from the most-recent user message', () => {
+    const history = [
+      userMsg('u1', [
+        { type: 'text', text: 'hello' },
+        { type: 'awaiting_response', state: 'pending', reason: 'first_token', startedTs: 100 },
+      ]),
+    ]
+    const plan = planClearAwaiting(history as never)
+    expect(plan).not.toBeNull()
+    expect(plan!.updated.id).toBe('u1')
+    expect(plan!.updated.parts).toEqual([{ type: 'text', text: 'hello' }])
+  })
+
+  it('does NOT mutate the original message (returns a fresh object)', () => {
+    const original = userMsg('u1', [
+      { type: 'text', text: 'hello' },
+      { type: 'awaiting_response', state: 'pending', reason: 'first_token', startedTs: 100 },
+    ])
+    const history = [original]
+    const plan = planClearAwaiting(history as never)
+    expect(plan).not.toBeNull()
+    expect(plan!.updated).not.toBe(original)
+    expect(original.parts).toHaveLength(2) // original untouched
+  })
+
+  it('is idempotent — second invocation on already-cleared history returns null', () => {
+    const history = [
+      userMsg('u1', [
+        { type: 'text', text: 'hello' },
+        { type: 'awaiting_response', state: 'pending', reason: 'first_token', startedTs: 100 },
+      ]),
+    ]
+    const first = planClearAwaiting(history as never)
+    expect(first).not.toBeNull()
+    // Apply the strip and re-scan — the follow-up event path.
+    const afterFirst = [{ ...history[0], parts: first!.updated.parts }]
+    expect(planClearAwaiting(afterFirst as never)).toBeNull()
+  })
+
+  it('scans tail-first — only the most-recent user message is considered', () => {
+    // Earlier user message still has awaiting (shouldn't — but the helper
+    // must stop at the first user from the tail and return null here).
+    const history = [
+      userMsg('u1', [
+        { type: 'text', text: 'old' },
+        { type: 'awaiting_response', state: 'pending', reason: 'first_token', startedTs: 50 },
+      ]),
+      assistantMsg('a1', [{ type: 'text', text: 'response' }]),
+      userMsg('u2', [{ type: 'text', text: 'followup' }]),
+    ]
+    expect(planClearAwaiting(history as never)).toBeNull()
+  })
+})
+
+describe('planAwaitingTimeout', () => {
+  const awaitingHistory = [
+    userMsg('u1', [
+      { type: 'text', text: 'hello' },
+      {
+        type: 'awaiting_response',
+        state: 'pending',
+        reason: 'first_token',
+        startedTs: 1_000,
+      },
+    ]),
+  ]
+
+  it('returns noop when a runner is attached, even past the grace window', () => {
+    const decision = planAwaitingTimeout({
+      history: awaitingHistory as never,
+      connectionId: 'conn-xyz',
+      now: 1_000 + RECOVERY_GRACE_MS + 1_000,
+    })
+    expect(decision).toEqual({ kind: 'noop' })
+  })
+
+  it('returns noop when no runner is attached but grace has not elapsed', () => {
+    const decision = planAwaitingTimeout({
+      history: awaitingHistory as never,
+      connectionId: null,
+      now: 1_000 + RECOVERY_GRACE_MS, // exactly at grace (<=, not >)
+    })
+    expect(decision).toEqual({ kind: 'noop' })
+  })
+
+  it('returns expire when no runner is attached and grace has elapsed', () => {
+    const decision = planAwaitingTimeout({
+      history: awaitingHistory as never,
+      connectionId: null,
+      now: 1_000 + RECOVERY_GRACE_MS + 1,
+    })
+    expect(decision).toEqual({ kind: 'expire', startedTs: 1_000 })
+  })
+
+  it('returns noop when the tail user has no awaiting part', () => {
+    const decision = planAwaitingTimeout({
+      history: [userMsg('u1', [{ type: 'text', text: 'hello' }])] as never,
+      connectionId: null,
+      now: Date.now(),
+    })
+    expect(decision).toEqual({ kind: 'noop' })
+  })
+
+  it('returns noop for empty history', () => {
+    const decision = planAwaitingTimeout({
+      history: [] as never,
+      connectionId: null,
+      now: Date.now(),
+    })
+    expect(decision).toEqual({ kind: 'noop' })
+  })
+
+  it('respects a custom graceMs override', () => {
+    // Short grace: 100ms, aged 200ms — should expire.
+    const decision = planAwaitingTimeout({
+      history: awaitingHistory as never,
+      connectionId: null,
+      now: 1_200,
+      graceMs: 100,
+    })
+    expect(decision).toEqual({ kind: 'expire', startedTs: 1_000 })
+  })
+
+  it('runs cleanly under vi.useFakeTimers clock control', () => {
+    vi.useFakeTimers()
+    try {
+      const t0 = 10_000
+      vi.setSystemTime(t0)
+      const history = [
+        userMsg('u1', [
+          {
+            type: 'awaiting_response',
+            state: 'pending',
+            reason: 'first_token',
+            startedTs: Date.now(),
+          },
+        ]),
+      ]
+      // T0: just stamped — no expire.
+      expect(
+        planAwaitingTimeout({ history: history as never, connectionId: null, now: Date.now() }),
+      ).toEqual({ kind: 'noop' })
+
+      // Advance 10s — still within grace, no expire.
+      vi.advanceTimersByTime(10_000)
+      expect(
+        planAwaitingTimeout({ history: history as never, connectionId: null, now: Date.now() }),
+      ).toEqual({ kind: 'noop' })
+
+      // Advance another 6s (total 16s past startedTs) — now past grace.
+      vi.advanceTimersByTime(6_000)
+      expect(
+        planAwaitingTimeout({ history: history as never, connectionId: null, now: Date.now() }),
+      ).toEqual({ kind: 'expire', startedTs: t0 })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

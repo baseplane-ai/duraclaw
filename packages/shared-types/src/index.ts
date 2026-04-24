@@ -578,10 +578,12 @@ export interface ContextUsage {
 
 export type SessionStatus =
   | 'idle'
+  | 'pending'
   | 'running'
   | 'waiting_input'
   | 'waiting_permission'
   | 'waiting_gate'
+  | 'error'
 
 // SessionState deleted (#31 P5 / B10). Status / gate / result are now derived
 // client-side from `messagesCollection`; context usage and kata state go over

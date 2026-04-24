@@ -9,7 +9,17 @@ import type { SessionStatus } from '~/lib/types'
 import { cn } from '~/lib/utils'
 import { getPreviewText, getProjectInitials } from './session-utils'
 
-const ACTIVE_STATUSES = new Set(['running', 'waiting_gate', 'waiting_input', 'waiting_permission'])
+// Spec #80 P1: `pending` (runner stamped, pre-first-event) renders in
+// the active strip alongside running / waiting_* so in-flight sessions
+// don't disappear between spawn and first event. `error` is terminal
+// and excluded.
+const ACTIVE_STATUSES = new Set([
+  'running',
+  'pending',
+  'waiting_gate',
+  'waiting_input',
+  'waiting_permission',
+])
 const IDLE_RECENCY_MS = 2 * 60 * 60 * 1000 // 2 hours
 
 // `status` is read directly from the D1-mirrored `session.status` column.

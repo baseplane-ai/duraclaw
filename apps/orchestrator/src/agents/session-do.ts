@@ -13,6 +13,7 @@ import * as schema from '~/db/schema'
 import { agentSessions, worktreeReservations } from '~/db/schema'
 import { generateActionToken } from '~/lib/action-token'
 import { CORE_RUNGS, tryAutoAdvance } from '~/lib/auto-advance'
+import type { AwaitingReason, AwaitingResponsePart } from '~/lib/awaiting-response'
 import { broadcastSessionRow } from '~/lib/broadcast-session'
 import { broadcastSyncedDelta } from '~/lib/broadcast-synced-delta'
 import { buildChainRow } from '~/lib/chains'
@@ -60,6 +61,8 @@ import {
   findPendingGatePart,
   getGatewayConnectionId,
   loadTurnState,
+  planAwaitingTimeout,
+  planClearAwaiting,
   resolveStaleThresholdMs,
 } from './session-do-helpers'
 import { SESSION_DO_MIGRATIONS } from './session-do-migrations'
@@ -838,6 +841,78 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     }
   }
 
+  /**
+   * Spec #80 B10: stamp-helper used at every turn-entry point
+   * (sendMessage / spawn / forkWithHistory / resubmitMessage) so the
+   * awaiting part shape is identical across all four call sites.
+   */
+  private buildAwaitingPart(reason: AwaitingReason = 'first_token'): AwaitingResponsePart {
+    return { type: 'awaiting_response', state: 'pending', reason, startedTs: Date.now() }
+  }
+
+  /**
+   * Spec #80 B5: scan tail of history for a user message carrying a
+   * trailing `awaiting_response@pending` part and strip it. Idempotent —
+   * if the tail user has no such part (already cleared, or never stamped)
+   * this is a no-op. Failures are swallowed; the P1.4 watchdog is the
+   * backstop for persistent awaiting state.
+   */
+  private clearAwaitingResponse(): void {
+    const plan = planClearAwaiting(this.session.getHistory())
+    if (plan === null) return
+    this.safeUpdateMessage(plan.updated)
+    this.broadcastMessages([plan.updated as unknown as WireSessionMessage])
+  }
+
+  /**
+   * Spec #80 B7: watchdog predicate — invoked from `alarm()` on the 30s
+   * cadence (and directly from tests). If the tail user message carries
+   * `awaiting_response@pending`, no runner is attached, and the part has
+   * aged past `RECOVERY_GRACE_MS`, clear the awaiting part, persist a
+   * diagnostic error row, and flip status to `'error'`. Independent of
+   * the stale-session branch in `alarm()` because an active awaiting
+   * part bumps `last_activity`, so the session does not look stale.
+   */
+  private async checkAwaitingTimeout(): Promise<void> {
+    const decision = planAwaitingTimeout({
+      history: this.session.getHistory(),
+      connectionId: this.getGatewayConnectionId(),
+      now: Date.now(),
+      graceMs: RECOVERY_GRACE_MS,
+    })
+    if (decision.kind === 'noop') return
+
+    // Expired — clear awaiting and surface an error row.
+    const errorText = 'runner failed to attach within recovery grace'
+    this.clearAwaitingResponse()
+
+    // Persist the error as a visible system message row — mirrors the
+    // `case 'error':` path in handleGatewayEvent so the UI has a concrete
+    // row to render alongside the status flip.
+    this.turnCounter++
+    const errorMsgId = `err-${this.turnCounter}`
+    const errorMsg: SessionMessage = {
+      id: errorMsgId,
+      role: 'system',
+      parts: [{ type: 'text', text: `⚠ Error: ${errorText}` }],
+      createdAt: new Date(),
+    }
+    await this.safeAppendMessage(errorMsg)
+    this.broadcastMessage(errorMsg)
+
+    // Transition to `'error'` with the error text populated — spec #80
+    // B7 widens `SessionStatus` to include `'error'` so the watchdog's
+    // terminal state renders as a distinct UI badge (red). The system
+    // message row above provides the diagnostic detail; the session
+    // remains resumable via sdk_session_id.
+    this.updateState({
+      status: 'error',
+      error: errorText,
+      active_callback_token: undefined,
+    })
+    void this.syncStatusToD1(new Date().toISOString())
+  }
+
   onConnect(connection: Connection, ctx: ConnectionContext) {
     // GH#49 + GH#61 observability: log socket-set size + same-id collision
     // count at the moment we enter onConnect. The `[SessionDO][conn] enter`
@@ -1333,7 +1408,11 @@ export class SessionDO extends Agent<Env, SessionMeta> {
    * have arrived recently and the WS is gone, attempt recovery.
    */
   async alarm() {
-    if (this.state.status !== 'running' && this.state.status !== 'waiting_gate') {
+    if (
+      this.state.status !== 'running' &&
+      this.state.status !== 'waiting_gate' &&
+      this.state.status !== 'pending'
+    ) {
       return // Session not active, no need to watch
     }
 
@@ -1378,6 +1457,11 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       await this.recoverFromDroppedConnection()
       return
     }
+
+    // Spec #80 B7: independent predicate — a session with an active
+    // awaiting part is not stale (last_activity was just bumped by the
+    // user turn), so this must run outside the stale-session branch.
+    await this.checkAwaitingTimeout()
 
     // Still active, schedule next check
     this.scheduleWatchdog()
@@ -2982,7 +3066,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     const userMsg: SessionMessage & { canonical_turn_id?: string } = {
       id: userMsgId,
       role: 'user',
-      parts: contentToParts(config.prompt),
+      parts: [...contentToParts(config.prompt), this.buildAwaitingPart('first_token')],
       createdAt: new Date(),
       canonical_turn_id: userMsgId,
     }
@@ -2993,6 +3077,10 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     } catch (err) {
       console.error(`[SessionDO:${id}] Failed to persist initial prompt:`, err)
     }
+    // Spec #80 B2: flip status to 'pending' so UI renders the awaiting
+    // bubble while we wait on the first runner event.
+    this.updateState({ status: 'pending', error: null })
+    void this.syncStatusToD1(new Date().toISOString())
 
     void this.triggerGatewayDial({
       type: 'execute',
@@ -3492,7 +3580,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     const userMsg: SessionMessage & { canonical_turn_id?: string } = {
       id: userMsgId,
       role: 'user',
-      parts: contentToParts(content),
+      parts: [...contentToParts(content), this.buildAwaitingPart('first_token')],
       createdAt: opts?.createdAt ? new Date(opts.createdAt) : new Date(),
       canonical_turn_id: canonicalTurnId,
     }
@@ -3510,6 +3598,12 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to persist user message:`, err)
     }
+    // Spec #80 B1: flip status to 'pending' so UI renders the awaiting
+    // bubble while we wait on the first runner event. Runs before the
+    // gateway-dispatch branches below so the 'pending' → 'running'
+    // transition is monotonic on the happy path.
+    this.updateState({ status: 'pending', error: null })
+    void this.syncStatusToD1(new Date().toISOString())
 
     if (hasLiveRunner) {
       // Promote state back to running so the UI reflects the new turn.
@@ -3598,7 +3692,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     const userMsg: SessionMessage & { canonical_turn_id?: string } = {
       id: userMsgId,
       role: 'user',
-      parts: contentToParts(content),
+      parts: [...contentToParts(content), this.buildAwaitingPart('first_token')],
       createdAt: new Date(),
       canonical_turn_id: userMsgId,
     }
@@ -3615,14 +3709,15 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       console.error(`[SessionDO:${this.ctx.id}] forkWithHistory: persist user msg failed:`, err)
     }
 
-    // Drop the old sdk_session_id so the new runner gets a brand-new one
-    // (guarantees no hasLiveResume collision with any orphan).
+    // Spec #80 B3: drop the old sdk_session_id so the new runner gets a
+    // brand-new one (guarantees no hasLiveResume collision with any
+    // orphan) and flip status to 'pending' while we wait for the dial.
     this.updateState({
-      status: 'running',
+      status: 'pending',
       error: null,
       sdk_session_id: null,
     })
-    this.syncStatusToD1(new Date().toISOString())
+    void this.syncStatusToD1(new Date().toISOString())
 
     void this.triggerGatewayDial({
       type: 'execute',
@@ -3961,7 +4056,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     const newUserMsg: SessionMessage & { canonical_turn_id?: string } = {
       id: newUserMsgId,
       role: 'user',
-      parts: [{ type: 'text', text: newContent }],
+      parts: [{ type: 'text', text: newContent }, this.buildAwaitingPart('first_token')],
       createdAt: new Date(),
       canonical_turn_id: newUserMsgId,
     }
@@ -3994,8 +4089,9 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     }
 
     // 4. Send to gateway for execution
-    this.updateState({ status: 'running', error: null })
-    this.syncStatusToD1(new Date().toISOString())
+    // Spec #80 B4: flip status to 'pending' while we wait for the dial.
+    this.updateState({ status: 'pending', error: null })
+    void this.syncStatusToD1(new Date().toISOString())
     void this.triggerGatewayDial({
       type: 'resume',
       project: this.state.project,
@@ -4122,6 +4218,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         break
 
       case 'partial_assistant': {
+        this.clearAwaitingResponse()
         const parts = partialAssistantToParts(event.content)
         const msgId = `msg-${this.turnCounter}`
 
@@ -4216,6 +4313,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       }
 
       case 'assistant': {
+        this.clearAwaitingResponse()
         // Final assistant message — finalize streaming parts with final content
         const newParts = assistantContentToParts(event.content as unknown[])
         const msgId = this.currentTurnMessageId ?? `msg-${this.turnCounter}`
@@ -4255,6 +4353,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       }
 
       case 'tool_result': {
+        this.clearAwaitingResponse()
         // Update the current assistant message's tool parts with results
         const currentMsgId = this.currentTurnMessageId ?? `msg-${this.turnCounter}`
         const existing = this.session.getMessage(currentMsgId)
@@ -4272,6 +4371,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       }
 
       case 'ask_user': {
+        this.clearAwaitingResponse()
         // No part-type / state promotion here. The client renders a
         // GateResolver directly off the SDK-native
         // `tool-AskUserQuestion` / `input-available` shape already in the
@@ -4324,6 +4424,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       }
 
       case 'permission_request': {
+        this.clearAwaitingResponse()
         // Same strategy as ask_user: promote the existing tool part created
         // by the assistant event rather than appending a duplicate.
         const permPromoteResult = this.promoteToolPartToGate(
@@ -4396,6 +4497,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       }
 
       case 'result': {
+        this.clearAwaitingResponse()
         // GH#75 P1.2 B7 — REORDER GUARD: all per-message broadcast frames
         // for this turn MUST fire before we flip state to `idle` and sync
         // status to D1. Client derived-status folds over messagesCollection
@@ -4528,6 +4630,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       }
 
       case 'stopped': {
+        this.clearAwaitingResponse()
         // Finalize orphaned streaming parts
         if (this.currentTurnMessageId) {
           const existing = this.session.getMessage(this.currentTurnMessageId)
@@ -4614,6 +4717,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       }
 
       case 'error': {
+        this.clearAwaitingResponse()
         // Finalize orphaned streaming parts
         if (this.currentTurnMessageId) {
           const existing = this.session.getMessage(this.currentTurnMessageId)
