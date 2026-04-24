@@ -20,8 +20,9 @@ vi.mock('./auth-routes', async () => {
   return { authRoutes: new Hono() }
 })
 
+const broadcastSyncedDeltaMock = vi.fn().mockResolvedValue(undefined)
 vi.mock('~/lib/broadcast-synced-delta', () => ({
-  broadcastSyncedDelta: vi.fn().mockResolvedValue(undefined),
+  broadcastSyncedDelta: (...args: unknown[]) => broadcastSyncedDeltaMock(...args),
 }))
 
 vi.mock('~/lib/broadcast-session', () => ({
@@ -72,12 +73,21 @@ function createMockEnv() {
 
 function makeApp(env: any) {
   const app = createApiApp()
-  const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() } as any
+  const pendingWaits: Array<Promise<unknown>> = []
+  const ctx = {
+    waitUntil: vi.fn((p: Promise<unknown>) => {
+      pendingWaits.push(p)
+    }),
+    passThroughOnException: vi.fn(),
+  } as any
   return {
     async request(path: string, init?: RequestInit) {
       const url = `http://localhost${path}`
       const req = new Request(url, init)
       return app.fetch(req, env, ctx)
+    },
+    async drainWaits() {
+      await Promise.all(pendingWaits.splice(0))
     },
   }
 }
@@ -359,6 +369,51 @@ describe('PATCH /api/projects/:name/visibility — admin-only', () => {
     expect(body.visibility).toBe('public')
     expect(fakeDb.db.update).toHaveBeenCalled()
   })
+
+  it('broadcasts a synced-collection delta to every presence-tracked user on success', async () => {
+    mockedGetRequestSession.mockResolvedValue({
+      userId: 'admin-1',
+      role: 'admin',
+      session: { id: 's' },
+      user: { id: 'admin-1', role: 'admin' },
+    } as any)
+    broadcastSyncedDeltaMock.mockClear()
+    // queue drives each awaited chain in order:
+    //   [0] UPDATE … RETURNING → [{name}] (truthy, proceed)
+    //   [1] SELECT project row → [{…visibility:'private'}]
+    //   [2] SELECT userPresence → [{userId}, {userId}]
+    fakeDb.data.queue = [
+      [{ name: 'my-proj' }],
+      [
+        {
+          name: 'my-proj',
+          displayName: null,
+          rootPath: '/tmp/my-proj',
+          updatedAt: 't',
+          deletedAt: null,
+          visibility: 'private',
+        },
+      ],
+      [{ userId: 'user-A' }, { userId: 'user-B' }],
+    ]
+
+    const app = makeApp(env)
+    const res = await app.request('/api/projects/my-proj/visibility', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ visibility: 'private' }),
+    })
+    await app.drainWaits()
+
+    expect(res.status).toBe(200)
+    expect(broadcastSyncedDeltaMock).toHaveBeenCalledTimes(2)
+    for (const call of broadcastSyncedDeltaMock.mock.calls) {
+      expect(call[2]).toBe('projects')
+      expect(Array.isArray(call[3])).toBe(true)
+      expect(call[3][0]).toMatchObject({ type: 'update' })
+      expect(call[3][0].value).toMatchObject({ name: 'my-proj', visibility: 'private' })
+    }
+  })
 })
 
 describe('createSession — inherits project visibility (p2-inherit)', () => {
@@ -404,7 +459,7 @@ describe('createSession — inherits project visibility (p2-inherit)', () => {
     expect((insertValues[0] as any).project).toBe('my-proj')
   })
 
-  it('defaults visibility=private when the project row is missing', async () => {
+  it('defaults visibility=public when the project row is missing', async () => {
     fakeDb.data.select = [] // no project row
 
     const insertValues: unknown[] = []
@@ -430,6 +485,39 @@ describe('createSession — inherits project visibility (p2-inherit)', () => {
       env,
       'user-A',
       { project: 'unknown-proj', prompt: 'hello' },
+      ctx,
+    )
+
+    expect(result.ok).toBe(true)
+    expect((insertValues[0] as any).visibility).toBe('public')
+  })
+
+  it('honors explicit visibility=private on the project row', async () => {
+    fakeDb.data.select = [{ visibility: 'private' }]
+
+    const insertValues: unknown[] = []
+    const originalInsert = fakeDb.db.insert
+    fakeDb.db.insert = vi.fn((...args: unknown[]) => {
+      const chain = originalInsert(...args)
+      const wrapped = new Proxy(chain, {
+        get(target, prop) {
+          if (prop === 'values') {
+            return (row: unknown) => {
+              insertValues.push(row)
+              return (target as any).values(row)
+            }
+          }
+          return (target as any)[prop]
+        },
+      })
+      return wrapped
+    })
+
+    const ctx = { waitUntil: vi.fn() }
+    const result = await createSession(
+      env,
+      'user-A',
+      { project: 'locked-proj', prompt: 'hello' },
       ctx,
     )
 

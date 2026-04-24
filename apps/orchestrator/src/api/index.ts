@@ -654,6 +654,11 @@ export function createApiApp() {
           rootPath: p.path,
           updatedAt: now,
           deletedAt: null,
+          // New projects default to 'public'. Admins can restrict via
+          // PATCH /api/projects/:name/visibility; that value is preserved
+          // across subsequent syncs (visibility omitted from the update
+          // clause below).
+          visibility: 'public',
         })
         .onConflictDoUpdate({
           target: projectsTable.name,
@@ -1674,6 +1679,36 @@ export function createApiApp() {
       .where(eq(projectsTable.name, name))
       .returning({ name: projectsTable.name })
     if (!result[0]) return c.json({ error: 'Project not found' }, 404)
+
+    // Re-read the full row so the synced-collection delta carries the
+    // same ProjectInfo shape clients already rely on (branch, dirty, pr
+    // come from the gateway endpoint and aren't stored here — we emit
+    // an update op with the D1-known fields; clients merge into their
+    // existing row via TanStack DB upsert semantics).
+    const [row] = await db.select().from(projectsTable).where(eq(projectsTable.name, name)).limit(1)
+    if (row) {
+      const projectInfo: ProjectInfo = {
+        name: row.name,
+        path: row.rootPath,
+        branch: 'unknown',
+        dirty: false,
+        active_session: null,
+        repo_origin: null,
+        ahead: 0,
+        behind: 0,
+        pr: null,
+        visibility: (row.visibility === 'private' ? 'private' : 'public') as 'public' | 'private',
+      }
+      const userRows = await db.select({ userId: userPresence.userId }).from(userPresence)
+      const userIds = userRows.map((r) => r.userId)
+      c.executionCtx.waitUntil(
+        Promise.allSettled(
+          userIds.map((uid) =>
+            broadcastSyncedDelta(c.env, uid, 'projects', [{ type: 'update', value: projectInfo }]),
+          ),
+        ).then(() => undefined),
+      )
+    }
 
     return c.json({ ok: true, visibility: body.visibility })
   })

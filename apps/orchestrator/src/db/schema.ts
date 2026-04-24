@@ -161,7 +161,7 @@ export const agentSessions = sqliteTable(
     kataStateJson: text('kata_state_json'),
     contextUsageJson: text('context_usage_json'),
     worktreeInfoJson: text('worktree_info_json'),
-    visibility: text('visibility').notNull().default('private'),
+    visibility: text('visibility').notNull().default('public'),
   },
   (t) => ({
     sdkIdUnique: uniqueIndex('idx_agent_sessions_sdk_id')
@@ -257,7 +257,7 @@ export const projects = sqliteTable('projects', {
   rootPath: text('root_path').notNull(),
   updatedAt: text('updated_at').notNull(),
   deletedAt: text('deleted_at'),
-  visibility: text('visibility').notNull().default('private'),
+  visibility: text('visibility').notNull().default('public'),
 })
 
 export const userPreferences = sqliteTable('user_preferences', {
