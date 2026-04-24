@@ -2990,74 +2990,57 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     const vapidPublicKey = this.env.VAPID_PUBLIC_KEY
     const vapidPrivateKey = this.env.VAPID_PRIVATE_KEY
     const vapidSubject = this.env.VAPID_SUBJECT
-    if (!vapidPublicKey || !vapidPrivateKey || !vapidSubject) {
-      console.log(`${tag} VAPID not configured — skipping`)
-      return
-    }
 
-    // Check user preferences cascade
-    try {
-      const prefs = await this.env.AUTH_DB.prepare(
-        'SELECT key, value FROM user_preferences WHERE user_id = ? AND key LIKE ?',
-      )
-        .bind(userId, 'push.%')
-        .all<{ key: string; value: string }>()
+    // TODO: add push preference columns to user_preferences schema
+    // (push.enabled, push.blocked, push.completed, push.error were never
+    // migrated from the legacy KV shape to the columnar table — the old
+    // query against key/value columns always threw. For now, treat all
+    // push events as opt-in.)
 
-      const prefMap = new Map(prefs.results.map((r) => [r.key, r.value]))
-
-      // Master toggle
-      if (prefMap.get('push.enabled') === 'false') {
-        console.log(`${tag} push.enabled=false — skipping`)
-        return
+    // Web push fan-out (VAPID-based)
+    if (vapidPublicKey && vapidPrivateKey && vapidSubject) {
+      let subscriptions: Array<{ id: string; endpoint: string; p256dh: string; auth: string }>
+      try {
+        const result = await this.env.AUTH_DB.prepare(
+          'SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ?',
+        )
+          .bind(userId)
+          .all<{ id: string; endpoint: string; p256dh: string; auth: string }>()
+        subscriptions = result.results
+      } catch (err) {
+        console.error(`${tag} subscription lookup failed:`, err)
+        subscriptions = []
       }
 
-      // Event-specific toggle
-      const prefKey = `push.${eventType}`
-      if (prefMap.get(prefKey) === 'false') {
-        console.log(`${tag} ${prefKey}=false — skipping`)
-        return
+      console.log(`${tag} ${subscriptions.length} web push subscription(s)`)
+
+      const vapid = {
+        publicKey: vapidPublicKey,
+        privateKey: vapidPrivateKey,
+        subject: vapidSubject,
       }
-    } catch (err) {
-      console.error(`${tag} preference lookup failed (continuing as opt-in):`, err)
-    }
 
-    // Fetch subscriptions
-    let subscriptions: Array<{ id: string; endpoint: string; p256dh: string; auth: string }>
-    try {
-      const result = await this.env.AUTH_DB.prepare(
-        'SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ?',
-      )
-        .bind(userId)
-        .all<{ id: string; endpoint: string; p256dh: string; auth: string }>()
-      subscriptions = result.results
-    } catch (err) {
-      console.error(`${tag} subscription lookup failed:`, err)
-      return
-    }
-
-    console.log(`${tag} ${subscriptions.length} subscription(s)`)
-    if (subscriptions.length === 0) return
-
-    const vapid = { publicKey: vapidPublicKey, privateKey: vapidPrivateKey, subject: vapidSubject }
-
-    // Send to all subscriptions (best-effort, no retry)
-    for (const sub of subscriptions) {
-      const endpointSummary = sub.endpoint.slice(0, 60)
-      const result = await sendPushNotification(sub, payload, vapid)
-      console.log(
-        `${tag} send sub=${sub.id} endpoint=${endpointSummary}... ok=${result.ok} status=${result.status ?? 'n/a'} gone=${Boolean(result.gone)}`,
-      )
-      if (result.gone) {
-        // 410 Gone — delete stale subscription
-        try {
-          await this.env.AUTH_DB.prepare('DELETE FROM push_subscriptions WHERE id = ?')
-            .bind(sub.id)
-            .run()
-          console.log(`${tag} deleted stale subscription ${sub.id}`)
-        } catch (err) {
-          console.error(`${tag} failed to delete stale subscription ${sub.id}:`, err)
+      // Send to all subscriptions (best-effort, no retry)
+      for (const sub of subscriptions) {
+        const endpointSummary = sub.endpoint.slice(0, 60)
+        const result = await sendPushNotification(sub, payload, vapid)
+        console.log(
+          `${tag} send sub=${sub.id} endpoint=${endpointSummary}... ok=${result.ok} status=${result.status ?? 'n/a'} gone=${Boolean(result.gone)}`,
+        )
+        if (result.gone) {
+          // 410 Gone — delete stale subscription
+          try {
+            await this.env.AUTH_DB.prepare('DELETE FROM push_subscriptions WHERE id = ?')
+              .bind(sub.id)
+              .run()
+            console.log(`${tag} deleted stale subscription ${sub.id}`)
+          } catch (err) {
+            console.error(`${tag} failed to delete stale subscription ${sub.id}:`, err)
+          }
         }
       }
+    } else {
+      console.log(`${tag} VAPID not configured — skipping web push`)
     }
 
     // FCM fan-out (Capacitor Android shell). Reads `FCM_SERVICE_ACCOUNT_JSON`
