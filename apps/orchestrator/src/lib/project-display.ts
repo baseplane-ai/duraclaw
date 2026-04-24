@@ -181,7 +181,13 @@ export function formatTabLabel(
 export function statusRingClass(status: string | undefined): string {
   switch (status) {
     case 'running':
+    case 'pending':
       return 'ring-2 ring-green-500'
+    // `completed_unseen` is the tab-scoped "done but you haven't looked
+    // yet" state — ring color matches the `DisplayState.color: 'sky'`
+    // variant in display-state.ts so tab strip + future surfaces agree.
+    case 'completed_unseen':
+      return 'ring-2 ring-sky-500'
     case 'waiting_gate':
     case 'waiting_input':
     case 'waiting_permission':

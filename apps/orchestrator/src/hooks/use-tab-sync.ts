@@ -144,6 +144,7 @@ function stringifyMeta(m: TabMeta): string {
   const out: TabMeta = {}
   if (m.kind) out.kind = m.kind
   if (m.project !== undefined) out.project = m.project
+  if (typeof m.lastSeenSeq === 'number') out.lastSeenSeq = m.lastSeenSeq
   return JSON.stringify(out)
 }
 

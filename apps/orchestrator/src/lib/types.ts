@@ -141,6 +141,21 @@ export interface TabMeta {
   kind?: 'session'
   /** One-tab-per-project cluster key for session tabs. */
   project?: string
+  /**
+   * Highest `agent_sessions.message_seq` the user has acknowledged for this
+   * tab. Bumped to the session's current `messageSeq` every time the tab
+   * becomes active (see `use-tab-sync.setActive`), and consulted by
+   * `deriveTabDisplayState` to surface the `completed_unseen` state when a
+   * background tab's session has advanced past the last value the user saw.
+   *
+   * Per-user because the row is per-user — so a shared session being viewed
+   * by another user does NOT clear this user's unseen marker.
+   *
+   * Absent → treated as 0, i.e. "everything is new". Freshly-opened tabs
+   * are immediately activated so `setActive` back-fills the current seq
+   * before the user sees a spurious "Done" marker.
+   */
+  lastSeenSeq?: number
 }
 
 export interface UserTabRow {
