@@ -35,6 +35,7 @@ import {
   memo,
   type ReactNode,
   useCallback,
+  useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -987,6 +988,18 @@ function VirtualizedMessageList({
       window.clearTimeout(timeoutId)
     }
   }, [])
+
+  // After the settle gate reveals the list, force a virtualizer-aware
+  // scroll to the last item. The generic `conversation.tsx` scroll-to-
+  // bottom uses `el.scrollTop = el.scrollHeight` which reads the
+  // virtualizer's *estimated* total size — for long sessions with many
+  // off-screen rows still at 160px estimates, that "bottom" is wrong.
+  // `scrollToIndex` tells the virtualizer to measure backward from the
+  // target, so it lands at the true bottom regardless of estimate drift.
+  useEffect(() => {
+    if (!isSettled || messages.length === 0) return
+    virtualizer.scrollToIndex(messages.length - 1, { align: 'end' })
+  }, [isSettled, messages.length, virtualizer.scrollToIndex])
 
   return (
     <div
