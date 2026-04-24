@@ -194,7 +194,7 @@ export function KanbanBoard() {
             {isLoading && chains.length === 0 ? (
               <p className="text-sm text-muted-foreground">Loading chains…</p>
             ) : null}
-            {LANES.map((lane) => (
+            {LANES.filter((lane) => byLane[lane].length > 0).map((lane) => (
               <KanbanLane
                 key={lane}
                 name={lane}
@@ -203,6 +203,14 @@ export function KanbanBoard() {
                 onToggle={() => toggle(lane)}
               />
             ))}
+            {!isLoading && chains.length > 0 && LANES.every((lane) => byLane[lane].length === 0) ? (
+              <p className="text-sm text-muted-foreground">No chains match the current filter.</p>
+            ) : null}
+            {!isLoading && chains.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                No chains yet. Spawn a session with a `kataIssue` tag to create one.
+              </p>
+            ) : null}
           </div>
         </DndContext>
         {pendingAdvance ? (

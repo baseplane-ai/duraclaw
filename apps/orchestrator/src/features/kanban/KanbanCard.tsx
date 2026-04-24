@@ -181,14 +181,12 @@ export function KanbanCard({ chain }: KanbanCardProps) {
   const sessionsForDots = chain.sessions as unknown as SessionRecord[]
 
   const hasActive = hasActiveSession(chain)
-  const startLabel = nextMode
-    ? hasActive
-      ? `Close current + start ${nextLabel}`
-      : `Start ${nextLabel}`
-    : ''
+  const startLabel = nextMode ? `Start ${nextLabel}` : ''
   const disabledTitle = loading
     ? 'Checking preconditions…'
     : reason || (canAdvance ? '' : 'Precondition not met')
+  const startTooltip =
+    disabledTitle || (hasActive ? `Closes current session, starts fresh ${nextLabel}` : undefined)
 
   return (
     <>
@@ -201,7 +199,7 @@ export function KanbanCard({ chain }: KanbanCardProps) {
         {...listeners}
       >
         <div className="flex items-start justify-between gap-2">
-          <div className="line-clamp-2 text-xs font-medium leading-snug">
+          <div className="line-clamp-2 min-w-0 flex-1 text-xs font-medium leading-snug">
             <span className="text-muted-foreground">#{chain.issueNumber}</span> {chain.issueTitle}
           </div>
           <button
@@ -226,10 +224,10 @@ export function KanbanCard({ chain }: KanbanCardProps) {
             ⟲ {autoAdvanceOn ? 'auto' : 'off'}
           </button>
         </div>
-        <div className="flex items-center gap-2 text-[11px]">
+        <div className="flex min-w-0 items-center gap-2 text-[11px]">
           <PipelineDots sessions={sessionsForDots} />
           {focus ? (
-            <span className="text-muted-foreground">
+            <span className="min-w-0 flex-1 truncate text-muted-foreground">
               {shortMode(focus.kataMode)} &middot; {shortStatusLabel(focus)}
               {focusTs ? ` &middot; ${formatTimeAgo(focusTs)}` : ''}
             </span>
@@ -238,8 +236,10 @@ export function KanbanCard({ chain }: KanbanCardProps) {
           )}
         </div>
         {worktree ? (
-          <div className="text-[11px] text-muted-foreground">
-            <span className="font-mono">{worktree}</span>
+          <div className="min-w-0 text-[11px] text-muted-foreground">
+            <span className="block truncate font-mono" title={worktree}>
+              {worktree}
+            </span>
           </div>
         ) : null}
         <div className="mt-0.5 flex flex-wrap gap-1.5">
@@ -263,7 +263,7 @@ export function KanbanCard({ chain }: KanbanCardProps) {
               onClick={handleStartNext}
               onPointerDown={(e) => e.stopPropagation()}
               disabled={!canAdvance || loading}
-              title={disabledTitle || undefined}
+              title={startTooltip}
             >
               {startLabel}
             </Button>
