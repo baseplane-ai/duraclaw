@@ -28,10 +28,23 @@ import { useLiveQuery } from '@tanstack/react-db'
 import { useMemo, useRef } from 'react'
 import { type CachedMessage, createMessagesCollection } from '~/db/messages-collection'
 
-// Minimal shape of the trailing part we sniff for the cache signature.
-// Avoids importing the full `SessionMessagePart` union (which would drag in
-// the orchestrator's `lib/types` barrel) into a file scoped to cache keys.
-type SessionMessagePartLike = { text?: unknown }
+// Minimal shape of parts we sniff for the cache signature. Avoids importing
+// the full `SessionMessagePart` union (which would drag in the orchestrator's
+// `lib/types` barrel) into a file scoped to cache keys.
+//
+// `state` is included so in-place part transitions (gate
+// `input-available`/`approval-requested` → `output-available`, tool
+// `output-available`/`output-error`, text `streaming` → done) invalidate the
+// cached sorted array. Without it, the optimistic gate-resolve write in
+// use-coding-agent (which mutates only `state` + `output` on a non-trailing
+// part) lands in the collection but never reaches the renderer until the
+// next message arrives — symptom: "submit feels frozen until first
+// assistant message comes back."
+//
+// `outputPresent` flips when an `output` field appears on a part — covers
+// the optimistic gate write that adds the answer alongside the state flip,
+// and also generic tool result arrivals where `parts.length` is unchanged.
+type SessionMessagePartLike = { text?: unknown; state?: unknown; output?: unknown }
 
 function parseTurnOrdinal(id?: string): number | undefined {
   if (!id) return undefined
@@ -92,15 +105,35 @@ export function useMessagesCollection(sessionId: string) {
     // Build a compact signature that catches the mutations we render off of:
     // row inserts/removes (length), turn structure (ids in order), parts
     // growth on streaming turns (parts.length), trailing-text growth
-    // (trailing part's text length). Cheap to compute, O(n) — far cheaper
-    // than re-running Virtuoso's measurement loop on a spurious data-prop
-    // change.
+    // (trailing part's text length), AND per-part state transitions +
+    // output-arrival (gate resolve, tool completion). The per-part state
+    // hash is what makes optimistic writes that mutate *state only* on a
+    // non-trailing part (GateResolver submit) visible to the renderer —
+    // without it, the submit-click lands in TanStack DB's optimistic layer
+    // but `prevSortedRef.current` is returned because the signature doesn't
+    // budge, and the user sees no feedback until the next assistant delta
+    // grows `parts.length` or `textLen` and forces a recompute.
+    //
+    // Still O(parts) per row — same big-O as before, just one extra
+    // character per part.
     let signature = `${sorted.length}`
     for (const row of sorted) {
       const parts = row.parts as SessionMessagePartLike[] | undefined
       const last = parts && parts.length > 0 ? parts[parts.length - 1] : undefined
       const textLen = typeof last?.text === 'string' ? last.text.length : 0
-      signature += `|${row.id}:${parts?.length ?? 0}:${textLen}`
+      // Per-part state + output-presence, concatenated. Using a single char
+      // per part (first letter of state; '+' when output is present, '-'
+      // otherwise) keeps the signature compact; mutations always change at
+      // least one character.
+      let partsHash = ''
+      if (parts) {
+        for (const p of parts) {
+          const s = typeof p.state === 'string' ? p.state : ''
+          partsHash += s.length > 0 ? s[0] : '_'
+          partsHash += p.output !== undefined ? '+' : '-'
+        }
+      }
+      signature += `|${row.id}:${parts?.length ?? 0}:${textLen}:${partsHash}`
     }
     if (prevSortedRef.current && signature === prevSignatureRef.current) {
       return prevSortedRef.current

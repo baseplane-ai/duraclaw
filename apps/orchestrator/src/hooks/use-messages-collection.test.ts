@@ -305,4 +305,125 @@ describe('useMessagesCollection', () => {
 
     expect(result.current.messages.map((m) => m.id)).toEqual(['usr-1', 'usr-client-abc'])
   })
+
+  // ── Cache-invalidation: optimistic gate resolve must reach the renderer ──
+  //
+  // Regression for the "submit feels frozen until first assistant message
+  // returns" bug. The signature-keyed memo in useMessagesCollection (added
+  // in 46d99de Fix B for Virtuoso perf) was keyed only on `[length, id,
+  // parts.length, trailing-text length]`. The optimistic gate-resolve path
+  // in use-coding-agent flips a non-trailing part's `state` from
+  // `input-available` → `output-available` and stamps an `output` field —
+  // neither changes parts.length nor trailing text length, so the cached
+  // sorted array was returned unchanged and ChatThread kept rendering the
+  // GateResolver. The signature must include per-part state + output
+  // presence to catch this.
+
+  it('part state transition (gate resolve) returns a new sorted array reference', () => {
+    const initial = [
+      makeMessage({
+        id: 'msg-1',
+        sessionId: 'session-abc',
+        parts: [
+          {
+            type: 'tool-AskUserQuestion',
+            toolCallId: 'tc-1',
+            state: 'input-available',
+            input: { question: 'pick one' },
+          },
+        ],
+      }),
+    ]
+    mockLiveQueryData = initial
+
+    const { result, rerender } = renderHook(() => useMessagesCollection('session-abc'))
+    const before = result.current.messages
+
+    // Simulate the optimistic gate resolve: same row id, same parts.length,
+    // but the part's state flips and an `output` appears.
+    mockLiveQueryData = [
+      makeMessage({
+        id: 'msg-1',
+        sessionId: 'session-abc',
+        parts: [
+          {
+            type: 'tool-AskUserQuestion',
+            toolCallId: 'tc-1',
+            state: 'output-available',
+            input: { question: 'pick one' },
+            output: 'option-a',
+          },
+        ],
+      }),
+    ]
+    rerender()
+
+    const after = result.current.messages
+
+    expect(after).not.toBe(before)
+    expect((after[0].parts as Array<{ state: string }>)[0].state).toBe('output-available')
+  })
+
+  it('output arrival on a non-trailing tool part returns a new sorted array reference', () => {
+    // Same class of bug for generic tool calls — output arrives on a tool
+    // part that's followed by a (possibly empty) text part. parts.length
+    // unchanged, trailing text length unchanged, but the tool part's state
+    // and output both mutate.
+    const initial = [
+      makeMessage({
+        id: 'msg-1',
+        sessionId: 'session-abc',
+        parts: [
+          { type: 'tool-bash', toolCallId: 'tc-1', state: 'input-available', input: 'ls' },
+          { type: 'text', text: '' },
+        ],
+      }),
+    ]
+    mockLiveQueryData = initial
+
+    const { result, rerender } = renderHook(() => useMessagesCollection('session-abc'))
+    const before = result.current.messages
+
+    mockLiveQueryData = [
+      makeMessage({
+        id: 'msg-1',
+        sessionId: 'session-abc',
+        parts: [
+          {
+            type: 'tool-bash',
+            toolCallId: 'tc-1',
+            state: 'output-available',
+            input: 'ls',
+            output: 'file1\nfile2',
+          },
+          { type: 'text', text: '' },
+        ],
+      }),
+    ]
+    rerender()
+
+    expect(result.current.messages).not.toBe(before)
+  })
+
+  it('truly identical data still returns the cached reference (perf cache intact)', () => {
+    // Counterpart to the cache-invalidation tests above — confirm the perf
+    // cache from 46d99de still kicks in for the no-op re-render case.
+    mockLiveQueryData = [
+      makeMessage({
+        id: 'msg-1',
+        sessionId: 'session-abc',
+        parts: [{ type: 'text', text: 'hello' }],
+      }),
+    ]
+    const { result, rerender } = renderHook(() => useMessagesCollection('session-abc'))
+    const before = result.current.messages
+
+    // Same `mockLiveQueryData` array reference, no mutation. Hook re-runs,
+    // useMemo's `[data]` dep is unchanged so it doesn't recompute — but
+    // even if it did (e.g. underlying live-query re-emits the same shape),
+    // the signature would match and the cached reference would return.
+    rerender()
+
+    expect(result.current.messages).toBe(before)
+  })
 })
