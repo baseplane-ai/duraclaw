@@ -2,6 +2,7 @@ project:
   name: duraclaw
   build_command: pnpm build
   test_command: pnpm test
+  test_file_pattern: "*.test.ts,*.spec.ts,*.test.tsx,*.spec.tsx"
   ci: null
 spec_path: planning/specs
 research_path: planning/research
