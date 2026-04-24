@@ -992,10 +992,6 @@ function VirtualizedMessageList({
     virtualizer.scrollToIndex(itemCount - 1, { align: 'end' })
   }, [])
 
-  // Index of the final rendered slot — either the last message row or,
-  // when present, the synthetic awaiting-response slot at messages.length.
-  const lastIndex = itemCount - 1
-
   return (
     <div
       ref={setScrollEl}
@@ -1014,7 +1010,6 @@ function VirtualizedMessageList({
           const isAwaitingSlot = showAwaiting && item.index === messages.length
           const msg = isAwaitingSlot ? null : messages[item.index]
           if (!isAwaitingSlot && !msg) return null
-          const isLast = item.index === lastIndex
           return (
             <div
               key={item.key}
@@ -1027,11 +1022,17 @@ function VirtualizedMessageList({
                 right: 0,
                 paddingLeft: 16,
                 paddingRight: 16,
-                // 50vh breathing room below the last message so streaming
-                // text never hugs the compose bar and the user can keep
-                // their eye at a comfortable mid-viewport line while
-                // tokens arrive (Hakim pattern, prompt-kit adoption).
-                paddingBottom: isLast ? '50vh' : undefined,
+                // Bottom breathing room below the whole list comes from
+                // the virtualizer's `paddingEnd: 8` (set above); no
+                // per-row paddingBottom. Previously the last row carried
+                // a 50vh tail (Hakim pattern, prompt-kit) to keep
+                // streaming tokens off the compose bar, but because the
+                // virtualizer measures the row including its padding,
+                // that 50vh was always present — producing a constant
+                // half-viewport gap below the last message (e.g.
+                // underneath a short ask_user gate) whenever the list
+                // was stuck to bottom. The tighter paddingEnd gives
+                // enough clearance without the gap.
                 transform: `translateY(${item.start}px)`,
               }}
             >
