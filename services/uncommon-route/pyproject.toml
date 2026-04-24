@@ -1,0 +1,61 @@
+[project]
+name = "uncommon-route"
+version = "0.3.1"
+description = "Local LLM router that cuts premium-model spend with adaptive 3-tier routing, OpenAI + Anthropic compatible"
+requires-python = ">=3.11"
+license = "LicenseRef-UncommonRoute-Modified-MIT"
+license-files = ["LICENSE"]
+readme = "README.md"
+authors = [
+    {name = "Anjie Yang", email = "andrewanjieyang@gmail.com"},
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+keywords = ["llm", "router", "ai", "smart-routing", "model-selection"]
+
+dependencies = [
+    "httpx>=0.27",
+    "uvicorn>=0.30",
+    "starlette>=0.38",
+]
+
+[project.optional-dependencies]
+dev = [
+    "build>=1.2",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+    "twine>=6.0",
+]
+
+[project.scripts]
+uncommon-route = "uncommon_route.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/CommonstackAI/UncommonRoute"
+Repository = "https://github.com/CommonstackAI/UncommonRoute"
+Issues = "https://github.com/CommonstackAI/UncommonRoute/issues"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["uncommon_route*"]
+
+[tool.setuptools.package-data]
+uncommon_route = ["router/model.json", "router/benchmark_seed.json", "static/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
