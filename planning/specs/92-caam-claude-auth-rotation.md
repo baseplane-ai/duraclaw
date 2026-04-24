@@ -2,12 +2,13 @@
 initiative: caam-claude-auth-rotation
 type: project
 issue_type: feature
-status: approved
+status: approved-revised
 priority: medium
 github_issue: 92
 created: 2026-04-24
 updated: 2026-04-24
 approved: 2026-04-24
+revised: 2026-04-24
 phases:
   - id: p1
     name: "shared-types + gateway: extend exit/meta schemas and env plumbing"
@@ -15,7 +16,7 @@ phases:
       - "Extend ExitFile.state union in packages/agent-gateway/src/types.ts: add 'rate_limited', 'rate_limited_no_profile', 'rate_limited_no_rotate'"
       - "Add optional claude_profile?: string | null and rotation?: {from: string; to: string} | null to MetaFile in packages/agent-gateway/src/types.ts"
       - "Confirm session-state.ts passes new states through verbatim (no enum gate); add type test"
-      - "Extend RateLimitEvent in packages/shared-types/src/index.ts with optional rotation?: {from: string | null; to: string | null; cooldown_minutes: number} and exit_reason?: 'rate_limited' | 'rate_limited_no_profile' | 'rate_limited_no_rotate'"
+      - "Extend RateLimitEvent in packages/shared-types/src/index.ts with optional rotation?: {from: string | null; to: string | null} and exit_reason?: 'rate_limited' | 'rate_limited_no_profile' | 'rate_limited_no_rotate' and resets_at?: number (ms epoch, mirrored from rate_limit_info.resetsAt when present). Drop the earlier cooldown_minutes field — the refresh time comes straight from the SDK event."
       - "Extend GatewayCommand union in packages/shared-types/src/index.ts with {type: 'synth-rate-limit', rate_limit_info?: Record<string, unknown>}. Runner-side handler is implemented in P2 (dev-gated). Lives in P1 so P2 integration tests can depend on the type being in the workspace type-check already."
       - "Allow DURACLAW_CLAUDE_* env vars through buildCleanEnv() in packages/agent-gateway/src/handlers.ts (currently strips CLAUDECODE* / CLAUDE_CODE_ENTRYPOINT; add an explicit passthrough so new vars aren't silently dropped if allowlisting is added later)"
     test_cases:
@@ -34,12 +35,12 @@ phases:
       - "Create packages/session-runner/src/caam.ts with typed wrappers: caamResolveBin(), caamIsConfigured(), caamActiveProfile('claude'), caamActivate('claude', profile), caamNext('claude'), caamCooldownSet('claude', profile, minutes), caamCooldownList('claude'), each with a subprocess-plus-text-parse fallback when --json is not supported"
       - "At runner startup (packages/session-runner/src/main.ts spawn path, before claude-runner.ts query()): if DURACLAW_CLAUDE_PROFILE set, call caamActivate; if any caam call fails because the profile is cooling, exit state:'failed' with error: 'pinned profile <p> is in cooldown until <ts>'. Otherwise stamp caamActiveProfile into ctx.meta.claude_profile"
       - "If caamIsConfigured() is false (binary missing OR caam ls claude returns zero profiles) log '[caam] not configured on this host — rotation disabled' exactly once and short-circuit all rotation paths below to no-ops that still relay raw rate_limit events"
-      - "In claude-runner.ts:637-646 rate_limit_event branch: (1) if DURACLAW_CLAUDE_ROTATION === 'off' OR peer-claude-runner detected via scanPeerMeta(SESSIONS_DIR, sessionId) returns any live claude runner, call send(ch, {type:'rate_limit', ..., exit_reason:'rate_limited_no_rotate'}), ctx.abortController.abort(); (2) otherwise call caamCooldownSet('claude', active, cooldownMinutes) then caamNext('claude'); if next returns null (all cooling), read caamCooldownList earliest_clear_ts, set ctx.meta.state = 'rate_limited_no_profile', include earliest_clear_ts in .exit error field, abort; (3) on successful rotation, set ctx.meta.rotation = {from: active, to: next.activated}, send rate_limit event with rotation metadata, abort"
+      - "In claude-runner.ts:637-646 rate_limit_event branch: (1) if DURACLAW_CLAUDE_ROTATION === 'off' OR peer-claude-runner detected via scanPeerMeta(SESSIONS_DIR, sessionId) returns any live claude runner, call send(ch, {type:'rate_limit', ..., exit_reason:'rate_limited_no_rotate'}), ctx.abortController.abort(); (2) otherwise read resetsAt from message.rate_limit_info, compute minutes = max(1, Math.ceil((resetsAt - Date.now()) / 60000)), call caamCooldownSet('claude', active, minutes) (records the SDK-reported refresh time in caam so 'next' skips it), then caamNext('claude'); if next returns null (every profile is in cooldown / unavailable), read caamCooldownList earliest_clear_ts, set ctx.meta.state = 'rate_limited_no_profile', include earliest_clear_ts in .exit error field, abort; (3) on successful rotation, set ctx.meta.rotation = {from: active, to: next.activated}, send rate_limit event with rotation metadata + resets_at, abort. If rate_limit_info.resetsAt is missing or in the past, fall back to a conservative 5-hour minutes value (the documented five_hour window) — logged as '[caam] rate_limit_info missing resetsAt, falling back to 300m'."
       - "Extend main.ts exit-file writer (lines 536-541, 558) to emit new state values based on ctx.meta.state, exit_code:0 for all rate_limited* variants, and error carrying rotation metadata JSON"
       - "Add packages/session-runner/src/peer-scan.ts: scanPeerMeta(dir, selfId) globs *.meta.json, filters state==='running', model starts with 'claude-', id !== selfId, returns array of peer summaries"
-      - "Read env knobs at startup in main.ts: CAAM_BIN (default probe $PATH then /home/ubuntu/bin/caam), DURACLAW_CLAUDE_PROFILE (pin), DURACLAW_CLAUDE_ROTATION ('auto' | 'off', default 'auto'), DURACLAW_CLAUDE_COOLDOWN_MINUTES (default 60). Resolve into ctx.rotationMode: if DURACLAW_CLAUDE_PROFILE is set OR env rotation is 'off', ctx.rotationMode = 'off'; else 'auto'. This single flag drives the B3 Gate-0 branch."
+      - "Read env knobs at startup in main.ts: CAAM_BIN (default probe $PATH then /home/ubuntu/bin/caam), DURACLAW_CLAUDE_PROFILE (pin), DURACLAW_CLAUDE_ROTATION ('auto' | 'off', default 'auto'). Resolve into ctx.rotationMode: if DURACLAW_CLAUDE_PROFILE is set OR env rotation is 'off', ctx.rotationMode = 'off'; else 'auto'. This single flag drives the B3 Gate-0 branch. NO cooldown-minutes env knob — B3 derives the value from rate_limit_info.resetsAt on each event."
       - "Refactor main.ts exit-file writer (lines 536-541, 558) into an idempotent writeExitFileInline(ctx, payload) helper using the existing link()+EEXIST single-writer pattern. Export from main.ts so claude-runner.ts's rate-limit branch can call it. Post-abort cleanup path and SIGTERM watchdog both call the same helper — first writer wins, subsequent calls no-op. Unit test: invoke writeExitFileInline twice with different payloads; assert only the first wins."
-      - "Emit structured stderr logs at every caam decision point (see Verification Plan): '[caam] active profile=X at startup', '[caam] rate_limit cooldown=Nm next=Y rotated', '[caam] rate_limit peer_detected skip_rotation', '[caam] rate_limit all_cooling earliest_clear=<ts>'"
+      - "Emit structured stderr logs at every caam decision point (see Verification Plan): '[caam] active profile=X at startup', '[caam] session_limit reset_at=<iso> derived_cooldown=Nm next=Y rotated', '[caam] session_limit peer_detected skip_rotation', '[caam] session_limit all_unavailable earliest_clear=<ts>', '[caam] rate_limit_info missing resetsAt, falling back to 300m' (fallback path only)."
       - "Implement runner-side dev-gated handler for GatewayCommand {type:'synth-rate-limit'} (type added in P1). Guard on process.env.DURACLAW_DEBUG_ENDPOINTS === '1'; when received, synthesize an SDK-shape rate_limit_event message into the same branch claude-runner.ts:637 consumes, with rate_limit_info from the command payload (or a canned default). All B3 gates fire and produce real .exit / .meta / caam side effects, exactly as a real rate-limit would. Used by P2 integration tests and VP1–VP3."
     test_cases:
       - id: "caam-wrapper-not-configured"
@@ -134,14 +135,26 @@ phases:
 
 `caam` (Coding Agent Account Manager) is installed on the VPS at
 `/home/ubuntu/bin/caam` and manages multiple backed-up Claude auth
-profiles (`claude/work1..workN`). Today, when `session-runner` hits an
-Anthropic usage limit, the SDK stream halts with a rate-limit error and
-the Duraclaw session stalls — we have no rotation. This spec adds a
-single-active-runner Phase 1 integration where the runner shells out to
-`caam` on `rate_limit_event` to cooldown the active profile, rotate to
-the next healthy one, and exit; the SessionDO then auto-respawns a
+profiles (`claude/work1..workN`). Today, when a Claude profile exhausts
+its session-usage window (Anthropic's five-hour / seven-day limits —
+surfaced as an SDK `rate_limit_event` with `status:'rejected'`), the
+stream halts and the Duraclaw session stalls. This spec adds a
+single-active-runner Phase 1 integration that treats the event as a
+**session-limit exhaustion, not an abstract rate-limit**: read the
+authoritative refresh timestamp directly from `rate_limit_info.resetsAt`,
+record it against the current profile in `caam`, pick the next
+non-exhausted profile, exit; the SessionDO then auto-respawns a
 `resume` runner against the rotated auth and resumes the user's
 conversation with a transcript breadcrumb.
+
+> **Revision note (2026-04-24).** Earlier draft of this spec treated the
+> event as a generic rate-limit and applied a fixed 60-minute cooldown
+> via a `DURACLAW_CLAUDE_COOLDOWN_MINUTES` env knob. That knob has been
+> removed. The SDK event carries the real refresh time in
+> `rate_limit_info.resetsAt` (see spec #13 B13 for the payload shape),
+> so the runner now derives cooldown-minutes from the event per-hit and
+> feeds the exact value into `caam cooldown set`. No guessing; no env
+> tuning.
 
 ## Root Cause / Current State
 
@@ -222,10 +235,11 @@ rotation?: { from: string; to: string } | null  // populated only during rotatio
 
 #### API Layer
 Gateway `POST /sessions/start` payload accepts a new optional field
-`env: { DURACLAW_CLAUDE_PROFILE?: string; DURACLAW_CLAUDE_ROTATION?: 'auto' | 'off'; DURACLAW_CLAUDE_COOLDOWN_MINUTES?: number }`
+`env: { DURACLAW_CLAUDE_PROFILE?: string; DURACLAW_CLAUDE_ROTATION?: 'auto' | 'off' }`
 that the gateway merges into the spawned child env. Backward-compatible
 — missing block means runner reads env from its own inherited
-environment.
+environment. (There is deliberately no cooldown-minutes knob: the runner
+reads the refresh time from each `rate_limit_event` payload instead.)
 
 #### Data Layer
 None (env-only).
@@ -245,7 +259,7 @@ None (env-only).
      pinned per B2): skip caam entirely, relay a `rate_limit` event to
      the DO with `exit_reason:'rate_limited_no_rotate'` and
      `rotation:null`, set `ctx.meta.state = 'rate_limited_no_rotate'`,
-     write `.exit` inline (see step 5 below), abort.
+     write `.exit` inline (see step 4 below), abort.
   1. **caam not configured** (B7 dev-box path,
      `!caamIsConfigured()`): relay a raw `rate_limit` event with no
      `exit_reason` and no `rotation`, **do not abort, do not exit**.
@@ -257,23 +271,29 @@ None (env-only).
      `exit_reason:'rate_limited_no_rotate'` + `rotation:null`, set
      `ctx.meta.state = 'rate_limited_no_rotate'`, write `.exit` inline,
      abort.
-  3. **Normal rotation**:
-     `caam cooldown set claude/<active> --minutes $COOLDOWN` then
+  3. **Normal rotation**: read `resetsAt` (ms epoch) from
+     `message.rate_limit_info`. If present and in the future, derive
+     `minutes = max(1, Math.ceil((resetsAt - Date.now()) / 60_000))` —
+     this is the SDK-reported refresh window for the current profile.
+     If `resetsAt` is missing or in the past, fall back to 300 minutes
+     (Anthropic's documented five-hour window) and log the fallback.
+     Then `caam cooldown set claude/<active> --minutes <minutes>`
+     (records the exact refresh time in caam's cooldown list so `next`
+     skips this profile until it naturally resets), then
      `caam next claude --quiet`.
-     - If `caam next` returns `null` (all profiles cooling): read
-       `caam cooldown list` to find earliest clear timestamp; relay
-       `rate_limit` event with `exit_reason:'rate_limited_no_profile'`,
-       `rotation:null`, `earliest_clear_ts: <ms>`; set
+     - If `caam next` returns `null` (every profile is in caam's
+       cooldown list): read `caam cooldown list` to find the earliest
+       clear timestamp across all profiles; relay `rate_limit` event
+       with `exit_reason:'rate_limited_no_profile'`, `rotation:null`,
+       `earliest_clear_ts: <ms>`, `resets_at: <resetsAt or null>`; set
        `ctx.meta.state = 'rate_limited_no_profile'` and
        `ctx.meta.rate_limit_earliest_clear_ts = <ts>`; write `.exit`
        inline; abort.
-     - If rotation succeeds: set
-       `ctx.meta.rotation = {from, to}` and
-       `ctx.meta.state = 'rate_limited'`, relay `rate_limit` event
-       with `exit_reason:'rate_limited'` and
-       `rotation:{from, to, cooldown_minutes:$COOLDOWN}`, write `.exit`
-       inline, abort.
-  5. **Inline `.exit` write ordering.** Steps 0, 2, 3 all write
+     - If rotation succeeds: set `ctx.meta.rotation = {from, to}` and
+       `ctx.meta.state = 'rate_limited'`, relay `rate_limit` event with
+       `exit_reason:'rate_limited'`, `rotation:{from, to}`, and
+       `resets_at: <resetsAt or null>`, write `.exit` inline, abort.
+  4. **Inline `.exit` write ordering.** Steps 0, 2, 3 all write
      `.exit` BEFORE calling `ctx.abortController.abort()`. The runner
      uses the single-writer `link()+EEXIST` pattern already in
      `main.ts`; the post-abort cleanup path becomes a no-op when
@@ -300,10 +320,16 @@ interface RateLimitEvent {
   rate_limit_info: Record<string, unknown>  // existing SDK passthrough
   // new optional fields, backward-compatible
   exit_reason?: 'rate_limited' | 'rate_limited_no_rotate' | 'rate_limited_no_profile'
-  rotation?: { from: string; to: string; cooldown_minutes: number } | null
+  rotation?: { from: string; to: string } | null
   earliest_clear_ts?: number  // ms epoch, only on rate_limited_no_profile
+  resets_at?: number          // ms epoch, mirrored from rate_limit_info.resetsAt
 }
 ```
+
+The `resets_at` field is the runner's read of `rate_limit_info.resetsAt`
+lifted to a typed top-level field so the DO doesn't have to re-parse the
+loosely-typed `rate_limit_info` blob. Omitted when the SDK payload
+didn't carry it (unlikely on real events, but the spec doesn't assume).
 
 #### Data Layer
 `ExitFile.state` union gains three literals:
@@ -463,13 +489,15 @@ documented "we'll revisit if telemetry says so":
 - **Rate-limit-aware concurrency control** (e.g., pausing new session
   spawns while we're mid-rotation). Out of scope; the single-runner
   assumption makes it moot for Phase 1.
-- **Deriving cooldown duration from `rate_limit_info.resets_at`.** The
-  SDK's `rate_limit_info` is relayed as `Record<string, unknown>` with
-  undocumented shape. We ship a fixed 60-minute default (env
-  override) and will reconsider after telemetry.
 - **Force-rotation UI button** ("skip cooldown, force next profile
-  now"). Not needed for Phase 1; `caam next --force` on the VPS
-  suffices for ops.
+  now"). Not needed for Phase 1; `caam cooldown clear claude/<profile>`
+  on the VPS suffices for ops.
+- **Structured telemetry for rotation frequency / reset-time accuracy.**
+  We now derive cooldown from `rate_limit_info.resetsAt`; if that field
+  ever drifts from reality we'd see "rotated but still rate-limited"
+  loops. Phase 1 observability is stderr logs only; a structured metric
+  pipeline (counter: rotations/hour; gauge: earliest_clear_ts drift) is
+  a separate issue if/when the logs say we need it.
 - **Migration of existing in-flight sessions.** On deploy, running
   session-runners continue with the old behavior (relay-only). Next
   spawn picks up the new logic. No backfill needed.
@@ -489,13 +517,18 @@ documented "we'll revisit if telemetry says so":
   `apps/orchestrator/src/agents/session-do.ts`; unit test asserts
   caam-metadata messages are dropped from SDK prompt reconstruction
   while still rendering in `messagesCollection`. Closed.
-- [x] **(resolved — ship 60, flip via env if telemetry says so)**
-  Nominal Anthropic reset window is ~5h rolling. 60-min cooldown
-  may allow us to rotate back too soon and immediately re-hit. If
-  stderr-log review shows same-profile re-hits within 60 m, flip the
-  default to 120 or 300 via deploy-time env change. Telemetry is runner
-  stderr logs captured to the per-session `.log`; no structured metric
-  pipeline required for Phase 1.
+- [x] **(superseded — 2026-04-24 revision)** Cooldown duration default
+  (60 vs 120 vs 300 minutes). Moot: the runner now derives the cooldown
+  value from `rate_limit_info.resetsAt` per-event, so there's no tunable
+  default to pick. Kept here for traceability because the earlier draft
+  spent a whole decision (D1) on it. Closed.
+- [ ] **(new — verify on first real hit)** `rate_limit_info.resetsAt`
+  field presence on actual SDK `rate_limit_event` messages for each
+  `rateLimitType` (`five_hour`, `seven_day`, `seven_day_opus`,
+  `seven_day_sonnet`, `overage`). Spec #13 B13 documents the shape as
+  optional; B3 has a 300-minute fallback that fires when missing. VP1
+  should capture one real event's payload (not just the synthetic) to
+  lock this in before we trust the derived-cooldown path end-to-end.
 
 ## Implementation Phases
 
@@ -552,24 +585,33 @@ Steps:
    Expected: `caam status` shows `claude: work1 ✅`
 3. Login via `scripts/verify/axi-a` to
    `http://127.0.0.1:$VERIFY_ORCH_PORT/login` and start a new session.
-4. In the session, synthesize a rate-limit by temporarily patching
-   `claude-runner.ts` to emit a fake `rate_limit_event` on the first
-   assistant turn (revert before merge). Or: hit the real API hard
-   enough. Recommended: a hidden dev endpoint
-   `POST /api/__dev__/synth-ratelimit/:sessionId` gated on
-   `DURACLAW_DEBUG_ENDPOINTS=1` that injects a fake event through the
-   runner's dial-back channel. (Add in P4 if the fake-event
-   infrastructure doesn't already exist.)
+4. In the session, synthesize a session-limit event via the dev
+   endpoint added in P3 (`POST /api/__dev__/synth-ratelimit/:sessionId`
+   with body `{target:'runner', rate_limit_info:{status:'rejected',
+   rateLimitType:'five_hour', resetsAt:<now+45min>}}`, gated on
+   `DURACLAW_DEBUG_ENDPOINTS=1`). The payload uses a 45-minute
+   `resetsAt` so we can verify the derived-minutes math (not a round
+   60). Steps 6/7 use that timestamp explicitly, so substitute whatever
+   you pass here.
    Expected: Within ~3 s, transcript shows system message
    `⚡ Claude profile rotated work1 → work2, resuming…`; StatusBar
    shows `rotating` briefly then `running`; next user message works
    normally.
 5. `cat /run/duraclaw/sessions/<sid>.exit`
-   Expected: `{"state":"rate_limited","exit_code":0,...,"error":"{\"rotation\":{\"from\":\"work1\",\"to\":\"work2\",...}}"}`
+   Expected: `{"state":"rate_limited","exit_code":0,...,
+   "error":"{\"rotation\":{\"from\":\"work1\",\"to\":\"work2\"},\"resets_at\":<ts>}"}`
 6. `caam cooldown list`
-   Expected: `claude/work1` listed with ~60 min remaining.
+   Expected: `claude/work1` listed with ~45 min remaining (matching the
+   synthesized `resetsAt` minus now). The exact minute count should
+   equal `Math.ceil((resetsAt - t_observed) / 60_000)` where
+   `t_observed` is the moment step 4 fires — tolerances of ±1 minute
+   are fine.
 7. `caam which claude`
    Expected: `claude: work2`
+8. Check runner stderr in `/run/duraclaw/sessions/<sid>.log`.
+   Expected: a single structured line of shape
+   `[caam] session_limit reset_at=<iso> derived_cooldown=45m next=work2 rotated`.
+   NO `[caam] rate_limit_info missing resetsAt` fallback line.
 
 ### VP2: Peer-detected skip
 
@@ -840,20 +882,35 @@ post-abort cleanup writer becomes a no-op:
   }
 
   // Gate 3: normal rotation.
-  const cooldown = Number(process.env.DURACLAW_CLAUDE_COOLDOWN_MINUTES ?? 60)
+  // Derive refresh time from the SDK event — no manual cooldown fudge.
+  const resetsAt: number | undefined =
+    typeof raw?.resetsAt === 'number' && raw.resetsAt > Date.now()
+      ? raw.resetsAt
+      : undefined
+  let minutes: number
+  if (resetsAt) {
+    minutes = Math.max(1, Math.ceil((resetsAt - Date.now()) / 60_000))
+  } else {
+    // Fallback: SDK payload didn't carry a usable resetsAt. Use 300m
+    // (Anthropic's documented five-hour window) as the conservative cap.
+    minutes = 300
+    ctx.log.warn('[caam] rate_limit_info missing resetsAt, falling back to 300m')
+  }
+
   const active = (await caamActiveProfile()) ?? 'unknown'
-  await caamCooldownSet(active, cooldown)
+  await caamCooldownSet(active, minutes)  // caam's 'next' now skips <active> until resetsAt
   const next = await caamNext()
 
   if (!next) {
     const earliest = await caamEarliestClearTs()
     send(ch, { type: 'rate_limit', session_id: sessionId, rate_limit_info: raw,
                exit_reason: 'rate_limited_no_profile', rotation: null,
-               earliest_clear_ts: earliest }, ctx)
+               earliest_clear_ts: earliest, resets_at: resetsAt ?? null }, ctx)
     ctx.meta.state = 'rate_limited_no_profile'
     ctx.meta.rate_limit_earliest_clear_ts = earliest
     await writeExitFileInline(ctx, { state: 'rate_limited_no_profile', exit_code: 0,
-      error: JSON.stringify({ reason: 'all_cooling', earliest_clear_ts: earliest }) })
+      error: JSON.stringify({ reason: 'all_unavailable', earliest_clear_ts: earliest,
+                              resets_at: resetsAt ?? null }) })
     ctx.abortController.abort()
     return
   }
@@ -862,10 +919,11 @@ post-abort cleanup writer becomes a no-op:
   ctx.meta.state = 'rate_limited'
   send(ch, { type: 'rate_limit', session_id: sessionId, rate_limit_info: raw,
              exit_reason: 'rate_limited',
-             rotation: { from: active, to: next.activated, cooldown_minutes: cooldown } }, ctx)
+             rotation: { from: active, to: next.activated },
+             resets_at: resetsAt ?? null }, ctx)
   await writeExitFileInline(ctx, { state: 'rate_limited', exit_code: 0,
-    error: JSON.stringify({ rotation: { from: active, to: next.activated,
-      cooldown_minutes: cooldown } }) })
+    error: JSON.stringify({ rotation: { from: active, to: next.activated },
+                            resets_at: resetsAt ?? null }) })
   ctx.abortController.abort()
 }
 ```
@@ -935,6 +993,16 @@ case 'rate_limit': {
   unit test pins this against the installed binary — if it changes on
   a caam upgrade, the wrapper's text fallback catches it; add a
   regression test in the same file.
+- **`rate_limit_info.resetsAt` is now load-bearing.** The 60-min
+  manual cooldown is gone; the runner reads `resetsAt` (ms epoch) out
+  of the SDK event and feeds `Math.ceil((resetsAt - now) / 60000)`
+  minutes directly into `caam cooldown set`. Spec #13 B13 types this
+  field as optional; the runner guards with `typeof raw.resetsAt ===
+  'number' && raw.resetsAt > Date.now()` and falls back to 300
+  minutes when the guard fails, logging the fallback exactly once per
+  event. Watch for `[caam] rate_limit_info missing resetsAt` in stderr
+  — it means the SDK passthrough schema drifted and the fallback is
+  masking it.
 - **DO alarms are coarse.** `ctx.storage.setAlarm` has minute-ish
   granularity under load. 30 s slop on `earliest_clear_ts` already
   accounts for this; don't rely on precise sub-second alarm fire.

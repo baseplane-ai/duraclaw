@@ -19,15 +19,26 @@ explicitly so a future review can flip any of them cheaply.
 
 ## Decisions
 
-### D1. Cooldown duration default: **60 min fixed**
-- Env override: `DURACLAW_CLAUDE_COOLDOWN_MINUTES` (default `60`).
-- Rationale: matches caam's documented example, comfortable around
-  Anthropic's rolling 5h window, simple to reason about. Telemetry from
-  rotation events will tell us whether 30/60/120 is right.
-- Reversibility: env change, no code.
-- Rejected: derive-from-`rate_limit_info` (payload shape undocumented in
-  the SDK relay — brittle); 5h fixed (over-cools, starves pool); 30m
-  (churn risk before telemetry exists).
+### D1. Cooldown duration default: **derived per-event from `rate_limit_info.resetsAt`**
+- **Superseded 2026-04-24.** Original decision was a 60-min fixed
+  cooldown behind `DURACLAW_CLAUDE_COOLDOWN_MINUTES`. User pushback made
+  the reframe explicit: "It's not a rate limit it's session limits that
+  error on exhaustion you don't need cool down you don't need anything
+  it's just you hit the session limit record the refresh time find open
+  non-limited account rotate then restart the session that's it."
+- New behavior: runner reads `rate_limit_info.resetsAt` (ms epoch) off
+  the SDK event, computes `minutes = max(1, Math.ceil((resetsAt - now)
+  / 60000))`, and passes that to `caam cooldown set`. No env knob.
+- Fallback when `resetsAt` is missing or stale: 300 minutes (Anthropic's
+  documented five-hour window), logged as a fallback once per event.
+- Rationale: spec #13 B13 already types `rate_limit_info.resetsAt` as
+  the authoritative reset timestamp; there's no reason to guess. The
+  "rejected — derive from `rate_limit_info`" note in the prior draft
+  assumed an undocumented payload; re-reading the types shows it IS
+  documented.
+- Reversibility: bring back the env knob in a single diff if the
+  derived-cooldown path proves wrong in production — the 300m fallback
+  is already the conservative ceiling.
 
 ### D2. All profiles in cooldown → **sticky "waiting" + auto-retry**
 - Runner writes `.exit` with new state `rate_limited_no_profile` and
