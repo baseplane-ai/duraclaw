@@ -3446,6 +3446,14 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     }
 
     this.updateState({ status: 'running' })
+    // Mirror the status flip into D1 so `sessionsCollection.status` (and
+    // the "Needs Attention" chip fed by it when `useDerivedStatus` yields
+    // to the D1 fallback) clears promptly. Without this, resolving a
+    // permission gate flips the DO's in-memory status but leaves
+    // `agent_sessions.status` stale at `waiting_gate` until the next
+    // event (assistant turn / result) triggers a sync — visible as a
+    // stuck amber chip after approve/deny.
+    this.syncStatusToD1(new Date().toISOString())
     return { ok: true }
   }
 
