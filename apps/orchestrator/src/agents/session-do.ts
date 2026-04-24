@@ -1963,19 +1963,31 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     // broadcast, so a client cursor advanced to T_wire can never cause the
     // same row to re-qualify on the next subscribe:messages.
     const now = new Date().toISOString()
-    const ops: SyncedCollectionOp<WireSessionMessage>[] = rawOps.map((op) => {
-      if (op.type === 'delete') return op
-      const value = op.value
-      if (value && typeof value === 'object' && !value.modifiedAt) {
-        return { ...op, value: { ...value, modifiedAt: now } }
-      }
-      return op
-    })
 
     if (!opts.targetClientId) {
       this.messageSeq += 1
       this.persistMessageSeq()
     }
+
+    // GH#76 follow-up: stamp `seq` on every outbound row so the client's
+    // `useDerivedStatus` hook can detect when the messages collection is
+    // ahead of the D1-mirrored `agent_sessions.message_seq` tiebreaker.
+    // Without this, `msg.seq` is always undefined on the wire → the hook's
+    // `localMaxSeq` stays at -1 → the tiebreaker `serverSeq (-1 default)
+    // >= localMaxSeq (-1)` is always true → the hook returns undefined and
+    // every consumer falls through to the stale D1 row (the regression
+    // that #76 was supposed to fix, not cause). Targeted sends don't bump
+    // `messageSeq`, so they echo the current value — same semantics as the
+    // frame envelope counter.
+    const rowSeq = this.messageSeq
+    const ops: SyncedCollectionOp<WireSessionMessage>[] = rawOps.map((op) => {
+      if (op.type === 'delete') return op
+      const value = op.value
+      if (!value || typeof value !== 'object') return op
+      const next: WireSessionMessage = { ...value, seq: rowSeq }
+      if (!next.modifiedAt) next.modifiedAt = now
+      return { ...op, value: next }
+    })
     const frame: SyncedCollectionFrame<WireSessionMessage> = {
       type: 'synced-collection-delta',
       collection: `messages:${this.name}`,

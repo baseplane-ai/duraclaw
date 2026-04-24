@@ -718,6 +718,18 @@ export interface SessionMessage {
    * declare now as an optional field so P1 MessagesFrame types compile.
    */
   canonical_turn_id?: string
+  /**
+   * Per-row copy of the broadcasting DO's `messageSeq` envelope counter at
+   * the time this row was emitted. Stamped by `SessionDO.broadcastMessages`
+   * on every outbound op. Used by `useDerivedStatus` to detect whether the
+   * messages collection is ahead of the D1-mirrored `agent_sessions.message_seq`
+   * tiebreaker — if any locally-held message has `seq > session.messageSeq`,
+   * the hook derives status from messages; otherwise it falls through to the
+   * D1 row. Optional on the wire for back-compat with older server bundles
+   * and cold-start REST replay rows that pre-date the stamping (they fall
+   * through the tiebreaker harmlessly).
+   */
+  seq?: number
 }
 
 export interface BranchInfoRow {
