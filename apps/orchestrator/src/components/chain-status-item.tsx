@@ -20,14 +20,13 @@ import type { KataSessionState } from '@duraclaw/shared-types'
 import { useLiveQuery } from '@tanstack/react-db'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { chainsCollection } from '~/db/chains-collection'
-import { userPreferencesCollection } from '~/db/user-preferences-collection'
+import { useChainAutoAdvance } from '~/hooks/use-chain-auto-advance'
 import { checkPrecondition } from '~/hooks/use-chain-preconditions'
 import { useTabSync } from '~/hooks/use-tab-sync'
 import { CORE_RUNG_ORDER, type CoreRung } from '~/lib/auto-advance'
 import { useStallReason } from '~/lib/chain-stall-store'
-import { parseJsonField } from '~/lib/json'
-import { apiUrl } from '~/lib/platform'
-import type { ChainSummary, UserPreferencesRow } from '~/lib/types'
+import { isChainSessionCompleted } from '~/lib/chains'
+import type { ChainSummary } from '~/lib/types'
 
 interface ChainStatusItemProps {
   kataState: KataSessionState
@@ -56,8 +55,6 @@ interface RungInfo {
   targetStatus: string | null
 }
 
-type PerChainPrefs = Record<string, { autoAdvance?: boolean }>
-
 const GH_REPO = 'baseplane-ai/duraclaw'
 
 /**
@@ -67,19 +64,6 @@ const GH_REPO = 'baseplane-ai/duraclaw'
  * parked after a turn and is NOT the active frontier for rung rendering.
  */
 const ACTIVE_STATUSES = new Set(['running', 'waiting_input', 'waiting_permission', 'waiting_gate'])
-
-/**
- * Predicate: did this chain session finish at least one turn?
- * `agent_sessions.status` never holds 'completed' in this codebase — finished
- * sessions land as 'idle' (SessionStatus union in packages/shared-types).
- * Because `ChainSummary.sessions[i]` does NOT carry `numTurns` (see
- * apps/orchestrator/src/lib/chains.ts:208-226), we use `lastActivity != null`
- * as the "ran at least one turn" proxy — closest available stand-in for
- * `isCompletedSession` in nav-sessions.tsx:725-732.
- */
-function isChainSessionCompleted(s: ChainSummary['sessions'][number]): boolean {
-  return s.status === 'idle' && s.lastActivity != null
-}
 
 /** Map a chain's derived `column` to the rung that represents the active frontier. */
 function columnToRung(column: ChainSummary['column']): CoreRung | null {
@@ -159,26 +143,6 @@ function computeRungs(chain: ChainSummary, sessionId: string): RungInfo[] {
   })
 }
 
-function readChainPrefs(row: UserPreferencesRow | null | undefined): {
-  perChain: PerChainPrefs
-  defaultOn: boolean
-} {
-  if (!row) return { perChain: {}, defaultOn: false }
-  const perChain = parseJsonField<PerChainPrefs>(row.chainsJson ?? null) ?? {}
-  const defaultOn = row.defaultChainAutoAdvance === true
-  return { perChain, defaultOn }
-}
-
-function effectiveAutoAdvance(
-  perChain: PerChainPrefs,
-  defaultOn: boolean,
-  issueNumber: number,
-): boolean {
-  const override = perChain[String(issueNumber)]?.autoAdvance
-  if (typeof override === 'boolean') return override
-  return defaultOn
-}
-
 export function ChainStatusItem({ kataState, kataIssue, sessionId }: ChainStatusItemProps) {
   const [showPopover, setShowPopover] = useState(false)
   // Mount-time re-evaluation of the precondition — a conservative fallback
@@ -192,8 +156,6 @@ export function ChainStatusItem({ kataState, kataIssue, sessionId }: ChainStatus
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data: chainsData } = useLiveQuery(chainsCollection as any)
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data: prefsData } = useLiveQuery(userPreferencesCollection as any)
 
   const { replaceTab } = useTabSync()
 
@@ -203,14 +165,7 @@ export function ChainStatusItem({ kataState, kataIssue, sessionId }: ChainStatus
     return arr.find((c) => c.issueNumber === kataIssue) ?? null
   }, [chainsData, kataIssue])
 
-  const prefsRow = useMemo<UserPreferencesRow | null>(() => {
-    if (!prefsData) return null
-    const arr = prefsData as UserPreferencesRow[]
-    return arr[0] ?? null
-  }, [prefsData])
-
-  const { perChain, defaultOn } = useMemo(() => readChainPrefs(prefsRow), [prefsRow])
-  const autoAdvanceOn = effectiveAutoAdvance(perChain, defaultOn, kataIssue)
+  const { enabled: autoAdvanceOn, toggle: onToggleAutoAdvance } = useChainAutoAdvance(kataIssue)
 
   const rungs = useMemo<RungInfo[]>(() => {
     if (!chain) return []
@@ -262,25 +217,6 @@ export function ChainStatusItem({ kataState, kataIssue, sessionId }: ChainStatus
     },
     [replaceTab, sessionId],
   )
-
-  const onToggleAutoAdvance = useCallback(async () => {
-    const next: PerChainPrefs = {
-      ...perChain,
-      [String(kataIssue)]: { autoAdvance: !autoAdvanceOn },
-    }
-    try {
-      const resp = await fetch(apiUrl('/api/preferences'), {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chains: next }),
-      })
-      if (!resp.ok) {
-        console.warn('[ChainStatusItem] prefs PUT failed', resp.status)
-      }
-    } catch (err) {
-      console.warn('[ChainStatusItem] prefs PUT threw', err)
-    }
-  }, [autoAdvanceOn, kataIssue, perChain])
 
   if (!chain) {
     // No chain data loaded yet — fall through to a compact pill with just

@@ -5,6 +5,7 @@ import {
   deriveColumn,
   deriveIssueType,
   findPrForIssue,
+  isChainSessionCompleted,
 } from './chains'
 
 /**
@@ -35,6 +36,39 @@ describe('deriveIssueType', () => {
   })
   it('handles undefined labels', () => {
     expect(deriveIssueType(undefined)).toBe('other')
+  })
+})
+
+describe('isChainSessionCompleted', () => {
+  // GH#82 regression: agent_sessions.status NEVER holds 'completed' in this
+  // codebase (the SessionStatus union is idle/pending/running/waiting_*/error).
+  // Finished rungs park as 'idle' with a non-null lastActivity. Every
+  // `status === 'completed'` check in the prior code was permanently false;
+  // this predicate is the canonical replacement.
+  it('returns true for an idle session with a lastActivity timestamp', () => {
+    expect(isChainSessionCompleted({ status: 'idle', lastActivity: '2026-04-24T12:00:00Z' })).toBe(
+      true,
+    )
+  })
+  it('returns false for an idle session that never ran (no lastActivity)', () => {
+    expect(isChainSessionCompleted({ status: 'idle', lastActivity: null })).toBe(false)
+  })
+  it('returns false for a running session even with lastActivity', () => {
+    expect(
+      isChainSessionCompleted({ status: 'running', lastActivity: '2026-04-24T12:00:00Z' }),
+    ).toBe(false)
+  })
+  it('returns false for waiting_* and error statuses', () => {
+    for (const status of ['waiting_input', 'waiting_permission', 'waiting_gate', 'error']) {
+      expect(isChainSessionCompleted({ status, lastActivity: '2026-04-24T12:00:00Z' })).toBe(false)
+    }
+  })
+  it('returns false for the literal "completed" string (defensive — not in the union)', () => {
+    // If any upstream surface ever starts writing 'completed' we should
+    // still gate on lastActivity; but for now treat as unrecognised.
+    expect(
+      isChainSessionCompleted({ status: 'completed', lastActivity: '2026-04-24T12:00:00Z' }),
+    ).toBe(false)
   })
 })
 

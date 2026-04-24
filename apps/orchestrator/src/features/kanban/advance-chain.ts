@@ -92,8 +92,14 @@ export async function spawnChainSession(input: {
 export async function advanceChain(
   chain: ChainSummary,
   nextMode: string,
+  options?: { projectOverride?: string | null },
 ): Promise<AdvanceChainResult> {
-  const project = chainProject(chain)
+  // Backlog-bootstrap path: empty chains have no prior session from which
+  // `chainProject()` can derive a worktree, so the KanbanCard caller
+  // resolves one via the Advance modal's project picker and passes it
+  // through `options.projectOverride`. Existing chains ignore the override
+  // and use the most-recent session's project.
+  const project = options?.projectOverride ?? chainProject(chain)
   if (!project) {
     return { ok: false, error: 'No project for chain' }
   }

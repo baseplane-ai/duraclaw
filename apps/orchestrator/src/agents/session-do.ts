@@ -16,7 +16,7 @@ import { CORE_RUNGS, tryAutoAdvance } from '~/lib/auto-advance'
 import type { AwaitingReason, AwaitingResponsePart } from '~/lib/awaiting-response'
 import { broadcastSessionRow } from '~/lib/broadcast-session'
 import { broadcastSyncedDelta } from '~/lib/broadcast-synced-delta'
-import { buildChainRow } from '~/lib/chains'
+import { buildChainRow, isChainSessionCompleted } from '~/lib/chains'
 import { chunkOps } from '~/lib/chunk-frame'
 import { runMigrations } from '~/lib/do-migrations'
 import {
@@ -2614,6 +2614,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
           status: agentSessions.status,
           kataMode: agentSessions.kataMode,
           createdAt: agentSessions.createdAt,
+          lastActivity: agentSessions.lastActivity,
         })
         .from(agentSessions)
         .where(eq(agentSessions.kataIssue, issueNumber))
@@ -2621,7 +2622,12 @@ export class SessionDO extends Agent<Env, SessionMeta> {
 
       const artifactLines: string[] = []
       for (const row of rows) {
-        if (row.status !== 'completed') continue
+        // agent_sessions.status never holds 'completed' in this codebase;
+        // finished rungs park as 'idle' with a non-null lastActivity. Use the
+        // shared predicate so this stays aligned with the client-side
+        // chain-progression gates (see lib/chains.ts).
+        if (!isChainSessionCompleted({ status: row.status, lastActivity: row.lastActivity }))
+          continue
         const rowMode = row.kataMode ?? 'unknown'
         const idTail = row.id.slice(-8)
         artifactLines.push(`- ${rowMode}: session ${idTail}`)
