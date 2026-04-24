@@ -882,8 +882,24 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     })
     if (decision.kind === 'noop') return
 
-    // Expired — clear awaiting and surface an error row.
-    const errorText = 'runner failed to attach within recovery grace'
+    // Expired — strip the awaiting part and surface a terminal error row.
+    await this.failAwaitingTurn('runner failed to attach within recovery grace')
+  }
+
+  /**
+   * Spec #80 B7 — terminal failure path for an in-flight awaiting turn.
+   * Clears the `awaiting_response@pending` part from the tail user message,
+   * appends a `⚠ Error: …` system-message row, flips status to `'error'`,
+   * and drops the active callback token so any late runner dial gets
+   * 4401'd. Used by:
+   *   - `checkAwaitingTimeout()` (alarm-driven, past recovery grace)
+   *   - `triggerGatewayDial()`'s two error branches (non-2xx response and
+   *     network throw). Without this, the awaiting part + bubble would
+   *     hang forever because the two catch-paths set `status:'idle'`
+   *     without scheduling a watchdog, and `useDerivedStatus` correctly
+   *     keeps returning `'pending'` from the still-present message tail.
+   */
+  private async failAwaitingTurn(errorText: string): Promise<void> {
     this.clearAwaitingResponse()
 
     // Persist the error as a visible system message row — mirrors the
@@ -1351,7 +1367,10 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       if (!resp.ok) {
         const errText = await resp.text().catch(() => 'unknown error')
         console.error(`[SessionDO:${this.ctx.id}] Gateway start failed: ${resp.status} ${errText}`)
-        this.updateState({ status: 'idle', error: `Gateway start failed: ${resp.status}` })
+        // Spec #80 B7 — runner never attached; terminate any stamped
+        // awaiting part immediately rather than letting it hang (no
+        // watchdog alarm was scheduled on this failure path).
+        await this.failAwaitingTurn(`Gateway start failed: ${resp.status}`)
         return
       }
 
@@ -1374,10 +1393,11 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       console.log(`[SessionDO:${this.ctx.id}] triggerGatewayDial: POST to gateway succeeded`)
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Gateway start POST failed:`, err)
-      this.updateState({
-        status: 'idle',
-        error: `Gateway start failed: ${err instanceof Error ? err.message : String(err)}`,
-      })
+      // Spec #80 B7 — runner never attached; terminate any stamped
+      // awaiting part immediately rather than letting it hang (no
+      // watchdog alarm was scheduled on this failure path).
+      const msg = err instanceof Error ? err.message : String(err)
+      await this.failAwaitingTurn(`Gateway start failed: ${msg}`)
     }
   }
 
