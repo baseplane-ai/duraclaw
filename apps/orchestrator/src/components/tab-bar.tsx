@@ -36,13 +36,10 @@ import {
   SheetTitle,
 } from '~/components/ui/sheet'
 import { projectsCollection } from '~/db/projects-collection'
-import { type SessionLocalState, sessionLocalCollection } from '~/db/session-local-collection'
 import type { SessionRecord } from '~/db/session-record'
-import { useDerivedStatus } from '~/hooks/use-derived-status'
 import { useIsMobile } from '~/hooks/use-mobile'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { isDraftTabId } from '~/hooks/use-tab-sync'
-import { deriveDisplayStateFromStatus } from '~/lib/display-state'
 import {
   deriveProjectAbbrev,
   deriveProjectColorSlot,
@@ -99,22 +96,6 @@ export function TabBar({
     }
     return m
   }, [allSessions])
-
-  // Hoist `sessionLocalCollection` + `sessionsCollection` subscriptions to
-  // the parent so N tabs share ONE live query each, not 2N. Perf: previously
-  // every tab called `useSession(id)` + `useSessionLocalState(id)` →
-  // any session/local update re-rendered all N tabs. Now only the affected
-  // tab re-renders (because `ProjectTab` is `memo()`'d with shallow-compare
-  // and gets its slice as a prop).
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data: localRows } = useLiveQuery(sessionLocalCollection as any)
-  const sessionLocalsMap = useMemo(() => {
-    const m = new Map<string, SessionLocalState>()
-    for (const row of (localRows ?? []) as SessionLocalState[]) {
-      m.set(row.id, row)
-    }
-    return m
-  }, [localRows])
 
   // Build tab rows by joining openTabs with sessions.
   const rows = useMemo<TabRow[]>(
@@ -288,7 +269,6 @@ export function TabBar({
                   key={row.sessionId}
                   sessionId={row.sessionId}
                   session={row.session}
-                  liveLocal={sessionLocalsMap.get(row.sessionId)}
                   draftProject={draftProject}
                   siblingIds={siblingsBySession.get(row.sessionId) ?? [row.sessionId]}
                   repoOrigin={
@@ -343,7 +323,6 @@ export function TabBar({
             <ProjectTab
               sessionId={activeDragRow.sessionId}
               session={activeDragRow.session}
-              liveLocal={sessionLocalsMap.get(activeDragRow.sessionId)}
               siblingIds={
                 siblingsBySession.get(activeDragRow.sessionId) ?? [activeDragRow.sessionId]
               }
@@ -366,9 +345,6 @@ export function TabBar({
 interface ProjectTabProps {
   sessionId: string
   session: SessionRecord | undefined
-  /** Transient WS readyState row for this session (hoisted from parent so
-   *  each tab doesn't open its own `useSessionLocalState` subscription). */
-  liveLocal?: SessionLocalState | undefined
   /** Project for a draft tab (no session row yet). */
   draftProject?: string | undefined
   /** Sessions sharing this tab's worktree, ordered stably; drives the
@@ -408,7 +384,6 @@ function SortableProjectTab(props: ProjectTabProps) {
 function ProjectTabInner({
   sessionId,
   session,
-  liveLocal,
   draftProject,
   siblingIds,
   repoOrigin,
@@ -423,25 +398,16 @@ function ProjectTabInner({
   const isMobile = useIsMobile()
   const [menuOpen, setMenuOpen] = useState(false)
 
-  // Route tab status through `deriveDisplayStateFromStatus` so it agrees
-  // with the status bar + sidebar.
-  // Spec #37 P2b: status / numTurns come from the D1-mirrored
-  // sessionsCollection row (= `session` prop, live-synced from the parent's
-  // single `useSessionsCollection` subscription); wsReadyState from the
-  // transient local row (= `liveLocal` prop, hoisted at the parent).
-  // We no longer call `useSession()` / `useSessionLocalState()` here — that
-  // opened 2N live-query subscriptions for N tabs and re-rendered every
-  // tab on any session delta.
-  // GH#50: feed TTL-derived status into the display mapper so stuck
-  // `running` tabs degrade to `idle` in lockstep with StatusBar / sidebar.
-  const sessionDerived =
-    useDerivedStatus(sessionId) ?? (session?.status as SessionStatus | undefined)
-  const tabDisplay = deriveDisplayStateFromStatus(
-    sessionDerived,
-    liveLocal?.wsReadyState ?? 3,
-    liveLocal?.wsCloseTs ?? null,
-  )
-  const tabStatus = tabDisplay.status !== 'unknown' ? tabDisplay.status : (sessionDerived ?? 'idle')
+  // Tab-strip status dot: read `session.status` directly from the D1-mirrored
+  // `agent_sessions` synced-collection row (pushed over the always-on
+  // `user-stream` WS via `broadcastSessionRow`). Do NOT gate on per-session
+  // `wsReadyState` here — background tabs' PartySockets legitimately close
+  // to save resources, and the server's session status is still authoritative
+  // and fresh over the user-stream rail. The per-session-WS "Reconnecting…"
+  // signal belongs to the active session's StatusBar / DisconnectedBanner,
+  // not the N-tab fleet view. This also removes N `useMessagesCollection`
+  // subscriptions (previously opened via `useDerivedStatus`) from the bar.
+  const tabStatus = (session?.status as SessionStatus | undefined) ?? 'idle'
 
   // Dense label — abbrev + worktree-N + optional a/b suffix.
   // Project color keyed by `repo_origin` so sibling worktrees of the same
@@ -671,9 +637,8 @@ function ProjectTabInner({
 }
 
 /**
- * Memoized ProjectTab — shallow-compares props. The parent now passes
- * `session` + `liveLocal` as stable references from `sessionsMap` /
- * `sessionLocalsMap`, so a tab only re-renders when its own session row
- * or its own transient local row actually changes.
+ * Memoized ProjectTab — shallow-compares props. The parent passes `session`
+ * as a stable reference from `sessionsMap`, so a tab only re-renders when
+ * its own session row actually changes.
  */
 const ProjectTab = memo(ProjectTabInner)
