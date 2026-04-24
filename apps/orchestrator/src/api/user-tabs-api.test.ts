@@ -19,6 +19,11 @@ vi.mock('~/lib/broadcast-tabs-snapshot', () => ({
   broadcastTabsSnapshot: vi.fn().mockResolvedValue(undefined),
 }))
 
+vi.mock('~/lib/broadcast-session-viewers', () => ({
+  fanoutSessionViewerChange: vi.fn().mockResolvedValue(undefined),
+  getSessionViewersForUser: vi.fn().mockResolvedValue([]),
+}))
+
 vi.mock('drizzle-orm/d1', () => ({
   drizzle: vi.fn(() => (globalThis as any).__fakeDb),
 }))

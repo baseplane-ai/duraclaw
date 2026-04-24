@@ -16,6 +16,10 @@ import {
 import { validateActionToken } from '~/lib/action-token'
 import { createAuth } from '~/lib/auth'
 import { broadcastSessionRow } from '~/lib/broadcast-session'
+import {
+  fanoutSessionViewerChange,
+  getSessionViewersForUser,
+} from '~/lib/broadcast-session-viewers'
 import { broadcastSyncedDelta } from '~/lib/broadcast-synced-delta'
 import { broadcastTabsSnapshot } from '~/lib/broadcast-tabs-snapshot'
 import { buildChainRowFromContext, type ChainBuildContext } from '~/lib/chains'
@@ -838,6 +842,16 @@ export function createApiApp() {
     return c.json({ tabs: tabs as UserTabRow[] })
   })
 
+  // session_viewers collection cold-start / reconnect resync. One row per
+  // sessionId the caller has as a live tab; `viewers` lists other users
+  // (excluding self) who also have the session as a live tab.
+  app.get('/api/session-viewers', async (c) => {
+    const userId = c.get('userId')
+    const db = getDb(c.env)
+    const viewers = await getSessionViewersForUser(db, userId)
+    return c.json({ viewers })
+  })
+
   app.post('/api/user-settings/tabs', async (c) => {
     const userId = c.get('userId')
     const body = (await c.req.json().catch(() => null)) as {
@@ -879,6 +893,9 @@ export function createApiApp() {
         .returning()
       const newRow = inserted[0] as UserTabRow
       c.executionCtx.waitUntil(broadcastTabsSnapshot(c.env, userId, db))
+      if (sessionId) {
+        c.executionCtx.waitUntil(fanoutSessionViewerChange(c.env, db, [sessionId]))
+      }
       return c.json({ tab: newRow }, 201)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
@@ -924,6 +941,18 @@ export function createApiApp() {
     }
 
     const db = getDb(c.env)
+
+    // Pre-select so we can detect a sessionId change and fan out viewers
+    // for both the old and new session — the unique `(userId, sessionId)`
+    // index means the user holds at most one live tab per sessionId, so
+    // when sessionId moves they always lose their old-session row.
+    const prevRows = await db
+      .select({ sessionId: userTabs.sessionId })
+      .from(userTabs)
+      .where(and(eq(userTabs.id, tabId), eq(userTabs.userId, userId), isNull(userTabs.deletedAt)))
+      .limit(1)
+    const prevSessionId = prevRows[0]?.sessionId ?? null
+
     const updated = await db
       .update(userTabs)
       .set(body as Partial<typeof userTabs.$inferInsert>)
@@ -936,6 +965,16 @@ export function createApiApp() {
 
     const updatedRow = updated[0] as UserTabRow
     c.executionCtx.waitUntil(broadcastTabsSnapshot(c.env, userId, db))
+
+    const nextSessionId = updatedRow.sessionId
+    if (prevSessionId !== nextSessionId) {
+      const affected: string[] = []
+      if (prevSessionId) affected.push(prevSessionId)
+      if (nextSessionId) affected.push(nextSessionId)
+      if (affected.length > 0) {
+        c.executionCtx.waitUntil(fanoutSessionViewerChange(c.env, db, affected, userId))
+      }
+    }
     return c.json({ tab: updatedRow })
   })
 
@@ -943,6 +982,17 @@ export function createApiApp() {
     const userId = c.get('userId')
     const tabId = c.req.param('id')
     const db = getDb(c.env)
+
+    // Capture sessionId pre-delete so the session_viewers fanout can
+    // drop this user from the row's viewer list and delete their local
+    // row in one pass.
+    const prevRows = await db
+      .select({ sessionId: userTabs.sessionId })
+      .from(userTabs)
+      .where(and(eq(userTabs.id, tabId), eq(userTabs.userId, userId), isNull(userTabs.deletedAt)))
+      .limit(1)
+    const prevSessionId = prevRows[0]?.sessionId ?? null
+
     const deleted = await db
       .update(userTabs)
       .set({ deletedAt: new Date().toISOString() })
@@ -954,6 +1004,9 @@ export function createApiApp() {
     }
 
     c.executionCtx.waitUntil(broadcastTabsSnapshot(c.env, userId, db))
+    if (prevSessionId) {
+      c.executionCtx.waitUntil(fanoutSessionViewerChange(c.env, db, [prevSessionId], userId))
+    }
     return c.body(null, 204)
   })
 

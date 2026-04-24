@@ -169,6 +169,29 @@ export interface UserTabRow {
 }
 
 /**
+ * Single other user viewing a session (derived from live `user_tabs` rows,
+ * excluding the recipient themselves). Name is the D1 `users.name` value at
+ * broadcast time; color is derived client-side from `colorForUserId(userId)`.
+ */
+export interface SessionViewer {
+  userId: string
+  name: string
+}
+
+/**
+ * One row of the `session_viewers` synced collection. There is one row per
+ * session the current user currently has as a live (non-deleted) tab;
+ * `viewers` enumerates the OTHER users who also have it as a live tab.
+ * Empty `viewers` is a valid state (no one else is here) — the row still
+ * exists so the client can distinguish "session is open, no peers" from
+ * "session is not open".
+ */
+export interface SessionViewerRow {
+  sessionId: string
+  viewers: SessionViewer[]
+}
+
+/**
  * Chain-level worktree checkout reservation (GH#16 Feature 3E). One row per
  * currently-checked-out worktree — owner holds the worktree for the lifetime
  * of the chain driving `issueNumber`. Serves as the TypeScript API contract
