@@ -3065,7 +3065,18 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
 
   @callable()
   async spawn(config: SpawnConfig): Promise<{ ok: boolean; session_id?: string; error?: string }> {
-    if (this.state.status === 'running' || this.state.status === 'waiting_gate') {
+    // 'pending' is the post-spawn intermediate state (spec #80) flipped
+    // below at line 3102 before the runner's first event lands. Without
+    // it in the guard, a concurrent second spawn() — always fired by
+    // AgentDetailWithSpawn once the WS opens on draft→real tab swap —
+    // races past this idempotency check, appends a second `usr-N`
+    // message, and broadcasts it. Symptom: two identical user bubbles
+    // on new-session-draft first submit.
+    if (
+      this.state.status === 'running' ||
+      this.state.status === 'waiting_gate' ||
+      this.state.status === 'pending'
+    ) {
       return { ok: false, error: 'Session already active' }
     }
 
@@ -3140,7 +3151,12 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     config: SpawnConfig,
     sdkSessionId: string,
   ): Promise<{ ok: boolean; session_id?: string; error?: string }> {
-    if (this.state.status === 'running' || this.state.status === 'waiting_gate') {
+    // Mirror spawn()'s guard — 'pending' is an active state (spec #80).
+    if (
+      this.state.status === 'running' ||
+      this.state.status === 'waiting_gate' ||
+      this.state.status === 'pending'
+    ) {
       return { ok: false, error: 'Session already active' }
     }
 

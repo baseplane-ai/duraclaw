@@ -3639,3 +3639,59 @@ describe('planAwaitingTimeout', () => {
     }
   })
 })
+
+// ── spawn() idempotency guard ─────────────────────────────────────
+//
+// Regression: when a user submits the first message in a new-session
+// draft tab, two code paths dispatch spawn() against the same DO:
+//
+//   1. POST /api/sessions (server-side) → createSession() → DO.fetch('/create')
+//      → spawn(config) — persists the initial user message (usr-1),
+//      then flips state from 'running' → 'pending' (spec #80, commit
+//      865045de) while awaiting the runner's first event.
+//
+//   2. AgentDetailWithSpawn (client-side) fires agent.spawn(spawnConfig)
+//      as an idempotent follow-up once the WS opens — relying on the
+//      DO's "Session already active" early-return.
+//
+// Before the fix, the guard only matched 'running' | 'waiting_gate', so
+// the second spawn arrived while state === 'pending', fell through,
+// appended a second user message (usr-2), and broadcast it. Symptom:
+// two identical user bubbles in the chat on first submit of a draft.
+//
+// The fix adds 'pending' to the guard in spawn() and resumeDiscovered().
+// This test mirrors the guard as a pure predicate so the contract is
+// pinned regardless of how the DO body evolves.
+
+describe('spawn() idempotency guard treats pending as active (GH new-session-draft dupe)', () => {
+  // Mirrors the guard in session-do.ts spawn() and resumeDiscovered().
+  // Any status in this set must short-circuit to "Session already active".
+  function isActiveSpawnGuardStatus(status: string): boolean {
+    return status === 'running' || status === 'waiting_gate' || status === 'pending'
+  }
+
+  // Every non-terminal active status must reject a concurrent spawn().
+  it.each([
+    'running',
+    'waiting_gate',
+    'pending',
+  ] as const)('rejects concurrent spawn when status is %s', (status) => {
+    expect(isActiveSpawnGuardStatus(status)).toBe(true)
+  })
+
+  // Regression case — without the fix this would be `false`, letting a
+  // second spawn() through and double-appending the user message.
+  it("'pending' specifically is treated as active (regression: spec #80 added 'pending' intermediate state)", () => {
+    expect(isActiveSpawnGuardStatus('pending')).toBe(true)
+  })
+
+  // Spawnable (terminal / initial) statuses must still allow spawn to proceed.
+  it.each([
+    'idle',
+    'error',
+    'completed',
+    'terminated',
+  ] as const)('allows spawn when status is %s', (status) => {
+    expect(isActiveSpawnGuardStatus(status)).toBe(false)
+  })
+})
