@@ -434,6 +434,122 @@ scripts/verify/dev-up.sh
 - `planning/research/2026-04-19-github-issue-board-integration.md` — GH integration research
 - Commits: 6109f49 (GH#16), 821e0c0/1b3f889 (GH#58), 47d24ee (GH#73)
 
+## Addendum — auto-advance UI reports spurious stall reasons ("no spec" / "no completed stage") even when the server-side path is fine
+
+**User reported:** "Auto advance broken too — says 'no spec' or 'noncompleted stage'."
+
+**Why that happens (and why my first pass under-weighted it):** the
+server-side `tryAutoAdvance` after GH#73 only ever emits one stall
+reason — `"Rung did not signal run-end (kata can-exit not satisfied)"`.
+It does **not** emit "Spec not found", "No completed research session",
+"No completed implementation session", or "VP evidence not found". Those
+strings come exclusively from the **client-side** `checkPrecondition` in
+`use-chain-preconditions.ts`.
+
+So when the user sees those reasons against an auto-advanced chain, it
+is coming from a separate fallback path I glossed over in the main
+writeup. The full chain of causation:
+
+1. User enables auto-advance on a chain (writes `chains_json` in
+   `user_preferences`).
+2. A chain session terminates. Server `tryAutoAdvance` runs with the
+   `runEnded` bit. It does **one** of:
+   - `action:'advanced'` — emits `chain_advance`. Fine.
+   - `action:'stalled'` — emits `chain_stalled` with reason
+     `"Rung did not signal run-end …"` or
+     `"Worktree held by chain #N"`. Client stores reason in
+     `chain-stall-store` (module-level `Map`), widget shows ⚠ with the
+     real server reason.
+   - `action:'none'` — silent (e.g. user pref OFF, already-spawned
+     successor).
+3. User reloads the page **or** the browser context is rebuilt
+   (tab switch after long idle, Capacitor WebView destruction, etc.).
+4. `chain-stall-store` is deliberately transient
+   (`apps/orchestrator/src/lib/chain-stall-store.ts:11-14` — "Transient
+   — not persisted; clears on chain_advance for the same issue or on
+   reload"). So `wsStallReason` is now `null`.
+5. `ChainStatusItem` runs its mount re-eval
+   (`chain-status-item.tsx:230-254`): when the current session is
+   `status === 'idle'` and auto-advance is on, it calls
+   `checkPrecondition(chain, chain.sessions)`.
+6. `checkPrecondition` is the exact client-side code from Bug #1 — it
+   checks `s.status === 'completed'` for research→planning and
+   implementation→verify (always false; `SessionStatus` has no
+   `'completed'`), and it fetches `/api/chains/:issue/spec-status` +
+   `/api/chains/:issue/vp-status` for planning→implementation and
+   verify→close (those endpoints go through the VPS gateway — see
+   `api/index.ts:2473`, `listGatewayFiles`; they return
+   `{exists: false}` if the gateway is down, the worktree isn't
+   reachable, or no spec file matches the issue-number prefix).
+7. The re-eval writes its reason into `mountReevalStallReason`. The
+   widget renders that as the current stall, with ⚠.
+8. User concludes: "auto-advance is broken — it keeps saying 'no spec'
+   or 'no completed stage'."
+
+**What is actually true at that moment:**
+
+- The chain may already have auto-advanced correctly (new successor
+  session exists in D1 with `kataMode = next`).
+- OR it may have silently not advanced because `runEnded=false` (kata
+  Stop hook never fired — session was aborted, hit max_turns, or the
+  runner fs.watch missed the file creation).
+- OR it may have stalled with the genuine server reason, but that
+  reason is gone because `chain-stall-store` didn't survive the
+  reload.
+
+The UI cannot distinguish those three cases — it papers over all of
+them with whatever `checkPrecondition` returns, and `checkPrecondition`
+returns false negatives for the reasons in Bug #1 and S6.
+
+### Worked example: the specific strings the user quoted
+
+- **"no spec"** — `checkPrecondition` reached the planning→implementation
+  branch (`use-chain-preconditions.ts:125-135`). The spec-status fetch
+  hit the gateway and returned `{exists: false}`. Three plausible
+  causes:
+  1. The spec file was never written (chain actually stuck on planning
+     — real stall, but UI can't confirm it from the client).
+  2. The spec file exists but the gateway-file listing returned a 404
+     or a transient error (dev stack down, gateway restart race).
+  3. The worktree path in `chain.sessions[*].project` doesn't match
+     where the spec was written (e.g. the user wrote it in a sibling
+     worktree). `listGatewayFiles(c.env, project, 'planning/specs')` is
+     pinned to the reservation's worktree.
+- **"noncompleted stage"** — `checkPrecondition` reached either
+  research→planning or implementation→verify. Returned "No completed
+  research session" / "No completed implementation session" because
+  `s.status === 'completed'` is the dead literal from Bug #1. There
+  may well be a completed-by-kata-stop research session visible in the
+  UI under that same rung ladder — but the precondition code doesn't
+  know how to recognise it.
+
+### Why this ties back to the same fix
+
+Fixing Bug #1 (replace `status === 'completed'` with the
+`isChainSessionCompleted(s)` proxy) makes two of the four spurious
+messages vanish. Moving the spec-status / vp-status probe off the
+client (S6 — cache on the DO via a `lastSpecStatus` / `lastVpStatus`
+bit written from the same kata/runner pipeline that produces
+`runEnded`) eliminates the other two, along with the original
+GH#73-style "gateway hiccup = permanent stall" risk.
+
+Alternatively: drop the mount re-eval entirely and make
+`chain-stall-store` read from a persisted source (OPFS or a small
+`session_meta.last_stall_reason` mirror pushed over the synced
+channel). The re-eval is only useful because the store is transient;
+persisting the store removes the need for the broken fallback.
+
+### Correction to the main TL;DR
+
+My original summary said "auto-advance is the only path that actually
+works today." That's defensible for the server-side computation, but
+**from the user's perspective auto-advance does not read as working
+either**, because the UI's post-reload fallback surfaces false-stall
+text generated by the same broken client code that breaks manual
+advance. The feature has effectively one set of reports — UI stall
+messages — and those reports are dominated by Bug #1 regardless of
+which server path you're on.
+
 ## Open questions (for follow-up specs, not answered here)
 
 - Should backlog → research need a project picker, or should it default
