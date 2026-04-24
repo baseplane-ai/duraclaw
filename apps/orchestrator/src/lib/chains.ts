@@ -128,6 +128,32 @@ function modeToColumn(mode: string): ChainSummary['column'] | null {
   }
 }
 
+/**
+ * Predicate: has this chain session finished at least one turn and is no
+ * longer the live frontier?
+ *
+ * `agent_sessions.status` never holds `'completed'` in this codebase —
+ * the `SessionStatus` union (packages/shared-types) is
+ * `'idle' | 'pending' | 'running' | 'waiting_*' | 'error'`. Finished
+ * sessions park as `'idle'`. `lastActivity != null` means at least one
+ * turn ran (we don't treat a freshly-spawned `'pending'` row as completed).
+ *
+ * Shared between:
+ *   - use-chain-preconditions (client manual-advance gate)
+ *   - KanbanCard status label rendering
+ *   - ChainStatusItem rung-completed bit (where the original predicate
+ *     was introduced — now canonical here)
+ *   - SessionDO prior-artifacts accumulator (kata entrance prompt)
+ *
+ * @see planning/research/2026-04-23-chain-feature-not-functional.md §1
+ */
+export function isChainSessionCompleted(session: {
+  status: string
+  lastActivity: string | null
+}): boolean {
+  return session.status === 'idle' && session.lastActivity != null
+}
+
 export function deriveIssueType(
   labels: Array<{ name: string }> | undefined,
 ): 'bug' | 'enhancement' | 'other' {

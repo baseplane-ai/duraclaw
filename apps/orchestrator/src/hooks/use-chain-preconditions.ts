@@ -21,6 +21,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
+import { isChainSessionCompleted } from '~/lib/chains'
 import type { ChainSummary, SpecStatusResponse, VpStatusResponse } from '~/lib/types'
 
 export type NextMode = 'research' | 'planning' | 'implementation' | 'verify' | 'close' | null
@@ -98,7 +99,11 @@ function nextFor(column: ChainSummary['column']): { mode: NextMode; label: strin
  */
 export async function checkPrecondition(
   chain: ChainSummary,
-  sessionsForChain: readonly { kataMode?: string | null; status: string }[],
+  sessionsForChain: readonly {
+    kataMode?: string | null
+    status: string
+    lastActivity?: string | null
+  }[],
 ): Promise<{ canAdvance: boolean; reason: string; nextMode: NextMode }> {
   const { mode } = nextFor(chain.column)
   if (mode === null) {
@@ -113,7 +118,11 @@ export async function checkPrecondition(
   }
 
   if (mode === 'planning') {
-    const ok = sessionsForChain.some((s) => s.kataMode === 'research' && s.status === 'completed')
+    const ok = sessionsForChain.some(
+      (s) =>
+        s.kataMode === 'research' &&
+        isChainSessionCompleted({ status: s.status, lastActivity: s.lastActivity ?? null }),
+    )
     return {
       canAdvance: ok,
       reason: ok ? '' : 'No completed research session',
@@ -137,7 +146,9 @@ export async function checkPrecondition(
 
   if (mode === 'verify') {
     const ok = sessionsForChain.some(
-      (s) => s.kataMode === 'implementation' && s.status === 'completed',
+      (s) =>
+        s.kataMode === 'implementation' &&
+        isChainSessionCompleted({ status: s.status, lastActivity: s.lastActivity ?? null }),
     )
     return {
       canAdvance: ok,

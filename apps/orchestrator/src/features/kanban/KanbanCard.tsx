@@ -7,16 +7,20 @@
  */
 
 import { useDraggable } from '@dnd-kit/core'
-import { useCallback, useState } from 'react'
+import { useLiveQuery } from '@tanstack/react-db'
+import { useCallback, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 import { PipelineDots } from '~/components/layout/nav-sessions'
 import { Button } from '~/components/ui/button'
+import { projectsCollection } from '~/db/projects-collection'
 import type { SessionRecord } from '~/db/session-record'
 import { formatTimeAgo } from '~/features/agent-orch/session-utils'
 import { WorktreeConflictModal } from '~/features/chain/WorktreeConflictModal'
+import { useChainAutoAdvance } from '~/hooks/use-chain-auto-advance'
 import { useChainCheckout } from '~/hooks/use-chain-checkout'
 import { useNextModePrecondition } from '~/hooks/use-chain-preconditions'
 import { useTabSync } from '~/hooks/use-tab-sync'
+import { isChainSessionCompleted } from '~/lib/chains'
 import type { ChainSummary, WorktreeReservation } from '~/lib/types'
 import { AdvanceConfirmModal } from './AdvanceConfirmModal'
 import { advanceChain, chainProject, hasActiveSession } from './advance-chain'
@@ -38,11 +42,15 @@ function pickFocusSession(
   return byActivity[0] ?? null
 }
 
-function shortStatusLabel(status: string): string {
+function shortStatusLabel(session: ChainSummary['sessions'][number]): string {
+  const { status } = session
   if (status === 'running') return 'live'
-  if (status === 'completed') return 'done'
   if (status === 'crashed') return 'crashed'
   if (status.startsWith('waiting')) return 'waiting'
+  // `isChainSessionCompleted` recognises the D1 terminal "rung finished"
+  // shape (status === 'idle' && lastActivity != null). An `'idle'` session
+  // with no lastActivity is freshly spawned — render plain idle.
+  if (isChainSessionCompleted(session)) return 'done'
   return 'idle'
 }
 
@@ -59,6 +67,28 @@ export function KanbanCard({ chain }: KanbanCardProps) {
   const [modalOpen, setModalOpen] = useState(false)
   const [pending, setPending] = useState(false)
   const [conflict, setConflict] = useState<WorktreeReservation | null>(null)
+  // Backlog-bootstrap: when a chain has zero sessions, the user picks a
+  // worktree via the Advance modal. Empty-string = "no selection yet", which
+  // is what disables the confirm button.
+  const [pickedProject, setPickedProject] = useState<string>('')
+
+  // Project list for the picker — only queried when we actually need it
+  // (the modal hasn't been opened yet on most cards, but useLiveQuery is
+  // cheap here since `projectsCollection` is a single module-level
+  // collection shared across the app).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: projectsData } = useLiveQuery(projectsCollection as any)
+  const projectOptions = useMemo(() => {
+    if (!projectsData) return [] as string[]
+    return (projectsData as Array<{ name: string }>).map((p) => p.name).sort()
+  }, [projectsData])
+
+  // Per-chain auto-advance toggle — same preference the StatusBar
+  // ChainStatusItem popover drives, surfaced on the card itself so users
+  // can flip it before any session exists (GH#82 "auto-advance hidden").
+  const { enabled: autoAdvanceOn, toggle: toggleAutoAdvance } = useChainAutoAdvance(
+    chain.issueNumber,
+  )
 
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `card:${chain.issueNumber}`,
@@ -79,13 +109,25 @@ export function KanbanCard({ chain }: KanbanCardProps) {
 
   const handleStartNext = useCallback(() => {
     if (!nextMode || !canAdvance) return
+    // Reset the picker state each time the modal opens — avoids a stale
+    // selection from a prior attempt persisting into a new session.
+    setPickedProject('')
     setModalOpen(true)
   }, [nextMode, canAdvance])
 
   const runAdvance = useCallback(async (): Promise<boolean> => {
     if (!nextMode) return false
+    // Backlog-bootstrap: empty chains have no prior project, so surface the
+    // user's pick from the modal's worktree picker. Existing chains ignore
+    // the override.
+    const existingProject = chainProject(chain)
+    const projectOverride = existingProject ? null : pickedProject || null
+    if (!existingProject && !projectOverride) {
+      toast.error('Pick a worktree before advancing')
+      return false
+    }
     setPending(true)
-    const res = await advanceChain(chain, nextMode)
+    const res = await advanceChain(chain, nextMode, { projectOverride })
     setPending(false)
     if (!res.ok) {
       if (res.conflict) {
@@ -98,9 +140,9 @@ export function KanbanCard({ chain }: KanbanCardProps) {
     }
     setModalOpen(false)
     toast.success(`Started ${nextMode} for #${chain.issueNumber}`)
-    openTab(res.sessionId, { project: chainProject(chain) ?? undefined })
+    openTab(res.sessionId, { project: existingProject ?? projectOverride ?? undefined })
     return true
-  }, [chain, nextMode, openTab])
+  }, [chain, nextMode, openTab, pickedProject])
 
   const handleConfirm = useCallback(async () => {
     await runAdvance()
@@ -158,14 +200,37 @@ export function KanbanCard({ chain }: KanbanCardProps) {
         {...attributes}
         {...listeners}
       >
-        <div className="line-clamp-2 text-xs font-medium leading-snug">
-          <span className="text-muted-foreground">#{chain.issueNumber}</span> {chain.issueTitle}
+        <div className="flex items-start justify-between gap-2">
+          <div className="line-clamp-2 text-xs font-medium leading-snug">
+            <span className="text-muted-foreground">#{chain.issueNumber}</span> {chain.issueTitle}
+          </div>
+          <button
+            type="button"
+            className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
+              autoAdvanceOn
+                ? 'bg-primary/15 text-primary hover:bg-primary/25'
+                : 'bg-muted text-muted-foreground hover:bg-muted/70'
+            }`}
+            title={
+              autoAdvanceOn
+                ? 'Auto-advance on — click to disable'
+                : 'Auto-advance off — click to enable'
+            }
+            onClick={(e) => {
+              e.stopPropagation()
+              void toggleAutoAdvance()
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+            data-testid={`chain-auto-chip-${chain.issueNumber}`}
+          >
+            ⟲ {autoAdvanceOn ? 'auto' : 'off'}
+          </button>
         </div>
         <div className="flex items-center gap-2 text-[11px]">
           <PipelineDots sessions={sessionsForDots} />
           {focus ? (
             <span className="text-muted-foreground">
-              {shortMode(focus.kataMode)} &middot; {shortStatusLabel(focus.status)}
+              {shortMode(focus.kataMode)} &middot; {shortStatusLabel(focus)}
               {focusTs ? ` &middot; ${formatTimeAgo(focusTs)}` : ''}
             </span>
           ) : (
@@ -214,6 +279,9 @@ export function KanbanCard({ chain }: KanbanCardProps) {
           nextMode={nextMode}
           worktree={worktree}
           worktreeReserved={!!chain.worktreeReservation}
+          projectOptions={chain.sessions.length === 0 ? projectOptions : undefined}
+          selectedProject={pickedProject || null}
+          onProjectChange={setPickedProject}
           onConfirm={handleConfirm}
           pending={pending}
         />
