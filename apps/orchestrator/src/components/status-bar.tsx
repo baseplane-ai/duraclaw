@@ -265,6 +265,15 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
         <WsDot readyState={readyState} />
         <span className="text-foreground">{display.label}</span>
         <span className="truncate text-muted-foreground">{project || '--'}</span>
+        {/* Session title — migrated from tab bar as part of the dense-tab
+            redesign. Tabs now carry only project abbrev+worktreeN; the full
+            title lives here so the active session is always identifiable
+            without hovering a tab. */}
+        {session?.title && (
+          <span className="truncate text-foreground/90" title={session.title}>
+            · {session.title}
+          </span>
+        )}
       </div>
       {worktreeInfo && <WorktreeStatusItem info={worktreeInfo} />}
       <span className="truncate text-muted-foreground">{model || '--'}</span>

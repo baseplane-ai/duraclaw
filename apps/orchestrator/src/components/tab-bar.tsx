@@ -16,6 +16,7 @@ import {
   useSortable,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
+import type { ProjectInfo } from '@duraclaw/shared-types'
 import { useLiveQuery } from '@tanstack/react-db'
 import { ChevronLeftIcon, ChevronRightIcon, CopyPlusIcon, PlusIcon, X } from 'lucide-react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -34,14 +35,23 @@ import {
   SheetHeader,
   SheetTitle,
 } from '~/components/ui/sheet'
+import { projectsCollection } from '~/db/projects-collection'
 import { type SessionLocalState, sessionLocalCollection } from '~/db/session-local-collection'
 import type { SessionRecord } from '~/db/session-record'
-import { getPreviewText, StatusDot } from '~/features/agent-orch/session-utils'
 import { useDerivedStatus } from '~/hooks/use-derived-status'
 import { useIsMobile } from '~/hooks/use-mobile'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { isDraftTabId } from '~/hooks/use-tab-sync'
 import { deriveDisplayStateFromStatus } from '~/lib/display-state'
+import {
+  deriveProjectAbbrev,
+  deriveProjectColorSlot,
+  deriveRepoBase,
+  deriveSessionSuffix,
+  type ProjectColorSlot,
+  parseWorktreeSuffix,
+  statusRingClass,
+} from '~/lib/project-display'
 import type { SessionStatus } from '~/lib/types'
 import { cn } from '~/lib/utils'
 
@@ -115,6 +125,38 @@ export function TabBar({
       })),
     [openTabs, sessionsMap],
   )
+
+  // Projects map: project name → repo_origin. Used to key the color slot
+  // so the 4 worktrees of one repo all share the same fill color.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: projectRows } = useLiveQuery((q) => q.from({ p: projectsCollection as any }))
+  const repoOriginByProject = useMemo(() => {
+    const m = new Map<string, string | null>()
+    for (const p of (projectRows ?? []) as unknown as ProjectInfo[]) {
+      m.set(p.name, p.repo_origin)
+    }
+    return m
+  }, [projectRows])
+
+  // Siblings-in-worktree map: sessionId → ordered list of sibling session
+  // IDs that share its `project` (= worktree). Sort by `createdAt` so the
+  // `a/b/c` suffix assignment stays stable across renders.
+  const siblingsBySession = useMemo(() => {
+    const byProject = new Map<string, SessionRecord[]>()
+    for (const row of rows) {
+      if (!row.session) continue
+      const arr = byProject.get(row.session.project) ?? []
+      arr.push(row.session)
+      byProject.set(row.session.project, arr)
+    }
+    const m = new Map<string, string[]>()
+    for (const arr of byProject.values()) {
+      arr.sort((a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? ''))
+      const ids = arr.map((s) => s.id)
+      for (const s of arr) m.set(s.id, ids)
+    }
+    return m
+  }, [rows])
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const [canScrollLeft, setCanScrollLeft] = useState(false)
@@ -248,6 +290,10 @@ export function TabBar({
                   session={row.session}
                   liveLocal={sessionLocalsMap.get(row.sessionId)}
                   draftProject={draftProject}
+                  siblingIds={siblingsBySession.get(row.sessionId) ?? [row.sessionId]}
+                  repoOrigin={
+                    row.session ? (repoOriginByProject.get(row.session.project) ?? null) : null
+                  }
                   isActive={row.sessionId === activeSessionId}
                   onSelect={() => onSelectSession(row.sessionId)}
                   onClose={() => onCloseTab(row.sessionId)}
@@ -298,6 +344,14 @@ export function TabBar({
               sessionId={activeDragRow.sessionId}
               session={activeDragRow.session}
               liveLocal={sessionLocalsMap.get(activeDragRow.sessionId)}
+              siblingIds={
+                siblingsBySession.get(activeDragRow.sessionId) ?? [activeDragRow.sessionId]
+              }
+              repoOrigin={
+                activeDragRow.session
+                  ? (repoOriginByProject.get(activeDragRow.session.project) ?? null)
+                  : null
+              }
               isActive={activeDragRow.sessionId === activeSessionId}
               onSelect={() => {}}
               onClose={() => {}}
@@ -317,6 +371,13 @@ interface ProjectTabProps {
   liveLocal?: SessionLocalState | undefined
   /** Project for a draft tab (no session row yet). */
   draftProject?: string | undefined
+  /** Sessions sharing this tab's worktree, ordered stably; drives the
+   *  `a/b/c` letter suffix. Length 1 → no suffix. */
+  siblingIds?: readonly string[]
+  /** `repo_origin` of the session's project. Used as the color-slot key
+   *  so sibling worktrees of the same repo share a fill color. Null when
+   *  the project isn't in the synced projects collection yet. */
+  repoOrigin?: string | null
   isActive: boolean
   isDragging?: boolean
   onSelect: () => void
@@ -349,6 +410,8 @@ function ProjectTabInner({
   session,
   liveLocal,
   draftProject,
+  siblingIds,
+  repoOrigin,
   isActive,
   isDragging,
   onSelect,
@@ -379,7 +442,19 @@ function ProjectTabInner({
     liveLocal?.wsCloseTs ?? null,
   )
   const tabStatus = tabDisplay.status !== 'unknown' ? tabDisplay.status : (sessionDerived ?? 'idle')
-  const tabNumTurns = session?.numTurns ?? 0
+
+  // Dense label — abbrev + worktree-N + optional a/b suffix.
+  // Project color keyed by `repo_origin` so sibling worktrees of the same
+  // repo share a fill; falls back to the repo base name when the project
+  // isn't in the synced collection yet (cold start / draft tab).
+  const tabProjectName = session?.project ?? draftProject ?? ''
+  const repoBase = deriveRepoBase(tabProjectName)
+  const abbrev = deriveProjectAbbrev(repoBase)
+  const worktreeN = parseWorktreeSuffix(tabProjectName, repoBase)
+  const sessionLetter = deriveSessionSuffix(sessionId, siblingIds ?? [sessionId])
+  const denseLabel = `${abbrev}${worktreeN}${sessionLetter}`
+  const colorSlot: ProjectColorSlot = deriveProjectColorSlot(repoOrigin || repoBase || null)
+  const ringClass = statusRingClass(tabStatus)
 
   useEffect(() => {
     if (isDragging) setMenuOpen(false)
@@ -446,12 +521,20 @@ function ProjectTabInner({
 
   const a11yLabel = `tab ${sessionId.slice(0, 8)}`
 
+  // Dense tab: project-color fill, status-color ring, abbrev+N[+letter]
+  // label, optional session title on desktop only. Replaces the prior
+  // StatusDot + project + preview trio — status now lives in the ring and
+  // summary text has moved to the status bar.
   const tabContent = (
     <button
       type="button"
       className={cn(
-        'flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors hover:bg-accent',
-        isActive && 'bg-accent text-accent-foreground',
+        'relative flex items-center gap-1.5 px-2 py-1 m-0.5 text-xs font-medium rounded-sm',
+        'transition-all',
+        colorSlot.bg,
+        colorSlot.text,
+        ringClass,
+        isActive ? 'ring-offset-1 ring-offset-background' : 'opacity-75 hover:opacity-100',
       )}
       onClick={handleSelectClick}
       onContextMenu={handleContextMenu}
@@ -463,35 +546,25 @@ function ProjectTabInner({
     >
       {session ? (
         <>
-          <StatusDot status={tabStatus} numTurns={tabNumTurns} />
+          <span className={cn('font-mono tracking-tight', isActive && 'font-semibold')}>
+            {denseLabel}
+          </span>
+          {!isMobile && session.title && (
+            <span className="max-w-40 truncate font-normal opacity-90">{session.title}</span>
+          )}
           <SessionPresenceIcons sessionId={sessionId} />
-          <div className="flex flex-col items-start min-w-0">
-            <span className="text-[11px] text-muted-foreground leading-tight font-normal">
-              {session.project}
-            </span>
-            <span className="max-w-32 truncate leading-tight">
-              {session.title || getPreviewText(session) || session.project}
-            </span>
-          </div>
         </>
       ) : isDraft ? (
         <>
-          <PlusIcon className="size-3 text-muted-foreground" />
-          <div className="flex flex-col items-start min-w-0">
-            {draftProject && (
-              <span className="text-[11px] text-muted-foreground leading-tight font-normal">
-                {draftProject}
-              </span>
-            )}
-            <span className="max-w-32 truncate leading-tight italic text-muted-foreground">
-              New session
-            </span>
-          </div>
+          <PlusIcon className="size-3 shrink-0" />
+          <span className={cn('font-mono tracking-tight', isActive && 'font-semibold')}>
+            {denseLabel || '--'}
+          </span>
+          {!isMobile && <span className="italic opacity-75 font-normal">New session</span>}
         </>
       ) : (
-        <div className="flex flex-col items-start min-w-0 gap-1 py-0.5">
-          <div className="animate-pulse bg-muted h-2 w-12 rounded" />
-          <div className="animate-pulse bg-muted h-3 w-20 rounded" />
+        <div className="flex items-center gap-1 py-0.5">
+          <div className="animate-pulse bg-black/10 dark:bg-white/10 h-3 w-8 rounded" />
         </div>
       )}
     </button>
@@ -513,10 +586,7 @@ function ProjectTabInner({
   if (isMobile) {
     return (
       <>
-        <div
-          className="group relative flex items-center border-r select-none"
-          data-tab-id={sessionId}
-        >
+        <div className="group relative flex items-center select-none" data-tab-id={sessionId}>
           {tabContent}
         </div>
         <Sheet open={menuOpen} onOpenChange={setMenuOpen}>
@@ -569,10 +639,7 @@ function ProjectTabInner({
 
   return (
     <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
-      <div
-        className="group relative flex items-center border-r select-none"
-        data-tab-id={sessionId}
-      >
+      <div className="group relative flex items-center select-none" data-tab-id={sessionId}>
         {tabContent}
         <DropdownMenuTrigger
           className="absolute inset-0 appearance-none bg-transparent pointer-events-none"
