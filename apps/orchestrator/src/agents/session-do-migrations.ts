@@ -281,4 +281,26 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 16,
+    description:
+      'Add Haiku session-titler columns to session_meta (GH#86). `title` mirrors D1 agent_sessions.title for never-clobber checks without a D1 round-trip; `title_confidence` is the most-recent Haiku confidence; `title_set_at_turn` snapshots num_turns at write time; `title_source` is the never-clobber gate (NULL → no title yet, "haiku" → may be retitled, "user" → frozen).',
+    up: (sql) => {
+      const addCol = (col: string, ddl: string) => {
+        try {
+          sql.exec(`ALTER TABLE session_meta ADD COLUMN ${col} ${ddl}`)
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e)
+          if (!msg.toLowerCase().includes('duplicate column')) {
+            console.warn('[migration v16] unexpected error adding column', col, e)
+            throw e
+          }
+        }
+      }
+      addCol('title', 'TEXT')
+      addCol('title_confidence', 'REAL')
+      addCol('title_set_at_turn', 'INTEGER')
+      addCol('title_source', 'TEXT')
+    },
+  },
 ]

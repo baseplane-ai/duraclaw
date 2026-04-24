@@ -7,6 +7,7 @@ import * as schema from '~/db/schema'
 import {
   agentSessions,
   auditLog,
+  featureFlags,
   projects as projectsTable,
   userPreferences,
   userPresence,
@@ -1713,6 +1714,34 @@ export function createApiApp() {
     return c.json({ ok: true, visibility: body.visibility })
   })
 
+  // ── Feature Flags (GH#86) ─────────────────────────────────────────
+
+  app.get('/api/admin/feature-flags', async (c) => {
+    if (c.get('role') !== 'admin') return c.json({ error: 'Forbidden' }, 403)
+    const db = getDb(c.env)
+    const rows = await db.select().from(featureFlags)
+    return c.json({ flags: rows })
+  })
+
+  app.patch('/api/admin/feature-flags/:id', async (c) => {
+    if (c.get('role') !== 'admin') return c.json({ error: 'Forbidden' }, 403)
+    const flagId = c.req.param('id')
+    const body = (await c.req.json().catch(() => null)) as { enabled?: boolean } | null
+    if (!body || typeof body.enabled !== 'boolean') {
+      return c.json({ error: 'Body must include { enabled: boolean }' }, 400)
+    }
+    const db = getDb(c.env)
+    const now = new Date().toISOString()
+    await db
+      .insert(featureFlags)
+      .values({ id: flagId, enabled: body.enabled, updatedAt: now })
+      .onConflictDoUpdate({
+        target: featureFlags.id,
+        set: { enabled: body.enabled, updatedAt: now },
+      })
+    return c.json({ ok: true, id: flagId, enabled: body.enabled })
+  })
+
   app.post('/api/sessions/sync', async (c) => {
     const _userId = c.get('userId')
 
@@ -2053,10 +2082,20 @@ export function createApiApp() {
     }
 
     const updatedAt = new Date().toISOString()
+    // GH#86 B4: any user-set title freezes the title forever (never-clobber
+    // invariant). We stamp `title_source='user'` automatically — clients
+    // never set it directly (it's not in SESSION_PATCH_KEYS).
+    const patch: Partial<typeof agentSessions.$inferInsert> = {
+      ...(body as Partial<typeof agentSessions.$inferInsert>),
+      updatedAt,
+    }
+    if ('title' in body) {
+      patch.titleSource = 'user'
+    }
     const db = getDb(c.env)
     const updated = await db
       .update(agentSessions)
-      .set({ ...(body as Partial<typeof agentSessions.$inferInsert>), updatedAt })
+      .set(patch)
       .where(and(eq(agentSessions.id, sessionId), eq(agentSessions.userId, userId)))
       .returning()
 
@@ -2064,6 +2103,33 @@ export function createApiApp() {
       // Either the session doesn't exist or it's owned by a different real
       // user — collapsed to 404 to avoid existence disclosure (B-API-1).
       return c.json({ error: 'Session not found' }, 404)
+    }
+
+    // GH#86 B4: also mirror the user-set title + provenance into the DO's
+    // `session_meta` so the runner-event handler (`case 'title_update':`)
+    // sees the freeze without a D1 round-trip on every event. Best-effort
+    // — if the DO is cold or unreachable, the next title_update will be
+    // discarded by the D1 source-of-truth check anyway.
+    if ('title' in body) {
+      const doId = getSessionDoId(c.env, sessionId)
+      const sessionDO = c.env.SESSION_AGENT.get(doId)
+      c.executionCtx.waitUntil(
+        sessionDO
+          .fetch(
+            new Request('https://session/title-set-by-user', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-partykit-room': sessionId,
+                'x-user-id': userId,
+              },
+              body: JSON.stringify({ title: (body as { title?: unknown }).title ?? null }),
+            }),
+          )
+          .catch((err) => {
+            console.warn(`[api] PATCH /api/sessions/${sessionId} DO sync failed:`, err)
+          }),
+      )
     }
 
     await broadcastSessionRow(c.env, c.executionCtx, sessionId, 'update')

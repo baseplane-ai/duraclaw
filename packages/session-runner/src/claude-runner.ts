@@ -12,6 +12,7 @@ import type {
 import { handleQueryCommand } from './commands.js'
 import { buildCleanEnv } from './env.js'
 import { resolveProject } from './project-resolver.js'
+import { SessionTitler, type TranscriptMessage } from './titler.js'
 import type { RunnerSessionContext } from './types.js'
 
 /** Debounce interval for kata state file changes (ms). Matches gateway. */
@@ -425,6 +426,23 @@ export class ClaudeRunner {
         options.resume = cmd.sdk_session_id
       }
 
+      // GH#86: instantiate the Haiku session titler. Runs fire-and-forget
+      // calls to Haiku after turn-complete and on pivot detection. Lives
+      // on ctx so handleIncomingCommand in main.ts can trigger pivot checks.
+      const titler = new SessionTitler({
+        channel: ch,
+        ctx,
+        sendFn: (channel, event, context) =>
+          send(channel, event as unknown as GatewayEvent, context),
+        enabled: !!cmd.titler_enabled,
+      })
+      ctx.titler = titler
+
+      // Accumulates user/assistant text for the titler's transcript. The
+      // titler needs a rolling window of recent messages — we collect them
+      // here because the SDK query() stream provides each message inline.
+      const titlerHistory: TranscriptMessage[] = []
+
       // canUseTool callback: intercepts AskUserQuestion and permission prompts
       options.canUseTool = async (
         toolName: string,
@@ -591,13 +609,17 @@ export class ClaudeRunner {
               ctx,
             )
           } else if (message.type === 'assistant') {
+            // GH#86: accumulate finalized assistant turns for the titler.
+            const assistantContent = (message as any).message?.content ?? []
+            titlerHistory.push({ role: 'assistant', content: assistantContent })
+
             send(
               ch,
               {
                 type: 'assistant',
                 session_id: sessionId,
                 uuid: (message as any).uuid,
-                content: (message as any).message?.content ?? [],
+                content: assistantContent,
               },
               ctx,
             )
@@ -713,6 +735,11 @@ export class ClaudeRunner {
               },
               ctx,
             )
+
+            // GH#86: fire-and-forget initial title check after turn-complete.
+            // Errors are swallowed inside the titler — no risk of breaking
+            // the main event loop.
+            titler.maybeInitialTitle(titlerHistory).catch(() => {})
           }
         }
         return idleStop
@@ -720,6 +747,10 @@ export class ClaudeRunner {
 
       // --- Initial turn ---
       // Build the streaming prompt: initial prompt only (no queue — each turn gets its own query)
+      // GH#86: capture initial prompt for titler transcript
+      const promptText = typeof cmd.prompt === 'string' ? cmd.prompt : JSON.stringify(cmd.prompt)
+      titlerHistory.push({ role: 'user', content: promptText })
+
       async function* initialPrompt(): AsyncGenerator<SDKUserMsg> {
         yield {
           type: 'user',
@@ -766,6 +797,10 @@ export class ClaudeRunner {
         }
 
         const content = nextContent
+        // GH#86: capture follow-up user content for titler transcript
+        const followUpText = typeof content === 'string' ? content : JSON.stringify(content)
+        titlerHistory.push({ role: 'user', content: followUpText })
+
         async function* followUpPrompt(): AsyncGenerator<SDKUserMsg> {
           yield {
             type: 'user',

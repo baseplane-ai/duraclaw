@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.91",
+    "@anthropic-ai/sdk": "^0.80.0",
     "@duraclaw/shared-transport": "workspace:*",
     "@duraclaw/shared-types": "workspace:*"
   },

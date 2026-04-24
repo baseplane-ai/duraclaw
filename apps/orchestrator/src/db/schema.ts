@@ -143,6 +143,12 @@ export const agentSessions = sqliteTable(
     prompt: text('prompt'),
     summary: text('summary'),
     title: text('title'),
+    // GH#86: provenance for `title` — `'user'` freezes the title (Haiku
+    // never overwrites), `'haiku'` allows future retitles, NULL means no
+    // title yet (or never auto-titled). Writes happen via the session
+    // PATCH handler (sets `'user'`) or the DO's `case 'title_update':`
+    // handler (sets `'haiku'`) — never directly from clients.
+    titleSource: text('title_source'),
     tag: text('tag'),
     origin: text('origin').default('duraclaw'),
     agent: text('agent').default('claude'),
@@ -258,6 +264,20 @@ export const projects = sqliteTable('projects', {
   updatedAt: text('updated_at').notNull(),
   deletedAt: text('deleted_at'),
   visibility: text('visibility').notNull().default('public'),
+})
+
+/**
+ * GH#86: Generic global feature-flag table.
+ *
+ * Read at session-spawn time by SessionDO.triggerGatewayDial (cached 5
+ * min in-DO). Admin-only CRUD via `/api/admin/feature-flags*`. Flags
+ * are global, not per-user. Write semantics: `enabled` is INTEGER
+ * (0/1) for SQLite truthiness; `updated_at` is ISO-8601 string.
+ */
+export const featureFlags = sqliteTable('feature_flags', {
+  id: text('id').primaryKey(),
+  enabled: integer('enabled', { mode: 'boolean' }).notNull().default(false),
+  updatedAt: text('updated_at').notNull(),
 })
 
 export const userPreferences = sqliteTable('user_preferences', {

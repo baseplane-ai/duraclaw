@@ -106,6 +106,23 @@ export interface SessionMeta {
    * finished" signal (no more fragile spec/VP filesystem probes).
    */
   lastRunEnded?: boolean
+  /**
+   * GH#86: Haiku-generated session title and provenance.
+   * - `title` mirrors `agent_sessions.title` (D1 is the durable source for
+   *   client reads, but we keep a copy in DO state so the never-clobber
+   *   guard in `case 'title_update':` doesn't need a D1 round-trip).
+   * - `title_source` is the never-clobber gate: `'user'` freezes the title
+   *   forever; `'haiku'` allows future retitles; `null` is the initial
+   *   "no title yet" state.
+   * - `title_confidence` is the Haiku-reported confidence for the most
+   *   recent successful titler call.
+   * - `title_set_at_turn` is the `num_turns` snapshot at title write time;
+   *   used to drive UI "title is N turns stale" affordances (future).
+   */
+  title?: string | null
+  title_confidence?: number | null
+  title_set_at_turn?: number | null
+  title_source?: 'user' | 'haiku' | null
 }
 
 const DEFAULT_META: SessionMeta = {
@@ -128,6 +145,10 @@ const DEFAULT_META: SessionMeta = {
   summary: null,
   sdk_session_id: null,
   active_callback_token: undefined,
+  title: null,
+  title_confidence: null,
+  title_set_at_turn: null,
+  title_source: null,
 }
 
 // Map `SessionMeta` keys to their `session_meta` column names. Keys not in
@@ -153,6 +174,10 @@ const META_COLUMN_MAP: Partial<Record<keyof SessionMeta, string>> = {
   active_callback_token: 'active_callback_token',
   lastKataMode: 'last_kata_mode',
   lastRunEnded: 'last_run_ended',
+  title: 'title',
+  title_confidence: 'title_confidence',
+  title_set_at_turn: 'title_set_at_turn',
+  title_source: 'title_source',
 }
 
 /**
@@ -242,6 +267,15 @@ export class SessionDO extends Agent<Env, SessionMeta> {
    * instance, then silent drop.
    */
   private loggedLegacyEventTypes = new Set<string>()
+
+  /**
+   * GH#86: feature-flag cache. `triggerGatewayDial` reads global flags
+   * (e.g. `haiku_titler`) from D1 to decide what to bake into the runner
+   * spawn payload. Cached for `FEATURE_FLAG_CACHE_TTL_MS` per DO so
+   * spawn paths don't hit D1 on every turn. Fail-open on read errors —
+   * see `getFeatureFlagEnabled`.
+   */
+  private featureFlagCache = new Map<string, { enabled: boolean; expiresAt: number }>()
 
   // ── Lifecycle ──────────────────────────────────────────────────
 
@@ -595,6 +629,30 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       try {
         const body = await this.getContextUsage()
         return new Response(JSON.stringify(body), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      } catch (err) {
+        return new Response(
+          JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+    }
+
+    // GH#86 B4: PATCH /api/sessions/:id with `{title: ...}` writes
+    // `title_source='user'` to D1, then POSTs here so the DO mirrors the
+    // freeze into `session_meta`. The runner-event handler
+    // (`case 'title_update':`) checks `this.state.title_source` first;
+    // without this sync, a Haiku call in flight at the moment of the
+    // user PATCH could still land and clobber the user's title.
+    if (request.method === 'POST' && url.pathname === '/title-set-by-user') {
+      try {
+        const body = (await request.json()) as { title?: string | null }
+        this.updateState({
+          title: body.title ?? null,
+          title_source: 'user',
+        })
+        return new Response(JSON.stringify({ ok: true }), {
           headers: { 'Content-Type': 'application/json' },
         })
       } catch (err) {
@@ -1281,6 +1339,37 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     await this.recoverFromDroppedConnection()
   }
 
+  // ── Feature Flags (GH#86) ───────────────────────────────────────
+
+  /**
+   * Read a global feature flag from D1, cached in-DO for 5 minutes.
+   * Fail-open: on D1 read failure (network error, missing table during
+   * a deploy window), returns `defaultValue` — callers decide whether
+   * the flag should default on or off.
+   */
+  private async getFeatureFlagEnabled(flagId: string, defaultValue: boolean): Promise<boolean> {
+    const now = Date.now()
+    const cached = this.featureFlagCache.get(flagId)
+    if (cached && cached.expiresAt > now) return cached.enabled
+    try {
+      const db = drizzle(this.env.AUTH_DB, { schema })
+      const row = await db
+        .select({ enabled: schema.featureFlags.enabled })
+        .from(schema.featureFlags)
+        .where(eq(schema.featureFlags.id, flagId))
+        .limit(1)
+      const enabled = row[0] ? !!row[0].enabled : defaultValue
+      this.featureFlagCache.set(flagId, { enabled, expiresAt: now + 300_000 })
+      return enabled
+    } catch (err) {
+      console.warn(
+        `[SessionDO:${this.ctx.id}] getFeatureFlagEnabled(${flagId}) D1 read failed, defaulting to ${defaultValue}:`,
+        err,
+      )
+      return defaultValue
+    }
+  }
+
   // ── Gateway Connection ─────────────────────────────────────────
 
   /**
@@ -1303,6 +1392,14 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       console.error(`[SessionDO:${this.ctx.id}] CC_GATEWAY_URL or WORKER_PUBLIC_URL not configured`)
       this.updateState({ status: 'idle', error: 'Gateway URL or Worker URL not configured' })
       return
+    }
+
+    // GH#86: inject titler_enabled into execute/resume commands. Read from
+    // D1 feature_flags (5-min cached). Fail-open (default true) so new
+    // deploys work before the admin toggles anything.
+    if (cmd.type === 'execute' || cmd.type === 'resume') {
+      const titlerEnabled = await this.getFeatureFlagEnabled('haiku_titler', true)
+      cmd = { ...cmd, titler_enabled: titlerEnabled }
     }
 
     const callback_token = crypto.randomUUID()
@@ -4857,6 +4954,45 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       }
 
       // P3 B4: parse `context_usage` to `ContextUsage`, drain probe resolvers,
+      // GH#86: Haiku-generated session title. Runner emits this after a
+      // successful Haiku call (initial title or pivot retitle). The DO
+      // applies iff title_source !== 'user' (B4 never-clobber invariant),
+      // persists to session_meta + D1, and broadcasts via broadcastSessionRow.
+      case 'title_update': {
+        // B4: never clobber a user-set title
+        if (this.state.title_source === 'user') {
+          console.log(`[SessionDO:${this.ctx.id}] title_update discarded: title_source='user'`)
+          break
+        }
+
+        this.updateState({
+          title: event.title,
+          title_confidence: event.confidence,
+          title_set_at_turn: event.turn_stamp,
+          title_source: 'haiku',
+        })
+
+        // D1 write then broadcast — chained inside a single waitUntil so
+        // the D1 write completes before broadcastSessionRow reads the row.
+        const sessionId = this.name
+        const now = new Date().toISOString()
+        this.ctx.waitUntil(
+          this.d1
+            .update(agentSessions)
+            .set({
+              title: event.title,
+              titleSource: 'haiku',
+              updatedAt: now,
+            })
+            .where(eq(agentSessions.id, sessionId))
+            .then(() => broadcastSessionRow(this.env, this.ctx, sessionId, 'update'))
+            .catch((err) => {
+              console.error(`[SessionDO:${this.ctx.id}] title_update D1 sync failed:`, err)
+            }),
+        )
+        break
+      }
+
       // and update `session_meta.context_usage_json` + cached_at. The original
       // gateway_event broadcast is retained (per P3 brief Non-Goals: keep
       // existing client handlers live until the deferred consumer-migration
