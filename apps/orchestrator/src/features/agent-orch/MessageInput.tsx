@@ -390,7 +390,11 @@ function ComposerActions({
     return () => ytext.unobserve(update)
   }, [ytext])
 
-  const isRunning = status === 'running' || status === 'waiting_gate'
+  // Spec #80 P1: `pending` (runner stamped, pre-first-event) counts as
+  // in-flight for input disabling — user shouldn't be able to submit
+  // another turn before the first event lands. `error` is terminal, so
+  // the input re-enables.
+  const isRunning = status === 'running' || status === 'waiting_gate' || status === 'pending'
 
   // Status left the busy set → clear the interrupt timer so the next
   // busy spin starts from zero.

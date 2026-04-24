@@ -201,7 +201,9 @@ export function SessionCardList({
     if (workspaceProjects && !workspaceProjects.includes(s.project)) return false
     if (s.archived) return false
     const derived = s.status as SessionStatus
-    if (statusFilter === 'running') return derived === 'running'
+    // Spec #80 P1: `pending` sessions (runner stamped, pre-first-event)
+    // stay grouped with running in the card-list filter.
+    if (statusFilter === 'running') return derived === 'running' || derived === 'pending'
     if (statusFilter === 'completed') return derived === 'idle'
     return true
   })

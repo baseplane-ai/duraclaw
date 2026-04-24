@@ -113,4 +113,112 @@ describe('useDerivedStatus', () => {
     // D1 serverSeq (2) >= localMaxSeq (2) → fall through to undefined
     expect(result.current).toBeUndefined()
   })
+
+  // ── Spec #80: awaiting-response → 'pending' status ─────────────────
+
+  it("returns 'pending' when the tail user message has an awaiting_response@pending part", () => {
+    const { result } = setup([
+      {
+        id: 'msg-1',
+        seq: 1,
+        parts: [
+          { type: 'text', text: 'hello', state: 'complete' },
+          {
+            type: 'awaiting_response',
+            state: 'pending',
+            reason: 'first_token',
+            startedTs: 1_000,
+          },
+        ],
+      },
+    ])
+    expect(result.current).toBe('pending')
+  })
+
+  it("picks 'pending' over a streaming text part elsewhere in the tail message", () => {
+    // Awaiting comes first in the parts array; the tail scan visits parts
+    // in order and should short-circuit on 'pending' before reaching
+    // 'streaming'.
+    const { result } = setup([
+      {
+        id: 'msg-1',
+        seq: 1,
+        parts: [
+          {
+            type: 'awaiting_response',
+            state: 'pending',
+            reason: 'first_token',
+            startedTs: 1_000,
+          },
+          { type: 'text', state: 'streaming' },
+        ],
+      },
+    ])
+    expect(result.current).toBe('pending')
+  })
+
+  it("transitions 'pending' → 'running' once the awaiting part is cleared and streaming begins", () => {
+    // Phase 1: user row + awaiting tail → 'pending'.
+    mockUseMessagesCollection.mockReturnValue({
+      messages: [
+        {
+          id: 'msg-u1',
+          seq: 1,
+          parts: [
+            { type: 'text', text: 'hi', state: 'complete' },
+            {
+              type: 'awaiting_response',
+              state: 'pending',
+              reason: 'first_token',
+              startedTs: 1_000,
+            },
+          ],
+        },
+      ],
+      isLoading: false,
+      isFetching: false,
+    } as ReturnType<typeof useMessagesCollection>)
+    mockUseSession.mockReturnValue(undefined)
+    const { result, rerender } = renderHook(() => useDerivedStatus('session-1'))
+    expect(result.current).toBe('pending')
+
+    // Phase 2: awaiting part removed (DO clear), assistant streaming tail
+    // appended. `seq` on the new assistant row advances past the user
+    // row's seq so localMaxSeq stays ahead of the (undefined) server seq.
+    mockUseMessagesCollection.mockReturnValue({
+      messages: [
+        {
+          id: 'msg-u1',
+          seq: 1,
+          parts: [{ type: 'text', text: 'hi', state: 'complete' }],
+        },
+        {
+          id: 'msg-a1',
+          seq: 2,
+          parts: [{ type: 'text', state: 'streaming' }],
+        },
+      ],
+      isLoading: false,
+      isFetching: false,
+    } as ReturnType<typeof useMessagesCollection>)
+    rerender()
+    expect(result.current).toBe('running')
+  })
+
+  it("falls back to 'running' when awaiting is cleared but streaming is the only in-flight marker", () => {
+    // Direct sanity: awaiting absent, streaming text present → 'running'.
+    const { result } = setup([
+      {
+        id: 'msg-u1',
+        seq: 1,
+        parts: [{ type: 'text', text: 'hi', state: 'complete' }],
+      },
+      {
+        id: 'msg-a1',
+        seq: 2,
+        parts: [{ type: 'text', state: 'streaming' }],
+      },
+    ])
+    expect(result.current).toBe('running')
+  })
 })

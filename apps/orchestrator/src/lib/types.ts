@@ -22,6 +22,10 @@ export type {
 } from '@duraclaw/shared-types'
 export type { SessionMessage, SessionMessagePart } from 'agents/experimental/memory/session'
 
+// Spec #80 P1: awaiting-response user-message part + reason enum.
+export type { AwaitingReason, AwaitingResponsePart } from './awaiting-response'
+export { buildAwaitingPart } from './awaiting-response'
+
 // ── Chat message type (shared across features + db) ───────────────
 
 export interface ChatMessage {

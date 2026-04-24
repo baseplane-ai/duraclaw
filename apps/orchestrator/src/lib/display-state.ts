@@ -16,6 +16,17 @@ import type { SessionStatus } from '~/lib/types'
 
 export type DisplayState =
   | { status: 'running'; label: 'Running'; color: 'green'; icon: 'spinner'; isInteractive: true }
+  // Spec #80 P1: `pending` = runner stamped, pre-first-event. Existing
+  // used colors are green (running), gray (idle/archived/disconnected/
+  // unknown), amber (waiting_gate). Spec preference order is
+  // amber → violet → sky; amber is taken, so violet is first unused.
+  | {
+      status: 'pending'
+      label: 'Thinking'
+      color: 'violet'
+      icon: 'spinner'
+      isInteractive: true
+    }
   | { status: 'idle'; label: 'Idle'; color: 'gray'; icon: 'circle'; isInteractive: true }
   | {
       status: 'waiting_gate'
@@ -24,6 +35,7 @@ export type DisplayState =
       icon: 'alert'
       isInteractive: true
     }
+  | { status: 'error'; label: 'Error'; color: 'red'; icon: 'alert'; isInteractive: true }
   | { status: 'archived'; label: 'Archived'; color: 'gray'; icon: 'archive'; isInteractive: false }
   | {
       status: 'disconnected'
@@ -42,6 +54,14 @@ const RUNNING: DisplayState = {
   isInteractive: true,
 }
 
+const PENDING: DisplayState = {
+  status: 'pending',
+  label: 'Thinking',
+  color: 'violet',
+  icon: 'spinner',
+  isInteractive: true,
+}
+
 const IDLE: DisplayState = {
   status: 'idle',
   label: 'Idle',
@@ -54,6 +74,14 @@ const WAITING_GATE: DisplayState = {
   status: 'waiting_gate',
   label: 'Needs Attention',
   color: 'amber',
+  icon: 'alert',
+  isInteractive: true,
+}
+
+const ERROR: DisplayState = {
+  status: 'error',
+  label: 'Error',
+  color: 'red',
   icon: 'alert',
   isInteractive: true,
 }
@@ -125,6 +153,8 @@ export function deriveDisplayStateFromStatus(
   // doesn't currently include them.
   const s = status as string
   switch (s) {
+    case 'pending':
+      return PENDING
     case 'running':
       return RUNNING
     case 'idle':
@@ -136,6 +166,8 @@ export function deriveDisplayStateFromStatus(
     case 'waiting_input':
     case 'waiting_permission':
       return WAITING_GATE
+    case 'error':
+      return ERROR
     case 'archived':
       return ARCHIVED
     default:
@@ -147,8 +179,10 @@ export function deriveDisplayStateFromStatus(
 // canonical variant objects without constructing them inline.
 export const DISPLAY_STATES = {
   running: RUNNING,
+  pending: PENDING,
   idle: IDLE,
   waiting_gate: WAITING_GATE,
+  error: ERROR,
   archived: ARCHIVED,
   disconnected: DISCONNECTED,
   unknown: UNKNOWN,

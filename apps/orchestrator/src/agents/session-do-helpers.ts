@@ -310,3 +310,89 @@ export function finalizeResultTurn(cbs: FinalizeResultTurnCallbacks): void {
   cbs.syncStatusToD1()
   cbs.syncResultToD1()
 }
+
+// ── Spec #80: awaiting-response helpers ────────────────────────────────
+
+/**
+ * Grace window applied to `awaiting_response@pending` parts before the
+ * DO watchdog treats them as a stalled dial-out. Mirrors the existing
+ * `recoverFromDroppedConnection` grace.
+ */
+export const RECOVERY_GRACE_MS = 15_000
+
+/**
+ * Pure version of `SessionDO.clearAwaitingResponse` (#80 B5).
+ *
+ * Scans history tail-first for the most-recent user message. If that
+ * message's trailing part is `awaiting_response@pending`, returns a new
+ * message value with that part stripped. Idempotent — returns `null`
+ * when the tail user has no such part (already cleared or never
+ * stamped), or when no user message exists in history.
+ *
+ * Extracted so unit tests can exercise the scan + strip logic without
+ * the TC39-decorated SessionDO class.
+ */
+export function planClearAwaiting<TMsg extends SessionMessage>(
+  history: readonly TMsg[],
+): { updated: TMsg } | null {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const msg = history[i]
+    if (msg.role !== 'user') continue
+    const lastPart = msg.parts[msg.parts.length - 1] as
+      | { type?: string; state?: string }
+      | undefined
+    if (lastPart?.type === 'awaiting_response' && lastPart.state === 'pending') {
+      const nextParts = msg.parts.slice(0, -1)
+      return { updated: { ...msg, parts: nextParts } }
+    }
+    // Tail user examined (awaiting present or not) — stop scanning.
+    return null
+  }
+  return null
+}
+
+/**
+ * Pure decision returned by {@link planAwaitingTimeout}.
+ *
+ * - `{ kind: 'noop' }` — nothing to do (no awaiting tail, runner
+ *   attached, or the grace window has not elapsed).
+ * - `{ kind: 'expire', startedTs }` — the caller should run the
+ *   expire sequence: clear awaiting, append an error system message,
+ *   flip DO state to `idle` with the error text populated, and sync
+ *   status to D1.
+ */
+export type AwaitingTimeoutDecision = { kind: 'noop' } | { kind: 'expire'; startedTs: number }
+
+/**
+ * Pure version of `SessionDO.checkAwaitingTimeout` (#80 B7).
+ *
+ * Decides whether the watchdog should expire an awaiting_response part.
+ * The decision is a pure function of the current history tail, the
+ * runner connection id, the current clock, and the grace window; the
+ * caller performs the state mutations so the side-effecting pieces
+ * (safeAppendMessage / updateState / syncStatusToD1) stay in the DO.
+ */
+export function planAwaitingTimeout<TMsg extends SessionMessage>(input: {
+  history: readonly TMsg[]
+  connectionId: string | null
+  now: number
+  graceMs?: number
+}): AwaitingTimeoutDecision {
+  if (input.connectionId !== null) return { kind: 'noop' }
+  const grace = input.graceMs ?? RECOVERY_GRACE_MS
+
+  for (let i = input.history.length - 1; i >= 0; i--) {
+    const msg = input.history[i]
+    if (msg.role !== 'user') continue
+    const lastPart = msg.parts[msg.parts.length - 1] as
+      | { type?: string; state?: string; startedTs?: number }
+      | undefined
+    if (lastPart?.type !== 'awaiting_response' || lastPart.state !== 'pending') {
+      return { kind: 'noop' }
+    }
+    const startedTs = typeof lastPart.startedTs === 'number' ? lastPart.startedTs : 0
+    if (input.now - startedTs <= grace) return { kind: 'noop' }
+    return { kind: 'expire', startedTs }
+  }
+  return { kind: 'noop' }
+}

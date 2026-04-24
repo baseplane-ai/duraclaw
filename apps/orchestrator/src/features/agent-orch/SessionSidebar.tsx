@@ -93,7 +93,9 @@ export function SessionSidebar({
         return false
     }
     const derived = s.status as SessionStatus
-    if (statusFilter === 'running') return derived === 'running'
+    // Spec #80 P1: `pending` sessions (runner stamped, pre-first-event)
+    // stay grouped with running in the sidebar filter.
+    if (statusFilter === 'running') return derived === 'running' || derived === 'pending'
     if (statusFilter === 'completed') return derived === 'idle'
     return true
   })
@@ -170,7 +172,13 @@ export function SessionSidebar({
               <span
                 className={cn(
                   'size-2 rounded-full',
-                  (session.status as string) === 'running' ? 'bg-green-500' : 'bg-gray-400',
+                  // Spec #80 P1: pending sessions share the running dot color
+                  // so the collapsed sidebar treats in-flight + pre-first-event
+                  // as the same active state.
+                  (session.status as string) === 'running' ||
+                    (session.status as string) === 'pending'
+                    ? 'bg-green-500'
+                    : 'bg-gray-400',
                 )}
               />
             </button>

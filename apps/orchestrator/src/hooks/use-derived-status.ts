@@ -46,6 +46,10 @@ export function useDerivedStatus(sessionId: string | null): SessionStatus | unde
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i]
       for (const part of (msg.parts as SessionMessagePart[] | undefined) ?? []) {
+        if (part.type === 'awaiting_response' && (part as { state?: string }).state === 'pending') {
+          return 'pending'
+        }
+
         if (part.type === 'result') {
           return 'idle'
         }

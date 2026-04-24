@@ -65,10 +65,19 @@ function getBarClasses(status: string | undefined): string {
   switch (status) {
     case 'running':
       return 'bg-info/20 border-t border-info/50'
+    // Spec #80 P1: `pending` = runner stamped, pre-first-event. Violet
+    // tint mirrors the display-state color token so StatusBar reads the
+    // same as the tab / list badge.
+    case 'pending':
+      return 'bg-violet-500/20 border-t border-violet-500/50'
     case 'waiting_gate':
     case 'waiting_input':
     case 'waiting_permission':
       return 'bg-warning/20 border-t border-warning/50'
+    // Spec #80 B7: `error` = watchdog terminal state. Red tint mirrors
+    // the display-state color token.
+    case 'error':
+      return 'bg-red-500/20 border-t border-red-500/50'
     default:
       return 'bg-background border-t'
   }
