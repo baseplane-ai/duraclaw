@@ -19,7 +19,6 @@ import { QuickPromptInput } from '~/components/quick-prompt-input'
 import { StatusBar } from '~/components/status-bar'
 import { TabBar } from '~/components/tab-bar'
 import { sessionsCollection } from '~/db/sessions-collection'
-import { useIsMobile } from '~/hooks/use-mobile'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { useSwipeTabs } from '~/hooks/use-swipe-tabs'
 import { getTabSyncSnapshot, isDraftTabId, newDraftTabId, useTabSync } from '~/hooks/use-tab-sync'
@@ -38,7 +37,6 @@ export function AgentOrchPage() {
 }
 
 function AgentOrchContent() {
-  const isMobile = useIsMobile()
   const { sessions } = useSessionsCollection()
   const search = useSearch({ from: '/_authenticated/' })
   const navigate = useNavigate()
@@ -309,18 +307,9 @@ function AgentOrchContent() {
     return () => window.removeEventListener('keydown', handler)
   }, [handleSelectSession, handleCloseTab])
 
-  // On mobile, the tab-bar hosts the SidebarTrigger as a left bookend so
-  // the 64px header row can be reclaimed. If there are no open tabs the
-  // tab-bar doesn't render, so fall back to the header to keep the
-  // sidebar reachable.
-  const showHeader = !isMobile || openTabs.length === 0
-
   return (
     <>
-      {showHeader && <Header fixed />}
-      <Main fixed fluid className="p-0" {...swipeProps}>
-        <PwaInstallBanner />
-        <PushOptInBanner />
+      <Header fixed flush>
         <TabBar
           openTabs={openTabs}
           activeSessionId={activeSessionId}
@@ -331,6 +320,10 @@ function AgentOrchContent() {
           onNewSessionInTab={handleNewSessionInTab}
           onNewTabForProject={handleNewTabForProject}
         />
+      </Header>
+      <Main fixed fluid className="p-0" {...swipeProps}>
+        <PwaInstallBanner />
+        <PushOptInBanner />
         <div
           className={
             swipeDir === 'left'
