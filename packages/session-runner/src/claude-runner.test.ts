@@ -1,5 +1,8 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ClaudeRunner, handleCanUseTool, isIdleStop } from './claude-runner.js'
+import { ClaudeRunner, handleCanUseTool, isIdleStop, startKataWatcher } from './claude-runner.js'
 import type { RunnerSessionContext } from './types.js'
 
 /**
@@ -694,4 +697,152 @@ describe('isIdleStop', () => {
       isIdleStop({ subtype: 'success', result: 'No response requested. Also did other work.' }),
     ).toBe(false)
   })
+})
+
+/**
+ * Regression — pre-fix, the runner attached a recursive `fs.watch` on
+ * `.kata/sessions/` at startup, but Bun's recursive watcher on Linux drops
+ * file events for sub-dirs created post-attach. The kata SessionStart
+ * hook creates `.kata/sessions/<sdk-id>/` shortly after the runner spawns
+ * and writes `state.json` into it; under the old scheme that write was
+ * silently lost, leaving `kataIssue=null` in D1 and the chain ladder
+ * un-rendered. The fix lazy-attaches a non-recursive watcher on the leaf
+ * dir at session.init (via `emitNow`) and retries when the dir hasn't
+ * been created yet.
+ */
+describe('startKataWatcher leaf-attach regression', () => {
+  let tmpProject: string
+  let sessionsDir: string
+  const sdkSessionId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+
+  beforeEach(() => {
+    tmpProject = mkdtempSync(path.join(tmpdir(), 'kata-watcher-'))
+    sessionsDir = path.join(tmpProject, '.kata', 'sessions')
+    mkdirSync(sessionsDir, { recursive: true })
+  })
+
+  afterEach(() => {
+    rmSync(tmpProject, { recursive: true, force: true })
+  })
+
+  it('emits non-null kata_state when state.json appears in a sub-dir created AFTER attach', async () => {
+    const sent: Record<string, unknown>[] = []
+    const ch = { send: (e: Record<string, unknown>) => sent.push(e) }
+    const ctx = createMockCtx({
+      sessionId: 'sess-test',
+      meta: {
+        sdk_session_id: null,
+        last_activity_ts: 0,
+        last_event_seq: 0,
+        cost: { input_tokens: 0, output_tokens: 0, usd: 0 },
+        model: null,
+        turn_count: 0,
+        state: 'running',
+      },
+    })
+
+    const w = startKataWatcher(tmpProject, 'tmp-project', ch as any, ctx)
+
+    // Simulate session.init: sdk id arrives, runner calls emitNow.
+    // At this point the leaf dir doesn't exist yet — emitNow's read
+    // returns null and attachLeafWatcher kicks the retry timer.
+    ctx.meta.sdk_session_id = sdkSessionId
+    w.emitNow()
+
+    // Wait for the first emit (will be `kata_state: null` since dir
+    // doesn't exist) and for the retry attach loop to be running.
+    await new Promise((r) => setTimeout(r, 200))
+
+    // Now the SessionStart hook lands: create the dir + state.json.
+    const sessionDir = path.join(sessionsDir, sdkSessionId)
+    mkdirSync(sessionDir, { recursive: true })
+    writeFileSync(
+      path.join(sessionDir, 'state.json'),
+      JSON.stringify({
+        sessionId: sdkSessionId,
+        workflowId: 'GH#103',
+        issueNumber: 103,
+        sessionType: 'implementation',
+        currentMode: 'implementation',
+        currentPhase: 'p1',
+        completedPhases: [],
+        template: 'implementation.md',
+        phases: ['p1', 'p2'],
+        modeHistory: [],
+        modeState: {},
+        updatedAt: new Date().toISOString(),
+        beadsCreated: [],
+        editedFiles: [],
+        todosWritten: false,
+      }),
+    )
+
+    // Allow retry attach (every 500ms) + leaf watcher fire + debounce.
+    await new Promise((r) => setTimeout(r, 1500))
+
+    w.stop()
+
+    const kataEvents = sent.filter((e) => e.type === 'kata_state')
+    expect(kataEvents.length).toBeGreaterThan(0)
+
+    // The crucial assertion: at least one emitted event must carry the
+    // populated state (issueNumber=103, currentMode=implementation).
+    // Pre-fix, every kata_state event was `kata_state: null` because the
+    // recursive watcher never fired for state.json.
+    const populated = kataEvents.find(
+      (e) =>
+        (e.kata_state as Record<string, unknown> | null)?.issueNumber === 103 &&
+        (e.kata_state as Record<string, unknown> | null)?.currentMode === 'implementation',
+    )
+    expect(populated).toBeDefined()
+  }, 5000)
+
+  it('emits non-null kata_state when state.json is written into a pre-existing leaf dir', async () => {
+    const sent: Record<string, unknown>[] = []
+    const ch = { send: (e: Record<string, unknown>) => sent.push(e) }
+    const ctx = createMockCtx({
+      sessionId: 'sess-test',
+      meta: {
+        sdk_session_id: null,
+        last_activity_ts: 0,
+        last_event_seq: 0,
+        cost: { input_tokens: 0, output_tokens: 0, usd: 0 },
+        model: null,
+        turn_count: 0,
+        state: 'running',
+      },
+    })
+
+    // SessionStart hook ran before the runner emitNow: dir already exists.
+    const sessionDir = path.join(sessionsDir, sdkSessionId)
+    mkdirSync(sessionDir, { recursive: true })
+
+    const w = startKataWatcher(tmpProject, 'tmp-project', ch as any, ctx)
+
+    ctx.meta.sdk_session_id = sdkSessionId
+    w.emitNow()
+
+    await new Promise((r) => setTimeout(r, 100))
+
+    writeFileSync(
+      path.join(sessionDir, 'state.json'),
+      JSON.stringify({
+        sessionId: sdkSessionId,
+        issueNumber: 42,
+        currentMode: 'planning',
+        sessionType: 'planning',
+      }),
+    )
+
+    await new Promise((r) => setTimeout(r, 400))
+
+    w.stop()
+
+    const populated = sent.find(
+      (e) =>
+        e.type === 'kata_state' &&
+        (e.kata_state as Record<string, unknown> | null)?.issueNumber === 42,
+    )
+    expect(populated).toBeDefined()
+  }, 5000)
 })

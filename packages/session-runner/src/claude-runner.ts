@@ -74,6 +74,11 @@ async function readSessionKataState(
   return { ...parsed, runEnded }
 }
 
+/** Retry interval (ms) when the leaf session dir doesn't yet exist. */
+const KATA_ATTACH_RETRY_MS = 500
+/** Total budget (ms) for retrying leaf-dir attach before giving up. */
+const KATA_ATTACH_RETRY_BUDGET_MS = 30_000
+
 /**
  * Watch `.kata/sessions/<sdk-session-id>/` for state.json / run-end.json
  * changes and emit KataStateEvent over the runner's dial-back channel.
@@ -84,20 +89,41 @@ async function readSessionKataState(
  * this watcher (via `emitKataStateNow`) from the init handler so the DO
  * sees the first snapshot as soon as it's resolvable.
  *
+ * **Linux/Bun caveat (was: silent kataIssue=null bug)** — this watcher
+ * intentionally does NOT use `fs.watch(parent, {recursive:true})`. On
+ * Linux, Bun's recursive watcher fires for files in dirs that existed at
+ * attach time, and for sub-dir creation events on the parent, but it does
+ * NOT fire for files written *inside* a sub-dir created after the watcher
+ * attached. The kata SessionStart hook creates `.kata/sessions/<sdk-id>/`
+ * shortly after the runner spawns and writes `state.json` into it; under
+ * the recursive scheme those writes were silently dropped, so the DO
+ * never received a non-null `kata_state`, `kataIssue` stayed null in D1,
+ * and chain-aware UI (`ChainStatusItem`) never mounted.
+ *
+ * Fix: lazy-attach a non-recursive watcher on the exact leaf session dir
+ * once `sdk_session_id` is known. If the dir doesn't exist yet (race with
+ * the SessionStart hook), retry every {@link KATA_ATTACH_RETRY_MS} ms up
+ * to {@link KATA_ATTACH_RETRY_BUDGET_MS}. A non-recursive watch on a
+ * pre-existing dir reliably fires `rename`/`change` for files written
+ * into it on every supported platform.
+ *
  * Returns `{ stop, emitNow }` — `emitNow()` is used by the session.init
- * handler to force a snapshot as soon as `sdk_session_id` is known, without
- * waiting for the next filesystem event.
+ * handler to force a snapshot as soon as `sdk_session_id` is known, and
+ * also to trigger the leaf-watcher attach.
  *
  * Errors are swallowed — kata state is best-effort.
  */
-function startKataWatcher(
+export function startKataWatcher(
   projectPath: string,
   project: string,
   ch: BufferedChannel,
   ctx: RunnerSessionContext,
 ): { stop: () => void; emitNow: () => void } {
   let debounceTimer: ReturnType<typeof setTimeout> | null = null
-  let watcher: FSWatcher | null = null
+  let leafWatcher: FSWatcher | null = null
+  let attachedFor: string | null = null
+  let retryTimer: ReturnType<typeof setTimeout> | null = null
+  let retryDeadline = 0
 
   const emitState = async () => {
     const sdkSessionId = ctx.meta.sdk_session_id
@@ -113,32 +139,63 @@ function startKataWatcher(
     }
   }
 
-  const sessionsDir = nodePath.join(projectPath, '.kata', 'sessions')
-  try {
-    watcher = watch(sessionsDir, { recursive: true }, (_event, filename) => {
-      // Only react to files the runner cares about. `state.json` is the
-      // live mode/phase snapshot; `run-end.json` is the GH#73 can-exit
-      // evidence file written by kata's Stop hook.
-      if (!filename?.endsWith('state.json') && !filename?.endsWith('run-end.json')) return
-      if (debounceTimer) clearTimeout(debounceTimer)
-      debounceTimer = setTimeout(() => {
-        debounceTimer = null
-        emitState()
-      }, KATA_DEBOUNCE_MS)
-    })
-  } catch {
-    // .kata/sessions/ may not exist yet — that's fine.
+  const scheduleEmit = () => {
+    if (debounceTimer) clearTimeout(debounceTimer)
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null
+      void emitState()
+    }, KATA_DEBOUNCE_MS)
+  }
+
+  const attachLeafWatcher = (sdkSessionId: string) => {
+    if (attachedFor === sdkSessionId && leafWatcher) return
+    if (leafWatcher) {
+      leafWatcher.close()
+      leafWatcher = null
+    }
+    const sessionDir = nodePath.join(projectPath, '.kata', 'sessions', sdkSessionId)
+    try {
+      leafWatcher = watch(sessionDir, (_event, filename) => {
+        // Only react to files the runner cares about. `state.json` is the
+        // live mode/phase snapshot; `run-end.json` is the GH#73 can-exit
+        // evidence file written by kata's Stop hook.
+        if (filename !== 'state.json' && filename !== 'run-end.json') return
+        scheduleEmit()
+      })
+      attachedFor = sdkSessionId
+      if (retryTimer) {
+        clearTimeout(retryTimer)
+        retryTimer = null
+      }
+      // Re-emit once attached: catches the case where state.json was
+      // written between emitNow()'s read and the watcher attach.
+      scheduleEmit()
+    } catch {
+      // Leaf dir doesn't exist yet — the kata SessionStart hook hasn't
+      // landed. Retry on a small budget; once the dir appears the watcher
+      // attaches and a fresh emit fires.
+      if (retryDeadline === 0) retryDeadline = Date.now() + KATA_ATTACH_RETRY_BUDGET_MS
+      if (Date.now() >= retryDeadline) return
+      if (retryTimer) clearTimeout(retryTimer)
+      retryTimer = setTimeout(() => {
+        retryTimer = null
+        attachLeafWatcher(sdkSessionId)
+      }, KATA_ATTACH_RETRY_MS)
+    }
   }
 
   return {
     stop: () => {
       if (debounceTimer) clearTimeout(debounceTimer)
-      if (watcher) {
-        watcher.close()
-        watcher = null
+      if (retryTimer) clearTimeout(retryTimer)
+      if (leafWatcher) {
+        leafWatcher.close()
+        leafWatcher = null
       }
     },
     emitNow: () => {
+      const sdkSessionId = ctx.meta.sdk_session_id
+      if (sdkSessionId) attachLeafWatcher(sdkSessionId)
       if (debounceTimer) clearTimeout(debounceTimer)
       debounceTimer = null
       void emitState()
