@@ -9,6 +9,7 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as AuthenticatedAdminCaamRouteImport } from './routes/_authenticated/admin.caam'
 import { Route as AuthenticatedAdminUsersRouteImport } from './routes/_authenticated/admin.users'
 import { Route as AuthenticatedBoardRouteImport } from './routes/_authenticated/board'
 import { Route as AuthenticatedDeploysRouteImport } from './routes/_authenticated/deploys'
@@ -58,6 +59,11 @@ const AuthenticatedSessionIdRoute = AuthenticatedSessionIdRouteImport.update({
   path: '/session/$id',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
+const AuthenticatedAdminCaamRoute = AuthenticatedAdminCaamRouteImport.update({
+  id: '/admin/caam',
+  path: '/admin/caam',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
 const AuthenticatedAdminUsersRoute = AuthenticatedAdminUsersRouteImport.update({
   id: '/admin/users',
   path: '/admin/users',
@@ -70,6 +76,7 @@ export interface FileRoutesByFullPath {
   '/board': typeof AuthenticatedBoardRoute
   '/deploys': typeof AuthenticatedDeploysRoute
   '/settings': typeof AuthenticatedSettingsRoute
+  '/admin/caam': typeof AuthenticatedAdminCaamRoute
   '/admin/users': typeof AuthenticatedAdminUsersRoute
   '/session/$id': typeof AuthenticatedSessionIdRoute
 }
@@ -80,6 +87,7 @@ export interface FileRoutesByTo {
   '/deploys': typeof AuthenticatedDeploysRoute
   '/settings': typeof AuthenticatedSettingsRoute
   '/': typeof AuthenticatedIndexRoute
+  '/admin/caam': typeof AuthenticatedAdminCaamRoute
   '/admin/users': typeof AuthenticatedAdminUsersRoute
   '/session/$id': typeof AuthenticatedSessionIdRoute
 }
@@ -92,6 +100,7 @@ export interface FileRoutesById {
   '/_authenticated/deploys': typeof AuthenticatedDeploysRoute
   '/_authenticated/settings': typeof AuthenticatedSettingsRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
+  '/_authenticated/admin/caam': typeof AuthenticatedAdminCaamRoute
   '/_authenticated/admin/users': typeof AuthenticatedAdminUsersRoute
   '/_authenticated/session/$id': typeof AuthenticatedSessionIdRoute
 }
@@ -104,6 +113,7 @@ export interface FileRouteTypes {
     | '/board'
     | '/deploys'
     | '/settings'
+    | '/admin/caam'
     | '/admin/users'
     | '/session/$id'
   fileRoutesByTo: FileRoutesByTo
@@ -114,6 +124,7 @@ export interface FileRouteTypes {
     | '/deploys'
     | '/settings'
     | '/'
+    | '/admin/caam'
     | '/admin/users'
     | '/session/$id'
   id:
@@ -125,6 +136,7 @@ export interface FileRouteTypes {
     | '/_authenticated/deploys'
     | '/_authenticated/settings'
     | '/_authenticated/'
+    | '/_authenticated/admin/caam'
     | '/_authenticated/admin/users'
     | '/_authenticated/session/$id'
   fileRoutesById: FileRoutesById
@@ -193,6 +205,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedSessionIdRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/admin/caam': {
+      id: '/_authenticated/admin/caam'
+      path: '/admin/caam'
+      fullPath: '/admin/caam'
+      preLoaderRoute: typeof AuthenticatedAdminCaamRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/_authenticated/admin/users': {
       id: '/_authenticated/admin/users'
       path: '/admin/users'
@@ -208,6 +227,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedDeploysRoute: typeof AuthenticatedDeploysRoute
   AuthenticatedSettingsRoute: typeof AuthenticatedSettingsRoute
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
+  AuthenticatedAdminCaamRoute: typeof AuthenticatedAdminCaamRoute
   AuthenticatedAdminUsersRoute: typeof AuthenticatedAdminUsersRoute
   AuthenticatedSessionIdRoute: typeof AuthenticatedSessionIdRoute
 }
@@ -217,6 +237,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedDeploysRoute: AuthenticatedDeploysRoute,
   AuthenticatedSettingsRoute: AuthenticatedSettingsRoute,
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
+  AuthenticatedAdminCaamRoute: AuthenticatedAdminCaamRoute,
   AuthenticatedAdminUsersRoute: AuthenticatedAdminUsersRoute,
   AuthenticatedSessionIdRoute: AuthenticatedSessionIdRoute,
 }
