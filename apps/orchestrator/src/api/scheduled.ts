@@ -23,6 +23,20 @@ export async function scheduled(
     const message = err instanceof Error ? err.message : String(err)
     console.error(`[cron] worktree-stale-gc failed: ${message}`)
   }
+
+  // Batch-analysis lane (PR #6). No-ops cleanly when the lane isn't
+  // configured (`ANTHROPIC_API_KEY` missing) so this runs harmlessly
+  // on every deploy regardless of opt-in state.
+  try {
+    const { pollBatchJobs } = await import('../batch/cron-poller')
+    const advanced = await pollBatchJobs({ env })
+    if (advanced > 0) {
+      console.log(`[cron] batch-lane: advanced ${advanced} job rows`)
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    console.error(`[cron] batch-lane poller failed: ${message}`)
+  }
 }
 
 /**

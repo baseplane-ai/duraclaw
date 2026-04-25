@@ -125,8 +125,31 @@ bucket_name = "duraclaw-mobile"
 binding = "SESSION_MEDIA"
 bucket_name = "duraclaw-session-media"
 
+# ── Batch-analysis lane (PR #6) ────────────────────────────────────
+# Opt-in. Uncomment the `producers` + `consumers` blocks once the
+# queues are created in your CF account, then `wrangler secret put
+# ANTHROPIC_API_KEY` and set `BATCH_LANE_ENABLED=1` in [vars] below.
+#
+#   pnpm wrangler queues create duraclaw-batch-jobs
+#   pnpm wrangler queues create duraclaw-batch-jobs-dlq
+#
+# [[queues.producers]]
+# binding    = "BATCH_JOBS"
+# queue      = "duraclaw-batch-jobs"
+#
+# [[queues.consumers]]
+# queue              = "duraclaw-batch-jobs"
+# max_batch_size     = 100      # Anthropic batch limit is 100k requests
+# max_batch_timeout  = 30       # seconds — coalesce slow trickles
+# max_retries        = 3
+# dead_letter_queue  = "duraclaw-batch-jobs-dlq"
+
 [vars]
 VAPID_SUBJECT = "mailto:push@codevibesmatter.com"
+# Set to "1" to enable POST /api/batch-jobs. The cron poller + queue
+# consumer activate independently via their bindings + the
+# ANTHROPIC_API_KEY secret.
+# BATCH_LANE_ENABLED = "1"
 
 # Environment variables (set via wrangler secret)
 # CC_GATEWAY_URL      — VPS executor WebSocket URL

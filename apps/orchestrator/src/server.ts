@@ -11,7 +11,7 @@ import { getRequestSession } from './api/auth-session'
 import { scheduled } from './api/scheduled'
 import * as schema from './db/schema'
 import { agentSessions } from './db/schema'
-import type { Env } from './lib/types'
+import type { BatchJobMessage, Env } from './lib/types'
 
 /**
  * Spec #68 B8 / B9 — shared ACL gate for WS upgrades.
@@ -217,6 +217,16 @@ export default {
     return env.ASSETS.fetch(new Request(new URL('/', request.url), request))
   },
   scheduled,
+  /**
+   * Cloudflare Queue consumer for the batch-analysis lane. Runs only
+   * when `BATCH_JOBS` is bound in wrangler.toml — the binding's
+   * `consumer` config decides batch size + max wait. See
+   * `src/batch/queue-consumer.ts` for the per-message lifecycle.
+   */
+  async queue(batch: MessageBatch<BatchJobMessage>, env: Env, _ctx: ExecutionContext) {
+    const { handleBatchQueue } = await import('./batch/queue-consumer')
+    await handleBatchQueue({ env, batch })
+  },
 }
 
 export { SessionCollabDO, SessionCollabDOv2, SessionDO, UserSettingsDO }

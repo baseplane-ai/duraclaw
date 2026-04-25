@@ -90,6 +90,38 @@ export interface Env {
    *  browsers must authenticate with this secret. Required for broadcast
    *  calls; missing secret means the DO rejects every broadcast with 401. */
   SYNC_BROADCAST_SECRET?: string
+
+  // ── Batch-analysis lane (PR #6) ──────────────────────────────────
+  /** Cloudflare Queue used for non-interactive LLM jobs that resolve via
+   *  the Anthropic Message Batches API (50% off vs sync). Optional —
+   *  when unbound the producer endpoint short-circuits to 503. */
+  BATCH_JOBS?: Queue<BatchJobMessage>
+  /** Feature flag for the producer endpoint. `'1'` enables
+   *  `POST /api/batch-jobs`; anything else makes it 503. The queue
+   *  consumer + cron poller always run if their bindings are present —
+   *  the flag only gates new submissions. */
+  BATCH_LANE_ENABLED?: string
+  /** Anthropic API key used by the batch consumer + cron poller. Set
+   *  via `wrangler secret put`. When unset the queue consumer logs and
+   *  bails without dropping the message; the queue's retry/DLQ takes
+   *  over until the secret is wired. */
+  ANTHROPIC_API_KEY?: string
+}
+
+// Queue message envelope. Producers push these; the consumer in
+// `src/batch/queue-consumer.ts` constructs one Anthropic batch request
+// per message batch. Kept tiny so a misconfigured producer can't blow
+// past Cloudflare Queue's 128 KB per-message cap.
+export interface BatchJobMessage {
+  /** D1 row id (UUID); also used as the Anthropic `custom_id`. */
+  id: string
+  /** Tag identifying the downstream consumer of the result. */
+  consumer: string
+  /** Optional cross-ref into `agent_sessions.id`. */
+  sessionId: string | null
+  /** The serialised `messages.create`-shaped request body. Stored
+   *  redundantly in D1 so a queue replay doesn't have to re-fetch. */
+  requestPayload: string
 }
 
 // ── D1 row response shapes (issue #7 p2) ───────────────────────────
