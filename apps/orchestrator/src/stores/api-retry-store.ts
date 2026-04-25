@@ -10,25 +10,31 @@ import { create } from 'zustand'
 
 interface ApiRetryStore {
   current: ApiRetryEvent | null
-  clearTimer: ReturnType<typeof setTimeout> | null
   push: (event: ApiRetryEvent) => void
   clear: () => void
 }
 
 const AUTO_CLEAR_MS = 30_000
 
-export const useApiRetryStore = create<ApiRetryStore>((set, get) => ({
+// Timer handle is module-private — keeping it out of the zustand state prevents
+// spurious re-renders for any subscriber that selects the full state.
+let clearTimer: ReturnType<typeof setTimeout> | null = null
+
+export const useApiRetryStore = create<ApiRetryStore>((set) => ({
   current: null,
-  clearTimer: null,
   push: (event) => {
-    const existing = get().clearTimer
-    if (existing) clearTimeout(existing)
-    const t = setTimeout(() => set({ current: null, clearTimer: null }), AUTO_CLEAR_MS)
-    set({ current: event, clearTimer: t })
+    if (clearTimer) clearTimeout(clearTimer)
+    clearTimer = setTimeout(() => {
+      clearTimer = null
+      set({ current: null })
+    }, AUTO_CLEAR_MS)
+    set({ current: event })
   },
   clear: () => {
-    const existing = get().clearTimer
-    if (existing) clearTimeout(existing)
-    set({ current: null, clearTimer: null })
+    if (clearTimer) {
+      clearTimeout(clearTimer)
+      clearTimer = null
+    }
+    set({ current: null })
   },
 }))

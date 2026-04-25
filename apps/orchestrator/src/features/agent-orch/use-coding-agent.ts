@@ -592,12 +592,9 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
             const reason = (event as { reason?: string }).reason ?? 'Stalled'
             if (typeof issue === 'number') setStallReason(issue, reason)
             void queryClient.invalidateQueries({ queryKey: ['chains'] })
-          } else if (event.type === 'compact_boundary') {
-            // GH#102 / spec 102-sdk-peelback B11: rendered via
-            // messagesCollection — no client-side fan-out needed. The DO
-            // persists the boundary as a system SessionMessage row that
-            // arrives on the synced-collection delta path.
           } else if (event.type === 'api_retry') {
+            // `compact_boundary` events are persisted by the DO as system SessionMessages
+            // and arrive via the messagesCollection delta path — no client-side fan-out.
             // GH#102 / spec 102-sdk-peelback B12: push the retry frame
             // into the transient banner store.
             useApiRetryStore.getState().push(event as unknown as ApiRetryEvent)

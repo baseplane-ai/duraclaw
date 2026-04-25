@@ -5206,7 +5206,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         }
         this.turnCounter++
         const compactMsgId = `compact-${compactEvent.seq ?? Date.now()}`
-        const compactMsg: WireSessionMessage = {
+        const compactMsg: SessionMessage = {
           id: compactMsgId,
           role: 'system',
           parts: [
@@ -5217,8 +5217,8 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           ],
           createdAt: new Date(),
         }
-        void this.safeAppendMessage(compactMsg as unknown as SessionMessage)
-        this.broadcastMessage(compactMsg as unknown as SessionMessage)
+        void this.safeAppendMessage(compactMsg)
+        this.broadcastMessage(compactMsg)
         this.broadcastGatewayEvent(event)
         break
       }
