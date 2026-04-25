@@ -1,6 +1,7 @@
 import { type FSWatcher, watch } from 'node:fs'
 import nodePath from 'node:path'
 import type { ServerWebSocket } from 'bun'
+import { handleActivateProfile, handleListProfiles } from './admin-caam.js'
 import { verifyToken } from './auth.js'
 import { handleDeployState } from './deploy-state.js'
 import { handleFileContents, handleFileTree, handleGitStatus } from './files.js'
@@ -102,6 +103,18 @@ const server = Bun.serve<WsData>({
     // orchestrator's admin /deploys tab to mirror the baseplane-infra TUI.
     if (req.method === 'GET' && path === '/deploy/state') {
       return handleDeployState(url)
+    }
+
+    // GET /admin/caam/profiles — merged caam ls + limits + cooldown list,
+    // 5s wall-clock budget. See B4 in planning/specs/103-caam-rotation-narrow.md.
+    if (req.method === 'GET' && path === '/admin/caam/profiles') {
+      return handleListProfiles()
+    }
+
+    // POST /admin/caam/activate — body { profile }, runs `caam activate claude <profile>`
+    // then re-fetches the merged list. See B5.
+    if (req.method === 'POST' && path === '/admin/caam/activate') {
+      return handleActivateProfile(await req.json().catch(() => null))
     }
 
     // GET /sessions — list all known sessions (B5b)
