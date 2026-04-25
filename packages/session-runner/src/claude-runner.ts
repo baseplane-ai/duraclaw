@@ -9,6 +9,7 @@ import type {
   KataSessionState,
   ResumeCommand,
 } from '@duraclaw/shared-types'
+import { caamActivate, caamCooldownList, caamCooldownSet, caamLs } from './caam.js'
 import { handleQueryCommand } from './commands.js'
 import { buildCleanEnv } from './env.js'
 import { resolveProject } from './project-resolver.js'
@@ -167,6 +168,63 @@ function send(ch: BufferedChannel, event: GatewayEvent, ctx: RunnerSessionContex
   ch.send({ ...(event as unknown as Record<string, unknown>), seq })
   ctx.meta.last_activity_ts = Date.now()
   ctx.meta.last_event_seq = seq
+}
+
+/**
+ * GH#103 B2/B3 — rotate the active caam claude profile when the SDK reports
+ * an explicit `assistant.error === 'rate_limit'`. Sets cooldown on the
+ * current profile, picks the next non-cooled non-system profile, activates
+ * it, surfaces a system_notice breadcrumb, and queues a synthetic 'continue'
+ * user turn so the SDK re-reads ~/.claude on its next API call.
+ *
+ * Exported for unit-test access. Module-scope so it is independently
+ * callable without driving the full SDK iterator.
+ */
+export async function handleRotation(
+  lastInfo: { resetsAt?: number } | undefined,
+  ch: BufferedChannel,
+  ctx: RunnerSessionContext,
+  sessionId: string,
+): Promise<void> {
+  const nowSec = Math.floor(Date.now() / 1000)
+  const resetsAt = typeof lastInfo?.resetsAt === 'number' ? lastInfo.resetsAt : nowSec + 5 * 3600
+  const profiles = caamLs()
+  const cooled = caamCooldownList()
+  const active = profiles.find((p) => p.active)?.name
+  const next = profiles.find((p) => !p.active && !p.system && !cooled.has(p.name))?.name
+
+  // Always set cooldown on the active profile (idempotent on the caam side).
+  if (active) caamCooldownSet(active, resetsAt)
+
+  if (!next) {
+    // B3: no candidate. Single breadcrumb. Do not exit, do not queue continue.
+    send(
+      ch,
+      {
+        type: 'system_notice',
+        session_id: sessionId,
+        text: `All Claude profiles in cooldown until ${new Date(resetsAt * 1000).toISOString()}`,
+      },
+      ctx,
+    )
+    return
+  }
+
+  caamActivate(next)
+
+  send(
+    ch,
+    {
+      type: 'system_notice',
+      session_id: sessionId,
+      text: `Switched profile to ${next} (was ${active ?? 'unknown'}, resets ${new Date(resetsAt * 1000).toISOString()})`,
+    },
+    ctx,
+  )
+
+  // Queue synthetic continue. The runner's multi-turn loop picks this up via
+  // queue.waitForNext() and the SDK re-reads ~/.claude on the next API call.
+  ctx.messageQueue?.push({ role: 'user', content: 'continue' })
 }
 
 /** Shape expected by the Claude Agent SDK for streaming user messages. */
@@ -469,6 +527,12 @@ export class ClaudeRunner {
       // here because the SDK query() stream provides each message inline.
       const titlerHistory: TranscriptMessage[] = []
 
+      // GH#103 B1: most recent SDKRateLimitInfo from any rate_limit_event
+      // (regardless of status). Read by handleRotation when an explicit
+      // assistant.error='rate_limit' arrives. Persists across the multi-turn
+      // loop because it is closed over by processQueryMessages.
+      let lastRateLimitInfo: { resetsAt?: number } | undefined
+
       // canUseTool callback: intercepts AskUserQuestion and permission prompts
       options.canUseTool = async (
         toolName: string,
@@ -634,6 +698,12 @@ export class ClaudeRunner {
               },
               ctx,
             )
+          } else if (message.type === 'assistant' && (message as any).error === 'rate_limit') {
+            // GH#103 B2/B3: explicit SDK rate-limit rejection. Rotate caam
+            // profile in-place; do NOT forward the errored assistant message
+            // and do NOT exit. The next stream-input ('continue' queued by
+            // handleRotation) drives the SDK to re-read ~/.claude.
+            await handleRotation(lastRateLimitInfo, ch, ctx, sessionId)
           } else if (message.type === 'assistant') {
             // GH#86: accumulate finalized assistant turns for the titler.
             const assistantContent = (message as any).message?.content ?? []
@@ -661,6 +731,9 @@ export class ClaudeRunner {
               ctx,
             )
           } else if (message.type === 'rate_limit_event') {
+            // GH#103 B1: cache for handleRotation. Always cache regardless of
+            // status — rotation only triggers on explicit assistant.error.
+            lastRateLimitInfo = (message as any).rate_limit_info
             send(
               ch,
               {

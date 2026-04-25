@@ -168,8 +168,21 @@ export type GatewayEvent =
   | ChainAdvanceEvent
   | ChainStalledEvent
   | GapSentinelEvent
+  | SystemNoticeEvent
   | TitleUpdateEvent
   | HeartbeatEvent
+
+/**
+ * Non-fatal text breadcrumb from the runner. Appended to the message thread
+ * as a `role: 'system'` SessionMessage. Does NOT change session status, does
+ * NOT clear the callback token, does NOT update D1. Used by the caam rotation
+ * path to surface "Switched profile to X" / "All profiles cooled" notices.
+ */
+export interface SystemNoticeEvent {
+  type: 'system_notice'
+  session_id: string
+  text: string
+}
 
 /**
  * Runner heartbeat — emitted every 15s by session-runner to prove liveness.

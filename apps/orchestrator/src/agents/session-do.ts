@@ -5433,6 +5433,24 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         break
       }
 
+      // GH#103: non-fatal text breadcrumb from the runner (e.g. caam rotation
+      // notices). Appended as a `role:'system'` message so it renders inline
+      // in the thread; does NOT change status, clear the callback token, or
+      // touch D1. Mirrors the message-construction half of `case 'error':`.
+      case 'system_notice': {
+        this.turnCounter++
+        const noticeMsgId = `notice-${this.turnCounter}`
+        const noticeMsg: SessionMessage = {
+          id: noticeMsgId,
+          role: 'system',
+          parts: [{ type: 'text', text: event.text }],
+          createdAt: new Date(),
+        }
+        this.safeAppendMessage(noticeMsg)
+        this.broadcastMessage(noticeMsg)
+        break
+      }
+
       // Events that don't produce message parts — just broadcast raw
       default: {
         // GH#50 B9: tolerant drop for legacy events from in-flight pre-B7
