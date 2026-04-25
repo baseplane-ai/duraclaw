@@ -581,6 +581,8 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           }
 
           // Spec 16-chain-ux-p1-5 B6/B7/B9: auto-advance result events.
+          // Note: `compact_boundary` events have no arm here — the DO persists them
+          // as system SessionMessages that arrive via the messagesCollection delta path.
           if (event.type === 'chain_advance') {
             const issue = (event as { issueNumber?: number }).issueNumber
             const nextMode = (event as { nextMode?: string }).nextMode ?? 'next rung'
@@ -593,8 +595,6 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
             if (typeof issue === 'number') setStallReason(issue, reason)
             void queryClient.invalidateQueries({ queryKey: ['chains'] })
           } else if (event.type === 'api_retry') {
-            // `compact_boundary` events are persisted by the DO as system SessionMessages
-            // and arrive via the messagesCollection delta path — no client-side fan-out.
             // GH#102 / spec 102-sdk-peelback B12: push the retry frame
             // into the transient banner store.
             useApiRetryStore.getState().push(event as unknown as ApiRetryEvent)
