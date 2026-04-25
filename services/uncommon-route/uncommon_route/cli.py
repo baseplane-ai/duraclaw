@@ -1179,6 +1179,68 @@ def _setup_openai(args: list[str]) -> None:
     print(f"  Status: {status}")
 
 
+def _cmd_replay(args: list[str]) -> None:
+    """Score a candidate routing policy against historical decisions.
+
+    Usage:
+      uncommon-route replay --from PATH [--policy PATH] [--json]
+
+    `--from` points at an NDJSON file produced by `NDJSONDecisionSink`
+    (UNCOMMON_ROUTE_DECISION_LOG). `--policy` points at a TOML file with
+    `tier_remap` / `model_overrides` / `cost_overrides` tables — see
+    `uncommon_route/replay.py` for the schema. With no `--policy` the
+    candidate equals the baseline (sanity check).
+
+    `--json` switches the output from the text report to a machine
+    -readable summary suitable for piping into a hill-climb loop.
+    """
+    from uncommon_route import replay as _replay
+
+    flags, positional = _parse_flags(
+        args,
+        {"from": True, "policy": True, "json": False, "help": False},
+    )
+
+    if flags.get("help") or positional:
+        print(_cmd_replay.__doc__ or "")
+        return
+
+    src = flags.get("from")
+    if not src or not isinstance(src, str):
+        print("error: --from PATH is required", file=sys.stderr)
+        sys.exit(2)
+
+    policy: dict[str, object] = {}
+    pol_path = flags.get("policy")
+    if isinstance(pol_path, str) and pol_path:
+        policy = _replay.load_policy(pol_path)
+
+    decisions = list(_replay.load_decisions(src))
+    baseline = _replay.compute_summary(decisions)
+    candidate_iter = _replay.apply_policy_overrides(decisions, policy)
+    candidate = _replay.compute_summary(candidate_iter)
+    diff = _replay.diff_summaries(baseline, candidate)
+
+    if flags.get("json"):
+        import json as _json
+        from dataclasses import asdict
+
+        print(
+            _json.dumps(
+                {
+                    "baseline": asdict(baseline),
+                    "candidate": asdict(candidate),
+                    "diff": asdict(diff),
+                },
+                default=str,
+                indent=2,
+            )
+        )
+        return
+
+    print(_replay.render_text_report(diff, baseline, candidate))
+
+
 def main() -> None:
     args = sys.argv[1:]
 
@@ -1207,6 +1269,7 @@ def main() -> None:
         "config": _cmd_config,
         "stats": _cmd_stats,
         "feedback": _cmd_feedback,
+        "replay": _cmd_replay,
     }
 
     handler = commands.get(cmd)
