@@ -2,7 +2,6 @@ import { type FSWatcher, watch } from 'node:fs'
 import nodePath from 'node:path'
 import type { ServerWebSocket } from 'bun'
 import { verifyToken } from './auth.js'
-import { fetchCaamStatus, resolveCaamBin } from './caam-admin.js'
 import { handleDeployState } from './deploy-state.js'
 import { handleFileContents, handleFileTree, handleGitStatus } from './files.js'
 import {
@@ -16,7 +15,6 @@ import { findLatestKataState } from './kata.js'
 import { spec as openapiSpec } from './openapi.js'
 import { discoverProjects, resolveProject } from './projects.js'
 import { getOrCreateReaper, startReaper, stopReaper } from './reaper.js'
-import { getSessionsDir } from './session-state.js'
 import type { WsData } from './types.js'
 
 /** Decode a captured project-name URL segment (e.g. `packages%2Fnanobanana`). */
@@ -136,19 +134,6 @@ const server = Bun.serve<WsData>({
         return json(400, { ok: false, error: 'invalid body' })
       }
       return handleStartSession(body, { logger: console })
-    }
-
-    // GET /admin/caam/status — production admin endpoint (GH#92 P5).
-    // Aggregates `caam status / cooldown list / ls claude` JSON output
-    // with a 3s total budget and surfaces the last rotation breadcrumb
-    // from $SESSIONS_DIR. Bearer-token auth is the same as every other
-    // /sessions endpoint — the route is NOT env-gated like /debug/reap.
-    if (req.method === 'GET' && path === '/admin/caam/status') {
-      const result = await fetchCaamStatus({
-        caamBin: resolveCaamBin(),
-        sessionsDir: getSessionsDir(),
-      })
-      return json(200, result)
     }
 
     // POST /debug/reap — dev-only on-demand reaper trigger (B6). Guarded by

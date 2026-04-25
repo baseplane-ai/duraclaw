@@ -58,11 +58,6 @@ export const defaultSpawn: SpawnFn = (bin, args, options) => {
  * Build a clean environment for the session-runner child. Strips
  * CLAUDECODE* so the SDK running inside the runner doesn't detect a nested
  * session. Inlined here since it has a single caller now.
- *
- * GH#92: `DURACLAW_CLAUDE_PROFILE` / `DURACLAW_CLAUDE_ROTATION` / `CAAM_BIN`
- * flow through naturally via the denylist policy below. If this ever
- * flips to an allowlist, those vars MUST be explicitly passed through
- * or caam rotation will silently break.
  */
 export function buildCleanEnv(): Record<string, string> {
   const clean: Record<string, string> = {}

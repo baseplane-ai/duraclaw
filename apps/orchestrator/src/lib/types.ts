@@ -90,13 +90,6 @@ export interface Env {
    *  browsers must authenticate with this secret. Required for broadcast
    *  calls; missing secret means the DO rejects every broadcast with 401. */
   SYNC_BROADCAST_SECRET?: string
-  /** GH#92 P3: when set to '1', exposes dev-only routes — currently
-   *  `POST /api/__dev__/synth-ratelimit/:sessionId` and the matching
-   *  `__devSynthRateLimit` SessionDO @callable. Mirrors the same env
-   *  knob the gateway and session-runner gate their debug endpoints on
-   *  (`POST /debug/reap`, `synth-rate-limit` GatewayCommand). Production
-   *  deploys leave it unset so the routes return 404. */
-  DURACLAW_DEBUG_ENDPOINTS?: string
 }
 
 // ── D1 row response shapes (issue #7 p2) ───────────────────────────

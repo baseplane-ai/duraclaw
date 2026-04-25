@@ -9,16 +9,8 @@ import type {
   KataSessionState,
   ResumeCommand,
 } from '@duraclaw/shared-types'
-import {
-  caamActiveProfile,
-  caamCooldownSet,
-  caamEarliestClearTs,
-  caamIsConfigured,
-  caamNext,
-} from './caam.js'
 import { handleQueryCommand } from './commands.js'
 import { buildCleanEnv } from './env.js'
-import { scanPeerMeta } from './peer-scan.js'
 import { resolveProject } from './project-resolver.js'
 import { SessionTitler, type TranscriptMessage } from './titler.js'
 import type { RunnerSessionContext } from './types.js'
@@ -175,196 +167,6 @@ function send(ch: BufferedChannel, event: GatewayEvent, ctx: RunnerSessionContex
   ch.send({ ...(event as unknown as Record<string, unknown>), seq })
   ctx.meta.last_activity_ts = Date.now()
   ctx.meta.last_event_seq = seq
-}
-
-/**
- * GH#92 B3 — rate_limit_event handler. Implements the five-gate
- * rotation decision tree. Every exit path writes `.exit` inline
- * (idempotent — see `ctx.writeExitFileInline`) and calls
- * `ctx.abortController.abort()` exactly once.
- *
- * Gate evaluation order (first match wins):
- *   0. `ctx.rotationMode === 'off'` — pin or env override → exit
- *      `rate_limited_no_rotate`, no caam calls.
- *   1. `!caamIsConfigured()` — dev-box B7 path. Relay raw event and
- *      STAY ALIVE (no abort, no exit) — preserves today's degraded
- *      behavior so dev boxes see the original SDK error.
- *   2. Peer claude runner detected via `scanPeerMeta()` — skip caam,
- *      exit `rate_limited_no_rotate`.
- *   3. Normal rotation — read `resetsAt` from the SDK event, record
- *      the cooldown in caam, pick next profile.
- *     3a. `caamNext()` returns `null` — every profile is cooling.
- *         Exit `rate_limited_no_profile` with `earliest_clear_ts`.
- *     3b. Rotation succeeds — exit `rate_limited` with rotation
- *         metadata; the DO's B4 handler schedules a resume alarm.
- */
-export async function handleRateLimitEvent(
-  ch: BufferedChannel,
-  ctx: RunnerSessionContext,
-  sessionId: string,
-  rawInfo: Record<string, unknown>,
-): Promise<void> {
-  const writeExit = ctx.writeExitFileInline
-  const mode = ctx.rotationMode ?? 'auto'
-
-  // --- Gate 0: rotation disabled (pin or env) ---
-  if (mode === 'off') {
-    console.warn('[caam] session_limit rotation_disabled mode=off')
-    send(
-      ch,
-      {
-        type: 'rate_limit',
-        session_id: sessionId,
-        rate_limit_info: rawInfo,
-        exit_reason: 'rate_limited_no_rotate',
-        rotation: null,
-      },
-      ctx,
-    )
-    ctx.meta.state = 'rate_limited_no_rotate'
-    if (writeExit) {
-      await writeExit({
-        state: 'rate_limited_no_rotate',
-        exit_code: 0,
-        error: JSON.stringify({ reason: 'rotation_disabled' }),
-      })
-    }
-    ctx.abortController.abort()
-    return
-  }
-
-  // --- Gate 1: caam not configured (dev box) — relay raw, STAY ALIVE ---
-  if (!(await caamIsConfigured())) {
-    console.warn('[caam] not configured on this host — rotation disabled')
-    send(ch, { type: 'rate_limit', session_id: sessionId, rate_limit_info: rawInfo }, ctx)
-    return
-  }
-
-  // --- Gate 2: peer claude runner live — skip rotation ---
-  const sessionsDir = ctx.sessionsDir ?? '/run/duraclaw/sessions'
-  const peers = await scanPeerMeta(sessionsDir, ctx.sessionId)
-  if (peers.length > 0) {
-    console.warn(
-      `[caam] session_limit peer_detected skip_rotation peers=${peers
-        .map((p) => p.sessionId)
-        .join(',')}`,
-    )
-    send(
-      ch,
-      {
-        type: 'rate_limit',
-        session_id: sessionId,
-        rate_limit_info: rawInfo,
-        exit_reason: 'rate_limited_no_rotate',
-        rotation: null,
-      },
-      ctx,
-    )
-    ctx.meta.state = 'rate_limited_no_rotate'
-    if (writeExit) {
-      await writeExit({
-        state: 'rate_limited_no_rotate',
-        exit_code: 0,
-        error: JSON.stringify({
-          reason: 'peer_detected',
-          peer_ids: peers.map((p) => p.sessionId),
-        }),
-      })
-    }
-    ctx.abortController.abort()
-    return
-  }
-
-  // --- Gate 3: normal rotation ---
-  // Derive cooldown minutes from the SDK's reset timestamp. Fall back
-  // to 300 minutes (Anthropic's documented five-hour window) when the
-  // SDK payload didn't carry a usable resetsAt — log the fallback so
-  // ops can spot SDK schema drift.
-  const resetsAtRaw = rawInfo?.resetsAt
-  const resetsAt: number | null =
-    typeof resetsAtRaw === 'number' && resetsAtRaw > Date.now() ? resetsAtRaw : null
-  let minutes: number
-  if (resetsAt !== null) {
-    minutes = Math.max(1, Math.ceil((resetsAt - Date.now()) / 60_000))
-  } else {
-    minutes = 300
-    console.warn('[caam] rate_limit_info missing resetsAt, falling back to 300m')
-  }
-
-  const active = (await caamActiveProfile()) ?? 'unknown'
-  try {
-    await caamCooldownSet(active, minutes)
-  } catch (err) {
-    console.error(`[caam] cooldown set failed: ${(err as Error).message}`)
-    // Continue — caamNext will skip <active> anyway if its cooldown
-    // timestamp was already past.
-  }
-  const next = await caamNext()
-
-  if (!next) {
-    const earliest = await caamEarliestClearTs()
-    console.warn(
-      `[caam] session_limit all_unavailable earliest_clear=${new Date(earliest).toISOString()}`,
-    )
-    send(
-      ch,
-      {
-        type: 'rate_limit',
-        session_id: sessionId,
-        rate_limit_info: rawInfo,
-        exit_reason: 'rate_limited_no_profile',
-        rotation: null,
-        earliest_clear_ts: earliest,
-        resets_at: resetsAt ?? undefined,
-      },
-      ctx,
-    )
-    ctx.meta.state = 'rate_limited_no_profile'
-    ctx.meta.rate_limit_earliest_clear_ts = earliest
-    if (writeExit) {
-      await writeExit({
-        state: 'rate_limited_no_profile',
-        exit_code: 0,
-        error: JSON.stringify({
-          reason: 'all_unavailable',
-          earliest_clear_ts: earliest,
-          resets_at: resetsAt,
-        }),
-      })
-    }
-    ctx.abortController.abort()
-    return
-  }
-
-  const resetIso = resetsAt !== null ? new Date(resetsAt).toISOString() : 'unknown'
-  console.warn(
-    `[caam] session_limit reset_at=${resetIso} derived_cooldown=${minutes}m next=${next.activated} rotated`,
-  )
-  ctx.meta.rotation = { from: active, to: next.activated }
-  ctx.meta.state = 'rate_limited'
-  send(
-    ch,
-    {
-      type: 'rate_limit',
-      session_id: sessionId,
-      rate_limit_info: rawInfo,
-      exit_reason: 'rate_limited',
-      rotation: { from: active, to: next.activated },
-      resets_at: resetsAt ?? undefined,
-    },
-    ctx,
-  )
-  if (writeExit) {
-    await writeExit({
-      state: 'rate_limited',
-      exit_code: 0,
-      error: JSON.stringify({
-        rotation: { from: active, to: next.activated },
-        resets_at: resetsAt,
-      }),
-    })
-  }
-  ctx.abortController.abort()
 }
 
 /** Shape expected by the Claude Agent SDK for streaming user messages. */
@@ -859,19 +661,15 @@ export class ClaudeRunner {
               ctx,
             )
           } else if (message.type === 'rate_limit_event') {
-            // GH#92 B3: caam-driven Claude profile rotation on SDK
-            // rate_limit_event. Gates are evaluated in order — the
-            // first matching gate writes `.exit` inline (beating the
-            // SIGTERM watchdog's 2 s grace writer via link+EEXIST)
-            // and aborts the SDK query. All rate_limited* exits use
-            // `exit_code: 0` — explicit lifecycle, not a crash.
-            const rawInfo = (message as { rate_limit_info?: Record<string, unknown> })
-              .rate_limit_info
-            await handleRateLimitEvent(ch, ctx, sessionId, rawInfo ?? {})
-            // `handleRateLimitEvent` calls `ctx.abortController.abort()`
-            // in every exit path, so the SDK async iterator breaks out
-            // of the `for await` loop on the next tick. No return needed
-            // here — the outer loop sees the abort and unwinds.
+            send(
+              ch,
+              {
+                type: 'rate_limit',
+                session_id: sessionId,
+                rate_limit_info: (message as any).rate_limit_info,
+              },
+              ctx,
+            )
           } else if (message.type === 'system' && (message as any).subtype === 'task_started') {
             send(
               ch,

@@ -1,4 +1,3 @@
-import type { CaamStatus } from '@duraclaw/shared-types'
 import type { SQL } from 'drizzle-orm'
 import { and, asc, desc, eq, inArray, isNull, like, ne, or, sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
@@ -1796,42 +1795,6 @@ export function createApiApp() {
     return c.json({ ok: true, id: flagId, enabled: body.enabled })
   })
 
-  // ── caam profile rotation status (GH#92) ─────────────────────────
-  app.get('/api/admin/caam/status', async (c) => {
-    if (c.get('role') !== 'admin') return c.json({ error: 'Forbidden' }, 403)
-    c.header('Cache-Control', 'no-store')
-
-    const degraded = (reason: string): CaamStatus => ({
-      caam_configured: false,
-      profiles: [],
-      active_profile: null,
-      warnings: [`Gateway unreachable: ${reason}`],
-      last_rotation: null,
-      fetched_at_ms: Date.now(),
-    })
-
-    if (!c.env.CC_GATEWAY_URL) return c.json(degraded('CC_GATEWAY_URL not configured'), 200)
-
-    const httpBase = c.env.CC_GATEWAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
-    const url = new URL('/admin/caam/status', httpBase)
-    const headers: Record<string, string> = {}
-    if (c.env.CC_GATEWAY_SECRET) headers.Authorization = `Bearer ${c.env.CC_GATEWAY_SECRET}`
-
-    const ac = new AbortController()
-    const timer = setTimeout(() => ac.abort(), 5000)
-    try {
-      const resp = await fetch(url.toString(), { headers, signal: ac.signal })
-      if (!resp.ok) return c.json({ error: `Gateway returned ${resp.status}` }, 502)
-      const payload = (await resp.json()) as CaamStatus
-      return c.json(payload)
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : 'unknown'
-      return c.json(degraded(reason), 200)
-    } finally {
-      clearTimeout(timer)
-    }
-  })
-
   app.post('/api/sessions/sync', async (c) => {
     const _userId = c.get('userId')
 
@@ -2421,75 +2384,6 @@ export function createApiApp() {
     // whether the gateway actually SIGTERM'd the runner.
     const result = (await response.json().catch(() => ({}))) as Record<string, unknown>
     return c.json({ status: 'idle', ...result })
-  })
-
-  // GH#92 P3: dev-only synthetic rate-limit injector. Two targets:
-  //   - target: 'runner' → forwards a {type:'synth-rate-limit'} GatewayCommand
-  //     down the existing dial-back WS to the live session-runner; the
-  //     runner's own gate (also `DURACLAW_DEBUG_ENDPOINTS=1`) decides whether
-  //     to honour it (LAYER A — VP1 path).
-  //   - target: 'do' → bypasses the runner; the DO synthesizes a
-  //     RateLimitEvent and runs it through `handleGatewayEvent` directly
-  //     (LAYER B — exercises the rate_limit branches without a subprocess).
-  // 404 when DURACLAW_DEBUG_ENDPOINTS != '1' so production deploys behave
-  // as if the route doesn't exist. Lives inside the authed block — any
-  // logged-in user with access to the session may invoke (no admin role
-  // required for a dev synth tool).
-  app.post('/api/__dev__/synth-ratelimit/:sessionId', async (c) => {
-    if (c.env.DURACLAW_DEBUG_ENDPOINTS !== '1') {
-      return c.json({ error: 'Not found' }, 404)
-    }
-    const userId = c.get('userId')
-    const sessionId = c.req.param('sessionId')
-    const access = await getAccessibleSession(c.env, sessionId, userId, c.get('role'))
-    if (!access.ok) {
-      return c.json({ error: 'Session not found' }, 404)
-    }
-
-    let body: {
-      target?: unknown
-      exit_reason?: unknown
-      rotation?: unknown
-      earliest_clear_ts?: unknown
-      resets_at?: unknown
-      rate_limit_info?: unknown
-    }
-    try {
-      body = (await c.req.json()) as typeof body
-    } catch {
-      return c.json({ error: 'Invalid JSON body' }, 400)
-    }
-
-    if (body.target !== 'runner' && body.target !== 'do') {
-      return c.json({ error: "target must be 'runner' or 'do'" }, 400)
-    }
-    const validReasons = new Set([
-      'rate_limited',
-      'rate_limited_no_rotate',
-      'rate_limited_no_profile',
-    ])
-    if (body.exit_reason !== undefined && typeof body.exit_reason !== 'string') {
-      return c.json({ error: 'exit_reason must be a string' }, 400)
-    }
-    if (typeof body.exit_reason === 'string' && !validReasons.has(body.exit_reason)) {
-      return c.json({ error: `Invalid exit_reason: ${body.exit_reason}` }, 400)
-    }
-
-    const doId = getSessionDoId(c.env, access.session.id)
-    const sessionDO = c.env.SESSION_AGENT.get(doId)
-    const doResp = await sessionDO.fetch(
-      new Request('https://session/__dev__/synth-rate-limit', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-partykit-room': access.session.id,
-          'x-user-id': userId,
-        },
-        body: JSON.stringify(body),
-      }),
-    )
-    const json = (await doResp.json().catch(() => ({}))) as Record<string, unknown>
-    return c.json(json, doResp.status as Parameters<typeof c.json>[1])
   })
 
   // ── Chain worktree reservations (GH#16 Feature 3E / U2) ──────────

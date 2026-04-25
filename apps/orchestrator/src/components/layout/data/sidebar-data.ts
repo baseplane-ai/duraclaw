@@ -1,4 +1,4 @@
-import { KeyRound, LayoutGrid, MessagesSquare, Rocket, Settings, Users } from 'lucide-react'
+import { LayoutGrid, MessagesSquare, Rocket, Settings, Users } from 'lucide-react'
 import type { NavGroup, SidebarData } from '../types'
 
 export const sidebarData: SidebarData = {
@@ -33,11 +33,6 @@ export const adminNavGroup: NavGroup = {
       title: 'Users',
       url: '/admin/users',
       icon: Users,
-    },
-    {
-      title: 'Auth Rotation',
-      url: '/admin/caam',
-      icon: KeyRound,
     },
     {
       title: 'Deploys',

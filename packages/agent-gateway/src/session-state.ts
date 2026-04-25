@@ -51,17 +51,9 @@ function emptyMeta(): Omit<MetaFile, 'state'> {
   }
 }
 
-/**
- * GH#92: `claude_profile` / `rotation` are included in the merged
- * snapshot only when the meta file actually carries them. Keeps the
- * snapshot wire shape backward-compatible on dev boxes without caam
- * (the fields are absent, not null) while propagating them verbatim
- * when the runner stamped a profile at startup or recorded a rotation
- * on rate_limit.
- */
 function mergeMeta(meta: MetaFile | null): Omit<MetaFile, 'state'> {
   if (!meta) return emptyMeta()
-  const base: Omit<MetaFile, 'state'> = {
+  return {
     sdk_session_id: meta.sdk_session_id ?? null,
     last_activity_ts: meta.last_activity_ts ?? null,
     last_event_seq: meta.last_event_seq ?? 0,
@@ -69,9 +61,6 @@ function mergeMeta(meta: MetaFile | null): Omit<MetaFile, 'state'> {
     model: meta.model ?? null,
     turn_count: meta.turn_count ?? 0,
   }
-  if (meta.claude_profile !== undefined) base.claude_profile = meta.claude_profile
-  if (meta.rotation !== undefined) base.rotation = meta.rotation
-  return base
 }
 
 export type ResolveResult = { found: true; state: SessionStateSnapshot } | { found: false }

@@ -15,7 +15,6 @@ export type GatewayCommand =
   | SetPermissionModeCommand
   | StopTaskCommand
   | PingCommand
-  | SynthRateLimitCommand
 
 export interface ExecuteCommand {
   type: 'execute'
@@ -121,26 +120,6 @@ export interface StopTaskCommand {
 
 export interface PingCommand {
   type: 'ping'
-}
-
-/**
- * GH#92 — dev-only synthetic rate_limit_event trigger. Routed from the
- * DO's `POST /api/__dev__/synth-ratelimit/:sessionId` endpoint through
- * the existing dial-back WS. The runner's handler is gated on
- * `DURACLAW_DEBUG_ENDPOINTS === '1'` and synthesizes an SDK-shape
- * rate_limit_event into its own message loop, so all B3 gates fire
- * and produce real .exit / .meta / caam side effects.
- *
- * The `rate_limit_info` payload mirrors the Claude SDK's
- * `rate_limit_event.rate_limit_info` shape (loosely typed by the SDK).
- * When omitted, the runner synthesizes a canned default with a
- * 45-minute `resetsAt` so VP1's derived-minutes math has a nonround
- * number to verify against.
- */
-export interface SynthRateLimitCommand {
-  type: 'synth-rate-limit'
-  session_id: string
-  rate_limit_info?: Record<string, unknown>
 }
 
 export interface AnswerCommand {
@@ -320,28 +299,10 @@ export interface RewindResultEvent {
   deletions?: number
 }
 
-/**
- * GH#92: runner → DO rate-limit relay. `rate_limit_info` is the raw
- * SDK passthrough; the new optional top-level fields are added by the
- * runner's caam-rotation branch so the DO doesn't have to re-parse the
- * loosely-typed SDK blob.
- *
- * - `exit_reason` distinguishes the three rotation outcomes. Absent
- *   on dev boxes without caam (B7 degraded-mode relay).
- * - `rotation` is non-null only on `rate_limited` success.
- * - `earliest_clear_ts` is populated only on `rate_limited_no_profile`
- *   (DO uses it to schedule a delayed resume alarm — see B6).
- * - `resets_at` mirrors `rate_limit_info.resetsAt` lifted to a typed
- *   top-level field; null when the SDK payload didn't carry it.
- */
 export interface RateLimitEvent {
   type: 'rate_limit'
   session_id: string
   rate_limit_info: Record<string, unknown>
-  exit_reason?: 'rate_limited' | 'rate_limited_no_rotate' | 'rate_limited_no_profile'
-  rotation?: { from: string; to: string } | null
-  earliest_clear_ts?: number
-  resets_at?: number | null
 }
 
 export interface TaskStartedEvent {
@@ -651,13 +612,6 @@ export interface ContextUsage {
 
 // ── Session State ────────────────────────────────────────────────────
 
-/**
- * GH#92 B4/B6: caam rotation adds two new transient/persistent states.
- *  - 'rotating'        : transient — caam profile rotation in progress,
- *                        runner is about to be respawned on a fresh profile.
- *  - 'waiting_profile' : persistent — every caam profile is in cooldown;
- *                        runner will resume after the earliest-clear ts.
- */
 export type SessionStatus =
   | 'idle'
   | 'pending'
@@ -665,8 +619,6 @@ export type SessionStatus =
   | 'waiting_input'
   | 'waiting_permission'
   | 'waiting_gate'
-  | 'rotating'
-  | 'waiting_profile'
   | 'error'
 
 // SessionState deleted (#31 P5 / B10). Status / gate / result are now derived
@@ -762,43 +714,6 @@ export interface SessionSummary {
   visibility?: 'public' | 'private'
 }
 
-// ── Admin: caam status (GH#92 P5) ───────────────────────────────────
-//
-// Shape returned by `GET /admin/caam/status` on the agent-gateway, and
-// proxied verbatim by the worker's admin route. The admin React
-// component imports this same type so wire / proxy / render all agree.
-//
-// `caam_configured: false` is the degraded mode (binary missing or not
-// executable) — every other field empties out and `warnings` carries
-// the human-readable reason. Endpoint never 500s; per-subcommand failures
-// surface as additional `warnings[]` entries with partial data.
-
-export interface CaamProfileStatus {
-  name: string
-  active: boolean
-  /** Tool / system bucket — always 'claude' on Duraclaw today. */
-  system: string
-  health: { status: string; error_count: number }
-  /** Cooldown clear time in ms-epoch; absent when profile is not cooling. */
-  cooldown_until?: number
-}
-
-export interface CaamLastRotation {
-  from: string
-  to: string
-  at_ms: number
-  session_id: string
-}
-
-export interface CaamStatus {
-  active_profile: string | null
-  profiles: CaamProfileStatus[]
-  warnings: string[]
-  last_rotation?: CaamLastRotation | null
-  caam_configured: boolean
-  fetched_at_ms: number
-}
-
 // ── Stored Message (for SQLite persistence) ─────────────────────────
 
 export interface StoredMessage {
@@ -812,36 +727,6 @@ export interface StoredMessage {
 // ── Messages Frame (SessionDO → Browser, unified {type:'messages'} channel) ──
 
 /**
- * GH#92 B4/B5/B6: optional per-message metadata bag. Currently carries the
- * caam rotation breadcrumb stamped onto system-role messages by the DO; new
- * keys can be added here without growing the top-level `SessionMessage`
- * surface.
- */
-export interface SessionMessageMetadata {
-  /**
-   * GH#92 B4/B5/B6: caam rotation breadcrumb — present on system-role
-   * messages inserted by the DO when a rate-limit rotation happens.
-   *   - kind 'rotated'  : successful rotation from → to
-   *   - kind 'skipped'  : rotation suppressed (peer runner live or
-   *                       DURACLAW_CLAUDE_ROTATION=off)
-   *   - kind 'waiting'  : every profile cooling; resume scheduled at
-   *                       earliest_clear_ts + 30s slop
-   * Client-side `useDerivedStatus` keys off this metadata (never body
-   * text) to surface the 'rotating' / 'waiting_profile' status.
-   * DO history → SDK resume-prompt serializer also filters on
-   * `metadata?.caam !== undefined` so these breadcrumbs are not
-   * replayed as user/assistant turns.
-   */
-  caam?: {
-    kind: 'rotated' | 'skipped' | 'waiting'
-    from?: string
-    to?: string
-    at: number
-    earliest_clear_ts?: number
-  }
-}
-
-/**
  * Wire-level shape of a session message. Mirrors the SDK's `SessionMessage`
  * (from `agents/experimental/memory/session`) as serialised over the
  * DO→browser WS channel. Additional fields may be present on the wire; this
@@ -852,12 +737,6 @@ export interface SessionMessage {
   sessionId?: string
   role: 'user' | 'assistant' | 'tool' | string
   parts: unknown[]
-  /**
-   * GH#92 B4–B6: optional metadata bag. See `SessionMessageMetadata`.
-   * Currently used by the DO to stamp caam rotation breadcrumbs on
-   * system-role messages.
-   */
-  metadata?: SessionMessageMetadata
   createdAt?: string | number | Date
   /**
    * Wall-clock of the last in-place mutation of this row (ISO 8601). Stamped
