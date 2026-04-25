@@ -36,6 +36,7 @@ import {
   SheetTitle,
 } from '~/components/ui/sheet'
 import { projectsCollection } from '~/db/projects-collection'
+import { useSessionStatus } from '~/db/session-local-collection'
 import type { SessionRecord } from '~/db/session-record'
 import { userTabsCollection } from '~/db/user-tabs-collection'
 import { useIsMobile } from '~/hooks/use-mobile'
@@ -501,15 +502,20 @@ function ProjectTabInner({
   const isMobile = useIsMobile()
   const [menuOpen, setMenuOpen] = useState(false)
 
-  // Tab-strip status dot: read `session.status` directly from the D1-mirrored
-  // `agent_sessions` synced-collection row (pushed over the always-on
-  // `user-stream` WS via `broadcastSessionRow`). Do NOT gate on per-session
-  // `wsReadyState` here — background tabs' PartySockets legitimately close
-  // to save resources, and the server's session status is still authoritative
-  // and fresh over the user-stream rail. The per-session-WS "Reconnecting…"
-  // signal belongs to the active session's StatusBar / DisconnectedBanner,
-  // not the N-tab fleet view. This also removes N `useMessagesCollection`
-  // subscriptions (previously opened via `useDerivedStatus`) from the bar.
+  // Tab-strip status dot: prefer `useSessionStatus(id)` — the DO-authoritative
+  // status pushed over the always-on user-stream WS via
+  // `broadcastStatusToOwner` (`session_status` collection → sessionLocalCollection).
+  // Falls back to the D1-mirrored `agent_sessions.status` for cold-start before
+  // the first DO push lands. Post the ea01ca5 refactor, D1 `agent_sessions.status`
+  // is no longer written on transitions (only at result-time, always 'idle'),
+  // so reading the D1 row alone leaves the tab dot stuck on its cold-start
+  // value through every mid-session running / waiting_gate transition.
+  //
+  // Do NOT gate on per-session `wsReadyState` here — background tabs'
+  // PartySockets legitimately close to save resources, and the server's
+  // session status is still authoritative and fresh over the user-stream
+  // rail. The per-session-WS "Reconnecting…" signal belongs to the active
+  // session's StatusBar / DisconnectedBanner, not the N-tab fleet view.
   //
   // Promotion to `completed_unseen` — when the server says `idle` but the
   // user hasn't activated this tab since the session's last event, the
@@ -518,7 +524,8 @@ function ProjectTabInner({
   // is passed as `1` (OPEN) because the per-tab WS doesn't gate the fleet
   // view (see comment above) — we deliberately short-circuit the
   // disconnect grace logic in `deriveDisplayStateFromStatus`.
-  const rawStatus = (session?.status as SessionStatus | undefined) ?? 'idle'
+  const doStatus = useSessionStatus(sessionId)
+  const rawStatus = doStatus ?? (session?.status as SessionStatus | undefined) ?? 'idle'
   const tabDisplay = deriveTabDisplayState({
     status: rawStatus,
     wsReadyState: 1,

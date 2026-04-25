@@ -9,7 +9,7 @@ import { useDrag } from '@use-gesture/react'
 import { ArchiveIcon, ChevronDownIcon, ChevronRightIcon } from 'lucide-react'
 import { useState } from 'react'
 import { Badge } from '~/components/ui/badge'
-import { useSessionLocalState } from '~/db/session-local-collection'
+import { useSessionLocalState, useSessionStatus } from '~/db/session-local-collection'
 import type { SessionRecord } from '~/db/session-record'
 import { useSession } from '~/hooks/use-sessions-collection'
 import { deriveDisplayStateFromStatus } from '~/lib/display-state'
@@ -91,9 +91,13 @@ function SwipeableCard({
 
   const liveSession = useSession(session.id)
   const local = useSessionLocalState(session.id)
+  const doStatus = useSessionStatus(session.id)
   const numTurns = liveSession?.numTurns ?? session.numTurns ?? 0
   const isLive = local?.wsReadyState === 1
-  const rawStatus = (liveSession ?? session).status as SessionStatus
+  // Post-ea01ca5: D1 `agent_sessions.status` is no longer mid-run authoritative
+  // (only seeded to 'idle' at result-time). Prefer the DO-pushed
+  // `useSessionStatus` and fall back to the D1 row only for cold-start.
+  const rawStatus = doStatus ?? ((liveSession ?? session).status as SessionStatus)
   const display = deriveDisplayStateFromStatus(
     rawStatus,
     local?.wsReadyState ?? 3,
@@ -156,9 +160,11 @@ function SwipeableCard({
 function OlderSessionRow({ session, onClick }: { session: SessionRecord; onClick: () => void }) {
   const liveSession = useSession(session.id)
   const local = useSessionLocalState(session.id)
+  const doStatus = useSessionStatus(session.id)
   const numTurns = liveSession?.numTurns ?? session.numTurns ?? 0
   const isLive = local?.wsReadyState === 1
-  const rawStatus = (liveSession ?? session).status as SessionStatus
+  // See RecentSessionCard for the rationale on preferring the DO-pushed status.
+  const rawStatus = doStatus ?? ((liveSession ?? session).status as SessionStatus)
   const display = deriveDisplayStateFromStatus(
     rawStatus,
     local?.wsReadyState ?? 3,
