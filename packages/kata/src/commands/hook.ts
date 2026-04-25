@@ -637,8 +637,23 @@ function resolveTranscriptPath(sessionId: string): string | undefined {
  * tool_use whose transcript timestamp is older than this is treated as
  * abandoned, not active. Required for SDK-driven sessions that sometimes
  * never emit a matching tool_result (issue #60, #68).
+ *
+ * Calibrated against two real-world ceilings:
+ *
+ * - **Legit Explore-agent runtime.** A "very thorough" Explore agent doing
+ *   deep research over a complex codebase or with many WebFetch calls
+ *   regularly takes 5–15 min before emitting `tool_result` (observed in the
+ *   duraclaw-dev6 sess-3d287864 wedge: 8 agents returned 2–7 min after
+ *   spawn, with the slowest tail past 7 min). Anything tighter than that
+ *   ages out legitimate work and blocks the active-agent bypass.
+ * - **VPS session-runner reaper.** Per `session-lifecycle.md`, the gateway
+ *   reaps idle runners after 30 min. Past that, the runner process — and
+ *   therefore any Agent it spawned — is gone, so an unmatched Agent older
+ *   than 30 min cannot possibly still be running. Aligning the window with
+ *   the reaper makes "abandoned" mean what it actually means in this
+ *   architecture.
  */
-const AGENT_ACTIVE_WINDOW_MS = 120_000
+const AGENT_ACTIVE_WINDOW_MS = 30 * 60 * 1000
 
 /**
  * Normalize a transcript `message.content` field into an array of content

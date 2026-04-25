@@ -686,10 +686,10 @@ describe('hasActiveBackgroundAgents', () => {
     expect(hasActiveBackgroundAgents(path)).toBe(false)
   })
 
-  it('recency filter: Agent older than 120s is abandoned even with no user prompt', async () => {
+  it('recency filter: Agent older than 30 min is abandoned even with no user prompt', async () => {
     const { hasActiveBackgroundAgents } = await import('./hook.js')
     const now = Date.parse('2026-04-23T20:00:00.000Z')
-    const oldTs = new Date(now - 200_000).toISOString() // 200s ago, past the 120s window
+    const oldTs = new Date(now - 31 * 60 * 1000).toISOString() // 31 min ago, past the 30-min window
     const path = writeTranscript([
       {
         type: 'assistant',
@@ -700,10 +700,10 @@ describe('hasActiveBackgroundAgents', () => {
     expect(hasActiveBackgroundAgents(path, now)).toBe(false)
   })
 
-  it('recency filter: Agent within 120s window is still active', async () => {
+  it('recency filter: Agent within 30 min window is still active', async () => {
     const { hasActiveBackgroundAgents } = await import('./hook.js')
     const now = Date.parse('2026-04-23T20:00:00.000Z')
-    const recentTs = new Date(now - 30_000).toISOString() // 30s ago, within window
+    const recentTs = new Date(now - 30_000).toISOString() // 30s ago, well within window
     const path = writeTranscript([
       {
         type: 'assistant',
@@ -717,7 +717,7 @@ describe('hasActiveBackgroundAgents', () => {
   it('recency filter: boundary — exactly at window is still active', async () => {
     const { hasActiveBackgroundAgents } = await import('./hook.js')
     const now = Date.parse('2026-04-23T20:00:00.000Z')
-    const boundaryTs = new Date(now - 120_000).toISOString() // exactly 120s ago
+    const boundaryTs = new Date(now - 30 * 60 * 1000).toISOString() // exactly 30 min ago
     const path = writeTranscript([
       {
         type: 'assistant',
@@ -726,6 +726,23 @@ describe('hasActiveBackgroundAgents', () => {
       },
     ])
     // strictly greater-than window → at boundary, still active
+    expect(hasActiveBackgroundAgents(path, now)).toBe(true)
+  })
+
+  it('recency filter: long-running Explore agent (10 min) still active', async () => {
+    const { hasActiveBackgroundAgents } = await import('./hook.js')
+    // Regression: Explore agents doing thorough research routinely take 5-15 min;
+    // the previous 120s window aged them out and broke the active-agent bypass.
+    // Mirrors the duraclaw-dev6 sess-3d287864 wedge where 8 agents took 2-7 min.
+    const now = Date.parse('2026-04-25T13:09:00.000Z')
+    const tenMinAgo = new Date(now - 10 * 60 * 1000).toISOString()
+    const path = writeTranscript([
+      {
+        type: 'assistant',
+        timestamp: tenMinAgo,
+        message: { content: [{ type: 'tool_use', name: 'Agent', id: 'thorough-agent' }] },
+      },
+    ])
     expect(hasActiveBackgroundAgents(path, now)).toBe(true)
   })
 
