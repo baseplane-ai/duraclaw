@@ -4,17 +4,11 @@ export type GatewayCommand =
   | ExecuteCommand
   | ResumeCommand
   | StreamInputCommand
-  | PermissionResponseCommand
-  | AbortCommand
-  | StopCommand
-  | AnswerCommand
-  | RewindCommand
   | InterruptCommand
-  | GetContextUsageCommand
-  | SetModelCommand
-  | SetPermissionModeCommand
-  | StopTaskCommand
+  | StopCommand
   | PingCommand
+  | PermissionResponseCommand
+  | AnswerCommand
 
 export interface ExecuteCommand {
   type: 'execute'
@@ -72,50 +66,14 @@ export interface PermissionResponseCommand {
   allowed: boolean
 }
 
-export interface AbortCommand {
-  type: 'abort'
-  session_id: string
-}
-
 export interface StopCommand {
   type: 'stop'
   session_id: string
 }
 
-export interface RewindCommand {
-  type: 'rewind'
-  session_id: string
-  message_id: string
-  /** If true, preview what would change without modifying files */
-  dry_run?: boolean
-}
-
 export interface InterruptCommand {
   type: 'interrupt'
   session_id: string
-}
-
-export interface GetContextUsageCommand {
-  type: 'get-context-usage'
-  session_id: string
-}
-
-export interface SetModelCommand {
-  type: 'set-model'
-  session_id: string
-  model?: string
-}
-
-export interface SetPermissionModeCommand {
-  type: 'set-permission-mode'
-  session_id: string
-  mode: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto'
-}
-
-export interface StopTaskCommand {
-  type: 'stop-task'
-  session_id: string
-  task_id: string
 }
 
 export interface PingCommand {
@@ -155,16 +113,10 @@ export type GatewayEvent =
   | ErrorEvent
   | KataStateEvent
   | StoppedEvent
-  | ContextUsageEvent
-  | RewindResultEvent
   | RateLimitEvent
   | TaskStartedEvent
   | TaskProgressEvent
   | TaskNotificationEvent
-  | ModeTransitionEvent
-  | ModeTransitionTimeoutEvent
-  | ModeTransitionPreambleDegradedEvent
-  | ModeTransitionFlushTimeoutEvent
   | ChainAdvanceEvent
   | ChainStalledEvent
   | GapSentinelEvent
@@ -229,45 +181,6 @@ export interface TitleUpdateEvent {
   turn_stamp: number
 }
 
-// ── Mode transition events (DO-synthesised for chain UX) ────────────
-//
-// Emitted by SessionDO when a chain-linked session receives a `kata_state`
-// event whose `currentMode` differs from the previous mode and
-// `continueSdk` is not set. These travel over the browser WS channel
-// alongside real runner events so the chain timeline UI can render them.
-
-export interface ModeTransitionEvent {
-  type: 'mode_transition'
-  session_id: string
-  from: string | null
-  to: string
-  issueNumber: number
-  at: string
-}
-
-export interface ModeTransitionTimeoutEvent {
-  type: 'mode_transition_timeout'
-  session_id: string
-  issueNumber: number
-  at: string
-  note: string
-}
-
-export interface ModeTransitionPreambleDegradedEvent {
-  type: 'mode_transition_preamble_degraded'
-  session_id: string
-  issueNumber: number
-  at: string
-  reason: string
-}
-
-export interface ModeTransitionFlushTimeoutEvent {
-  type: 'mode_transition_flush_timeout'
-  session_id: string
-  issueNumber: number
-  at: string
-}
-
 // ── Chain auto-advance events (DO-synthesised for chain UX P3) ──────
 //
 // Emitted by SessionDO when a chain-linked session terminates and the
@@ -293,23 +206,6 @@ export interface StoppedEvent {
   type: 'stopped'
   session_id: string
   sdk_session_id: string | null
-}
-
-export interface ContextUsageEvent {
-  type: 'context_usage'
-  session_id: string
-  /** Full SDK response from query.getContextUsage() */
-  usage: Record<string, unknown>
-}
-
-export interface RewindResultEvent {
-  type: 'rewind_result'
-  session_id: string
-  can_rewind: boolean
-  error?: string
-  files_changed?: string[]
-  insertions?: number
-  deletions?: number
 }
 
 export interface RateLimitEvent {
@@ -428,6 +324,13 @@ export interface ResultEvent {
   num_turns: number | null
   is_error: boolean
   sdk_summary: string | null
+  /**
+   * GH#102 / spec 102-sdk-peelback B8: optional attachment with the latest
+   * context-usage snapshot from the SDK at turn-complete. Replaces the
+   * standalone (now-deleted) `ContextUsageEvent`. Best-effort — runner
+   * omits this if the SDK call throws or returns malformed data.
+   */
+  context_usage?: WireContextUsage
 }
 
 export interface ErrorEvent {
@@ -608,11 +511,10 @@ export interface KataStateEvent {
 // ── Context Usage (shared between DO + client) ─────────────────────
 //
 // Mirror of the canonical shape client-side code writes into
-// `sessionLiveStateCollection.contextUsage`. The SDK's
-// `query.getContextUsage()` returns a `Record<string, unknown>` on the wire
-// (see ContextUsageEvent.usage); this interface is the parsed /
-// strongly-typed projection used by UI consumers and by the new P3 REST
-// cache in SessionDO's `session_meta.context_usage_json` column.
+// `sessionLiveStateCollection.contextUsage`. UI-side camelCase used by
+// consumers and by the P3 REST cache in SessionDO's
+// `session_meta.context_usage_json` column. The wire-side sibling is
+// `WireContextUsage` (snake_case), carried on `ResultEvent.context_usage`.
 
 export interface ContextUsage {
   totalTokens: number
@@ -621,6 +523,26 @@ export interface ContextUsage {
   model?: string
   isAutoCompactEnabled?: boolean
   autoCompactThreshold?: number
+}
+
+/**
+ * Wire-side context-usage attachment carried on `ResultEvent.context_usage`.
+ * Snake_case to match the rest of the wire types. The UI-side camelCase
+ * `ContextUsage` (above) is the sibling — transform is applied at the
+ * SessionDO ingest boundary (`handleGatewayEvent('result')`).
+ *
+ * GH#102 / spec 102-sdk-peelback B8: replaces the standalone
+ * `ContextUsageEvent` (deleted) with an attachment on the `result` event
+ * so each turn-complete carries fresh token counts in one frame.
+ */
+export interface WireContextUsage {
+  input_tokens: number
+  output_tokens: number
+  total_tokens: number
+  max_tokens: number
+  percentage: number
+  model: string
+  auto_compact_at?: number
 }
 
 // ── Session State ────────────────────────────────────────────────────

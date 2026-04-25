@@ -222,8 +222,10 @@ describe('gateway_event non-message events (hook-side, not cache)', () => {
         makeWsMessage({
           type: 'gateway_event',
           event: {
-            type: 'context_usage',
-            usage: { totalTokens: 100, maxTokens: 200000, percentage: 0.05 },
+            type: 'kata_state',
+            session_id: 'test-session',
+            project: 'test-project',
+            kata_state: null,
           },
         }),
       )

@@ -727,6 +727,58 @@ export class ClaudeRunner {
             ctx.meta.cost.usd = result.total_cost_usd
           }
 
+          // GH#102 / spec 102-sdk-peelback B8: best-effort context-usage
+          // snapshot attached to the turn-complete `result` event. Replaces
+          // the standalone `context_usage` GatewayEvent. Any throw or
+          // missing/zero `max_tokens` → omit the attachment entirely
+          // rather than emit a malformed payload.
+          let contextUsageAttachment:
+            | {
+                input_tokens: number
+                output_tokens: number
+                total_tokens: number
+                max_tokens: number
+                percentage: number
+                model: string
+                auto_compact_at?: number
+              }
+            | undefined
+          try {
+            const usage = (await (
+              q as unknown as {
+                getContextUsage: () => Promise<Record<string, unknown> | null | undefined>
+              }
+            )
+              .getContextUsage()
+              .catch(() => null)) as Record<string, unknown> | null
+            if (usage) {
+              const inputTokens = Number(usage.input_tokens ?? usage.inputTokens ?? 0)
+              const outputTokens = Number(usage.output_tokens ?? usage.outputTokens ?? 0)
+              const totalTokens = Number(
+                usage.total_tokens ?? usage.totalTokens ?? inputTokens + outputTokens,
+              )
+              const maxTokens = Number(usage.max_tokens ?? usage.maxTokens ?? 0)
+              if (maxTokens > 0) {
+                const percentage = totalTokens > 0 ? (totalTokens / maxTokens) * 100 : 0
+                const model = typeof usage.model === 'string' ? usage.model : (ctx.meta.model ?? '')
+                const autoCompactAtRaw = usage.auto_compact_at ?? usage.autoCompactAt
+                contextUsageAttachment = {
+                  input_tokens: inputTokens,
+                  output_tokens: outputTokens,
+                  total_tokens: totalTokens,
+                  max_tokens: maxTokens,
+                  percentage,
+                  model,
+                  ...(typeof autoCompactAtRaw === 'number'
+                    ? { auto_compact_at: autoCompactAtRaw }
+                    : {}),
+                }
+              }
+            }
+          } catch {
+            /* best-effort — never break the result emission */
+          }
+
           send(
             ch,
             {
@@ -739,6 +791,7 @@ export class ClaudeRunner {
               num_turns: result.num_turns ?? null,
               is_error: result.subtype !== 'success',
               sdk_summary: sdkSummary,
+              ...(contextUsageAttachment ? { context_usage: contextUsageAttachment } : {}),
             },
             ctx,
           )

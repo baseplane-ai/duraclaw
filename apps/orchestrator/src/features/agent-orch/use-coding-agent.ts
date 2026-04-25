@@ -562,14 +562,19 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         if (parsed.type === 'gateway_event' && parsed.event) {
           const event = parsed.event as GatewayEvent & { uuid?: string; content?: unknown[] }
 
-          // Spec #37 P2b B16: kata_state / context_usage no longer write to
-          // a client collection. The DO persists both into its
-          // `agent_sessions` row (as JSON-serialised TEXT columns) and
-          // broadcasts a synced delta; sessionsCollection converges.
-          // Invalidate the query key so an active queryFn cold-start path
-          // refetches the latest TEXT columns — hot path is already
-          // synced-delta driven.
-          if (event.type === 'kata_state' || event.type === 'context_usage') {
+          // Spec #37 P2b B16: kata_state no longer writes to a client
+          // collection. The DO persists into its `agent_sessions` row (as
+          // a JSON-serialised TEXT column) and broadcasts a synced delta;
+          // sessionsCollection converges. Invalidate the query key so an
+          // active queryFn cold-start path refetches the latest TEXT
+          // columns — hot path is already synced-delta driven.
+          //
+          // GH#102 / spec 102-sdk-peelback B8: context_usage is no longer
+          // its own wire event — it rides on `result`, which already
+          // triggers a session-row D1 write + synced delta via
+          // `syncResultToD1` → `broadcastSessionRow`. ContextBar refreshes
+          // automatically; no extra invalidate needed here.
+          if (event.type === 'kata_state') {
             void queryClient.invalidateQueries({ queryKey: ['sessions'] })
           }
 

@@ -293,24 +293,6 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   /** Per-session monotonic sequence for MessagesFrame broadcasts (B1). Persisted in typed `session_meta.message_seq`; survives DO rehydrate. */
   private messageSeq = 0
   /**
-   * P3 B4: single-flight in-flight probe for `getContextUsage`. Concurrent
-   * callers await the same promise; cleared on settle (resolve / reject /
-   * timeout) so the next caller can issue a fresh probe.
-   */
-  private contextUsageProbeInFlight: Promise<ContextUsage | null> | null = null
-  /**
-   * P3 B4: pending resolvers for the next `context_usage` gateway_event. The
-   * handler in `handleGatewayEvent` drains them on arrival. Multiple entries
-   * exist only transiently when the probe times out and a new probe races in
-   * before the timed-out resolver is swept — the timeout path removes its
-   * own slot so late arrivals don't leak.
-   */
-  private contextUsageResolvers: Array<{
-    resolve: (v: ContextUsage | null) => void
-    reject: (e: unknown) => void
-  }> = []
-
-  /**
    * GH#86: feature-flag cache. `triggerGatewayDial` reads global flags
    * (e.g. `haiku_titler`) from D1 to decide what to bake into the runner
    * spawn payload. Cached for `FEATURE_FLAG_CACHE_TTL_MS` per DO so
@@ -2657,23 +2639,12 @@ export class SessionDO extends Agent<Env, SessionMeta> {
    * spawns a fresh runner in the new mode with an artifact-pointer preamble.
    */
   private async handleModeTransition(kataState: KataSessionState, fromMode: string | null) {
-    const sessionId = this.name
     const toMode = kataState.currentMode ?? ''
     const issueNumber = kataState.issueNumber ?? 0
 
     console.log(
       `[SessionDO:${this.ctx.id}] mode transition ${fromMode ?? '(none)'}→${toMode} issue=#${issueNumber}`,
     )
-
-    // 1. Announce the transition to browsers so the chain timeline UI picks it up.
-    this.broadcastGatewayEvent({
-      type: 'mode_transition',
-      session_id: sessionId,
-      from: fromMode,
-      to: toMode,
-      issueNumber,
-      at: new Date().toISOString(),
-    })
 
     // 2. Flush window — BufferedChannel has no in-flight-send introspection,
     //    so the best we can do is a short pause to let the runner's final
@@ -2736,13 +2707,6 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       console.warn(
         `[SessionDO:${this.ctx.id}] mode transition: runner did not exit within 5s — proceeding (token rotation in triggerGatewayDial will evict lingering runner via 4410)`,
       )
-      this.broadcastGatewayEvent({
-        type: 'mode_transition_timeout',
-        session_id: sessionId,
-        issueNumber,
-        at: new Date().toISOString(),
-        note: 'runner did not exit within 5s; proceeding with fresh spawn',
-      })
     }
 
     // 5. Build preamble (degrade gracefully on failure).
@@ -2770,7 +2734,6 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     const issueNumber = ks.issueNumber ?? 0
     const mode = ks.currentMode ?? 'unknown'
     const phase = ks.currentPhase ?? 'p0'
-    const sessionId = this.name
 
     // Issue title is not a first-class field on the DO — leave as 'untitled'
     // until chain metadata plumbing lands (downstream P5 work).
@@ -2814,15 +2777,7 @@ ${artifacts}
 
 Read the relevant artifacts before acting. Your kata state is already linked: workflowId=GH#${issueNumber}, mode=${mode}, phase=${phase}.`
     } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err)
       console.error(`[SessionDO:${this.ctx.id}] buildModePreamble failed:`, err)
-      this.broadcastGatewayEvent({
-        type: 'mode_transition_preamble_degraded',
-        session_id: sessionId,
-        issueNumber,
-        at: new Date().toISOString(),
-        reason,
-      })
       return degraded()
     }
   }
@@ -3399,7 +3354,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
 
   /**
    * Soft-abort the in-flight turn — flips status → idle, drops the
-   * callback token, and best-effort fires `{type:'abort'}` down the
+   * callback token, and best-effort fires `{type:'stop'}` down the
    * dial-back WS to the runner. Idempotent and safe from any status:
    * a stale UI button or a second click never wedges the DO. The old
    * strict guard (running / waiting_gate only) defeated the purpose
@@ -3421,7 +3376,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       error: null,
       active_callback_token: undefined,
     })
-    this.sendToGateway({ type: 'abort', session_id: this.state.session_id ?? '' })
+    this.sendToGateway({ type: 'stop', session_id: this.state.session_id ?? '' })
     console.log(`[SessionDO:${this.ctx.id}] abort: ${reason ?? 'user request'}`)
     return { ok: true }
   }
@@ -3480,9 +3435,9 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       active_callback_token: undefined,
     })
 
-    // Best-effort in-band abort — harmless if the WS is dead.
+    // Best-effort in-band stop — harmless if the WS is dead.
     if (sessionId) {
-      this.sendToGateway({ type: 'abort', session_id: sessionId })
+      this.sendToGateway({ type: 'stop', session_id: sessionId })
     }
 
     // Out-of-band SIGTERM via gateway HTTP. This is the slice that
@@ -4248,17 +4203,13 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
   }
 
   /**
-   * P3 B4: cached-or-fresh context usage reader.
+   * P3 B4: cached context usage reader.
    *
-   * Semantics:
-   * - Fresh cache hit (<5s old) → return cached value, `isCached: true`.
-   * - Stale-or-missing + gateway connected → single-flight probe with 3s
-   *   timeout; on success UPDATE the cache and return `isCached: false`.
-   * - No gateway connection → return stale cache (or null) with
-   *   `isCached: true`.
-   * - Probe timeout or error → fall through to stale cache / null.
-   *
-   * Retained as `@callable()` so the existing client-side
+   * GH#102 / spec 102-sdk-peelback B7+B8: the `get-context-usage` wire
+   * command was deleted; the runner now attaches `context_usage` to every
+   * `result` event, which keeps the `session_meta.context_usage_json`
+   * cache fresh per turn. This RPC is now a pure cache read. Retained as
+   * `@callable()` so the existing client-side
    * `connection.call('getContextUsage', [])` trigger continues to work.
    * Also invoked via HTTP by `onRequest`'s `GET /context-usage` route
    * (backing `/api/sessions/:id/context-usage`).
@@ -4281,74 +4232,11 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
             cachedAt: row.context_usage_cached_at,
           }
         : null
-    const now = Date.now()
-    if (cached && now - cached.cachedAt < 5_000) {
-      return {
-        contextUsage: cached.value,
-        fetchedAt: new Date(cached.cachedAt).toISOString(),
-        isCached: true,
-      }
+    return {
+      contextUsage: cached?.value ?? null,
+      fetchedAt: cached ? new Date(cached.cachedAt).toISOString() : new Date().toISOString(),
+      isCached: true,
     }
-    if (!this.getGatewayConnectionId()) {
-      return {
-        contextUsage: cached?.value ?? null,
-        fetchedAt: cached ? new Date(cached.cachedAt).toISOString() : new Date().toISOString(),
-        isCached: true,
-      }
-    }
-    if (!this.contextUsageProbeInFlight) {
-      this.contextUsageProbeInFlight = this.probeContextUsageWithTimeout().finally(() => {
-        this.contextUsageProbeInFlight = null
-      })
-    }
-    try {
-      const value = await this.contextUsageProbeInFlight
-      const cachedAt = Date.now()
-      this.sql`UPDATE session_meta
-        SET context_usage_json = ${JSON.stringify(value)},
-            context_usage_cached_at = ${cachedAt},
-            updated_at = ${cachedAt}
-        WHERE id = 1`
-      return {
-        contextUsage: value,
-        fetchedAt: new Date(cachedAt).toISOString(),
-        isCached: false,
-      }
-    } catch {
-      return {
-        contextUsage: cached?.value ?? null,
-        fetchedAt: cached ? new Date(cached.cachedAt).toISOString() : new Date().toISOString(),
-        isCached: true,
-      }
-    }
-  }
-
-  /**
-   * P3 B4: dispatch a `get-context-usage` GatewayCommand and await the
-   * matched `context_usage` gateway_event. 3s timeout — if the runner is
-   * unresponsive we reject and the caller falls back to stale / null rather
-   * than blocking the Worker up to its CPU limit.
-   */
-  private probeContextUsageWithTimeout(): Promise<ContextUsage | null> {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        // Remove this resolver so a late gateway reply doesn't leak into
-        // the next probe's resolver slot.
-        const idx = this.contextUsageResolvers.findIndex((r) => r.resolve === innerResolve)
-        if (idx >= 0) this.contextUsageResolvers.splice(idx, 1)
-        reject(new Error('probe_timeout'))
-      }, 3_000)
-      const innerResolve = (v: ContextUsage | null) => {
-        clearTimeout(timer)
-        resolve(v)
-      }
-      const innerReject = (e: unknown) => {
-        clearTimeout(timer)
-        reject(e)
-      }
-      this.contextUsageResolvers.push({ resolve: innerResolve, reject: innerReject })
-      this.sendToGateway({ type: 'get-context-usage', session_id: this.state.session_id ?? '' })
-    })
   }
 
   /**
@@ -4409,13 +4297,11 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
 
   @callable()
   async rewind(messageId: string): Promise<{ ok: boolean; error?: string }> {
-    this.sendToGateway({
-      type: 'rewind',
-      session_id: this.state.session_id ?? '',
-      message_id: messageId,
-    })
-    // DO-authored snapshot (B2): broadcast the trimmed history so all clients
-    // converge on the post-rewind view without round-tripping through gateway.
+    // GH#102 / spec 102-sdk-peelback B9: the wire `rewind` GatewayCommand
+    // and the runner's `q.rewindFiles()` SDK call are deleted. The DO no
+    // longer talks to the runner here — the rewind UX is purely client-
+    // visible: trim the in-DO transcript and broadcast a snapshot so all
+    // attached browsers converge.
     try {
       const history = this.session.getHistory()
       const idx = history.findIndex((m) => m.id === messageId)
@@ -4499,9 +4385,9 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     originalMessageId: string,
     newContent: string,
   ): Promise<{ ok: boolean; leafId?: string; error?: string }> {
-    // 1. If streaming in progress, abort first
+    // 1. If streaming in progress, interrupt first so a new turn can start.
     if (this.currentTurnMessageId) {
-      this.sendToGateway({ type: 'abort', session_id: this.state.session_id ?? '' })
+      this.sendToGateway({ type: 'interrupt', session_id: this.state.session_id ?? '' })
       // Finalize orphaned streaming parts
       const existing = this.session.getMessage(this.currentTurnMessageId)
       if (existing) {
@@ -5062,6 +4948,36 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
 
       case 'result': {
         this.clearAwaitingResponse()
+
+        // GH#102 / spec 102-sdk-peelback B8: the runner now attaches the
+        // latest context-usage snapshot to every `result` event (replaces
+        // the standalone `context_usage` GatewayEvent). Transform from the
+        // wire snake_case `WireContextUsage` to the canonical camelCase
+        // `ContextUsage` and write it through the same 5s-debounced D1
+        // mirror as before, plus the typed `session_meta` cache so the
+        // pure-cache `getContextUsage()` reader returns fresh data.
+        if (event.context_usage) {
+          const wire = event.context_usage
+          const parsed: ContextUsage = {
+            totalTokens: wire.total_tokens ?? 0,
+            maxTokens: wire.max_tokens ?? 0,
+            percentage: wire.percentage ?? 0,
+            model: wire.model || undefined,
+            autoCompactThreshold: wire.auto_compact_at,
+          }
+          try {
+            const cachedAt = Date.now()
+            this.sql`UPDATE session_meta
+              SET context_usage_json = ${JSON.stringify(parsed)},
+                  context_usage_cached_at = ${cachedAt},
+                  updated_at = ${cachedAt}
+              WHERE id = 1`
+          } catch (err) {
+            console.error(`[SessionDO:${this.ctx.id}] Failed to persist context_usage cache:`, err)
+          }
+          this.syncContextUsageToD1(JSON.stringify(parsed))
+        }
+
         // GH#75 P1.2 B7 — REORDER GUARD: all per-message broadcast frames
         // for this turn MUST fire before we flip state to `idle`. If status
         // flips first the sidebar can resolve to idle while the final
@@ -5404,7 +5320,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         break
       }
 
-      // P3 B4: parse `context_usage` to `ContextUsage`, drain probe resolvers,
       // GH#86: Haiku-generated session title. Runner emits this after a
       // successful Haiku call (initial title or pivot retitle). The DO
       // applies iff title_source !== 'user' (B4 never-clobber invariant),
@@ -5444,54 +5359,10 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         break
       }
 
-      // and update `session_meta.context_usage_json` + cached_at. The original
-      // gateway_event broadcast is retained (per P3 brief Non-Goals: keep
-      // existing client handlers live until the deferred consumer-migration
-      // issue swaps them to REST).
-      case 'context_usage': {
-        const rawUsage = event.usage ?? {}
-        const parsed: ContextUsage = {
-          totalTokens: (rawUsage.totalTokens as number) ?? 0,
-          maxTokens: (rawUsage.maxTokens as number) ?? 0,
-          percentage: (rawUsage.percentage as number) ?? 0,
-          model: rawUsage.model as string | undefined,
-          isAutoCompactEnabled: rawUsage.isAutoCompactEnabled as boolean | undefined,
-          autoCompactThreshold: rawUsage.autoCompactThreshold as number | undefined,
-        }
-        // Drain any awaiters first so they settle on the fresh value rather
-        // than the pre-write cache.
-        const resolvers = this.contextUsageResolvers.splice(0)
-        for (const r of resolvers) {
-          try {
-            r.resolve(parsed)
-          } catch {
-            // Defensive: never let a resolver throw tank the event loop.
-          }
-        }
-        // Persist into the typed session_meta cache so subsequent calls
-        // within the 5s TTL hit the fresh row without re-probing.
-        try {
-          const cachedAt = Date.now()
-          this.sql`UPDATE session_meta
-            SET context_usage_json = ${JSON.stringify(parsed)},
-                context_usage_cached_at = ${cachedAt},
-                updated_at = ${cachedAt}
-            WHERE id = 1`
-        } catch (err) {
-          console.error(`[SessionDO:${this.ctx.id}] Failed to persist context_usage cache:`, err)
-        }
-        // Spec #37 B5: mirror context_usage onto the D1 session row with a 5s
-        // trailing-edge debounce so sidebar / history cards track live usage.
-        this.syncContextUsageToD1(JSON.stringify(parsed))
-        // Retained WS broadcast — consumer migration is a separate issue.
-        this.broadcastGatewayEvent(event)
-        break
-      }
-
       // Events that don't produce message parts — just broadcast raw
       default: {
-        // rewind_result, rate_limit, task_started, task_progress,
-        // task_notification — broadcast as-is
+        // rate_limit, task_started, task_progress, task_notification —
+        // broadcast as-is
         this.broadcastGatewayEvent(event)
         break
       }

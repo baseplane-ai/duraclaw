@@ -203,7 +203,6 @@ function handleIncomingCommand(msg: unknown, ctx: RunnerSessionContext, ch: Buff
       }
       break
     }
-    case 'abort':
     case 'stop': {
       // Close the lifetime queue first so the Query exhausts cleanly,
       // then abort to trigger the SIGTERM/watchdog shutdown path if
@@ -231,101 +230,6 @@ function handleIncomingCommand(msg: unknown, ctx: RunnerSessionContext, ch: Buff
           `[session-runner] interrupt error: ${err instanceof Error ? err.message : String(err)}`,
         )
       })
-      break
-    }
-    case 'get-context-usage': {
-      if (!ctx.query) {
-        console.warn('[session-runner] get-context-usage before Query ready — dropping')
-        break
-      }
-      ctx.query
-        .getContextUsage()
-        .then((usage) => {
-          const seq = ++ctx.nextSeq
-          ch.send({
-            type: 'context_usage',
-            session_id: ctx.sessionId,
-            usage: usage as unknown as Record<string, unknown>,
-            seq,
-          })
-          ctx.meta.last_activity_ts = Date.now()
-          ctx.meta.last_event_seq = seq
-        })
-        .catch((err: unknown) => {
-          console.error(
-            `[session-runner] getContextUsage error: ${err instanceof Error ? err.message : String(err)}`,
-          )
-        })
-      break
-    }
-    case 'set-model': {
-      if (!ctx.query) {
-        console.warn('[session-runner] set-model before Query ready — dropping')
-        break
-      }
-      const model = typeof m.model === 'string' ? m.model : undefined
-      ctx.query.setModel(model).catch((err: unknown) => {
-        console.error(
-          `[session-runner] setModel error: ${err instanceof Error ? err.message : String(err)}`,
-        )
-      })
-      break
-    }
-    case 'set-permission-mode': {
-      if (!ctx.query) {
-        console.warn('[session-runner] set-permission-mode before Query ready — dropping')
-        break
-      }
-      ctx.query.setPermissionMode(m.mode as any).catch((err: unknown) => {
-        console.error(
-          `[session-runner] setPermissionMode error: ${err instanceof Error ? err.message : String(err)}`,
-        )
-      })
-      break
-    }
-    case 'stop-task': {
-      const taskId = m.task_id
-      if (ctx.query && typeof taskId === 'string') {
-        ;(ctx.query as unknown as { stopTask: (id: string) => unknown }).stopTask(taskId)
-      }
-      break
-    }
-    case 'rewind': {
-      if (ctx.query) {
-        const q = ctx.query as unknown as {
-          rewindFiles: (
-            id: string,
-            opts: { dryRun?: boolean },
-          ) => Promise<{
-            canRewind: boolean
-            error?: string
-            filesChanged?: string[]
-            insertions?: number
-            deletions?: number
-          }>
-        }
-        q.rewindFiles(String(m.message_id), { dryRun: Boolean(m.dry_run) })
-          .then((result) => {
-            ch.send({
-              type: 'rewind_result',
-              session_id: ctx.sessionId,
-              can_rewind: result.canRewind,
-              error: result.error,
-              files_changed: result.filesChanged,
-              insertions: result.insertions,
-              deletions: result.deletions,
-              seq: ++ctx.nextSeq,
-            })
-          })
-          .catch((err: unknown) => {
-            ch.send({
-              type: 'error',
-              session_id: ctx.sessionId,
-              error: `Rewind failed: ${err instanceof Error ? err.message : String(err)}`,
-              seq: ++ctx.nextSeq,
-            })
-          })
-      }
       break
     }
     case 'ping': {
