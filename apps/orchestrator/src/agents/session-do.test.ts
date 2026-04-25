@@ -4099,3 +4099,152 @@ describe('interrupt() gate-flip mutation (mirror)', () => {
     expect(finalHistory[0].parts[2].type).toBe('text')
   })
 })
+
+// ── Stop escape-hatch — works from any status (mirror) ───────────────
+//
+// Regression: pre-fix, both `interrupt()` and `forceStop()` rejected
+// when the session status wasn't `running` or `waiting_gate`. That
+// stranded users in `idle` / `error` / `pending` / `waiting_input` /
+// `waiting_permission` with a still-mounted GateResolver and no way
+// to clear it. The fix moves gate-clearing into a status-agnostic
+// helper (`clearPendingGateParts`) called unconditionally by both
+// RPCs; this block locks in the predicate behavior so a future
+// refactor can't silently re-narrow it.
+
+describe('Stop escape-hatch — works from any status (mirror)', () => {
+  // Mirrors the post-fix `clearPendingGateParts()` helper. The DO
+  // walks history newest-first, and for any message containing a
+  // pending gate part flips every pending gate part on that message
+  // to {state: 'output-denied', output: 'Interrupted'}, then
+  // broadcasts the whole updated message. Status is irrelevant —
+  // this loop runs from `idle`, `error`, `waiting_input`, and every
+  // other state in the SessionStatus union.
+  function clearGatesMirror(history: SessionMessage[]): {
+    broadcasted: SessionMessage[]
+    finalHistory: SessionMessage[]
+  } {
+    const broadcasted: SessionMessage[] = []
+    const finalHistory = history.slice()
+    for (let i = finalHistory.length - 1; i >= 0; i--) {
+      const msg = finalHistory[i]
+      const hasPendingGate = msg.parts.some(isPendingGatePart)
+      if (!hasPendingGate) continue
+      const updatedParts = msg.parts.map((p) =>
+        isPendingGatePart(p) ? { ...p, state: 'output-denied' as const, output: 'Interrupted' } : p,
+      )
+      const updatedMsg: SessionMessage = { ...msg, parts: updatedParts }
+      finalHistory[i] = updatedMsg
+      broadcasted.push(updatedMsg)
+    }
+    return { broadcasted, finalHistory }
+  }
+
+  it('flips a tool-AskUserQuestion + input-available part from an idle baseline', () => {
+    // Simulates the wedged-from-idle case: the runner died, the DO
+    // status is `idle`, but a stale `tool-AskUserQuestion` part is
+    // still rendering a GateResolver in the UI. The user clicks Stop;
+    // the helper must clear the part regardless of status.
+    const history: SessionMessage[] = [
+      {
+        id: 'm1',
+        role: 'assistant',
+        createdAt: new Date(),
+        parts: [
+          {
+            type: 'tool-AskUserQuestion',
+            toolCallId: 'toolu_NATIVE',
+            state: 'input-available',
+            toolName: 'AskUserQuestion',
+            input: { questions: [{ question: 'pick one' }] },
+          },
+        ],
+      },
+    ]
+
+    const { broadcasted, finalHistory } = clearGatesMirror(history)
+
+    expect(finalHistory[0].parts[0].state).toBe('output-denied')
+    expect((finalHistory[0].parts[0] as { output?: unknown }).output).toBe('Interrupted')
+    expect(broadcasted).toHaveLength(1)
+  })
+
+  it('flips a tool-ask_user + approval-requested part (legacy DO-promoted shape)', () => {
+    const history: SessionMessage[] = [
+      {
+        id: 'm1',
+        role: 'assistant',
+        createdAt: new Date(),
+        parts: [
+          {
+            type: 'tool-ask_user',
+            toolCallId: 'toolu_LEGACY',
+            state: 'approval-requested',
+          },
+        ],
+      },
+    ]
+    const { broadcasted, finalHistory } = clearGatesMirror(history)
+    expect(finalHistory[0].parts[0].state).toBe('output-denied')
+    expect((finalHistory[0].parts[0] as { output?: unknown }).output).toBe('Interrupted')
+    expect(broadcasted).toHaveLength(1)
+  })
+
+  it('flips a tool-permission + approval-requested part (canUseTool gate)', () => {
+    const history: SessionMessage[] = [
+      {
+        id: 'm1',
+        role: 'assistant',
+        createdAt: new Date(),
+        parts: [
+          {
+            type: 'tool-permission',
+            toolCallId: 'toolu_PERM',
+            state: 'approval-requested',
+          },
+        ],
+      },
+    ]
+    const { broadcasted, finalHistory } = clearGatesMirror(history)
+    expect(finalHistory[0].parts[0].state).toBe('output-denied')
+    expect((finalHistory[0].parts[0] as { output?: unknown }).output).toBe('Interrupted')
+    expect(broadcasted).toHaveLength(1)
+  })
+
+  it('leaves non-pending parts untouched', () => {
+    // Mixed message: one pending gate, one already-resolved gate, and
+    // a plain text part. Helper must flip only the pending one.
+    const history: SessionMessage[] = [
+      {
+        id: 'm1',
+        role: 'assistant',
+        createdAt: new Date(),
+        parts: [
+          {
+            type: 'tool-AskUserQuestion',
+            toolCallId: 'toolu_PENDING',
+            state: 'input-available',
+            toolName: 'AskUserQuestion',
+          },
+          {
+            type: 'tool-AskUserQuestion',
+            toolCallId: 'toolu_DONE',
+            state: 'output-available',
+            toolName: 'AskUserQuestion',
+            output: { answers: [{ label: 'yes' }] },
+          },
+          { type: 'text', text: 'thinking…' },
+        ],
+      },
+    ]
+
+    const { broadcasted, finalHistory } = clearGatesMirror(history)
+
+    expect(finalHistory[0].parts[0].state).toBe('output-denied')
+    // Already-resolved gate is left alone.
+    expect(finalHistory[0].parts[1].state).toBe('output-available')
+    // Plain text part is untouched.
+    expect(finalHistory[0].parts[2].type).toBe('text')
+    expect((finalHistory[0].parts[2] as { text?: string }).text).toBe('thinking…')
+    expect(broadcasted).toHaveLength(1)
+  })
+})

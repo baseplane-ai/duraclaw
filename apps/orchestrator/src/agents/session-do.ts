@@ -3628,6 +3628,13 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
    * (timeout / gateway unreachable / pid not found). The DO has already
    * locally recovered regardless — `forceStop` never leaves the DO in a
    * weird state.
+   *
+   * Safe to call from ANY status. The local cleanup (flip → idle, drop
+   * callback token, broadcast cleared gates) and the gateway SIGTERM
+   * are both idempotent / best-effort, so a stale UI button or a
+   * second click never wedges the DO. The previous strict guard
+   * (running / waiting_gate only) defeated the universal-escape-hatch
+   * promise above.
    */
   @callable()
   async forceStop(reason?: string): Promise<{
@@ -3640,15 +3647,19 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       | { kind: 'not_found' }
       | { kind: 'unreachable'; reason: string }
   }> {
-    if (this.state.status !== 'running' && this.state.status !== 'waiting_gate') {
-      return {
-        ok: false,
-        error: `Cannot force-stop: status is '${this.state.status}'`,
-        kill: { kind: 'skipped', reason: 'no_session_id' },
-      }
-    }
+    // Always clear pending gate parts — even from idle / error, the UI
+    // may still be rendering a GateResolver against a stale message.
+    this.clearPendingGateParts()
 
     const sessionId = this.state.session_id
+
+    // Fast path: nothing to stop. Already idle and no session_id means
+    // there's no runner to SIGTERM and no state to flip — return early
+    // so we don't make a pointless gateway round-trip.
+    if (this.state.status === 'idle' && !sessionId) {
+      return { ok: true, kill: { kind: 'skipped', reason: 'no_session_id' } }
+    }
+
     this.updateState({
       status: 'idle',
       error: null,
@@ -4322,30 +4333,20 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     return { ok: true }
   }
 
-  @callable()
-  async interrupt(): Promise<{ ok: boolean; error?: string }> {
-    if (this.state.status !== 'running' && this.state.status !== 'waiting_gate') {
-      return { ok: false, error: `Cannot interrupt: status is '${this.state.status}'` }
-    }
-
-    // Release ALL pending gate parts. The UI may be rendering a
-    // GateResolver for any tool_call_id whose part is in a pending-gate
-    // state. Three shapes count as pending here, mirroring
-    // `isPendingGatePart` / `findPendingGatePart` / client-side
-    // `isPendingGate`:
-    //   - `tool-ask_user` + `approval-requested` (DO-promoted ask_user)
-    //   - `tool-permission` + `approval-requested` (canUseTool gate)
-    //   - `tool-AskUserQuestion` + `input-available` (SDK-native shape;
-    //     post `1f6678e` ask_user gates land here and are no longer
-    //     promoted to `tool-ask_user`).
-    // Flipping every pending gate part to 'output-denied' guarantees the
-    // UI clears its GateResolver(s) when the user hits interrupt — the
-    // client's `isPendingGate` predicate requires `input-available` or
-    // `approval-requested`, neither of which matches `output-denied`. The
-    // subsequent `interrupt` command to the runner aborts the SDK's
-    // in-flight canUseTool promise — no per-gate cancel command exists,
-    // so we rely on the SDK interrupt to release the pending
-    // answer/permission wait.
+  /**
+   * Walk session history, flip every pending gate part to
+   * `output-denied` with `output: 'Interrupted'`, persist via
+   * `safeUpdateMessage`, and broadcast the mutation to clients via
+   * `broadcastMessage`. Idempotent — runs from any status. Used by
+   * both `interrupt()` and `forceStop()` so the GateResolver UI
+   * clears regardless of which Stop affordance the user reaches for.
+   *
+   * "Pending" mirrors `isPendingGatePart` (session-do-helpers.ts):
+   *   - tool-ask_user / approval-requested
+   *   - tool-permission / approval-requested
+   *   - tool-AskUserQuestion / input-available  (SDK-native shape)
+   */
+  private clearPendingGateParts(): void {
     const history = this.session.getHistory()
     for (let i = history.length - 1; i >= 0; i--) {
       const msg = history[i]
@@ -4361,6 +4362,21 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       } catch (err) {
         console.error(`[SessionDO:${this.ctx.id}] Failed to mark gate interrupted:`, err)
       }
+    }
+  }
+
+  @callable()
+  async interrupt(): Promise<{ ok: boolean; error?: string }> {
+    // Always clear pending gate parts first — the GateResolver UI is
+    // mounted off `isPendingGate`, and the user may be hitting Stop
+    // from any status (idle / error / waiting_input / etc.) to dismiss
+    // a stuck modal. This is decoupled from the runner-side interrupt:
+    // the loop is idempotent and safe to run with no live SDK.
+    this.clearPendingGateParts()
+
+    // No live runner to interrupt — UI was unblocked, we're done.
+    if (this.state.status !== 'running' && this.state.status !== 'waiting_gate') {
+      return { ok: true }
     }
 
     // Flip status back to running so the watchdog and UI agree.
