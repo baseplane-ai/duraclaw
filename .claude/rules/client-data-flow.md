@@ -5,15 +5,17 @@ paths:
 
 # Client data flow (session live state)
 
-**Spec #31 unified sync channel** — `messagesCollection` is the sole live
-source of per-session status and gate. The DO suppresses the Agents SDK's
-built-in state broadcast (`shouldSendProtocolMessages() => false`); the
-`SessionState` blob type is deleted. Hooks `useDerivedStatus(sessionId)`
-and `useDerivedGate(sessionId)` fold over `messagesCollection` to surface
-the active status / pending gate for any consumer. The DO persists its
-own typed `SessionMeta` in a `session_meta` SQLite table (migration v6+v7)
-and restores it on rehydrate via `hydrateMetaFromSql()` — no more reliance
-on the Agents SDK `setState` JSON blob surviving eviction.
+**DO-authoritative status** — the SessionDO stamps `sessionStatus` on
+every `messages:*` / `branchInfo:*` WS frame and pushes a status-only
+frame on every `updateState({status})` transition. The client extracts
+`sessionStatus` from frames and writes it to the transient
+`sessionLocalCollection` (memory-only). `useSessionStatus(sessionId)`
+reads it; consumers fall back to `session?.status` (D1 row) only before
+the first WS frame (cold-start). No message-fold, no tiebreaker, no
+derivation. `useDerivedGate(sessionId)` still folds over
+`messagesCollection` for the gate payload. The DO persists its own typed
+`SessionMeta` in a `session_meta` SQLite table (migration v6+v7) and
+restores it on rehydrate via `hydrateMetaFromSql()`.
 
 The browser has three render sources for per-session state, all TanStack DB
 collections (OPFS-persisted, reactive via `useLiveQuery`):
@@ -21,16 +23,14 @@ collections (OPFS-persisted, reactive via `useLiveQuery`):
 1. `sessionsCollection` — per-session summary (`project`, `model`,
    `numTurns`, `totalCostUsd`, `durationMs`, `contextUsage`, `kataState`,
    `worktreeInfo`, `messageSeq`, and `status`). D1-mirrored via
-   `broadcastSessionRow`. Session status derives from
-   `useDerivedStatus(sessionId) ?? session?.status` — the hook folds
-   over `messagesCollection` and uses `messageSeq` as a tiebreaker to
-   detect stale D1 cache. The transient `sessionLocalCollection` carries
-   only `{id, wsReadyState, wsCloseTs}` (memory-only, no persistence).
+   `broadcastSessionRow`. The D1 `status` column is the cold-start
+   fallback only; live status comes from `useSessionStatus` (WS frame).
+   The transient `sessionLocalCollection` carries
+   `{id, wsReadyState, wsCloseTs, status}` (memory-only, no persistence).
 2. `messagesCollection` — per-session message history, one collection per
    agentName (memoised by `createMessagesCollection`). Query-backed with a
    REST fallback (`GET /api/sessions/:id/messages`) for cold-start and
-   reconnect-with-stale-cache; WS is the live push channel. This is also
-   the authoritative source for derived status / gate (see above).
+   reconnect-with-stale-cache; WS is the live push channel.
 3. `branchInfoCollection` — per-session branch siblings for rewind /
    resubmit / navigate. Populated by DO-pushed snapshots alongside
    messages; the `useBranchInfo` hook drives the branch arrows in the UI.

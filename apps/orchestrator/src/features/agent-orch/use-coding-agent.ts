@@ -213,6 +213,29 @@ export function onSessionStreamReconnect(
 // Internal dispatch helpers (not exported). Called by the useCodingAgent
 // hook's onMessage / reconnect-detection plumbing wired below.
 function dispatchSessionFrame(sessionId: string, frame: SyncedCollectionFrame<unknown>): void {
+  // Extract DO-authoritative status from every session-scoped frame and
+  // write it into the transient local collection. This replaces the old
+  // `useDerivedStatus` message-fold — the DO stamps `sessionStatus` on
+  // every frame, so the client always has the latest status.
+  if (frame.sessionStatus !== undefined) {
+    const newStatus = frame.sessionStatus
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const coll = sessionLocalCollection as any
+    try {
+      coll.update(sessionId, (draft: { status: string }) => {
+        draft.status = newStatus
+      })
+    } catch {
+      // No row yet — insert one with defaults for wsReadyState/wsCloseTs.
+      coll.insert({
+        id: sessionId,
+        wsReadyState: 3,
+        wsCloseTs: null,
+        status: newStatus,
+      })
+    }
+  }
+
   const set = sessionFrameHandlers.get(sessionId)
   if (!set || set.size === 0) {
     // No subscriber yet — buffer for the late-arriving handler (typically the

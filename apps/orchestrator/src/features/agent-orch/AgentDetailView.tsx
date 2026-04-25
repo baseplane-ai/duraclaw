@@ -9,8 +9,8 @@ import { StatusBar } from '~/components/status-bar'
 import { VisibilityBadge } from '~/components/visibility-badge'
 import { type BranchInfoRow, createBranchInfoCollection } from '~/db/branch-info-collection'
 import { projectsCollection } from '~/db/projects-collection'
+import { useSessionStatus } from '~/db/session-local-collection'
 import { useDerivedGate } from '~/hooks/use-derived-gate'
-import { useDerivedStatus } from '~/hooks/use-derived-status'
 import { useSession } from '~/hooks/use-sessions-collection'
 import { useSession as useAuthSession } from '~/lib/auth-client'
 import { apiUrl } from '~/lib/platform'
@@ -114,7 +114,7 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
   )
 
   const status =
-    useDerivedStatus(sessionId) ?? (session?.status as SessionStatus | undefined) ?? 'idle'
+    useSessionStatus(sessionId) ?? (session?.status as SessionStatus | undefined) ?? 'idle'
 
   // GH (force-stop fix): the Stop button must remain reachable when a gate
   // part is pending in messages even if `status` has flipped to `idle` —

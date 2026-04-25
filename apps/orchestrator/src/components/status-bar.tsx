@@ -1,8 +1,7 @@
 /**
  * StatusBar — VS Code-style fixed-bottom status bar showing session state.
- * Reads the active session's D1-mirrored row via `useSession` and the
- * transient WS readyState via `useSessionLocalState`. `sessionId` is a prop
- * from the parent route; when null, the bar renders nothing.
+ * Status is DO-authoritative via `useSessionStatus` (extracted from WS
+ * frames), with D1 `session?.status` as cold-start fallback only.
  */
 
 import type { ProjectInfo } from '@duraclaw/shared-types'
@@ -11,8 +10,7 @@ import { GitBranchIcon } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { ChainStatusItem } from '~/components/chain-status-item'
 import { projectsCollection } from '~/db/projects-collection'
-import { useSessionLocalState } from '~/db/session-local-collection'
-import { useDerivedStatus } from '~/hooks/use-derived-status'
+import { useSessionLocalState, useSessionStatus } from '~/db/session-local-collection'
 import { useSession } from '~/hooks/use-sessions-collection'
 import { deriveDisplayStateFromStatus } from '~/lib/display-state'
 import { parseJsonField } from '~/lib/json'
@@ -223,9 +221,7 @@ function useWorktreeInfoFromProjects(projectName: string): WorktreeInfo | null {
 }
 
 export function StatusBar({ sessionId }: { sessionId: string | null }) {
-  // Spec #37 P2b: read the D1-mirrored row through `useSession` and the
-  // transient WS readyState through `useSessionLocalState`. Status is the
-  // `status` column (DO-authoritative via messagesCollection fold).
+  // DO-authoritative status from WS frames; D1 row as cold-start fallback.
   const session = useSession(sessionId)
   const local = useSessionLocalState(sessionId)
   // Must be called unconditionally (before any early return) to preserve
@@ -234,7 +230,7 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
 
   const readyState = local?.wsReadyState ?? 3
 
-  const status = useDerivedStatus(sessionId) ?? (session?.status as SessionStatus | undefined)
+  const status = useSessionStatus(sessionId) ?? (session?.status as SessionStatus | undefined)
 
   if (!sessionId) return null
   const statusResolved: SessionStatus = status ?? 'idle'

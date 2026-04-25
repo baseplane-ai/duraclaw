@@ -10,8 +10,7 @@
 
 import { WifiOffIcon } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useSessionLocalState } from '~/db/session-local-collection'
-import { useDerivedStatus } from '~/hooks/use-derived-status'
+import { useSessionLocalState, useSessionStatus } from '~/db/session-local-collection'
 import { useSession } from '~/hooks/use-sessions-collection'
 import type { SessionStatus } from '~/lib/types'
 import { useNow } from '~/lib/use-now'
@@ -45,7 +44,7 @@ export function DisconnectedBanner({
   const nowTs = useNow()
   const wsReadyState = local?.wsReadyState ?? 3
   const status =
-    useDerivedStatus(sessionId) ?? (session?.status as SessionStatus | undefined) ?? 'idle'
+    useSessionStatus(sessionId) ?? (session?.status as SessionStatus | undefined) ?? 'idle'
   const hasSdkSession = Boolean(session?.sdkSessionId)
 
   // Baseline: eligible to eventually show if WS is not open, session is

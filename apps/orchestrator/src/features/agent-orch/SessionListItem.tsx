@@ -28,9 +28,8 @@ import {
   DropdownMenuTrigger,
 } from '~/components/ui/dropdown-menu'
 import { Input } from '~/components/ui/input'
-import { useSessionLocalState } from '~/db/session-local-collection'
+import { useSessionLocalState, useSessionStatus } from '~/db/session-local-collection'
 import type { SessionRecord } from '~/db/session-record'
-import { useDerivedStatus } from '~/hooks/use-derived-status'
 import { useSession } from '~/hooks/use-sessions-collection'
 import { deriveDisplayStateFromStatus } from '~/lib/display-state'
 import type { SessionStatus } from '~/lib/types'
@@ -59,15 +58,13 @@ export function SessionListItem({
   // Spec #37 P2b: read the D1-mirrored row via `useSession`; wsReadyState
   // from the transient local row. Falls back to the `session` prop (also
   // sessionsCollection-backed) for callers that pass a prefetched record.
-  // GH#90: use useDerivedStatus so the sidebar agrees with the status bar —
-  // live-evidence signals (running / waiting_gate) from messagesCollection
-  // override stale D1 status, preventing "idle-but-running" display.
+  // DO-authoritative status from WS frames; D1 fallback for cold-start.
   const liveSession = useSession(session.id)
   const local = useSessionLocalState(session.id)
-  const derivedStatus = useDerivedStatus(session.id)
+  const doStatus = useSessionStatus(session.id)
   const numTurns = liveSession?.numTurns ?? session.numTurns ?? 0
   const isLive = local?.wsReadyState === 1
-  const rawStatus = derivedStatus ?? ((liveSession ?? session).status as SessionStatus)
+  const rawStatus = doStatus ?? ((liveSession ?? session).status as SessionStatus)
   const display = deriveDisplayStateFromStatus(
     rawStatus,
     local?.wsReadyState ?? 3,

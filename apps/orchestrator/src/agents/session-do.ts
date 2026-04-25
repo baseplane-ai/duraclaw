@@ -1807,6 +1807,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
    * clients no longer consume them and DO rehydrate pulls from SQLite.
    */
   private updateState(partial: Partial<SessionMeta>) {
+    const prevStatus = this.state.status
     this.setState({
       ...this.state,
       ...partial,
@@ -1814,8 +1815,14 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     })
     this.persistMetaPatch(partial)
 
-    // Patch-merge into the Agent's state blob and mirror the durable
-    // subset into session_meta.
+    // Push a status-only frame to all connected clients whenever the
+    // status field actually changes. This ensures the client sees every
+    // transition immediately — even when no message broadcast coincides
+    // with the change (e.g. result handler flips idle AFTER the final
+    // message was already broadcast with the old status).
+    if (partial.status !== undefined && partial.status !== prevStatus) {
+      this.broadcastStatusFrame()
+    }
   }
 
   private persistMetaPatch(partial: Partial<SessionMeta>) {
@@ -2231,16 +2238,9 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       this.persistMessageSeq()
     }
 
-    // GH#76 follow-up: stamp `seq` on every outbound row so the client's
-    // `useDerivedStatus` hook can detect when the messages collection is
-    // ahead of the D1-mirrored `agent_sessions.message_seq` tiebreaker.
-    // Without this, `msg.seq` is always undefined on the wire → the hook's
-    // `localMaxSeq` stays at -1 → the tiebreaker `serverSeq (-1 default)
-    // >= localMaxSeq (-1)` is always true → the hook returns undefined and
-    // every consumer falls through to the stale D1 row (the regression
-    // that #76 was supposed to fix, not cause). Targeted sends don't bump
-    // `messageSeq`, so they echo the current value — same semantics as the
-    // frame envelope counter.
+    // Stamp `seq` on every outbound row. Used by gap-detection on the
+    // client (messageSeq tiebreaker). Targeted sends don't bump
+    // `messageSeq`, so they echo the current value.
     const rowSeq = this.messageSeq
     const ops: SyncedCollectionOp<WireSessionMessage>[] = rawOps.map((op) => {
       if (op.type === 'delete') return op
@@ -2255,6 +2255,9 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       collection: `messages:${this.name}`,
       ops,
       messageSeq: this.messageSeq,
+      // DO-authoritative status: stamped on every session-scoped frame so
+      // the client reads it directly — no derivation fold, no D1 tiebreaker.
+      sessionStatus: this.state.status,
       // GH#75: targeted sends (cursor-replay, requestSnapshot reply)
       // bypass client gap-gating. Clients install `lastSeq = max(lastSeq,
       // messageSeq)` after applying and apply ops even when the current
@@ -2298,10 +2301,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       collection: `branchInfo:${this.name}`,
       ops,
       messageSeq: this.messageSeq,
-      // GH#75: same targeted-frame contract as broadcastMessages — the
-      // snapshot / cursor-replay path delivers branchInfo rows in
-      // lockstep with the messages frame and both must bypass client
-      // gap-gating.
+      sessionStatus: this.state.status,
       ...(opts.targetClientId ? { targeted: true as const } : {}),
     }
     const data = JSON.stringify(frame)
@@ -2310,6 +2310,27 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     } else {
       this.broadcastToClients(data)
     }
+  }
+
+  /**
+   * Push a status-only frame to all connected clients. Carries zero ops —
+   * the client extracts `sessionStatus` and writes it to the local status
+   * store. Called from `updateState` whenever the status field changes, so
+   * the client sees every transition immediately — even when no message
+   * broadcast coincides with the change.
+   *
+   * Does NOT bump `messageSeq` (no payload ⇒ no gap-check concern), so
+   * the client's seq-tracking is unperturbed.
+   */
+  private broadcastStatusFrame(): void {
+    const frame: SyncedCollectionFrame<WireSessionMessage> = {
+      type: 'synced-collection-delta',
+      collection: `messages:${this.name}`,
+      ops: [],
+      messageSeq: this.messageSeq,
+      sessionStatus: this.state.status,
+    }
+    this.broadcastToClients(JSON.stringify(frame))
   }
 
   /**

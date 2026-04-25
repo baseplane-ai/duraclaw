@@ -19,6 +19,7 @@ vi.mock('~/hooks/use-sessions-collection', () => ({
 
 vi.mock('~/db/session-local-collection', () => ({
   useSessionLocalState: () => localRow,
+  useSessionStatus: () => localRow?.status,
 }))
 
 import { StatusBar } from './status-bar'

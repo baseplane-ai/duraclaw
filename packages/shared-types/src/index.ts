@@ -878,4 +878,16 @@ export interface SyncedCollectionFrame<TRow = unknown> {
    * OTA / version-skew safe.
    */
   targeted?: boolean
+  /**
+   * DO-authoritative session status, stamped on every `messages:*` frame.
+   * Replaces the client-side `useDerivedStatus` fold — the DO is the
+   * single source of truth. Clients read this directly; no derivation,
+   * no D1 tiebreaker. Cold-start (before first WS frame) falls back to
+   * the D1 `agent_sessions.status` column.
+   *
+   * Only populated on session-scoped collections (`messages:*`,
+   * `branchInfo:*`). User-scoped collections (UserSettingsDO fanout)
+   * never carry this field.
+   */
+  sessionStatus?: SessionStatus
 }
