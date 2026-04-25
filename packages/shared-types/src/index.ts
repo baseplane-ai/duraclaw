@@ -1,3 +1,5 @@
+import type { SDKAssistantMessageError } from '@anthropic-ai/claude-agent-sdk'
+
 // ── Gateway Commands (Orchestrator → Gateway) ─────────────────────────
 
 export type GatewayCommand =
@@ -122,6 +124,8 @@ export type GatewayEvent =
   | GapSentinelEvent
   | TitleUpdateEvent
   | SessionStateChangedEvent
+  | CompactBoundaryEvent
+  | ApiRetryEvent
 
 /**
  * GH#102 / spec 102-sdk-peelback B1: SDK-native liveness signal.
@@ -144,6 +148,50 @@ export interface SessionStateChangedEvent {
    */
   seq?: number
   state: 'idle' | 'running' | 'requires_action' | 'compacting' | 'api_retry'
+  ts: number
+}
+
+/**
+ * GH#102 / spec 102-sdk-peelback B11: SDK-native auto-compact boundary.
+ *
+ * Translated by the runner from `SDKCompactBoundaryMessage`. Persisted by
+ * the DO as a system-flavored `SessionMessage` (transcript-visible) and
+ * also broadcast as a dedicated gateway event for any UI consumer.
+ */
+export interface CompactBoundaryEvent {
+  type: 'compact_boundary'
+  session_id: string
+  seq?: number
+  trigger: 'manual' | 'auto'
+  pre_tokens: number
+  preserved_segment?: {
+    head_uuid: string
+    anchor_uuid: string
+    tail_uuid: string
+  }
+  ts: number
+}
+
+/**
+ * GH#102 / spec 102-sdk-peelback B12: dedicated `api_retry` event.
+ *
+ * Translated by the runner from `SDKAPIRetryMessage`. NOT persisted by
+ * the DO — retries are transient diagnostic state, not transcript
+ * content. Broadcast to the client which renders the `ApiRetryBanner`.
+ *
+ * `error` is the SDK `SDKAssistantMessageError` enum (7 values at
+ * @anthropic-ai/claude-agent-sdk@0.2.98), with `'unknown'` as a
+ * forward-compat fallback in case the SDK widens the enum.
+ */
+export interface ApiRetryEvent {
+  type: 'api_retry'
+  session_id: string
+  seq?: number
+  attempt: number
+  max_retries: number
+  retry_delay_ms: number
+  error_status: number | null
+  error: SDKAssistantMessageError | 'unknown'
   ts: number
 }
 

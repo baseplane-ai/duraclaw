@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type {
+  ApiRetryEvent,
+  CompactBoundaryEvent,
   DiscoveredSession,
   ExecuteCommand,
   GatewayCommand,
@@ -499,5 +501,61 @@ describe('shared-types: kata state fields (#29)', () => {
       kata_state: null,
     }
     expect(event.kata_state).toBeNull()
+  })
+})
+
+describe('shared-types: GH#102 SDK peel-back events', () => {
+  test('CompactBoundaryEvent is part of GatewayEvent union and carries preserved_segment', () => {
+    const event: CompactBoundaryEvent = {
+      type: 'compact_boundary',
+      session_id: 'sess-1',
+      seq: 42,
+      trigger: 'auto',
+      pre_tokens: 175_000,
+      preserved_segment: {
+        head_uuid: '11111111-1111-1111-1111-111111111111',
+        anchor_uuid: '22222222-2222-2222-2222-222222222222',
+        tail_uuid: '33333333-3333-3333-3333-333333333333',
+      },
+      ts: 1_700_000_000_000,
+    }
+    const widened: GatewayEvent = event
+    expect(widened.type).toBe('compact_boundary')
+    expect(event.trigger).toBe('auto')
+    expect(event.pre_tokens).toBe(175_000)
+    expect(event.preserved_segment?.anchor_uuid).toBe('22222222-2222-2222-2222-222222222222')
+  })
+
+  test('ApiRetryEvent with HTTP status assignable to GatewayEvent', () => {
+    const event: ApiRetryEvent = {
+      type: 'api_retry',
+      session_id: 'sess-1',
+      seq: 17,
+      attempt: 2,
+      max_retries: 10,
+      retry_delay_ms: 5_000,
+      error_status: 529,
+      error: 'server_error',
+      ts: 1_700_000_000_000,
+    }
+    const widened: GatewayEvent = event
+    expect(widened.type).toBe('api_retry')
+    expect(event.error_status).toBe(529)
+    expect(event.error).toBe('server_error')
+  })
+
+  test('ApiRetryEvent accepts null error_status and unknown error fallback', () => {
+    const event: ApiRetryEvent = {
+      type: 'api_retry',
+      session_id: 'sess-1',
+      attempt: 1,
+      max_retries: 10,
+      retry_delay_ms: 1_000,
+      error_status: null,
+      error: 'unknown',
+      ts: 1_700_000_000_000,
+    }
+    expect(event.error_status).toBeNull()
+    expect(event.error).toBe('unknown')
   })
 })

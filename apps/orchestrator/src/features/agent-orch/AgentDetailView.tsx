@@ -4,6 +4,7 @@
 
 import { useLiveQuery } from '@tanstack/react-db'
 import { useCallback, useEffect, useMemo } from 'react'
+import { ApiRetryBanner } from '~/components/api-retry-banner'
 import { DisconnectedBanner } from '~/components/disconnected-banner'
 import { StatusBar } from '~/components/status-bar'
 import { VisibilityBadge } from '~/components/visibility-badge'
@@ -175,6 +176,7 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
         onSendSuggestion={handleSendSuggestion}
       />
 
+      <ApiRetryBanner />
       <DisconnectedBanner
         sessionId={sessionId}
         onReattach={reattach}

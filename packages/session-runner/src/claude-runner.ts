@@ -1,6 +1,7 @@
 import { type FSWatcher, watch } from 'node:fs'
 import fs from 'node:fs/promises'
 import nodePath from 'node:path'
+import type { SDKAssistantMessageError } from '@anthropic-ai/claude-agent-sdk'
 import type { BufferedChannel } from '@duraclaw/shared-transport'
 import type {
   ExecuteCommand,
@@ -154,6 +155,34 @@ export function isIdleStop(result: Record<string, unknown>): boolean {
   if (result.subtype !== 'success') return false
   const text = typeof result.result === 'string' ? result.result.trim() : ''
   return /^no response requested\.?$/i.test(text)
+}
+
+// SDK SDKAssistantMessageError enum, captured at @anthropic-ai/claude-agent-sdk@0.2.98.
+// On SDK upgrade: if a new enum value lands, add it here; unmapped values fall through
+// to 'unknown' on the wire (see mapError below) and emit a console.warn so we spot drift.
+const KNOWN_SDK_ASSISTANT_MESSAGE_ERRORS = new Set<string>([
+  'authentication_failed',
+  'billing_error',
+  'rate_limit',
+  'invalid_request',
+  'server_error',
+  'unknown',
+  'max_output_tokens',
+])
+
+/**
+ * GH#102 / spec 102-sdk-peelback B12: forward-compat mapper for the SDK's
+ * `SDKAssistantMessageError` enum. Pass-through for known values; degrades
+ * unknown widening to `'unknown'` and warns.
+ */
+export function mapError(input: string): SDKAssistantMessageError | 'unknown' {
+  if (KNOWN_SDK_ASSISTANT_MESSAGE_ERRORS.has(input)) {
+    return input as SDKAssistantMessageError
+  }
+  console.warn(
+    `[claude-runner] Unknown SDKAssistantMessageError value '${input}' — degrading to 'unknown'. SDK enum may have widened.`,
+  )
+  return 'unknown'
 }
 
 /**
@@ -536,16 +565,58 @@ export class ClaudeRunner {
             )
           }
         } else if (message.type === 'system' && (message as any).subtype === 'api_retry') {
-          // GH#102 / spec 102-sdk-peelback B1: synthesise `api_retry` from
-          // SDKAPIRetryMessage for the liveness signal. The dedicated
-          // `api_retry` GatewayEvent (spec phase p4 / B12) will be added
-          // alongside this in P1.5; here we emit the liveness frame only.
+          // GH#102 / spec 102-sdk-peelback B1 + B12: dual-emit. The
+          // liveness frame drives `transient_state` mapping in the DO
+          // (B1); the dedicated `api_retry` GatewayEvent (B12) carries
+          // the full retry-attempt payload to the client banner.
           send(
             ch,
             {
               type: 'session_state_changed',
               session_id: sessionId,
               state: 'api_retry',
+              ts: Date.now(),
+            },
+            ctx,
+          )
+          const apiRetry = message as unknown as {
+            attempt: number
+            max_retries: number
+            retry_delay_ms: number
+            error_status: number | null
+            error: string
+          }
+          send(
+            ch,
+            {
+              type: 'api_retry',
+              session_id: sessionId,
+              attempt: apiRetry.attempt,
+              max_retries: apiRetry.max_retries,
+              retry_delay_ms: apiRetry.retry_delay_ms,
+              error_status: apiRetry.error_status,
+              error: mapError(apiRetry.error),
+              ts: Date.now(),
+            },
+            ctx,
+          )
+        } else if (message.type === 'system' && (message as any).subtype === 'compact_boundary') {
+          // GH#102 / spec 102-sdk-peelback B11: SDK auto-compact boundary.
+          // SDKCompactBoundaryMessage shape: trigger / pre_tokens /
+          // preserved_segment all live under `compact_metadata`.
+          const meta = (message as any).compact_metadata as {
+            trigger: 'manual' | 'auto'
+            pre_tokens: number
+            preserved_segment?: { head_uuid: string; anchor_uuid: string; tail_uuid: string }
+          }
+          send(
+            ch,
+            {
+              type: 'compact_boundary',
+              session_id: sessionId,
+              trigger: meta.trigger,
+              pre_tokens: meta.pre_tokens,
+              preserved_segment: meta.preserved_segment,
               ts: Date.now(),
             },
             ctx,

@@ -37,6 +37,7 @@ import { contentToParts } from '~/lib/message-parts'
 import { isNative, wsBaseUrl } from '~/lib/platform'
 // `BranchInfoRow` still used by navigateBranch's branchInfoCollection read.
 import type {
+  ApiRetryEvent,
   ContentBlock,
   ContextUsage,
   GateResponse,
@@ -46,6 +47,7 @@ import type {
   SpawnConfig,
 } from '~/lib/types'
 import { attachWsDebug, wsHardFailEnabled } from '~/lib/ws-debug'
+import { useApiRetryStore } from '~/stores/api-retry-store'
 
 export type { ContentBlock, ContextUsage, GateResponse, SpawnConfig }
 
@@ -590,6 +592,24 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
             const reason = (event as { reason?: string }).reason ?? 'Stalled'
             if (typeof issue === 'number') setStallReason(issue, reason)
             void queryClient.invalidateQueries({ queryKey: ['chains'] })
+          } else if (event.type === 'compact_boundary') {
+            // GH#102 / spec 102-sdk-peelback B11: rendered via
+            // messagesCollection — no client-side fan-out needed. The DO
+            // persists the boundary as a system SessionMessage row that
+            // arrives on the synced-collection delta path.
+          } else if (event.type === 'api_retry') {
+            // GH#102 / spec 102-sdk-peelback B12: push the retry frame
+            // into the transient banner store.
+            useApiRetryStore.getState().push(event as unknown as ApiRetryEvent)
+          } else if (
+            event.type === 'partial_assistant' ||
+            event.type === 'assistant' ||
+            event.type === 'result'
+          ) {
+            // GH#102 / spec 102-sdk-peelback B12: clear the retry banner
+            // on the next non-retry signal (auto-clear timeout still
+            // applies as a fallback).
+            useApiRetryStore.getState().clear()
           }
 
           // Spec #37 B13: `result` gateway_event handler removed — the

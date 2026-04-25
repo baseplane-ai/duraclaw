@@ -5193,6 +5193,64 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         break
       }
 
+      case 'compact_boundary': {
+        // GH#102 / spec 102-sdk-peelback B11: persist auto-compact boundary as a
+        // system-flavored transcript row so the seam is visible in history;
+        // also broadcast the dedicated event for any client-side consumer.
+        const compactEvent = event as {
+          type: 'compact_boundary'
+          session_id: string
+          seq?: number
+          trigger: 'manual' | 'auto'
+          pre_tokens: number
+        }
+        this.turnCounter++
+        const compactMsgId = `compact-${compactEvent.seq ?? Date.now()}`
+        const compactMsg: WireSessionMessage = {
+          id: compactMsgId,
+          role: 'system',
+          parts: [
+            {
+              type: 'text',
+              text: `Context compacted at ${compactEvent.pre_tokens} tokens`,
+            },
+          ],
+          createdAt: new Date(),
+        }
+        void this.safeAppendMessage(compactMsg as unknown as SessionMessage)
+        this.broadcastMessage(compactMsg as unknown as SessionMessage)
+        this.broadcastGatewayEvent(event)
+        break
+      }
+
+      case 'api_retry': {
+        // GH#102 / spec 102-sdk-peelback B12: transient diagnostic frame.
+        // NOT persisted — retries are not transcript content. Forward to
+        // clients (UI banner) and log for diagnostic replay.
+        const retry = event as {
+          type: 'api_retry'
+          attempt: number
+          max_retries: number
+          retry_delay_ms: number
+          error_status: number | null
+          error: string
+        }
+        this.logEvent(
+          'warn',
+          'sdk',
+          `api_retry attempt=${retry.attempt}/${retry.max_retries} status=${retry.error_status} error=${retry.error}`,
+          {
+            attempt: retry.attempt,
+            maxRetries: retry.max_retries,
+            retryDelayMs: retry.retry_delay_ms,
+            errorStatus: retry.error_status,
+            error: retry.error,
+          },
+        )
+        this.broadcastGatewayEvent(event)
+        break
+      }
+
       case 'kata_state': {
         // PRESERVE existing side effects — store in kv and sync to D1.
         try {

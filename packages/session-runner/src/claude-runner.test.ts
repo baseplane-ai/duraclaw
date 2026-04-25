@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ClaudeRunner, handleCanUseTool, isIdleStop } from './claude-runner.js'
+import { ClaudeRunner, handleCanUseTool, isIdleStop, mapError } from './claude-runner.js'
 import type { RunnerSessionContext } from './types.js'
 
 /**
@@ -693,5 +693,27 @@ describe('isIdleStop', () => {
     expect(
       isIdleStop({ subtype: 'success', result: 'No response requested. Also did other work.' }),
     ).toBe(false)
+  })
+})
+
+describe('mapError (GH#102 B12 forward-compat)', () => {
+  it('passes known SDKAssistantMessageError values through unchanged', () => {
+    expect(mapError('rate_limit')).toBe('rate_limit')
+    expect(mapError('max_output_tokens')).toBe('max_output_tokens')
+    expect(mapError('server_error')).toBe('server_error')
+    expect(mapError('authentication_failed')).toBe('authentication_failed')
+    expect(mapError('billing_error')).toBe('billing_error')
+    expect(mapError('invalid_request')).toBe('invalid_request')
+    expect(mapError('unknown')).toBe('unknown')
+  })
+
+  it("degrades unrecognised future SDK enum widening to 'unknown'", () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      expect(mapError('novel_future_value')).toBe('unknown')
+      expect(warnSpy).toHaveBeenCalled()
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 })
