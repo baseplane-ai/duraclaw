@@ -67,6 +67,22 @@ export function useDerivedStatus(sessionId: string | null): SessionStatus | unde
           derived = 'running'
           break
         }
+
+        // Mid-turn tool-execution wedge — assistant has emitted a tool_use
+        // and the SDK is blocked on tool_result. Part shape:
+        // `{ type: 'tool-<name>', state: 'input-available' }`. Without this
+        // rule the tail-scan finds no marker on the in-flight assistant
+        // turn, walks back to a prior `result` part, and returns 'idle'
+        // while the runner is actively executing a tool. Originally fixed
+        // in ad5f548; regressed by 362ca50's predicate-narrowing rewrite.
+        if (
+          typeof part.type === 'string' &&
+          part.type.startsWith('tool-') &&
+          state === 'input-available'
+        ) {
+          derived = 'running'
+          break
+        }
       }
       if (derived !== undefined) break
     }

@@ -228,6 +228,57 @@ describe('useDerivedStatus', () => {
     expect(result.current).toBe('running')
   })
 
+  // ── Mid-turn tool-execution wedge (regression guard for ad5f548 / 362ca50) ──
+
+  it("returns 'running' when the tail assistant has a tool part in input-available", () => {
+    // Canonical mid-turn shape: assistant emitted text + tool_use, SDK is
+    // blocked on tool_result. text@done, tool@input-available — without the
+    // input-available rule this falls through to the prior `result` → idle,
+    // and the StatusBar / sidebar / stop button all desync from reality.
+    const { result } = setup([
+      { id: 'msg-a0', seq: 1, parts: [{ type: 'result' }] },
+      { id: 'msg-u1', seq: 2, parts: [{ type: 'text', text: 'go', state: 'complete' }] },
+      {
+        id: 'msg-a1',
+        seq: 3,
+        parts: [
+          { type: 'text', text: 'running it now', state: 'done' },
+          {
+            type: 'tool-bash',
+            state: 'input-available',
+            toolCallId: 'tc-1',
+            toolName: 'bash',
+            input: { cmd: 'ls' },
+          },
+        ],
+      },
+    ])
+    expect(result.current).toBe('running')
+  })
+
+  it("returns 'running' for a lone tool part in input-available (no streaming text)", () => {
+    // Tool-only assistant turn, no text block at all — common for SDK
+    // tool-only emissions.
+    const { result } = setup([
+      { id: 'msg-a0', seq: 1, parts: [{ type: 'result' }] },
+      { id: 'msg-u1', seq: 2, parts: [{ type: 'text', text: 'go', state: 'complete' }] },
+      {
+        id: 'msg-a1',
+        seq: 3,
+        parts: [
+          {
+            type: 'tool-edit',
+            state: 'input-available',
+            toolCallId: 'tc-2',
+            toolName: 'edit',
+            input: {},
+          },
+        ],
+      },
+    ])
+    expect(result.current).toBe('running')
+  })
+
   it("falls back to 'running' when awaiting is cleared but streaming is the only in-flight marker", () => {
     // Direct sanity: awaiting absent, streaming text present → 'running'.
     const { result } = setup([
