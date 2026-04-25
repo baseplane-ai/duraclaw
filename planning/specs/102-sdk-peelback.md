@@ -147,14 +147,14 @@ phases:
     name: "Reduction D — adopt compact_boundary and api_retry SDK signals"
     tasks:
       - "Add `CompactBoundaryEvent` type to `packages/shared-types/src/index.ts` GatewayEvent union: `{ type: 'compact_boundary', session_id, seq, trigger: 'manual' | 'auto', pre_tokens: number, preserved_segment?: { head_uuid: string, anchor_uuid: string, tail_uuid: string }, ts: number }`. NOTE: there is NO `post_tokens` field — the SDK message does not carry it (verified via P0 spike)"
-      - "Add `ApiRetryEvent` type to `packages/shared-types/src/index.ts` GatewayEvent union: `{ type: 'api_retry', session_id, seq, attempt: number, max_attempts: number, delay_ms: number, error_class: 'rate_limit' | 'server_error' | 'overloaded' | 'billing_error' | 'unknown', error_message?: string, ts: number }`. The error_class enum captures the structured failure family the SDK reports"
-      - "Translate `SDKCompactBoundaryMessage` (sdk.d.ts:2008-2025) to `compact_boundary` in `claude-runner.ts processQueryMessages`. Pass through `trigger` and `pre_tokens`; pass through `preserved_segment` if present"
-      - "Translate `SDKAPIRetryMessage` (sdk.d.ts:1974-1982) to `api_retry`. Map the SDK `error_class` enum to our wire enum via this table (1:1 today, plus `default → 'unknown'` for forward-compat against new SDK enum values): `'rate_limit' → 'rate_limit'`; `'server_error' → 'server_error'`; `'overloaded' → 'overloaded'`; `'billing_error' → 'billing_error'`; **any other SDK-emitted value → `'unknown'`** (do not throw, do not skip the event — log a warn-level event_log entry with the unmapped value so we can spot SDK enum drift). Document this exact table in a code comment at the `mapErrorClass()` site so future SDK upgrades have a single review point"
+      - "Add `ApiRetryEvent` type to `packages/shared-types/src/index.ts` GatewayEvent union: `{ type: 'api_retry', session_id, seq, attempt: number, max_retries: number, retry_delay_ms: number, error_status: number | null, error: SDKAssistantMessageError | 'unknown', ts: number }`. Field names match SDK `SDKAPIRetryMessage` verbatim (per P0 spike §1.3 / addendum §4.2 / §5.1). The `error` value is the full 7-value `SDKAssistantMessageError` union (`'authentication_failed' | 'billing_error' | 'rate_limit' | 'invalid_request' | 'server_error' | 'unknown' | 'max_output_tokens'`) plus a forward-compat `'unknown'` fallback for SDK enum widening. `error_status` is the HTTP status code (e.g. 529) or `null` for connection-class errors that had no HTTP response"
+      - "Translate `SDKCompactBoundaryMessage` (sdk.d.ts:2008-2025) to `compact_boundary` in `claude-runner.ts processQueryMessages`. Pass through `trigger` and `pre_tokens` from `message.compact_metadata.trigger` and `message.compact_metadata.pre_tokens` (the SDK nests these under `compact_metadata`, NOT flat on the message — verified P0 spike §1.4); pass through `compact_metadata.preserved_segment` if present"
+      - "Translate `SDKAPIRetryMessage` (sdk.d.ts:1974-1984) to `api_retry`. Pass through `attempt`, `max_retries`, `retry_delay_ms`, `error_status` 1:1. Map `message.error` (SDK's `SDKAssistantMessageError` 7-value enum) through a `mapError()` helper that returns the value unchanged if it's a known SDK enum member, else `'unknown'` (forward-compat for SDK enum widening — log a warn-level event_log entry with the unmapped value so we can spot drift). Document the known-set in a code comment at the `mapError()` site so future SDK upgrades have a single review point"
       - "DO event-handler: persist `compact_boundary` events to a new SessionMessagePart (or as a system-flavored entry in the message stream — implementer decides between (a) a synthetic `system-event` SessionMessagePart with type='compact_boundary' or (b) a separate `compact_boundaries` SQLite table). Recommend (a) for consistency with how `system` messages already render in the transcript"
       - "DO event-handler: do NOT persist `api_retry` events to the message stream. Broadcast them as a transient frame on the WS only (so an in-tab session displays a banner) and emit one logEvent entry per retry for diagnostic replay. Once the retry succeeds (next `partial_assistant` or `result` arrives), the banner UI clears via timeout"
       - "Add `compact_boundary` and `api_retry` cases to the DO's `handleGatewayEvent` switch — both pass through `broadcastGatewayEvent` so the client receives them"
       - "Add `compact_boundary` consumer in `apps/orchestrator/src/features/agent-orch/use-coding-agent.ts` — appends a stub `system-event` SessionMessagePart with the seam metadata. Transcript-seam UI rendering (history dimming, token-savings chip) is OUT OF SCOPE — sibling spec owns that. This phase ships the wire/DO plumbing only; the system-event part renders as plain text 'Context compacted at <pre_tokens> tokens' until the UX spec lands"
-      - "Add `api_retry` consumer in `use-coding-agent.ts` — fan out to a transient `apiRetryStore` (new file `apps/orchestrator/src/stores/api-retry-store.ts`) that drives a banner component. Use the existing banner pattern from `apps/orchestrator/src/components/disconnected-banner.tsx` as the reference; copy its bg-warning/20 + border-icon + dismiss layout. Banner content: 'Retrying request (attempt N of M, retrying in Xs)…' plus error_class chip"
+      - "Add `api_retry` consumer in `use-coding-agent.ts` — fan out to a transient `apiRetryStore` (new file `apps/orchestrator/src/stores/api-retry-store.ts`) that drives a banner component. Use the existing banner pattern from `apps/orchestrator/src/components/disconnected-banner.tsx` as the reference; copy its bg-warning/20 + border-icon + dismiss layout. Banner content: 'Retrying request (attempt N of M, retrying in Xs)…' plus an `error` chip (the SDKAssistantMessageError value)"
       - "Add `ApiRetryBanner` component at `apps/orchestrator/src/components/api-retry-banner.tsx`. Mount it once in `__root.tsx` alongside the existing connection banners. Auto-clear on next non-retry event (partial_assistant, assistant, result) or 30s timeout, whichever first"
       - "Update `packages/shared-types/src/index.test.ts` — add tests for the two new event types"
       - "Verify: `pnpm typecheck`, `pnpm test`. Manual smoke: trigger a real auto-compact (long session) → verify a system-event part is appended with pre_tokens. Force an api_retry (proxy 529 mid-turn) → verify ApiRetryBanner appears and clears after retry succeeds"
@@ -168,8 +168,8 @@ phases:
       - id: "compact-boundary-shape-matches-sdk"
         description: "Unit test in claude-runner: given a synthetic SDKCompactBoundaryMessage with all fields populated, the resulting CompactBoundaryEvent has correct trigger, pre_tokens, preserved_segment values. Verifies no field is lost in translation"
         type: "unit"
-      - id: "api-retry-error-class-mapping"
-        description: "Unit test: each SDK error-class value maps to the documented wire enum value. Unknown SDK classes map to 'unknown' (forward-compat)"
+      - id: "api-retry-error-mapping"
+        description: "Unit test: each known SDK `SDKAssistantMessageError` value passes through `mapError()` unchanged. Any string outside the known set (simulating SDK enum widening) maps to 'unknown' (forward-compat)"
         type: "unit"
       - id: "no-message-stream-pollution-on-retry"
         description: "api_retry events do NOT append a SessionMessagePart to messagesCollection. They flow through the transient store only. Verified by counting messagesCollection rows before/after a triggered retry — count unchanged"
@@ -402,8 +402,8 @@ interface CompactBoundaryEvent {
 **Core:**
 - **ID:** api-retry-event
 - **Trigger:** SDK emits `SDKAPIRetryMessage` (transient API failure: 5xx, 529, rate-limit, billing)
-- **Expected:** Runner translates to an `api_retry` GatewayEvent carrying `attempt`, `max_attempts`, `delay_ms`, `error_class`, and optional `error_message`. DO broadcasts it as a transient frame (NOT persisted to messagesCollection — retries are not transcript content). UI mounts an `ApiRetryBanner` driven by a transient `apiRetryStore`. Banner auto-clears on next non-retry event or 30s timeout.
-- **Verify:** Inject a 529 via proxy; ApiRetryBanner appears with "Retrying (attempt 2/10, 5s)" plus an error-class chip; on retry success the banner clears.
+- **Expected:** Runner translates to an `api_retry` GatewayEvent carrying `attempt`, `max_retries`, `retry_delay_ms`, `error_status`, and `error` (the SDK `SDKAssistantMessageError` enum value, mapped through `mapError()` for forward-compat). DO broadcasts it as a transient frame (NOT persisted to messagesCollection — retries are not transcript content). UI mounts an `ApiRetryBanner` driven by a transient `apiRetryStore`. Banner auto-clears on next non-retry event or 30s timeout.
+- **Verify:** Inject a 529 via proxy; ApiRetryBanner appears with "Retrying (attempt 2/10, 5s)" plus an `error` chip; on retry success the banner clears.
 **Source:** new event type in `packages/shared-types/src/index.ts`; runner translation in `claude-runner.ts`; new banner component at `apps/orchestrator/src/components/api-retry-banner.tsx`; new store at `apps/orchestrator/src/stores/api-retry-store.ts`
 
 #### UI Layer
@@ -418,10 +418,11 @@ interface ApiRetryEvent {
   session_id: string
   seq: number
   attempt: number
-  max_attempts: number
-  delay_ms: number
-  error_class: 'rate_limit' | 'server_error' | 'overloaded' | 'billing_error' | 'unknown'
-  error_message?: string
+  max_retries: number              // matches SDK SDKAPIRetryMessage.max_retries
+  retry_delay_ms: number           // matches SDK SDKAPIRetryMessage.retry_delay_ms
+  error_status: number | null      // HTTP status code (e.g. 529); null on connection-class errors with no HTTP response
+  error: SDKAssistantMessageError | 'unknown'
+                                   // SDK 7-value enum, plus 'unknown' as forward-compat fallback for SDK enum widening
   ts: number
 }
 ```
@@ -750,12 +751,13 @@ case 'session_state_changed': {
   break
 }
 case 'compact_boundary': {
+  // SDK nests these under compact_metadata (sdk.d.ts:2008-2025) — NOT flat on the message
   send(ch, {
     type: 'compact_boundary',
     session_id: ctx.sessionId,
-    trigger: message.trigger,
-    pre_tokens: message.pre_tokens,
-    preserved_segment: message.preserved_segment,
+    trigger: message.compact_metadata.trigger,
+    pre_tokens: message.compact_metadata.pre_tokens,
+    preserved_segment: message.compact_metadata.preserved_segment,
     ts: Date.now(),
   }, ctx)
   break
@@ -765,10 +767,10 @@ case 'api_retry': {
     type: 'api_retry',
     session_id: ctx.sessionId,
     attempt: message.attempt,
-    max_attempts: message.max_attempts,
-    delay_ms: message.delay_ms,
-    error_class: mapErrorClass(message.error_class),
-    error_message: message.error_message,
+    max_retries: message.max_retries,
+    retry_delay_ms: message.retry_delay_ms,
+    error_status: message.error_status,
+    error: mapError(message.error),
     ts: Date.now(),
   }, ctx)
   break
@@ -826,8 +828,8 @@ export function ApiRetryBanner() {
   return (
     <div className="bg-warning/20 border-warning border-b px-4 py-2 ...">
       <RotateCw className="size-4" />
-      <span>Retrying request (attempt {retry.attempt} of {retry.max_attempts}, {Math.round(retry.delay_ms / 1000)}s)…</span>
-      <span className="text-muted-foreground text-xs">{retry.error_class}</span>
+      <span>Retrying request (attempt {retry.attempt} of {retry.max_retries}, {Math.round(retry.retry_delay_ms / 1000)}s)…</span>
+      <span className="text-muted-foreground text-xs">{retry.error}</span>
     </div>
   )
 }
