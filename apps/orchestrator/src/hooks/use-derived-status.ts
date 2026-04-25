@@ -41,7 +41,12 @@ export function useDerivedStatus(sessionId: string | null): SessionStatus | unde
     if (!messages || messages.length === 0) return undefined
 
     // Scan messages tail-first — first terminal or in-flight marker wins.
+    // `derivedFromLatchedTool` distinguishes 'running' inferred from a
+    // tool-`input-available` part (a latched marker that survives runner
+    // death) from 'running' inferred from a `text@streaming` part (true
+    // real-time proof). Only the latter bypasses the D1 seq tiebreaker.
     let derived: SessionStatus | undefined
+    let derivedFromLatchedTool = false
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i]
       for (const part of (msg.parts as SessionMessagePart[] | undefined) ?? []) {
@@ -80,28 +85,49 @@ export function useDerivedStatus(sessionId: string | null): SessionStatus | unde
         // turn, walks back to a prior `result` part, and returns 'idle'
         // while the runner is actively executing a tool. Originally fixed
         // in ad5f548; regressed by 362ca50's predicate-narrowing rewrite.
+        //
+        // BUT: a tool `input-available` part is a *latched* marker — when
+        // the runner crashes / disconnects mid-tool, the DO never receives
+        // a tool_result event and `finalizeStreamingParts` only flips parts
+        // on `currentTurnMessageId`'s message at result-time. Sessions that
+        // ended without a result event leave dangling `input-available`
+        // parts that survive across runner reaps, restarts, even days —
+        // and tail-scan would forever classify them as 'running'. We mark
+        // this path so the D1 seq tiebreaker below can catch the
+        // stalled-runner case (D1 says idle, serverSeq caught up).
         if (
           typeof part.type === 'string' &&
           part.type.startsWith('tool-') &&
           state === 'input-available'
         ) {
           derived = 'running'
+          derivedFromLatchedTool = true
           break
         }
       }
       if (derived !== undefined) break
     }
 
-    // Live-evidence signals are direct proof of current state — trust them
-    // unconditionally regardless of D1 seq comparison.
-    if (derived === 'running' || derived === 'waiting_gate' || derived === 'pending') {
+    // True live-evidence signals (streaming text, awaiting_response pending,
+    // gate parts) are direct proof of current state — trust them
+    // unconditionally regardless of D1 seq comparison. NOTE: 'running'
+    // derived from a latched tool `input-available` is intentionally NOT
+    // in this set; it falls through to the seq tiebreaker below.
+    if (derived === 'waiting_gate' || derived === 'pending') {
+      return derived
+    }
+    if (derived === 'running' && !derivedFromLatchedTool) {
       return derived
     }
 
-    // For `idle` / `undefined` — apply the tiebreaker: if D1 has caught up
-    // (or leads), return undefined so callers fall through to session?.status.
-    // This prevents stale local `idle` from overriding a fresher D1 status
-    // after reconnect.
+    // For 'idle' / 'undefined' / latched-tool-'running' — apply the
+    // tiebreaker: if D1 has caught up (or leads), return undefined so
+    // callers fall through to session?.status. This prevents two failure
+    // modes:
+    //   1. Stale local `idle` overriding a fresher D1 status after reconnect.
+    //   2. Dangling tool `input-available` parts on a stalled-runner
+    //      session keeping the UI on 'Running' forever while D1 truthfully
+    //      reports `idle`.
     let localMaxSeq = -1
     for (const msg of messages) {
       const seq = (msg as { seq?: number }).seq ?? -1

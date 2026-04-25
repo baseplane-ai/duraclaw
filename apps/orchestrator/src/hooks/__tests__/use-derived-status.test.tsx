@@ -309,6 +309,89 @@ describe('useDerivedStatus', () => {
     expect(result.current).toBe('running')
   })
 
+  // Regression: stalled-runner sessions whose runner died mid-tool leave
+  // dangling `tool-* + input-available` parts that `finalizeStreamingParts`
+  // never sweeps (the DO only finalizes `currentTurnMessageId`'s message at
+  // result-time, and a runner that died never sent a result). The post-
+  // 2a0da13 generic tool-input-available rule then mis-classifies the
+  // session as 'running' forever. With the latched-tool tiebreaker, when
+  // D1's `messageSeq` has caught up to `localMaxSeq`, we defer to
+  // `session?.status` (D1 truth) instead of trusting the latched marker.
+  it('defers to D1 when tail has dangling tool input-available and serverSeq caught up', () => {
+    mockUseMessagesCollection.mockReturnValue({
+      messages: [
+        { id: 'msg-9', seq: 9, parts: [{ type: 'result' }] },
+        {
+          id: 'msg-10',
+          seq: 10,
+          parts: [
+            { type: 'text', text: 'running it', state: 'done' },
+            {
+              type: 'tool-Bash',
+              state: 'input-available',
+              toolCallId: 'tc-1',
+              toolName: 'Bash',
+              input: { cmd: 'ls' },
+            },
+            {
+              type: 'tool-Read',
+              state: 'input-available',
+              toolCallId: 'tc-2',
+              toolName: 'Read',
+              input: { path: '/x' },
+            },
+          ],
+        },
+      ],
+      isLoading: false,
+      isFetching: false,
+    } as ReturnType<typeof useMessagesCollection>)
+    mockUseSession.mockReturnValue({
+      id: 'session-1',
+      messageSeq: 10,
+      status: 'idle',
+    } as ReturnType<typeof useSession>)
+    const { result } = renderHook(() => useDerivedStatus('session-1'))
+    // serverSeq (10) >= localMaxSeq (10) + derived is latched-tool-running →
+    // undefined so caller falls through to session.status === 'idle'.
+    expect(result.current).toBeUndefined()
+  })
+
+  it("still returns 'running' for tool input-available when D1 is behind (mid-turn)", () => {
+    // Sanity: the latched-tool tiebreaker must NOT fire mid-turn. When the
+    // user just sent a turn and D1 hasn't caught up yet, a tool-input-
+    // available part really does indicate active execution.
+    mockUseMessagesCollection.mockReturnValue({
+      messages: [
+        { id: 'msg-1', seq: 1, parts: [{ type: 'result' }] },
+        { id: 'msg-2', seq: 2, parts: [{ type: 'text', text: 'go', state: 'complete' }] },
+        {
+          id: 'msg-3',
+          seq: 3,
+          parts: [
+            {
+              type: 'tool-bash',
+              state: 'input-available',
+              toolCallId: 'tc-1',
+              toolName: 'bash',
+              input: { cmd: 'ls' },
+            },
+          ],
+        },
+      ],
+      isLoading: false,
+      isFetching: false,
+    } as ReturnType<typeof useMessagesCollection>)
+    mockUseSession.mockReturnValue({
+      id: 'session-1',
+      messageSeq: 1, // D1 still behind — only result row mirrored
+      status: 'running',
+    } as ReturnType<typeof useSession>)
+    const { result } = renderHook(() => useDerivedStatus('session-1'))
+    // serverSeq (1) < localMaxSeq (3) → tiebreaker doesn't fire → 'running'.
+    expect(result.current).toBe('running')
+  })
+
   it("falls back to 'running' when awaiting is cleared but streaming is the only in-flight marker", () => {
     // Direct sanity: awaiting absent, streaming text present → 'running'.
     const { result } = setup([
