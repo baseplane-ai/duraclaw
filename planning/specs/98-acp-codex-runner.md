@@ -2,7 +2,8 @@
 initiative: acp-codex-runner
 type: project
 issue_type: feature
-status: approved
+status: closed
+closed_reason: "Architectural pivot to Path A (per-SDK wrappers). See GH#98 closing comment."
 priority: medium
 github_issue: 98
 created: 2026-04-25
