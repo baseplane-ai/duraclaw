@@ -101,9 +101,17 @@ const PREF_PATCH_KEYS = new Set([
   'defaultChainAutoAdvance',
 ])
 
-const PERMISSION_MODES = new Set(['default', 'acceptAll', 'acceptEdits', 'plan'])
-const THINKING_MODES = new Set(['adaptive', 'off', 'on'])
-const EFFORTS = new Set(['low', 'medium', 'high'])
+const PERMISSION_MODES = new Set([
+  'default',
+  'acceptAll',
+  'acceptEdits',
+  'bypassPermissions',
+  'plan',
+  'dontAsk',
+  'auto',
+])
+const THINKING_MODES = new Set(['adaptive', 'enabled', 'disabled'])
+const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
 
 function getDb(env: ApiAppEnv['Bindings']) {
   return drizzle(env.AUTH_DB, { schema })
@@ -1078,10 +1086,10 @@ export function createApiApp() {
     const defaults: UserPreferencesRow = {
       userId,
       permissionMode: 'default',
-      model: 'claude-opus-4-6',
+      model: 'claude-opus-4-7',
       maxBudget: null,
       thinkingMode: 'adaptive',
-      effort: 'high',
+      effort: 'xhigh',
       hiddenProjects: null,
       chainsJson: null,
       defaultChainAutoAdvance: false,

@@ -79,7 +79,7 @@ describe('GET /api/preferences', () => {
     expect(body.userId).toBe('user-1')
     expect(body.permissionMode).toBe('default')
     expect(body.thinkingMode).toBe('adaptive')
-    expect(body.effort).toBe('high')
+    expect(body.effort).toBe('xhigh')
     // Defaults are NOT persisted on a GET — only on PUT.
     expect(fakeDb.db.insert).not.toHaveBeenCalled()
   })
