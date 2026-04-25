@@ -3,17 +3,16 @@ import fs from 'node:fs/promises'
 import nodePath from 'node:path'
 import type { BufferedChannel } from '@duraclaw/shared-transport'
 import type {
-  ContentBlock,
   ExecuteCommand,
   GatewayEvent,
   KataSessionState,
   ResumeCommand,
 } from '@duraclaw/shared-types'
-import { handleQueryCommand } from './commands.js'
 import { buildCleanEnv } from './env.js'
 import { resolveProject } from './project-resolver.js'
+import { PushPullQueue } from './push-pull-queue.js'
 import { SessionTitler, type TranscriptMessage } from './titler.js'
-import type { RunnerSessionContext } from './types.js'
+import type { RunnerSessionContext, SDKUserMsg } from './types.js'
 
 /** Debounce interval for kata state file changes (ms). Matches gateway. */
 const KATA_DEBOUNCE_MS = 150
@@ -167,83 +166,6 @@ function send(ch: BufferedChannel, event: GatewayEvent, ctx: RunnerSessionContex
   ch.send({ ...(event as unknown as Record<string, unknown>), seq })
   ctx.meta.last_activity_ts = Date.now()
   ctx.meta.last_event_seq = seq
-}
-
-/** Shape expected by the Claude Agent SDK for streaming user messages. */
-interface SDKUserMsg {
-  type: 'user'
-  message: { role: 'user'; content: string | ContentBlock[] }
-  parent_tool_use_id: string | null
-}
-
-/**
- * Create an async iterable queue for streaming user messages into a running session.
- * The queue yields messages as they are pushed, and stops when done() is called.
- */
-function createMessageQueue() {
-  const pending: Array<{ role: 'user'; content: string | ContentBlock[] }> = []
-  let resolve: (() => void) | null = null
-  let waitResolve: (() => void) | null = null
-  let finished = false
-
-  const iterable: AsyncIterable<SDKUserMsg> = {
-    [Symbol.asyncIterator]() {
-      return {
-        async next() {
-          while (true) {
-            if (pending.length > 0) {
-              const msg = pending.shift() as { role: 'user'; content: string | ContentBlock[] }
-              const sdkMsg: SDKUserMsg = {
-                type: 'user',
-                message: { role: 'user', content: msg.content },
-                parent_tool_use_id: null,
-              }
-              return { value: sdkMsg, done: false }
-            }
-            if (finished) {
-              return { value: undefined, done: true as const }
-            }
-            await new Promise<void>((r) => {
-              resolve = r
-            })
-            resolve = null
-          }
-        },
-      }
-    },
-  }
-
-  return {
-    iterable,
-    push(msg: { role: 'user'; content: string | ContentBlock[] }) {
-      pending.push(msg)
-      resolve?.()
-      waitResolve?.()
-    },
-    /** Block until the next message is pushed, returning it as an SDKUserMsg. Returns null if done(). */
-    async waitForNext(): Promise<SDKUserMsg | null> {
-      while (true) {
-        if (pending.length > 0) {
-          const msg = pending.shift() as { role: 'user'; content: string | ContentBlock[] }
-          return {
-            type: 'user',
-            message: { role: 'user', content: msg.content },
-            parent_tool_use_id: null,
-          }
-        }
-        if (finished) return null
-        await new Promise<void>((r) => {
-          waitResolve = r
-        })
-        waitResolve = null
-      }
-    },
-    done() {
-      finished = true
-      resolve?.()
-      waitResolve?.()
-    },
-  }
 }
 
 /**
@@ -418,9 +340,11 @@ export class ClaudeRunner {
     }
     const projectPath: string = resolvedPath
 
-    // Set up message queue for streaming input
-    const queue = createMessageQueue()
-    ctx.messageQueue = queue
+    // Lifetime queue: a single PushPullQueue feeds the one-and-only Query()
+    // for this runner process. Initial user turn is pushed below; subsequent
+    // stream-input commands push onto the same queue (see main.ts).
+    const userQueue = new PushPullQueue<SDKUserMsg>()
+    ctx.userQueue = userQueue
 
     let sdkSessionId: string | null = null
     const kataWatcher = startKataWatcher(projectPath, cmd.project, ch, ctx)
@@ -522,376 +446,314 @@ export class ClaudeRunner {
         ],
       }
 
-      /**
-       * Process all messages from a single SDK query() call.
-       * Returns true if the turn was an idle stop that should be auto-nudged.
-       */
-      async function processQueryMessages(iter: any): Promise<boolean> {
-        ctx.query = iter
-        let idleStop = false
+      // --- Initial user turn: push onto the lifetime queue ---
+      // GH#86: capture initial prompt for titler transcript.
+      const promptText = typeof cmd.prompt === 'string' ? cmd.prompt : JSON.stringify(cmd.prompt)
+      titlerHistory.push({ role: 'user', content: promptText })
+      userQueue.push({
+        type: 'user',
+        message: { role: 'user', content: cmd.prompt },
+        parent_tool_use_id: null,
+      })
 
-        for await (const message of iter) {
-          console.log(`[session-runner] executeSession: message type=${message.type}`)
-          if (ac.signal.aborted) break
+      // --- One Query for the runner's lifetime ---
+      // Both `execute` and `resume` converge here; only options differ.
+      console.log(`[session-runner] executeSession: calling query() for ${cmd.project}`)
+      const q = query({
+        prompt: userQueue as AsyncIterable<SDKUserMsg>,
+        options: options as any,
+      })
+      ctx.query = q
 
-          if (message.type === 'system' && (message as any).subtype === 'init') {
-            sdkSessionId = (message as any).session_id ?? null
-            const model = (message as any).model ?? null
-            const tools = (message as any).tools ?? []
+      // Single message loop for the session lifetime. interrupt() does NOT
+      // close the queue; the SDK yields a result sentinel and the loop keeps
+      // pulling. The loop exits when (a) abortController fires, (b)
+      // userQueue.close() is called by `stop` and the SDK reaches end-of-
+      // stream, or (c) the SDK throws / ends naturally.
+      for await (const message of q) {
+        console.log(`[session-runner] executeSession: message type=${message.type}`)
+        if (ac.signal.aborted) break
 
-            ctx.meta.sdk_session_id = sdkSessionId
-            ctx.meta.model = model
+        if (message.type === 'system' && (message as any).subtype === 'init') {
+          sdkSessionId = (message as any).session_id ?? null
+          const model = (message as any).model ?? null
+          const tools = (message as any).tools ?? []
 
-            send(
-              ch,
-              {
-                type: 'session.init',
-                session_id: sessionId,
-                sdk_session_id: sdkSessionId ?? null,
-                project: cmd.project,
-                model,
-                tools,
-              },
-              ctx,
-            )
+          ctx.meta.sdk_session_id = sdkSessionId
+          ctx.meta.model = model
 
-            // GH#73: with the kata session id now known, push an initial
-            // kata_state snapshot so the DO syncs the mode/issue + runEnded
-            // fields for this session immediately. Prior to session.init the
-            // watcher can't pick the right folder, so this is the first
-            // viable emission point.
-            if (sdkSessionId) kataWatcher.emitNow()
+          send(
+            ch,
+            {
+              type: 'session.init',
+              session_id: sessionId,
+              sdk_session_id: sdkSessionId ?? null,
+              project: cmd.project,
+              model,
+              tools,
+            },
+            ctx,
+          )
 
-            // Drain command queue now that Query is available
-            if (ctx.commandQueue.length > 0) {
-              for (const queuedCmd of ctx.commandQueue) {
-                await handleQueryCommand(ctx, queuedCmd, ch)
-              }
-              ctx.commandQueue = []
-            }
-          } else if (
-            message.type === 'system' &&
-            (message as any).subtype === 'session_state_changed'
-          ) {
-            // GH#102 / spec 102-sdk-peelback B1: SDK-native liveness signal.
-            // Translates the SDK's 3-value enum directly. SDK type
-            // SDKSessionStateChangedMessage — see addendum §1.1.
+          // GH#73: with the kata session id now known, push an initial
+          // kata_state snapshot so the DO syncs the mode/issue + runEnded
+          // fields for this session immediately. Prior to session.init the
+          // watcher can't pick the right folder, so this is the first
+          // viable emission point.
+          if (sdkSessionId) kataWatcher.emitNow()
+        } else if (
+          message.type === 'system' &&
+          (message as any).subtype === 'session_state_changed'
+        ) {
+          // GH#102 / spec 102-sdk-peelback B1: SDK-native liveness signal.
+          // Translates the SDK's 3-value enum directly. SDK type
+          // SDKSessionStateChangedMessage — see addendum §1.1.
+          send(
+            ch,
+            {
+              type: 'session_state_changed',
+              session_id: sessionId,
+              state: (message as any).state,
+              ts: Date.now(),
+            },
+            ctx,
+          )
+        } else if (message.type === 'system' && (message as any).subtype === 'status') {
+          // GH#102 / spec 102-sdk-peelback B1: synthesise `compacting` from
+          // SDKStatusMessage. `status:'compacting'` → state:'compacting'.
+          // `status:null` → no-op (the next session_state_changed will
+          // reassert authority). See addendum §1.2.
+          if ((message as any).status === 'compacting') {
             send(
               ch,
               {
                 type: 'session_state_changed',
                 session_id: sessionId,
-                state: (message as any).state,
+                state: 'compacting',
                 ts: Date.now(),
               },
               ctx,
             )
-          } else if (message.type === 'system' && (message as any).subtype === 'status') {
-            // GH#102 / spec 102-sdk-peelback B1: synthesise `compacting` from
-            // SDKStatusMessage. `status:'compacting'` → state:'compacting'.
-            // `status:null` → no-op (the next session_state_changed will
-            // reassert authority). See addendum §1.2.
-            if ((message as any).status === 'compacting') {
+          }
+        } else if (message.type === 'system' && (message as any).subtype === 'api_retry') {
+          // GH#102 / spec 102-sdk-peelback B1: synthesise `api_retry` from
+          // SDKAPIRetryMessage for the liveness signal. The dedicated
+          // `api_retry` GatewayEvent (spec phase p4 / B12) will be added
+          // alongside this in P1.5; here we emit the liveness frame only.
+          send(
+            ch,
+            {
+              type: 'session_state_changed',
+              session_id: sessionId,
+              state: 'api_retry',
+              ts: Date.now(),
+            },
+            ctx,
+          )
+        } else if (message.type === 'stream_event') {
+          // Token-level partial from the SDK. SDKPartialAssistantMessage wraps
+          // a BetaRawMessageStreamEvent. We forward both text_delta and
+          // thinking_delta so extended-thinking traces stream incrementally
+          // alongside the assistant text. input_json_delta (tool_use input)
+          // is skipped — it can't render incrementally against the existing
+          // parts model and arrives fully resolved in the final `assistant`.
+          const ev = (message as any).event
+          if (ev?.type === 'content_block_delta' && ev.delta) {
+            const idx = typeof ev.index === 'number' ? ev.index : 0
+            if (ev.delta.type === 'text_delta') {
               send(
                 ch,
                 {
-                  type: 'session_state_changed',
+                  type: 'partial_assistant',
                   session_id: sessionId,
-                  state: 'compacting',
-                  ts: Date.now(),
+                  content: [{ type: 'text', id: `blk-${idx}`, delta: ev.delta.text ?? '' }],
+                },
+                ctx,
+              )
+            } else if (ev.delta.type === 'thinking_delta') {
+              send(
+                ch,
+                {
+                  type: 'partial_assistant',
+                  session_id: sessionId,
+                  content: [{ type: 'thinking', id: `blk-${idx}`, delta: ev.delta.thinking ?? '' }],
                 },
                 ctx,
               )
             }
-          } else if (message.type === 'system' && (message as any).subtype === 'api_retry') {
-            // GH#102 / spec 102-sdk-peelback B1: synthesise `api_retry` from
-            // SDKAPIRetryMessage for the liveness signal. The dedicated
-            // `api_retry` GatewayEvent (spec phase p4 / B12) will be added
-            // alongside this in P1.5; here we emit the liveness frame only.
-            send(
-              ch,
-              {
-                type: 'session_state_changed',
-                session_id: sessionId,
-                state: 'api_retry',
-                ts: Date.now(),
-              },
-              ctx,
-            )
-          } else if (message.type === 'stream_event') {
-            // Token-level partial from the SDK. SDKPartialAssistantMessage wraps
-            // a BetaRawMessageStreamEvent. We forward both text_delta and
-            // thinking_delta so extended-thinking traces stream incrementally
-            // alongside the assistant text. input_json_delta (tool_use input)
-            // is skipped — it can't render incrementally against the existing
-            // parts model and arrives fully resolved in the final `assistant`.
-            const ev = (message as any).event
-            if (ev?.type === 'content_block_delta' && ev.delta) {
-              const idx = typeof ev.index === 'number' ? ev.index : 0
-              if (ev.delta.type === 'text_delta') {
-                send(
-                  ch,
-                  {
-                    type: 'partial_assistant',
-                    session_id: sessionId,
-                    content: [{ type: 'text', id: `blk-${idx}`, delta: ev.delta.text ?? '' }],
-                  },
-                  ctx,
-                )
-              } else if (ev.delta.type === 'thinking_delta') {
-                send(
-                  ch,
-                  {
-                    type: 'partial_assistant',
-                    session_id: sessionId,
-                    content: [
-                      { type: 'thinking', id: `blk-${idx}`, delta: ev.delta.thinking ?? '' },
-                    ],
-                  },
-                  ctx,
-                )
+          }
+        } else if (message.type === 'assistant' && (message as any).partial) {
+          // Legacy path: older SDK versions emitted `assistant` with partial=true.
+          // Kept for safety; current SDK (0.2.98+) uses `stream_event` above.
+          const content = (message as any).message?.content ?? []
+          const blocks = content.map((block: any) => {
+            if (block.type === 'text') {
+              return { type: 'text', id: block.id ?? '', delta: block.text ?? '' }
+            }
+            if (block.type === 'tool_use') {
+              return {
+                type: 'tool_use',
+                id: block.id ?? '',
+                tool_name: block.name,
+                input_delta:
+                  typeof block.input === 'string' ? block.input : JSON.stringify(block.input ?? ''),
               }
             }
-          } else if (message.type === 'assistant' && (message as any).partial) {
-            // Legacy path: older SDK versions emitted `assistant` with partial=true.
-            // Kept for safety; current SDK (0.2.98+) uses `stream_event` above.
-            const content = (message as any).message?.content ?? []
-            const blocks = content.map((block: any) => {
-              if (block.type === 'text') {
-                return { type: 'text', id: block.id ?? '', delta: block.text ?? '' }
-              }
-              if (block.type === 'tool_use') {
-                return {
-                  type: 'tool_use',
-                  id: block.id ?? '',
-                  tool_name: block.name,
-                  input_delta:
-                    typeof block.input === 'string'
-                      ? block.input
-                      : JSON.stringify(block.input ?? ''),
-                }
-              }
-              return { type: block.type, id: block.id ?? '' }
+            return { type: block.type, id: block.id ?? '' }
+          })
+
+          send(
+            ch,
+            {
+              type: 'partial_assistant',
+              session_id: sessionId,
+              content: blocks,
+            },
+            ctx,
+          )
+        } else if (message.type === 'assistant') {
+          // GH#86: accumulate finalized assistant turns for the titler.
+          const assistantContent = (message as any).message?.content ?? []
+          titlerHistory.push({ role: 'assistant', content: assistantContent })
+
+          send(
+            ch,
+            {
+              type: 'assistant',
+              session_id: sessionId,
+              uuid: (message as any).uuid,
+              content: assistantContent,
+            },
+            ctx,
+          )
+        } else if (message.type === 'tool_use_summary') {
+          send(
+            ch,
+            {
+              type: 'tool_result',
+              session_id: sessionId,
+              uuid: (message as any).uuid ?? '',
+              content: (message as any).content ?? (message as any).results ?? [],
+            },
+            ctx,
+          )
+        } else if (message.type === 'rate_limit_event') {
+          send(
+            ch,
+            {
+              type: 'rate_limit',
+              session_id: sessionId,
+              rate_limit_info: (message as any).rate_limit_info,
+            },
+            ctx,
+          )
+        } else if (message.type === 'system' && (message as any).subtype === 'task_started') {
+          send(
+            ch,
+            {
+              type: 'task_started',
+              session_id: sessionId,
+              task_id: (message as any).task_id,
+              description: (message as any).description ?? '',
+              task_type: (message as any).task_type,
+              prompt: (message as any).prompt,
+            },
+            ctx,
+          )
+        } else if (message.type === 'system' && (message as any).subtype === 'task_progress') {
+          send(
+            ch,
+            {
+              type: 'task_progress',
+              session_id: sessionId,
+              task_id: (message as any).task_id,
+              description: (message as any).description ?? '',
+              usage: (message as any).usage ?? { total_tokens: 0, tool_uses: 0, duration_ms: 0 },
+              last_tool_name: (message as any).last_tool_name,
+              summary: (message as any).summary,
+            },
+            ctx,
+          )
+        } else if (message.type === 'system' && (message as any).subtype === 'task_notification') {
+          send(
+            ch,
+            {
+              type: 'task_notification',
+              session_id: sessionId,
+              task_id: (message as any).task_id,
+              status: (message as any).status,
+              summary: (message as any).summary ?? '',
+              output_file: (message as any).output_file ?? '',
+              usage: (message as any).usage,
+            },
+            ctx,
+          )
+        } else if (message.type === 'result') {
+          const result = message as any
+          const wasInterrupted = ctx.interrupted
+
+          // Idle stop — the model hit the interactive stop sequence with
+          // "No response requested." Normally suppress the result and
+          // auto-nudge by pushing "continue" onto the lifetime queue.
+          // BUT if the user interrupted, forward the result so the DO
+          // transitions to idle (otherwise it stays stuck in 'running'
+          // with no runner).
+          if (isIdleStop(result) && !wasInterrupted) {
+            console.log(`[session-runner] executeSession: idle stop detected — auto-nudging`)
+            ctx.meta.turn_count++
+            userQueue.push({
+              type: 'user',
+              message: { role: 'user', content: 'continue' },
+              parent_tool_use_id: null,
             })
-
-            send(
-              ch,
-              {
-                type: 'partial_assistant',
-                session_id: sessionId,
-                content: blocks,
-              },
-              ctx,
-            )
-          } else if (message.type === 'assistant') {
-            // GH#86: accumulate finalized assistant turns for the titler.
-            const assistantContent = (message as any).message?.content ?? []
-            titlerHistory.push({ role: 'assistant', content: assistantContent })
-
-            send(
-              ch,
-              {
-                type: 'assistant',
-                session_id: sessionId,
-                uuid: (message as any).uuid,
-                content: assistantContent,
-              },
-              ctx,
-            )
-          } else if (message.type === 'tool_use_summary') {
-            send(
-              ch,
-              {
-                type: 'tool_result',
-                session_id: sessionId,
-                uuid: (message as any).uuid ?? '',
-                content: (message as any).content ?? (message as any).results ?? [],
-              },
-              ctx,
-            )
-          } else if (message.type === 'rate_limit_event') {
-            send(
-              ch,
-              {
-                type: 'rate_limit',
-                session_id: sessionId,
-                rate_limit_info: (message as any).rate_limit_info,
-              },
-              ctx,
-            )
-          } else if (message.type === 'system' && (message as any).subtype === 'task_started') {
-            send(
-              ch,
-              {
-                type: 'task_started',
-                session_id: sessionId,
-                task_id: (message as any).task_id,
-                description: (message as any).description ?? '',
-                task_type: (message as any).task_type,
-                prompt: (message as any).prompt,
-              },
-              ctx,
-            )
-          } else if (message.type === 'system' && (message as any).subtype === 'task_progress') {
-            send(
-              ch,
-              {
-                type: 'task_progress',
-                session_id: sessionId,
-                task_id: (message as any).task_id,
-                description: (message as any).description ?? '',
-                usage: (message as any).usage ?? { total_tokens: 0, tool_uses: 0, duration_ms: 0 },
-                last_tool_name: (message as any).last_tool_name,
-                summary: (message as any).summary,
-              },
-              ctx,
-            )
-          } else if (
-            message.type === 'system' &&
-            (message as any).subtype === 'task_notification'
-          ) {
-            send(
-              ch,
-              {
-                type: 'task_notification',
-                session_id: sessionId,
-                task_id: (message as any).task_id,
-                status: (message as any).status,
-                summary: (message as any).summary ?? '',
-                output_file: (message as any).output_file ?? '',
-                usage: (message as any).usage,
-              },
-              ctx,
-            )
-          } else if (message.type === 'result') {
-            const result = message as any
-
-            // Idle stop — the model hit the interactive stop sequence with
-            // "No response requested." Normally suppress and auto-nudge.
-            // BUT if the user interrupted, forward the result so the DO
-            // transitions to idle (otherwise it stays stuck in 'running'
-            // with no runner).
-            if (isIdleStop(result) && !ctx.interrupted) {
-              idleStop = true
-              console.log(`[session-runner] executeSession: idle stop detected`)
-              continue
-            }
-
-            const duration = Date.now() - startTime
-
-            // Fetch SDK session summary (best-effort)
-            let sdkSummary: string | null = null
-            if (sdkSessionId) {
-              try {
-                const { getSessionInfo } = await import('@anthropic-ai/claude-agent-sdk')
-                const info = await getSessionInfo(sdkSessionId, { dir: projectPath })
-                sdkSummary = info?.summary ?? null
-              } catch {
-                // Non-fatal -- summary is best-effort
-              }
-            }
-
-            if (typeof result.total_cost_usd === 'number') {
-              ctx.meta.cost.usd = result.total_cost_usd
-            }
-
-            send(
-              ch,
-              {
-                type: 'result',
-                session_id: sessionId,
-                subtype: result.subtype,
-                duration_ms: duration,
-                total_cost_usd: result.total_cost_usd ?? null,
-                result: result.result ?? null,
-                num_turns: result.num_turns ?? null,
-                is_error: result.subtype !== 'success',
-                sdk_summary: sdkSummary,
-              },
-              ctx,
-            )
-
-            // GH#86: fire-and-forget initial title check after turn-complete.
-            // Errors are swallowed inside the titler — no risk of breaking
-            // the main event loop.
-            titler.maybeInitialTitle(titlerHistory).catch(() => {})
+            continue
           }
-        }
-        return idleStop
-      }
 
-      // --- Initial turn ---
-      // Build the streaming prompt: initial prompt only (no queue — each turn gets its own query)
-      // GH#86: capture initial prompt for titler transcript
-      const promptText = typeof cmd.prompt === 'string' ? cmd.prompt : JSON.stringify(cmd.prompt)
-      titlerHistory.push({ role: 'user', content: promptText })
+          const duration = Date.now() - startTime
 
-      async function* initialPrompt(): AsyncGenerator<SDKUserMsg> {
-        yield {
-          type: 'user',
-          message: { role: 'user', content: cmd.prompt },
-          parent_tool_use_id: null,
-        }
-      }
-
-      console.log(`[session-runner] executeSession: calling query() for ${cmd.project}`)
-      const iter = query({
-        prompt: initialPrompt(),
-        options: options as any,
-      })
-      let wasIdleStop = await processQueryMessages(iter)
-      ctx.meta.turn_count++
-
-      // --- Multi-turn loop ---
-      // After each turn, either auto-nudge idle stops or wait for user input.
-      //
-      // Idle stops ("No response requested."): the model hit the SDK's
-      // interactive stop sequence mid-workflow.  The result is suppressed
-      // (not forwarded) and we immediately resume with "continue" so the
-      // session keeps running.  No cap — the stop hooks and task system
-      // will end the session naturally when work is done.
-      //
-      // Normal results: forwarded to orchestrator, then wait for the next
-      // user message (stream-input) before resuming.
-      while (!ac.signal.aborted && sdkSessionId) {
-        // Reset interrupt flag after the turn completes so the runner
-        // can accept follow-up messages. The interrupt stopped the
-        // current turn; it doesn't kill the whole session.
-        const wasInterrupted = ctx.interrupted
-        if (wasInterrupted) ctx.interrupted = false
-
-        let nextContent: string | ContentBlock[]
-
-        if (wasIdleStop && !wasInterrupted) {
-          console.log(`[session-runner] executeSession: auto-nudging after idle stop`)
-          nextContent = 'continue'
-        } else {
-          const nextMsg = await queue.waitForNext()
-          if (!nextMsg) break // queue.done() was called — session is closing
-          nextContent = nextMsg.message.content
-        }
-
-        const content = nextContent
-        // GH#86: capture follow-up user content for titler transcript
-        const followUpText = typeof content === 'string' ? content : JSON.stringify(content)
-        titlerHistory.push({ role: 'user', content: followUpText })
-
-        async function* followUpPrompt(): AsyncGenerator<SDKUserMsg> {
-          yield {
-            type: 'user',
-            message: { role: 'user', content },
-            parent_tool_use_id: null,
+          // Fetch SDK session summary (best-effort)
+          let sdkSummary: string | null = null
+          if (sdkSessionId) {
+            try {
+              const { getSessionInfo } = await import('@anthropic-ai/claude-agent-sdk')
+              const info = await getSessionInfo(sdkSessionId, { dir: projectPath })
+              sdkSummary = info?.summary ?? null
+            } catch {
+              // Non-fatal -- summary is best-effort
+            }
           }
-        }
 
-        console.log(`[session-runner] executeSession: resuming for follow-up turn`)
-        const resumeOpts = { ...options, resume: sdkSessionId }
-        const resumeIter = query({
-          prompt: followUpPrompt(),
-          options: resumeOpts as any,
-        })
-        wasIdleStop = await processQueryMessages(resumeIter)
-        ctx.meta.turn_count++
+          if (typeof result.total_cost_usd === 'number') {
+            ctx.meta.cost.usd = result.total_cost_usd
+          }
+
+          send(
+            ch,
+            {
+              type: 'result',
+              session_id: sessionId,
+              subtype: result.subtype,
+              duration_ms: duration,
+              total_cost_usd: result.total_cost_usd ?? null,
+              result: result.result ?? null,
+              num_turns: result.num_turns ?? null,
+              is_error: result.subtype !== 'success',
+              sdk_summary: sdkSummary,
+            },
+            ctx,
+          )
+
+          // Reset interrupt flag and bump turn counter once the result has
+          // been forwarded. The for-await loop continues — the next push
+          // on userQueue will start the next turn under the same Query.
+          if (wasInterrupted) ctx.interrupted = false
+          ctx.meta.turn_count++
+
+          // GH#86: fire-and-forget initial title check after turn-complete.
+          // Errors are swallowed inside the titler — no risk of breaking
+          // the main event loop.
+          titler.maybeInitialTitle(titlerHistory).catch(() => {})
+        }
       }
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : String(err)
@@ -912,9 +774,10 @@ export class ClaudeRunner {
       }
     } finally {
       kataWatcher.stop()
-      // Clean up the message queue and query reference
-      queue.done()
-      ctx.messageQueue = null
+      // Close the lifetime queue and clear ctx pointers. close() is
+      // idempotent and safe even if `stop` already closed it from main.ts.
+      userQueue.close()
+      ctx.userQueue = null
       ctx.query = null
       // If we reached here without hitting the catch and no terminal state was
       // set yet, this was a natural completion (result event received, loop exited).

@@ -27,7 +27,6 @@ import { BufferedChannel, DialBackClient, type GapSentinel } from '@duraclaw/sha
 import type { ExecuteCommand, GatewayCommand, ResumeCommand } from '@duraclaw/shared-types'
 import { atomicOverwrite, atomicWriteOnce } from './atomic.js'
 import { ClaudeRunner } from './claude-runner.js'
-import { handleQueryCommand, type QueueableCommand } from './commands.js'
 import type { RunnerSessionContext } from './types.js'
 
 const META_INTERVAL_MS = 10_000
@@ -159,31 +158,18 @@ function handleIncomingCommand(msg: unknown, ctx: RunnerSessionContext, ch: Buff
         ctx.titler.maybePivotRetitle([], userText).catch(() => {})
       }
 
-      // Queue follow-up: if the SDK query is actively running (not
-      // between turns waiting on waitForNext), inject via streamInput()
-      // with priority 'next' so the message queues until the current
-      // turn completes — matching the TUI's queue-while-busy behavior.
-      // Explicit interrupts use the separate 'interrupt' command type.
-      if (ctx.query) {
-        const sdkMsg = {
-          type: 'user' as const,
-          message: { role: 'user' as const, content: msg.content },
+      // GH#102 / spec 102-sdk-peelback B4+B5: push onto the lifetime
+      // PushPullQueue. The single Query() pulls from this for the whole
+      // session — no per-turn streamInput half-close, no between-turns
+      // fallback queue.
+      if (ctx.userQueue) {
+        ctx.userQueue.push({
+          type: 'user',
+          message: { role: 'user', content: msg.content },
           parent_tool_use_id: null,
-          priority: 'next' as const,
-        }
-        async function* singleMessage() {
-          yield sdkMsg
-        }
-        ctx.query.streamInput(singleMessage()).catch((err: unknown) => {
-          console.error(
-            `[session-runner] streamInput error: ${err instanceof Error ? err.message : String(err)}`,
-          )
-          // Fall back to queue so the message isn't lost
-          ctx.messageQueue?.push(msg)
         })
-      } else if (ctx.messageQueue) {
-        // Between turns — queue for the next waitForNext() call
-        ctx.messageQueue.push(msg)
+      } else {
+        console.warn('[session-runner] stream-input arrived before userQueue was ready — dropping')
       }
       break
     }
@@ -219,21 +205,82 @@ function handleIncomingCommand(msg: unknown, ctx: RunnerSessionContext, ch: Buff
     }
     case 'abort':
     case 'stop': {
+      // Close the lifetime queue first so the Query exhausts cleanly,
+      // then abort to trigger the SIGTERM/watchdog shutdown path if
+      // the SDK doesn't unwind on its own.
+      try {
+        ctx.userQueue?.close()
+      } catch {
+        /* close is idempotent in PushPullQueue; defensive */
+      }
       ctx.abortController.abort()
       break
     }
-    case 'interrupt':
-    case 'get-context-usage':
-    case 'set-model':
-    case 'set-permission-mode': {
-      const queueable = m as unknown as QueueableCommand
-      if (ctx.query) {
-        handleQueryCommand(ctx, queueable, ch).catch((err) => {
-          console.error(`[session-runner] handleQueryCommand error: ${(err as Error).message}`)
-        })
-      } else {
-        ctx.commandQueue.push(queueable)
+    case 'interrupt': {
+      // Mark the context as interrupted BEFORE calling q.interrupt(). On
+      // long-running / mid-tool-use sessions the SDK's query generator can
+      // throw rather than cleanly yield a result; the outer catch in
+      // claude-runner.ts uses this flag to suppress the `error` event and
+      // mark meta.state='aborted' so the session lands in `idle` ("just
+      // pausing") instead of `error` (genuine failure). The lifetime
+      // PushPullQueue is NOT touched — interrupt only stops the current
+      // turn; the queue stays open for the next stream-input.
+      ctx.interrupted = true
+      ctx.query?.interrupt().catch((err: unknown) => {
+        console.error(
+          `[session-runner] interrupt error: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      })
+      break
+    }
+    case 'get-context-usage': {
+      if (!ctx.query) {
+        console.warn('[session-runner] get-context-usage before Query ready — dropping')
+        break
       }
+      ctx.query
+        .getContextUsage()
+        .then((usage) => {
+          const seq = ++ctx.nextSeq
+          ch.send({
+            type: 'context_usage',
+            session_id: ctx.sessionId,
+            usage: usage as unknown as Record<string, unknown>,
+            seq,
+          })
+          ctx.meta.last_activity_ts = Date.now()
+          ctx.meta.last_event_seq = seq
+        })
+        .catch((err: unknown) => {
+          console.error(
+            `[session-runner] getContextUsage error: ${err instanceof Error ? err.message : String(err)}`,
+          )
+        })
+      break
+    }
+    case 'set-model': {
+      if (!ctx.query) {
+        console.warn('[session-runner] set-model before Query ready — dropping')
+        break
+      }
+      const model = typeof m.model === 'string' ? m.model : undefined
+      ctx.query.setModel(model).catch((err: unknown) => {
+        console.error(
+          `[session-runner] setModel error: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      })
+      break
+    }
+    case 'set-permission-mode': {
+      if (!ctx.query) {
+        console.warn('[session-runner] set-permission-mode before Query ready — dropping')
+        break
+      }
+      ctx.query.setPermissionMode(m.mode as any).catch((err: unknown) => {
+        console.error(
+          `[session-runner] setPermissionMode error: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      })
       break
     }
     case 'stop-task': {
@@ -400,18 +447,18 @@ async function main(): Promise<void> {
     },
   })
 
-  // Build the per-session context. `messageQueue` / `query` are filled by the
-  // runner once session.init arrives; `commandQueue` buffers DO->runner
-  // commands received before that moment.
+  // Build the per-session context. `userQueue` / `query` are filled by the
+  // runner at session start (userQueue is constructed before query() is
+  // invoked, so it's available to `stream-input` from the very first
+  // command after session.init).
   const ctx: RunnerSessionContext = {
     sessionId: argv.sessionId,
     abortController: new AbortController(),
     interrupted: false,
     pendingAnswer: null,
     pendingPermission: null,
-    messageQueue: null,
+    userQueue: null,
     query: null,
-    commandQueue: [],
     titler: null,
     nextSeq: 0,
     meta: {
