@@ -569,6 +569,55 @@ export class ClaudeRunner {
               }
               ctx.commandQueue = []
             }
+          } else if (
+            message.type === 'system' &&
+            (message as any).subtype === 'session_state_changed'
+          ) {
+            // GH#102 / spec 102-sdk-peelback B1: SDK-native liveness signal.
+            // Translates the SDK's 3-value enum directly. SDK type
+            // SDKSessionStateChangedMessage — see addendum §1.1.
+            send(
+              ch,
+              {
+                type: 'session_state_changed',
+                session_id: sessionId,
+                state: (message as any).state,
+                ts: Date.now(),
+              },
+              ctx,
+            )
+          } else if (message.type === 'system' && (message as any).subtype === 'status') {
+            // GH#102 / spec 102-sdk-peelback B1: synthesise `compacting` from
+            // SDKStatusMessage. `status:'compacting'` → state:'compacting'.
+            // `status:null` → no-op (the next session_state_changed will
+            // reassert authority). See addendum §1.2.
+            if ((message as any).status === 'compacting') {
+              send(
+                ch,
+                {
+                  type: 'session_state_changed',
+                  session_id: sessionId,
+                  state: 'compacting',
+                  ts: Date.now(),
+                },
+                ctx,
+              )
+            }
+          } else if (message.type === 'system' && (message as any).subtype === 'api_retry') {
+            // GH#102 / spec 102-sdk-peelback B1: synthesise `api_retry` from
+            // SDKAPIRetryMessage for the liveness signal. The dedicated
+            // `api_retry` GatewayEvent (spec phase p4 / B12) will be added
+            // alongside this in P1.5; here we emit the liveness frame only.
+            send(
+              ch,
+              {
+                type: 'session_state_changed',
+                session_id: sessionId,
+                state: 'api_retry',
+                ts: Date.now(),
+              },
+              ctx,
+            )
           } else if (message.type === 'stream_event') {
             // Token-level partial from the SDK. SDKPartialAssistantMessage wraps
             // a BetaRawMessageStreamEvent. We forward both text_delta and

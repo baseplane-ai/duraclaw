@@ -84,6 +84,20 @@ import { SESSION_DO_MIGRATIONS } from './session-do-migrations'
  */
 export interface SessionMeta {
   status: SessionStatus
+  /**
+   * GH#102 / spec 102-sdk-peelback B1: scaffold-only field for SDK-derived
+   * transient states that should not change `status` (which the UI hook
+   * contract treats as sacred). Set to `'compacting'` while the SDK is
+   * mid-compact, `'api_retry'` while a retry is pending, and `null`
+   * otherwise. RESET TO `null` on any non-transient `state` arrival.
+   *
+   * NB: scaffold-only — no UI consumer reads this yet, no broadcast frame
+   * includes it, no migration test asserts on it. A future UX spec
+   * (transcript-seam design) will wire it. The only requirement here:
+   * the field exists, gets populated on `compacting` / `api_retry` arrivals,
+   * and is reset to null on the next non-transient state-change event.
+   */
+  transient_state?: 'compacting' | 'api_retry' | null
   session_id: string | null
   project: string
   project_path: string
@@ -132,6 +146,7 @@ export interface SessionMeta {
 
 const DEFAULT_META: SessionMeta = {
   status: 'idle',
+  transient_state: null,
   session_id: null,
   project: '',
   project_path: '',
@@ -266,8 +281,12 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   private recentTurnFingerprints: string[] = []
   /** Cached gateway connection ID — avoids SQLite reads on every message. */
   private cachedGatewayConnId: string | null = null
-  /** Timestamp of the last gateway event received on the WS connection. */
-  private lastGatewayActivity = 0
+  /**
+   * Updated on EVERY GatewayEvent arrival (not just heartbeat). Used by the
+   * residual watchdog (B2) — staleness is `now - lastAnyEventTs >
+   * staleThresholdMs && WS not OPEN`.
+   */
+  private lastAnyEventTs = 0
   /** GH#57: pending recovery timer — set when WS drops but gateway says runner
    * is still alive. Cleared when the runner reconnects (onConnectInner). */
   private recoveryGraceTimer: ReturnType<typeof setTimeout> | null = null
@@ -290,13 +309,6 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     resolve: (v: ContextUsage | null) => void
     reject: (e: unknown) => void
   }> = []
-  /**
-   * GH#50 B9: legacy-event drop log dedupe set. Pre-P3 in-flight runners
-   * may continue to send `heartbeat` / `session_state_changed` frames
-   * during the deploy window; we want one warn line per type per DO
-   * instance, then silent drop.
-   */
-  private loggedLegacyEventTypes = new Set<string>()
 
   /**
    * GH#86: feature-flag cache. `triggerGatewayDial` reads global flags
@@ -1173,7 +1185,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       // Do NOT use connection.setState — it conflicts with Agent SDK internals
       this.sql`INSERT OR REPLACE INTO kv (key, value) VALUES ('gateway_conn_id', ${connection.id})`
       this.cachedGatewayConnId = connection.id
-      this.lastGatewayActivity = Date.now()
+      this.lastAnyEventTs = Date.now()
 
       // GH#57: runner reconnected after a transient WS flap — cancel the
       // pending recovery grace so we don't clear the callback token. The grace
@@ -1219,7 +1231,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       const gwConnId = this.getGatewayConnectionId()
       if (gwConnId && connection.id === gwConnId) {
         // Gateway message: parse and route to handleGatewayEvent
-        this.lastGatewayActivity = Date.now()
+        this.lastAnyEventTs = Date.now()
         try {
           const raw = typeof data === 'string' ? data : new TextDecoder().decode(data)
           const event = parseEvent(raw)
@@ -1319,7 +1331,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
           //   - `enter` without `exit` → our onConnectInner threw
           //   - Both `enter` + `exit` → SDK post-handler code threw
           console.error(
-            `[SessionDO][conn] 1006-diag doId=${this.ctx.id} connId=${connection.id} reason=${JSON.stringify(reason)} sameIdRemaining=${remaining} status=${this.state.status} hasGateway=${!!this.getGatewayConnectionId()} lastGatewayActivity=${this.lastGatewayActivity} sessionId=${this.state.session_id ?? 'none'}`,
+            `[SessionDO][conn] 1006-diag doId=${this.ctx.id} connId=${connection.id} reason=${JSON.stringify(reason)} sameIdRemaining=${remaining} status=${this.state.status} hasGateway=${!!this.getGatewayConnectionId()} lastAnyEventTs=${this.lastAnyEventTs} sessionId=${this.state.session_id ?? 'none'}`,
           )
         } else {
           console.log(
@@ -1617,7 +1629,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
         )
       }
 
-      this.lastGatewayActivity = Date.now()
+      this.lastAnyEventTs = Date.now()
       this.scheduleWatchdog()
       console.log(`[SessionDO:${this.ctx.id}] triggerGatewayDial: POST to gateway succeeded`)
     } catch (err) {
@@ -1703,7 +1715,12 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       console.warn(`[SessionDO:${this.ctx.id}] Watchdog: recovery_grace read failed:`, err)
     }
 
-    const staleDuration = Date.now() - this.lastGatewayActivity
+    // GH#102 / spec 102-sdk-peelback B2: residual watchdog. Staleness fires
+    // only when (no event of any kind in `staleThresholdMs`) AND (gateway WS
+    // is not OPEN). A quiet session with an OPEN WS is healthy. Compacting
+    // and api_retry produce session_state_changed activity — they do NOT
+    // trip this.
+    const staleDuration = Date.now() - this.lastAnyEventTs
     const staleThreshold = resolveStaleThresholdMs(this.env.STALE_THRESHOLD_MS)
 
     if (staleDuration > staleThreshold && !gwConnId) {
@@ -2600,22 +2617,6 @@ export class SessionDO extends Agent<Env, SessionMeta> {
         }
       })()
     }, 5000)
-  }
-
-  /**
-   * GH#50 B9: tolerant log-once-then-drop for legacy event types
-   * (`heartbeat`, `session_state_changed`) emitted by pre-P3 runners
-   * during the rollout window. Liveness bump (B1) runs BEFORE this drop
-   * so the legacy frame still refreshes the TTL — clients with P2
-   * shipped never see a flap.
-   */
-  private handleLegacyEvent(type: string, sessionId: string | null) {
-    if (!this.loggedLegacyEventTypes.has(type)) {
-      console.warn(
-        `[session-do] dropped legacy event type=${type} sessionId=${sessionId ?? 'unknown'}`,
-      )
-      this.loggedLegacyEventTypes.add(type)
-    }
   }
 
   /**
@@ -5222,6 +5223,60 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         break
       }
 
+      case 'session_state_changed': {
+        // GH#102 / spec 102-sdk-peelback B1: SDK-native liveness signal.
+        // (lastAnyEventTs is bumped by the generic onMessage handler.)
+        const stateEvent = event as { type: 'session_state_changed'; state: string }
+        switch (stateEvent.state) {
+          case 'idle':
+            this.updateState({ status: 'idle', transient_state: null })
+            break
+          case 'running':
+            this.updateState({ status: 'running', transient_state: null })
+            break
+          case 'requires_action': {
+            // Walk history newest-first for any pending gate part; map its
+            // shape to the right waiting_* status. Defensive fallback to
+            // `waiting_gate` per spec when no gate part is found.
+            const history = this.session.getHistory()
+            let pendingType: 'ask_user' | 'permission_request' | null = null
+            outer: for (let i = history.length - 1; i >= 0; i--) {
+              for (const p of history[i].parts) {
+                if (!isPendingGatePart(p)) continue
+                if (p.type === 'tool-permission') {
+                  pendingType = 'permission_request'
+                  break outer
+                }
+                if (p.type === 'tool-ask_user' || p.type === 'tool-AskUserQuestion') {
+                  pendingType = 'ask_user'
+                  break outer
+                }
+              }
+            }
+            const status: SessionStatus =
+              pendingType === 'permission_request'
+                ? 'waiting_permission'
+                : pendingType === 'ask_user'
+                  ? 'waiting_input'
+                  : 'waiting_gate'
+            this.updateState({ status, transient_state: null })
+            break
+          }
+          case 'compacting':
+            this.updateState({ transient_state: 'compacting' })
+            break
+          case 'api_retry':
+            this.updateState({ transient_state: 'api_retry' })
+            break
+          default:
+            console.warn(
+              `[SessionDO:${this.ctx.id}] unknown session_state_changed state=${stateEvent.state}`,
+            )
+        }
+        this.broadcastGatewayEvent(event)
+        break
+      }
+
       case 'kata_state': {
         // PRESERVE existing side effects — store in kv and sync to D1.
         try {
@@ -5435,22 +5490,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
 
       // Events that don't produce message parts — just broadcast raw
       default: {
-        // GH#50 B9: tolerant drop for legacy events from in-flight pre-B7
-        // runners during the rollout window. These frames are logged once
-        // then silently dropped.
-        const type = (event as { type: string }).type
-        if (type === 'heartbeat') {
-          // Runner heartbeat — liveness proof. `lastGatewayActivity` was
-          // already bumped by the generic `onMessage` handler; nothing else
-          // to do. Not broadcast to clients.
-          break
-        }
-        if (type === 'session_state_changed') {
-          const sid =
-            (event as { session_id?: string | null }).session_id ?? this.state.session_id ?? null
-          this.handleLegacyEvent(type, sid)
-          break
-        }
         // rewind_result, rate_limit, task_started, task_progress,
         // task_notification — broadcast as-is
         this.broadcastGatewayEvent(event)

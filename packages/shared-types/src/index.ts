@@ -169,17 +169,30 @@ export type GatewayEvent =
   | ChainStalledEvent
   | GapSentinelEvent
   | TitleUpdateEvent
-  | HeartbeatEvent
+  | SessionStateChangedEvent
 
 /**
- * Runner heartbeat — emitted every 15s by session-runner to prove liveness.
- * The DO uses this to bump `lastGatewayActivity`; the watchdog alarm detects
- * a stale session when heartbeats stop arriving. Not forwarded to clients.
+ * GH#102 / spec 102-sdk-peelback B1: SDK-native liveness signal.
+ *
+ * Translated by the runner from `SDKSessionStateChangedMessage` (3-value
+ * SDK enum) plus `SDKStatusMessage{status:'compacting'}` and
+ * `SDKAPIRetryMessage` (synthesised). Wire enum is wider than the SDK's
+ * `idle | running | requires_action` because the runner additionally
+ * exposes `compacting` and `api_retry` as transient liveness states
+ * derived from sibling SDK frames. Used by the DO to drive both
+ * `lastAnyEventTs` (residual watchdog) and `SessionMeta.status` /
+ * `SessionMeta.transient_state` mapping.
  */
-export interface HeartbeatEvent {
-  type: 'heartbeat'
+export interface SessionStateChangedEvent {
+  type: 'session_state_changed'
   session_id: string
-  seq: number
+  /**
+   * Stamped by the runner's BufferedChannel `send()` helper — callers never
+   * pass it explicitly. Always present on the wire.
+   */
+  seq?: number
+  state: 'idle' | 'running' | 'requires_action' | 'compacting' | 'api_retry'
+  ts: number
 }
 
 /**

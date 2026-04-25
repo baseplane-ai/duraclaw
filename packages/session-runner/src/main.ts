@@ -33,7 +33,6 @@ import type { RunnerSessionContext } from './types.js'
 const META_INTERVAL_MS = 10_000
 const META_FAILURE_LIMIT = 5
 const SIGTERM_GRACE_MS = 2_000
-const HEARTBEAT_INTERVAL_MS = 15_000
 
 interface Argv {
   sessionId: string
@@ -467,17 +466,6 @@ async function main(): Promise<void> {
   await flushMeta()
   const metaTimer = setInterval(flushMeta, META_INTERVAL_MS)
 
-  // Heartbeat: prove liveness to the DO so its watchdog can detect silent
-  // runner death. The DO already bumps `lastGatewayActivity` on any gateway
-  // message (onMessage handler), so this lightweight event is sufficient.
-  const heartbeatTimer = setInterval(() => {
-    channel.send({
-      type: 'heartbeat',
-      session_id: argv.sessionId,
-      seq: ++ctx.nextSeq,
-    })
-  }, HEARTBEAT_INTERVAL_MS)
-
   // --- Step 10: SIGTERM handler ---
   let forcedExit = false
   const sigtermHandler = () => {
@@ -487,7 +475,6 @@ async function main(): Promise<void> {
       if (forcedExit) return
       forcedExit = true
       clearInterval(metaTimer)
-      clearInterval(heartbeatTimer)
       try {
         await atomicOverwrite(argv.metaFile, JSON.stringify(ctx.meta))
       } catch {
@@ -532,7 +519,6 @@ async function main(): Promise<void> {
   // --- Step 9: clean shutdown ---
   if (forcedExit) return // SIGTERM watchdog already handled the exit
   clearInterval(metaTimer)
-  clearInterval(heartbeatTimer)
   // Best-effort final meta flush — don't let it throw.
   try {
     await atomicOverwrite(argv.metaFile, JSON.stringify(ctx.meta))
