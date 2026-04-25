@@ -291,18 +291,6 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     reject: (e: unknown) => void
   }> = []
   /**
-   * Cache of the last status+error we synced to D1. Used by `syncStatusToD1` /
-   * `syncStatusAndErrorToD1` to short-circuit redundant writes — critical for
-   * the belt-and-suspenders hydrate reconciliation (L269-ish), which
-   * previously stamped `last_activity = now()` on every DO wake and scrambled
-   * the sidebar "Recent" ordering. Initialized from D1 by
-   * `initStatusCacheAndReconcile` on hydrate; kept coherent by every write
-   * path in `sync*ToD1` below.
-   */
-  private lastSyncedStatus: SessionStatus | null = null
-  private lastSyncedError: string | null = null
-
-  /**
    * GH#50 B9: legacy-event drop log dedupe set. Pre-P3 in-flight runners
    * may continue to send `heartbeat` / `session_state_changed` frames
    * during the deploy window; we want one warn line per type per DO
@@ -462,19 +450,6 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     // Belt-and-suspenders D1 reconciliation. Any prior code path that was
     // supposed to flush `state.status` to `agent_sessions` but silently
     // dropped the write (eviction race, failed UPDATE, transient D1 error)
-    // leaves D1 diverged from the DO's in-memory truth. Re-emit on every
-    // rehydrate so clients observe the DO's last-known status the next
-    // time this DO is loaded — the synced-collection delta pushes the
-    // corrected row to the user's UserSettingsDO.
-    //
-    // NOTE: this path must NOT bump `last_activity`. DO rehydrate is not
-    // user activity — stamping `last_activity = now()` every wake caused
-    // the sidebar "Recent" list to thrash as DOs were touched by tab
-    // navigation, WS reconnects, etc. `initStatusCacheAndReconcile`
-    // primes the status cache from D1 first, so the common "D1 already
-    // matches" case is a true no-op (no write, no broadcast). Divergent
-    // cases still write but leave `last_activity` untouched.
-    void this.initStatusCacheAndReconcile()
   }
 
   /**
@@ -1136,7 +1111,6 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       error: errorText,
       active_callback_token: undefined,
     })
-    void this.syncStatusToD1(new Date().toISOString())
   }
 
   onConnect(connection: Connection, ctx: ConnectionContext) {
@@ -1785,7 +1759,6 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       error: 'Gateway connection lost — session stopped. You can send a new message to resume.',
       active_callback_token: undefined,
     })
-    this.syncStatusToD1(new Date().toISOString())
 
     // Notify connected clients
     this.broadcastToClients(
@@ -1822,6 +1795,10 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     // message was already broadcast with the old status).
     if (partial.status !== undefined && partial.status !== prevStatus) {
       this.broadcastStatusFrame()
+      // Push status to the owner's user-stream (via UserSettingsDO) so
+      // background sessions (sidebar, tabs) see transitions without a
+      // per-session WS. Fire-and-forget via waitUntil — no D1 write.
+      this.broadcastStatusToOwner()
     }
   }
 
@@ -1947,8 +1924,8 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     if (!userId || !sessionId || !project || !kataMode) return
     if (!CORE_RUNGS.has(kataMode)) return
 
-    // kataIssue isn't on SessionMeta — source it from the D1 row we just
-    // wrote in syncStatusToD1 above. A single PK lookup; cheap.
+    // kataIssue isn't on SessionMeta — source it from the D1 row.
+    // A single PK lookup; cheap.
     let kataIssue: number | null = null
     try {
       const rows = await this.d1
@@ -2334,6 +2311,22 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   }
 
   /**
+   * Push status to the session owner's user-stream (via UserSettingsDO)
+   * so background sessions (sidebar, tab bar) see transitions without a
+   * per-session WS connection. Uses the lightweight `session_status`
+   * collection — `{id, status}` only, no D1 read/write. Fire-and-forget.
+   */
+  private broadcastStatusToOwner(): void {
+    const userId = this.state.userId
+    if (!userId) return
+    this.ctx.waitUntil(
+      broadcastSyncedDelta(this.env, userId, 'session_status', [
+        { type: 'update', value: { id: this.name, status: this.state.status } },
+      ]),
+    )
+  }
+
+  /**
    * Persist the current `messageSeq` to `session_meta`. Called unconditionally
    * from `broadcastMessages` / `broadcastBranchInfo` after incrementing
    * `this.messageSeq` (GH#69 B4 — unconditional to eliminate hibernation-
@@ -2481,73 +2474,13 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     return drizzle(this.env.AUTH_DB, { schema })
   }
 
-  private async syncStatusToD1(updatedAt: string, opts: { bumpLastActivity?: boolean } = {}) {
-    try {
-      const sessionId = this.name
-      const newStatus = this.state.status
-      const shouldClearError = newStatus === 'running' || newStatus === 'idle'
-      const nextError = shouldClearError ? null : this.lastSyncedError
-      // Fast no-op: nothing to reconcile. Prevents spurious lastActivity
-      // bumps + delta-frame broadcasts on hydrate reconciliation and on
-      // same-status re-emits that would otherwise scramble the sidebar
-      // "Recent" ordering (sessions jumping around on every DO wake).
-      if (this.lastSyncedStatus === newStatus && this.lastSyncedError === nextError) {
-        return
-      }
-      const bumpLastActivity = opts.bumpLastActivity !== false
-      await this.d1
-        .update(agentSessions)
-        .set({
-          status: newStatus,
-          updatedAt,
-          messageSeq: this.messageSeq,
-          ...(bumpLastActivity ? { lastActivity: updatedAt } : {}),
-          ...(shouldClearError ? { error: null, errorCode: null } : {}),
-        })
-        .where(eq(agentSessions.id, sessionId))
-      await broadcastSessionRow(this.env, this.ctx, sessionId, 'update')
-      this.lastSyncedStatus = newStatus
-      this.lastSyncedError = nextError
-    } catch (err) {
-      console.error(`[SessionDO:${this.ctx.id}] Failed to sync status to D1:`, err)
-    }
-  }
-
-  /**
-   * Hydrate-path reconciliation. Reads the current `status` + `error` from
-   * D1 to prime `lastSyncedStatus` / `lastSyncedError`, then calls
-   * `syncStatusToD1` with `bumpLastActivity: false` so the belt-and-
-   * suspenders reconcile never touches `last_activity`. If D1 already
-   * matches the DO's in-memory state, the subsequent sync is a no-op via
-   * the cache fast path — no write, no broadcast, no sidebar jitter.
-   */
-  private async initStatusCacheAndReconcile() {
-    try {
-      const sessionId = this.name
-      const rows = await this.d1
-        .select({ status: agentSessions.status, error: agentSessions.error })
-        .from(agentSessions)
-        .where(eq(agentSessions.id, sessionId))
-        .limit(1)
-      const row = rows[0]
-      if (row) {
-        this.lastSyncedStatus = row.status as SessionStatus
-        this.lastSyncedError = row.error ?? null
-      }
-    } catch {
-      // Best-effort prime. If the read fails the cache stays null and the
-      // next write path will issue a real UPDATE + broadcast — same as
-      // the prior behaviour.
-    }
-    void this.syncStatusToD1(new Date().toISOString(), { bumpLastActivity: false })
-  }
-
   private async syncResultToD1(updatedAt: string) {
     try {
       const sessionId = this.name
       await this.d1
         .update(agentSessions)
         .set({
+          status: 'idle',
           summary: this.state.summary,
           durationMs: this.state.duration_ms,
           totalCostUsd: this.state.total_cost_usd,
@@ -2573,51 +2506,6 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       await broadcastSessionRow(this.env, this.ctx, sessionId, 'update')
     } catch (err) {
       console.error(`[SessionDO:${this.ctx.id}] Failed to sync sdk_session_id to D1:`, err)
-    }
-  }
-
-  /**
-   * Consolidated status + error write: one UPDATE, one broadcast. Preserves
-   * `syncStatusToD1`'s `shouldClearError` semantics — when `errorMsg` is null
-   * and the new status is `running` / `idle`, clears `error` + `errorCode`.
-   * When `errorMsg` is non-null, sets error + errorCode as provided regardless
-   * of status.
-   */
-  private async syncStatusAndErrorToD1(
-    status: SessionStatus,
-    errorMsg: string | null,
-    errorCode: string | null,
-    updatedAt: string,
-  ) {
-    try {
-      const sessionId = this.name
-      const shouldClearError = errorMsg == null && (status === 'running' || status === 'idle')
-      const errorFields =
-        errorMsg != null
-          ? { error: errorMsg, errorCode }
-          : shouldClearError
-            ? { error: null, errorCode: null }
-            : {}
-      await this.d1
-        .update(agentSessions)
-        .set({
-          status,
-          updatedAt,
-          messageSeq: this.messageSeq,
-          lastActivity: updatedAt,
-          ...errorFields,
-        })
-        .where(eq(agentSessions.id, sessionId))
-      await broadcastSessionRow(this.env, this.ctx, sessionId, 'update')
-      // Keep the cache coherent so the next `syncStatusToD1` fast-path
-      // reflects this write. Without this, a subsequent same-status
-      // `syncStatusToD1` call could spuriously write again (not broken,
-      // but wasteful).
-      this.lastSyncedStatus = status
-      this.lastSyncedError =
-        errorMsg != null ? errorMsg : shouldClearError ? null : this.lastSyncedError
-    } catch (err) {
-      console.error(`[SessionDO:${this.ctx.id}] Failed to sync status+error to D1:`, err)
     }
   }
 
@@ -3289,7 +3177,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     }
 
     this.updateState({ status: 'running', error: null })
-    this.syncStatusToD1(new Date().toISOString())
     void this.triggerGatewayDial({
       type: 'resume',
       project: this.state.project,
@@ -3325,7 +3212,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // the old gateway WS with 4410 before POSTing to spawn a new runner.
     // That 4410 is what kills the orphan.
     this.updateState({ status: 'running', error: null })
-    this.syncStatusToD1(new Date().toISOString())
     void this.triggerGatewayDial({
       type: 'resume',
       project: this.state.project,
@@ -3395,7 +3281,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // Spec #80 B2: flip status to 'pending' so UI renders the awaiting
     // bubble while we wait on the first runner event.
     this.updateState({ status: 'pending', error: null })
-    void this.syncStatusToD1(new Date().toISOString())
 
     void this.triggerGatewayDial({
       type: 'execute',
@@ -3501,7 +3386,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       error: null,
       active_callback_token: undefined,
     })
-    this.syncStatusToD1(new Date().toISOString())
 
     const gwConnId = this.getGatewayConnectionId()
     if (gwConnId) {
@@ -3537,7 +3421,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       active_callback_token: undefined,
     })
     this.sendToGateway({ type: 'abort', session_id: this.state.session_id ?? '' })
-    this.syncStatusToD1(new Date().toISOString())
     console.log(`[SessionDO:${this.ctx.id}] abort: ${reason ?? 'user request'}`)
     return { ok: true }
   }
@@ -3600,7 +3483,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     if (sessionId) {
       this.sendToGateway({ type: 'abort', session_id: sessionId })
     }
-    this.syncStatusToD1(new Date().toISOString())
 
     // Out-of-band SIGTERM via gateway HTTP. This is the slice that
     // actually rescues the stuck-runner case.
@@ -3910,10 +3792,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // the "Needs Attention" chip fed by it when `useDerivedStatus` yields
     // to the D1 fallback) clears promptly. Without this, resolving a
     // permission gate flips the DO's in-memory status but leaves
-    // `agent_sessions.status` stale at `waiting_gate` until the next
-    // event (assistant turn / result) triggers a sync — visible as a
-    // stuck amber chip after approve/deny.
-    this.syncStatusToD1(new Date().toISOString())
     return { ok: true }
   }
 
@@ -4151,13 +4029,11 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // gateway-dispatch branches below so the 'pending' → 'running'
     // transition is monotonic on the happy path.
     this.updateState({ status: 'pending', error: null })
-    void this.syncStatusToD1(new Date().toISOString())
 
     if (hasLiveRunner) {
       // Promote state back to running so the UI reflects the new turn.
       if (status !== 'running' && status !== 'waiting_gate') {
         this.updateState({ status: 'running', error: null })
-        this.syncStatusToD1(new Date().toISOString())
       }
       this.sendToGateway({
         type: 'stream-input',
@@ -4167,7 +4043,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       })
     } else if (isResumable) {
       this.updateState({ status: 'running', error: null })
-      this.syncStatusToD1(new Date().toISOString())
       void this.triggerGatewayDial({
         type: 'resume',
         project: this.state.project,
@@ -4265,7 +4140,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       error: null,
       sdk_session_id: null,
     })
-    void this.syncStatusToD1(new Date().toISOString())
 
     void this.triggerGatewayDial({
       type: 'execute',
@@ -4688,7 +4562,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // 4. Send to gateway for execution
     // Spec #80 B4: flip status to 'pending' while we wait for the dial.
     this.updateState({ status: 'pending', error: null })
-    void this.syncStatusToD1(new Date().toISOString())
     void this.triggerGatewayDial({
       type: 'resume',
       project: this.state.project,
@@ -5094,7 +4967,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         // "running" from "blocked on user answer." (#76 P3: gate scalar
         // removed — messages are the sole gate source.)
         this.updateState({ status: 'waiting_gate' })
-        this.syncStatusToD1(new Date().toISOString())
         this.ctx.waitUntil(
           this.dispatchPush(
             {
@@ -5129,10 +5001,9 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           break
         }
 
-        // Status flip + D1 sync + action token + push are still
+        // Status flip + action token + push are still
         // load-bearing. (#76 P3: gate scalar removed.)
         this.updateState({ status: 'waiting_gate' })
-        this.syncStatusToD1(new Date().toISOString())
         this.ctx.waitUntil(
           (async () => {
             try {
@@ -5191,12 +5062,11 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       case 'result': {
         this.clearAwaitingResponse()
         // GH#75 P1.2 B7 — REORDER GUARD: all per-message broadcast frames
-        // for this turn MUST fire before we flip state to `idle` and sync
-        // status to D1. Client derived-status folds over messagesCollection
-        // (spec #31), so if status flips first the sidebar can resolve to
-        // idle while the final assistant frame is still in flight. The
-        // `finalizeResultTurn` helper encodes the ordering by construction;
-        // do not inline the phases without preserving that invariant.
+        // for this turn MUST fire before we flip state to `idle`. If status
+        // flips first the sidebar can resolve to idle while the final
+        // assistant frame is still in flight. The `finalizeResultTurn`
+        // helper encodes the ordering by construction; do not inline the
+        // phases without preserving that invariant.
         const _now = new Date().toISOString()
         finalizeResultTurn({
           broadcastPhase: () => {
@@ -5278,9 +5148,6 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
               summary: event.sdk_summary ?? this.state.summary,
             })
           },
-          syncStatusToD1: () => {
-            this.syncStatusToD1(_now)
-          },
           syncResultToD1: () => {
             this.syncResultToD1(_now)
           },
@@ -5344,14 +5211,14 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           completed_at: new Date().toISOString(),
           active_callback_token: undefined,
         })
-        // Chain auto-advance (spec 16-chain-ux-p1-5 B6 / B7 / B9) must run
-        // AFTER syncStatusToD1 flushes — tryAutoAdvance's preconditions query
-        // agent_sessions expecting status='idle' + numTurns>0. Racing these
-        // two fire-and-forget causes chain stalls with a false "No completed
-        // research session" miss.
-        void this.syncStatusToD1(new Date().toISOString())
-          .then(() => this.maybeAutoAdvanceChain())
-          .catch((err) => console.error('[session-do] post-stop chain:', err))
+        // Chain auto-advance fires after updateState has broadcast the
+        // idle status. tryAutoAdvance's preconditions query agent_sessions
+        // expecting status='idle' + numTurns>0.
+        this.ctx.waitUntil(
+          this.maybeAutoAdvanceChain().catch((err) =>
+            console.error('[session-do] post-stop chain:', err),
+          ),
+        )
         break
       }
 
@@ -5447,9 +5314,25 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
           error: event.error,
           active_callback_token: undefined,
         })
-        {
+        if (event.error) {
           const _now = new Date().toISOString()
-          this.syncStatusAndErrorToD1('idle', event.error ?? null, null, _now)
+          try {
+            const sessionId = this.name
+            this.ctx.waitUntil(
+              this.d1
+                .update(agentSessions)
+                .set({
+                  error: event.error,
+                  updatedAt: _now,
+                  lastActivity: _now,
+                  messageSeq: this.messageSeq,
+                })
+                .where(eq(agentSessions.id, sessionId))
+                .then(() => broadcastSessionRow(this.env, this.ctx, sessionId, 'update')),
+            )
+          } catch (err) {
+            console.error(`[SessionDO:${this.ctx.id}] Failed to sync error to D1:`, err)
+          }
         }
         this.ctx.waitUntil(
           this.dispatchPush(

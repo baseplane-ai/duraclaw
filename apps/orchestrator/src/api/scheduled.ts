@@ -5,7 +5,7 @@ import type { Env } from '~/lib/types'
  *
  * Previously also reconciled session rows against the gateway's
  * `GET /sessions` snapshot — that was redundant with the DO's own
- * `syncStatusToD1` / `syncResultToD1` / `syncSdkSessionIdToD1` writes
+ * `syncResultToD1` / `syncSdkSessionIdToD1` writes
  * and caused a bulk-bump bug where dormant rows (snapshot
  * `last_activity_ts === null`) had their `last_activity` column
  * stamped to the cron tick time, scrambling sidebar ordering.

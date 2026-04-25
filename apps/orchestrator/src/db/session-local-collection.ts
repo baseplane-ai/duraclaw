@@ -8,8 +8,10 @@
  * reload. Spec #37 B11.
  */
 
+import type { SyncedCollectionFrame } from '@duraclaw/shared-types'
 import { createCollection, localOnlyCollectionOptions } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
+import { subscribeUserStream } from '~/hooks/use-user-stream'
 import type { SessionStatus } from '~/lib/types'
 
 export interface SessionLocalState {
@@ -40,6 +42,39 @@ export const sessionLocalCollection = createCollection(
     getKey: (item) => item.id,
   }),
 )
+
+/**
+ * Subscribe to `session_status` deltas on the user-stream (UserSettingsDO).
+ * Fired by the SessionDO's `broadcastStatusToOwner()` on every status
+ * transition — covers background sessions (sidebar, tab bar) that don't
+ * have a per-session WS connection. Writes to `sessionLocalCollection` so
+ * `useSessionStatus()` reactively updates for all sessions.
+ *
+ * Module-level subscription — safe to register before the WS opens.
+ */
+if (typeof window !== 'undefined') {
+  subscribeUserStream('session_status', (frame: SyncedCollectionFrame<unknown>) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const coll = sessionLocalCollection as any
+    for (const op of frame.ops) {
+      if (op.type === 'delete') continue
+      const row = op.value as { id?: string; status?: string }
+      if (!row?.id || !row?.status) continue
+      try {
+        coll.update(row.id, (draft: { status: string }) => {
+          draft.status = row.status as string
+        })
+      } catch {
+        coll.insert({
+          id: row.id,
+          wsReadyState: 3,
+          wsCloseTs: null,
+          status: row.status as SessionStatus,
+        })
+      }
+    }
+  })
+}
 
 export function useSessionLocalState(
   sessionId: string | null | undefined,

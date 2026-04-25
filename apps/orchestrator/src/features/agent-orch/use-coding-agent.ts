@@ -590,7 +590,7 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
           // Spec #37 B13: `result` gateway_event handler removed — the
           // running → idle transition is now driven by the D1-mirrored
           // `agent_sessions.status` synced-collection delta (written by
-          // the DO's syncStatusToD1 + broadcastSessionRow). Cost /
+          // the DO's updateState + broadcastSessionRow). Cost /
           // duration / numTurns flow on the same row.
         }
       } catch {

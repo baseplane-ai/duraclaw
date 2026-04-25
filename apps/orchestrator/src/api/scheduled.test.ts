@@ -2,7 +2,7 @@
 //
 // The cron's only job is the worktree-reservation stale GC. The prior
 // gateway-session reconciliation was deleted because it duplicated the
-// DO's `syncStatusToD1` writes and bulk-bumped `last_activity` on every
+// DO's D1 sync writes and bulk-bumped `last_activity` on every
 // tick (see commit history).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'

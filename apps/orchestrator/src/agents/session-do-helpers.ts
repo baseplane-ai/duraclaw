@@ -328,16 +328,13 @@ export interface FinalizeResultTurnCallbacks {
   broadcastPhase: () => void
   /** Transition DO state to `idle` with the result summary fields. */
   updateStateIdle: () => void
-  /** Fire-and-forget D1 sync of the `agent_sessions` row. */
-  syncStatusToD1: () => void
-  /** Fire-and-forget D1 sync of the result columns. */
+  /** Fire-and-forget D1 sync of the result columns (includes status). */
   syncResultToD1: () => void
 }
 
 export function finalizeResultTurn(cbs: FinalizeResultTurnCallbacks): void {
   cbs.broadcastPhase()
   cbs.updateStateIdle()
-  cbs.syncStatusToD1()
   cbs.syncResultToD1()
 }
 
@@ -400,7 +397,7 @@ export type AwaitingTimeoutDecision = { kind: 'noop' } | { kind: 'expire'; start
  * The decision is a pure function of the current history tail, the
  * runner connection id, the current clock, and the grace window; the
  * caller performs the state mutations so the side-effecting pieces
- * (safeAppendMessage / updateState / syncStatusToD1) stay in the DO.
+ * (safeAppendMessage / updateState) stay in the DO.
  */
 /**
  * Runaway-empty-assistant-turn guard step (pure decision).

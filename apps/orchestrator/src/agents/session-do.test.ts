@@ -3258,29 +3258,19 @@ describe('B10 atomic dual-emit — messages + branchInfo in same DO turn (GH#38 
   })
 })
 
-// ── idle→running status flush to D1 (StatusBar live-update bug) ──
+// ── idle→running status broadcast via updateState ──
 //
-// Regression guard for the bug where StatusBar + tab-bar froze at the
-// prior turn's final values for the entire duration of a new turn.
-// Root cause: four `updateState({status:'running', …})` call-sites
-// (sendMessage hasLiveRunner branch, sendMessage isResumable branch,
-// forkWithHistory, resubmitMessage) did NOT call the paired
-// `syncStatusToD1(…)` helper, so the D1 row stayed on the previous
-// terminal status — `agent_sessions` synced-collection delta frames
-// never fired, and `useSession(sessionId)` surfaced stale status.
-//
-// Every OTHER status transition in session-do.ts (stop/abort/forceStop,
-// waiting_gate, result→idle, stopped→idle, recovery, error) correctly
-// calls `syncStatusToD1(new Date().toISOString())` after `updateState`.
-// The fix restores symmetry: after each idle→running update, fire the
-// flush. This test mirrors the production contract so a future edit that
-// drops the flush breaks this assertion.
+// Regression guard: status transitions must call updateState so the
+// DO-authoritative status frame reaches clients. Previously these
+// call-sites also called syncStatusToD1; that method has been removed
+// (updateState now handles status broadcasting directly). This test
+// verifies the updateState call fires for each transition path.
 
-describe('idle→running flushes status to D1 (StatusBar live-update)', () => {
+describe('idle→running broadcasts status via updateState', () => {
   type Partial = { status: 'running'; gate: null; error: null }
 
   function makeHarness() {
-    const calls: Array<'updateState' | 'syncStatusToD1'> = []
+    const calls: Array<'updateState'> = []
     const partials: Partial[] = []
     return {
       calls,
@@ -3289,50 +3279,42 @@ describe('idle→running flushes status to D1 (StatusBar live-update)', () => {
         calls.push('updateState')
         partials.push(p)
       },
-      syncStatusToD1: (_updatedAt: string) => {
-        calls.push('syncStatusToD1')
-      },
     }
   }
 
-  // sendMessage (hasLiveRunner branch) mirrors session-do.ts lines ~2514-2524.
+  // sendMessage (hasLiveRunner branch)
   function simulateSendMessageHasLiveRunner(
     priorStatus: 'idle' | 'running' | 'waiting_gate',
     h: ReturnType<typeof makeHarness>,
   ): void {
     if (priorStatus !== 'running' && priorStatus !== 'waiting_gate') {
       h.updateState({ status: 'running', gate: null, error: null })
-      h.syncStatusToD1(new Date().toISOString())
     }
-    // sendToGateway(stream-input) elided — not relevant to the flush contract.
   }
 
-  // sendMessage (isResumable branch) mirrors session-do.ts lines ~2525-2533.
+  // sendMessage (isResumable branch)
   function simulateSendMessageIsResumable(h: ReturnType<typeof makeHarness>): void {
     h.updateState({ status: 'running', gate: null, error: null })
-    h.syncStatusToD1(new Date().toISOString())
   }
 
-  // forkWithHistory mirrors session-do.ts lines ~2618-2624 (status partial only).
+  // forkWithHistory
   function simulateForkWithHistory(h: ReturnType<typeof makeHarness>): void {
     h.updateState({ status: 'running', gate: null, error: null })
-    h.syncStatusToD1(new Date().toISOString())
   }
 
-  // resubmitMessage mirrors session-do.ts lines ~2991-2992.
+  // resubmitMessage
   function simulateResubmitMessage(h: ReturnType<typeof makeHarness>): void {
     h.updateState({ status: 'running', gate: null, error: null })
-    h.syncStatusToD1(new Date().toISOString())
   }
 
-  it('sendMessage hasLiveRunner (idle): updateState THEN syncStatusToD1', () => {
+  it('sendMessage hasLiveRunner (idle): calls updateState', () => {
     const h = makeHarness()
     simulateSendMessageHasLiveRunner('idle', h)
-    expect(h.calls).toEqual(['updateState', 'syncStatusToD1'])
+    expect(h.calls).toEqual(['updateState'])
     expect(h.partials[0]).toEqual({ status: 'running', gate: null, error: null })
   })
 
-  it('sendMessage hasLiveRunner (already running): no-op — no flush, no churn', () => {
+  it('sendMessage hasLiveRunner (already running): no-op — no churn', () => {
     const h = makeHarness()
     simulateSendMessageHasLiveRunner('running', h)
     expect(h.calls).toEqual([])
@@ -3344,22 +3326,22 @@ describe('idle→running flushes status to D1 (StatusBar live-update)', () => {
     expect(h.calls).toEqual([])
   })
 
-  it('sendMessage isResumable: updateState THEN syncStatusToD1 (fresh-resume path)', () => {
+  it('sendMessage isResumable: calls updateState (fresh-resume path)', () => {
     const h = makeHarness()
     simulateSendMessageIsResumable(h)
-    expect(h.calls).toEqual(['updateState', 'syncStatusToD1'])
+    expect(h.calls).toEqual(['updateState'])
   })
 
-  it('forkWithHistory: updateState THEN syncStatusToD1 (orphan auto-fork)', () => {
+  it('forkWithHistory: calls updateState (orphan auto-fork)', () => {
     const h = makeHarness()
     simulateForkWithHistory(h)
-    expect(h.calls).toEqual(['updateState', 'syncStatusToD1'])
+    expect(h.calls).toEqual(['updateState'])
   })
 
-  it('resubmitMessage: updateState THEN syncStatusToD1 (rewind→resubmit)', () => {
+  it('resubmitMessage: calls updateState (rewind→resubmit)', () => {
     const h = makeHarness()
     simulateResubmitMessage(h)
-    expect(h.calls).toEqual(['updateState', 'syncStatusToD1'])
+    expect(h.calls).toEqual(['updateState'])
   })
 })
 
@@ -3385,7 +3367,7 @@ describe('error event transitions session to idle (not error) so user can resume
   }
 
   // Mirrors session-do.ts handleGatewayEvent `case 'error':` — the
-  // updateState partial + the paired syncStatusAndErrorToD1 call.
+  // updateState partial + the paired D1 error write.
   function simulateErrorEvent(errText: string): {
     partial: ErrorPartial
     d1Status: 'idle'
@@ -3558,10 +3540,9 @@ describe('GH#75 B7: finalizeResultTurn enforces broadcast-before-state ordering'
     finalizeResultTurn({
       broadcastPhase: () => calls.push('broadcastPhase'),
       updateStateIdle: () => calls.push('updateStateIdle'),
-      syncStatusToD1: () => calls.push('syncStatusToD1'),
       syncResultToD1: () => calls.push('syncResultToD1'),
     })
-    expect(calls).toEqual(['broadcastPhase', 'updateStateIdle', 'syncStatusToD1', 'syncResultToD1'])
+    expect(calls).toEqual(['broadcastPhase', 'updateStateIdle', 'syncResultToD1'])
   })
 
   it('records every broadcastMessage call before updateState flips to idle', () => {
@@ -3580,12 +3561,11 @@ describe('GH#75 B7: finalizeResultTurn enforces broadcast-before-state ordering'
         broadcastMessage('msg-3')
       },
       updateStateIdle: () => calls.push('updateState:idle'),
-      syncStatusToD1: () => calls.push('syncStatusToD1'),
       syncResultToD1: () => calls.push('syncResultToD1'),
     })
 
     const idleIdx = calls.indexOf('updateState:idle')
-    const statusIdx = calls.indexOf('syncStatusToD1')
+    const resultIdx = calls.indexOf('syncResultToD1')
     const broadcastIdxs = calls
       .map((c, i) => (c.startsWith('broadcastMessage:') ? i : -1))
       .filter((i) => i >= 0)
@@ -3593,9 +3573,9 @@ describe('GH#75 B7: finalizeResultTurn enforces broadcast-before-state ordering'
     expect(broadcastIdxs.length).toBe(3)
     for (const bIdx of broadcastIdxs) {
       expect(bIdx).toBeLessThan(idleIdx)
-      expect(bIdx).toBeLessThan(statusIdx)
+      expect(bIdx).toBeLessThan(resultIdx)
     }
-    expect(idleIdx).toBeLessThan(statusIdx)
+    expect(idleIdx).toBeLessThan(resultIdx)
   })
 
   it('still dispatches flush phase when broadcastPhase emits no frames', () => {
@@ -3606,10 +3586,9 @@ describe('GH#75 B7: finalizeResultTurn enforces broadcast-before-state ordering'
     finalizeResultTurn({
       broadcastPhase: () => {},
       updateStateIdle: () => calls.push('updateState:idle'),
-      syncStatusToD1: () => calls.push('syncStatusToD1'),
       syncResultToD1: () => calls.push('syncResultToD1'),
     })
-    expect(calls).toEqual(['updateState:idle', 'syncStatusToD1', 'syncResultToD1'])
+    expect(calls).toEqual(['updateState:idle', 'syncResultToD1'])
   })
 })
 
