@@ -35,6 +35,7 @@ import {
   memo,
   type ReactNode,
   useCallback,
+  useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -895,6 +896,16 @@ interface VirtualizedMessageListProps {
    * rather than a layout jump.
    */
   awaitingReason?: AwaitingReason
+  /**
+   * Fires once, after the virtualizer's mount-time measurement flurry
+   * has settled (each visible row's 160px estimate replaced with its
+   * real measured height). The parent uses this to flip
+   * `<Conversation resize>` from `'instant'` (suppress per-row glide
+   * during settle) to `'smooth'` (restore streaming spring). Idempotent
+   * — guarded by an internal ref so it never re-fires on subsequent
+   * resizes (streaming deltas, branch-navigates, rewinds).
+   */
+  onMeasurementsSettled?: () => void
 }
 
 function VirtualizedMessageList({
@@ -905,6 +916,7 @@ function VirtualizedMessageList({
   branchInfo,
   onBranchNavigate,
   awaitingReason,
+  onMeasurementsSettled,
 }: VirtualizedMessageListProps) {
   const { scrollRef, contentRef } = useAutoScrollContext()
   const scrollElRef = useRef<HTMLDivElement | null>(null)
@@ -991,6 +1003,32 @@ function VirtualizedMessageList({
     if (itemCount === 0) return
     virtualizer.scrollToIndex(itemCount - 1, { align: 'end' })
   }, [])
+
+  // Settle detector — fires `onMeasurementsSettled` once after the
+  // mount-time measurement burst stops. Mechanism: re-arming setTimeout
+  // that resets on every render. The virtualizer triggers a re-render
+  // for each ResizeObserver-driven measurement that replaces a row's
+  // 160px estimate with its real height; while measurements are
+  // landing, this effect re-fires and clears the pending timeout. Once
+  // the measurement burst finishes, no further re-renders cancel the
+  // timer, so it expires and signals the parent to flip
+  // `<Conversation resize>` from `'instant'` back to `'smooth'`.
+  // Subsequent re-renders (streaming deltas, awaiting toggles) are
+  // ignored because `hasSettledRef.current` is one-way true.
+  // 80ms is comfortably longer than two ResizeObserver rAF ticks
+  // (~32ms at 60fps) but short enough to be invisible to any user
+  // action that follows tab activation.
+  const hasSettledRef = useRef(false)
+  useEffect(() => {
+    if (hasSettledRef.current) return
+    if (itemCount === 0) return
+    const t = setTimeout(() => {
+      if (hasSettledRef.current) return
+      hasSettledRef.current = true
+      onMeasurementsSettled?.()
+    }, 80)
+    return () => clearTimeout(t)
+  })
 
   return (
     <div
@@ -1105,6 +1143,21 @@ export function ChatThread({
   onSendSuggestion,
 }: ChatThreadProps) {
   const awaitingReason = useMemo(() => findAwaitingReason(messages), [messages])
+
+  // Resize-anchor behavior for `<Conversation>`. Starts as `'instant'`
+  // so the virtualizer's mount-time measurement flurry (replacing 160px
+  // estimates with real row heights) doesn't compose into a visible
+  // multi-step glide on stale-tab reopens. `VirtualizedMessageList`
+  // calls `setResizeBehavior('smooth')` once measurements settle, which
+  // restores the spring animation for streaming deltas. This subtree
+  // is keyed by `activeSessionId` upstream, so a session switch
+  // remounts ChatThread and resets this state to `'instant'` — exactly
+  // the moment the next mount-time burst is about to happen.
+  const [resizeBehavior, setResizeBehavior] = useState<'instant' | 'smooth'>('instant')
+  const handleMeasurementsSettled = useCallback(() => {
+    setResizeBehavior('smooth')
+  }, [])
+
   // Empty / connecting placeholder path — bypass the Conversation wrapper
   // entirely. There's no content to auto-scroll and no message list to
   // render, so mounting the IntersectionObserver + ResizeObserver pair would
@@ -1163,7 +1216,7 @@ export function ChatThread({
       className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-x-clip"
       data-session-id={sessionId}
     >
-      <Conversation className="min-h-0 flex-1">
+      <Conversation className="min-h-0 flex-1" resize={resizeBehavior}>
         <VirtualizedMessageList
           messages={messages}
           readOnly={readOnly}
@@ -1172,6 +1225,7 @@ export function ChatThread({
           branchInfo={branchInfo}
           onBranchNavigate={onBranchNavigate}
           awaitingReason={awaitingReason}
+          onMeasurementsSettled={handleMeasurementsSettled}
         />
         {/* Tailwind's @source scan of ai-elements/src isn't extracting
             this positional class from the shared component — declaring it

@@ -49,14 +49,24 @@ export function useAutoScrollContext() {
   return ctx
 }
 
-function useAutoScroll(): AutoScrollContext {
+function useAutoScroll(resize: 'smooth' | 'instant' = 'smooth'): AutoScrollContext {
   // `initial: 'instant'` — library jumps to bottom inside a useLayoutEffect
   //   before first paint, so OPFS-cached history renders already-scrolled.
   // `resize: 'smooth'` — spring animation for streaming deltas; avoids the
   //   visible discrete jitter of a raw scrollTop assignment under fast token
   //   bursts. The library caps its resize animation at 350ms so it won't
   //   accumulate lag under sustained high-frequency growth.
-  const stb = useStickToBottom({ initial: 'instant', resize: 'smooth' })
+  // The `resize` arg is a controlled override: virtualized callers (see
+  //   ChatThread) pin it to `'instant'` during the mount-time measurement
+  //   flurry — when the virtualizer replaces 160px estimates with real row
+  //   heights, each measurement fires a ResizeObserver tick that would
+  //   otherwise spring back to bottom for up to 350ms per tick, layering
+  //   into a visible glide on stale-tab reopens. Once measurements settle,
+  //   the caller flips back to `'smooth'` so streaming retains the spring.
+  //   Because `useStickToBottom` reads its options through a ref updated on
+  //   every render (optionsRef.current = options), the toggle is reactive
+  //   without remounting the hook.
+  const stb = useStickToBottom({ initial: 'instant', resize })
 
   // Library's scrollToBottom returns Promise<boolean>|boolean — our API is
   // fire-and-forget, so discard.
@@ -98,10 +108,21 @@ function useAutoScroll(): AutoScrollContext {
 // Public components — same API as before
 // ---------------------------------------------------------------------------
 
-export type ConversationProps = ComponentProps<'div'>
+export type ConversationProps = ComponentProps<'div'> & {
+  /**
+   * Override the spring-vs-instant behavior for content-resize-driven
+   * scroll anchoring. Defaults to `'smooth'`, which preserves the
+   * streaming-delta spring animation. Virtualized callers may flip to
+   * `'instant'` during the mount-time measurement flurry to suppress
+   * the per-row glide as estimates are replaced with real heights.
+   * `initial` (first-paint pre-scroll) is always `'instant'` and is
+   * not configurable here.
+   */
+  resize?: 'smooth' | 'instant'
+}
 
-export const Conversation = ({ className, children, ...props }: ConversationProps) => {
-  const ctx = useAutoScroll()
+export const Conversation = ({ className, children, resize, ...props }: ConversationProps) => {
+  const ctx = useAutoScroll(resize)
   return (
     <Ctx.Provider value={ctx}>
       <div className={cn('relative flex-1 overflow-y-clip', className)} role="log" {...props}>
