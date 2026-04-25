@@ -29,6 +29,7 @@
 
 import { useMemo } from 'react'
 import type { SessionMessagePart, SessionStatus } from '~/lib/types'
+import { isPendingGatePart } from './use-derived-gate'
 import { useMessagesCollection } from './use-messages-collection'
 import { useSession } from './use-sessions-collection'
 
@@ -54,15 +55,19 @@ export function useDerivedStatus(sessionId: string | null): SessionStatus | unde
           break
         }
 
-        const state = (part as { state?: string }).state
-        if (
-          (part.type === 'tool-permission' || part.type === 'tool-ask_user') &&
-          state === 'approval-requested'
-        ) {
+        // Share the gate predicate with `useDerivedGate` so the two hooks
+        // can't drift. Covers `tool-permission + approval-requested`,
+        // `tool-ask_user + approval-requested`, AND `tool-AskUserQuestion +
+        // input-available` (the SDK-native shape) — the last of which the
+        // hand-rolled predicate here used to miss, leaving status to fall
+        // through to stale D1 `running` while the runner was actually
+        // parked on an AskUserQuestion gate.
+        if (isPendingGatePart(part)) {
           derived = 'waiting_gate'
           break
         }
 
+        const state = (part as { state?: string }).state
         if (part.type === 'text' && state === 'streaming') {
           derived = 'running'
           break

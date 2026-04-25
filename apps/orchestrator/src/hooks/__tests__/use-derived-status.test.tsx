@@ -85,6 +85,24 @@ describe('useDerivedStatus', () => {
     expect(result.current).toBe('waiting_gate')
   })
 
+  // Regression: SDK-native AskUserQuestion gate shape is
+  // `tool-AskUserQuestion + input-available` (not the legacy
+  // `tool-ask_user + approval-requested` promotion). Before sharing
+  // `isPendingGatePart` with `useDerivedGate`, the hand-rolled predicate
+  // here missed the SDK-native shape, leaving status to fall through to
+  // stale D1 `running` while the runner was actually parked on the gate.
+  it('returns waiting_gate for SDK-native tool-AskUserQuestion + input-available', () => {
+    const { result } = setup([
+      { id: 'msg-1', seq: 1, parts: [{ type: 'text', state: 'complete' }] },
+      {
+        id: 'msg-2',
+        seq: 2,
+        parts: [{ type: 'tool-AskUserQuestion', state: 'input-available', toolCallId: 'tc-3' }],
+      },
+    ])
+    expect(result.current).toBe('waiting_gate')
+  })
+
   it('returns undefined for null sessionId', () => {
     mockUseMessagesCollection.mockReturnValue({
       messages: [],
