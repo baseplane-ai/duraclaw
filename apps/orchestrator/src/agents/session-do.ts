@@ -61,6 +61,7 @@ import {
   finalizeResultTurn,
   findPendingGatePart,
   getGatewayConnectionId,
+  isPendingGatePart,
   loadTurnState,
   planAwaitingTimeout,
   planClearAwaiting,
@@ -4154,27 +4155,30 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     }
 
     // Release ALL pending gate parts. The UI may be rendering a
-    // GateResolver for any tool_call_id with approval-requested state.
-    // Flipping every approval-requested gate part to 'output-denied'
-    // guarantees the UI clears its GateResolver(s) when the user hits
-    // interrupt. The subsequent `interrupt` command to the runner aborts
-    // the SDK's in-flight canUseTool promise — no per-gate cancel
-    // command exists, so we rely on the SDK interrupt to release the
-    // pending answer/permission wait.
+    // GateResolver for any tool_call_id whose part is in a pending-gate
+    // state. Three shapes count as pending here, mirroring
+    // `isPendingGatePart` / `findPendingGatePart` / client-side
+    // `isPendingGate`:
+    //   - `tool-ask_user` + `approval-requested` (DO-promoted ask_user)
+    //   - `tool-permission` + `approval-requested` (canUseTool gate)
+    //   - `tool-AskUserQuestion` + `input-available` (SDK-native shape;
+    //     post `1f6678e` ask_user gates land here and are no longer
+    //     promoted to `tool-ask_user`).
+    // Flipping every pending gate part to 'output-denied' guarantees the
+    // UI clears its GateResolver(s) when the user hits interrupt — the
+    // client's `isPendingGate` predicate requires `input-available` or
+    // `approval-requested`, neither of which matches `output-denied`. The
+    // subsequent `interrupt` command to the runner aborts the SDK's
+    // in-flight canUseTool promise — no per-gate cancel command exists,
+    // so we rely on the SDK interrupt to release the pending
+    // answer/permission wait.
     const history = this.session.getHistory()
     for (let i = history.length - 1; i >= 0; i--) {
       const msg = history[i]
-      const hasPendingGate = msg.parts.some(
-        (p) =>
-          p.state === 'approval-requested' &&
-          (p.type === 'tool-ask_user' || p.type === 'tool-permission'),
-      )
+      const hasPendingGate = msg.parts.some(isPendingGatePart)
       if (!hasPendingGate) continue
       const updatedParts = msg.parts.map((p) =>
-        p.state === 'approval-requested' &&
-        (p.type === 'tool-ask_user' || p.type === 'tool-permission')
-          ? { ...p, state: 'output-denied' as const, output: 'Interrupted' }
-          : p,
+        isPendingGatePart(p) ? { ...p, state: 'output-denied' as const, output: 'Interrupted' } : p,
       )
       const updatedMsg: SessionMessage = { ...msg, parts: updatedParts }
       try {

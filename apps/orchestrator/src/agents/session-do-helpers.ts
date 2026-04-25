@@ -236,6 +236,36 @@ export type LegacyDroppedEventType = (typeof LEGACY_DROPPED_EVENT_TYPES)[number]
 export type PendingGateType = 'ask_user' | 'permission_request'
 
 /**
+ * Predicate: is `p` a still-pending gate part?
+ *
+ * Three shapes count as pending:
+ *   - `tool-ask_user` + `approval-requested` (DO-promoted ask_user)
+ *   - `tool-permission` + `approval-requested` (canUseTool permission)
+ *   - `tool-AskUserQuestion` + `input-available` (SDK-native shape, post
+ *     `1f6678e` no longer promoted to `tool-ask_user`)
+ *
+ * Mirrors the matchers in `findPendingGatePart` (server-side gate lookup)
+ * and `isPendingGate` in `ChatThread.tsx` (client render predicate). Used
+ * by `SessionDO.interrupt()` to flip every pending gate part to a
+ * terminal state on Stop, so the client's GateResolver unmounts.
+ *
+ * Extracted as a pure helper so unit tests can exercise it without
+ * instantiating SessionDO (whose decorators block direct import).
+ */
+export function isPendingGatePart(p: SessionMessagePart): boolean {
+  if (
+    p.state === 'approval-requested' &&
+    (p.type === 'tool-ask_user' || p.type === 'tool-permission')
+  ) {
+    return true
+  }
+  if (p.state === 'input-available' && p.type === 'tool-AskUserQuestion') {
+    return true
+  }
+  return false
+}
+
+/**
  * Walk message history newest-first looking for a still-pending gate part
  * whose `toolCallId` matches `gateId`. This is the sole gate lookup used
  * by `SessionDO.resolveGate` — no scalar involved.
