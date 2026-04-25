@@ -6,7 +6,7 @@
     "useIgnoreFile": true,
     "defaultBranch": "main"
   },
-  "files": { "includes": ["**", "!!**/dist"] },
+  "files": { "includes": ["**", "!!**/dist", "!services/uncommon-route"] },
   "formatter": {
     "enabled": true,
     "indentStyle": "space",
