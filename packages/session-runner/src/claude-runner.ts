@@ -12,6 +12,7 @@ import type {
 import { handleQueryCommand } from './commands.js'
 import { buildCleanEnv } from './env.js'
 import { resolveProject } from './project-resolver.js'
+import { buildRouterOptions } from './router-options.js'
 import type { RunnerSessionContext } from './types.js'
 
 /** Debounce interval for kata state file changes (ms). Matches gateway. */
@@ -410,6 +411,11 @@ export class ClaudeRunner {
         includePartialMessages: true,
         settingSources: ['user', 'project', 'local'],
         enableFileCheckpointing: true,
+        // Feature-flagged: when `UNCOMMON_ROUTE_URL` is set, the SDK
+        // calls are routed through the local UncommonRoute proxy with
+        // the sessionId propagated as `x-session-id`. Unset = direct
+        // Anthropic API, unchanged behaviour.
+        ...buildRouterOptions({ sessionId }),
       }
 
       if (cmd.type === 'execute') {
