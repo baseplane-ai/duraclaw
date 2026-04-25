@@ -755,6 +755,100 @@ describe('hasActiveBackgroundAgents', () => {
     ])
     expect(hasActiveBackgroundAgents(path, now)).toBe(false)
   })
+
+  it('does not clear unmatched agents on synthetic "Stop hook feedback:" user message', async () => {
+    const { hasActiveBackgroundAgents } = await import('./hook.js')
+    // Reproduces the duraclaw-dev6 sess-3d287864 wedge:
+    // 1. Model spawns Agent → unmatched in transcript.
+    // 2. Stop hook blocks, Claude Code re-injects the block reason as a
+    //    `user`-text turn prefixed with "Stop hook feedback:".
+    // 3. Without the guard, that synthetic user-text triggered the staleness
+    //    clear, wiped the unmatched-agent map, and the next Stop-hook call
+    //    returned `false` from this guard → block → infinite redirect loop.
+    const path = writeTranscript([
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Agent', id: 'live-agent-1' }] },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'text',
+              text:
+                'Stop hook feedback:\nSession has incomplete work:\n' +
+                '- 5 task(s) still pending\n  - [1] P0: Setup - research codebase',
+            },
+          ],
+        },
+      },
+    ])
+    expect(hasActiveBackgroundAgents(path)).toBe(true)
+  })
+
+  it('does not clear unmatched agents on bare "Session has incomplete work:" prefix', async () => {
+    const { hasActiveBackgroundAgents } = await import('./hook.js')
+    // Defensive: some Claude Code paths may pass the kata block reason
+    // through without the "Stop hook feedback:" wrapper. Match the kata-side
+    // marker too.
+    const path = writeTranscript([
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Agent', id: 'live-agent-2' }] },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'text',
+              text: 'Session has incomplete work:\n- 2 task(s) still pending',
+            },
+          ],
+        },
+      },
+    ])
+    expect(hasActiveBackgroundAgents(path)).toBe(true)
+  })
+
+  it('still clears unmatched agents on a genuine user prompt that mentions stop hook in passing', async () => {
+    const { hasActiveBackgroundAgents } = await import('./hook.js')
+    // Guard against false negatives: only the exact prefix is treated as
+    // synthetic; a genuine user message that happens to discuss the stop
+    // hook still counts as conversation-moved-on.
+    const path = writeTranscript([
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Agent', id: 'a1' }] },
+      },
+      {
+        type: 'user',
+        message: { content: [{ type: 'text', text: 'why is the stop hook firing?' }] },
+      },
+    ])
+    expect(hasActiveBackgroundAgents(path)).toBe(false)
+  })
+
+  it('SDK string-form synthetic stop-hook feedback also preserves unmatched agents', async () => {
+    const { hasActiveBackgroundAgents } = await import('./hook.js')
+    // SDK sessions store user content as a bare string. The guard must work
+    // through normalizeContentBlocks for both shapes.
+    const path = writeTranscript([
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Agent', id: 'sdk-agent-1' }] },
+      },
+      {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: 'Stop hook feedback:\nSession has incomplete work:\n- 1 task(s) still pending',
+        },
+      },
+    ])
+    expect(hasActiveBackgroundAgents(path)).toBe(true)
+  })
 })
 
 describe('handleStopConditions run-end artifact', () => {

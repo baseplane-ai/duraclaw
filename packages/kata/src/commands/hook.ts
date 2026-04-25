@@ -659,6 +659,29 @@ function normalizeContentBlocks(raw: unknown): Array<Record<string, unknown>> {
 }
 
 /**
+ * Detect Claude Code's synthetic "Stop hook feedback" user-message that
+ * re-injects this hook's own block reason as a `user`-role text turn.
+ *
+ * Without this guard, the user-prompt staleness clear in
+ * `hasActiveBackgroundAgents` wipes the unmatched-agent map every time the
+ * Stop hook blocks — which defeats the active-agent bypass and produces a
+ * tight Stop-hook → block-reason → user-message → Stop-hook redirect loop
+ * (the model emits a tiny "awaiting agents" turn each cycle, ~3 s cadence,
+ * burning tokens until an Agent finally returns).
+ *
+ * Both prefixes are stable, kata-controlled: `Stop hook feedback:` is the
+ * Claude Code wrapper, `Session has incomplete work:` is the leading line
+ * of the block reason built in `handleStopConditions` below.
+ */
+function isStopHookFeedbackText(text: string): boolean {
+  const trimmed = text.trimStart()
+  return (
+    trimmed.startsWith('Stop hook feedback:') ||
+    trimmed.startsWith('Session has incomplete work:')
+  )
+}
+
+/**
  * Check if there are active background agents by scanning the session transcript.
  * An Agent tool_use without a matching tool_result means the agent is still running.
  *
@@ -668,6 +691,11 @@ function normalizeContentBlocks(raw: unknown): Array<Record<string, unknown>> {
  *    prompt (a `user` entry carrying text content, not just tool_results),
  *    all still-unmatched Agent IDs from before that prompt are abandoned.
  *    Handles both array-of-blocks and SDK string-form content (issue #68).
+ *    Synthetic Claude-Code "Stop hook feedback:" re-injections of this
+ *    hook's own block reason are *not* genuine user prompts and must not
+ *    trigger the clear — otherwise the Stop hook devours its own bypass
+ *    and locks the session into a redirect loop. Detected via
+ *    `isStopHookFeedbackText`.
  *
  * 2. **Recency window** (issue #68): an unmatched Agent whose tool_use
  *    timestamp is older than `AGENT_ACTIVE_WINDOW_MS` is treated as
@@ -720,20 +748,26 @@ export function hasActiveBackgroundAgents(
           const contentBlocks = normalizeContentBlocks(message.content)
 
           let hasToolResult = false
-          let hasUserText = false
+          let hasGenuineUserText = false
           for (const block of contentBlocks) {
             if (block.type === 'tool_result' && typeof block.tool_use_id === 'string') {
               agentToolUseIds.delete(block.tool_use_id)
               hasToolResult = true
             }
             if (block.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
-              hasUserText = true
+              // Skip Claude-Code's own "Stop hook feedback" re-injection of
+              // this hook's block reason — counting it as a real user prompt
+              // would clear unmatched agents and break the bypass it's
+              // meant to inform.
+              if (!isStopHookFeedbackText(block.text)) {
+                hasGenuineUserText = true
+              }
             }
           }
 
           // A new user prompt (not just tool_results) means the conversation moved on.
           // Any still-unmatched Agent IDs from before this point are stale.
-          if (hasUserText && !hasToolResult) {
+          if (hasGenuineUserText && !hasToolResult) {
             agentToolUseIds.clear()
           }
         }
