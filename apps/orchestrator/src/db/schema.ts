@@ -300,3 +300,28 @@ export const userPreferences = sqliteTable('user_preferences', {
   ),
   updatedAt: text('updated_at').notNull(),
 })
+
+// ── Batch-analysis lane (PR #6) ───────────────────────────────────
+// Mirror of migration 0022. Drizzle row shape used by the queue
+// consumer + cron poller; producers (POST /api/batch-jobs) insert
+// with `status='queued'` + minimal metadata.
+export const batchJobs = sqliteTable(
+  'batch_jobs',
+  {
+    id: text('id').primaryKey(),
+    consumer: text('consumer').notNull(),
+    sessionId: text('session_id'),
+    status: text('status').notNull(), // queued|anthropic_submitted|in_progress|completed|failed
+    anthropicId: text('anthropic_id'),
+    requestPayload: text('request_payload').notNull(),
+    resultPayload: text('result_payload'),
+    error: text('error'),
+    createdAt: integer('created_at').notNull(),
+    submittedAt: integer('submitted_at'),
+    completedAt: integer('completed_at'),
+  },
+  (t) => ({
+    statusIdx: index('batch_jobs_status_idx').on(t.status, t.createdAt),
+    sessionIdx: index('batch_jobs_session_idx').on(t.sessionId, t.createdAt),
+  }),
+)
