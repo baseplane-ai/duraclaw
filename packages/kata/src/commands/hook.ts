@@ -807,6 +807,59 @@ export function hasActiveBackgroundAgents(
   }
 }
 
+/**
+ * Check if there's a pending AskUserQuestion tool call awaiting user response.
+ * An unmatched AskUserQuestion tool_use (no corresponding tool_result) means
+ * the session is paused waiting for the user. Blocking exit in this state
+ * creates a redirect loop — the model can't complete tasks while waiting for
+ * the user's answer.
+ */
+export function hasPendingAskUserQuestion(transcriptPath: string | undefined): boolean {
+  if (!transcriptPath) return false
+  try {
+    const content = readFileSync(transcriptPath, 'utf-8')
+    const lines = content.split('\n').filter((l) => l.trim())
+
+    const pendingIds = new Set<string>()
+
+    for (const line of lines) {
+      try {
+        const msg = JSON.parse(line) as Record<string, unknown>
+
+        if (msg.type === 'assistant') {
+          const message = (msg.message as Record<string, unknown>) ?? msg
+          const contentBlocks = normalizeContentBlocks(message.content)
+          for (const block of contentBlocks) {
+            if (
+              block.type === 'tool_use' &&
+              block.name === 'AskUserQuestion' &&
+              typeof block.id === 'string'
+            ) {
+              pendingIds.add(block.id)
+            }
+          }
+        }
+
+        if (msg.type === 'user') {
+          const message = (msg.message as Record<string, unknown>) ?? msg
+          const contentBlocks = normalizeContentBlocks(message.content)
+          for (const block of contentBlocks) {
+            if (block.type === 'tool_result' && typeof block.tool_use_id === 'string') {
+              pendingIds.delete(block.tool_use_id)
+            }
+          }
+        }
+      } catch {
+        // Skip unparseable lines
+      }
+    }
+
+    return pendingIds.size > 0
+  } catch {
+    return false
+  }
+}
+
 // ── Handler: stop-conditions ──
 // Calls canExit to check if session can be stopped
 export async function handleStopConditions(input: Record<string, unknown>): Promise<void> {
@@ -867,6 +920,19 @@ export async function handleStopConditions(input: Record<string, unknown>): Prom
           note: 'background agents active — deferring to agent notifications',
         })
         logStopHook(sessionId, 'allow', result.reasons, 'background agents active')
+        return
+      }
+
+      // If an AskUserQuestion is pending, allow exit — the session is paused
+      // waiting for user input. Blocking here creates a redirect loop: the
+      // model can't complete tasks while the question is unanswered.
+      if (hasPendingAskUserQuestion(transcriptPath)) {
+        logHook(sessionId, {
+          hook: 'stop-conditions',
+          decision: 'allow',
+          note: 'AskUserQuestion pending — session awaiting user response',
+        })
+        logStopHook(sessionId, 'allow', result.reasons, 'AskUserQuestion pending')
         return
       }
 

@@ -868,6 +868,93 @@ describe('hasActiveBackgroundAgents', () => {
   })
 })
 
+describe('hasPendingAskUserQuestion', () => {
+  let tmpDir: string
+
+  beforeEach(() => {
+    tmpDir = makeTmpDir()
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  function writeTranscript(lines: unknown[]): string {
+    const path = join(tmpDir, 'transcript.jsonl')
+    writeFileSync(path, lines.map((l) => JSON.stringify(l)).join('\n'))
+    return path
+  }
+
+  it('returns false for undefined transcript path', async () => {
+    const { hasPendingAskUserQuestion } = await import('./hook.js')
+    expect(hasPendingAskUserQuestion(undefined)).toBe(false)
+  })
+
+  it('returns false for nonexistent transcript', async () => {
+    const { hasPendingAskUserQuestion } = await import('./hook.js')
+    expect(hasPendingAskUserQuestion('/nonexistent/path.jsonl')).toBe(false)
+  })
+
+  it('returns false when AskUserQuestion has a matching tool_result', async () => {
+    const { hasPendingAskUserQuestion } = await import('./hook.js')
+    const path = writeTranscript([
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'AskUserQuestion', id: 'ask-1' }] },
+      },
+      { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'ask-1' }] } },
+    ])
+    expect(hasPendingAskUserQuestion(path)).toBe(false)
+  })
+
+  it('returns true when AskUserQuestion has no matching tool_result', async () => {
+    const { hasPendingAskUserQuestion } = await import('./hook.js')
+    const path = writeTranscript([
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'AskUserQuestion', id: 'ask-1' }] },
+      },
+      // No tool_result for ask-1
+    ])
+    expect(hasPendingAskUserQuestion(path)).toBe(true)
+  })
+
+  it('returns false when no AskUserQuestion calls exist', async () => {
+    const { hasPendingAskUserQuestion } = await import('./hook.js')
+    const path = writeTranscript([
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Agent', id: 'agent-1' }] },
+      },
+    ])
+    expect(hasPendingAskUserQuestion(path)).toBe(false)
+  })
+
+  it('returns false for empty transcript', async () => {
+    const { hasPendingAskUserQuestion } = await import('./hook.js')
+    const path = writeTranscript([])
+    expect(hasPendingAskUserQuestion(path)).toBe(false)
+  })
+
+  it('tracks multiple AskUserQuestion calls independently', async () => {
+    const { hasPendingAskUserQuestion } = await import('./hook.js')
+    const path = writeTranscript([
+      {
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'tool_use', name: 'AskUserQuestion', id: 'ask-1' },
+            { type: 'tool_use', name: 'AskUserQuestion', id: 'ask-2' },
+          ],
+        },
+      },
+      { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'ask-1' }] } },
+      // ask-2 still pending
+    ])
+    expect(hasPendingAskUserQuestion(path)).toBe(true)
+  })
+})
+
 describe('handleStopConditions run-end artifact', () => {
   let tmpDir: string
   const sessionId = '00000000-0000-0000-0000-000000000099'
