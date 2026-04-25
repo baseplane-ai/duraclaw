@@ -28,6 +28,7 @@ from typing import Any, AsyncGenerator
 
 from collections.abc import AsyncGenerator as _LifespanGen
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 import httpx
 
@@ -680,15 +681,100 @@ class UpstreamSemanticCompressor:
 
 _OPENCLAW_SESSION_HEADER = "x-openclaw-session-key"
 
+# Session-aware routing inputs sent by the caller (e.g. Duraclaw's
+# session-runner). All optional — when absent the resolver returns the
+# sentinels documented on `RouteRecord` (turn_index=-1, etc.).
+_TURN_INDEX_HEADER = "x-uncommon-route-turn-index"
+_SESSION_BUDGET_HEADER = "x-uncommon-route-session-budget-usd"
+_DIFFICULTY_HINT_HEADER = "x-uncommon-route-difficulty-hint"
+_CONTEXT_USAGE_HEADER = "x-uncommon-route-context-usage-pct"
+
+_VALID_DIFFICULTY_HINTS = {"easy", "medium", "hard", "reasoning"}
+
+
+@dataclass
+class SessionContext:
+    """Per-request session metadata extracted from inbound headers."""
+
+    session_id: str | None = None
+    turn_index: int = -1
+    session_budget_usd: float = 0.0
+    difficulty_hint: str = ""
+    context_usage_pct: float = 0.0
+
+
+def _coerce_int_header(raw: str | None, default: int = -1) -> int:
+    if not raw:
+        return default
+    try:
+        return int(raw.strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_float_header(raw: str | None, default: float = 0.0) -> float:
+    if not raw:
+        return default
+    try:
+        return float(raw.strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_difficulty_hint(raw: str | None) -> str:
+    if not raw:
+        return ""
+    normalised = raw.strip().lower()
+    return normalised if normalised in _VALID_DIFFICULTY_HINTS else ""
+
 
 def _resolve_session_id(request: Request, body: dict) -> str | None:
-    """Derive a session ID for cache keys and composition (not routing)."""
+    """Derive a session ID for cache keys and composition (not routing).
+
+    Kept for backward compatibility with existing call sites; new code
+    should prefer `_resolve_session_context()`, which carries the same
+    session id plus turn-index, budget, difficulty hint, and context
+    usage in one round of header parsing.
+    """
+    return _resolve_session_context(request, body).session_id
+
+
+def _resolve_session_context(request: Request, body: dict) -> SessionContext:
+    """Parse session-aware routing headers into a `SessionContext`.
+
+    All four enrichment headers are optional. Missing / malformed values
+    fall back to sentinels (`turn_index=-1`, `session_budget_usd=0.0`,
+    `difficulty_hint=""`, `context_usage_pct=0.0`) so existing callers
+    that don't set them see no behavioural change.
+    """
     raw_headers = {k: v for k, v in request.headers.items()}
     sid = raw_headers.get("x-session-id") or raw_headers.get(_OPENCLAW_SESSION_HEADER)
-    if sid:
-        return sid
-    messages = body.get("messages", [])
-    return derive_session_id(messages)
+    if not sid:
+        messages = body.get("messages", [])
+        sid = derive_session_id(messages)
+
+    return SessionContext(
+        session_id=sid,
+        turn_index=_coerce_int_header(raw_headers.get(_TURN_INDEX_HEADER)),
+        session_budget_usd=_coerce_float_header(raw_headers.get(_SESSION_BUDGET_HEADER)),
+        difficulty_hint=_coerce_difficulty_hint(raw_headers.get(_DIFFICULTY_HINT_HEADER)),
+        context_usage_pct=_coerce_float_header(raw_headers.get(_CONTEXT_USAGE_HEADER)),
+    )
+
+
+def _session_extras(ctx: SessionContext) -> dict[str, Any]:
+    """Spread-friendly kwargs for the new `RouteRecord` session fields.
+
+    Use as `**_session_extras(session_ctx)` at every `RouteRecord(...)`
+    construction in this module. `session_id` stays on its own line for
+    readability and to keep the diff vs upstream tight.
+    """
+    return {
+        "turn_index": ctx.turn_index,
+        "session_budget_usd": ctx.session_budget_usd,
+        "difficulty_hint": ctx.difficulty_hint,
+        "context_usage_pct": ctx.context_usage_pct,
+    }
 
 
 def _classify_step(body: dict) -> tuple[str, list[str]]:
@@ -2068,7 +2154,8 @@ def create_app(
         effective_output_tokens = max_tokens
         _pv = " ".join(prompt[:80].split())
         prompt_preview = (_pv + "...") if len(prompt) > 80 else _pv
-        session_id = _resolve_session_id(request, body)
+        session_ctx = _resolve_session_context(request, body)
+        session_id = session_ctx.session_id
         step_type, tool_names = _classify_step(body)
 
         retrial_previous = None
@@ -2627,6 +2714,7 @@ def create_app(
                                 sidechannel_estimated_cost=sidechannel_estimated_cost,
                                 sidechannel_actual_cost=sidechannel_actual_cost,
                                 session_id=session_id,
+                                **_session_extras(session_ctx),
                                 step_type=step_type,
                                 fallback_reason=fallback_reason,
                                 streaming=True,
@@ -2673,6 +2761,7 @@ def create_app(
                                 input_tokens_before=input_tokens_before,
                                 input_tokens_after=input_tokens_after,
                                 session_id=session_id,
+                                **_session_extras(session_ctx),
                                 streaming=True,
                                 step_type=step_type,
                                 request_id=request_id,
@@ -2727,6 +2816,7 @@ def create_app(
                                 sidechannel_estimated_cost=sidechannel_estimated_cost,
                                 sidechannel_actual_cost=sidechannel_actual_cost,
                                 session_id=session_id,
+                                **_session_extras(session_ctx),
                                 step_type=step_type,
                                 fallback_reason=fallback_reason,
                                 streaming=True,
@@ -2763,6 +2853,7 @@ def create_app(
                                 input_tokens_before=input_tokens_before,
                                 input_tokens_after=input_tokens_after,
                                 session_id=session_id,
+                                **_session_extras(session_ctx),
                                 streaming=True,
                                 step_type=step_type,
                                 request_id=request_id,
@@ -3077,6 +3168,7 @@ def create_app(
                         sidechannel_estimated_cost=sidechannel_estimated_cost,
                         sidechannel_actual_cost=sidechannel_actual_cost,
                         session_id=session_id,
+                        **_session_extras(session_ctx),
                         streaming=False,
                         step_type=step_type,
                         fallback_reason=fallback_reason,
@@ -3123,6 +3215,7 @@ def create_app(
                         input_tokens_before=input_tokens_before,
                         input_tokens_after=input_tokens_after,
                         session_id=session_id,
+                        **_session_extras(session_ctx),
                         streaming=False,
                         step_type=step_type,
                         request_id=request_id,
@@ -3184,6 +3277,7 @@ def create_app(
                         sidechannel_estimated_cost=sidechannel_estimated_cost,
                         sidechannel_actual_cost=sidechannel_actual_cost,
                         session_id=session_id,
+                        **_session_extras(session_ctx),
                         step_type=step_type,
                         fallback_reason=fallback_reason,
                         streaming=is_streaming,
@@ -3249,6 +3343,7 @@ def create_app(
                         sidechannel_estimated_cost=sidechannel_estimated_cost,
                         sidechannel_actual_cost=sidechannel_actual_cost,
                         session_id=session_id,
+                        **_session_extras(session_ctx),
                         step_type=step_type,
                         fallback_reason=fallback_reason,
                         streaming=is_streaming,

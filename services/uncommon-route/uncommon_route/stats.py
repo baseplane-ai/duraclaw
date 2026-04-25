@@ -93,6 +93,13 @@ class RouteRecord:
     feedback_to_tier: str = ""
     feedback_reason: str = ""
     feedback_submitted_at: float = 0.0
+    # Session-aware routing inputs. All optional; populated from
+    # `x-uncommon-route-*` request headers via `_resolve_session_context`
+    # in proxy.py. `-1` / `0.0` / `""` mean "header not provided".
+    turn_index: int = -1
+    session_budget_usd: float = 0.0
+    difficulty_hint: str = ""
+    context_usage_pct: float = 0.0
 
 
 @dataclass
