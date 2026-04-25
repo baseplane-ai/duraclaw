@@ -1,3 +1,4 @@
+import type { Connection } from 'partyserver'
 import { YServer } from 'y-partyserver'
 import * as Y from 'yjs'
 
@@ -52,5 +53,34 @@ export class SessionCollabDOv2 extends YServer {
       update,
       Date.now(),
     )
+  }
+
+  /**
+   * Flush pending Y.Doc state to SQLite when the last client disconnects.
+   *
+   * y-partyserver schedules `onSave` via `setTimeout`-debounce on each Y.Doc
+   * update. With `hibernate: true`, a DO with zero active WebSockets is
+   * eligible for hibernation, which evicts the in-memory Y.Doc *and* the
+   * pending debounce timer — losing any unsaved typing. Override
+   * `onClose` so the last departing connection flushes synchronously
+   * before the DO can hibernate. The base debounced save is kept; this
+   * is purely additive for the "zero connections after close" case.
+   */
+  async onClose(connection: Connection, code: number, reason: string, wasClean: boolean) {
+    try {
+      await super.onClose(connection, code, reason, wasClean)
+    } finally {
+      // `getConnections()` filters by `readyState === OPEN`. By the time
+      // `onClose` fires, the closing socket is in CLOSING/CLOSED, so it's
+      // naturally excluded — the count reflects the post-close active set.
+      const active = Array.from(this.getConnections()).length
+      if (active === 0) {
+        try {
+          await this.onSave()
+        } catch (err) {
+          console.error('[session-collab-do] flush on last close failed:', err)
+        }
+      }
+    }
   }
 }
