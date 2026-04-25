@@ -4,25 +4,30 @@ import { chunkOps } from '~/lib/chunk-frame'
 import { getSessionStatus } from '~/lib/vps-client'
 import { fingerprintAssistantContent } from './gateway-event-mapper'
 import {
+  findPendingGatePartByHistory as findPendingGatePart,
+  isPendingGatePart,
+} from './session-do/gates'
+import {
+  finalizeResultTurn,
+  repeatedTurnGuardStep,
+  runawayGuardStep,
+} from './session-do/gateway-event-handler'
+import { claimSubmitId, deriveSnapshotOps } from './session-do/history'
+import { loadTurnState } from './session-do/hydration'
+import {
   buildGatewayCallbackUrl,
   buildGatewayStartUrl,
-  claimSubmitId,
   constantTimeEquals,
+  getGatewayConnectionIdFromSql as getGatewayConnectionId,
+  validateGatewayToken,
+} from './session-do/runner-link'
+import { RECOVERY_GRACE_MS } from './session-do/types'
+import {
   DEFAULT_STALE_THRESHOLD_MS,
-  deriveSnapshotOps,
-  finalizeResultTurn,
-  findPendingGatePart,
-  getGatewayConnectionId,
-  isPendingGatePart,
-  loadTurnState,
   planAwaitingTimeout,
   planClearAwaiting,
-  RECOVERY_GRACE_MS,
-  repeatedTurnGuardStep,
   resolveStaleThresholdMs,
-  runawayGuardStep,
-  validateGatewayToken,
-} from './session-do-helpers'
+} from './session-do/watchdog'
 import { SESSION_DO_MIGRATIONS } from './session-do-migrations'
 
 /**

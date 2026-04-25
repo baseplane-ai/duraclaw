@@ -2,7 +2,7 @@ import type { SQL } from 'drizzle-orm'
 import { and, asc, desc, eq, inArray, isNull, like, ne, or, sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import { Hono } from 'hono'
-import { constantTimeEquals } from '~/agents/session-do-helpers'
+import { constantTimeEquals } from '~/agents/session-do/runner-link'
 import * as schema from '~/db/schema'
 import {
   agentSessions,
