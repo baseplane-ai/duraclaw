@@ -16,20 +16,29 @@
 
 import { isNative } from '~/lib/platform'
 
-declare global {
-  var __duraclaw_router__:
-    | {
-        navigate: (opts: {
-          to: string
-          search?: Record<string, unknown>
-          replace?: boolean
-        }) => void
-      }
-    | undefined
-}
+type DeepLinkSubscriber = (sessionId: string) => void
+const subscribers = new Set<DeepLinkSubscriber>()
 
 let pendingDeepLink: string | null = null
 let initialized = false
+
+/**
+ * Subscribe to live deep-link tap events. The subscriber receives the
+ * target session id whenever a `pushNotificationActionPerformed` tap is
+ * processed. Returns an unsubscribe function.
+ *
+ * Used by `AgentOrchContent` to react to taps that arrive AFTER first
+ * mount (warm-start, foreground, or post-mount cold-start delivery).
+ * The cold-start path still goes through `consumePendingDeepLink()` so
+ * the very first commit can short-circuit the "restore last-active tab"
+ * effect before any subscriber has registered.
+ */
+export function subscribeDeepLink(fn: DeepLinkSubscriber): () => void {
+  subscribers.add(fn)
+  return () => {
+    subscribers.delete(fn)
+  }
+}
 
 /**
  * Parse a deep-link URL (relative or absolute) and return the session id
@@ -83,9 +92,15 @@ export async function initNativePushDeepLink(): Promise<void> {
       pendingDeepLink = `/?session=${sessionId}`
       console.info('[push] notification tap → pending deep-link:', pendingDeepLink)
 
-      const router = globalThis.__duraclaw_router__
-      if (router) {
-        router.navigate({ to: '/', search: { session: sessionId }, replace: true })
+      // Notify any live subscribers (warm-start / post-mount taps).
+      // Cold-start taps that arrive before React mounts are picked up
+      // via `consumePendingDeepLink()` instead.
+      for (const fn of subscribers) {
+        try {
+          fn(sessionId)
+        } catch (err) {
+          console.warn('[push] subscriber threw:', err)
+        }
       }
     })
   } catch (err) {
@@ -113,4 +128,14 @@ export function consumePendingDeepLink(): string | null {
 export function __resetForTests(): void {
   pendingDeepLink = null
   initialized = false
+  subscribers.clear()
+}
+
+/**
+ * Test-only. Sets the pending deep-link slot directly so tests can
+ * exercise `consumePendingDeepLink()` without going through the
+ * Capacitor mock. Pass a relative URL like `/?session=abc`.
+ */
+export function __setPendingDeepLinkForTests(url: string | null): void {
+  pendingDeepLink = url
 }

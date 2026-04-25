@@ -23,7 +23,7 @@ import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { useSwipeTabs } from '~/hooks/use-swipe-tabs'
 import { getTabSyncSnapshot, isDraftTabId, newDraftTabId, useTabSync } from '~/hooks/use-tab-sync'
 import { useUserDefaults } from '~/hooks/use-user-defaults'
-import { consumePendingDeepLink } from '~/lib/native-push-deep-link'
+import { consumePendingDeepLink, subscribeDeepLink } from '~/lib/native-push-deep-link'
 import { apiUrl } from '~/lib/platform'
 import { promptToPreviewText } from '~/lib/prompt-preview'
 import type { ContentBlock } from '~/lib/types'
@@ -58,9 +58,12 @@ function AgentOrchContent() {
   } = useTabSync()
 
   // Deep-link: URL has ?session=X → open & activate that tab.
-  // Only creates a tab if the session exists in the collection (has a
-  // project). If it's already in the Y.Map, just activates it. If
-  // sessions haven't loaded yet, waits — the effect re-runs when they do.
+  // If it's already in the Y.Map, just activates it. If the session
+  // is in the local `sessions` collection, opens its tab. Otherwise
+  // (cache miss — push from another device, fresh session, not yet
+  // hydrated) fetches the session row from the API so we can still
+  // open the tab. Without that fetch, deep-linked taps to unknown
+  // sessions silently no-op.
   const deepLinkedRef = useRef<string | null>(null)
   useEffect(() => {
     if (!searchSessionId || searchSessionId === deepLinkedRef.current) return
@@ -75,30 +78,61 @@ function AgentOrchContent() {
     if (session?.project) {
       deepLinkedRef.current = searchSessionId
       openTab(searchSessionId, { project: session.project })
+      return
     }
-    // If sessions haven't loaded yet, this is a no-op. The effect
-    // re-runs when `sessions` changes and picks it up then.
+    // Cache miss — fetch the session row so we can open its tab.
+    // GET /api/sessions/:id returns { session: { project, ... } }.
+    let cancelled = false
+    ;(async () => {
+      try {
+        const resp = await fetch(apiUrl(`/api/sessions/${encodeURIComponent(searchSessionId)}`), {
+          credentials: 'include',
+        })
+        if (!resp.ok || cancelled) return
+        const body = (await resp.json()) as { session?: { project?: string } } | null
+        if (cancelled) return
+        const project = body?.session?.project
+        if (project) {
+          deepLinkedRef.current = searchSessionId
+          openTab(searchSessionId, { project })
+        }
+      } catch {
+        // best-effort hydration; swallow network errors
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
   }, [searchSessionId, openTab, setActive, sessions, openTabs])
 
-  // Native push tap deep-link: if the user got here by tapping a push
-  // notification, the @capacitor/push-notifications listener stashed the
-  // target session id in a module-level pending slot before React mounted.
-  // Consume it here, BEFORE the cold-start effect, so the deep-link wins
-  // the race against "restore last-active tab".
+  // Native push tap deep-link: handles two delivery windows.
+  //   1. Cold-start — the @capacitor/push-notifications listener
+  //      stashed the target session id in a module-level pending slot
+  //      before React mounted. Consume it on first effect run so the
+  //      deep-link wins the race against "restore last-active tab".
+  //   2. Warm / post-mount — taps that arrive after first commit are
+  //      delivered live via `subscribeDeepLink`. Without this, the
+  //      one-shot consume would miss them and the user would land on
+  //      whatever tab was last active.
   const coldStartedRef = useRef(false)
   const deepLinkConsumedRef = useRef(false)
-  // One-shot via deepLinkConsumedRef: the pending slot is only populated
-  // by a pre-mount tap, so we only need to consume once on first render.
-  // Listing deps satisfies exhaustive-deps; any re-run is a no-op.
   useEffect(() => {
-    if (deepLinkConsumedRef.current) return
-    deepLinkConsumedRef.current = true
-    const pending = consumePendingDeepLink()
-    if (pending && !searchSessionId) {
-      // Block cold-start so it doesn't also navigate.
-      coldStartedRef.current = true
-      navigate({ to: '/', search: { session: pending }, replace: true })
+    // Cold-start consume (one-shot for first mount).
+    if (!deepLinkConsumedRef.current) {
+      deepLinkConsumedRef.current = true
+      const pending = consumePendingDeepLink()
+      if (pending && !searchSessionId) {
+        // Block cold-start so it doesn't also navigate.
+        coldStartedRef.current = true
+        navigate({ to: '/', search: { session: pending }, replace: true })
+      }
     }
+    // Live subscriber for post-mount taps.
+    const unsub = subscribeDeepLink((sessionId) => {
+      coldStartedRef.current = true
+      navigate({ to: '/', search: { session: sessionId }, replace: true })
+    })
+    return unsub
   }, [navigate, searchSessionId])
 
   // Cold-start: page loaded at "/" with no ?session — restore the last

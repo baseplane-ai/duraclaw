@@ -24,8 +24,10 @@ vi.mock('~/lib/platform', () => ({
 
 import {
   __resetForTests,
+  __setPendingDeepLinkForTests,
   consumePendingDeepLink,
   initNativePushDeepLink,
+  subscribeDeepLink,
 } from './native-push-deep-link'
 
 function fireTap(data: Record<string, unknown>): void {
@@ -40,8 +42,6 @@ describe('native-push-deep-link', () => {
     mockAddListener.mockClear()
     isNativeMock.mockReturnValue(true)
     __resetForTests()
-    // Default jsdom origin is http://localhost:3000.
-    delete (globalThis as { __duraclaw_router__?: unknown }).__duraclaw_router__
   })
 
   afterEach(() => {
@@ -72,20 +72,58 @@ describe('native-push-deep-link', () => {
     expect(consumePendingDeepLink()).toBeNull()
   })
 
-  it('calls router.navigate when __duraclaw_router__ is set', async () => {
-    const navigate = vi.fn()
-    ;(globalThis as { __duraclaw_router__?: { navigate: typeof navigate } }).__duraclaw_router__ = {
-      navigate,
-    }
+  it('notifies subscribers with the session id on tap', async () => {
+    const fn = vi.fn()
+    subscribeDeepLink(fn)
 
     await initNativePushDeepLink()
     fireTap({ url: '/?session=zzz', sessionId: 'zzz' })
 
-    expect(navigate).toHaveBeenCalledWith({
-      to: '/',
-      search: { session: 'zzz' },
-      replace: true,
+    expect(fn).toHaveBeenCalledWith('zzz')
+  })
+
+  it('subscribeDeepLink unsubscribe stops further notifications', async () => {
+    const fn = vi.fn()
+    const unsub = subscribeDeepLink(fn)
+
+    await initNativePushDeepLink()
+    fireTap({ url: '/?session=first' })
+    expect(fn).toHaveBeenCalledTimes(1)
+
+    unsub()
+    fireTap({ url: '/?session=second' })
+    expect(fn).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not notify subscribers for cross-origin URLs', async () => {
+    const fn = vi.fn()
+    subscribeDeepLink(fn)
+
+    await initNativePushDeepLink()
+    fireTap({ url: 'https://evil.example.com/?session=abc' })
+
+    expect(fn).not.toHaveBeenCalled()
+  })
+
+  it('subscriber throw is isolated and does not break other subscribers', async () => {
+    const bad = vi.fn(() => {
+      throw new Error('boom')
     })
+    const good = vi.fn()
+    subscribeDeepLink(bad)
+    subscribeDeepLink(good)
+
+    await initNativePushDeepLink()
+    fireTap({ url: '/?session=ok' })
+
+    expect(bad).toHaveBeenCalledWith('ok')
+    expect(good).toHaveBeenCalledWith('ok')
+  })
+
+  it('__setPendingDeepLinkForTests + consumePendingDeepLink round-trip', () => {
+    __setPendingDeepLinkForTests('/?session=fromtest')
+    expect(consumePendingDeepLink()).toBe('fromtest')
+    expect(consumePendingDeepLink()).toBeNull()
   })
 
   it('short-circuits on web (isNative() === false), no addListener call', async () => {
