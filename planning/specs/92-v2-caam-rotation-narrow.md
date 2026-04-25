@@ -28,6 +28,9 @@ phases:
       - id: "rotation-noisy-events-ignored"
         description: "Stream of rate_limit_event with status='allowed' / 'allowed_warning' → zero caam calls"
         type: "unit"
+      - id: "rotation-in-place"
+        description: "After caam.activate is called, next stream-input ('continue') produces a successful assistant turn — no respawn"
+        type: "integration"
   - id: p2
     name: "Admin profile dashboard"
     tasks:
@@ -184,12 +187,9 @@ Explicitly out of scope:
 
 ## Open Questions
 
-- [ ] **Q1: In-place vs respawn after `caam activate`.** Does the live `@anthropic-ai/claude-agent-sdk` process re-read `~/.claude` credentials on the next API call, or are they cached in-memory after the first auth?
-  - **Resolution path:** VP1 below. Run rotation on a real session-runner with two profiles configured. After `caam activate` completes, observe whether the synthetic 'continue' stream-input produces a successful next assistant turn.
-    - **If yes (creds re-read):** spec stands as written. Done.
-    - **If no (creds cached):** add a single fallback — runner exits with `rate_limited` reason; gateway respawns; DO calls `triggerGatewayDial({type:'resume',...})` AND injects `'continue'` as the first stream-input on the new connection. **No** new DO state required: the DO can synthesize the continue inline after `triggerGatewayDial` returns, no `pendingContinue` field needed if the dial-back is awaited synchronously.
-- [ ] **Q2: Does `caam cooldown set` accept ISO timestamps or only `--minutes N`?** The CLI help shows `--minutes`. If it doesn't accept absolute timestamps, runner computes `Math.ceil((resetsAt - now)/60)`. Confirm via `caam cooldown set --help`.
-- [ ] **Q3: What's `caam limits claude --format json` shape under heavy concurrent load?** The fetched-at timestamp suggests a network call to the provider — needs to confirm latency and whether it can rate-limit itself. If so, fall back to using `caam ls claude --json`'s `health.expires_at` for resets-at and skip `limits`.
+- [x] ~~**Q1: In-place vs respawn after `caam activate`.**~~ **Resolved:** the SDK isn't holding live process state at the rate-limit moment — the API call already failed, so the next call re-reads `~/.claude` cleanly. In-place rotation works; no respawn fallback needed.
+- [x] ~~**Q2: Does `caam cooldown set` accept ISO timestamps?**~~ **Resolved:** `--minutes int` only. Runner computes `Math.ceil((resetsAt - now)/60)`.
+- [ ] **Q3: What's `caam limits claude --format json` latency under concurrent dashboard loads?** It calls the provider — confirm during P2. If it's slow or self-rate-limiting, drop it from the dashboard merge and use `caam ls claude --json`'s `health.expires_at` for resets-at instead.
 
 ## Implementation Phases
 
@@ -309,7 +309,7 @@ async function handleRotation(info, channel, queue) {
 
 ### Gotchas
 - The SDK `assistant` message's `error` field is **optional** — most assistant messages have no error. Cast carefully and check truthiness, don't destructure.
-- `caam activate` mutates `~/.claude` synchronously but the SDK process has its own state. **Q1 must resolve before merging** — if SDK caches, `queue.push('continue')` won't help and we'll need the respawn fallback.
+- `caam activate` mutates `~/.claude` synchronously. The SDK re-reads creds on the next API call (the rate-limit failure means there's no in-flight call to invalidate), so `queue.push('continue')` triggers a fresh auth read and the rotation completes in-place. No respawn needed.
 - `caam cooldown set claude/<name>` namespacing: the CLI uses `claude/<profile>` separator, not whitespace. Verify with `caam cooldown set --help`.
 - `Bun.spawn` vs `node:child_process`: session-runner runs under Bun. `child_process.spawnSync` works under Bun and avoids async surprises in the rotation handler. Prefer it.
 
