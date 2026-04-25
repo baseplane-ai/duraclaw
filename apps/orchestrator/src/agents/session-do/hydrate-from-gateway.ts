@@ -6,7 +6,7 @@ import type { SessionDOContext } from './types'
 /**
  * Spec #101 Stage 6: extracted body of `SessionDO.hydrateFromGateway()`.
  *
- * Pulls the SDK-side transcript for `(project, sdk_session_id)` from the
+ * Pulls the SDK-side transcript for `(project, runner_session_id)` from the
  * gateway and merges new events into local history. Skips entries already
  * persisted (counted by `getPathLength()`); tool_result events apply to
  * the prior assistant message; consecutive assistant events on the same
@@ -15,11 +15,11 @@ import type { SessionDOContext } from './types'
  */
 export async function hydrateFromGatewayImpl(ctx: SessionDOContext): Promise<void> {
   const gatewayUrl = ctx.env.CC_GATEWAY_URL
-  if (!gatewayUrl || !ctx.state.sdk_session_id || !ctx.state.project) return
+  if (!gatewayUrl || !ctx.state.runner_session_id || !ctx.state.project) return
 
   const httpBase = gatewayUrl.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
   const url = new URL(
-    `/projects/${encodeURIComponent(ctx.state.project)}/sessions/${encodeURIComponent(ctx.state.sdk_session_id)}/messages`,
+    `/projects/${encodeURIComponent(ctx.state.project)}/sessions/${encodeURIComponent(ctx.state.runner_session_id)}/messages`,
     httpBase,
   )
   const headers: Record<string, string> = {}
@@ -163,7 +163,7 @@ export async function hydrateFromGatewayImpl(ctx: SessionDOContext): Promise<voi
       ctx.do.persistTurnState()
     }
     console.log(
-      `[SessionDO:${ctx.ctx.id}] Hydrated ${persisted} new events (skipped ${skipped} existing) from gateway for sdk_session=${ctx.state.sdk_session_id.slice(0, 12)}`,
+      `[SessionDO:${ctx.ctx.id}] Hydrated ${persisted} new events (skipped ${skipped} existing) from gateway for runner_session=${ctx.state.runner_session_id.slice(0, 12)}`,
     )
   } catch (err) {
     console.error(`[SessionDO:${ctx.ctx.id}] Gateway hydration error:`, err)

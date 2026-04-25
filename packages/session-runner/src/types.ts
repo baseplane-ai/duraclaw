@@ -52,7 +52,7 @@ export interface RunnerSessionContext {
   nextSeq: number
   /** In-memory snapshot of live session state; the meta-file dumper reads this. */
   meta: {
-    sdk_session_id: string | null
+    runner_session_id: string | null
     last_activity_ts: number
     last_event_seq: number
     cost: { input_tokens: number; output_tokens: number; usd: number }

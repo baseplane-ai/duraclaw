@@ -1,4 +1,5 @@
 import type {
+  AdapterCapabilities,
   SyncedCollectionOp,
   SessionMessage as WireSessionMessage,
 } from '@duraclaw/shared-types'
@@ -110,7 +111,13 @@ export interface SessionMeta {
   result: string | null
   error: string | null
   summary: string | null
-  sdk_session_id: string | null
+  runner_session_id: string | null
+  /**
+   * Adapter capability flags reported by the runner on `session.init`.
+   * `null` until the runner first reports (or for legacy runners that
+   * never report). Persisted as JSON in `session_meta.capabilities_json`.
+   */
+  capabilities: AdapterCapabilities | null
   active_callback_token?: string
   lastKataMode?: string
   /** GH#73: true once runner observed `run-end.json`. Gate for chain auto-advance. */
@@ -317,12 +324,12 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   ): void {
     fireRunawayInterruptImpl(this.moduleCtx, errorCode, userVisibleMessage, diagnostics)
   }
-  /** Resume a discovered VPS session by sdk_session_id (called from /create). */
+  /** Resume a discovered VPS session by runner_session_id (called from /create). */
   async resumeDiscovered(
     config: SpawnConfig,
-    sdkSessionId: string,
+    runnerSessionId: string,
   ): Promise<{ ok: boolean; session_id?: string; error?: string }> {
-    return resumeDiscoveredImpl(this.moduleCtx, config, sdkSessionId)
+    return resumeDiscoveredImpl(this.moduleCtx, config, runnerSessionId)
   }
 
   handleGatewayEvent(event: GatewayEvent) {

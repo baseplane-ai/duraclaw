@@ -195,7 +195,7 @@ export async function getMessagesImpl(
   // src/api/scheduled.ts UPSERTs gateway-discovered rows into agent_sessions
   // every 5 minutes; this just rehydrates a cold DO from that row when
   // the browser hits a session whose DO has no in-memory state yet.
-  if (!ctx.state.sdk_session_id && opts?.session_hint) {
+  if (!ctx.state.runner_session_id && opts?.session_hint) {
     try {
       const rows = await ctx.do.d1
         .select()
@@ -203,9 +203,9 @@ export async function getMessagesImpl(
         .where(eq(agentSessions.id, opts.session_hint))
         .limit(1)
       const row = rows[0]
-      if (row?.sdkSessionId) {
+      if (row?.runnerSessionId) {
         ctx.do.updateState({
-          sdk_session_id: row.sdkSessionId,
+          runner_session_id: row.runnerSessionId,
           project: row.project ?? '',
           session_id: row.id,
           summary: row.summary ?? null,
@@ -226,7 +226,7 @@ export async function getMessagesImpl(
   // the merge path calls safeUpdateMessage on existing rows, which bumps
   // modified_at to now(), making them appear "newer than cursor" on the
   // immediately-following subscribe replay. See GH#78 addendum B.
-  if (ctx.state.sdk_session_id && ctx.state.project && ctx.session.getPathLength() === 0) {
+  if (ctx.state.runner_session_id && ctx.state.project && ctx.session.getPathLength() === 0) {
     await hydrateFromGatewayImpl(ctx)
   }
 

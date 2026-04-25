@@ -34,7 +34,7 @@ function createMockCtx(overrides?: Partial<RunnerSessionContext>): RunnerSession
     commandQueue: [],
     nextSeq: 0,
     meta: {
-      sdk_session_id: null,
+      runner_session_id: null,
       last_activity_ts: 0,
       last_event_seq: 0,
       cost: { input_tokens: 0, output_tokens: 0, usd: 0 },
@@ -110,7 +110,7 @@ describe('ClaudeRunner', () => {
         type: 'resume' as const,
         project: 'nonexistent-project-xyz-999',
         prompt: 'continue',
-        sdk_session_id: 'fake-session-id',
+        runner_session_id: 'fake-session-id',
       }
 
       await runner.resume(ch as any, cmd, ctx)
@@ -152,7 +152,7 @@ describe('ClaudeRunner', () => {
         type: 'resume' as const,
         project: 'nonexistent-project-xyz-999',
         prompt: 'continue',
-        sdk_session_id: 'fake-session-id',
+        runner_session_id: 'fake-session-id',
       }
 
       await runner.resume(ch as any, cmd, ctx)

@@ -87,6 +87,19 @@ function hydrateMetaFromSql(ctx: SessionDOContext): void {
       if (key === 'lastRunEnded') {
         // INTEGER 0/1 → boolean. GH#73.
         ;(patch as Record<string, unknown>)[key] = raw === 1 || raw === '1' || raw === true
+      } else if (key === 'capabilities') {
+        // Spec #101 P1.2 B7: capabilities_json is stored as TEXT JSON.
+        // Parse on hydrate so the in-memory shape matches AdapterCapabilities.
+        if (typeof raw === 'string' && raw.length > 0) {
+          try {
+            ;(patch as Record<string, unknown>)[key] = JSON.parse(raw)
+          } catch (err) {
+            console.warn(
+              `[SessionDO:${ctx.ctx.id}] hydrateMetaFromSql: capabilities_json parse failed`,
+              err,
+            )
+          }
+        }
       } else {
         ;(patch as Record<string, unknown>)[key] = raw
       }

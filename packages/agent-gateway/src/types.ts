@@ -29,7 +29,7 @@ export interface PidFile {
  * session-runner every ~10s while the SDK is running.
  */
 export interface MetaFile {
-  sdk_session_id: string | null
+  runner_session_id: string | null
   last_activity_ts: number | null
   last_event_seq: number
   cost: { input_tokens: number; output_tokens: number; usd: number }
@@ -53,7 +53,7 @@ export interface ExitFile {
 export interface SessionStateSnapshot {
   session_id: string
   state: 'running' | 'completed' | 'failed' | 'aborted' | 'crashed'
-  sdk_session_id: string | null
+  runner_session_id: string | null
   last_activity_ts: number | null
   last_event_seq: number
   cost: { input_tokens: number; output_tokens: number; usd: number }

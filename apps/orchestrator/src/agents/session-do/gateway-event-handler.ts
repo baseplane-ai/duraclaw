@@ -18,9 +18,10 @@ import { broadcastMessages as broadcastMessagesImpl } from './broadcast'
 import { promoteToolPartToGate as promoteToolPartToGateImpl } from './gates'
 import { handleRateLimit } from './resume-scheduler'
 import {
+  syncCapabilitiesToD1 as syncCapabilitiesToD1Impl,
   syncKataAllToD1 as syncKataAllToD1Impl,
   syncResultToD1 as syncResultToD1Impl,
-  syncSdkSessionIdToD1 as syncSdkSessionIdToD1Impl,
+  syncRunnerSessionIdToD1 as syncRunnerSessionIdToD1Impl,
 } from './status'
 import { handleTitleUpdate } from './title'
 import {
@@ -59,13 +60,37 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
       )
       break
 
-    case 'session.init':
-      self.updateState({ sdk_session_id: event.sdk_session_id, model: event.model })
-      // Sync sdk_session_id to D1 so discovery won't create a duplicate row.
-      if (event.sdk_session_id) {
-        void syncSdkSessionIdToD1Impl(ctx, event.sdk_session_id, new Date().toISOString())
+    case 'session.init': {
+      // Spec #101 P1.2 B7: relay AdapterCapabilities reported by the
+      // runner. `capabilities` is optional on the wire — older runners
+      // omit it; we leave the cached field at whatever it was (typically
+      // null). When present we persist + broadcast a single SessionMeta
+      // patch so downstream consumers see the runner_session_id, model,
+      // and capabilities flip atomically.
+      const patch: Partial<{
+        runner_session_id: string | null
+        model: string | null
+        capabilities: typeof event.capabilities | null
+      }> = {
+        runner_session_id: event.runner_session_id,
+        model: event.model,
+      }
+      if (event.capabilities !== undefined) {
+        patch.capabilities = event.capabilities
+      }
+      self.updateState(patch)
+      // Sync runner_session_id to D1 so discovery won't create a duplicate row.
+      if (event.runner_session_id) {
+        void syncRunnerSessionIdToD1Impl(ctx, event.runner_session_id, new Date().toISOString())
+      }
+      // Sync capabilities to D1 (and broadcast row update) so the
+      // sidebar / agent-detail surfaces can render capability-aware UI
+      // without a DO round-trip.
+      if (event.capabilities !== undefined) {
+        void syncCapabilitiesToD1Impl(ctx, event.capabilities, new Date().toISOString())
       }
       break
+    }
 
     case 'partial_assistant': {
       self.clearAwaitingResponse()
@@ -520,12 +545,21 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
           // so we keep active_callback_token intact — clearing it would block the
           // runner from re-dialling if its WS flaps. The token is cleared only
           // on true terminal transitions (stopped/failed/aborted/crashed).
+          // Spec #101 P1.2 B9 — cost delegation. Trust the runner's
+          // reported `total_cost_usd` for adapters that emit USD cost
+          // (Claude SDK). For adapters that don't (capabilities.emitsUsdCost
+          // === false), keep the existing cached value untouched rather
+          // than zeroing or accumulating zero. No client-side recomputation.
+          const emitsUsdCost = ctx.state.capabilities?.emitsUsdCost ?? true
+          const nextTotalCost = emitsUsdCost
+            ? (ctx.state.total_cost_usd ?? 0) + (event.total_cost_usd ?? 0)
+            : ctx.state.total_cost_usd
           self.updateState({
             status: 'idle',
             completed_at: new Date().toISOString(),
             result: event.result,
             duration_ms: (ctx.state.duration_ms ?? 0) + (event.duration_ms ?? 0),
-            total_cost_usd: (ctx.state.total_cost_usd ?? 0) + (event.total_cost_usd ?? 0),
+            total_cost_usd: nextTotalCost,
             num_turns: ctx.state.num_turns + (event.num_turns ?? 0),
             error: event.is_error ? event.result : null,
             summary: event.sdk_summary ?? ctx.state.summary,
@@ -688,7 +722,7 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
       broadcastMessagesImpl(ctx, [errorMsg as unknown as WireSessionMessage])
 
       // Transition to idle — session remains interactive and resumable via
-      // sdk_session_id. The error text is already persisted as a visible
+      // runner_session_id. The error text is already persisted as a visible
       // system message (see above). Clears active_callback_token so the
       // current runner is terminal; sendMessage will dial a fresh resume runner
       // on the user's next turn.

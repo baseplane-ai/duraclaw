@@ -5,7 +5,7 @@
  *
  * Layout mirrors the spec (16-chain-ux.md lines 639-653). The "Reset
  * context" bullet is aspirational: the P3 degraded path just aborts +
- * respawns, which still gives the new runner a fresh sdk_session_id —
+ * respawns, which still gives the new runner a fresh runner_session_id —
  * functionally equivalent to a context reset for the SDK. P4 will swap
  * in the preamble template.
  */

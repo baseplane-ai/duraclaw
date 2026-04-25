@@ -53,7 +53,7 @@ interface FixtureOpts {
   meta?: {
     last_activity_ts?: number | null
     state?: string
-    sdk_session_id?: string | null
+    runner_session_id?: string | null
     last_event_seq?: number
     cost?: { input_tokens: number; output_tokens: number; usd: number }
     model?: string | null
@@ -85,7 +85,7 @@ async function writeSession(dir: string, f: FixtureOpts): Promise<void> {
     await fs.writeFile(
       metaPath,
       JSON.stringify({
-        sdk_session_id: f.meta.sdk_session_id ?? null,
+        runner_session_id: f.meta.runner_session_id ?? null,
         last_activity_ts: f.meta.last_activity_ts ?? null,
         last_event_seq: f.meta.last_event_seq ?? 0,
         cost: f.meta.cost ?? { input_tokens: 0, output_tokens: 0, usd: 0 },

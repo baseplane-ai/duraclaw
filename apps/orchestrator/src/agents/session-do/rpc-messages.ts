@@ -20,7 +20,7 @@ import type { SessionDOContext } from './types'
  * Spec #101 Stage 6: extracted body of `SessionDO.sendMessage(...)`.
  *
  * Idempotency, orphan auto-fork, status auto-heal, and the dispatch
- * decision (live runner → stream-input vs idle+sdk_session_id → resume)
+ * decision (live runner → stream-input vs idle+runner_session_id → resume)
  * all live here. The DO-class shim is a single `return sendMessageImpl(...)`.
  */
 
@@ -98,7 +98,7 @@ export async function sendMessageImpl(
       `[SessionDO:${ctx.ctx.id}] sendMessage: auto-healing stuck status='${ctx.state.status}' with no runner — running recovery inline`,
     )
     await ctx.do.recoverFromDroppedConnection()
-    // recovery flipped status to 'idle' and preserved sdk_session_id;
+    // recovery flipped status to 'idle' and preserved runner_session_id;
     // fall through to the resumable path below.
   }
 
@@ -109,10 +109,10 @@ export async function sendMessageImpl(
   // still attached, reuse that runner.
   // `'error'` is a terminal-UI state set by `failAwaitingTurn()` (spec
   // #80 B7) but per its own contract "the session remains resumable via
-  // sdk_session_id" — the next user turn must reopen the resume path,
+  // runner_session_id" — the next user turn must reopen the resume path,
   // not get wedged behind the gate below.
   const isResumable =
-    !hasLiveRunner && (status === 'idle' || status === 'error') && ctx.state.sdk_session_id
+    !hasLiveRunner && (status === 'idle' || status === 'error') && ctx.state.runner_session_id
 
   if (!hasLiveRunner && !isResumable) {
     return { ok: false, error: `Cannot send message: status is '${status}'` }
@@ -137,18 +137,18 @@ export async function sendMessageImpl(
   }
 
   // If we're about to take the resume path, preflight for an orphan runner
-  // that would hijack the sdk_session_id. If found, auto-fork to a fresh
-  // SDK session so the user doesn't see silent failure.
+  // that would hijack the runner_session_id. If found, auto-fork to a fresh
+  // adapter session so the user doesn't see silent failure.
   if (!hasLiveRunner && isResumable) {
-    const sdk = ctx.state.sdk_session_id ?? ''
+    const sdk = ctx.state.runner_session_id ?? ''
     const gatewayUrl = ctx.env.CC_GATEWAY_URL
     if (gatewayUrl && sdk) {
       try {
         const sessions = await listSessions(gatewayUrl, ctx.env.CC_GATEWAY_SECRET)
-        const orphan = sessions.find((s) => s.sdk_session_id === sdk && s.state === 'running')
+        const orphan = sessions.find((s) => s.runner_session_id === sdk && s.state === 'running')
         if (orphan) {
           console.warn(
-            `[SessionDO:${ctx.ctx.id}] sendMessage: orphan runner ${orphan.session_id} holds sdk_session_id ${sdk} — auto-forking with transcript`,
+            `[SessionDO:${ctx.ctx.id}] sendMessage: orphan runner ${orphan.session_id} holds runner_session_id ${sdk} — auto-forking with transcript`,
           )
           return forkWithHistoryImpl(ctx, content)
         }
@@ -240,7 +240,7 @@ export async function sendMessageImpl(
       type: 'resume',
       project: ctx.state.project,
       prompt: content,
-      sdk_session_id: ctx.state.sdk_session_id ?? '',
+      runner_session_id: ctx.state.runner_session_id ?? '',
     })
   }
 

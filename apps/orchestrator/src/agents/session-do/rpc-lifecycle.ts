@@ -105,7 +105,7 @@ export async function spawnImpl(
 export async function resumeDiscoveredImpl(
   ctx: SessionDOContext,
   config: SpawnConfig,
-  sdkSessionId: string,
+  runnerSessionId: string,
 ): Promise<{ ok: boolean; session_id?: string; error?: string }> {
   // Mirror spawn()'s guard — 'pending' is an active state (spec #80).
   if (
@@ -132,7 +132,7 @@ export async function resumeDiscoveredImpl(
     started_at: now,
     created_at: ctx.state.created_at || now,
     updated_at: now,
-    sdk_session_id: sdkSessionId,
+    runner_session_id: runnerSessionId,
   }
   ctx.do.setState(resumeState)
   ctx.do.persistMetaPatch(resumeState)
@@ -161,12 +161,12 @@ export async function resumeDiscoveredImpl(
     type: 'resume',
     project: config.project,
     prompt: config.prompt,
-    sdk_session_id: sdkSessionId,
+    runner_session_id: runnerSessionId,
     agent: config.agent,
   })
 
   console.log(
-    `[SessionDO:${id}] resumeDiscovered: ${config.project} sdk_session=${sdkSessionId.slice(0, 12)}`,
+    `[SessionDO:${id}] resumeDiscovered: ${config.project} runner_session=${runnerSessionId.slice(0, 12)}`,
   )
   return { ok: true, session_id: id }
 }
@@ -178,8 +178,8 @@ export async function reattachImpl(
   if (hasLiveRunner) {
     return { ok: true } // already connected
   }
-  if (!ctx.state.sdk_session_id) {
-    return { ok: false, error: 'No sdk_session_id — nothing to reattach' }
+  if (!ctx.state.runner_session_id) {
+    return { ok: false, error: 'No runner_session_id — nothing to reattach' }
   }
   if (!ctx.state.project) {
     return { ok: false, error: 'No project set — cannot dial gateway' }
@@ -196,7 +196,7 @@ export async function reattachImpl(
     type: 'resume',
     project: ctx.state.project,
     prompt: '',
-    sdk_session_id: ctx.state.sdk_session_id,
+    runner_session_id: ctx.state.runner_session_id,
   })
   return { ok: true }
 }
@@ -204,8 +204,8 @@ export async function reattachImpl(
 export async function resumeFromTranscriptImpl(
   ctx: SessionDOContext,
 ): Promise<{ ok: boolean; error?: string }> {
-  if (!ctx.state.sdk_session_id) {
-    return { ok: false, error: 'No sdk_session_id — nothing to resume' }
+  if (!ctx.state.runner_session_id) {
+    return { ok: false, error: 'No runner_session_id — nothing to resume' }
   }
   if (!ctx.state.project) {
     return { ok: false, error: 'No project set — cannot dial gateway' }
@@ -225,7 +225,7 @@ export async function resumeFromTranscriptImpl(
     type: 'resume',
     project: ctx.state.project,
     prompt: '',
-    sdk_session_id: ctx.state.sdk_session_id,
+    runner_session_id: ctx.state.runner_session_id,
   })
   return { ok: true }
 }

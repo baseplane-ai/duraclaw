@@ -66,7 +66,7 @@ export async function failAwaitingTurnImpl(
   // B7 widens `SessionStatus` to include `'error'` so the watchdog's
   // terminal state renders as a distinct UI badge (red). The system
   // message row above provides the diagnostic detail; the session
-  // remains resumable via sdk_session_id.
+  // remains resumable via runner_session_id.
   ctx.do.updateState({
     status: 'error',
     error: errorText,
@@ -99,7 +99,7 @@ export async function recoverFromDroppedConnectionImpl(ctx: SessionDOContext): P
     ctx.do.persistTurnState()
   }
 
-  // Transition to idle (session may be resumable via sdk_session_id).
+  // Transition to idle (session may be resumable via runner_session_id).
   // Clear active_callback_token — the runner that owned it is gone.
   ctx.do.updateState({
     status: 'idle',

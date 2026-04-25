@@ -91,7 +91,7 @@ function makeSummaryRow(overrides: Record<string, unknown> = {}) {
     archived: false,
     origin: null,
     agent: null,
-    sdkSessionId: null,
+    runnerSessionId: null,
     contextUsageJson: null,
     kataStateJson: null,
     worktreeInfoJson: null,

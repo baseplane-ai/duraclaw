@@ -25,7 +25,7 @@ const KATA_DEBOUNCE_MS = 150
  * multiple SDK sessions share a worktree (e.g. two chain rungs running in
  * parallel), the newest-mtime heuristic propagated the wrong session's state
  * to D1 — every chain card would flip between its two peers' modes. The
- * runner already knows its own SDK session id via `ctx.meta.sdk_session_id`
+ * runner already knows its own SDK session id via `ctx.meta.runner_session_id`
  * (set from `session.init`), and kata names its session folders by that id,
  * so a direct read is both correct and cheaper.
  *
@@ -78,14 +78,14 @@ async function readSessionKataState(
  * Watch `.kata/sessions/<sdk-session-id>/` for state.json / run-end.json
  * changes and emit KataStateEvent over the runner's dial-back channel.
  *
- * GH#73: read is targeted at `ctx.meta.sdk_session_id` rather than scanning
- * all sessions by mtime. `sdk_session_id` isn't set until the SDK emits
+ * GH#73: read is targeted at `ctx.meta.runner_session_id` rather than scanning
+ * all sessions by mtime. `runner_session_id` isn't set until the SDK emits
  * `session.init`, so `emitState()` is a no-op until then; the caller pokes
  * this watcher (via `emitKataStateNow`) from the init handler so the DO
  * sees the first snapshot as soon as it's resolvable.
  *
  * Returns `{ stop, emitNow }` — `emitNow()` is used by the session.init
- * handler to force a snapshot as soon as `sdk_session_id` is known, without
+ * handler to force a snapshot as soon as `runner_session_id` is known, without
  * waiting for the next filesystem event.
  *
  * Errors are swallowed — kata state is best-effort.
@@ -100,7 +100,7 @@ function startKataWatcher(
   let watcher: FSWatcher | null = null
 
   const emitState = async () => {
-    const sdkSessionId = ctx.meta.sdk_session_id
+    const sdkSessionId = ctx.meta.runner_session_id
     // Pre-init: we don't know which kata session folder to read yet. Skip —
     // emitNow() from the session.init handler will fire as soon as the id
     // arrives.
@@ -449,7 +449,7 @@ export class ClaudeRunner {
         if (cmd.effort) options.effort = cmd.effort
       } else {
         // resume
-        options.resume = cmd.sdk_session_id
+        options.resume = cmd.runner_session_id
       }
 
       // GH#86: instantiate the Haiku session titler. Runs fire-and-forget
@@ -539,7 +539,7 @@ export class ClaudeRunner {
             const model = (message as any).model ?? null
             const tools = (message as any).tools ?? []
 
-            ctx.meta.sdk_session_id = sdkSessionId
+            ctx.meta.runner_session_id = sdkSessionId
             ctx.meta.model = model
 
             send(
@@ -547,7 +547,7 @@ export class ClaudeRunner {
               {
                 type: 'session.init',
                 session_id: sessionId,
-                sdk_session_id: sdkSessionId ?? null,
+                runner_session_id: sdkSessionId ?? null,
                 project: cmd.project,
                 model,
                 tools,

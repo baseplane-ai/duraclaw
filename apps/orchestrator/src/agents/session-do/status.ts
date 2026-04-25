@@ -1,3 +1,4 @@
+import type { AdapterCapabilities } from '@duraclaw/shared-types'
 import { and, eq } from 'drizzle-orm'
 import { agentSessions, worktreeReservations } from '~/db/schema'
 import { broadcastSessionRow } from '~/lib/broadcast-session'
@@ -65,6 +66,12 @@ export function persistMetaPatch(ctx: SessionDOContext, partial: Partial<Session
       // "not yet ended" state is explicit rather than SQL NULL.
       cols.push(`${col} = ?`)
       vals.push(value ? 1 : 0)
+    } else if (key === 'capabilities') {
+      // Spec #101 P1.2 B7: capabilities_json is TEXT JSON. Stringify
+      // here so persistMetaPatch keeps the typed in-memory shape on the
+      // SessionMeta side and DB-typed JSON on the SQLite side.
+      cols.push(`${col} = ?`)
+      vals.push(value == null ? null : JSON.stringify(value))
     } else {
       cols.push(`${col} = ?`)
       vals.push(value ?? null)
@@ -111,24 +118,50 @@ export async function syncResultToD1(ctx: SessionDOContext, updatedAt: string): 
 }
 
 /**
- * Persist the SDK-issued `sdk_session_id` onto the D1 row so REST callers
- * (resume-after-idle, orphan recovery) can re-spawn against the right
- * session identifier.
+ * Persist the runner-issued `runner_session_id` onto the D1 row so REST
+ * callers (resume-after-idle, orphan recovery) can re-spawn against the
+ * right session identifier. The id is whatever the underlying adapter
+ * uses (Claude SDK session_id, Codex thread_id, etc.) — the DO is
+ * agnostic to its provenance.
  */
-export async function syncSdkSessionIdToD1(
+export async function syncRunnerSessionIdToD1(
   ctx: SessionDOContext,
-  sdkSessionId: string,
+  runnerSessionId: string,
   updatedAt: string,
 ): Promise<void> {
   try {
     const sessionId = ctx.do.name
     await ctx.do.d1
       .update(agentSessions)
-      .set({ sdkSessionId, messageSeq: ctx.do.messageSeq, updatedAt })
+      .set({ runnerSessionId, messageSeq: ctx.do.messageSeq, updatedAt })
       .where(eq(agentSessions.id, sessionId))
     await broadcastSessionRow(ctx.env, ctx.ctx, sessionId, 'update')
   } catch (err) {
-    console.error(`[SessionDO:${ctx.ctx.id}] Failed to sync sdk_session_id to D1:`, err)
+    console.error(`[SessionDO:${ctx.ctx.id}] Failed to sync runner_session_id to D1:`, err)
+  }
+}
+
+/**
+ * Spec #101 P1.2 B7: persist runner-reported AdapterCapabilities onto
+ * the D1 row + broadcast. Stored as serialized JSON in
+ * `agent_sessions.capabilities_json` so the sidebar / agent-detail
+ * surfaces can render capability-aware UI without a DO round-trip.
+ */
+export async function syncCapabilitiesToD1(
+  ctx: SessionDOContext,
+  capabilities: AdapterCapabilities | null,
+  updatedAt: string,
+): Promise<void> {
+  try {
+    const sessionId = ctx.do.name
+    const capabilitiesJson = capabilities ? JSON.stringify(capabilities) : null
+    await ctx.do.d1
+      .update(agentSessions)
+      .set({ capabilitiesJson, messageSeq: ctx.do.messageSeq, updatedAt })
+      .where(eq(agentSessions.id, sessionId))
+    await broadcastSessionRow(ctx.env, ctx.ctx, sessionId, 'update')
+  } catch (err) {
+    console.error(`[SessionDO:${ctx.ctx.id}] Failed to sync capabilities to D1:`, err)
   }
 }
 

@@ -258,19 +258,21 @@ export async function resubmitMessageImpl(
     type: 'resume',
     project: ctx.state.project,
     prompt: newContent,
-    sdk_session_id: ctx.state.sdk_session_id ?? '',
+    runner_session_id: ctx.state.runner_session_id ?? '',
   })
 
   return { ok: true, leafId: newUserMsgId }
 }
 
 /**
- * Body of the `@callable forkWithHistory` RPC. Spawns a fresh SDK
- * session (new sdk_session_id) seeded with a transcript of the prior
- * conversation. Feels like a resume from the user's POV but sidesteps
- * SDK `resume` entirely — useful when the prior sdk_session_id is
- * orphaned by a stuck session-runner, unresumable, or we just want a
- * clean context window without losing the thread.
+ * Body of the `@callable forkWithHistory` RPC. Spec #101 P1.2 B10:
+ * transcript-agnostic — works for any adapter that accepts a prompt. The
+ * spawned runner gets a fresh adapter session (new `runner_session_id`)
+ * seeded with a serialized transcript of the prior conversation. Feels
+ * like a resume from the user's POV but sidesteps adapter-native resume
+ * entirely — useful when the prior `runner_session_id` is orphaned by a
+ * stuck runner, unresumable, or we just want a clean context window
+ * without losing the thread.
  */
 export async function forkWithHistoryImpl(
   ctx: SessionDOContext,
@@ -324,13 +326,13 @@ export async function forkWithHistoryImpl(
     console.error(`[SessionDO:${ctx.ctx.id}] forkWithHistory: persist user msg failed:`, err)
   }
 
-  // Spec #80 B3: drop the old sdk_session_id so the new runner gets a
+  // Spec #80 B3: drop the old runner_session_id so the new runner gets a
   // brand-new one (guarantees no hasLiveResume collision with any
   // orphan) and flip status to 'pending' while we wait for the dial.
   updateState(ctx, {
     status: 'pending',
     error: null,
-    sdk_session_id: null,
+    runner_session_id: null,
   })
 
   void triggerGatewayDial(ctx, {

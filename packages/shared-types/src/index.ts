@@ -134,7 +134,7 @@ export interface ResumeCommand {
   type: 'resume'
   project: string
   prompt: string | ContentBlock[]
-  sdk_session_id: string
+  runner_session_id: string
   /** Which agent to use for resume. Defaults to 'claude' if omitted. */
   agent?: string
   /** GH#86: enable Haiku-based session titler in the runner. Default false. */
@@ -279,7 +279,7 @@ export interface ChainStalledEvent {
 export interface StoppedEvent {
   type: 'stopped'
   session_id: string
-  sdk_session_id: string | null
+  runner_session_id: string | null
 }
 
 export interface ContextUsageEvent {
@@ -342,13 +342,37 @@ export interface TaskNotificationEvent {
   }
 }
 
+/**
+ * AdapterCapabilities — declared by the runner on session.init so the DO
+ * (and downstream UI) know which features the underlying SDK supports.
+ *
+ * Optional for backward compatibility with older runners that predate
+ * this field; consumers MUST tolerate `undefined` and fall back to the
+ * Claude Agent SDK behavior.
+ */
+export interface AdapterCapabilities {
+  supportsRewind: boolean
+  supportsThinkingDeltas: boolean
+  supportsPermissionGate: boolean
+  supportsSubagents: boolean
+  supportsPermissionMode: boolean
+  supportsSetModel: boolean
+  supportsContextUsage: boolean
+  supportsInterrupt: boolean
+  supportsCleanAbort: boolean
+  emitsUsdCost: boolean
+  availableProviders: ReadonlyArray<{ provider: string; models: string[] }>
+}
+
 export interface SessionInitEvent {
   type: 'session.init'
   session_id: string
-  sdk_session_id: string | null
+  runner_session_id: string | null
   project: string
   model: string | null
   tools: string[]
+  /** Optional — populated by capability-aware runners. */
+  capabilities?: AdapterCapabilities
 }
 
 export interface PartialAssistantEvent {
@@ -496,7 +520,7 @@ export interface SdkSessionInfo {
 
 export interface DiscoveredSession {
   /** Unique session ID from the agent (SDK session_id, thread_id, etc.) */
-  sdk_session_id: string
+  runner_session_id: string
   /** Agent that created this session */
   agent: string
   /** Project directory path */
@@ -701,7 +725,8 @@ export interface SessionSummary {
   archived?: boolean
   origin?: string | null
   agent?: string | null
-  sdkSessionId?: string | null
+  runnerSessionId?: string | null
+  capabilitiesJson?: string | null
   kataMode?: string | null
   kataIssue?: number | null
   kataPhase?: string | null

@@ -46,7 +46,7 @@
  *
  * The SQL output is safe to re-run: each statement uses ON CONFLICT to
  * UPDATE in place. agent_sessions conflicts are keyed on `id` (the PK — so
- * NULL sdk_session_id rows still upsert deterministically); user_tabs on
+ * NULL runner_session_id rows still upsert deterministically); user_tabs on
  * (id) and user_preferences on (user_id).
  */
 
@@ -58,7 +58,7 @@ interface AgentSessionDump {
   project: string
   status: string
   model: string | null
-  sdk_session_id: string | null
+  runner_session_id: string | null
   created_at: string
   updated_at: string
   last_activity: string | null
@@ -120,7 +120,7 @@ function emitAgentSessions(rows: AgentSessionDump[]): string[] {
       'project',
       'status',
       'model',
-      'sdk_session_id',
+      'runner_session_id',
       'created_at',
       'updated_at',
       'last_activity',
@@ -145,7 +145,7 @@ function emitAgentSessions(rows: AgentSessionDump[]): string[] {
       sqlEscape(r.project),
       sqlEscape(r.status),
       sqlEscape(r.model),
-      sqlEscape(r.sdk_session_id),
+      sqlEscape(r.runner_session_id),
       sqlEscape(r.created_at),
       sqlEscape(r.updated_at),
       sqlEscape(r.last_activity),
@@ -165,10 +165,10 @@ function emitAgentSessions(rows: AgentSessionDump[]): string[] {
       sqlEscape(r.kata_phase),
     ]
     // ON CONFLICT(id) — keyed on the primary key so re-running the script is
-    // deterministic even for rows where sdk_session_id IS NULL. We previously
-    // keyed on sdk_session_id, but SQL's NULL ≠ NULL means a NULL row would
+    // deterministic even for rows where runner_session_id IS NULL. We previously
+    // keyed on runner_session_id, but SQL's NULL ≠ NULL means a NULL row would
     // bypass the upsert and hit a PRIMARY KEY violation on `id` instead.
-    // sdk_session_id is still written as a regular column value (and updated
+    // runner_session_id is still written as a regular column value (and updated
     // from excluded on subsequent runs).
     const updateAssignments = cols
       .filter((c) => c !== 'id')

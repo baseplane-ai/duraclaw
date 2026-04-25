@@ -21,7 +21,7 @@ export async function handleHttpRequest(
     try {
       const body = (await request.json()) as SpawnConfig & {
         userId?: string
-        sdk_session_id?: string
+        runner_session_id?: string
         project_path?: string
       }
       const userId = request.headers.get('x-user-id') ?? body.userId ?? null
@@ -30,8 +30,8 @@ export async function handleHttpRequest(
       }
 
       let result: { ok: boolean; session_id?: string; error?: string }
-      if (body.sdk_session_id) {
-        result = await ctx.do.resumeDiscovered(body, body.sdk_session_id)
+      if (body.runner_session_id) {
+        result = await ctx.do.resumeDiscovered(body, body.runner_session_id)
       } else {
         result = await ctx.do.spawn(body)
       }
