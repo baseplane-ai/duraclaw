@@ -3465,6 +3465,19 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     gateId: string,
     response: GateResponse,
   ): Promise<{ ok: boolean; error?: string }> {
+    const resolveStartedAt = Date.now()
+    const responseShape = {
+      hasAnswer: response.answer !== undefined,
+      hasAnswers: response.answers !== undefined,
+      answersCount: Array.isArray(response.answers) ? response.answers.length : null,
+      hasApproved: response.approved !== undefined,
+      approved: response.approved ?? null,
+      declined: response.declined ?? null,
+    }
+    console.log(
+      `[gate] resolveGate entered doId=${this.ctx.id.toString()} sessionId=${this.state.session_id ?? '?'} gateId=${gateId} response=${JSON.stringify(responseShape)}`,
+    )
+
     // Relaxed: accept resolveGate in any status. The CLI terminal may have
     // already resolved the tool (advancing status to 'running'), but the web
     // UI still has the GateResolver mounted. Rejecting here just blocks the
@@ -3476,6 +3489,9 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // scalar state.gate removed; messages are the sole source of truth).
     const match = findPendingGatePart(this.session.getHistory(), gateId)
     if (!match) {
+      console.warn(
+        `[gate] resolveGate not_found gateId=${gateId} sessionId=${this.state.session_id ?? '?'} duration_ms=${Date.now() - resolveStartedAt}`,
+      )
       return {
         ok: false,
         error: `Gate '${gateId}' not found (no pending part in history)`,
@@ -3485,8 +3501,14 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       id: gateId,
       type: match.type,
     }
+    console.log(
+      `[gate] resolveGate match found gateId=${gateId} type=${match.type} sessionId=${this.state.session_id ?? '?'}`,
+    )
 
     if (gate.type === 'permission_request' && response.approved !== undefined) {
+      console.log(
+        `[gate] resolveGate sending permission-response gateId=${gateId} allowed=${response.approved}`,
+      )
       this.sendToGateway({
         type: 'permission-response',
         session_id: this.state.session_id ?? '',
@@ -3562,6 +3584,13 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         }
       }
 
+      const answerKeys = Object.keys(answersRecord)
+      const answerKeySamples = answerKeys.map((k) => k.slice(0, 60))
+      const answerLengths = answerKeys.map((k) => answersRecord[k]?.length ?? 0)
+      const totalAnswerChars = answerLengths.reduce((acc, n) => acc + n, 0)
+      console.log(
+        `[gate] resolveGate sending answer gateId=${gateId} answers_keys=${answerKeys.length} total_chars=${totalAnswerChars} key_samples=${JSON.stringify(answerKeySamples)} value_lengths=${JSON.stringify(answerLengths)}`,
+      )
       this.sendToGateway({
         type: 'answer',
         session_id: this.state.session_id ?? '',
@@ -3569,6 +3598,9 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         answers: answersRecord,
       })
     } else {
+      console.warn(
+        `[gate] resolveGate invalid_response gateId=${gateId} type=${gate.type} response_shape=${JSON.stringify(responseShape)}`,
+      )
       return { ok: false, error: 'Invalid response for gate type' }
     }
 
@@ -3637,7 +3669,7 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       // gate will stay visible until the next message broadcast refreshes
       // the part. Return an error so the client can surface it.
       console.error(
-        `[SessionDO:${this.ctx.id}] resolveGate: no message part found for toolCallId '${gateId}' — answer sent to agent but UI not updated`,
+        `[gate] resolveGate no_message_part gateId=${gateId} sessionId=${this.state.session_id ?? '?'} duration_ms=${Date.now() - resolveStartedAt} — answer sent to agent but UI not updated`,
       )
       return {
         ok: false,
@@ -3645,6 +3677,9 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       }
     }
 
+    console.log(
+      `[gate] resolveGate ok gateId=${gateId} sessionId=${this.state.session_id ?? '?'} duration_ms=${Date.now() - resolveStartedAt}`,
+    )
     this.updateState({ status: 'running' })
     // Mirror the status flip into D1 so `sessionsCollection.status` (and
     // the "Needs Attention" chip fed by it when `useDerivedStatus` yields
@@ -4679,6 +4714,21 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         // state is the single writer now; resolveGate → tool_result
         // advances it monotonically.
 
+        const askedQuestions = Array.isArray(event.questions) ? event.questions : []
+        const askedSummary = askedQuestions.map((q, idx) => {
+          const qq = q as Record<string, unknown>
+          return {
+            idx,
+            header: typeof qq?.header === 'string' ? (qq.header as string).slice(0, 80) : null,
+            questionLen: typeof qq?.question === 'string' ? (qq.question as string).length : null,
+            optionsCount: Array.isArray(qq?.options) ? (qq.options as unknown[]).length : null,
+            multiSelect: typeof qq?.multiSelect === 'boolean' ? qq.multiSelect : null,
+          }
+        })
+        console.log(
+          `[gate] ask_user received doId=${this.ctx.id.toString()} sessionId=${this.state.session_id} toolCallId=${event.tool_call_id} questions_count=${askedQuestions.length} summary=${JSON.stringify(askedSummary)}`,
+        )
+
         // Race guard: if resolveGate has already advanced the matching
         // part to a terminal state, announcing the gate now would leave
         // status=waiting_gate dangling + fire a push for a gate that's
@@ -4696,7 +4746,12 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
                   p.state === 'approval-denied'),
             ),
           )
-        if (alreadyResolved) break
+        if (alreadyResolved) {
+          console.log(
+            `[gate] ask_user short-circuit already_resolved toolCallId=${event.tool_call_id}`,
+          )
+          break
+        }
 
         // Status flip + push notification are still load-bearing: UI
         // status indicators and notifications need to distinguish
