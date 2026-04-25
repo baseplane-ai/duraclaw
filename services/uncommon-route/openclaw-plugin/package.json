@@ -1,0 +1,33 @@
+{
+  "name": "@anjieyang/uncommon-route",
+  "version": "0.3.1",
+  "description": "OpenClaw plugin for UncommonRoute, the local LLM router that cuts premium-model spend",
+  "type": "module",
+  "main": "src/index.js",
+  "openclaw": {
+    "extensions": [
+      "./src/index.js"
+    ]
+  },
+  "files": [
+    "src/",
+    "openclaw.plugin.json",
+    "openclaw.security.json",
+    "README.md"
+  ],
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "llm-router",
+    "smart-routing"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "openclaw": ">=2025.1.0"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  }
+}
