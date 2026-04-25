@@ -1,10 +1,6 @@
 import { wrapFetch } from './fetch.js'
-import {
-  type FetchLike,
-  OPENCLAW_SESSION_HEADER,
-  type RouterOptions,
-  SESSION_HEADER,
-} from './types.js'
+import { sessionHeadersFromOptions } from './session-headers.js'
+import type { FetchLike, RouterOptions } from './types.js'
 
 /**
  * Return value of {@link routerConfig}: a pre-built config object that
@@ -34,11 +30,7 @@ function normaliseBaseUrl(url: string): string {
 }
 
 function buildHeaders(opts: RouterOptions): Record<string, string> {
-  const headers: Record<string, string> = {}
-  if (opts.sessionId) headers[SESSION_HEADER] = opts.sessionId
-  if (opts.openclawSessionKey) {
-    headers[OPENCLAW_SESSION_HEADER] = opts.openclawSessionKey
-  }
+  const headers: Record<string, string> = sessionHeadersFromOptions(opts)
   if (opts.headers) {
     for (const [k, v] of Object.entries(opts.headers)) headers[k] = v
   }

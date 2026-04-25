@@ -1,9 +1,5 @@
-import {
-  type FetchLike,
-  OPENCLAW_SESSION_HEADER,
-  type RouterOptions,
-  SESSION_HEADER,
-} from './types.js'
+import { sessionHeadersFromOptions } from './session-headers.js'
+import type { FetchLike, RouterOptions } from './types.js'
 
 function resolveBaseFetch(opts: RouterOptions): FetchLike {
   if (opts.fetch) return opts.fetch
@@ -48,12 +44,7 @@ function mergeHeaders(
  */
 export function wrapFetch(opts: RouterOptions): FetchLike {
   const base = resolveBaseFetch(opts)
-  const defaults: Record<string, string> = {}
-
-  if (opts.sessionId) defaults[SESSION_HEADER] = opts.sessionId
-  if (opts.openclawSessionKey) {
-    defaults[OPENCLAW_SESSION_HEADER] = opts.openclawSessionKey
-  }
+  const defaults: Record<string, string> = sessionHeadersFromOptions(opts)
   if (opts.headers) {
     for (const [k, v] of Object.entries(opts.headers)) defaults[k] = v
   }

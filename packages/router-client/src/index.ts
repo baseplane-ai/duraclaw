@@ -17,10 +17,15 @@ export {
   hasRouteMetadata,
   parseRouteHeaders,
 } from './headers.js'
+export { sessionHeadersFromOptions } from './session-headers.js'
 export {
+  CONTEXT_USAGE_HEADER,
+  DIFFICULTY_HINT_HEADER,
   type FetchLike,
   OPENCLAW_SESSION_HEADER,
   type RouteMetadata,
   type RouterOptions,
+  SESSION_BUDGET_HEADER,
   SESSION_HEADER,
+  TURN_INDEX_HEADER,
 } from './types.js'

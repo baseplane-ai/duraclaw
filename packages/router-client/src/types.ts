@@ -43,6 +43,21 @@ export interface RouterOptions {
   openclawSessionKey?: string
 
   /**
+   * Per-session enrichment hints the router uses for session-aware
+   * routing. All optional; omitted fields are simply not sent. Field
+   * shapes mirror `proxy.py::_resolve_session_context`:
+   *   - turnIndex          → `x-uncommon-route-turn-index` (int)
+   *   - sessionBudgetUsd   → `x-uncommon-route-session-budget-usd` (float)
+   *   - difficultyHint     → `x-uncommon-route-difficulty-hint`
+   *                          ("easy" | "medium" | "hard" | "reasoning")
+   *   - contextUsagePct    → `x-uncommon-route-context-usage-pct` (0..1)
+   */
+  turnIndex?: number
+  sessionBudgetUsd?: number
+  difficultyHint?: 'easy' | 'medium' | 'hard' | 'reasoning'
+  contextUsagePct?: number
+
+  /**
    * Extra headers merged into every request. Keys are treated
    * case-insensitively against the defaults the client adds; user values
    * take precedence.
@@ -92,3 +107,13 @@ export const SESSION_HEADER = 'x-session-id'
 
 /** OpenClaw-specific session header name. */
 export const OPENCLAW_SESSION_HEADER = 'x-openclaw-session-key'
+
+/**
+ * Session-aware routing enrichment headers. Names mirror
+ * `proxy.py::_resolve_session_context` 1:1 so the wire format is
+ * one-edit-per-side when fields are added or renamed.
+ */
+export const TURN_INDEX_HEADER = 'x-uncommon-route-turn-index'
+export const SESSION_BUDGET_HEADER = 'x-uncommon-route-session-budget-usd'
+export const DIFFICULTY_HINT_HEADER = 'x-uncommon-route-difficulty-hint'
+export const CONTEXT_USAGE_HEADER = 'x-uncommon-route-context-usage-pct'
