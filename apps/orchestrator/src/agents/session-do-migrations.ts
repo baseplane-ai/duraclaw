@@ -303,4 +303,21 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
       addCol('title_source', 'TEXT')
     },
   },
+  {
+    version: 17,
+    description:
+      'Add event_log table for durable per-session observability (gate lifecycle, conn events). 7-day retention enforced on DO start. Queryable via getEventLog() RPC.',
+    up: (sql) => {
+      sql.exec(`CREATE TABLE IF NOT EXISTS event_log (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts INTEGER NOT NULL,
+        level TEXT NOT NULL,
+        tag TEXT NOT NULL,
+        message TEXT NOT NULL,
+        attrs TEXT
+      )`)
+      sql.exec(`CREATE INDEX IF NOT EXISTS idx_event_log_ts ON event_log (ts)`)
+      sql.exec(`CREATE INDEX IF NOT EXISTS idx_event_log_tag_ts ON event_log (tag, ts)`)
+    },
+  },
 ]

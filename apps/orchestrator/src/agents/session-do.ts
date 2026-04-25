@@ -297,10 +297,58 @@ export class SessionDO extends Agent<Env, SessionMeta> {
    */
   private featureFlagCache = new Map<string, { enabled: boolean; expiresAt: number }>()
 
+  // ── Event log (migration v17) ─────────────────────────────────
+
+  /** 7-day retention for event_log rows. */
+  private static readonly EVENT_LOG_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+
+  /**
+   * Persist a structured log event to SQLite + mirror to console for
+   * wrangler tail. Every `[gate]` / `[conn]` / `[rpc]` log should flow
+   * through here so the event is durable and queryable via `getEventLog`.
+   */
+  private logEvent(
+    level: 'info' | 'warn' | 'error',
+    tag: string,
+    message: string,
+    attrs?: Record<string, unknown>,
+  ) {
+    const ts = Date.now()
+    try {
+      this.ctx.storage.sql.exec(
+        'INSERT INTO event_log (ts, level, tag, message, attrs) VALUES (?, ?, ?, ?, ?)',
+        ts,
+        level,
+        tag,
+        message,
+        attrs ? JSON.stringify(attrs) : null,
+      )
+    } catch {
+      // Best-effort — never crash the DO for a log write.
+    }
+    const line = `[${tag}] ${message}`
+    if (level === 'error') console.error(line)
+    else if (level === 'warn') console.warn(line)
+    else console.log(line)
+  }
+
+  /** Delete event_log rows older than the retention window. */
+  private gcEventLog() {
+    try {
+      const cutoff = Date.now() - SessionDO.EVENT_LOG_RETENTION_MS
+      this.ctx.storage.sql.exec('DELETE FROM event_log WHERE ts < ?', cutoff)
+    } catch {
+      // Best-effort — never fatal on cold start.
+    }
+  }
+
   // ── Lifecycle ──────────────────────────────────────────────────
 
   async onStart() {
     runMigrations(this.ctx.storage.sql, SESSION_DO_MIGRATIONS)
+
+    // Trim event_log rows older than 7 days on every cold start.
+    this.gcEventLog()
 
     // Rehydrate per-session monotonic seq from typed session_meta (B1). The
     // v6 migration INSERT OR IGNOREs row id=1 so the `?? 0` is belt-and-
@@ -3474,9 +3522,12 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       approved: response.approved ?? null,
       declined: response.declined ?? null,
     }
-    console.log(
-      `[gate] resolveGate entered doId=${this.ctx.id.toString()} sessionId=${this.state.session_id ?? '?'} gateId=${gateId} response=${JSON.stringify(responseShape)}`,
-    )
+    this.logEvent('info', 'gate', `resolveGate entered gateId=${gateId}`, {
+      doId: this.ctx.id.toString(),
+      sessionId: this.state.session_id ?? '?',
+      gateId,
+      ...responseShape,
+    })
 
     // Relaxed: accept resolveGate in any status. The CLI terminal may have
     // already resolved the tool (advancing status to 'running'), but the web
@@ -3489,8 +3540,15 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // scalar state.gate removed; messages are the sole source of truth).
     const match = findPendingGatePart(this.session.getHistory(), gateId)
     if (!match) {
-      console.warn(
-        `[gate] resolveGate not_found gateId=${gateId} sessionId=${this.state.session_id ?? '?'} duration_ms=${Date.now() - resolveStartedAt}`,
+      this.logEvent(
+        'warn',
+        'gate',
+        `resolveGate not_found gateId=${gateId} duration_ms=${Date.now() - resolveStartedAt}`,
+        {
+          gateId,
+          sessionId: this.state.session_id ?? '?',
+          durationMs: Date.now() - resolveStartedAt,
+        },
       )
       return {
         ok: false,
@@ -3501,13 +3559,21 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       id: gateId,
       type: match.type,
     }
-    console.log(
-      `[gate] resolveGate match found gateId=${gateId} type=${match.type} sessionId=${this.state.session_id ?? '?'}`,
-    )
+    this.logEvent('info', 'gate', `resolveGate match found gateId=${gateId} type=${match.type}`, {
+      gateId,
+      type: match.type,
+      sessionId: this.state.session_id ?? '?',
+    })
 
     if (gate.type === 'permission_request' && response.approved !== undefined) {
-      console.log(
-        `[gate] resolveGate sending permission-response gateId=${gateId} allowed=${response.approved}`,
+      this.logEvent(
+        'info',
+        'gate',
+        `resolveGate sending permission-response gateId=${gateId} allowed=${response.approved}`,
+        {
+          gateId,
+          allowed: response.approved,
+        },
       )
       this.sendToGateway({
         type: 'permission-response',
@@ -3588,8 +3654,17 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       const answerKeySamples = answerKeys.map((k) => k.slice(0, 60))
       const answerLengths = answerKeys.map((k) => answersRecord[k]?.length ?? 0)
       const totalAnswerChars = answerLengths.reduce((acc, n) => acc + n, 0)
-      console.log(
-        `[gate] resolveGate sending answer gateId=${gateId} answers_keys=${answerKeys.length} total_chars=${totalAnswerChars} key_samples=${JSON.stringify(answerKeySamples)} value_lengths=${JSON.stringify(answerLengths)}`,
+      this.logEvent(
+        'info',
+        'gate',
+        `resolveGate sending answer gateId=${gateId} answers_keys=${answerKeys.length} total_chars=${totalAnswerChars}`,
+        {
+          gateId,
+          answersKeys: answerKeys.length,
+          totalChars: totalAnswerChars,
+          keySamples: answerKeySamples,
+          valueLengths: answerLengths,
+        },
       )
       this.sendToGateway({
         type: 'answer',
@@ -3598,8 +3673,15 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         answers: answersRecord,
       })
     } else {
-      console.warn(
-        `[gate] resolveGate invalid_response gateId=${gateId} type=${gate.type} response_shape=${JSON.stringify(responseShape)}`,
+      this.logEvent(
+        'warn',
+        'gate',
+        `resolveGate invalid_response gateId=${gateId} type=${gate.type}`,
+        {
+          gateId,
+          type: gate.type,
+          ...responseShape,
+        },
       )
       return { ok: false, error: 'Invalid response for gate type' }
     }
@@ -3668,8 +3750,15 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       // but we couldn't find the message part to flip its state. The UI
       // gate will stay visible until the next message broadcast refreshes
       // the part. Return an error so the client can surface it.
-      console.error(
-        `[gate] resolveGate no_message_part gateId=${gateId} sessionId=${this.state.session_id ?? '?'} duration_ms=${Date.now() - resolveStartedAt} — answer sent to agent but UI not updated`,
+      this.logEvent(
+        'error',
+        'gate',
+        `resolveGate no_message_part gateId=${gateId} duration_ms=${Date.now() - resolveStartedAt} — answer sent but UI not updated`,
+        {
+          gateId,
+          sessionId: this.state.session_id ?? '?',
+          durationMs: Date.now() - resolveStartedAt,
+        },
       )
       return {
         ok: false,
@@ -3677,8 +3766,15 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       }
     }
 
-    console.log(
-      `[gate] resolveGate ok gateId=${gateId} sessionId=${this.state.session_id ?? '?'} duration_ms=${Date.now() - resolveStartedAt}`,
+    this.logEvent(
+      'info',
+      'gate',
+      `resolveGate ok gateId=${gateId} duration_ms=${Date.now() - resolveStartedAt}`,
+      {
+        gateId,
+        sessionId: this.state.session_id ?? '?',
+        durationMs: Date.now() - resolveStartedAt,
+      },
     )
     this.updateState({ status: 'running' })
     // Mirror the status flip into D1 so `sessionsCollection.status` (and
@@ -3690,6 +3786,50 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // stuck amber chip after approve/deny.
     this.syncStatusToD1(new Date().toISOString())
     return { ok: true }
+  }
+
+  /**
+   * Query the durable event_log table (migration v17). Useful for
+   * historical playback of gate lifecycle, connection events, etc.
+   * Returns rows oldest-first for chronological replay.
+   */
+  @callable()
+  async getEventLog(opts?: { tag?: string; sinceTs?: number; limit?: number }): Promise<
+    Array<{
+      seq: number
+      ts: number
+      level: string
+      tag: string
+      message: string
+      attrs: string | null
+    }>
+  > {
+    const limit = Math.min(opts?.limit ?? 1000, 10_000)
+    const sinceTs = opts?.sinceTs ?? 0
+    try {
+      if (opts?.tag) {
+        const rows = this.sql<{
+          seq: number
+          ts: number
+          level: string
+          tag: string
+          message: string
+          attrs: string | null
+        }>`SELECT seq, ts, level, tag, message, attrs FROM event_log WHERE tag = ${opts.tag} AND ts >= ${sinceTs} ORDER BY seq DESC LIMIT ${limit}`
+        return [...rows].reverse()
+      }
+      const rows = this.sql<{
+        seq: number
+        ts: number
+        level: string
+        tag: string
+        message: string
+        attrs: string | null
+      }>`SELECT seq, ts, level, tag, message, attrs FROM event_log WHERE ts >= ${sinceTs} ORDER BY seq DESC LIMIT ${limit}`
+      return [...rows].reverse()
+    } catch {
+      return []
+    }
   }
 
   @callable()
@@ -4725,8 +4865,17 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
             multiSelect: typeof qq?.multiSelect === 'boolean' ? qq.multiSelect : null,
           }
         })
-        console.log(
-          `[gate] ask_user received doId=${this.ctx.id.toString()} sessionId=${this.state.session_id} toolCallId=${event.tool_call_id} questions_count=${askedQuestions.length} summary=${JSON.stringify(askedSummary)}`,
+        this.logEvent(
+          'info',
+          'gate',
+          `ask_user received toolCallId=${event.tool_call_id} questions_count=${askedQuestions.length}`,
+          {
+            doId: this.ctx.id.toString(),
+            sessionId: this.state.session_id,
+            toolCallId: event.tool_call_id,
+            questionsCount: askedQuestions.length,
+            summary: askedSummary,
+          },
         )
 
         // Race guard: if resolveGate has already advanced the matching
@@ -4747,8 +4896,13 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
             ),
           )
         if (alreadyResolved) {
-          console.log(
-            `[gate] ask_user short-circuit already_resolved toolCallId=${event.tool_call_id}`,
+          this.logEvent(
+            'info',
+            'gate',
+            `ask_user short-circuit already_resolved toolCallId=${event.tool_call_id}`,
+            {
+              toolCallId: event.tool_call_id,
+            },
           )
           break
         }
