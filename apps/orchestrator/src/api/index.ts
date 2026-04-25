@@ -2367,6 +2367,62 @@ export function createApiApp() {
     return c.json({ status: 'idle' })
   })
 
+  // Force-stop is the escalation lever for sessions where soft-abort
+  // can't make progress — typically because the dial-back WS to the
+  // runner is dead. The DO unilaterally flips → idle, drops the
+  // callback token, clears any pending gate parts, AND HTTP-pings the
+  // gateway to SIGTERM the runner PID out-of-band. Idempotent: safe
+  // to call from any status, safe to call repeatedly.
+  //
+  // Owner OR admin (same widening as /abort) — this is a recovery
+  // action a user must be able to invoke from devtools when the UI
+  // affordance is hidden (Stop button only renders while
+  // `isRunning`). Returns the gateway kill outcome verbatim so the
+  // caller can tell apart "signalled" / "already_terminal" /
+  // "not_found" / "unreachable" / "skipped" cases.
+  app.post('/api/sessions/:id/force-stop', async (c) => {
+    const userId = c.get('userId')
+    const access = await getAccessibleSession(c.env, c.req.param('id'), userId, c.get('role'))
+    if (!access.ok) {
+      return c.json({ error: 'Session not found' }, 404)
+    }
+
+    let reason: string | undefined
+    try {
+      const body = (await c.req.json().catch(() => null)) as { reason?: unknown } | null
+      if (body && typeof body.reason === 'string') reason = body.reason
+    } catch {
+      // No body / non-JSON body — fall through with reason undefined.
+    }
+
+    const doId = getSessionDoId(c.env, access.session.id)
+    const sessionDO = c.env.SESSION_AGENT.get(doId)
+    const response = await sessionDO.fetch(
+      new Request('https://session/force-stop', {
+        method: 'POST',
+        headers: {
+          'x-partykit-room': access.session.id,
+          'x-user-id': userId,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ reason: reason ?? 'force-stop via api' }),
+      }),
+    )
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => '')
+      return c.json(
+        { error: `Force-stop failed: ${text || response.statusText}` },
+        response.status === 403 ? 403 : 500,
+      )
+    }
+
+    // forceStop returns `{ok, kill}`; pass through so the caller can see
+    // whether the gateway actually SIGTERM'd the runner.
+    const result = (await response.json().catch(() => ({}))) as Record<string, unknown>
+    return c.json({ status: 'idle', ...result })
+  })
+
   // GH#92 P3: dev-only synthetic rate-limit injector. Two targets:
   //   - target: 'runner' → forwards a {type:'synth-rate-limit'} GatewayCommand
   //     down the existing dial-back WS to the live session-runner; the

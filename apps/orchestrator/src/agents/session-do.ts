@@ -830,6 +830,68 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       }
     }
 
+    // Stop levers exposed over HTTP so the API layer (or a curl from
+    // devtools) can kill a wedged session even when the WS RPC channel
+    // is dead. Both routes mirror their @callable() counterparts and
+    // return the same JSON shape — no auth here; the API layer
+    // (`apps/orchestrator/src/api/index.ts`) gates on session
+    // ownership/admin before forwarding.
+    //
+    // Pre-fix this fell through to partyserver's default `super.onRequest`
+    // which returns 404 "Not implemented" — meaning the existing
+    // `POST /api/sessions/:id/abort` route had been silently broken: the
+    // DO 404'd, the API layer translated that into `{error: 'Abort
+    // failed'}`, and the wedged session stayed wedged. Adding explicit
+    // path handlers here makes the escape hatch actually fire.
+    if (request.method === 'POST' && url.pathname === '/abort') {
+      try {
+        let reason: string | undefined
+        try {
+          const body = (await request.clone().json()) as { reason?: unknown } | null
+          if (body && typeof body.reason === 'string') reason = body.reason
+        } catch {
+          // No body / non-JSON body → no reason. The callable accepts
+          // undefined and just logs "user request".
+        }
+        const result = await this.abort(reason)
+        return new Response(JSON.stringify(result), {
+          status: result.ok ? 200 : 400,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      } catch (err) {
+        return new Response(
+          JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/force-stop') {
+      try {
+        let reason: string | undefined
+        try {
+          const body = (await request.clone().json()) as { reason?: unknown } | null
+          if (body && typeof body.reason === 'string') reason = body.reason
+        } catch {
+          // tolerate missing body — see /abort note
+        }
+        const result = await this.forceStop(reason)
+        return new Response(JSON.stringify(result), {
+          // forceStop is best-effort and idempotent; it always returns
+          // ok:true and surfaces the gateway kill outcome via `kill`.
+          // 200 across the board lets the API layer pass `kill` straight
+          // through to the caller for diagnostics.
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      } catch (err) {
+        return new Response(
+          JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+    }
+
     // Delegate to Agent base class for WS upgrades and other routes
     return super.onRequest(request)
   }
@@ -3596,12 +3658,25 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     return { ok: true }
   }
 
+  /**
+   * Soft-abort the in-flight turn — flips status → idle, drops the
+   * callback token, and best-effort fires `{type:'abort'}` down the
+   * dial-back WS to the runner. Idempotent and safe from any status:
+   * a stale UI button or a second click never wedges the DO. The old
+   * strict guard (running / waiting_gate only) defeated the purpose
+   * of having an "are you sure you're stuck?" escape hatch since it
+   * silently rejected most of the states a user might actually want
+   * to recover from.
+   *
+   * Pending gate parts (AskUserQuestion / permission prompts) are
+   * cleared first via `clearPendingGateParts()` so the GateResolver
+   * UI unmounts even if the WS abort never lands. For the harder
+   * "runner alive on the VPS but unreachable" case, escalate to
+   * `forceStop()` (out-of-band SIGTERM).
+   */
   @callable()
   async abort(reason?: string): Promise<{ ok: boolean; error?: string }> {
-    if (this.state.status !== 'running' && this.state.status !== 'waiting_gate') {
-      return { ok: false, error: `Cannot abort: status is '${this.state.status}'` }
-    }
-
+    this.clearPendingGateParts()
     this.updateState({
       status: 'idle',
       error: null,

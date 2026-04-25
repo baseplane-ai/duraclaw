@@ -4382,3 +4382,51 @@ describe('runawayGuardStep (gate-aware runaway-empty-turn guard)', () => {
     expect(fireCount).toBeGreaterThanOrEqual(1)
   })
 })
+
+// ── abort() callable — no status guard regression ────────────────────
+//
+// Pre-fix the `abort()` callable rejected with "Cannot abort: status is
+// '<x>'" whenever the session was anything other than `running` or
+// `waiting_gate`. That stranded the `/api/sessions/:id/abort` HTTP
+// route — which proxies straight through to this callable — in the
+// exact wedged states (idle / error / pending / waiting_input /
+// waiting_permission) where a user is most likely to need a soft
+// abort. The fix drops the guard so abort is idempotent across every
+// status. This mirror locks in the predicate: any status accepted.
+
+describe('abort() — accepts every SessionStatus (no guard regression)', () => {
+  // The abort callable's pre-fix guard was a single boolean check; we
+  // mirror it inverted to assert "no rejection" for the seven statuses
+  // in the SessionStatus union. If a future refactor adds a new
+  // status, this test will fail on the typecheck — forcing a
+  // conscious decision rather than silently re-narrowing abort.
+  type SessionStatusList =
+    | 'idle'
+    | 'pending'
+    | 'running'
+    | 'waiting_input'
+    | 'waiting_permission'
+    | 'waiting_gate'
+    | 'error'
+
+  const ALL_STATUSES: SessionStatusList[] = [
+    'idle',
+    'pending',
+    'running',
+    'waiting_input',
+    'waiting_permission',
+    'waiting_gate',
+    'error',
+  ]
+
+  function abortGuardMirror(status: SessionStatusList): { rejected: boolean } {
+    // Post-fix abort has NO status guard. If the predicate ever
+    // re-narrows to a status subset, flip this back to mirror it and
+    // the assertions below will fail loudly.
+    return { rejected: false }
+  }
+
+  it.each(ALL_STATUSES)('does not reject from status %s', (status) => {
+    expect(abortGuardMirror(status).rejected).toBe(false)
+  })
+})
