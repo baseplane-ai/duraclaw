@@ -25,6 +25,31 @@ export interface DerivedGatePayload {
   part: SessionMessagePart
 }
 
+/**
+ * Predicate matching every gate part shape the UI must treat as "pending":
+ *   - `tool-permission + approval-requested` (legacy permission_request)
+ *   - `tool-ask_user + approval-requested` (legacy AskUserQuestion promotion)
+ *   - `tool-AskUserQuestion + input-available` (SDK-native shape)
+ * Mirrors ChatThread's `isPendingGate`. Exported so the Stop-button
+ * "wedged-from-idle" wiring in AgentDetailView can share the predicate
+ * without re-deriving the truthy gate payload.
+ */
+export function isPendingGatePart(part: SessionMessagePart): boolean {
+  const state = (part as { state?: string }).state
+  const toolCallId = (part as { toolCallId?: string }).toolCallId
+  if (!toolCallId) return false
+  if (
+    (part.type === 'tool-permission' || part.type === 'tool-ask_user') &&
+    state === 'approval-requested'
+  ) {
+    return true
+  }
+  if (part.type === 'tool-AskUserQuestion' && state === 'input-available') {
+    return true
+  }
+  return false
+}
+
 export function useDerivedGate(sessionId: string): DerivedGatePayload | null {
   const { messages } = useMessagesCollection(sessionId)
 
@@ -35,18 +60,15 @@ export function useDerivedGate(sessionId: string): DerivedGatePayload | null {
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i]
       for (const part of (msg.parts as SessionMessagePart[] | undefined) ?? []) {
-        const state = (part as { state?: string }).state
-        const toolCallId = (part as { toolCallId?: string }).toolCallId
-        if (
-          (part.type === 'tool-permission' || part.type === 'tool-ask_user') &&
-          state === 'approval-requested' &&
-          toolCallId
-        ) {
-          return {
-            id: toolCallId,
-            type: part.type === 'tool-permission' ? 'permission_request' : 'ask_user',
-            part,
-          }
+        if (!isPendingGatePart(part)) continue
+        const toolCallId = (part as { toolCallId?: string }).toolCallId as string
+        // Both `tool-ask_user` (legacy) and `tool-AskUserQuestion` (SDK-native)
+        // collapse to the `ask_user` resolver type — only `tool-permission`
+        // is the permission gate.
+        return {
+          id: toolCallId,
+          type: part.type === 'tool-permission' ? 'permission_request' : 'ask_user',
+          part,
         }
       }
     }

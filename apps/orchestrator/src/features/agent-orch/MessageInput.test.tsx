@@ -298,7 +298,16 @@ describe('MessageInput force-stop escalation (state-driven relabel)', () => {
     }
   })
 
-  it('clears the relabel timer when status leaves the busy set (normal interrupt path)', () => {
+  it('keeps the relabel timer running when status flickers off mid-window (sticky escalation)', () => {
+    // Pre-fix: this test asserted the OPPOSITE — that an `idle` status
+    // flip cancelled the relabel timer. That codified the bug: the
+    // moment `interrupt()` cleared a pending gate part, useDerivedStatus
+    // dropped out of `waiting_gate` (~150ms after click) and the
+    // cleanup useEffect tore down `interruptSentAt` before the relabel
+    // setTimeout ever fired. Result: the user could never reach the
+    // force-stop button on a wedged session. The fix makes the
+    // post-click window sticky for FORCE_STOP_WINDOW_MS regardless of
+    // status flicker, so the relabel always gets to run.
     vi.useFakeTimers()
     try {
       const onInterrupt = vi.fn()
@@ -316,7 +325,8 @@ describe('MessageInput force-stop escalation (state-driven relabel)', () => {
       act(() => {
         submit.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
       })
-      // Status flips back to idle before the window closes.
+      // Status flips back to idle right after the click — exactly the
+      // mid-flight transition that used to cancel the relabel.
       rerender(
         <MessageInput
           onSend={vi.fn()}
@@ -325,12 +335,79 @@ describe('MessageInput force-stop escalation (state-driven relabel)', () => {
           onForceStop={onForceStop}
         />,
       )
-      act(() => {
-        vi.advanceTimersByTime(10_000)
-      })
 
-      // No force-stop affordance — session successfully interrupted.
+      // Cross the relabel threshold. Button must still be present
+      // AND carry the force-stop affordance because the sticky window
+      // outlasts the status flip.
+      act(() => {
+        vi.advanceTimersByTime(3_001)
+      })
+      expect(submit.getAttribute('data-status')).toBe('streaming')
+      expect(submit.getAttribute('data-force-stop')).toBe('true')
+      expect(submit.getAttribute('title')).toMatch(/Force stop/i)
+
+      // Past the full window the button auto-hides — a successful
+      // interrupt eventually produces a clean idle composer.
+      act(() => {
+        vi.advanceTimersByTime(3_001)
+      })
+      expect(submit.getAttribute('data-status')).toBe('')
       expect(submit.getAttribute('data-force-stop')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('renders the Stop button when hasPendingGate is true even with status=idle (wedged-from-idle)', () => {
+    // Wedged-from-idle: runner died with a `tool-AskUserQuestion`
+    // still `input-available`, D1 status flipped to `idle`, but the
+    // gate part is still on screen. AgentDetailView passes
+    // hasPendingGate=true via useDerivedGate so the user can dismiss
+    // the stuck modal from the composer instead of being trapped.
+    const onInterrupt = vi.fn()
+    render(<MessageInput onSend={vi.fn()} status="idle" hasPendingGate onInterrupt={onInterrupt} />)
+    const submit = screen.getByTestId('prompt-input-submit')
+    expect(submit.getAttribute('data-status')).toBe('streaming')
+    expect(submit.getAttribute('data-has-onstop')).toBe('true')
+    expect(submit.getAttribute('aria-label')).toBe('Stop')
+
+    submit.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    expect(onInterrupt).toHaveBeenCalledTimes(1)
+  })
+
+  it('escalates to force-stop on a wedged-from-idle gate after the relabel window', () => {
+    // Same wedged-from-idle case, plus the user click + 3s wait. This
+    // is the canonical "Stop button does nothing, please give me a
+    // bigger hammer" flow the fix exists for.
+    vi.useFakeTimers()
+    try {
+      const onInterrupt = vi.fn()
+      const onForceStop = vi.fn()
+      render(
+        <MessageInput
+          onSend={vi.fn()}
+          status="idle"
+          hasPendingGate
+          onInterrupt={onInterrupt}
+          onForceStop={onForceStop}
+        />,
+      )
+      const submit = screen.getByTestId('prompt-input-submit')
+
+      act(() => {
+        submit.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+      })
+      expect(onInterrupt).toHaveBeenCalledTimes(1)
+
+      act(() => {
+        vi.advanceTimersByTime(3_001)
+      })
+      expect(submit.getAttribute('data-force-stop')).toBe('true')
+
+      act(() => {
+        submit.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+      })
+      expect(onForceStop).toHaveBeenCalledTimes(1)
     } finally {
       vi.useRealTimers()
     }

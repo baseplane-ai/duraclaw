@@ -9,6 +9,7 @@ import { StatusBar } from '~/components/status-bar'
 import { VisibilityBadge } from '~/components/visibility-badge'
 import { type BranchInfoRow, createBranchInfoCollection } from '~/db/branch-info-collection'
 import { projectsCollection } from '~/db/projects-collection'
+import { useDerivedGate } from '~/hooks/use-derived-gate'
 import { useDerivedStatus } from '~/hooks/use-derived-status'
 import { useSession } from '~/hooks/use-sessions-collection'
 import { useSession as useAuthSession } from '~/lib/auth-client'
@@ -115,6 +116,14 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
   const status =
     useDerivedStatus(sessionId) ?? (session?.status as SessionStatus | undefined) ?? 'idle'
 
+  // GH (force-stop fix): the Stop button must remain reachable when a gate
+  // part is pending in messages even if `status` has flipped to `idle` —
+  // e.g. wedged-from-idle, where the runner died but `tool-AskUserQuestion`
+  // is still sitting `input-available`. `useDerivedGate` covers all three
+  // gate-part shapes (legacy + SDK-native), so coercing its truthy result
+  // into a boolean is enough to keep the composer in "interruptible" mode.
+  const hasPendingGate = Boolean(useDerivedGate(sessionId))
+
   // Draft key scopes localStorage drafts. Tabs ARE sessions (userTabsCollection
   // rows keyed by sessionId), so use sessionId directly — no separate tab ID.
   const draftKey = sessionId
@@ -198,6 +207,7 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
         // inside MessageInput.
         disabled={false}
         status={status}
+        hasPendingGate={hasPendingGate}
         onInterrupt={interrupt}
         onForceStop={forceStop}
         draftKey={draftKey}

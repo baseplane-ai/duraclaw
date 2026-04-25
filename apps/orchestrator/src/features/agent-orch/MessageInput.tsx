@@ -82,6 +82,17 @@ interface MessageInputProps {
    */
   onForceStop?: (reason?: string) => void
   /**
+   * True when the messages collection has at least one pending gate
+   * part (`tool-permission` / `tool-ask_user` / `tool-AskUserQuestion`
+   * still in approval-requested / input-available). Drives the Stop
+   * button into the visible-and-actionable state even when the
+   * derived session status has slipped to `idle` / `error` (e.g. the
+   * runner died with a gate still on screen). Without this, the user
+   * sees a stale GateResolver but no way to dismiss it from the
+   * composer. Computed in AgentDetailView via useDerivedGate.
+   */
+  hasPendingGate?: boolean
+  /**
    * Optional tab id — kept for parity with the previous per-tab draft
    * API. Drafts now live in the shared Y.Text on SessionCollabDO, so this
    * key only scopes the local `PromptInputProvider` (no DO round-trip).
@@ -99,6 +110,7 @@ export function MessageInput({
   status,
   onInterrupt,
   onForceStop,
+  hasPendingGate,
   draftKey,
 }: MessageInputProps) {
   const [images, setImages] = useState<ImagePreview[]>([])
@@ -312,6 +324,7 @@ export function MessageInput({
             status={status}
             onInterrupt={onInterrupt}
             onForceStop={onForceStop}
+            hasPendingGate={hasPendingGate}
           />
         </PromptInputFooter>
       </PromptInput>
@@ -328,6 +341,7 @@ interface ComposerActionsProps {
   status?: SessionStatus
   onInterrupt?: () => void
   onForceStop?: (reason?: string) => void
+  hasPendingGate?: boolean
 }
 
 /**
@@ -338,6 +352,22 @@ interface ComposerActionsProps {
  * unrescuable. Exported for testability.
  */
 export const FORCE_STOP_RELABEL_MS = 3_000
+
+/**
+ * Total time the button stays visible after a Stop click, regardless
+ * of whether the derived status has flipped. Pre-fix the button was
+ * unmounted the moment status left the busy set — which fires within
+ * ~150ms because `interrupt()` clears pending gate parts and the
+ * messages-derived status drops out of `waiting_gate` before the
+ * runner has actually settled. With the window stickier than the
+ * status flicker, the relabel timer at FORCE_STOP_RELABEL_MS can
+ * always run to completion and the user gets the escalation lever
+ * they need. After this window we tear down `interruptSentAt` and
+ * the button hides if the underlying status is no longer busy — so
+ * a successful interrupt still produces a clean idle composer in
+ * about twice the previous wait.
+ */
+const FORCE_STOP_WINDOW_MS = 2 * FORCE_STOP_RELABEL_MS
 
 /**
  * Renders the combined send/interrupt button inside the prompt input
@@ -369,6 +399,7 @@ function ComposerActions({
   status,
   onInterrupt,
   onForceStop,
+  hasPendingGate,
 }: ComposerActionsProps) {
   const controller = usePromptInputController()
   // Perf: track only the 0↔non-empty transition of the shared draft, not
@@ -400,31 +431,53 @@ function ComposerActions({
   // in-flight for input disabling — user shouldn't be able to submit
   // another turn before the first event lands. `error` is terminal, so
   // the input re-enables.
-  const isRunning = status === 'running' || status === 'waiting_gate' || status === 'pending'
+  // `hasPendingGate` widens the busy set: when a gate part is still
+  // rendering in the transcript but the derived status has slipped
+  // (idle / error / waiting_input / waiting_permission — the wedged-
+  // gate case the user keeps hitting), the Stop button must still
+  // render so the user can dismiss the stuck modal from the composer.
+  const isRunning =
+    status === 'running' ||
+    status === 'waiting_gate' ||
+    status === 'pending' ||
+    Boolean(hasPendingGate)
 
-  // Status left the busy set → clear the interrupt timer so the next
-  // busy spin starts from zero.
-  useEffect(() => {
-    if (!isRunning && interruptSentAt !== null) {
-      setInterruptSentAt(null)
-    }
-  }, [isRunning, interruptSentAt])
-
-  // While an interrupt is pending, tick once at the relabel threshold so
-  // the button visibly flips without waiting for another unrelated
-  // render. Single timer, cleaned up on unmount / state change.
+  // Sticky escalation window: once the user clicks Stop, we keep
+  // `interruptSentAt` populated for FORCE_STOP_WINDOW_MS regardless
+  // of whether the derived status flips out of the busy set. Pre-fix
+  // an early-reset useEffect tore the timer down the moment
+  // `!isRunning` (which fires ~150ms after click because
+  // `clearPendingGateParts` flips the gate part to output-denied and
+  // useDerivedStatus drops out of `waiting_gate` before the runner
+  // has actually settled). The relabel `setTimeout` was being
+  // cancelled before it ever got to fire. The single timer below
+  // does both jobs: tick at FORCE_STOP_RELABEL_MS so the button
+  // visibly relabels, and auto-clear at FORCE_STOP_WINDOW_MS so a
+  // genuinely successful interrupt eventually hides the button.
   useEffect(() => {
     if (interruptSentAt === null) return
     const elapsed = Date.now() - interruptSentAt
-    const remaining = FORCE_STOP_RELABEL_MS - elapsed
-    if (remaining <= 0) return
-    const t = setTimeout(() => setTick((n) => n + 1), remaining)
-    return () => clearTimeout(t)
+    const tickIn = FORCE_STOP_RELABEL_MS - elapsed
+    const clearIn = FORCE_STOP_WINDOW_MS - elapsed
+    if (clearIn <= 0) {
+      setInterruptSentAt(null)
+      return
+    }
+    const tickTimer = tickIn > 0 ? setTimeout(() => setTick((n) => n + 1), tickIn) : undefined
+    const clearTimer = setTimeout(() => setInterruptSentAt(null), clearIn)
+    return () => {
+      if (tickTimer !== undefined) clearTimeout(tickTimer)
+      clearTimeout(clearTimer)
+    }
   }, [interruptSentAt])
 
   const controllerText = controller.textInput.value
   const hasText = ytext ? !isDraftEmpty : controllerText.trim().length > 0
-  const showInterrupt = isRunning && !hasText && Boolean(onInterrupt)
+  // Sticky button: keep visible during the post-click escalation window
+  // even if status flickers out of busy. Outside that window, fall
+  // back to the live status / pending-gate signal.
+  const inInterruptWindow = interruptSentAt !== null
+  const showInterrupt = (isRunning || inInterruptWindow) && !hasText && Boolean(onInterrupt)
 
   const showForceStop =
     showInterrupt &&
