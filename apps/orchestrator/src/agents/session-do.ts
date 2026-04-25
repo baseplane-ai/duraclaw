@@ -48,6 +48,7 @@ import {
   applyToolResult,
   assistantContentToParts,
   finalizeStreamingParts,
+  isAssistantContentEmpty,
   mergeFinalAssistantParts,
   partialAssistantToParts,
   upsertParts,
@@ -61,6 +62,7 @@ import {
   finalizeResultTurn,
   findPendingGatePart,
   getGatewayConnectionId,
+  isPendingGatePart,
   loadTurnState,
   planAwaitingTimeout,
   planClearAwaiting,
@@ -117,7 +119,7 @@ export interface SessionMeta {
    * watchdog reads this; when `Date.now() >= at` and no live runner is
    * attached, the DO calls `triggerGatewayDial({type:'resume', ...})`
    * exactly once and clears the field. Persisted as JSON in
-   * `session_meta.pending_resume_json` (migration v17); explicitly
+   * `session_meta.pending_resume_json` (migration v18); explicitly
    * nullable because the column can be NULL.
    */
   pendingResume?: { kind: 'rotation'; at: number } | null
@@ -230,6 +232,16 @@ function parseTurnOrdinal(id?: string): number | undefined {
   return m ? Number.parseInt(m[1], 10) : undefined
 }
 
+/**
+ * Runaway-turn guard threshold. When the SDK emits this many consecutive
+ * `assistant` events whose content is "effectively empty" (no tool_use and
+ * only whitespace / ZWS text), the DO interrupts the runner and flips the
+ * session to idle with a visible system-error message. See prod incident
+ * 2026-04-24, session `sess-ffca0374-...`, where the model emitted 500+
+ * single-U+200B assistant turns before a human interrupted it.
+ */
+const RUNAWAY_EMPTY_TURN_THRESHOLD = 10
+
 // Stale threshold is resolved per-alarm via resolveStaleThresholdMs(env) so
 // config changes take effect on the next DO wake without a code change.
 // Default is 90s — see DEFAULT_STALE_THRESHOLD_MS in session-do-helpers.
@@ -239,6 +251,15 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   private session!: Session
   private turnCounter = 0
   private currentTurnMessageId: string | null = null
+  /**
+   * Count of consecutive "effectively empty" assistant turns observed on this
+   * DO instance. Reset on any substantive assistant content. When it reaches
+   * `RUNAWAY_EMPTY_TURN_THRESHOLD`, the `case 'assistant'` handler interrupts
+   * the runner and surfaces a system error. Memory-only — no need to persist
+   * across rehydrate since the counter is meaningful only within a live SDK
+   * turn loop.
+   */
+  private consecutiveEmptyAssistantTurns = 0
   /** Cached gateway connection ID — avoids SQLite reads on every message. */
   private cachedGatewayConnId: string | null = null
   /** Timestamp of the last gateway event received on the WS connection. */
@@ -294,10 +315,58 @@ export class SessionDO extends Agent<Env, SessionMeta> {
    */
   private featureFlagCache = new Map<string, { enabled: boolean; expiresAt: number }>()
 
+  // ── Event log (migration v17) ─────────────────────────────────
+
+  /** 7-day retention for event_log rows. */
+  private static readonly EVENT_LOG_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+
+  /**
+   * Persist a structured log event to SQLite + mirror to console for
+   * wrangler tail. Every `[gate]` / `[conn]` / `[rpc]` log should flow
+   * through here so the event is durable and queryable via `getEventLog`.
+   */
+  private logEvent(
+    level: 'info' | 'warn' | 'error',
+    tag: string,
+    message: string,
+    attrs?: Record<string, unknown>,
+  ) {
+    const ts = Date.now()
+    try {
+      this.ctx.storage.sql.exec(
+        'INSERT INTO event_log (ts, level, tag, message, attrs) VALUES (?, ?, ?, ?, ?)',
+        ts,
+        level,
+        tag,
+        message,
+        attrs ? JSON.stringify(attrs) : null,
+      )
+    } catch {
+      // Best-effort — never crash the DO for a log write.
+    }
+    const line = `[${tag}] ${message}`
+    if (level === 'error') console.error(line)
+    else if (level === 'warn') console.warn(line)
+    else console.log(line)
+  }
+
+  /** Delete event_log rows older than the retention window. */
+  private gcEventLog() {
+    try {
+      const cutoff = Date.now() - SessionDO.EVENT_LOG_RETENTION_MS
+      this.ctx.storage.sql.exec('DELETE FROM event_log WHERE ts < ?', cutoff)
+    } catch {
+      // Best-effort — never fatal on cold start.
+    }
+  }
+
   // ── Lifecycle ──────────────────────────────────────────────────
 
   async onStart() {
     runMigrations(this.ctx.storage.sql, SESSION_DO_MIGRATIONS)
+
+    // Trim event_log rows older than 7 days on every cold start.
+    this.gcEventLog()
 
     // Rehydrate per-session monotonic seq from typed session_meta (B1). The
     // v6 migration INSERT OR IGNOREs row id=1 so the `?? 0` is belt-and-
@@ -3177,74 +3246,57 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     const vapidPublicKey = this.env.VAPID_PUBLIC_KEY
     const vapidPrivateKey = this.env.VAPID_PRIVATE_KEY
     const vapidSubject = this.env.VAPID_SUBJECT
-    if (!vapidPublicKey || !vapidPrivateKey || !vapidSubject) {
-      console.log(`${tag} VAPID not configured — skipping`)
-      return
-    }
 
-    // Check user preferences cascade
-    try {
-      const prefs = await this.env.AUTH_DB.prepare(
-        'SELECT key, value FROM user_preferences WHERE user_id = ? AND key LIKE ?',
-      )
-        .bind(userId, 'push.%')
-        .all<{ key: string; value: string }>()
+    // TODO: add push preference columns to user_preferences schema
+    // (push.enabled, push.blocked, push.completed, push.error were never
+    // migrated from the legacy KV shape to the columnar table — the old
+    // query against key/value columns always threw. For now, treat all
+    // push events as opt-in.)
 
-      const prefMap = new Map(prefs.results.map((r) => [r.key, r.value]))
-
-      // Master toggle
-      if (prefMap.get('push.enabled') === 'false') {
-        console.log(`${tag} push.enabled=false — skipping`)
-        return
+    // Web push fan-out (VAPID-based)
+    if (vapidPublicKey && vapidPrivateKey && vapidSubject) {
+      let subscriptions: Array<{ id: string; endpoint: string; p256dh: string; auth: string }>
+      try {
+        const result = await this.env.AUTH_DB.prepare(
+          'SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ?',
+        )
+          .bind(userId)
+          .all<{ id: string; endpoint: string; p256dh: string; auth: string }>()
+        subscriptions = result.results
+      } catch (err) {
+        console.error(`${tag} subscription lookup failed:`, err)
+        subscriptions = []
       }
 
-      // Event-specific toggle
-      const prefKey = `push.${eventType}`
-      if (prefMap.get(prefKey) === 'false') {
-        console.log(`${tag} ${prefKey}=false — skipping`)
-        return
+      console.log(`${tag} ${subscriptions.length} web push subscription(s)`)
+
+      const vapid = {
+        publicKey: vapidPublicKey,
+        privateKey: vapidPrivateKey,
+        subject: vapidSubject,
       }
-    } catch (err) {
-      console.error(`${tag} preference lookup failed (continuing as opt-in):`, err)
-    }
 
-    // Fetch subscriptions
-    let subscriptions: Array<{ id: string; endpoint: string; p256dh: string; auth: string }>
-    try {
-      const result = await this.env.AUTH_DB.prepare(
-        'SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ?',
-      )
-        .bind(userId)
-        .all<{ id: string; endpoint: string; p256dh: string; auth: string }>()
-      subscriptions = result.results
-    } catch (err) {
-      console.error(`${tag} subscription lookup failed:`, err)
-      return
-    }
-
-    console.log(`${tag} ${subscriptions.length} subscription(s)`)
-    if (subscriptions.length === 0) return
-
-    const vapid = { publicKey: vapidPublicKey, privateKey: vapidPrivateKey, subject: vapidSubject }
-
-    // Send to all subscriptions (best-effort, no retry)
-    for (const sub of subscriptions) {
-      const endpointSummary = sub.endpoint.slice(0, 60)
-      const result = await sendPushNotification(sub, payload, vapid)
-      console.log(
-        `${tag} send sub=${sub.id} endpoint=${endpointSummary}... ok=${result.ok} status=${result.status ?? 'n/a'} gone=${Boolean(result.gone)}`,
-      )
-      if (result.gone) {
-        // 410 Gone — delete stale subscription
-        try {
-          await this.env.AUTH_DB.prepare('DELETE FROM push_subscriptions WHERE id = ?')
-            .bind(sub.id)
-            .run()
-          console.log(`${tag} deleted stale subscription ${sub.id}`)
-        } catch (err) {
-          console.error(`${tag} failed to delete stale subscription ${sub.id}:`, err)
+      // Send to all subscriptions (best-effort, no retry)
+      for (const sub of subscriptions) {
+        const endpointSummary = sub.endpoint.slice(0, 60)
+        const result = await sendPushNotification(sub, payload, vapid)
+        console.log(
+          `${tag} send sub=${sub.id} endpoint=${endpointSummary}... ok=${result.ok} status=${result.status ?? 'n/a'} gone=${Boolean(result.gone)}`,
+        )
+        if (result.gone) {
+          // 410 Gone — delete stale subscription
+          try {
+            await this.env.AUTH_DB.prepare('DELETE FROM push_subscriptions WHERE id = ?')
+              .bind(sub.id)
+              .run()
+            console.log(`${tag} deleted stale subscription ${sub.id}`)
+          } catch (err) {
+            console.error(`${tag} failed to delete stale subscription ${sub.id}:`, err)
+          }
         }
       }
+    } else {
+      console.log(`${tag} VAPID not configured — skipping web push`)
     }
 
     // FCM fan-out (Capacitor Android shell). Reads `FCM_SERVICE_ACCOUNT_JSON`
@@ -3649,6 +3701,22 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     gateId: string,
     response: GateResponse,
   ): Promise<{ ok: boolean; error?: string }> {
+    const resolveStartedAt = Date.now()
+    const responseShape = {
+      hasAnswer: response.answer !== undefined,
+      hasAnswers: response.answers !== undefined,
+      answersCount: Array.isArray(response.answers) ? response.answers.length : null,
+      hasApproved: response.approved !== undefined,
+      approved: response.approved ?? null,
+      declined: response.declined ?? null,
+    }
+    this.logEvent('info', 'gate', `resolveGate entered gateId=${gateId}`, {
+      doId: this.ctx.id.toString(),
+      sessionId: this.state.session_id ?? '?',
+      gateId,
+      ...responseShape,
+    })
+
     // Relaxed: accept resolveGate in any status. The CLI terminal may have
     // already resolved the tool (advancing status to 'running'), but the web
     // UI still has the GateResolver mounted. Rejecting here just blocks the
@@ -3659,18 +3727,42 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // Look up the pending gate part directly from history (#76 P3 —
     // scalar state.gate removed; messages are the sole source of truth).
     const match = findPendingGatePart(this.session.getHistory(), gateId)
-    const gate: { id: string; type: 'ask_user' | 'permission_request' } | null = match
-      ? { id: gateId, type: match.type }
-      : null
-
-    if (!gate) {
+    if (!match) {
+      this.logEvent(
+        'warn',
+        'gate',
+        `resolveGate not_found gateId=${gateId} duration_ms=${Date.now() - resolveStartedAt}`,
+        {
+          gateId,
+          sessionId: this.state.session_id ?? '?',
+          durationMs: Date.now() - resolveStartedAt,
+        },
+      )
       return {
         ok: false,
         error: `Gate '${gateId}' not found (no pending part in history)`,
       }
     }
+    const gate: { id: string; type: 'ask_user' | 'permission_request' } = {
+      id: gateId,
+      type: match.type,
+    }
+    this.logEvent('info', 'gate', `resolveGate match found gateId=${gateId} type=${match.type}`, {
+      gateId,
+      type: match.type,
+      sessionId: this.state.session_id ?? '?',
+    })
 
     if (gate.type === 'permission_request' && response.approved !== undefined) {
+      this.logEvent(
+        'info',
+        'gate',
+        `resolveGate sending permission-response gateId=${gateId} allowed=${response.approved}`,
+        {
+          gateId,
+          allowed: response.approved,
+        },
+      )
       this.sendToGateway({
         type: 'permission-response',
         session_id: this.state.session_id ?? '',
@@ -3678,28 +3770,107 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         allowed: response.approved,
       })
     } else if (gate.type === 'ask_user') {
-      let flatAnswer: string | undefined
-      if (response.declined === true) {
-        // User dismissed the question by typing a new message. Feed the
-        // SDK a placeholder tool-result so its pending AskUserQuestion
-        // callback completes and the runner unblocks to accept the next
-        // stream-input turn.
-        flatAnswer = '[User declined to answer. See subsequent message for next instruction.]'
-      } else if (response.answers !== undefined) {
-        flatAnswer = this.flattenStructuredAnswers(response.answers)
-      } else if (response.answer !== undefined) {
-        flatAnswer = response.answer
+      // Build a question-keyed answer record. The SDK's AskUserQuestion
+      // tool serializes results as `User has answered your questions:
+      // "<questionText>"="<answer>", ...` — so the key MUST be the full
+      // question text (input.questions[i].question, not header).
+      const partInput = (match.part as { input?: { questions?: unknown } }).input
+      const rawQuestions = Array.isArray(partInput?.questions) ? partInput.questions : []
+      const questions = rawQuestions as Array<{ question?: string; header?: string }>
+      const declinedPlaceholder =
+        '[User declined to answer. See subsequent message for next instruction.]'
+
+      const buildPerQuestionValue = (i: number): string => {
+        if (response.declined === true) return declinedPlaceholder
+        if (response.answers !== undefined) {
+          const a = response.answers[i]
+          if (!a) return ''
+          return this.flattenStructuredAnswers([a])
+        }
+        if (response.answer !== undefined) {
+          // Legacy single-string path: apply to the first question only;
+          // subsequent questions get empty strings.
+          return i === 0 ? response.answer : ''
+        }
+        return ''
       }
-      if (flatAnswer === undefined) {
-        return { ok: false, error: 'Invalid response for gate type' }
+
+      let answersRecord: Record<string, string>
+      if (questions.length === 0) {
+        // Legacy / SDK-native fallback: no `input.questions` array. Pick a
+        // single key from anywhere reasonable on the part, falling back to
+        // the literal 'question' so the answer string isn't lost.
+        const partAny = match.part as {
+          input?: { question?: string }
+        }
+        const fallbackKey =
+          (typeof partAny.input?.question === 'string' && partAny.input.question.trim()) ||
+          'question'
+        let value: string
+        if (response.declined === true) value = declinedPlaceholder
+        else if (response.answers !== undefined)
+          value = this.flattenStructuredAnswers(response.answers)
+        else if (response.answer !== undefined) value = response.answer
+        else {
+          return { ok: false, error: 'Invalid response for gate type' }
+        }
+        console.warn(
+          `[SessionDO:${this.ctx.id}] resolveGate: ask_user part missing input.questions, falling back to single-key '${fallbackKey}'`,
+        )
+        answersRecord = { [fallbackKey]: value }
+      } else {
+        // Validate that we have a usable response for at least one branch.
+        if (
+          response.declined !== true &&
+          response.answers === undefined &&
+          response.answer === undefined
+        ) {
+          return { ok: false, error: 'Invalid response for gate type' }
+        }
+        answersRecord = {}
+        for (let i = 0; i < questions.length; i++) {
+          const q = questions[i]
+          const key =
+            (typeof q?.question === 'string' && q.question.trim()) ||
+            (typeof q?.header === 'string' && q.header.trim()) ||
+            `question_${i}`
+          answersRecord[key] = buildPerQuestionValue(i)
+        }
       }
+
+      const answerKeys = Object.keys(answersRecord)
+      const answerKeySamples = answerKeys.map((k) => k.slice(0, 60))
+      const answerLengths = answerKeys.map((k) => answersRecord[k]?.length ?? 0)
+      const totalAnswerChars = answerLengths.reduce((acc, n) => acc + n, 0)
+      this.logEvent(
+        'info',
+        'gate',
+        `resolveGate sending answer gateId=${gateId} answers_keys=${answerKeys.length} total_chars=${totalAnswerChars}`,
+        {
+          gateId,
+          answersKeys: answerKeys.length,
+          totalChars: totalAnswerChars,
+          keySamples: answerKeySamples,
+          valueLengths: answerLengths,
+        },
+      )
       this.sendToGateway({
         type: 'answer',
         session_id: this.state.session_id ?? '',
         tool_call_id: gateId,
-        answers: { answer: flatAnswer },
+        answers: answersRecord,
       })
     } else {
+      this.logEvent(
+        'warn',
+        'gate',
+        `resolveGate invalid_response gateId=${gateId} type=${gate.type}`,
+        {
+          gateId,
+          type: gate.type,
+          ...responseShape,
+        },
+      )
       return { ok: false, error: 'Invalid response for gate type' }
     }
 
@@ -3767,8 +3938,15 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       // but we couldn't find the message part to flip its state. The UI
       // gate will stay visible until the next message broadcast refreshes
       // the part. Return an error so the client can surface it.
-      console.error(
-        `[SessionDO:${this.ctx.id}] resolveGate: no message part found for toolCallId '${gateId}' — answer sent to agent but UI not updated`,
+      this.logEvent(
+        'error',
+        'gate',
+        `resolveGate no_message_part gateId=${gateId} duration_ms=${Date.now() - resolveStartedAt} — answer sent but UI not updated`,
+        {
+          gateId,
+          sessionId: this.state.session_id ?? '?',
+          durationMs: Date.now() - resolveStartedAt,
+        },
       )
       return {
         ok: false,
@@ -3776,6 +3954,16 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
       }
     }
 
+    this.logEvent(
+      'info',
+      'gate',
+      `resolveGate ok gateId=${gateId} duration_ms=${Date.now() - resolveStartedAt}`,
+      {
+        gateId,
+        sessionId: this.state.session_id ?? '?',
+        durationMs: Date.now() - resolveStartedAt,
+      },
+    )
     this.updateState({ status: 'running' })
     // Mirror the status flip into D1 so `sessionsCollection.status` (and
     // the "Needs Attention" chip fed by it when `useDerivedStatus` yields
@@ -3786,6 +3974,50 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     // stuck amber chip after approve/deny.
     this.syncStatusToD1(new Date().toISOString())
     return { ok: true }
+  }
+
+  /**
+   * Query the durable event_log table (migration v17). Useful for
+   * historical playback of gate lifecycle, connection events, etc.
+   * Returns rows oldest-first for chronological replay.
+   */
+  @callable()
+  async getEventLog(opts?: { tag?: string; sinceTs?: number; limit?: number }): Promise<
+    Array<{
+      seq: number
+      ts: number
+      level: string
+      tag: string
+      message: string
+      attrs: string | null
+    }>
+  > {
+    const limit = Math.min(opts?.limit ?? 1000, 10_000)
+    const sinceTs = opts?.sinceTs ?? 0
+    try {
+      if (opts?.tag) {
+        const rows = this.sql<{
+          seq: number
+          ts: number
+          level: string
+          tag: string
+          message: string
+          attrs: string | null
+        }>`SELECT seq, ts, level, tag, message, attrs FROM event_log WHERE tag = ${opts.tag} AND ts >= ${sinceTs} ORDER BY seq DESC LIMIT ${limit}`
+        return [...rows].reverse()
+      }
+      const rows = this.sql<{
+        seq: number
+        ts: number
+        level: string
+        tag: string
+        message: string
+        attrs: string | null
+      }>`SELECT seq, ts, level, tag, message, attrs FROM event_log WHERE ts >= ${sinceTs} ORDER BY seq DESC LIMIT ${limit}`
+      return [...rows].reverse()
+    } catch {
+      return []
+    }
   }
 
   @callable()
@@ -4097,27 +4329,30 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     }
 
     // Release ALL pending gate parts. The UI may be rendering a
-    // GateResolver for any tool_call_id with approval-requested state.
-    // Flipping every approval-requested gate part to 'output-denied'
-    // guarantees the UI clears its GateResolver(s) when the user hits
-    // interrupt. The subsequent `interrupt` command to the runner aborts
-    // the SDK's in-flight canUseTool promise — no per-gate cancel
-    // command exists, so we rely on the SDK interrupt to release the
-    // pending answer/permission wait.
+    // GateResolver for any tool_call_id whose part is in a pending-gate
+    // state. Three shapes count as pending here, mirroring
+    // `isPendingGatePart` / `findPendingGatePart` / client-side
+    // `isPendingGate`:
+    //   - `tool-ask_user` + `approval-requested` (DO-promoted ask_user)
+    //   - `tool-permission` + `approval-requested` (canUseTool gate)
+    //   - `tool-AskUserQuestion` + `input-available` (SDK-native shape;
+    //     post `1f6678e` ask_user gates land here and are no longer
+    //     promoted to `tool-ask_user`).
+    // Flipping every pending gate part to 'output-denied' guarantees the
+    // UI clears its GateResolver(s) when the user hits interrupt — the
+    // client's `isPendingGate` predicate requires `input-available` or
+    // `approval-requested`, neither of which matches `output-denied`. The
+    // subsequent `interrupt` command to the runner aborts the SDK's
+    // in-flight canUseTool promise — no per-gate cancel command exists,
+    // so we rely on the SDK interrupt to release the pending
+    // answer/permission wait.
     const history = this.session.getHistory()
     for (let i = history.length - 1; i >= 0; i--) {
       const msg = history[i]
-      const hasPendingGate = msg.parts.some(
-        (p) =>
-          p.state === 'approval-requested' &&
-          (p.type === 'tool-ask_user' || p.type === 'tool-permission'),
-      )
+      const hasPendingGate = msg.parts.some(isPendingGatePart)
       if (!hasPendingGate) continue
       const updatedParts = msg.parts.map((p) =>
-        p.state === 'approval-requested' &&
-        (p.type === 'tool-ask_user' || p.type === 'tool-permission')
-          ? { ...p, state: 'output-denied' as const, output: 'Interrupted' }
-          : p,
+        isPendingGatePart(p) ? { ...p, state: 'output-denied' as const, output: 'Interrupted' } : p,
       )
       const updatedMsg: SessionMessage = { ...msg, parts: updatedParts }
       try {
@@ -4676,6 +4911,57 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
 
       case 'assistant': {
         this.clearAwaitingResponse()
+
+        // Runaway-turn guard: detect the "empty assistant loop" failure mode
+        // (prod incident 2026-04-24 — 500+ single-ZWS turns). Increment the
+        // counter on effectively-empty content; reset on any substantive
+        // turn. When the threshold fires, interrupt the runner, append a
+        // visible system error, flip to idle, and skip further persistence
+        // for this empty event so we don't spam the transcript with one more
+        // blank bubble before stopping.
+        if (isAssistantContentEmpty(event.content as unknown[])) {
+          this.consecutiveEmptyAssistantTurns++
+          if (this.consecutiveEmptyAssistantTurns >= RUNAWAY_EMPTY_TURN_THRESHOLD) {
+            console.warn('[session-do] runaway empty-assistant-turn loop detected', {
+              sessionId: this.state.session_id,
+              consecutive: this.consecutiveEmptyAssistantTurns,
+            })
+            this.sendToGateway({
+              type: 'interrupt',
+              session_id: this.state.session_id ?? '',
+            })
+            this.turnCounter++
+            const errorMsgId = `err-${this.turnCounter}`
+            const errorMsg: SessionMessage = {
+              id: errorMsgId,
+              role: 'system',
+              parts: [
+                {
+                  type: 'text',
+                  text: '⚠ Session auto-stopped: detected repeated empty assistant turns (model runaway).',
+                },
+              ],
+              createdAt: new Date(),
+            }
+            try {
+              this.safeAppendMessage(errorMsg)
+              this.broadcastMessage(errorMsg)
+            } catch (err) {
+              console.error('[session-do] runaway-guard persist failed', err)
+            }
+            this.updateState({
+              status: 'idle',
+              error: 'runaway_empty_assistant_turns',
+            })
+            this.consecutiveEmptyAssistantTurns = 0
+            this.currentTurnMessageId = null
+            this.persistTurnState()
+            break
+          }
+        } else {
+          this.consecutiveEmptyAssistantTurns = 0
+        }
+
         // Final assistant message — finalize streaming parts with final content
         const newParts = assistantContentToParts(event.content as unknown[])
         const msgId = this.currentTurnMessageId ?? `msg-${this.turnCounter}`
@@ -4746,6 +5032,30 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         // state is the single writer now; resolveGate → tool_result
         // advances it monotonically.
 
+        const askedQuestions = Array.isArray(event.questions) ? event.questions : []
+        const askedSummary = askedQuestions.map((q, idx) => {
+          const qq = q as Record<string, unknown>
+          return {
+            idx,
+            header: typeof qq?.header === 'string' ? (qq.header as string).slice(0, 80) : null,
+            questionLen: typeof qq?.question === 'string' ? (qq.question as string).length : null,
+            optionsCount: Array.isArray(qq?.options) ? (qq.options as unknown[]).length : null,
+            multiSelect: typeof qq?.multiSelect === 'boolean' ? qq.multiSelect : null,
+          }
+        })
+        this.logEvent(
+          'info',
+          'gate',
+          `ask_user received toolCallId=${event.tool_call_id} questions_count=${askedQuestions.length}`,
+          {
+            doId: this.ctx.id.toString(),
+            sessionId: this.state.session_id,
+            toolCallId: event.tool_call_id,
+            questionsCount: askedQuestions.length,
+            summary: askedSummary,
+          },
+        )
+
         // Race guard: if resolveGate has already advanced the matching
         // part to a terminal state, announcing the gate now would leave
         // status=waiting_gate dangling + fire a push for a gate that's
@@ -4763,7 +5073,17 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
                   p.state === 'approval-denied'),
             ),
           )
-        if (alreadyResolved) break
+        if (alreadyResolved) {
+          this.logEvent(
+            'info',
+            'gate',
+            `ask_user short-circuit already_resolved toolCallId=${event.tool_call_id}`,
+            {
+              toolCallId: event.tool_call_id,
+            },
+          )
+          break
+        }
 
         // Status flip + push notification are still load-bearing: UI
         // status indicators and notifications need to distinguish

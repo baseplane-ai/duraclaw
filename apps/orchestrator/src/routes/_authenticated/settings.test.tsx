@@ -60,10 +60,10 @@ vi.mock('@tanstack/react-db', () => ({
 const mockUpdatePreferences = vi.fn()
 let mockUserDefaultsReturn = {
   preferences: {
-    permission_mode: 'default',
+    permissionMode: 'default',
     model: 'claude-opus-4-6',
-    max_budget: null as number | null,
-    thinking_mode: 'adaptive',
+    maxBudget: null as number | null,
+    thinkingMode: 'adaptive',
     effort: 'high',
   },
   updatePreferences: mockUpdatePreferences,
@@ -138,10 +138,10 @@ describe('SettingsPage', () => {
     mockSetVariant.mockClear()
     mockUserDefaultsReturn = {
       preferences: {
-        permission_mode: 'default',
+        permissionMode: 'default',
         model: 'claude-opus-4-6',
-        max_budget: null,
-        thinking_mode: 'adaptive',
+        maxBudget: null,
+        thinkingMode: 'adaptive',
         effort: 'high',
       },
       updatePreferences: mockUpdatePreferences,
@@ -244,7 +244,7 @@ describe('SettingsPage', () => {
       planRadio.click()
     })
 
-    expect(mockUpdatePreferences).toHaveBeenCalledWith({ permission_mode: 'plan' })
+    expect(mockUpdatePreferences).toHaveBeenCalledWith({ permissionMode: 'plan' })
   })
 
   it('renders the Max Budget input with placeholder', () => {
@@ -256,7 +256,7 @@ describe('SettingsPage', () => {
   })
 
   it('calls updatePreferences with null when budget is cleared', async () => {
-    mockUserDefaultsReturn.preferences.max_budget = 10
+    mockUserDefaultsReturn.preferences.maxBudget = 10
     renderPage()
     const input = screen.getByLabelText('Max Budget (USD)') as HTMLInputElement
 
@@ -264,7 +264,7 @@ describe('SettingsPage', () => {
       fireEvent.change(input, { target: { value: '' } })
     })
 
-    expect(mockUpdatePreferences).toHaveBeenCalledWith({ max_budget: null })
+    expect(mockUpdatePreferences).toHaveBeenCalledWith({ maxBudget: null })
   })
 
   it('calls updatePreferences with parsed number when budget is set', async () => {
@@ -275,7 +275,7 @@ describe('SettingsPage', () => {
       fireEvent.change(input, { target: { value: '25.5' } })
     })
 
-    expect(mockUpdatePreferences).toHaveBeenCalledWith({ max_budget: 25.5 })
+    expect(mockUpdatePreferences).toHaveBeenCalledWith({ maxBudget: 25.5 })
   })
 
   it('renders Model label', () => {

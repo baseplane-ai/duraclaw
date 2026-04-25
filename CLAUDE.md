@@ -754,6 +754,17 @@ in `planning/research/2026-04-18-verify-infra-issue-8.md`.
 
 ## Conventions
 
+- **DO observability — use `logEvent()`, not `console.log`**: Inside
+  `SessionDO`, all structured/diagnostic logs MUST go through
+  `this.logEvent(level, tag, message, attrs?)` (migration v17). This
+  writes to the per-DO `event_log` SQLite table (durable, 7-day
+  retention, GC'd on `onStart`) AND mirrors to `console.log` for live
+  `wrangler tail`. Use tag prefixes consistently: `gate` for
+  AskUserQuestion / permission lifecycle, `conn` for WS connection
+  events, `rpc` for callable entry/exit. Query via the `getEventLog()`
+  RPC (`{tag?, sinceTs?, limit?}`) — no external log infra needed for
+  per-session replay. Runner-side logs still go to `console.log` (they
+  land in `/run/duraclaw/sessions/{id}.log` on the VPS).
 - Commit messages: `type(scope): description` (feat, fix, chore, refactor, docs, test)
 - Biome formatting: 2-space indent, 100 char line width, LF endings
 - Path alias: `~/` maps to `./src/` in orchestrator

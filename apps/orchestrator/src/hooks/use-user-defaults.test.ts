@@ -6,12 +6,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useUserDefaults } from './use-user-defaults'
 
 const DEFAULTS = {
-  permission_mode: 'default',
+  permissionMode: 'default',
   model: 'claude-opus-4-7',
-  max_budget: null,
-  thinking_mode: 'adaptive',
+  maxBudget: null,
+  thinkingMode: 'adaptive',
   effort: 'xhigh',
 }
+
+const STORAGE_KEY = 'user-preferences-v2'
 
 describe('useUserDefaults', () => {
   beforeEach(() => {
@@ -37,7 +39,7 @@ describe('useUserDefaults', () => {
 
   it('loads cached preferences from localStorage', async () => {
     const cached = { ...DEFAULTS, model: 'claude-sonnet-4-20250514', effort: 'low' }
-    localStorage.setItem('user-preferences', JSON.stringify(cached))
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(cached))
 
     const { result } = renderHook(() => useUserDefaults())
 
@@ -51,10 +53,10 @@ describe('useUserDefaults', () => {
 
   it('fetches preferences from server and merges with defaults', async () => {
     const serverPrefs = {
-      permission_mode: 'bypassPermissions',
+      permissionMode: 'bypassPermissions',
       model: 'claude-sonnet-4-20250514',
-      max_budget: 10,
-      thinking_mode: 'enabled',
+      maxBudget: 10,
+      thinkingMode: 'enabled',
       effort: 'medium',
     }
     vi.mocked(fetch).mockResolvedValue(
@@ -74,7 +76,7 @@ describe('useUserDefaults', () => {
     expect(result.current.loading).toBe(false)
 
     // Should cache in localStorage
-    const cached = JSON.parse(localStorage.getItem('user-preferences')!)
+    const cached = JSON.parse(localStorage.getItem(STORAGE_KEY)!)
     expect(cached.model).toBe('claude-sonnet-4-20250514')
   })
 
@@ -132,12 +134,12 @@ describe('useUserDefaults', () => {
     })
 
     // Should update localStorage
-    const cached = JSON.parse(localStorage.getItem('user-preferences')!)
+    const cached = JSON.parse(localStorage.getItem(STORAGE_KEY)!)
     expect(cached.model).toBe('claude-sonnet-4-20250514')
   })
 
   it('ignores invalid localStorage cache gracefully', async () => {
-    localStorage.setItem('user-preferences', 'not-valid-json')
+    localStorage.setItem(STORAGE_KEY, 'not-valid-json')
 
     const { result } = renderHook(() => useUserDefaults())
 

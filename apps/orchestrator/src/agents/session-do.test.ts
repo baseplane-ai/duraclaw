@@ -1,3 +1,4 @@
+import type { SessionMessage, SessionMessagePart } from 'agents/experimental/memory/session'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { chunkOps } from '~/lib/chunk-frame'
 import { getSessionStatus } from '~/lib/vps-client'
@@ -11,6 +12,7 @@ import {
   finalizeResultTurn,
   findPendingGatePart,
   getGatewayConnectionId,
+  isPendingGatePart,
   loadTurnState,
   planAwaitingTimeout,
   planClearAwaiting,
@@ -238,7 +240,7 @@ describe('SESSION_DO_MIGRATIONS', () => {
   describe('migration chain integrity', () => {
     it('has sequential version numbers', () => {
       const versions = SESSION_DO_MIGRATIONS.map((m) => m.version)
-      expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17])
+      expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18])
     })
 
     it('all migrations have descriptions', () => {
@@ -1020,14 +1022,18 @@ describe('findPendingGatePart', () => {
     const msg = mkMsg([
       { type: 'tool-ask_user', toolCallId: 'toolu_A', state: 'approval-requested' },
     ])
-    expect(findPendingGatePart([msg], 'toolu_A')).toEqual({ type: 'ask_user' })
+    const result = findPendingGatePart([msg], 'toolu_A')
+    expect(result?.type).toBe('ask_user')
+    expect(result?.part?.toolCallId).toBe('toolu_A')
   })
 
   it('returns permission_request when a tool-permission part is approval-requested', () => {
     const msg = mkMsg([
       { type: 'tool-permission', toolCallId: 'toolu_B', state: 'approval-requested' },
     ])
-    expect(findPendingGatePart([msg], 'toolu_B')).toEqual({ type: 'permission_request' })
+    const result = findPendingGatePart([msg], 'toolu_B')
+    expect(result?.type).toBe('permission_request')
+    expect(result?.part?.toolCallId).toBe('toolu_B')
   })
 
   it('returns null for a part that has moved past approval-requested', () => {
@@ -1051,8 +1057,8 @@ describe('findPendingGatePart', () => {
     const newer = mkMsg([
       { type: 'tool-ask_user', toolCallId: 'toolu_NEW', state: 'approval-requested' },
     ])
-    expect(findPendingGatePart([older, newer], 'toolu_OLD')).toEqual({ type: 'ask_user' })
-    expect(findPendingGatePart([older, newer], 'toolu_NEW')).toEqual({ type: 'ask_user' })
+    expect(findPendingGatePart([older, newer], 'toolu_OLD')?.type).toBe('ask_user')
+    expect(findPendingGatePart([older, newer], 'toolu_NEW')?.type).toBe('ask_user')
   })
 
   it('ignores non-gate tool parts with matching toolCallId', () => {
@@ -1083,7 +1089,7 @@ describe('findPendingGatePart', () => {
         toolName: 'AskUserQuestion',
       },
     ])
-    expect(findPendingGatePart([msg], 'toolu_NATIVE')).toEqual({ type: 'ask_user' })
+    expect(findPendingGatePart([msg], 'toolu_NATIVE')?.type).toBe('ask_user')
   })
 
   it('returns null for a tool-AskUserQuestion part that already has output', () => {
@@ -1097,6 +1103,165 @@ describe('findPendingGatePart', () => {
       },
     ])
     expect(findPendingGatePart([msg], 'toolu_DONE')).toBeNull()
+  })
+})
+
+// ── resolveGate ask_user: question-keyed answers ─────────────────────
+//
+// Regression: resolveGate was sending `{answers: {answer: '<flat>'}}` to
+// the runner — the SDK's AskUserQuestion tool expects answers keyed by
+// the full question text. The harness below mirrors the exact ask_user
+// branch of SessionDO.resolveGate (post-fix shape) so we can witness
+// the wire payload without instantiating the decorator class.
+
+interface FakeAnswerSent {
+  type: 'answer'
+  session_id: string
+  tool_call_id: string
+  answers: Record<string, string>
+}
+
+type AskUserResolveResponse = {
+  approved?: boolean
+  answer?: string
+  answers?: Array<{ label: string; note?: string }>
+  declined?: boolean
+}
+
+function flattenStructuredAnswersForTest(answers: Array<{ label: string; note?: string }>): string {
+  const parts: string[] = []
+  for (const a of answers) {
+    const label = (a.label ?? '').trim()
+    const note = (a.note ?? '').trim()
+    if (label && note) parts.push(`${label} (note: ${note})`)
+    else if (label) parts.push(label)
+    else if (note) parts.push(note)
+  }
+  return parts.join('; ')
+}
+
+function simulateResolveAskUser(args: {
+  gateId: string
+  sessionId: string
+  questions: Array<{ question?: string; header?: string }>
+  response: AskUserResolveResponse
+}): { sent: FakeAnswerSent | null; warnings: string[] } {
+  const warnings: string[] = []
+  let sent: FakeAnswerSent | null = null
+  const declinedPlaceholder =
+    '[User declined to answer. See subsequent message for next instruction.]'
+
+  const buildPerQuestionValue = (i: number): string => {
+    if (args.response.declined === true) return declinedPlaceholder
+    if (args.response.answers !== undefined) {
+      const a = args.response.answers[i]
+      if (!a) return ''
+      return flattenStructuredAnswersForTest([a])
+    }
+    if (args.response.answer !== undefined) {
+      return i === 0 ? args.response.answer : ''
+    }
+    return ''
+  }
+
+  let answersRecord: Record<string, string>
+  if (args.questions.length === 0) {
+    let value: string
+    if (args.response.declined === true) value = declinedPlaceholder
+    else if (args.response.answers !== undefined)
+      value = flattenStructuredAnswersForTest(args.response.answers)
+    else if (args.response.answer !== undefined) value = args.response.answer
+    else throw new Error('Invalid response for gate type')
+    warnings.push('fallback')
+    answersRecord = { question: value }
+  } else {
+    if (
+      args.response.declined !== true &&
+      args.response.answers === undefined &&
+      args.response.answer === undefined
+    ) {
+      throw new Error('Invalid response for gate type')
+    }
+    answersRecord = {}
+    for (let i = 0; i < args.questions.length; i++) {
+      const q = args.questions[i]
+      const key =
+        (typeof q?.question === 'string' && q.question.trim()) ||
+        (typeof q?.header === 'string' && q.header.trim()) ||
+        `question_${i}`
+      answersRecord[key] = buildPerQuestionValue(i)
+    }
+  }
+
+  sent = {
+    type: 'answer',
+    session_id: args.sessionId,
+    tool_call_id: args.gateId,
+    answers: answersRecord,
+  }
+  return { sent, warnings }
+}
+
+describe('SessionDO.resolveGate ask_user payload', () => {
+  it('keys structured answers by question text (not header) and pairs them with input.questions order', () => {
+    const { sent } = simulateResolveAskUser({
+      gateId: 'toolu_GATE1',
+      sessionId: 'sess-1',
+      questions: [
+        {
+          question: 'Slide 4 ship?',
+          header: 'Slide 4',
+        },
+        {
+          question: 'Slide 5 style?',
+          header: 'Slide 5',
+        },
+      ],
+      response: {
+        answers: [{ label: 'Ship' }, { label: '', note: 'current is good, just upscale' }],
+      },
+    })
+    expect(sent).not.toBeNull()
+    expect(sent?.tool_call_id).toBe('toolu_GATE1')
+    expect(sent?.answers).toEqual({
+      'Slide 4 ship?': 'Ship',
+      'Slide 5 style?': 'current is good, just upscale',
+    })
+  })
+
+  it('applies the declined placeholder to every question key', () => {
+    const { sent } = simulateResolveAskUser({
+      gateId: 'toolu_GATE2',
+      sessionId: 'sess-2',
+      questions: [{ question: 'Q1?' }, { question: 'Q2?' }],
+      response: { declined: true },
+    })
+    const placeholder = '[User declined to answer. See subsequent message for next instruction.]'
+    expect(sent?.answers).toEqual({
+      'Q1?': placeholder,
+      'Q2?': placeholder,
+    })
+  })
+
+  it('legacy single-string response keys on the first question only', () => {
+    const { sent } = simulateResolveAskUser({
+      gateId: 'toolu_GATE3',
+      sessionId: 'sess-3',
+      questions: [{ question: 'What color?' }, { question: 'What size?' }],
+      response: { answer: 'red' },
+    })
+    expect(sent?.answers).toEqual({ 'What color?': 'red', 'What size?': '' })
+  })
+
+  it('falls back to a single key when input.questions is missing/empty', () => {
+    const { sent, warnings } = simulateResolveAskUser({
+      gateId: 'toolu_GATE4',
+      sessionId: 'sess-4',
+      questions: [],
+      response: { answer: 'just answer' },
+    })
+    expect(warnings).toContain('fallback')
+    expect(sent?.answers).toEqual({ question: 'just answer' })
   })
 })
 
@@ -3695,5 +3860,242 @@ describe('spawn() idempotency guard treats pending as active (GH new-session-dra
     'terminated',
   ] as const)('allows spawn when status is %s', (status) => {
     expect(isActiveSpawnGuardStatus(status)).toBe(false)
+  })
+})
+
+// ── isPendingGatePart + interrupt() gate-flip regression ─────────────
+//
+// Regression: when the user clicks Stop while an `ask_user` question
+// gate is showing, the GateResolver UI must disappear. Pre-fix,
+// `SessionDO.interrupt()` only matched the DO-promoted shape
+// (`tool-ask_user` / `tool-permission` + `approval-requested`) — but
+// after `1f6678e` (refactor(session-do): drop ask_user part promotion;
+// single writer on state) ask_user gates land as the SDK-native
+// `tool-AskUserQuestion` + `input-available` and were left untouched
+// by the interrupt loop. The client `isPendingGate` predicate kept
+// matching, the GateResolver stayed mounted, and a later resolveGate
+// flowing through the abort path returned "not found" → toast.
+//
+// SessionDO can't be instantiated under vitest (TC39 decorator parse
+// barrier), so we exercise the predicate directly and mirror the
+// `interrupt()` mutation loop in a local harness.
+
+describe('isPendingGatePart', () => {
+  it('matches tool-ask_user + approval-requested', () => {
+    const part: SessionMessagePart = {
+      type: 'tool-ask_user',
+      toolCallId: 'toolu_A',
+      state: 'approval-requested',
+    }
+    expect(isPendingGatePart(part)).toBe(true)
+  })
+
+  it('matches tool-permission + approval-requested', () => {
+    const part: SessionMessagePart = {
+      type: 'tool-permission',
+      toolCallId: 'toolu_B',
+      state: 'approval-requested',
+    }
+    expect(isPendingGatePart(part)).toBe(true)
+  })
+
+  it('matches tool-AskUserQuestion + input-available (SDK-native shape)', () => {
+    const part: SessionMessagePart = {
+      type: 'tool-AskUserQuestion',
+      toolCallId: 'toolu_NATIVE',
+      state: 'input-available',
+      toolName: 'AskUserQuestion',
+    }
+    expect(isPendingGatePart(part)).toBe(true)
+  })
+
+  it('does NOT match tool-AskUserQuestion + output-denied (terminal)', () => {
+    const part: SessionMessagePart = {
+      type: 'tool-AskUserQuestion',
+      toolCallId: 'toolu_DONE',
+      state: 'output-denied',
+      toolName: 'AskUserQuestion',
+      output: 'Interrupted',
+    }
+    expect(isPendingGatePart(part)).toBe(false)
+  })
+
+  it('does NOT match tool-AskUserQuestion + output-available', () => {
+    const part: SessionMessagePart = {
+      type: 'tool-AskUserQuestion',
+      toolCallId: 'toolu_DONE',
+      state: 'output-available',
+      toolName: 'AskUserQuestion',
+      output: { answers: [{ label: 'yes' }] },
+    }
+    expect(isPendingGatePart(part)).toBe(false)
+  })
+
+  it('does NOT match tool-ask_user with non-pending state', () => {
+    const part: SessionMessagePart = {
+      type: 'tool-ask_user',
+      toolCallId: 'toolu_X',
+      state: 'output-available',
+      output: 'ok',
+    }
+    expect(isPendingGatePart(part)).toBe(false)
+  })
+
+  it('does NOT match a non-gate tool part with approval-requested state', () => {
+    const part: SessionMessagePart = {
+      type: 'tool-Edit',
+      toolCallId: 'toolu_E',
+      state: 'approval-requested',
+      toolName: 'Edit',
+    }
+    expect(isPendingGatePart(part)).toBe(false)
+  })
+})
+
+describe('interrupt() gate-flip mutation (mirror)', () => {
+  // Mirrors the post-fix `interrupt()` mutation loop without
+  // instantiating SessionDO. The DO walks history newest-first, and
+  // for any message containing a pending gate part flips every pending
+  // gate part on that message to {state: 'output-denied', output:
+  // 'Interrupted'}, then broadcasts the whole updated message.
+  function interruptMutate(history: SessionMessage[]): {
+    broadcasted: SessionMessage[]
+    finalHistory: SessionMessage[]
+  } {
+    const broadcasted: SessionMessage[] = []
+    const finalHistory = history.slice()
+    for (let i = finalHistory.length - 1; i >= 0; i--) {
+      const msg = finalHistory[i]
+      const hasPendingGate = msg.parts.some(isPendingGatePart)
+      if (!hasPendingGate) continue
+      const updatedParts = msg.parts.map((p) =>
+        isPendingGatePart(p) ? { ...p, state: 'output-denied' as const, output: 'Interrupted' } : p,
+      )
+      const updatedMsg: SessionMessage = { ...msg, parts: updatedParts }
+      finalHistory[i] = updatedMsg
+      broadcasted.push(updatedMsg)
+    }
+    return { broadcasted, finalHistory }
+  }
+
+  it('flips a tool-AskUserQuestion + input-available part to output-denied (regression)', () => {
+    const history: SessionMessage[] = [
+      {
+        id: 'm1',
+        role: 'assistant',
+        createdAt: new Date(),
+        parts: [
+          {
+            type: 'tool-AskUserQuestion',
+            toolCallId: 'toolu_NATIVE',
+            state: 'input-available',
+            toolName: 'AskUserQuestion',
+            input: { questions: [{ question: 'pick one' }] },
+          },
+        ],
+      },
+    ]
+
+    const { broadcasted, finalHistory } = interruptMutate(history)
+
+    const flippedPart = finalHistory[0].parts[0]
+    expect(flippedPart.state).toBe('output-denied')
+    expect(flippedPart.state).not.toBe('input-available')
+    expect((flippedPart as { output?: unknown }).output).toBe('Interrupted')
+
+    expect(broadcasted).toHaveLength(1)
+    expect(broadcasted[0].id).toBe('m1')
+    expect(broadcasted[0].parts[0].state).toBe('output-denied')
+  })
+
+  it('still flips the legacy tool-ask_user + approval-requested shape', () => {
+    const history: SessionMessage[] = [
+      {
+        id: 'm1',
+        role: 'assistant',
+        createdAt: new Date(),
+        parts: [
+          {
+            type: 'tool-ask_user',
+            toolCallId: 'toolu_LEGACY',
+            state: 'approval-requested',
+          },
+        ],
+      },
+    ]
+    const { broadcasted, finalHistory } = interruptMutate(history)
+    expect(finalHistory[0].parts[0].state).toBe('output-denied')
+    expect(broadcasted).toHaveLength(1)
+  })
+
+  it('flips tool-permission + approval-requested', () => {
+    const history: SessionMessage[] = [
+      {
+        id: 'm1',
+        role: 'assistant',
+        createdAt: new Date(),
+        parts: [
+          {
+            type: 'tool-permission',
+            toolCallId: 'toolu_PERM',
+            state: 'approval-requested',
+          },
+        ],
+      },
+    ]
+    const { broadcasted, finalHistory } = interruptMutate(history)
+    expect(finalHistory[0].parts[0].state).toBe('output-denied')
+    expect(broadcasted).toHaveLength(1)
+  })
+
+  it('does not broadcast or mutate when no pending gate parts exist', () => {
+    const history: SessionMessage[] = [
+      {
+        id: 'm1',
+        role: 'assistant',
+        createdAt: new Date(),
+        parts: [
+          {
+            type: 'tool-AskUserQuestion',
+            toolCallId: 'toolu_DONE',
+            state: 'output-available',
+            toolName: 'AskUserQuestion',
+            output: { answers: [{ label: 'yes' }] },
+          },
+        ],
+      },
+    ]
+    const { broadcasted, finalHistory } = interruptMutate(history)
+    expect(broadcasted).toHaveLength(0)
+    expect(finalHistory[0].parts[0].state).toBe('output-available')
+  })
+
+  it('flips both legacy and SDK-native gate parts in the same message', () => {
+    const history: SessionMessage[] = [
+      {
+        id: 'm1',
+        role: 'assistant',
+        createdAt: new Date(),
+        parts: [
+          {
+            type: 'tool-AskUserQuestion',
+            toolCallId: 'toolu_A',
+            state: 'input-available',
+            toolName: 'AskUserQuestion',
+          },
+          {
+            type: 'tool-permission',
+            toolCallId: 'toolu_B',
+            state: 'approval-requested',
+          },
+          // Non-gate part should be left untouched.
+          { type: 'text', text: 'thinking…' },
+        ],
+      },
+    ]
+    const { finalHistory } = interruptMutate(history)
+    expect(finalHistory[0].parts[0].state).toBe('output-denied')
+    expect(finalHistory[0].parts[1].state).toBe('output-denied')
+    expect(finalHistory[0].parts[2].type).toBe('text')
   })
 })

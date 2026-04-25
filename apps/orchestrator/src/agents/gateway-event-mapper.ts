@@ -46,6 +46,51 @@ export function partialAssistantToParts(content: unknown[]): SessionMessagePart[
 }
 
 /**
+ * Predicate — true when a finalized `assistant` event's content is
+ * "effectively empty": no tool_use blocks, and every text/thinking block
+ * has only whitespace / zero-width characters. Used by
+ * `SessionDO.case 'assistant'` to detect the runaway-turn failure mode
+ * where Claude stops emitting substantive content and spins on a loop
+ * of single-ZWS assistant turns (prod incident 2026-04-24, session
+ * `sess-ffca0374-...`, 500+ single-char persisted parts before user
+ * interrupt).
+ *
+ * Conservative by design:
+ * - Empty `content: []` → empty (the SDK occasionally emits these on
+ *   transcript replay / cancellation paths, which is exactly what we
+ *   want the runaway counter to catch).
+ * - Any `tool_use` block → non-empty (tool calls always count as
+ *   progress, even if paired with whitespace text).
+ * - Any text/thinking block with non-whitespace content → non-empty.
+ *   Note: `String.prototype.trim()` does NOT strip U+200B / U+200C /
+ *   U+200D / U+FEFF (ZWS / ZWNJ / ZWJ / BOM) — which is exactly the
+ *   character the runaway-loop model emits. `IS_BLANK_RE` adds those to
+ *   the standard `\s` class so a single-ZWS turn counts as empty.
+ * - Unknown block types (image, server_tool_use, etc.) → non-empty.
+ *   Unknown shapes are treated as progress so we never interrupt a
+ *   legitimate turn we simply don't recognise.
+ */
+const IS_BLANK_RE = /^[\s\u200B-\u200D\uFEFF]*$/
+
+export function isAssistantContentEmpty(content: unknown[]): boolean {
+  for (const block of content) {
+    const b = block as Record<string, unknown>
+    if (b.type === 'tool_use') return false
+    if (b.type === 'text') {
+      if (typeof b.text === 'string' && !IS_BLANK_RE.test(b.text)) return false
+      continue
+    }
+    if (b.type === 'thinking') {
+      if (typeof b.thinking === 'string' && !IS_BLANK_RE.test(b.thinking)) return false
+      continue
+    }
+    // Unknown block type — treat as progress.
+    return false
+  }
+  return true
+}
+
+/**
  * Extract displayable text from tool result content.
  * Content can be a string, an array of content blocks [{type:"text", text:"..."}], or other shapes.
  */

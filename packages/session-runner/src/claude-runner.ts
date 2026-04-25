@@ -462,30 +462,56 @@ export async function handleCanUseTool(
   const { toolUseID: id, signal } = opts
 
   if (toolName === 'AskUserQuestion') {
+    const askedAt = Date.now()
+    const rawQuestions = Array.isArray((input as any).questions) ? (input as any).questions : []
+    const qSummary = rawQuestions.map((q: Record<string, unknown>, idx: number) => ({
+      idx,
+      header: typeof q?.header === 'string' ? q.header.slice(0, 80) : null,
+      questionLen: typeof q?.question === 'string' ? q.question.length : null,
+      optionsCount: Array.isArray(q?.options) ? (q.options as unknown[]).length : null,
+      multiSelect: typeof q?.multiSelect === 'boolean' ? q.multiSelect : null,
+    }))
+    console.log(
+      `[gate] canUseTool AskUserQuestion entered toolUseID=${id} questions_count=${rawQuestions.length} q_summary=${JSON.stringify(qSummary)}`,
+    )
+
     // Send ask_user event to orchestrator
     sendEvent({
       type: 'ask_user',
       session_id: sessionId,
       tool_call_id: id,
-      questions: (input as any).questions ?? [],
+      questions: rawQuestions,
     })
 
     // No timeout — the agent waits indefinitely for the user to answer.
     // The user can still abort the session, which fires `signal` and rejects.
-    const answers = await new Promise<Record<string, string>>((resolve, reject) => {
-      ctx.pendingAnswer = { resolve, reject }
+    try {
+      const answers = await new Promise<Record<string, string>>((resolve, reject) => {
+        ctx.pendingAnswer = { resolve, reject }
 
-      signal.addEventListener(
-        'abort',
-        () => {
-          ctx.pendingAnswer = null
-          reject(new Error('Session aborted'))
-        },
-        { once: true },
+        signal.addEventListener(
+          'abort',
+          () => {
+            ctx.pendingAnswer = null
+            reject(new Error('Session aborted'))
+          },
+          { once: true },
+        )
+      })
+
+      const answerKeys = Object.keys(answers ?? {})
+      const totalAnswerLen = answerKeys.reduce((acc, k) => acc + (answers[k]?.length ?? 0), 0)
+      console.log(
+        `[gate] canUseTool AskUserQuestion resolved toolUseID=${id} answers_keys_count=${answerKeys.length} answer_total_chars=${totalAnswerLen} duration_ms=${Date.now() - askedAt} keys=${JSON.stringify(answerKeys.map((k) => k.slice(0, 60)))}`,
       )
-    })
 
-    return { behavior: 'allow', updatedInput: { ...input, answers } }
+      return { behavior: 'allow', updatedInput: { ...input, answers } }
+    } catch (err) {
+      console.warn(
+        `[gate] canUseTool AskUserQuestion rejected toolUseID=${id} duration_ms=${Date.now() - askedAt} reason=${err instanceof Error ? err.message : String(err)}`,
+      )
+      throw err
+    }
   }
 
   // Permission prompt for all other tools

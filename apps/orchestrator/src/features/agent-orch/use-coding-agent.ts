@@ -849,12 +849,18 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
       // Native TanStack DB optimistic path: createTransaction runs the
       // async `mutationFn` (the RPC) and keeps the tx.mutate staged write
       // visible to `useLiveQuery` readers as an optimistic layer merged
-      // *over* synced. Any WS delta that arrives for this row during the
-      // RPC window writes to synced — it does NOT overwrite the rendered
-      // view, so the UI stays on the resolved summary instead of flashing
-      // back to the pre-submit gate. On success, server echo reconciles
-      // via deepEquals; on mutationFn throw, the staged write auto-rolls
+      // *over* synced. On mutationFn throw, the staged write auto-rolls
       // back and the GateResolver re-mounts for retry.
+      //
+      // IMPORTANT: we intentionally do NOT await `tx.isPersisted.promise`.
+      // Awaiting it caused a transient gate-flash: the promise resolves
+      // when the RPC returns {ok:true}, which strips the optimistic overlay
+      // — but the DO's `broadcastMessage` WS delta hasn't arrived yet, so
+      // for a brief window the synced layer still has `input-available` and
+      // the GateResolver re-mounts then unmounts when the echo lands.
+      // Fire-and-forget keeps the optimistic layer alive until the server
+      // echo writes to synced and TanStack DB's deepEquals reconciles them.
+      // Errors surface via the .catch → toast path below.
       //
       // If we couldn't locate the target row (cold cache, row churn), we
       // still fire the RPC — the server-side resolveGate broadcast will
@@ -879,12 +885,13 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
             draft.parts = stagedParts
           })
         })
-        try {
-          await tx.isPersisted.promise
-          return { ok: true }
-        } catch (err) {
-          return { ok: false, error: err instanceof Error ? err.message : String(err) }
-        }
+        // Don't await — let the optimistic layer persist until the WS echo
+        // reconciles it. Surface RPC failures via toast so the user knows to
+        // retry (the rollback will re-mount GateResolver automatically).
+        tx.isPersisted.promise.catch((err) => {
+          toast.error(err instanceof Error ? err.message : 'Failed to submit response — try again')
+        })
+        return { ok: true }
       }
 
       // Fallback: no matching pending part found in the live collection

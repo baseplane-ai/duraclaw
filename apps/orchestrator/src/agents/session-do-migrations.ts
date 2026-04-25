@@ -306,20 +306,35 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
   {
     version: 17,
     description:
+      'Add event_log table for durable per-session observability (gate lifecycle, conn events). 7-day retention enforced on DO start. Queryable via getEventLog() RPC.',
+    up: (sql) => {
+      sql.exec(`CREATE TABLE IF NOT EXISTS event_log (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts INTEGER NOT NULL,
+        level TEXT NOT NULL,
+        tag TEXT NOT NULL,
+        message TEXT NOT NULL,
+        attrs TEXT
+      )`)
+      sql.exec(`CREATE INDEX IF NOT EXISTS idx_event_log_ts ON event_log (ts)`)
+      sql.exec(`CREATE INDEX IF NOT EXISTS idx_event_log_tag_ts ON event_log (tag, ts)`)
+    },
+  },
+  {
+    version: 18,
+    description:
       'Add pending_resume_json to session_meta for GH#92 caam rotation (P3). JSON-encoded `{kind:"rotation",at:<ms>}` set when the rate_limit handler schedules a delayed resume across DO eviction; the alarm watchdog reads it, fires `triggerGatewayDial({type:"resume",...})` once `Date.now() >= at` with no live runner attached, and clears the field. NULL means no pending resume — the default for every existing row.',
     up: (sql) => {
       // Defensively idempotent: dev worktrees may have run an earlier
-      // GH#92 P3 build that added this column before the v17 version
-      // bump landed (the spec churned across several revisions). Match
-      // the v7/v11/v14/v15/v16 pattern of swallowing only the
-      // "duplicate column" case so re-running the migration on those
-      // boxes is a no-op rather than a hard failure.
+      // build that added this column before the version bump landed.
+      // Match the v7/v11/v14/v15/v16 pattern of swallowing only the
+      // "duplicate column" case.
       try {
         sql.exec(`ALTER TABLE session_meta ADD COLUMN pending_resume_json TEXT`)
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e)
         if (!msg.toLowerCase().includes('duplicate column')) {
-          console.warn('[migration v17] unexpected error adding pending_resume_json column', e)
+          console.warn('[migration v18] unexpected error adding pending_resume_json column', e)
           throw e
         }
       }

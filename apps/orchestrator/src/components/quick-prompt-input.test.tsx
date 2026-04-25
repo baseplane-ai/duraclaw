@@ -8,7 +8,7 @@ import { QuickPromptInput } from './quick-prompt-input'
 // Mock useUserDefaults
 vi.mock('~/hooks/use-user-defaults', () => ({
   useUserDefaults: () => ({
-    preferences: { model: 'claude-opus-4-6', permission_mode: 'default' },
+    preferences: { model: 'claude-opus-4-6', permissionMode: 'default' },
     updatePreferences: vi.fn(),
     loading: false,
   }),

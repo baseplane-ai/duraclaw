@@ -138,8 +138,8 @@ function DefaultsSection() {
         <div className="space-y-3">
           <Label className="text-sm font-medium">Permission Mode</Label>
           <RadioGroup
-            value={preferences.permission_mode}
-            onValueChange={(value) => updatePreferences({ permission_mode: value })}
+            value={preferences.permissionMode}
+            onValueChange={(value) => updatePreferences({ permissionMode: value })}
             className="grid gap-2"
           >
             {PERMISSION_MODES.map((mode) => (
@@ -186,11 +186,11 @@ function DefaultsSection() {
             step={0.5}
             className="w-full max-w-xs"
             placeholder="No limit"
-            value={preferences.max_budget ?? ''}
+            value={preferences.maxBudget ?? ''}
             onChange={(e) => {
               const val = e.target.value
               updatePreferences({
-                max_budget: val === '' ? null : Number.parseFloat(val),
+                maxBudget: val === '' ? null : Number.parseFloat(val),
               })
             }}
           />
@@ -203,8 +203,8 @@ function DefaultsSection() {
         <div className="space-y-2">
           <Label htmlFor="thinking-mode">Thinking Mode</Label>
           <Select
-            value={preferences.thinking_mode}
-            onValueChange={(value) => updatePreferences({ thinking_mode: value })}
+            value={preferences.thinkingMode}
+            onValueChange={(value) => updatePreferences({ thinkingMode: value })}
           >
             <SelectTrigger id="thinking-mode" className="w-full max-w-xs">
               <SelectValue />

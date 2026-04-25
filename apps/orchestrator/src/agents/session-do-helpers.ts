@@ -6,7 +6,7 @@ import type {
   SyncedCollectionOp,
   SessionMessage as WireSessionMessage,
 } from '@duraclaw/shared-types'
-import type { SessionMessage } from 'agents/experimental/memory/session'
+import type { SessionMessage, SessionMessagePart } from 'agents/experimental/memory/session'
 
 /**
  * Pure op-derivation helper for snapshot emitters (GH#38 P1.4).
@@ -241,6 +241,36 @@ export type LegacyDroppedEventType = (typeof LEGACY_DROPPED_EVENT_TYPES)[number]
 export type PendingGateType = 'ask_user' | 'permission_request'
 
 /**
+ * Predicate: is `p` a still-pending gate part?
+ *
+ * Three shapes count as pending:
+ *   - `tool-ask_user` + `approval-requested` (DO-promoted ask_user)
+ *   - `tool-permission` + `approval-requested` (canUseTool permission)
+ *   - `tool-AskUserQuestion` + `input-available` (SDK-native shape, post
+ *     `1f6678e` no longer promoted to `tool-ask_user`)
+ *
+ * Mirrors the matchers in `findPendingGatePart` (server-side gate lookup)
+ * and `isPendingGate` in `ChatThread.tsx` (client render predicate). Used
+ * by `SessionDO.interrupt()` to flip every pending gate part to a
+ * terminal state on Stop, so the client's GateResolver unmounts.
+ *
+ * Extracted as a pure helper so unit tests can exercise it without
+ * instantiating SessionDO (whose decorators block direct import).
+ */
+export function isPendingGatePart(p: SessionMessagePart): boolean {
+  if (
+    p.state === 'approval-requested' &&
+    (p.type === 'tool-ask_user' || p.type === 'tool-permission')
+  ) {
+    return true
+  }
+  if (p.state === 'input-available' && p.type === 'tool-AskUserQuestion') {
+    return true
+  }
+  return false
+}
+
+/**
  * Walk message history newest-first looking for a still-pending gate part
  * whose `toolCallId` matches `gateId`. This is the sole gate lookup used
  * by `SessionDO.resolveGate` — no scalar involved.
@@ -252,7 +282,7 @@ export type PendingGateType = 'ask_user' | 'permission_request'
 export function findPendingGatePart(
   history: SessionMessage[],
   gateId: string,
-): { type: PendingGateType } | null {
+): { type: PendingGateType; part: SessionMessagePart } | null {
   for (let i = history.length - 1; i >= 0; i--) {
     const msg = history[i]
     for (const p of msg.parts) {
@@ -266,11 +296,11 @@ export function findPendingGatePart(
         p.type === 'tool-AskUserQuestion' &&
         (p.state === 'input-available' || p.state === 'approval-requested')
       ) {
-        return { type: 'ask_user' }
+        return { type: 'ask_user', part: p }
       }
       if (p.state !== 'approval-requested') continue
-      if (p.type === 'tool-ask_user') return { type: 'ask_user' }
-      if (p.type === 'tool-permission') return { type: 'permission_request' }
+      if (p.type === 'tool-ask_user') return { type: 'ask_user', part: p }
+      if (p.type === 'tool-permission') return { type: 'permission_request', part: p }
     }
   }
   return null

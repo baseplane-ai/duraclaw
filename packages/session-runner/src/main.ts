@@ -220,9 +220,25 @@ function handleIncomingCommand(msg: unknown, ctx: RunnerSessionContext, ch: Buff
       break
     }
     case 'answer': {
+      const answersObj =
+        m.answers && typeof m.answers === 'object' ? (m.answers as Record<string, string>) : {}
+      const keys = Object.keys(answersObj)
+      const totalLen = keys.reduce((acc, k) => acc + (answersObj[k]?.length ?? 0), 0)
+      const keySamples = keys.map((k) => k.slice(0, 60))
       if (ctx.pendingAnswer) {
-        ctx.pendingAnswer.resolve((m.answers as Record<string, string>) ?? {})
+        console.log(
+          `[gate] answer received tool_call_id=${m.tool_call_id} keys=${keys.length} total_chars=${totalLen} key_samples=${JSON.stringify(keySamples)}`,
+        )
+        ctx.pendingAnswer.resolve(answersObj)
         ctx.pendingAnswer = null
+      } else {
+        // No pendingAnswer means: AbortSignal already cleared it (session
+        // aborted or canUseTool rejected before this frame arrived). The
+        // answer is silently dropped — the SDK has already moved on. Worth
+        // a warn so we can correlate timing in playback.
+        console.warn(
+          `[gate] answer received but no pendingAnswer tool_call_id=${m.tool_call_id} keys=${keys.length} key_samples=${JSON.stringify(keySamples)}`,
+        )
       }
       break
     }
