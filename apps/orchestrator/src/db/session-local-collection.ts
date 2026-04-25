@@ -11,7 +11,7 @@
 import type { SyncedCollectionFrame } from '@duraclaw/shared-types'
 import { createCollection, localOnlyCollectionOptions } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
-import { subscribeUserStream } from '~/hooks/use-user-stream'
+import { onUserStreamReconnect, subscribeUserStream } from '~/hooks/use-user-stream'
 import type { SessionStatus } from '~/lib/types'
 
 export interface SessionLocalState {
@@ -53,6 +53,34 @@ export const sessionLocalCollection = createCollection(
  * Module-level subscription — safe to register before the WS opens.
  */
 if (typeof window !== 'undefined') {
+  // On user-stream reconnect, clear cached status from all local rows so
+  // consumers fall back to D1 `session?.status` until the next DO push
+  // arrives. Without this, a session that stayed `running` throughout the
+  // disconnect would show stale pre-disconnect status forever (no
+  // transition → no delta → no update). Active sessions re-populate
+  // immediately from the next WS frame; background sessions re-populate
+  // when the DO pushes the next `session_status` delta.
+  onUserStreamReconnect(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const coll = sessionLocalCollection as any
+    try {
+      // Iterate optimisticUpserts (the live row map for local-only collections)
+      // and clear status on each row. wsReadyState/wsCloseTs are unaffected.
+      const items = coll._state?.optimisticUpserts as Map<string, SessionLocalState> | undefined
+      if (items) {
+        for (const [id, item] of items) {
+          if (item.status !== undefined) {
+            coll.update(id, (draft: { status: SessionStatus | undefined }) => {
+              draft.status = undefined
+            })
+          }
+        }
+      }
+    } catch {
+      // collection not ready — no-op
+    }
+  })
+
   subscribeUserStream('session_status', (frame: SyncedCollectionFrame<unknown>) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const coll = sessionLocalCollection as any
