@@ -26,7 +26,8 @@ import path from 'node:path'
 import { BufferedChannel, DialBackClient, type GapSentinel } from '@duraclaw/shared-transport'
 import type { ExecuteCommand, GatewayCommand, ResumeCommand } from '@duraclaw/shared-types'
 import { atomicOverwrite, atomicWriteOnce } from './atomic.js'
-import { ClaudeRunner } from './claude-runner.js'
+import { caamActivate, caamActiveProfile, caamEarliestClearTs, caamIsConfigured } from './caam.js'
+import { ClaudeRunner, handleRateLimitEvent } from './claude-runner.js'
 import { handleQueryCommand, type QueueableCommand } from './commands.js'
 import type { RunnerSessionContext } from './types.js'
 
@@ -87,6 +88,30 @@ async function writeExitAndExit(
     console.error(`[session-runner] failed to write exit file: ${(err as Error).message}`)
   }
   process.exit(code)
+}
+
+/**
+ * GH#92 — inline exit-file writer factory. Returns a closure that writes
+ * the exit-file once (atomicWriteOnce is link+EEXIST under the hood, so
+ * a second call silently no-ops). Exposed on `ctx.writeExitFileInline`
+ * so the rate-limit branch in claude-runner.ts can stamp `.exit` BEFORE
+ * calling `ctx.abortController.abort()` — the DO sees the .exit via
+ * /sessions/:id/status and can auto-respawn without racing the clean-
+ * shutdown path's exit writer.
+ */
+function makeWriteExitFileInline(
+  exitFile: string,
+): (payload: Record<string, unknown>) => Promise<void> {
+  return async (payload) => {
+    try {
+      const outcome = await atomicWriteOnce(exitFile, JSON.stringify(payload))
+      if (outcome === 'already_exists') {
+        console.warn('[session-runner] exit file already present, inline write skipped')
+      }
+    } catch (err) {
+      console.error(`[session-runner] inline exit-file write failed: ${(err as Error).message}`)
+    }
+  }
 }
 
 /**
@@ -286,6 +311,27 @@ function handleIncomingCommand(msg: unknown, ctx: RunnerSessionContext, ch: Buff
       ch.send({ type: 'pong', seq: ++ctx.nextSeq })
       break
     }
+    case 'synth-rate-limit': {
+      // GH#92 — dev-only: synthesize an SDK-shape rate_limit_event
+      // by invoking the B3 gate tree directly. Produces real .exit /
+      // .meta / caam side effects indistinguishable from a real event.
+      // Gated on DURACLAW_DEBUG_ENDPOINTS=1.
+      if (process.env.DURACLAW_DEBUG_ENDPOINTS !== '1') {
+        console.warn('[session-runner] ignoring synth-rate-limit: DURACLAW_DEBUG_ENDPOINTS != 1')
+        break
+      }
+      const info = (m.rate_limit_info as Record<string, unknown> | undefined) ?? {
+        status: 'rejected',
+        rateLimitType: 'five_hour',
+        // 45 minutes in the future — non-round so VP1 can verify the
+        // derived-minutes math (ceil(45) vs floor(60)).
+        resetsAt: Date.now() + 45 * 60_000,
+      }
+      handleRateLimitEvent(ch, ctx, ctx.sessionId, info).catch((err: unknown) => {
+        console.error(`[session-runner] synth-rate-limit handler error: ${(err as Error).message}`)
+      })
+      break
+    }
   }
 }
 
@@ -337,6 +383,15 @@ async function main(): Promise<void> {
       )
     }
   }
+
+  // --- GH#92: resolve caam env knobs ---
+  // DURACLAW_CLAUDE_PROFILE pins to a specific caam profile (B2).
+  // DURACLAW_CLAUDE_ROTATION overrides rotation mode ('auto' | 'off').
+  // Pinning forces rotation off — pinning is an explicit no-fallback choice (D8).
+  const pinnedProfile = process.env.DURACLAW_CLAUDE_PROFILE || null
+  const envRotation = process.env.DURACLAW_CLAUDE_ROTATION as 'auto' | 'off' | undefined
+  const rotationMode: 'auto' | 'off' = pinnedProfile || envRotation === 'off' ? 'off' : 'auto'
+  const sessionsDir = process.env.SESSIONS_DIR ?? '/run/duraclaw/sessions'
 
   // --- Step 4: write pid-file ---
   const pidPayload = {
@@ -414,6 +469,10 @@ async function main(): Promise<void> {
     commandQueue: [],
     titler: null,
     nextSeq: 0,
+    // GH#92: caam rotation fields
+    rotationMode,
+    sessionsDir,
+    writeExitFileInline: makeWriteExitFileInline(argv.exitFile),
     meta: {
       sdk_session_id: null,
       last_activity_ts: Date.now(),
@@ -515,6 +574,57 @@ async function main(): Promise<void> {
   }
   process.on('SIGTERM', sigtermHandler)
 
+  // --- GH#92: caam startup — pin activation or auto-stamp ---
+  // B2: if pinned profile set, activate it before touching the SDK.
+  // B1: stamp the active profile into ctx.meta for the meta-file dumper.
+  const caamReady = await caamIsConfigured()
+  if (caamReady) {
+    if (pinnedProfile) {
+      // B2: pinned profile — activate; fail-fast if profile is cooling.
+      try {
+        await caamActivate(pinnedProfile, { force: true })
+        ctx.meta.claude_profile = pinnedProfile
+        console.error(
+          `[session-runner] caam: pinned profile '${pinnedProfile}' activated (rotation=off)`,
+        )
+      } catch (_err) {
+        // Activation failed — profile may be cooling. Query cooldowns
+        // for a useful ISO timestamp in the error message.
+        const clearTs = await caamEarliestClearTs()
+        const clearIso = new Date(clearTs).toISOString()
+        const errorMsg = `pinned profile '${pinnedProfile}' is in cooldown until ${clearIso}`
+        console.error(`[session-runner] caam: ${errorMsg} — exiting before SDK query`)
+        // Flush meta as failed before writing exit file
+        ctx.meta.state = 'failed'
+        await flushMeta()
+        clearInterval(metaTimer)
+        clearInterval(heartbeatTimer)
+        try {
+          await dialBackClient.stop()
+        } catch {
+          /* best-effort */
+        }
+        return writeExitAndExit(
+          argv.exitFile,
+          { state: 'failed', exit_code: 1, error: errorMsg, duration_ms: Date.now() - startTime },
+          1,
+        )
+      }
+    } else {
+      // B1: no pin — just stamp whatever caam reports as active.
+      const active = await caamActiveProfile()
+      ctx.meta.claude_profile = active
+      if (active) {
+        console.error(
+          `[session-runner] caam: active profile '${active}' (rotation=${rotationMode})`,
+        )
+      }
+    }
+  } else {
+    // B7: caam not configured — dev-box path, no profile stamp.
+    console.error('[session-runner] caam: not configured — rotation disabled (dev-box path)')
+  }
+
   // --- Step 6: run ---
   const runner = new ClaudeRunner()
   let caughtError: Error | null = null
@@ -554,6 +664,25 @@ async function main(): Promise<void> {
       state: ctx.meta.state,
       exit_code: exitCode,
       duration_ms: durationMs,
+    }
+  } else if (
+    ctx.meta.state === 'rate_limited' ||
+    ctx.meta.state === 'rate_limited_no_profile' ||
+    ctx.meta.state === 'rate_limited_no_rotate'
+  ) {
+    // GH#92: rate-limit states — the inline writer in handleRateLimitEvent
+    // already wrote .exit with full metadata (rotation, earliest_clear_ts,
+    // etc.). This is a defensive fallback: atomicWriteOnce will no-op if
+    // the inline write already succeeded, but if it didn't (e.g. inline
+    // threw), this ensures the exit file still reflects the correct state.
+    exitPayload = {
+      state: ctx.meta.state,
+      exit_code: 0,
+      duration_ms: durationMs,
+      ...(ctx.meta.rotation ? { rotation: ctx.meta.rotation } : {}),
+      ...(ctx.meta.rate_limit_earliest_clear_ts
+        ? { earliest_clear_ts: ctx.meta.rate_limit_earliest_clear_ts }
+        : {}),
     }
   } else if (caughtError) {
     exitPayload = {

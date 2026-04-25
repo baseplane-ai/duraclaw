@@ -1,5 +1,6 @@
 import type {
   BranchInfoRow,
+  SessionMessageMetadata,
   SyncedCollectionFrame,
   SyncedCollectionOp,
   SessionMessage as WireSessionMessage,
@@ -65,7 +66,10 @@ import {
   loadTurnState,
   planAwaitingTimeout,
   planClearAwaiting,
+  planPendingResumeDispatch,
+  planRateLimitAction,
   resolveStaleThresholdMs,
+  serializeHistoryForFork,
 } from './session-do-helpers'
 import { SESSION_DO_MIGRATIONS } from './session-do-migrations'
 
@@ -109,6 +113,17 @@ export interface SessionMeta {
    */
   lastRunEnded?: boolean
   /**
+   * GH#92 B4/B6: persisted resume schedule across DO eviction/rehydrate.
+   * Set by the rate_limit handler when a caam rotation or
+   * waiting_profile transition schedules a delayed resume. The alarm
+   * watchdog reads this; when `Date.now() >= at` and no live runner is
+   * attached, the DO calls `triggerGatewayDial({type:'resume', ...})`
+   * exactly once and clears the field. Persisted as JSON in
+   * `session_meta.pending_resume_json` (migration v18); explicitly
+   * nullable because the column can be NULL.
+   */
+  pendingResume?: { kind: 'rotation'; at: number } | null
+  /**
    * GH#86: Haiku-generated session title and provenance.
    * - `title` mirrors `agent_sessions.title` (D1 is the durable source for
    *   client reads, but we keep a copy in DO state so the never-clobber
@@ -147,6 +162,7 @@ const DEFAULT_META: SessionMeta = {
   summary: null,
   sdk_session_id: null,
   active_callback_token: undefined,
+  pendingResume: null,
   title: null,
   title_confidence: null,
   title_set_at_turn: null,
@@ -176,6 +192,7 @@ const META_COLUMN_MAP: Partial<Record<keyof SessionMeta, string>> = {
   active_callback_token: 'active_callback_token',
   lastKataMode: 'last_kata_mode',
   lastRunEnded: 'last_run_ended',
+  pendingResume: 'pending_resume_json',
   title: 'title',
   title_confidence: 'title_confidence',
   title_set_at_turn: 'title_set_at_turn',
@@ -748,6 +765,70 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       }
     }
 
+    // GH#92 P3: dev-only synth-rate-limit endpoint. Belt-and-suspenders
+    // gated on `DURACLAW_DEBUG_ENDPOINTS === '1'` so a direct DO RPC
+    // bypassing the API route still fails closed in production.
+    if (request.method === 'POST' && url.pathname === '/__dev__/synth-rate-limit') {
+      if (this.env.DURACLAW_DEBUG_ENDPOINTS !== '1') {
+        return new Response(JSON.stringify({ error: 'Not found' }), {
+          status: 404,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      try {
+        const body = (await request.json()) as {
+          target: 'runner' | 'do'
+          exit_reason?: 'rate_limited' | 'rate_limited_no_rotate' | 'rate_limited_no_profile'
+          rotation?: { from: string; to: string } | null
+          earliest_clear_ts?: number
+          resets_at?: number | null
+          rate_limit_info?: Record<string, unknown>
+        }
+        if (body.target !== 'runner' && body.target !== 'do') {
+          return new Response(JSON.stringify({ error: "target must be 'runner' or 'do'" }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        }
+        const sessionId = this.state.session_id ?? this.ctx.id.toString()
+        if (body.target === 'runner') {
+          if (!this.getGatewayConnectionId()) {
+            return new Response(JSON.stringify({ error: 'No live runner attached' }), {
+              status: 409,
+              headers: { 'Content-Type': 'application/json' },
+            })
+          }
+          this.sendToGateway({
+            type: 'synth-rate-limit',
+            session_id: sessionId,
+            rate_limit_info: body.rate_limit_info,
+          } as GatewayCommand)
+          return new Response(JSON.stringify({ ok: true, target: 'runner', sessionId }), {
+            headers: { 'Content-Type': 'application/json' },
+          })
+        }
+        // target === 'do'
+        const synthEvent = {
+          type: 'rate_limit' as const,
+          session_id: sessionId,
+          rate_limit_info: body.rate_limit_info ?? { synthesized: true },
+          exit_reason: body.exit_reason,
+          rotation: body.rotation ?? null,
+          earliest_clear_ts: body.earliest_clear_ts,
+          resets_at: body.resets_at ?? null,
+        }
+        this.handleGatewayEvent(synthEvent as GatewayEvent)
+        return new Response(JSON.stringify({ ok: true, target: 'do', sessionId }), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      } catch (err) {
+        return new Response(
+          JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+    }
+
     // Delegate to Agent base class for WS upgrades and other routes
     return super.onRequest(request)
   }
@@ -1054,6 +1135,36 @@ export class SessionDO extends Agent<Env, SessionMeta> {
       active_callback_token: undefined,
     })
     void this.syncStatusToD1(new Date().toISOString())
+  }
+
+  /**
+   * GH#92 P3 (B4/B5/B6): append a system-role message stamped with caam
+   * rotation metadata. The body is rendered to the user as a chrome line in
+   * the message stream; the `metadata.caam` payload is what
+   * `useDerivedStatus` keys off to surface `'rotating'` / `'waiting_profile'`,
+   * and what `forkWithHistory` filters out of the SDK resume-prompt so the
+   * runner doesn't see its own breadcrumbs replayed as conversation turns.
+   *
+   * Distinct from `failAwaitingTurn`: that path turns the session terminal
+   * (status='error', drops the callback token); this one only writes a row
+   * and lets the caller decide on the status transition.
+   */
+  private async insertSystemBreadcrumb(opts: {
+    body: string
+    metadata: SessionMessageMetadata
+  }): Promise<void> {
+    const msg: SessionMessage = {
+      id: `sys-caam-${crypto.randomUUID()}`,
+      role: 'system',
+      parts: [{ type: 'text', text: opts.body }],
+      createdAt: new Date(),
+      // SDK's local SessionMessage type doesn't declare `metadata`; the
+      // wire shape (WireSessionMessage) does, and broadcastMessages/
+      // assistant_messages persistence both round-trip the field.
+      ...({ metadata: opts.metadata } as Record<string, unknown>),
+    }
+    await this.safeAppendMessage(msg)
+    this.broadcastMessage(msg)
   }
 
   onConnect(connection: Connection, ctx: ConnectionContext) {
@@ -1594,6 +1705,27 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   }
 
   /**
+   * GH#92 P3: schedule a delayed-resume alarm at `at`, but never *push back*
+   * a sooner pending alarm (e.g. the 30s watchdog). CF's `setAlarm` replaces
+   * the pending alarm wholesale, so without coalescing we'd accidentally
+   * delay a stale-runner watchdog by an hour just because a `waiting_profile`
+   * resume was scheduled far in the future. Reads the current alarm, picks
+   * the earlier of (existing, at), and writes that.
+   */
+  private async scheduleResumeAlarm(at: number): Promise<void> {
+    let existing: number | null = null
+    try {
+      existing = await this.ctx.storage.getAlarm()
+    } catch (err) {
+      // getAlarm shouldn't throw in practice, but don't let observability
+      // failures wedge the rate_limit handler.
+      console.warn(`[SessionDO:${this.ctx.id}] scheduleResumeAlarm: getAlarm failed:`, err)
+    }
+    const target = Math.min(existing ?? Number.POSITIVE_INFINITY, at)
+    this.ctx.storage.setAlarm(target)
+  }
+
+  /**
    * DO alarm handler — watchdog for stale gateway connections.
    *
    * Fires periodically while a runner is expected to be attached. The guard
@@ -1606,6 +1738,39 @@ export class SessionDO extends Agent<Env, SessionMeta> {
    * `idle` forever — the DO would never notice the runner is gone.
    */
   async alarm() {
+    // GH#92 P3 (B4/B6): delayed-resume dispatch. Runs BEFORE the truly-idle
+    // early-return so a `waiting_profile` session (status='idle', no
+    // callback token) still fires the resume dial when its alarm comes
+    // due. Decision logic is pure (planPendingResumeDispatch); this site
+    // executes the plan and clears pendingResume FIRST so a double-fire
+    // (race with setAlarm replacement) can't dispatch two `resume`
+    // triggers.
+    const resumePlan = planPendingResumeDispatch({
+      pendingResume: this.state.pendingResume,
+      now: Date.now(),
+      hasRunner: !!this.getGatewayConnectionId(),
+      sdkSessionId: this.state.sdk_session_id,
+      project: this.state.project ? this.state.project : null,
+    })
+    if (resumePlan.kind !== 'noop') {
+      this.updateState({ pendingResume: null })
+      if (resumePlan.kind === 'dispatch') {
+        void this.triggerGatewayDial({
+          type: 'resume',
+          project: resumePlan.project,
+          prompt: '',
+          sdk_session_id: resumePlan.sdkSessionId,
+        })
+      } else if (resumePlan.kind === 'clear_missing_context') {
+        console.warn(
+          `[SessionDO:${this.ctx.id}] pendingResume fired but no sdk_session_id/project — skipping (sdk=${this.state.sdk_session_id} project=${this.state.project})`,
+        )
+      }
+      // 'clear_only' — runner already attached, just dropped pendingResume.
+      // Fall through to the rest of the watchdog tick so status / D1
+      // sync still runs against the current state.
+    }
+
     const isActiveStatus =
       this.state.status === 'running' ||
       this.state.status === 'waiting_gate' ||
@@ -1748,6 +1913,11 @@ export class SessionDO extends Agent<Env, SessionMeta> {
         // "not yet ended" state is explicit rather than SQL NULL.
         cols.push(`${col} = ?`)
         vals.push(value ? 1 : 0)
+      } else if (key === 'pendingResume') {
+        // GH#92: JSON-encoded object → TEXT column (migration v17). null /
+        // undefined → SQL NULL so cleared schedules don't leak stale JSON.
+        cols.push(`${col} = ?`)
+        vals.push(value == null ? null : JSON.stringify(value))
       } else {
         cols.push(`${col} = ?`)
         vals.push(value ?? null)
@@ -1788,6 +1958,23 @@ export class SessionDO extends Agent<Env, SessionMeta> {
         if (key === 'lastRunEnded') {
           // INTEGER 0/1 → boolean. GH#73.
           ;(patch as Record<string, unknown>)[key] = raw === 1 || raw === '1' || raw === true
+        } else if (key === 'pendingResume') {
+          // GH#92: TEXT JSON → typed object. Defensive parse — corrupt JSON
+          // (should never happen, but...) falls back to null so a bad row
+          // doesn't wedge hydrate.
+          if (typeof raw === 'string' && raw.length > 0) {
+            try {
+              ;(patch as Record<string, unknown>)[key] = JSON.parse(raw)
+            } catch (parseErr) {
+              console.warn(
+                `[SessionDO:${this.ctx.id}] hydrateMetaFromSql: corrupt pending_resume_json, falling back to null`,
+                parseErr,
+              )
+              ;(patch as Record<string, unknown>)[key] = null
+            }
+          } else {
+            ;(patch as Record<string, unknown>)[key] = null
+          }
         } else {
           ;(patch as Record<string, unknown>)[key] = raw
         }
@@ -4068,26 +4255,13 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
 
     // Build a compact transcript from local history (safe to read even when
     // the DO has lost WS contact with its session-runner).
-    const history = this.session.getHistory()
-    const transcript = history
-      .map((m) => {
-        const role = m.role === 'user' ? 'User' : m.role === 'assistant' ? 'Assistant' : m.role
-        const text = m.parts
-          .map((p) => {
-            if (p.type === 'text') return p.text ?? ''
-            if (p.type === 'reasoning') return `[thinking] ${p.text ?? ''}`
-            if (typeof p.type === 'string' && p.type.startsWith('tool-')) {
-              const name = (p as { toolName?: string }).toolName ?? p.type.slice(5)
-              return `[used tool: ${name}]`
-            }
-            return ''
-          })
-          .filter(Boolean)
-          .join('\n')
-        return text ? `${role}: ${text}` : ''
-      })
-      .filter(Boolean)
-      .join('\n\n')
+    // GH#92 P3: caam rotation breadcrumbs (system-role messages stamped
+    // with `metadata.caam`) are filtered inside serializeHistoryForFork
+    // so the SDK doesn't see its own chrome replayed as a conversation
+    // turn. They still ride messagesCollection for the UI.
+    const transcript = serializeHistoryForFork(
+      this.session.getHistory() as unknown as readonly WireSessionMessage[],
+    )
 
     const nextText =
       typeof content === 'string'
@@ -5367,6 +5541,50 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         this.syncContextUsageToD1(JSON.stringify(parsed))
         // Retained WS broadcast — consumer migration is a separate issue.
         this.broadcastGatewayEvent(event)
+        break
+      }
+
+      // GH#92 P3 (B4/B5/B6): caam rotation handling. Branches on
+      // `exit_reason` set by the runner's caam-rotation arm. Absent
+      // `exit_reason` is the dev-box / legacy degraded-mode path (B7) —
+      // falls through to the default broadcast. We always still broadcast
+      // the raw event for consumers that listen to `gateway_event` frames.
+      case 'rate_limit': {
+        this.broadcastGatewayEvent(event)
+        // GH#92 P3 (B4/B5/B6): pure decision logic lives in
+        // `planRateLimitAction`; this site just executes the plan via
+        // existing helpers (insertSystemBreadcrumb / updateState /
+        // scheduleResumeAlarm / syncStatusAndErrorToD1).
+        const plan = planRateLimitAction({ event, now: Date.now() })
+        if (plan.kind === 'rotation_missing') {
+          console.warn(
+            `[SessionDO:${this.ctx.id}] rate_limit exit_reason=rate_limited with null rotation — skipping resume schedule`,
+          )
+          break
+        }
+        if (plan.kind === 'degraded') {
+          // No exit_reason — B7 dev-box / legacy relay. Already broadcast
+          // above; nothing else to do.
+          break
+        }
+        if (plan.kind === 'waiting' && plan.fallbackUsed) {
+          console.warn(
+            `[SessionDO:${this.ctx.id}] rate_limit exit_reason=rate_limited_no_profile missing/stale earliest_clear_ts (${event.earliest_clear_ts}) — defaulting to now+60s`,
+          )
+        }
+        void this.insertSystemBreadcrumb(plan.breadcrumb)
+        if (plan.kind === 'skipped') {
+          this.updateState({
+            status: 'error',
+            error: plan.terminalError,
+            active_callback_token: undefined,
+          })
+          this.syncStatusAndErrorToD1('error', plan.terminalError, null, new Date().toISOString())
+          break
+        }
+        // 'rotated' / 'waiting' — schedule pendingResume + alarm.
+        this.updateState({ pendingResume: plan.pendingResume })
+        void this.scheduleResumeAlarm(plan.pendingResume.at)
         break
       }
 

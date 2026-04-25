@@ -39,6 +39,30 @@ export function useDerivedStatus(sessionId: string | null): SessionStatus | unde
   return useMemo(() => {
     if (!messages || messages.length === 0) return undefined
 
+    // GH#92 P3: caam rotation breadcrumb dominance.
+    // Walk from tail forward and stop at the first message that is either
+    //   (a) a non-system message — fall through to the legacy fold below;
+    //   (b) a system message with `metadata.caam` defined — derive status
+    //       directly from `caam.kind`.
+    // This implements "the newest caam breadcrumb beats older messages,
+    // BUT a newer non-system message (assistant/user/tool) supersedes any
+    // earlier caam breadcrumb" — once the runner produces fresh output,
+    // the rotation breadcrumb is no longer the live signal.
+    // We branch strictly on `metadata.caam` (never on body text).
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i] as {
+        role?: string
+        metadata?: { caam?: { kind: 'rotated' | 'skipped' | 'waiting' } }
+      }
+      if (msg.role !== 'system') break
+      const caam = msg.metadata?.caam
+      if (caam === undefined) continue
+      if (caam.kind === 'rotated') return 'rotating'
+      if (caam.kind === 'waiting') return 'waiting_profile'
+      if (caam.kind === 'skipped') return 'error'
+      break
+    }
+
     // Scan messages tail-first — first terminal or in-flight marker wins.
     let derived: SessionStatus | undefined
     for (let i = messages.length - 1; i >= 0; i--) {

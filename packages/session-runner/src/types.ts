@@ -50,6 +50,29 @@ export interface RunnerSessionContext {
   titler: SessionTitler | null
   /** Monotonic sequence stamped on every outbound event. Part B populates this. */
   nextSeq: number
+  /**
+   * GH#92: rotation policy for this runner, resolved at startup from env
+   * (`DURACLAW_CLAUDE_PROFILE` / `DURACLAW_CLAUDE_ROTATION`). `off` means
+   * caam rotation is suppressed and a rate_limit_event aborts with
+   * `rate_limited_no_rotate`; `auto` runs the normal B3 rotation gates.
+   * A pinned profile (`DURACLAW_CLAUDE_PROFILE` set) forces `off` —
+   * pinning is an explicit no-fallback choice per D8.
+   */
+  rotationMode?: 'auto' | 'off'
+  /**
+   * GH#92: path to the sessions-files directory (normally `/run/duraclaw/sessions`).
+   * Read from `SESSIONS_DIR` env at startup. Exposed on ctx so the
+   * rate-limit branch in claude-runner.ts can globs peer `*.meta.json`
+   * without re-reading process.env.
+   */
+  sessionsDir?: string
+  /**
+   * GH#92: inline exit-file writer exposed on ctx so the rate-limit
+   * branch in claude-runner.ts can write `.exit` BEFORE calling
+   * `ctx.abortController.abort()`. Idempotent (link+EEXIST under the
+   * hood); second caller no-ops. Populated by main.ts at startup.
+   */
+  writeExitFileInline?: (payload: Record<string, unknown>) => Promise<void>
   /** In-memory snapshot of live session state; the meta-file dumper reads this. */
   meta: {
     sdk_session_id: string | null
@@ -58,6 +81,20 @@ export interface RunnerSessionContext {
     cost: { input_tokens: number; output_tokens: number; usd: number }
     model: string | null
     turn_count: number
-    state: 'running' | 'completed' | 'failed' | 'aborted' | 'crashed'
+    state:
+      | 'running'
+      | 'completed'
+      | 'failed'
+      | 'aborted'
+      | 'crashed'
+      | 'rate_limited'
+      | 'rate_limited_no_profile'
+      | 'rate_limited_no_rotate'
+    /** GH#92: active caam Claude profile name, stamped at runner startup. */
+    claude_profile?: string | null
+    /** GH#92: rotation metadata, populated only when rate_limited fired and we rotated. */
+    rotation?: { from: string; to: string } | null
+    /** GH#92: earliest cooldown-clear timestamp, populated only on rate_limited_no_profile. */
+    rate_limit_earliest_clear_ts?: number | null
   }
 }

@@ -9,6 +9,7 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as AuthenticatedAdminCaamRouteImport } from './routes/_authenticated/admin.caam'
 import { Route as AuthenticatedAdminUsersRouteImport } from './routes/_authenticated/admin.users'
 import { Route as AuthenticatedBoardRouteImport } from './routes/_authenticated/board'
 import { Route as AuthenticatedDeploysRouteImport } from './routes/_authenticated/deploys'
@@ -63,6 +64,11 @@ const AuthenticatedAdminUsersRoute = AuthenticatedAdminUsersRouteImport.update({
   path: '/admin/users',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
+const AuthenticatedAdminCaamRoute = AuthenticatedAdminCaamRouteImport.update({
+  id: '/admin/caam',
+  path: '/admin/caam',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
 export interface FileRoutesByFullPath {
   '/': typeof AuthenticatedIndexRoute
   '/login': typeof LoginRoute
@@ -71,6 +77,7 @@ export interface FileRoutesByFullPath {
   '/deploys': typeof AuthenticatedDeploysRoute
   '/settings': typeof AuthenticatedSettingsRoute
   '/admin/users': typeof AuthenticatedAdminUsersRoute
+  '/admin/caam': typeof AuthenticatedAdminCaamRoute
   '/session/$id': typeof AuthenticatedSessionIdRoute
 }
 export interface FileRoutesByTo {
@@ -81,6 +88,7 @@ export interface FileRoutesByTo {
   '/settings': typeof AuthenticatedSettingsRoute
   '/': typeof AuthenticatedIndexRoute
   '/admin/users': typeof AuthenticatedAdminUsersRoute
+  '/admin/caam': typeof AuthenticatedAdminCaamRoute
   '/session/$id': typeof AuthenticatedSessionIdRoute
 }
 export interface FileRoutesById {
@@ -93,6 +101,7 @@ export interface FileRoutesById {
   '/_authenticated/settings': typeof AuthenticatedSettingsRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
   '/_authenticated/admin/users': typeof AuthenticatedAdminUsersRoute
+  '/_authenticated/admin/caam': typeof AuthenticatedAdminCaamRoute
   '/_authenticated/session/$id': typeof AuthenticatedSessionIdRoute
 }
 export interface FileRouteTypes {
@@ -105,6 +114,7 @@ export interface FileRouteTypes {
     | '/deploys'
     | '/settings'
     | '/admin/users'
+    | '/admin/caam'
     | '/session/$id'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -115,6 +125,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/'
     | '/admin/users'
+    | '/admin/caam'
     | '/session/$id'
   id:
     | '__root__'
@@ -126,6 +137,7 @@ export interface FileRouteTypes {
     | '/_authenticated/settings'
     | '/_authenticated/'
     | '/_authenticated/admin/users'
+    | '/_authenticated/admin/caam'
     | '/_authenticated/session/$id'
   fileRoutesById: FileRoutesById
 }
@@ -200,6 +212,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedAdminUsersRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/admin/caam': {
+      id: '/_authenticated/admin/caam'
+      path: '/admin/caam'
+      fullPath: '/admin/caam'
+      preLoaderRoute: typeof AuthenticatedAdminCaamRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
   }
 }
 
@@ -209,6 +228,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedSettingsRoute: typeof AuthenticatedSettingsRoute
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
   AuthenticatedAdminUsersRoute: typeof AuthenticatedAdminUsersRoute
+  AuthenticatedAdminCaamRoute: typeof AuthenticatedAdminCaamRoute
   AuthenticatedSessionIdRoute: typeof AuthenticatedSessionIdRoute
 }
 
@@ -218,6 +238,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedSettingsRoute: AuthenticatedSettingsRoute,
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
   AuthenticatedAdminUsersRoute: AuthenticatedAdminUsersRoute,
+  AuthenticatedAdminCaamRoute: AuthenticatedAdminCaamRoute,
   AuthenticatedSessionIdRoute: AuthenticatedSessionIdRoute,
 }
 
