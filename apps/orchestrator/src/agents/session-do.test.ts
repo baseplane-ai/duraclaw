@@ -2,6 +2,7 @@ import type { SessionMessage, SessionMessagePart } from 'agents/experimental/mem
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { chunkOps } from '~/lib/chunk-frame'
 import { getSessionStatus } from '~/lib/vps-client'
+import { fingerprintAssistantContent } from './gateway-event-mapper'
 import {
   buildGatewayCallbackUrl,
   buildGatewayStartUrl,
@@ -17,6 +18,7 @@ import {
   planAwaitingTimeout,
   planClearAwaiting,
   RECOVERY_GRACE_MS,
+  repeatedTurnGuardStep,
   resolveStaleThresholdMs,
   runawayGuardStep,
   validateGatewayToken,
@@ -4428,5 +4430,199 @@ describe('abort() — accepts every SessionStatus (no guard regression)', () => 
 
   it.each(ALL_STATUSES)('does not reject from status %s', (status) => {
     expect(abortGuardMirror(status).rejected).toBe(false)
+  })
+})
+
+// ── fingerprintAssistantContent (repeat-detector input) ───────
+//
+// The fingerprint extractor must (a) return null for tool_use turns
+// (varying tool args = progress), (b) return null for empty turns
+// (delegate to the empty-turn guard), (c) collapse whitespace / case /
+// ZWS variants of the same text to identical fingerprints, and
+// (d) tag text vs thinking blocks distinctly so a thinking-only stream
+// and a text-only stream of the same string don't collide.
+describe('fingerprintAssistantContent', () => {
+  it('returns null when any tool_use block is present', () => {
+    expect(
+      fingerprintAssistantContent([
+        { type: 'text', text: 'looks the same every time' },
+        { type: 'tool_use', name: 'Read', input: { file: 'a.ts' } },
+      ]),
+    ).toBeNull()
+  })
+
+  it('returns null for whitespace-only text content', () => {
+    expect(fingerprintAssistantContent([{ type: 'text', text: '   \u200B  ' }])).toBeNull()
+  })
+
+  it('returns null for empty content array', () => {
+    expect(fingerprintAssistantContent([])).toBeNull()
+  })
+
+  it('collapses whitespace, ZWS, and case to identical fingerprints', () => {
+    const a = fingerprintAssistantContent([{ type: 'text', text: 'Awaiting reply: 1, 2, or 3' }])
+    const b = fingerprintAssistantContent([
+      { type: 'text', text: 'awaiting\u200Breply:\t1, 2, or 3\n' },
+    ])
+    const c = fingerprintAssistantContent([
+      { type: 'text', text: 'AWAITING  REPLY:  1,  2,  or  3' },
+    ])
+    expect(a).not.toBeNull()
+    expect(a).toBe(b)
+    expect(a).toBe(c)
+  })
+
+  it('produces distinct fingerprints for thinking-only vs text-only with same string', () => {
+    const t = fingerprintAssistantContent([{ type: 'text', text: 'hello' }])
+    const r = fingerprintAssistantContent([{ type: 'thinking', thinking: 'hello' }])
+    expect(t).not.toBeNull()
+    expect(r).not.toBeNull()
+    expect(t).not.toBe(r)
+  })
+
+  it('returns null for unknown block types (conservative skip)', () => {
+    expect(fingerprintAssistantContent([{ type: 'image', source: { data: 'x' } }])).toBeNull()
+  })
+})
+
+// ── repeatedTurnGuardStep (stuck-content runaway guard) ───────
+//
+// Catches the runaway flavor the empty-turn guard misses: model wedged
+// emitting near-identical non-empty turns (Stop-hook redirect loop,
+// prompt-feedback loop, etc.). Tighter threshold than the empty-turn
+// guard because identical-content loops are a rarer / stronger signal.
+describe('repeatedTurnGuardStep (repeated-content runaway guard)', () => {
+  const THRESHOLD = 5
+
+  it('does not fire until the ring is full of identical fingerprints', () => {
+    let recent: string[] = []
+    const fps: Array<{ shouldFire: boolean }> = []
+    for (let i = 0; i < THRESHOLD; i++) {
+      const d = repeatedTurnGuardStep({
+        status: 'streaming',
+        fingerprint: 'awaiting reply: 1, 2, or 3',
+        recent,
+        threshold: THRESHOLD,
+      })
+      recent = d.nextRecent
+      fps.push({ shouldFire: d.shouldFire })
+    }
+    // First THRESHOLD-1 calls do NOT fire.
+    expect(fps.slice(0, THRESHOLD - 1).every((d) => !d.shouldFire)).toBe(true)
+    // The Nth call (ring just became full + all identical) DOES fire.
+    expect(fps[THRESHOLD - 1].shouldFire).toBe(true)
+  })
+
+  it('never fires when fingerprints differ across turns', () => {
+    let recent: string[] = []
+    let fired = false
+    for (let i = 0; i < 20; i++) {
+      const d = repeatedTurnGuardStep({
+        status: 'streaming',
+        fingerprint: `unique turn ${i}`,
+        recent,
+        threshold: THRESHOLD,
+      })
+      recent = d.nextRecent
+      if (d.shouldFire) fired = true
+    }
+    expect(fired).toBe(false)
+    // Ring is capped at threshold size.
+    expect(recent.length).toBe(THRESHOLD)
+  })
+
+  it("clears ring and never fires while status === 'waiting_gate'", () => {
+    let recent = ['x', 'x', 'x', 'x']
+    const d = repeatedTurnGuardStep({
+      status: 'waiting_gate',
+      fingerprint: 'x',
+      recent,
+      threshold: THRESHOLD,
+    })
+    recent = d.nextRecent
+    expect(d.shouldFire).toBe(false)
+    expect(recent).toEqual([])
+  })
+
+  it('null fingerprint (tool_use / empty / unknown) leaves the ring untouched and does not fire', () => {
+    const before = ['stuck', 'stuck', 'stuck']
+    const d = repeatedTurnGuardStep({
+      status: 'streaming',
+      fingerprint: null,
+      recent: before,
+      threshold: THRESHOLD,
+    })
+    expect(d.shouldFire).toBe(false)
+    expect(d.nextRecent).toEqual(before)
+  })
+
+  it('tool-use turns interleaved with stuck text still trip the guard on the 5th identical text turn', () => {
+    // Mirrors the real shape: model emits text-only loop, occasionally
+    // peppered with tool_use turns. The tool turns are skipped (null
+    // fingerprint) but do not reset the ring of stuck text turns.
+    let recent: string[] = []
+    let fired = false
+    const sequence: Array<string | null> = [
+      'stuck reply',
+      'stuck reply',
+      null, // tool_use — skipped
+      'stuck reply',
+      null, // tool_use — skipped
+      'stuck reply',
+      'stuck reply', // 5th identical text turn — fires
+    ]
+    for (const fp of sequence) {
+      const d = repeatedTurnGuardStep({
+        status: 'streaming',
+        fingerprint: fp,
+        recent,
+        threshold: THRESHOLD,
+      })
+      recent = d.nextRecent
+      if (d.shouldFire) {
+        fired = true
+        break
+      }
+    }
+    expect(fired).toBe(true)
+  })
+
+  it('a single different fingerprint mid-streak resets the loop detection', () => {
+    let recent: string[] = []
+    let fired = false
+    const sequence = ['A', 'A', 'A', 'A', 'B', 'A', 'A'] // never 5 in a row
+    for (const fp of sequence) {
+      const d = repeatedTurnGuardStep({
+        status: 'streaming',
+        fingerprint: fp,
+        recent,
+        threshold: THRESHOLD,
+      })
+      recent = d.nextRecent
+      if (d.shouldFire) fired = true
+    }
+    expect(fired).toBe(false)
+  })
+
+  it('full bug-repro: 12 identical "Awaiting reply" turns fires by the 5th turn', () => {
+    // Mirrors the prior session: AskUserQuestion stream-closed, kata
+    // stop-conditions hook kept blocking Stop, agent echoed identical
+    // "Awaiting reply: 1, 2, or 3" 12 times. Threshold = 5 catches it
+    // 7 turns earlier than the empty-turn guard would (it never would,
+    // the content was non-empty).
+    const fp = 'awaiting reply: 1, 2, or 3'
+    let recent: string[] = []
+    let fireOnTurn = -1
+    for (let turn = 1; turn <= 12; turn++) {
+      const d = repeatedTurnGuardStep({
+        status: 'streaming',
+        fingerprint: fp,
+        recent,
+        threshold: THRESHOLD,
+      })
+      recent = d.nextRecent
+      if (d.shouldFire && fireOnTurn === -1) fireOnTurn = turn
+    }
+    expect(fireOnTurn).toBe(THRESHOLD)
   })
 })

@@ -449,6 +449,54 @@ export function runawayGuardStep(input: RunawayGuardInput): RunawayGuardDecision
   return { nextCounter: 0, shouldFire: false }
 }
 
+/**
+ * Repeated-assistant-turn guard step (pure decision).
+ *
+ * Catches the "stuck-content" runaway flavor that the empty-turn guard
+ * misses: model wedged emitting near-identical non-empty turns, prompt-
+ * feedback loops, Stop-hook re-triggering with the same redirect. The
+ * empty-turn guard fires only when assistant content is whitespace/ZWS;
+ * a loop where every turn says "I cannot proceed without X" sails past it.
+ *
+ * Decision rules:
+ *   - status === 'waiting_gate'     → clear ring, do not fire (gate-pending)
+ *   - fingerprint === null          → skip (tool_use turn, empty turn —
+ *                                     ring untouched, defer to other guards)
+ *   - otherwise                     → append to ring (capped at threshold);
+ *                                     fire when ring is full AND every
+ *                                     entry equals the newest fingerprint
+ *
+ * Threshold is intentionally tighter than the empty-turn threshold (10):
+ * an identical-content loop is a stronger, rarer signal than a flood of
+ * empty turns, so 5 is enough to act on. Tool-use turns are deliberately
+ * excluded (varying tool args = legitimate progress, not a wedge).
+ *
+ * Pure helper for unit-testability — same pattern as `runawayGuardStep`.
+ */
+export interface RepeatedTurnGuardInput {
+  status: string | undefined
+  fingerprint: string | null
+  recent: readonly string[]
+  threshold: number
+}
+export interface RepeatedTurnGuardDecision {
+  nextRecent: string[]
+  shouldFire: boolean
+}
+export function repeatedTurnGuardStep(input: RepeatedTurnGuardInput): RepeatedTurnGuardDecision {
+  if (input.status === 'waiting_gate') {
+    return { nextRecent: [], shouldFire: false }
+  }
+  if (input.fingerprint === null) {
+    return { nextRecent: [...input.recent], shouldFire: false }
+  }
+  const appended = [...input.recent, input.fingerprint]
+  const nextRecent = appended.slice(-input.threshold)
+  const shouldFire =
+    nextRecent.length >= input.threshold && nextRecent.every((fp) => fp === nextRecent[0])
+  return { nextRecent, shouldFire }
+}
+
 export function planAwaitingTimeout<TMsg extends SessionMessage>(input: {
   history: readonly TMsg[]
   connectionId: string | null

@@ -90,6 +90,68 @@ export function isAssistantContentEmpty(content: unknown[]): boolean {
   return true
 }
 
+/** Whitespace + ZWS class for fingerprint normalization. */
+const NORMALIZE_WS_RE = /[\s\u200B-\u200D\uFEFF]+/g
+
+/**
+ * Build a stable fingerprint of an assistant turn's textual / reasoning
+ * content for the repeated-turn runaway guard. Returns `null` when the
+ * turn should be ignored by the repeat detector:
+ *
+ *   - any `tool_use` block present → tool turns vary by design and
+ *     represent progress, not a wedge
+ *   - all-empty / whitespace-only content → the empty-turn guard
+ *     handles this flavor; we don't double-count
+ *   - unknown block types → treat as progress (consistent with
+ *     `isAssistantContentEmpty`'s "unknown is non-empty" rule, but here
+ *     null = "skip" rather than "non-empty progress"; we lean
+ *     conservative and skip rather than over-fire on shapes we don't
+ *     understand)
+ *
+ * Normalization: tag each block (\x01 text / \x02 thinking) so a
+ * thinking-only stream and an identical text-only stream don't collide,
+ * NFKC-normalize, collapse whitespace + ZWS into a single ASCII space,
+ * trim, lowercase. Identical-modulo-formatting turns produce identical
+ * fingerprints so the repeat detector catches loops the model dresses
+ * up with cosmetic variation.
+ */
+export function fingerprintAssistantContent(content: unknown[]): string | null {
+  let buf = ''
+  let sawAnyContent = false
+  for (const block of content) {
+    const b = block as Record<string, unknown>
+    if (b.type === 'tool_use') return null
+    if (b.type === 'text' && typeof b.text === 'string') {
+      buf += `\x01${b.text}`
+      sawAnyContent = true
+      continue
+    }
+    if (b.type === 'thinking' && typeof b.thinking === 'string') {
+      buf += `\x02${b.thinking}`
+      sawAnyContent = true
+      continue
+    }
+    // Unknown shape — be conservative; don't fingerprint a turn we
+    // can't fully account for.
+    return null
+  }
+  if (!sawAnyContent) return null
+  const normalized = buf.normalize('NFKC').replace(NORMALIZE_WS_RE, ' ').trim().toLowerCase()
+  // Strip per-block type tags before deciding emptiness — a turn whose
+  // only "content" is tag bytes (e.g. whitespace-only text blocks)
+  // shouldn't fingerprint as repeatable.
+  let hasContent = false
+  for (let i = 0; i < normalized.length; i++) {
+    const code = normalized.charCodeAt(i)
+    if (code !== 0x01 && code !== 0x02) {
+      hasContent = true
+      break
+    }
+  }
+  if (!hasContent) return null
+  return normalized
+}
+
 /**
  * Extract displayable text from tool result content.
  * Content can be a string, an array of content blocks [{type:"text", text:"..."}], or other shapes.

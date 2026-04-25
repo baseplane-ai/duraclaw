@@ -48,6 +48,7 @@ import {
   applyToolResult,
   assistantContentToParts,
   finalizeStreamingParts,
+  fingerprintAssistantContent,
   isAssistantContentEmpty,
   mergeFinalAssistantParts,
   partialAssistantToParts,
@@ -68,6 +69,7 @@ import {
   planClearAwaiting,
   planPendingResumeDispatch,
   planRateLimitAction,
+  repeatedTurnGuardStep,
   resolveStaleThresholdMs,
   runawayGuardStep,
   serializeHistoryForFork,
@@ -243,6 +245,16 @@ function parseTurnOrdinal(id?: string): number | undefined {
  */
 const RUNAWAY_EMPTY_TURN_THRESHOLD = 10
 
+/**
+ * Repeat-detector threshold for the "stuck-content" runaway flavor —
+ * model emits N consecutive non-empty turns with identical fingerprints
+ * (whitespace / case / Unicode-modulo). Tighter than the empty-turn
+ * threshold because identical-content loops are a stronger, rarer signal:
+ * 5 in a row is virtually never legitimate. Tool-use turns are excluded
+ * from fingerprinting (varying tool args = legitimate progress).
+ */
+const REPEATED_TURN_THRESHOLD = 5
+
 // Stale threshold is resolved per-alarm via resolveStaleThresholdMs(env) so
 // config changes take effect on the next DO wake without a code change.
 // Default is 90s — see DEFAULT_STALE_THRESHOLD_MS in session-do-helpers.
@@ -261,6 +273,14 @@ export class SessionDO extends Agent<Env, SessionMeta> {
    * turn loop.
    */
   private consecutiveEmptyAssistantTurns = 0
+  /**
+   * Ring of fingerprints for the most recent non-tool, non-empty assistant
+   * turns. Capped at `REPEATED_TURN_THRESHOLD`. When the ring is full and
+   * all entries match, the `case 'assistant'` handler interrupts the
+   * runner (same fire path as the empty-turn guard). Memory-only — only
+   * meaningful within a live SDK turn loop, so no rehydrate persistence.
+   */
+  private recentTurnFingerprints: string[] = []
   /** Cached gateway connection ID — avoids SQLite reads on every message. */
   private cachedGatewayConnId: string | null = null
   /** Timestamp of the last gateway event received on the WS connection. */
@@ -4441,6 +4461,47 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
     }
   }
 
+  /**
+   * Shared fire path for both runaway-loop guards (empty-turn +
+   * repeated-content). Sends the interrupt GatewayCommand, appends a
+   * visible system error to the transcript, flips the session to idle
+   * with the supplied error code, and clears both guard rings. Caller
+   * `break`s out of the `case 'assistant'` after invoking.
+   */
+  private fireRunawayInterrupt(
+    errorCode: string,
+    userVisibleMessage: string,
+    diagnostics: { kind: 'empty' | 'repeated'; consecutive: number },
+  ): void {
+    console.warn(`[session-do] runaway ${diagnostics.kind}-assistant-turn loop detected`, {
+      sessionId: this.state.session_id,
+      consecutive: diagnostics.consecutive,
+    })
+    this.sendToGateway({
+      type: 'interrupt',
+      session_id: this.state.session_id ?? '',
+    })
+    this.turnCounter++
+    const errorMsgId = `err-${this.turnCounter}`
+    const errorMsg: SessionMessage = {
+      id: errorMsgId,
+      role: 'system',
+      parts: [{ type: 'text', text: userVisibleMessage }],
+      createdAt: new Date(),
+    }
+    try {
+      this.safeAppendMessage(errorMsg)
+      this.broadcastMessage(errorMsg)
+    } catch (err) {
+      console.error('[session-do] runaway-guard persist failed', err)
+    }
+    this.updateState({ status: 'idle', error: errorCode })
+    this.consecutiveEmptyAssistantTurns = 0
+    this.recentTurnFingerprints = []
+    this.currentTurnMessageId = null
+    this.persistTurnState()
+  }
+
   @callable()
   async interrupt(): Promise<{ ok: boolean; error?: string }> {
     // Always clear pending gate parts first — the GateResolver UI is
@@ -5022,40 +5083,33 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         })
         this.consecutiveEmptyAssistantTurns = guardDecision.nextCounter
         if (guardDecision.shouldFire) {
-          console.warn('[session-do] runaway empty-assistant-turn loop detected', {
-            sessionId: this.state.session_id,
-            consecutive: guardDecision.nextCounter,
-          })
-          this.sendToGateway({
-            type: 'interrupt',
-            session_id: this.state.session_id ?? '',
-          })
-          this.turnCounter++
-          const errorMsgId = `err-${this.turnCounter}`
-          const errorMsg: SessionMessage = {
-            id: errorMsgId,
-            role: 'system',
-            parts: [
-              {
-                type: 'text',
-                text: '⚠ Session auto-stopped: detected repeated empty assistant turns (model runaway).',
-              },
-            ],
-            createdAt: new Date(),
-          }
-          try {
-            this.safeAppendMessage(errorMsg)
-            this.broadcastMessage(errorMsg)
-          } catch (err) {
-            console.error('[session-do] runaway-guard persist failed', err)
-          }
-          this.updateState({
-            status: 'idle',
-            error: 'runaway_empty_assistant_turns',
-          })
-          this.consecutiveEmptyAssistantTurns = 0
-          this.currentTurnMessageId = null
-          this.persistTurnState()
+          this.fireRunawayInterrupt(
+            'runaway_empty_assistant_turns',
+            '⚠ Session auto-stopped: detected repeated empty assistant turns (model runaway).',
+            { kind: 'empty', consecutive: guardDecision.nextCounter },
+          )
+          break
+        }
+
+        // Repeated-content guard: detect the "stuck-content" runaway flavor
+        // the empty-turn guard misses (model wedged emitting near-identical
+        // non-empty turns, prompt-feedback loop, Stop-hook redirect loop).
+        // Same gate-aware short-circuit; tool-use turns are skipped via
+        // null fingerprint (varying tool args = legitimate progress).
+        const fingerprint = fingerprintAssistantContent(event.content as unknown[])
+        const repeatDecision = repeatedTurnGuardStep({
+          status: this.state.status,
+          fingerprint,
+          recent: this.recentTurnFingerprints,
+          threshold: REPEATED_TURN_THRESHOLD,
+        })
+        this.recentTurnFingerprints = repeatDecision.nextRecent
+        if (repeatDecision.shouldFire) {
+          this.fireRunawayInterrupt(
+            'repeated_assistant_turns',
+            '⚠ Session auto-stopped: detected repeated assistant turns (model wedge / hook loop).',
+            { kind: 'repeated', consecutive: repeatDecision.nextRecent.length },
+          )
           break
         }
 
