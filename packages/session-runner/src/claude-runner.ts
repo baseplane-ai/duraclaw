@@ -187,7 +187,12 @@ export async function handleRotation(
   sessionId: string,
 ): Promise<void> {
   const nowSec = Math.floor(Date.now() / 1000)
-  const resetsAt = typeof lastInfo?.resetsAt === 'number' ? lastInfo.resetsAt : nowSec + 5 * 3600
+  // Anthropic's hard rate-limit window is 5h; if the SDK didn't surface a
+  // resetsAt (lastInfo missing entirely) fall back to that as a conservative
+  // cooldown so we don't activate-then-immediately-rotate-back later.
+  const FALLBACK_COOLDOWN_SEC = 5 * 3600
+  const resetsAt =
+    typeof lastInfo?.resetsAt === 'number' ? lastInfo.resetsAt : nowSec + FALLBACK_COOLDOWN_SEC
   const profiles = caamLs()
   const cooled = caamCooldownList()
   const active = profiles.find((p) => p.active)?.name

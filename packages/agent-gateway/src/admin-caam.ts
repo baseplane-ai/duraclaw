@@ -56,6 +56,10 @@ function toIso(value: string | number | null | undefined): string | null {
   if (typeof value === 'number' && Number.isFinite(value)) {
     // Treat as Unix seconds; the caam CLI emits seconds for both
     // `resets_at` and `health.expires_at` / `cooldown.until`.
+    // The 1e12 threshold disambiguates seconds vs milliseconds — Unix-second
+    // timestamps don't cross 1e12 until ~year 33658, so any incoming number
+    // ≥ 1e12 is treated as already-milliseconds (defensive against caam
+    // someday switching units).
     const ms = value < 1e12 ? value * 1000 : value
     const d = new Date(ms)
     if (Number.isNaN(d.getTime())) return null
