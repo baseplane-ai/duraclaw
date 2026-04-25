@@ -160,16 +160,17 @@ function handleIncomingCommand(msg: unknown, ctx: RunnerSessionContext, ch: Buff
         ctx.titler.maybePivotRetitle([], userText).catch(() => {})
       }
 
-      // Mid-flight steering: if the SDK query is actively running (not
-      // between turns waiting on waitForNext), inject directly via
-      // streamInput() so the model sees the user message immediately —
-      // same mechanism the CLI uses for mid-generation steering.
+      // Queue follow-up: if the SDK query is actively running (not
+      // between turns waiting on waitForNext), inject via streamInput()
+      // with priority 'next' so the message queues until the current
+      // turn completes — matching the TUI's queue-while-busy behavior.
+      // Explicit interrupts use the separate 'interrupt' command type.
       if (ctx.query) {
         const sdkMsg = {
           type: 'user' as const,
           message: { role: 'user' as const, content: msg.content },
           parent_tool_use_id: null,
-          priority: 'now' as const,
+          priority: 'next' as const,
         }
         async function* singleMessage() {
           yield sdkMsg
