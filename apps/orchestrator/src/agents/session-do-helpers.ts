@@ -407,6 +407,48 @@ export type AwaitingTimeoutDecision = { kind: 'noop' } | { kind: 'expire'; start
  * caller performs the state mutations so the side-effecting pieces
  * (safeAppendMessage / updateState / syncStatusToD1) stay in the DO.
  */
+/**
+ * Runaway-empty-assistant-turn guard step (pure decision).
+ *
+ * The DO tracks `consecutiveEmptyAssistantTurns` to catch the prod-incident
+ * failure mode where the SDK emits a flood of effectively-empty assistant
+ * events (commit 083d7a9). The original implementation incremented the
+ * counter on every empty turn regardless of session status, which fired the
+ * interrupt while a session was legitimately paused on an `ask_user` /
+ * `permission_request` gate — the runner is blocked awaiting user input,
+ * and any empty/thinking turns the model emits under that condition are
+ * not a runaway signal.
+ *
+ * Decision rules:
+ *   - status === 'waiting_gate'  → reset counter, do not fire (gate-pending)
+ *   - empty content              → increment; fire when ≥ threshold
+ *   - non-empty (substantive)    → reset counter
+ *
+ * Extracted as a pure helper so it can be unit-tested without touching the
+ * SessionDO TC39-decorator parse barrier (same pattern as
+ * `deriveSnapshotOps` and `planAwaitingTimeout`).
+ */
+export interface RunawayGuardInput {
+  status: string | undefined
+  isEmpty: boolean
+  counter: number
+  threshold: number
+}
+export interface RunawayGuardDecision {
+  nextCounter: number
+  shouldFire: boolean
+}
+export function runawayGuardStep(input: RunawayGuardInput): RunawayGuardDecision {
+  if (input.status === 'waiting_gate') {
+    return { nextCounter: 0, shouldFire: false }
+  }
+  if (input.isEmpty) {
+    const nextCounter = input.counter + 1
+    return { nextCounter, shouldFire: nextCounter >= input.threshold }
+  }
+  return { nextCounter: 0, shouldFire: false }
+}
+
 export function planAwaitingTimeout<TMsg extends SessionMessage>(input: {
   history: readonly TMsg[]
   connectionId: string | null

@@ -69,6 +69,7 @@ import {
   planPendingResumeDispatch,
   planRateLimitAction,
   resolveStaleThresholdMs,
+  runawayGuardStep,
   serializeHistoryForFork,
 } from './session-do-helpers'
 import { SESSION_DO_MIGRATIONS } from './session-do-migrations'
@@ -4929,53 +4930,58 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
         this.clearAwaitingResponse()
 
         // Runaway-turn guard: detect the "empty assistant loop" failure mode
-        // (prod incident 2026-04-24 — 500+ single-ZWS turns). Increment the
-        // counter on effectively-empty content; reset on any substantive
-        // turn. When the threshold fires, interrupt the runner, append a
-        // visible system error, flip to idle, and skip further persistence
-        // for this empty event so we don't spam the transcript with one more
-        // blank bubble before stopping.
-        if (isAssistantContentEmpty(event.content as unknown[])) {
-          this.consecutiveEmptyAssistantTurns++
-          if (this.consecutiveEmptyAssistantTurns >= RUNAWAY_EMPTY_TURN_THRESHOLD) {
-            console.warn('[session-do] runaway empty-assistant-turn loop detected', {
-              sessionId: this.state.session_id,
-              consecutive: this.consecutiveEmptyAssistantTurns,
-            })
-            this.sendToGateway({
-              type: 'interrupt',
-              session_id: this.state.session_id ?? '',
-            })
-            this.turnCounter++
-            const errorMsgId = `err-${this.turnCounter}`
-            const errorMsg: SessionMessage = {
-              id: errorMsgId,
-              role: 'system',
-              parts: [
-                {
-                  type: 'text',
-                  text: '⚠ Session auto-stopped: detected repeated empty assistant turns (model runaway).',
-                },
-              ],
-              createdAt: new Date(),
-            }
-            try {
-              this.safeAppendMessage(errorMsg)
-              this.broadcastMessage(errorMsg)
-            } catch (err) {
-              console.error('[session-do] runaway-guard persist failed', err)
-            }
-            this.updateState({
-              status: 'idle',
-              error: 'runaway_empty_assistant_turns',
-            })
-            this.consecutiveEmptyAssistantTurns = 0
-            this.currentTurnMessageId = null
-            this.persistTurnState()
-            break
+        // (prod incident 2026-04-24 — 500+ single-ZWS turns). The decision
+        // is a pure function of (status, isEmpty, counter, threshold) so it
+        // lives in `runawayGuardStep` for unit-testability. Critically, when
+        // status === 'waiting_gate' we reset the counter and do not fire:
+        // the runner is legitimately blocked awaiting user input, and any
+        // empty/thinking turns the model emits under that condition are not
+        // a runaway signal. Without this gate-aware short-circuit, empty
+        // turns leaking in just before / during a gate would trip the
+        // interrupt and kill the gate (regression after commit 083d7a9).
+        const guardDecision = runawayGuardStep({
+          status: this.state.status,
+          isEmpty: isAssistantContentEmpty(event.content as unknown[]),
+          counter: this.consecutiveEmptyAssistantTurns,
+          threshold: RUNAWAY_EMPTY_TURN_THRESHOLD,
+        })
+        this.consecutiveEmptyAssistantTurns = guardDecision.nextCounter
+        if (guardDecision.shouldFire) {
+          console.warn('[session-do] runaway empty-assistant-turn loop detected', {
+            sessionId: this.state.session_id,
+            consecutive: guardDecision.nextCounter,
+          })
+          this.sendToGateway({
+            type: 'interrupt',
+            session_id: this.state.session_id ?? '',
+          })
+          this.turnCounter++
+          const errorMsgId = `err-${this.turnCounter}`
+          const errorMsg: SessionMessage = {
+            id: errorMsgId,
+            role: 'system',
+            parts: [
+              {
+                type: 'text',
+                text: '⚠ Session auto-stopped: detected repeated empty assistant turns (model runaway).',
+              },
+            ],
+            createdAt: new Date(),
           }
-        } else {
+          try {
+            this.safeAppendMessage(errorMsg)
+            this.broadcastMessage(errorMsg)
+          } catch (err) {
+            console.error('[session-do] runaway-guard persist failed', err)
+          }
+          this.updateState({
+            status: 'idle',
+            error: 'runaway_empty_assistant_turns',
+          })
           this.consecutiveEmptyAssistantTurns = 0
+          this.currentTurnMessageId = null
+          this.persistTurnState()
+          break
         }
 
         // Final assistant message — finalize streaming parts with final content
@@ -5036,6 +5042,12 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
 
       case 'ask_user': {
         this.clearAwaitingResponse()
+        // Reset runaway-empty-turn counter: an empty/thinking-only assistant
+        // event may have arrived just before the gate (putting the counter
+        // near threshold), and the gate itself is the definitive "not a
+        // runaway" signal. Belt-and-braces with the waiting_gate
+        // short-circuit in `case 'assistant'`.
+        this.consecutiveEmptyAssistantTurns = 0
         // No part-type / state promotion here. The client renders a
         // GateResolver directly off the SDK-native
         // `tool-AskUserQuestion` / `input-available` shape already in the
@@ -5125,6 +5137,8 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
 
       case 'permission_request': {
         this.clearAwaitingResponse()
+        // Reset runaway-empty-turn counter (same rationale as ask_user).
+        this.consecutiveEmptyAssistantTurns = 0
         // Same strategy as ask_user: promote the existing tool part created
         // by the assistant event rather than appending a duplicate.
         const permPromoteResult = this.promoteToolPartToGate(

@@ -18,6 +18,7 @@ import {
   planClearAwaiting,
   RECOVERY_GRACE_MS,
   resolveStaleThresholdMs,
+  runawayGuardStep,
   validateGatewayToken,
 } from './session-do-helpers'
 import { SESSION_DO_MIGRATIONS } from './session-do-migrations'
@@ -4246,5 +4247,138 @@ describe('Stop escape-hatch — works from any status (mirror)', () => {
     expect(finalHistory[0].parts[2].type).toBe('text')
     expect((finalHistory[0].parts[2] as { text?: string }).text).toBe('thinking…')
     expect(broadcasted).toHaveLength(1)
+  })
+})
+
+// ── Runaway-empty-assistant-turn guard (gate-aware) ───────────
+//
+// Regression: the original guard incremented the counter on every empty
+// assistant event regardless of session status, so an `ask_user` /
+// `permission_request` gate that rode in just after a streak of empty /
+// thinking-only turns tripped the interrupt and killed the gate.
+// `runawayGuardStep` short-circuits when status === 'waiting_gate', and
+// the DO additionally resets the counter as the first line of each gate
+// handler (see `case 'ask_user':` / `case 'permission_request':`).
+describe('runawayGuardStep (gate-aware runaway-empty-turn guard)', () => {
+  const THRESHOLD = 10
+
+  it('increments on empty content and fires when counter reaches threshold', () => {
+    let counter = 0
+    let fired = false
+    for (let i = 0; i < 11; i++) {
+      const d = runawayGuardStep({
+        status: 'streaming',
+        isEmpty: true,
+        counter,
+        threshold: THRESHOLD,
+      })
+      counter = d.nextCounter
+      if (d.shouldFire) {
+        fired = true
+        break
+      }
+    }
+    expect(fired).toBe(true)
+    // Should fire on the 10th increment (counter goes 0 → 1 … → 10 ≥ threshold).
+    expect(counter).toBe(THRESHOLD)
+  })
+
+  it('resets counter on substantive (non-empty) content', () => {
+    const d = runawayGuardStep({
+      status: 'streaming',
+      isEmpty: false,
+      counter: 7,
+      threshold: THRESHOLD,
+    })
+    expect(d).toEqual({ nextCounter: 0, shouldFire: false })
+  })
+
+  it("resets counter and never fires while status === 'waiting_gate'", () => {
+    // Pre-existing high counter (e.g. 9 empty turns just before the gate).
+    const d = runawayGuardStep({
+      status: 'waiting_gate',
+      isEmpty: true,
+      counter: 9,
+      threshold: THRESHOLD,
+    })
+    expect(d).toEqual({ nextCounter: 0, shouldFire: false })
+  })
+
+  it('never fires for any number of empty turns while waiting_gate', () => {
+    let counter = 0
+    let fired = false
+    // Drive 5 empty turns under waiting_gate AFTER an initial 9-streak that
+    // had already pushed the counter close to threshold.
+    counter = 9
+    for (let i = 0; i < 5; i++) {
+      const d = runawayGuardStep({
+        status: 'waiting_gate',
+        isEmpty: true,
+        counter,
+        threshold: THRESHOLD,
+      })
+      counter = d.nextCounter
+      if (d.shouldFire) fired = true
+    }
+    expect(fired).toBe(false)
+    expect(counter).toBe(0)
+  })
+
+  it('full bug-repro scenario: 9 empty + ask_user + 5 empty under waiting_gate does not fire', () => {
+    // Phase 1 — 9 consecutive empty assistant turns while running.
+    let counter = 0
+    let fired = false
+    for (let i = 0; i < 9; i++) {
+      const d = runawayGuardStep({
+        status: 'streaming',
+        isEmpty: true,
+        counter,
+        threshold: THRESHOLD,
+      })
+      counter = d.nextCounter
+      if (d.shouldFire) fired = true
+    }
+    expect(fired).toBe(false)
+    expect(counter).toBe(9)
+
+    // Phase 2 — `ask_user` arrives. The DO resets the counter as the first
+    // line of `case 'ask_user'`. (Status would have flipped to
+    // waiting_gate inside that same handler too — both layers cooperate.)
+    counter = 0
+
+    // Phase 3 — 5 more empty assistant events leak in while paused on the
+    // gate. The status='waiting_gate' short-circuit must keep the counter
+    // pinned at 0 and never fire.
+    for (let i = 0; i < 5; i++) {
+      const d = runawayGuardStep({
+        status: 'waiting_gate',
+        isEmpty: true,
+        counter,
+        threshold: THRESHOLD,
+      })
+      counter = d.nextCounter
+      if (d.shouldFire) fired = true
+    }
+    expect(fired).toBe(false)
+    expect(counter).toBe(0)
+  })
+
+  it('preserves existing behavior: 11 consecutive empty turns under non-gate status DO fires', () => {
+    let counter = 0
+    let fireCount = 0
+    for (let i = 0; i < 11; i++) {
+      const d = runawayGuardStep({
+        status: 'streaming',
+        isEmpty: true,
+        counter,
+        threshold: THRESHOLD,
+      })
+      counter = d.nextCounter
+      if (d.shouldFire) fireCount++
+    }
+    // Fires on the 10th and the 11th (caller is responsible for resetting
+    // after firing — the DO sets `consecutiveEmptyAssistantTurns = 0` after
+    // sending the interrupt).
+    expect(fireCount).toBeGreaterThanOrEqual(1)
   })
 })
