@@ -68,7 +68,7 @@ export function useDerivedStatus(sessionId: string | null): SessionStatus | unde
         }
 
         const state = (part as { state?: string }).state
-        if (part.type === 'text' && state === 'streaming') {
+        if ((part.type === 'text' || part.type === 'reasoning') && state === 'streaming') {
           derived = 'running'
           break
         }

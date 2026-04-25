@@ -65,6 +65,18 @@ describe('useDerivedStatus', () => {
     expect(result.current).toBe('running')
   })
 
+  it('returns running when tail has a reasoning part with streaming state (extended thinking)', () => {
+    // During extended thinking the latest message only has reasoning@streaming
+    // parts — no text@streaming. Without this rule the hook walks back to a
+    // prior result and returns idle for the entire thinking phase.
+    const { result } = setup([
+      { id: 'msg-a0', seq: 1, parts: [{ type: 'result' }] },
+      { id: 'msg-u1', seq: 2, parts: [{ type: 'text', text: 'go', state: 'complete' }] },
+      { id: 'msg-a1', seq: 3, parts: [{ type: 'reasoning', state: 'streaming' }] },
+    ])
+    expect(result.current).toBe('running')
+  })
+
   it('returns idle when a result part appears after a tool_result part (tail-first scan)', () => {
     const { result } = setup([
       { id: 'msg-1', seq: 1, parts: [{ type: 'tool_result' }] },
