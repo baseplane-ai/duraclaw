@@ -131,9 +131,13 @@ export async function checkPrecondition(
   }
 
   if (mode === 'implementation') {
+    const project = chain.sessions[0]?.project ?? chain.worktreeReservation?.worktree
+    if (!project) {
+      return { canAdvance: false, reason: 'No project context for chain', nextMode: mode }
+    }
     const spec = await cachedFetch<SpecStatusResponse>(
-      `spec:${chain.issueNumber}`,
-      `/api/chains/${chain.issueNumber}/spec-status`,
+      `spec:${chain.issueNumber}:${project}`,
+      `/api/chains/${chain.issueNumber}/spec-status?project=${encodeURIComponent(project)}`,
     )
     if (!spec.exists) {
       return { canAdvance: false, reason: 'Spec not found', nextMode: mode }
@@ -158,9 +162,13 @@ export async function checkPrecondition(
   }
 
   if (mode === 'close') {
+    const project = chain.sessions[0]?.project ?? chain.worktreeReservation?.worktree
+    if (!project) {
+      return { canAdvance: false, reason: 'No project context for chain', nextMode: mode }
+    }
     const vp = await cachedFetch<VpStatusResponse>(
-      `vp:${chain.issueNumber}`,
-      `/api/chains/${chain.issueNumber}/vp-status`,
+      `vp:${chain.issueNumber}:${project}`,
+      `/api/chains/${chain.issueNumber}/vp-status?project=${encodeURIComponent(project)}`,
     )
     if (!vp.exists) {
       return { canAdvance: false, reason: 'VP evidence not found', nextMode: mode }

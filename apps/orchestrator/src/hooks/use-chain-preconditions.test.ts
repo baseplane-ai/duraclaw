@@ -1,7 +1,7 @@
 /**
  * @vitest-environment jsdom
  */
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ChainSummary } from '~/lib/types'
 import { checkPrecondition } from './use-chain-preconditions'
@@ -94,6 +94,154 @@ describe('checkPrecondition — manual-advance gates (GH#82)', () => {
       const res = await checkPrecondition(c, [])
       expect(res.canAdvance).toBe(false)
       expect(res.reason).toContain('closed')
+    })
+  })
+})
+
+/**
+ * Regression: the spec-status / vp-status routes require `?project=` —
+ * before this fix the hook called them without it, the server returned
+ * 400, `cachedFetch` silently coerced that into `{exists:false}`, and
+ * every chain rendered "Spec not found" / "VP evidence not found"
+ * regardless of worktree state.
+ */
+describe('checkPrecondition — project query param transmission', () => {
+  let fetchMock: ReturnType<typeof vi.fn>
+
+  beforeEach(() => {
+    fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  function uniqueChain(overrides: Partial<ChainSummary>): ChainSummary {
+    // Use a fresh issueNumber per test so the module-level cache (keyed
+    // by `spec:${issue}:${project}`) doesn't bleed between cases.
+    const issueNumber = Math.floor(Math.random() * 1_000_000) + 1_000_000
+    return {
+      issueNumber,
+      issueTitle: 'project-param test',
+      issueType: 'enhancement',
+      issueState: 'open',
+      column: 'planning',
+      sessions: [],
+      worktreeReservation: null,
+      lastActivity: '2026-04-25T00:00:00Z',
+      ...overrides,
+    }
+  }
+
+  describe('planning → implementation (spec-status)', () => {
+    it('passes ?project= derived from chain.sessions[0].project', async () => {
+      fetchMock.mockResolvedValueOnce(
+        new Response(JSON.stringify({ exists: true, status: 'approved' }), { status: 200 }),
+      )
+      const c = uniqueChain({
+        column: 'planning',
+        sessions: [
+          {
+            id: 's1',
+            kataMode: 'planning',
+            status: 'idle',
+            lastActivity: '2026-04-25T00:00:00Z',
+            createdAt: '2026-04-25T00:00:00Z',
+            project: 'duraclaw-dev5',
+          },
+        ],
+      })
+      const res = await checkPrecondition(c, [])
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      const url = fetchMock.mock.calls[0][0] as string
+      expect(url).toContain(`/api/chains/${c.issueNumber}/spec-status`)
+      expect(url).toContain('project=duraclaw-dev5')
+      expect(res).toEqual({ canAdvance: true, reason: '', nextMode: 'implementation' })
+    })
+
+    it('falls back to worktreeReservation.worktree when no sessions present', async () => {
+      fetchMock.mockResolvedValueOnce(
+        new Response(JSON.stringify({ exists: true, status: 'approved' }), { status: 200 }),
+      )
+      const c = uniqueChain({
+        column: 'planning',
+        sessions: [],
+        worktreeReservation: {
+          worktree: 'duraclaw-dev2',
+          heldSince: '2026-04-25T00:00:00Z',
+          lastActivityAt: '2026-04-25T00:00:00Z',
+          ownerId: 'u1',
+          stale: false,
+        },
+      })
+      await checkPrecondition(c, [])
+      const url = fetchMock.mock.calls[0][0] as string
+      expect(url).toContain('project=duraclaw-dev2')
+    })
+
+    it('blocks with a clear reason when no project context is available', async () => {
+      const c = uniqueChain({ column: 'planning', sessions: [], worktreeReservation: null })
+      const res = await checkPrecondition(c, [])
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(res.canAdvance).toBe(false)
+      expect(res.reason).toContain('project context')
+    })
+
+    it('url-encodes worktree names with special characters', async () => {
+      fetchMock.mockResolvedValueOnce(
+        new Response(JSON.stringify({ exists: true, status: 'approved' }), { status: 200 }),
+      )
+      const c = uniqueChain({
+        column: 'planning',
+        sessions: [
+          {
+            id: 's1',
+            kataMode: 'planning',
+            status: 'idle',
+            lastActivity: '2026-04-25T00:00:00Z',
+            createdAt: '2026-04-25T00:00:00Z',
+            project: 'name with space',
+          },
+        ],
+      })
+      await checkPrecondition(c, [])
+      const url = fetchMock.mock.calls[0][0] as string
+      expect(url).toContain('project=name%20with%20space')
+    })
+  })
+
+  describe('verify → close (vp-status)', () => {
+    it('passes ?project= derived from chain.sessions[0].project', async () => {
+      fetchMock.mockResolvedValueOnce(
+        new Response(JSON.stringify({ exists: true, passed: true }), { status: 200 }),
+      )
+      const c = uniqueChain({
+        column: 'verify',
+        sessions: [
+          {
+            id: 's1',
+            kataMode: 'verify',
+            status: 'idle',
+            lastActivity: '2026-04-25T00:00:00Z',
+            createdAt: '2026-04-25T00:00:00Z',
+            project: 'duraclaw',
+          },
+        ],
+      })
+      const res = await checkPrecondition(c, [])
+      const url = fetchMock.mock.calls[0][0] as string
+      expect(url).toContain(`/api/chains/${c.issueNumber}/vp-status`)
+      expect(url).toContain('project=duraclaw')
+      expect(res).toEqual({ canAdvance: true, reason: '', nextMode: 'close' })
+    })
+
+    it('blocks with a clear reason when no project context is available', async () => {
+      const c = uniqueChain({ column: 'verify', sessions: [], worktreeReservation: null })
+      const res = await checkPrecondition(c, [])
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(res.canAdvance).toBe(false)
+      expect(res.reason).toContain('project context')
     })
   })
 })
