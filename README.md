@@ -29,10 +29,13 @@
 </p>
 
 > **Status — active development.** Built and used in-house at
-> [@baseplane-ai](https://github.com/baseplane-ai); the repo is public so you
-> can read the code and lift ideas, but it isn't packaged for one-click
-> self-hosting yet — running it assumes a Cloudflare Workers account, D1, R2,
-> and a Linux VPS you control.
+> [@baseplane-ai](https://github.com/baseplane-ai), but the repo is public
+> and self-hostable. The VPS side is a single-script install
+> (`packages/agent-gateway/systemd/install.sh` lays down the systemd
+> unit); the orchestrator side needs your own Cloudflare Workers account
+> with D1, R2, and a few secrets wired up
+> ([Quickstart](#quickstart) walks through both). Not one-click, but not
+> bespoke either.
 
 > **Agent scope today: Claude only.** Every session runs against
 > [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk).
@@ -452,6 +455,33 @@ scripts/verify/dev-up.sh    # generates .dev.vars, starts the stack
 See [`.claude/rules/worktree-setup.md`](.claude/rules/worktree-setup.md)
 for the port-derivation table and per-worktree allocation rules.
 
+### Self-hosting on a VPS + your own Cloudflare account
+
+If you're not the baseplane infra pipeline and just want to run your
+own copy:
+
+```bash
+# 1. On a Linux VPS (Bun + systemd available):
+#    install the gateway as a systemd unit. It listens on
+#    127.0.0.1:$CC_GATEWAY_PORT and spawns one session-runner
+#    per session.
+bash packages/agent-gateway/systemd/install.sh
+
+# 2. From your laptop, deploy the orchestrator to your own CF account.
+#    Needs: a Workers paid plan (DO + SQLite-backed DOs), a D1 DB
+#    named `duraclaw-auth`, an R2 bucket for the mobile OTA bundle,
+#    plus secrets (CC_GATEWAY_URL, CC_GATEWAY_SECRET,
+#    WORKER_PUBLIC_URL, BETTER_AUTH_SECRET, BETTER_AUTH_URL).
+cd apps/orchestrator
+pnpm wrangler d1 migrations apply duraclaw-auth --remote
+pnpm wrangler deploy
+```
+
+Gateway internals + the systemd contract live in
+[`.claude/rules/gateway.md`](.claude/rules/gateway.md); orchestrator
+secrets + DO topology in
+[`.claude/rules/orchestrator.md`](.claude/rules/orchestrator.md).
+
 ## Common commands
 
 Run from the repo root:
@@ -465,10 +495,15 @@ Run from the repo root:
 | `pnpm verify:smoke` | Real-curl + browser verification baseline (login, gateway, session, browser) |
 | `pnpm kata` | Workflow CLI — `pnpm kata enter <mode>` to start a structured session |
 
-> **Heads up — don't run `pnpm ship`, `wrangler deploy`, or the gateway
-> install script manually.** Deploys are owned by the infra pipeline; doing
-> it by hand bypasses the mobile OTA bundle upload and strands every
-> Android client on the previous web bundle. See [Deployment](#deployment).
+> **Heads up (baseplane-internal only).** If you're working inside the
+> baseplane infra setup, don't run `pnpm ship`, `wrangler deploy`, or
+> the gateway install script by hand — deploys are owned by the
+> pipeline, and doing it manually skips the mobile OTA bundle upload
+> and strands every Android client on the previous web bundle. See
+> [Deployment](#deployment). Self-hosters running their own CF
+> account ignore this — those commands are exactly the deploy path
+> for you (no OTA channel to break unless you're shipping the mobile
+> APK too).
 
 For the full verification command set (`verify:auth`, `verify:gateway`,
 `verify:session`, `verify:browser`, ...) and the verification policy
