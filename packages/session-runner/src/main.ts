@@ -25,8 +25,8 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { BufferedChannel, DialBackClient, type GapSentinel } from '@duraclaw/shared-transport'
 import type { ExecuteCommand, GatewayCommand, ResumeCommand } from '@duraclaw/shared-types'
+import { ClaudeAdapter, createAdapter, type RunnerAdapter } from './adapters/index.js'
 import { atomicOverwrite, atomicWriteOnce } from './atomic.js'
-import { ClaudeRunner } from './claude-runner.js'
 import type { RunnerSessionContext } from './types.js'
 
 const META_INTERVAL_MS = 10_000
@@ -142,7 +142,14 @@ async function hasLiveResume(cmd: ResumeCommand, pidFile: string): Promise<boole
  * Handle a command received from the DO over the dial-back WS.
  * Mirrors the gateway's old `handleDialbackMessage` but against a
  * RunnerSessionContext instead of a gateway session context.
+ *
+ * `currentAdapter` is module-scope state (set in `main()` after the
+ * registry returns) so codex sessions can route stream-input /
+ * interrupt to the adapter's per-turn API instead of the Claude-only
+ * lifetime queue.
  */
+let currentAdapter: RunnerAdapter | null = null
+
 function handleIncomingCommand(msg: unknown, ctx: RunnerSessionContext, ch: BufferedChannel): void {
   if (!msg || typeof msg !== 'object') return
   const m = msg as Record<string, unknown>
@@ -158,18 +165,14 @@ function handleIncomingCommand(msg: unknown, ctx: RunnerSessionContext, ch: Buff
         ctx.titler.maybePivotRetitle([], userText).catch(() => {})
       }
 
-      // GH#102 / spec 102-sdk-peelback B4+B5: push onto the lifetime
-      // PushPullQueue. The single Query() pulls from this for the whole
-      // session — no per-turn streamInput half-close, no between-turns
-      // fallback queue.
-      if (ctx.userQueue) {
-        ctx.userQueue.push({
-          type: 'user',
-          message: { role: 'user', content: msg.content },
-          parent_tool_use_id: null,
-        })
+      // GH#107: route via the adapter's pushUserTurn interface. Each
+      // adapter owns the SDK coupling — ClaudeAdapter pushes onto the
+      // lifetime PushPullQueue (spec 102-sdk-peelback B4+B5);
+      // CodexAdapter kicks off a fresh per-turn `runStreamed()`.
+      if (currentAdapter) {
+        currentAdapter.pushUserTurn({ role: 'user', content: msg.content })
       } else {
-        console.warn('[session-runner] stream-input arrived before userQueue was ready — dropping')
+        console.warn('[session-runner] stream-input arrived before adapter was ready — dropping')
       }
       break
     }
@@ -216,7 +219,7 @@ function handleIncomingCommand(msg: unknown, ctx: RunnerSessionContext, ch: Buff
       break
     }
     case 'interrupt': {
-      // Mark the context as interrupted BEFORE calling q.interrupt(). On
+      // Mark the context as interrupted BEFORE delegating. On
       // long-running / mid-tool-use sessions the SDK's query generator can
       // throw rather than cleanly yield a result; the outer catch in
       // claude-runner.ts uses this flag to suppress the `error` event and
@@ -224,8 +227,14 @@ function handleIncomingCommand(msg: unknown, ctx: RunnerSessionContext, ch: Buff
       // pausing") instead of `error` (genuine failure). The lifetime
       // PushPullQueue is NOT touched — interrupt only stops the current
       // turn; the queue stays open for the next stream-input.
+      // ClaudeAdapter.interrupt also sets ctx.interrupted; setting it
+      // here too is idempotent and keeps the invariant explicit at the
+      // dispatch site.
       ctx.interrupted = true
-      ctx.query?.interrupt().catch((err: unknown) => {
+      // GH#107: route via the adapter interface — ClaudeAdapter calls
+      // `ctx.query?.interrupt()` internally; CodexAdapter aborts the
+      // in-flight `runStreamed` via the SDK's TurnOptions.signal.
+      currentAdapter?.interrupt().catch((err: unknown) => {
         console.error(
           `[session-runner] interrupt error: ${err instanceof Error ? err.message : String(err)}`,
         )
@@ -455,16 +464,84 @@ async function main(): Promise<void> {
   process.on('SIGTERM', sigtermHandler)
 
   // --- Step 6: run ---
-  const runner = new ClaudeRunner()
+  // GH#107 / spec 107 P1.1: select the runner adapter via the registry.
+  // Unknown agent → emit error event + write failed exit-file + exit(1)
+  // before any SDK is touched.
+  let runner: RunnerAdapter
+  try {
+    runner = createAdapter(cmd.agent)
+  } catch (err) {
+    const errMsg = (err as Error).message
+    channel.send({
+      type: 'error',
+      session_id: argv.sessionId,
+      error: errMsg,
+      seq: ++ctx.nextSeq,
+    })
+    try {
+      await dialBackClient.stop()
+    } catch {
+      /* best-effort */
+    }
+    clearInterval(metaTimer)
+    return writeExitAndExit(argv.exitFile, { state: 'failed', exit_code: 1, error: errMsg }, 1)
+  }
+
+  currentAdapter = runner
   let caughtError: Error | null = null
   try {
-    if (cmd.type === 'execute') {
-      await runner.execute(channel, cmd as ExecuteCommand, ctx)
+    // P1.1 legacy bridge: ClaudeAdapter still drives `ClaudeRunner` via
+    // `runLegacy(channel, cmd, ctx)`. CodexAdapter (P3) uses the
+    // standard `run(opts)` path with channel-mediated event routing —
+    // every event funnels through `channel.send` so BufferedChannel
+    // stamps `seq` automatically (same monotonic stream Claude uses).
+    if (runner instanceof ClaudeAdapter) {
+      if (cmd.type === 'execute') {
+        await runner.runLegacy(channel, cmd as ExecuteCommand, ctx)
+      } else {
+        await runner.runLegacy(channel, cmd as ResumeCommand, ctx)
+      }
+    } else if (runner.name === 'codex') {
+      const execCmd = cmd as ExecuteCommand | ResumeCommand
+      await runner.run({
+        sessionId: argv.sessionId,
+        project: execCmd.project,
+        model: execCmd.type === 'execute' ? execCmd.model : undefined,
+        prompt: execCmd.prompt,
+        resumeSessionId: execCmd.type === 'resume' ? execCmd.runner_session_id : undefined,
+        env: process.env as unknown as Readonly<Record<string, string>>,
+        signal: ctx.abortController.signal,
+        codexModels: execCmd.codex_models,
+        onEvent: (event) => {
+          // BufferedChannel.send requires `seq` on every event — stamp
+          // monotonic seq from the same `ctx.nextSeq` counter Claude
+          // uses so codex sessions live on the same gap-detection rail.
+          channel.send({ ...(event as object), seq: ++ctx.nextSeq })
+          // Track meta-file invariants: last activity + seq + state.
+          ctx.meta.last_activity_ts = Date.now()
+          ctx.meta.last_event_seq = ctx.nextSeq
+          if ((event as { type?: string }).type === 'session.init') {
+            const ev = event as { runner_session_id?: string | null; model?: string | null }
+            ctx.meta.runner_session_id = ev.runner_session_id ?? null
+            if (ev.model) ctx.meta.model = ev.model
+          } else if ((event as { type?: string }).type === 'result') {
+            ctx.meta.turn_count++
+          }
+        },
+      })
+      ctx.meta.state = ctx.interrupted ? 'aborted' : 'completed'
     } else {
-      await runner.resume(channel, cmd as ResumeCommand, ctx)
+      throw new Error(`adapter '${runner.name}' has no main.ts dispatch path yet`)
     }
   } catch (err) {
     caughtError = err instanceof Error ? err : new Error(String(err))
+  } finally {
+    try {
+      await runner.dispose()
+    } catch {
+      /* best-effort — dispose must not throw */
+    }
+    currentAdapter = null
   }
 
   // --- Step 9: clean shutdown ---

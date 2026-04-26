@@ -49,6 +49,7 @@ import type {
   UserTabRow,
   VpStatusResponse,
 } from '~/lib/types'
+import { adminCodexModelsRoutes } from './admin-codex-models'
 import { authMiddleware } from './auth-middleware'
 import { authRoutes } from './auth-routes'
 import { getRequestSession } from './auth-session'
@@ -837,6 +838,10 @@ export function createApiApp() {
   })
 
   app.use('/api/*', authMiddleware)
+
+  // GH#107 P2: admin-only codex_models CRUD. Mounted after authMiddleware
+  // so `c.get('role')` is populated; the sub-app asserts admin role.
+  app.route('/api/admin/codex-models', adminCodexModelsRoutes())
 
   // ── User settings (tabs) — direct D1 CRUD (B-API-2) ──────────────
 

@@ -174,6 +174,23 @@ export async function triggerGatewayDial(
     cmd = { ...cmd, titler_enabled: titlerEnabled }
   }
 
+  // GH#107: inject codex_models catalog onto codex spawn payloads. Reads
+  // from D1 `codex_models WHERE enabled = 1`. Fail-open: on D1 read
+  // failure the runner falls back to the adapter's hardcoded defaults.
+  if (cmd.type === 'execute' || cmd.type === 'resume') {
+    if (cmd.agent === 'codex') {
+      try {
+        const result = await ctx.env.AUTH_DB.prepare(
+          'SELECT name, context_window FROM codex_models WHERE enabled = 1 ORDER BY name',
+        ).all<{ name: string; context_window: number }>()
+        cmd = { ...cmd, codex_models: result.results ?? [] }
+      } catch (err) {
+        console.error(`[SessionDO:${ctx.ctx.id}] Failed to read codex_models from D1:`, err)
+        // Proceed without — adapter falls back to hardcoded defaults.
+      }
+    }
+  }
+
   const callback_token = crypto.randomUUID()
 
   // Ordering invariant: close the old gateway WS FIRST, then rotate the
