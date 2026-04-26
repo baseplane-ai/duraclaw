@@ -873,6 +873,24 @@ export class ClaudeRunner {
           if (wasInterrupted) ctx.interrupted = false
           ctx.meta.turn_count++
 
+          // GH#102 / B1: synthesise `idle` after turn-complete. With the
+          // one-Query-per-session model (Reduction B), the SDK's internal
+          // do-while loop stays alive waiting for the next `streamInput()`
+          // push, so the native `session_state_changed{state:'idle'}` is
+          // never emitted between turns — only when the query fully ends.
+          // Emitting here mirrors the contract the DO and UI expect: every
+          // `result` is followed by an `idle` transition.
+          send(
+            ch,
+            {
+              type: 'session_state_changed',
+              session_id: sessionId,
+              state: 'idle',
+              ts: Date.now(),
+            },
+            ctx,
+          )
+
           // GH#86: fire-and-forget initial title check after turn-complete.
           // Errors are swallowed inside the titler — no risk of breaking
           // the main event loop.
