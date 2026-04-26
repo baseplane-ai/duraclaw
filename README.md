@@ -40,11 +40,12 @@
 2. [What it is not](#what-it-is-not)
 3. [Architecture](#architecture)
 4. [Repository map](#repository-map)
-5. [Quickstart](#quickstart)
-6. [Common commands](#common-commands)
-7. [Deployment](#deployment)
-8. [Contributing](#contributing)
-9. [Roadmap](#roadmap)
+5. [Tech stack](#tech-stack)
+6. [Quickstart](#quickstart)
+7. [Common commands](#common-commands)
+8. [Deployment](#deployment)
+9. [Contributing](#contributing)
+10. [Roadmap](#roadmap)
 
 ---
 
@@ -147,10 +148,96 @@ rules under [`.claude/rules/`](.claude/rules/).
 | [`packages/session-runner`](packages/session-runner) | Per-session Claude Agent SDK owner (one `query()` per process) | [`packages/session-runner/README.md`](packages/session-runner/README.md) |
 | [`packages/shared-transport`](packages/shared-transport) | `BufferedChannel` ring + `DialBackClient` (runner → DO WS, 1/3/9/27/30s backoff) | [`packages/shared-transport/README.md`](packages/shared-transport/README.md) |
 | [`packages/shared-types`](packages/shared-types) | `GatewayCommand` / `GatewayEvent` shapes shared across the wire | — |
-| [`packages/ai-elements`](packages/ai-elements) | In-house React design system — 50+ chat / code / tool components (`Conversation`, `Reasoning`, `ToolCallList`, `CodeBlock`, `Terminal`, `FileTree`, ...) on top of a 25-component shadcn-style UI primitive layer | — |
+| [`packages/ai-elements`](packages/ai-elements) | Vendored + customized fork of [Vercel AI Elements](https://ai-sdk.dev/elements) — 50+ chat / code / tool React components (`Conversation`, `Reasoning`, `ToolCallList`, `CodeBlock`, `Terminal`, `FileTree`, ...) over a 25-component Radix UI primitive layer, with [Streamdown](https://github.com/vercel/streamdown) for streaming markdown and [Shiki](https://shiki.style/) for syntax highlighting | — |
 | [`packages/kata`](packages/kata) | Structured-workflow CLI for Claude Code: modes (research, planning, implementation, debug, task, verify, freeform), phase tasks, exit-gate enforcement | [`packages/kata/README.md`](packages/kata/README.md) |
 | [`planning/`](planning) | Specs, progress tracker, research docs | [`planning/progress.md`](planning/progress.md) |
 | [`scripts/verify/`](scripts/verify) | Real-curl + browser verification harnesses (no mocks) | [`AGENTS.md`](AGENTS.md) |
+
+## Tech stack
+
+Every major library duraclaw is built on, grouped by concern. Versions float on the latest minor unless otherwise pinned — see the per-package `package.json` for exact ranges.
+
+**Frontend (`apps/orchestrator`)**
+
+- [React 19](https://react.dev/) + [React DOM](https://react.dev/) — UI runtime
+- [TanStack Start](https://tanstack.com/start) + [TanStack Router](https://tanstack.com/router) — full-stack React framework + file-based routing
+- [TanStack DB](https://tanstack.com/db) + [TanStack Query](https://tanstack.com/query) + [TanStack Virtual](https://tanstack.com/virtual) — local-first reactive collections, query cache, list virtualization
+- [Vite 8](https://vite.dev/) + [`@cloudflare/vite-plugin`](https://www.npmjs.com/package/@cloudflare/vite-plugin) + [`@vitejs/plugin-react`](https://www.npmjs.com/package/@vitejs/plugin-react) — dev server + production build
+- [Tailwind CSS 4](https://tailwindcss.com/) + [`@tailwindcss/vite`](https://tailwindcss.com/) + [`tw-animate-css`](https://www.npmjs.com/package/tw-animate-css) — styling
+- [Zustand](https://zustand.docs.pmnd.rs/) — client state, [Zod 4](https://zod.dev/) — schema validation
+- [`@dnd-kit/*`](https://dndkit.com/) — drag and drop, [`@use-gesture/react`](https://use-gesture.netlify.app/) + [`@react-spring/web`](https://www.react-spring.dev/) — gesture / animation
+- [Sonner](https://sonner.emilkowal.ski/) — toasts, [`react-top-loading-bar`](https://www.npmjs.com/package/react-top-loading-bar) — route progress
+- [`react-markdown`](https://github.com/remarkjs/react-markdown) + [`remark-gfm`](https://github.com/remarkjs/remark-gfm) + [`rehype-sanitize`](https://github.com/rehypejs/rehype-sanitize) — markdown rendering
+- [`input-otp`](https://input-otp.rdsx.dev/), [`cmdk`](https://cmdk.paco.me/) — input primitives
+
+**Realtime / collab**
+
+- [Yjs](https://yjs.dev/) + [`y-partyserver`](https://www.npmjs.com/package/y-partyserver) + [`y-protocols`](https://www.npmjs.com/package/y-protocols) + [`y-indexeddb`](https://www.npmjs.com/package/y-indexeddb) — CRDT collab inside `SessionCollabDO`
+- [PartyServer](https://github.com/threepointone/partyserver) + [PartySocket](https://github.com/threepointone/partysocket) — Durable-Object-friendly WebSocket framework
+- [`agents`](https://www.npmjs.com/package/agents) — Cloudflare Agents SDK (Durable-Object-backed agent runtime)
+
+**AI / chat UI**
+
+- [Vercel AI SDK (`ai`)](https://sdk.vercel.ai/) + [`@ai-sdk/react`](https://sdk.vercel.ai/) — streaming chat primitives
+- **[Vercel AI Elements](https://ai-sdk.dev/elements)** — vendored as `@duraclaw/ai-elements` and customized
+- [Streamdown](https://github.com/vercel/streamdown) (`streamdown` + `@streamdown/cjk` / `code` / `math` / `mermaid`) — Vercel's streaming markdown
+- [Shiki](https://shiki.style/) — syntax highlighting, [`ansi-to-react`](https://www.npmjs.com/package/ansi-to-react) — terminal color rendering
+- [`tokenlens`](https://www.npmjs.com/package/tokenlens) — token accounting, [`@xyflow/react`](https://reactflow.dev/) — graph diagrams
+- [`react-jsx-parser`](https://www.npmjs.com/package/react-jsx-parser) — runtime JSX previews, [`media-chrome`](https://www.media-chrome.org/) — media controls, [`@rive-app/react-webgl2`](https://rive.app/) — Rive animations
+- [Motion](https://motion.dev/), [`embla-carousel-react`](https://www.embla-carousel.com/), [`use-stick-to-bottom`](https://www.npmjs.com/package/use-stick-to-bottom)
+
+**UI primitives**
+
+- [Radix UI](https://www.radix-ui.com/) — accordion, alert-dialog, avatar, checkbox, collapsible, dialog, direction, dropdown-menu, hover-card, label, popover, progress, radio-group, scroll-area, select, separator, slot, switch, tabs, tooltip, use-controllable-state, icons
+- [Lucide React](https://lucide.dev/) — icon set
+- [`class-variance-authority`](https://cva.style/) + [`clsx`](https://github.com/lukeed/clsx) + [`tailwind-merge`](https://github.com/dcastil/tailwind-merge) — variant authoring + class merging
+
+**Backend (Cloudflare Workers)**
+
+- [Cloudflare Workers](https://workers.cloudflare.com/) + [Durable Objects](https://developers.cloudflare.com/durable-objects/) — runtime + per-session state
+- [D1](https://developers.cloudflare.com/d1/) — SQL store for auth (via [Drizzle ORM](https://orm.drizzle.team/) + [`drizzle-kit`](https://orm.drizzle.team/kit-docs/overview))
+- [R2](https://developers.cloudflare.com/r2/) — mobile OTA bundle storage
+- [Hono](https://hono.dev/) — edge HTTP router, [Wrangler](https://developers.cloudflare.com/workers/wrangler/) — Workers tooling
+
+**Auth**
+
+- [Better Auth](https://www.better-auth.com/) + [`better-auth-capacitor`](https://www.npmjs.com/package/better-auth-capacitor) — sessions on web, bearer tokens on native
+- [`jose`](https://github.com/panva/jose) — JWT signing for FCM HTTP v1
+
+**Push notifications**
+
+- [`@pushforge/builder`](https://www.npmjs.com/package/@pushforge/builder) — Web Push (VAPID) payload builder
+- [`@capacitor/push-notifications`](https://capacitorjs.com/docs/apis/push-notifications) — FCM bridge on Android
+
+**Mobile (`apps/mobile`)**
+
+- [Capacitor 8](https://capacitorjs.com/) — `@capacitor/core`, `@capacitor/android`, `@capacitor/app`, `@capacitor/network`, `@capacitor/preferences`, `@capacitor/push-notifications`
+- [`@capacitor-community/sqlite`](https://github.com/capacitor-community/sqlite) — native SQLite swap for OPFS
+- [`@capgo/capacitor-updater`](https://capgo.app/) — web-bundle OTA channel
+- [`@tanstack/capacitor-db-sqlite-persistence`](https://tanstack.com/db) — TanStack DB persistence on native
+
+**PWA**
+
+- [`vite-plugin-pwa`](https://vite-pwa-org.netlify.app/) + [`workbox-precaching`](https://developer.chrome.com/docs/workbox/) + [`workbox-window`](https://developer.chrome.com/docs/workbox/)
+
+**VPS runner stack (`packages/agent-gateway` + `packages/session-runner`)**
+
+- [Bun](https://bun.sh/) — runtime for the gateway HTTP server and the per-session runner binary
+- [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk) — the agent SDK each runner owns
+- [`@anthropic-ai/sdk`](https://www.npmjs.com/package/@anthropic-ai/sdk) — lower-level client
+- systemd — process supervision for the gateway
+
+**`packages/kata` (workflow CLI)**
+
+- [`js-yaml`](https://github.com/nodeca/js-yaml) — phase / mode config parsing
+- [Zod](https://zod.dev/) — config validation
+- [`tsx`](https://github.com/privatenumber/tsx) — dev runner
+
+**Build / tooling (root)**
+
+- [pnpm workspaces](https://pnpm.io/workspaces) + [Turbo](https://turbo.build/repo) — monorepo + task orchestration
+- [tsup](https://tsup.egoist.dev/) — library builds, [TypeScript 5.8](https://www.typescriptlang.org/) — typing
+- [Biome](https://biomejs.dev/) — lint + format, [Vitest 4](https://vitest.dev/) + [`@testing-library/react`](https://testing-library.com/) + [`jsdom`](https://github.com/jsdom/jsdom) — tests
 
 ## Quickstart
 
