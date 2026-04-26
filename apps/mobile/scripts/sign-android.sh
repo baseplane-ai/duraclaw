@@ -58,10 +58,10 @@ Then re-run with the same passwords exported:
   export KEY_PASS=<pass>
   apps/mobile/scripts/sign-android.sh
 
-Production keystore: stored in the 1Password Engineering vault. Supply via
-CI secret bindings — never commit the .jks file or the passwords. Rotate
-only with explicit infra approval (changing the signing key invalidates
-upgrades for any installed APK).
+Production keystore: store in your secrets manager and supply the four env
+vars above via CI secret bindings — never commit the .jks file or the
+passwords. Rotate only with explicit infra approval (changing the signing
+key invalidates upgrades for any installed APK).
 HELP
   exit 1
 fi

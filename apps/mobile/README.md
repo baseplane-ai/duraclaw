@@ -176,15 +176,19 @@ apps/mobile/scripts/sign-android.sh
 
 ### Production keystore
 
-Stored in the **1Password Engineering vault** as item
-`duraclaw-android-keystore`. Workflow:
+Production signing keys are stored in a secrets manager (we use
+1Password — substitute your own). The sign script reads four env vars;
+populate them however your secrets workflow prefers. Example with
+1Password's `op` CLI:
 
 ```bash
-op item get duraclaw-android-keystore --field keystore --reveal > /secure/tmp/duraclaw-prod.jks
+# Replace <vault> and the field paths with your own vault layout
+op item get duraclaw-android-keystore --vault <vault> --field keystore --reveal \
+  > /secure/tmp/duraclaw-prod.jks
 export KEYSTORE_PATH=/secure/tmp/duraclaw-prod.jks
-export KEYSTORE_PASS="$(op read 'op://Engineering/duraclaw-android-keystore/keystore_password')"
+export KEYSTORE_PASS="$(op read 'op://<vault>/duraclaw-android-keystore/keystore_password')"
 export KEY_ALIAS=duraclaw
-export KEY_PASS="$(op read 'op://Engineering/duraclaw-android-keystore/key_password')"
+export KEY_PASS="$(op read 'op://<vault>/duraclaw-android-keystore/key_password')"
 apps/mobile/scripts/sign-android.sh
 shred -u /secure/tmp/duraclaw-prod.jks
 ```
@@ -208,8 +212,8 @@ commit the `.jks` file or hardcode passwords.
    ```bash
    adb install -r apps/mobile/android/app/build/outputs/apk/release/app-release-signed.apk
    ```
-   For non-ADB distribution: upload to a 1Password shared item or signed
-   S3 URL, send the link, tap-to-install.
+   For non-ADB distribution: upload to a private file share (signed S3
+   URL, secrets-manager shared item, etc.), send the link, tap-to-install.
 4. First launch prompts for notification permission (FCM push).
 5. Tail logs while the app runs:
    ```bash

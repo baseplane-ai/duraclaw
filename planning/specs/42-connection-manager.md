@@ -315,7 +315,7 @@ Expected: log contains 3 entries (`agent:*`, `user-stream`, `collab:*`) with `re
 
 ### V6: Backgrounded-socket recovery on Android device
 
-1. Sideload the APK via the flow in CLAUDE.md (`adb -s 100.113.109.57:<PORT> install -r apps/mobile/android/app/build/outputs/apk/release/app-release-signed.apk`).
+1. Sideload the APK via the flow in CLAUDE.md (`adb -s $DEVICE_IP:<PORT> install -r apps/mobile/android/app/build/outputs/apk/release/app-release-signed.apk`).
 2. Open the app, log in, open a session.
 3. Chrome DevTools inspect via `chrome://inspect/#devices` targeting the Android WebView.
 4. In DevTools console: `window.__connectionRegistry.snapshot().map(c => ({id: c.id, rs: c.readyState}))` — all OPEN.

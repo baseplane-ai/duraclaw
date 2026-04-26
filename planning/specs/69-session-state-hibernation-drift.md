@@ -315,15 +315,15 @@ scripts/axi eval 'document.querySelector("[data-testid=status-bar]")?.textConten
 ```bash
 export PATH="/home/ubuntu/Android/sdk/platform-tools:$PATH"
 # 1. Sideload latest APK
-adb -s 100.113.109.57:<PORT> install -r apps/mobile/android/app/build/outputs/apk/release/app-release-signed.apk
+adb -s $DEVICE_IP:<PORT> install -r apps/mobile/android/app/build/outputs/apk/release/app-release-signed.apk
 
 # 2. Start a session, begin streaming
 # 3. Press home button (background the app)
 # 4. Wait 10s, reopen the app
 
 # 5. Tail logcat for status transitions
-adb -s 100.113.109.57:<PORT> logcat -c
-adb -s 100.113.109.57:<PORT> logcat "*:S" Capacitor/Console:V Capacitor:V chromium:V
+adb -s $DEVICE_IP:<PORT> logcat -c
+adb -s $DEVICE_IP:<PORT> logcat "*:S" Capacitor/Console:V Capacitor:V chromium:V
 # Expected: no [derive-status] TTL idle override warnings
 # Expected: [cm] reconnect events followed by stable Running status
 ```

@@ -55,27 +55,33 @@ update available" instead of 500'ing.
 
 **APK signing** — `apps/mobile/scripts/sign-android.sh` wraps `apksigner`
 and requires `KEYSTORE_PATH`, `KEYSTORE_PASS`, `KEY_ALIAS`, `KEY_PASS`.
-Production keystore lives in 1Password Engineering vault; never commit.
+Production keystore lives in your secrets manager (we use 1Password —
+the script's help text shows the `op read` template). Never commit the
+`.jks` file or the passwords.
 
-## Sideloading to the Pixel over wireless ADB (Tailscale)
+## Sideloading to a dev device over wireless ADB (e.g. Tailscale)
 
-The dev Pixel (`46211FDAQ00534`) is reachable from the VPS via Tailscale
-at `100.113.109.57`. Pairing record is persisted under `~/.android/` —
-**re-pairing is almost never needed**, only the `connect` port changes.
+For dev iteration, sideload the signed APK to a physical Android device
+over wireless `adb`. If the device is on the same LAN, use its LAN IP;
+if it's reachable via Tailscale, use its Tailscale IP. Pairing record
+persists under `~/.android/` — **re-pairing is almost never needed**,
+only the `connect` port changes between toggles.
 
-Toolchain on this VPS:
+Convention used in the snippets below:
 
-- `adb` binary: `/home/ubuntu/Android/sdk/platform-tools/adb`
-  (not on `$PATH` by default — `export PATH="/home/ubuntu/Android/sdk/platform-tools:$PATH"`)
+- `$DEVICE_IP` — IP of your dev Android device
+- `$DEVICE_PORT` — wireless-debugging port (rotates each toggle — read
+  it from the device's *Wireless debugging* screen)
+- `adb` may not be on `$PATH` — `export PATH="$ANDROID_HOME/platform-tools:$PATH"`
 - Package id: `com.baseplane.duraclaw`
 
 ```bash
-export PATH="/home/ubuntu/Android/sdk/platform-tools:$PATH"
-adb connect 100.113.109.57:<PORT>     # PORT rotates each WiFi-debug toggle -- ask the user
+export PATH="$ANDROID_HOME/platform-tools:$PATH"
+adb connect $DEVICE_IP:$DEVICE_PORT
 adb devices
-adb -s 100.113.109.57:<PORT> install -r \
+adb -s $DEVICE_IP:$DEVICE_PORT install -r \
   apps/mobile/android/app/build/outputs/apk/release/app-release-signed.apk
-adb -s 100.113.109.57:<PORT> shell monkey -p com.baseplane.duraclaw \
+adb -s $DEVICE_IP:$DEVICE_PORT shell monkey -p com.baseplane.duraclaw \
   -c android.intent.category.LAUNCHER 1
 ```
 
@@ -83,13 +89,14 @@ Gotchas:
 
 - **Port rotation**: Android cycles the Wireless-debugging port every
   toggle and on idle-drop. If `adb connect` says `Connection refused`,
-  ask the user to read the current port. No re-pair needed.
-- **mDNS is not forwarded across Tailscale** — always `connect` by
-  explicit `IP:PORT`.
+  re-read the current port from the device. No re-pair needed.
+- **mDNS is not forwarded across Tailscale** — when going over a
+  tailnet, always `connect` by explicit `IP:PORT`.
 - **`INSTALL_FAILED_UPDATE_INCOMPATIBLE`** means the signing key differs
   — `adb uninstall com.baseplane.duraclaw` then retry.
-- **Project `grep` alias** on this box is `rg` and rejects `-E`; use
-  `/usr/bin/grep -E` when parsing `dumpsys package` output.
+- **`grep -E` may be aliased to `rg`** in some shells which rejects
+  `-E`; use `/usr/bin/grep -E` explicitly when parsing `dumpsys package`
+  output.
 
 ## Tailing WebView console to logcat
 
@@ -103,8 +110,8 @@ Relevant prefixes:
 - `[ws:<channel>] open|close|error ...` — per-socket lifecycle
 
 ```bash
-export PATH="/home/ubuntu/Android/sdk/platform-tools:$PATH"
-adb -s 100.113.109.57:<PORT> logcat -c
-adb -s 100.113.109.57:<PORT> logcat "*:S" \
+export PATH="$ANDROID_HOME/platform-tools:$PATH"
+adb -s $DEVICE_IP:$DEVICE_PORT logcat -c
+adb -s $DEVICE_IP:$DEVICE_PORT logcat "*:S" \
   Capacitor/Console:V Capacitor:V chromium:V
 ```
