@@ -178,18 +178,32 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     runMigrations(this.ctx.storage.sql, SESSION_DO_MIGRATIONS)
     this.session = Session.create(this)
     // Build SessionDOContext (spec #101 B3) — live references, never reconstructed.
-    this.moduleCtx = {
+    // `state` MUST be a live getter that delegates to `this.state` (the Agent
+    // base class's reactive state proxy). Capturing `this.state` as a plain
+    // property here would freeze a snapshot — `setState` reassigns the
+    // underlying `_state` on every call, so a captured reference goes stale
+    // immediately on the first `updateState()`.
+    const moduleCtx = {
       do: this,
-      state: this.state,
       session: this.session,
       sql: this.ctx.storage.sql,
       env: this.env,
       ctx: this.ctx,
-      broadcast: (data) => this.broadcastToClients(data),
+      broadcast: (data: string) => this.broadcastToClients(data),
       getConnections: () => Array.from(this.getConnections()),
-      logEvent: (level, tag, message, attrs) =>
-        logEvent(this.moduleCtx, level, tag, message, attrs),
-    }
+      logEvent: (
+        level: 'info' | 'warn' | 'error',
+        tag: string,
+        message: string,
+        attrs?: Record<string, unknown>,
+      ) => logEvent(this.moduleCtx, level, tag, message, attrs),
+    } as Omit<SessionDOContext, 'state'> as SessionDOContext
+    Object.defineProperty(moduleCtx, 'state', {
+      get: () => this.state,
+      enumerable: true,
+      configurable: false,
+    })
+    this.moduleCtx = moduleCtx
     await runHydration(this.moduleCtx)
     gcEventLog(this.moduleCtx)
   }
