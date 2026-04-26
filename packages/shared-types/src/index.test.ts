@@ -52,7 +52,7 @@ describe('shared-types rename: worktree→project', () => {
       type: 'resume',
       project: 'dev1',
       prompt: 'continue',
-      sdk_session_id: 'abc',
+      runner_session_id: 'abc',
     }
     expect(cmd.project).toBe('dev1')
   })
@@ -62,7 +62,7 @@ describe('shared-types rename: worktree→project', () => {
       type: 'resume',
       project: 'dev1',
       prompt: 'continue',
-      sdk_session_id: 'abc',
+      runner_session_id: 'abc',
     }
     expect(cmd.type).toBe('resume')
   })
@@ -71,7 +71,7 @@ describe('shared-types rename: worktree→project', () => {
     const event: SessionInitEvent = {
       type: 'session.init',
       session_id: '123',
-      sdk_session_id: null,
+      runner_session_id: null,
       project: 'dev1',
       model: null,
       tools: [],
@@ -276,7 +276,7 @@ describe('SessionStatus type', () => {
 describe('shared-types: session discovery (#27)', () => {
   test('DiscoveredSession has all required fields', () => {
     const session: DiscoveredSession = {
-      sdk_session_id: 'sess-abc-123',
+      runner_session_id: 'sess-abc-123',
       agent: 'claude',
       project_dir: '/data/projects/dev1',
       project: 'dev1',
@@ -289,7 +289,7 @@ describe('shared-types: session discovery (#27)', () => {
       message_count: null,
       user: null,
     }
-    expect(session.sdk_session_id).toBe('sess-abc-123')
+    expect(session.runner_session_id).toBe('sess-abc-123')
     expect(session.agent).toBe('claude')
     expect(session.project_dir).toBe('/data/projects/dev1')
     expect(session.project).toBe('dev1')
@@ -301,7 +301,7 @@ describe('shared-types: session discovery (#27)', () => {
 
   test('DiscoveredSession nullable fields accept values', () => {
     const session: DiscoveredSession = {
-      sdk_session_id: 'sess-def-456',
+      runner_session_id: 'sess-def-456',
       agent: 'codex',
       project_dir: '/data/projects/dev2',
       project: 'dev2',
@@ -340,7 +340,7 @@ describe('shared-types: session discovery (#27)', () => {
   test('SessionSource.discoverSessions accepts optional filter opts', async () => {
     const sessions: DiscoveredSession[] = [
       {
-        sdk_session_id: 'sess-1',
+        runner_session_id: 'sess-1',
         agent: 'claude',
         project_dir: '/data/projects/dev1',
         project: 'dev1',
@@ -374,7 +374,7 @@ describe('shared-types: session discovery (#27)', () => {
       limit: 10,
     })
     expect(result).toHaveLength(1)
-    expect(result[0].sdk_session_id).toBe('sess-1')
+    expect(result[0].runner_session_id).toBe('sess-1')
   })
 
   test('SessionSource agent and description are readonly', () => {

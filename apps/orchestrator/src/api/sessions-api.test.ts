@@ -208,7 +208,7 @@ describe('POST /api/sessions', () => {
     expect(fakeDb.db.insert).toHaveBeenCalled()
   })
 
-  it('does not pass sdk_session_id to DO for a regular spawn', async () => {
+  it('does not pass runner_session_id to DO for a regular spawn', async () => {
     const app = makeApp(env)
     await app.request('/api/sessions', {
       method: 'POST',
@@ -217,12 +217,12 @@ describe('POST /api/sessions', () => {
     })
 
     expect(lastFetchBody).toBeDefined()
-    expect(lastFetchBody.sdk_session_id).toBeUndefined()
+    expect(lastFetchBody.runner_session_id).toBeUndefined()
     expect(lastFetchBody.project).toBe('my-project')
     expect(lastFetchBody.prompt).toBe('do stuff')
   })
 
-  it('passes sdk_session_id and agent to DO for resume', async () => {
+  it('passes runner_session_id and agent to DO for resume', async () => {
     const app = makeApp(env)
     const res = await app.request('/api/sessions', {
       method: 'POST',
@@ -230,14 +230,14 @@ describe('POST /api/sessions', () => {
       body: JSON.stringify({
         project: 'my-project',
         prompt: 'resume',
-        sdk_session_id: 'sdk-abc-123',
+        runner_session_id: 'sdk-abc-123',
         agent: 'claude',
       }),
     })
 
     expect(res.status).toBe(201)
     expect(lastFetchBody).toBeDefined()
-    expect(lastFetchBody.sdk_session_id).toBe('sdk-abc-123')
+    expect(lastFetchBody.runner_session_id).toBe('sdk-abc-123')
     expect(lastFetchBody.agent).toBe('claude')
     expect(lastFetchBody.project).toBe('my-project')
     expect(lastFetchBody.prompt).toBe('resume')
@@ -251,7 +251,7 @@ describe('POST /api/sessions', () => {
       body: JSON.stringify({
         project: 'my-project',
         prompt: 'resume',
-        sdk_session_id: 'sdk-abc-123',
+        runner_session_id: 'sdk-abc-123',
         agent: 'claude',
       }),
     })

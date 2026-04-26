@@ -28,7 +28,7 @@ export interface CreateSessionParams {
   prompt: string | ContentBlock[]
   model?: string
   system_prompt?: string
-  sdk_session_id?: string
+  runner_session_id?: string
   agent?: string
   kataIssue?: number | null
   client_session_id?: string
@@ -97,7 +97,7 @@ export async function createSession(
     project: params.project,
     status: 'running',
     model: params.model ?? null,
-    sdkSessionId: params.sdk_session_id ?? null,
+    runnerSessionId: params.runner_session_id ?? null,
     createdAt: now,
     updatedAt: now,
     lastActivity: now,
@@ -123,12 +123,12 @@ export async function createSession(
   // can never fetch messages for a session that ran successfully.
   // See: GH incident sess-d62bb777 — DO ran, D1 INSERT failed silently,
   // session became permanently unreachable.
-  if (params.sdk_session_id) {
+  if (params.runner_session_id) {
     await db
       .insert(agentSessions)
       .values(baseRow)
       .onConflictDoUpdate({
-        target: agentSessions.sdkSessionId,
+        target: agentSessions.runnerSessionId,
         set: {
           id: sessionId,
           userId,
@@ -162,7 +162,7 @@ export async function createSession(
         prompt: params.prompt,
         model: params.model,
         system_prompt: params.system_prompt,
-        sdk_session_id: params.sdk_session_id,
+        runner_session_id: params.runner_session_id,
         agent: params.agent,
         userId,
       }),

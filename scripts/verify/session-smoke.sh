@@ -68,7 +68,7 @@ for _ in $(seq 1 60); do
   sleep 2
 done
 
-jq -e '.session.status == "idle" and .session.sdk_session_id != null and (.session.num_turns // 0) >= 1' "$session_state_file" >/dev/null
+jq -e '.session.status == "idle" and .session.runner_session_id != null and (.session.num_turns // 0) >= 1' "$session_state_file" >/dev/null
 echo "Session completed successfully"
 
 print_section "session-messages"

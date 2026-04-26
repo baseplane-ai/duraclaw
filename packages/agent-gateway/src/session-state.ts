@@ -42,7 +42,7 @@ async function readJsonIfExists<T>(filePath: string): Promise<T | null> {
 /** Zero / null defaults for the meta fields when meta.json is missing. */
 function emptyMeta(): Omit<MetaFile, 'state'> {
   return {
-    sdk_session_id: null,
+    runner_session_id: null,
     last_activity_ts: null,
     last_event_seq: 0,
     cost: { input_tokens: 0, output_tokens: 0, usd: 0 },
@@ -54,7 +54,7 @@ function emptyMeta(): Omit<MetaFile, 'state'> {
 function mergeMeta(meta: MetaFile | null): Omit<MetaFile, 'state'> {
   if (!meta) return emptyMeta()
   return {
-    sdk_session_id: meta.sdk_session_id ?? null,
+    runner_session_id: meta.runner_session_id ?? null,
     last_activity_ts: meta.last_activity_ts ?? null,
     last_event_seq: meta.last_event_seq ?? 0,
     cost: meta.cost ?? { input_tokens: 0, output_tokens: 0, usd: 0 },

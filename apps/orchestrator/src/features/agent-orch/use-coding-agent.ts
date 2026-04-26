@@ -79,7 +79,7 @@ export interface UseCodingAgentResult {
   sendMessage: (content: string | ContentBlock[]) => Promise<unknown>
   /** Submit a collaborative draft (Y.Text): optimistically clear, RPC send, restore on failure. */
   submitDraft: (yText: Y.Text) => Promise<{ ok: boolean; error?: string; sent?: boolean }>
-  /** Spawn a fresh SDK session with the current transcript prepended; recovers from orphaned sdk_session_id. */
+  /** Spawn a fresh adapter session with the current transcript prepended; recovers from orphaned runner_session_id. */
   forkWithHistory: (content: string | ContentBlock[]) => Promise<unknown>
   /** Retry the gateway dial — used by DisconnectedBanner for reattach. */
   reattach: () => Promise<unknown>

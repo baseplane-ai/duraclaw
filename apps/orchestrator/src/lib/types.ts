@@ -107,7 +107,8 @@ export interface AgentSessionRow {
   project: string
   status: string
   model: string | null
-  sdkSessionId: string | null
+  runnerSessionId: string | null
+  capabilitiesJson: string | null
   createdAt: string
   updatedAt: string
   lastActivity: string | null

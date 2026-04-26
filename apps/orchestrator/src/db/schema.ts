@@ -134,7 +134,8 @@ export const agentSessions = sqliteTable(
     project: text('project').notNull(),
     status: text('status').notNull().default('running'),
     model: text('model'),
-    sdkSessionId: text('sdk_session_id'),
+    runnerSessionId: text('runner_session_id'),
+    capabilitiesJson: text('capabilities_json'),
     createdAt: text('created_at').notNull(),
     updatedAt: text('updated_at').notNull(),
     lastActivity: text('last_activity'),
@@ -170,9 +171,9 @@ export const agentSessions = sqliteTable(
     visibility: text('visibility').notNull().default('public'),
   },
   (t) => ({
-    sdkIdUnique: uniqueIndex('idx_agent_sessions_sdk_id')
-      .on(t.sdkSessionId)
-      .where(sql`${t.sdkSessionId} IS NOT NULL`),
+    runnerIdUnique: uniqueIndex('idx_agent_sessions_runner_id')
+      .on(t.runnerSessionId)
+      .where(sql`${t.runnerSessionId} IS NOT NULL`),
     userLastActivity: index('idx_agent_sessions_user_last_activity').on(t.userId, t.lastActivity),
     userProject: index('idx_agent_sessions_user_project').on(t.userId, t.project),
     visibilityLastActivity: index('idx_agent_sessions_visibility_last_activity').on(

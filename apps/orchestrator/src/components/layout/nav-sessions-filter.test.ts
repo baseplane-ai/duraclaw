@@ -22,7 +22,7 @@ function mkSession(id: string, userId: string | null): SessionRecord {
     archived: false,
     origin: null,
     agent: null,
-    sdkSessionId: null,
+    runnerSessionId: null,
     kataMode: null,
     kataIssue: null,
     kataPhase: null,

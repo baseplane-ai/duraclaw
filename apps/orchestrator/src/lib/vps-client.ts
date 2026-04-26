@@ -11,7 +11,7 @@ export function parseEvent(data: string | ArrayBuffer): GatewayEvent {
 export interface SessionStatusBody {
   ok: true
   state: 'running' | 'completed' | 'failed' | 'aborted' | 'crashed'
-  sdk_session_id: string | null
+  runner_session_id: string | null
   last_activity_ts: number | null
   last_event_seq: number
   cost: { input_tokens: number; output_tokens: number; usd: number }
@@ -95,7 +95,7 @@ export async function getSessionStatus(
 export interface SessionListEntry {
   session_id: string
   state: 'running' | 'completed' | 'failed' | 'aborted' | 'crashed'
-  sdk_session_id: string | null
+  runner_session_id: string | null
   last_activity_ts: number | null
   last_event_seq: number
   cost: { input_tokens: number; output_tokens: number; usd: number }
