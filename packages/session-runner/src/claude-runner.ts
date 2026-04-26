@@ -120,7 +120,7 @@ export function startKataWatcher(
   project: string,
   ch: BufferedChannel,
   ctx: RunnerSessionContext,
-): { stop: () => void; emitNow: () => void } {
+): { stop: () => void; emitNow: () => Promise<void> } {
   let debounceTimer: ReturnType<typeof setTimeout> | null = null
   let leafWatcher: FSWatcher | null = null
   let attachedFor: string | null = null
@@ -195,12 +195,12 @@ export function startKataWatcher(
         leafWatcher = null
       }
     },
-    emitNow: () => {
+    emitNow: async () => {
       const sdkSessionId = ctx.meta.runner_session_id
       if (sdkSessionId) attachLeafWatcher(sdkSessionId)
       if (debounceTimer) clearTimeout(debounceTimer)
       debounceTimer = null
-      void emitState()
+      await emitState()
     },
   }
 }
@@ -588,7 +588,7 @@ export class ClaudeRunner {
           // fields for this session immediately. Prior to session.init the
           // watcher can't pick the right folder, so this is the first
           // viable emission point.
-          if (sdkSessionId) kataWatcher.emitNow()
+          if (sdkSessionId) void kataWatcher.emitNow()
         } else if (
           message.type === 'system' &&
           (message as any).subtype === 'session_state_changed'
@@ -907,6 +907,21 @@ export class ClaudeRunner {
             }
           } catch {
             /* best-effort — never break the result emission */
+          }
+
+          // Auto-advance race fix: kata's Stop hook just wrote (or didn't
+          // write) `run-end.json` synchronously. The watcher's debounced
+          // emit (KATA_DEBOUNCE_MS) loses the race against this `result`
+          // send under normal SDK shutdown timing, leaving `lastRunEnded`
+          // false on the DO when `maybeAutoAdvanceChain()` reads it on the
+          // same microtask the result is processed → permanent stall.
+          // Synchronously flush a fresh kata_state read before the result so
+          // the wire ordering is `kata_state(runEnded=…)` → `result`. Best-
+          // effort — never block the result on a kata-state read failure.
+          try {
+            await kataWatcher.emitNow()
+          } catch {
+            /* swallow — kata state is best-effort */
           }
 
           send(

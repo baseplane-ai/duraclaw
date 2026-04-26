@@ -920,12 +920,28 @@ export async function handleStopConditions(input: Record<string, unknown>): Prom
           note: 'background agents active — deferring to agent notifications',
         })
         logStopHook(sessionId, 'allow', result.reasons, 'background agents active')
+        // The model started background agents and is exiting cleanly; the
+        // rung's foreground work is done, agent completion is async. Write
+        // run-end.json so chain auto-advance treats this as a clean exit
+        // rather than a permanent stall. Without this, every session that
+        // dispatches background work and then exits leaves runEnded=false
+        // and silently stalls the chain.
+        writeRunEndArtifact(sessionId, state, {
+          note: 'background agents active — foreground complete',
+          stopConditions,
+          advisories: result.advisories,
+        })
         return
       }
 
       // If an AskUserQuestion is pending, allow exit — the session is paused
       // waiting for user input. Blocking here creates a redirect loop: the
       // model can't complete tasks while the question is unanswered.
+      //
+      // Deliberately do NOT writeRunEndArtifact here: the rung is paused mid-
+      // conversation, not finished. Letting auto-advance fire would discard
+      // the pending question and skip to the next mode while the user still
+      // owes an answer — far worse failure mode than a manual nudge.
       if (hasPendingAskUserQuestion(transcriptPath)) {
         logHook(sessionId, {
           hook: 'stop-conditions',
