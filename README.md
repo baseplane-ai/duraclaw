@@ -1,7 +1,9 @@
 <!--
   README design notes (see planning/research/2026-04-26-readme-overhaul.md):
   - Human-facing. Agent-facing rules live in CLAUDE.md. Do not duplicate.
-  - ~280 lines max. Defer to per-package READMEs and .claude/rules/.
+  - This README is the index of everything — long is fine, the TOC up top
+    is what makes it skim-friendly. Defer deep mechanics to per-package
+    READMEs and .claude/rules/, but link them from here.
   - Architecture ASCII block is mirrored from CLAUDE.md — keep them in sync.
   - Hero image is generated; see docs/hero/ for variants.
 -->
