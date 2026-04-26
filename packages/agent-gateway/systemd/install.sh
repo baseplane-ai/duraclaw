@@ -1,4 +1,18 @@
 #!/usr/bin/env bash
+#
+# Installs the Duraclaw agent-gateway as a systemd unit on this VPS.
+#
+# Prereqs: Linux + systemd, Bun on $PATH, sudo, a non-root user that owns
+# the duraclaw checkout. The cleanest way to land all of that — plus
+# claude-code, gh, jq, ripgrep, and the rest of the agent-coding
+# toolchain Duraclaw assumes — is to bootstrap the box with ACFS
+# (Agentic Coding Flywheel Setup) first:
+#
+#   https://github.com/Dicklesworthstone/agentic_coding_flywheel_setup
+#
+# Then run this script from the duraclaw checkout. See README.md →
+# Quickstart → Self-hosting for the full path.
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -460,10 +460,23 @@ for the port-derivation table and per-worktree allocation rules.
 
 ### Self-hosting on a VPS + your own Cloudflare account
 
+> **VPS prereq — start with [ACFS (Agentic Coding Flywheel
+> Setup)](https://github.com/Dicklesworthstone/agentic_coding_flywheel_setup).**
+> Duraclaw's VPS side assumes a Linux box with Bun, systemd, sudo, a
+> non-root user, claude-code itself, and the surrounding agent-coding
+> toolchain (gh, jq, git, ripgrep, ...) already in place. ACFS is a
+> single curl|bash bootstrap that lays all of that down — it's the
+> intended on-ramp for the gateway install below, and several of
+> Duraclaw's design choices (per-session runner processes, systemd
+> reaper semantics, the "let agents work unattended for hours" mental
+> model) come straight from that ecosystem. See
+> [Acknowledgments](#acknowledgments) for the full picture; if you
+> already have a flywheel-style box, you're ready.
+
 Two scripts, two halves of the stack:
 
 ```bash
-# 1. On a Linux VPS (Bun + systemd available):
+# 1. On a Linux VPS (Bun + systemd available — ACFS-provisioned is fine):
 #    install the gateway as a systemd unit. It listens on
 #    127.0.0.1:$CC_GATEWAY_PORT and spawns one session-runner per session.
 bash packages/agent-gateway/systemd/install.sh
