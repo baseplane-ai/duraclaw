@@ -99,6 +99,7 @@ export class CodexAdapter implements RunnerAdapter {
       this.thread = this.codex.startThread({
         workingDirectory: opts.project,
         approvalPolicy: 'never',
+        sandboxMode: 'workspace-write',
         skipGitRepoCheck: true,
       })
     }

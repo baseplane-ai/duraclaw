@@ -130,6 +130,7 @@ describe('CodexAdapter', () => {
     expect(codexMock.startThread).toHaveBeenCalledWith({
       workingDirectory: '/tmp/test-project',
       approvalPolicy: 'never',
+      sandboxMode: 'workspace-write',
       skipGitRepoCheck: true,
     })
 
