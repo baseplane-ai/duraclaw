@@ -1,6 +1,6 @@
 import type { SessionMessage } from 'agents/experimental/memory/session'
 import { transcriptUserContentToParts } from '~/lib/message-parts'
-import { applyToolResult, assistantContentToParts, upsertParts } from '../gateway-event-mapper'
+import { applyToolResult, assistantContentToParts, upsertParts } from './message-parts'
 import type { SessionDOContext } from './types'
 
 /**

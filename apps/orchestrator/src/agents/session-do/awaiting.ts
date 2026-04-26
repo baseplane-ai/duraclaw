@@ -1,12 +1,12 @@
 import type { SessionMessage as WireSessionMessage } from '@duraclaw/shared-types'
 import type { SessionMessage } from 'agents/experimental/memory/session'
-import { finalizeStreamingParts } from '../gateway-event-mapper'
 import {
   broadcastMessages as broadcastMessagesImpl,
   broadcastToClients as broadcastToClientsImpl,
 } from './broadcast'
 import { safeUpdateMessage as safeUpdateMessageImpl } from './history'
 import { hydrateFromGatewayImpl } from './hydrate-from-gateway'
+import { finalizeStreamingParts } from './message-parts'
 import { sendToGateway } from './runner-link'
 import { RECOVERY_GRACE_MS, type SessionDOContext } from './types'
 import {

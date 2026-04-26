@@ -364,6 +364,24 @@ export interface AdapterCapabilities {
   availableProviders: ReadonlyArray<{ provider: string; models: string[] }>
 }
 
+/**
+ * Transport-layer message part — mirrors the DO-internal SessionMessagePart
+ * from `agents/experimental/memory/session`. Decoupled from the SDK type so
+ * shared-types doesn't import the Agents SDK. The DO maps WireMessagePart →
+ * SessionMessagePart on arrival (identity today; indirection allows divergence).
+ */
+export type WireMessagePart =
+  | { type: 'text'; text: string; state: 'streaming' | 'done' }
+  | { type: 'reasoning'; text: string; state: 'streaming' | 'done' }
+  | {
+      type: string // 'tool-{name}' e.g. 'tool-Bash', 'tool-Read'
+      toolCallId: string
+      toolName: string
+      input?: unknown
+      output?: unknown
+      state: string // 'input-available', 'output-available', 'output-error', etc.
+    }
+
 export interface SessionInitEvent {
   type: 'session.init'
   session_id: string
@@ -379,6 +397,7 @@ export interface PartialAssistantEvent {
   type: 'partial_assistant'
   session_id: string
   content: PartialContentBlock[]
+  parts?: WireMessagePart[]
 }
 
 export interface PartialContentBlock {
@@ -397,6 +416,7 @@ export interface AssistantEvent {
   session_id: string
   uuid: string
   content: unknown[]
+  parts?: WireMessagePart[]
 }
 
 export interface ToolResultEvent {

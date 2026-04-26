@@ -4,7 +4,6 @@ import type { AwaitingReason, AwaitingResponsePart } from '~/lib/awaiting-respon
 import { chunkOps } from '~/lib/chunk-frame'
 import { contentToParts } from '~/lib/message-parts'
 import type { ContentBlock } from '~/lib/types'
-import { finalizeStreamingParts } from '../gateway-event-mapper'
 import { broadcastBranchInfo, broadcastMessages } from './broadcast'
 import {
   bumpTurnCounter,
@@ -13,6 +12,7 @@ import {
   safeAppendMessage,
   safeUpdateMessage,
 } from './history'
+import { finalizeStreamingParts } from './message-parts'
 import { sendToGateway, triggerGatewayDial } from './runner-link'
 import { updateState } from './status'
 import type { SessionDOContext } from './types'

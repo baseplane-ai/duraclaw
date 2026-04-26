@@ -11,6 +11,7 @@ import type {
 } from '@duraclaw/shared-types'
 import { handleQueryCommand } from './commands.js'
 import { buildCleanEnv } from './env.js'
+import { assistantContentToWireParts, partialAssistantToWireParts } from './event-translator.js'
 import { resolveProject } from './project-resolver.js'
 import { SessionTitler, type TranscriptMessage } from './titler.js'
 import type { RunnerSessionContext } from './types.js'
@@ -586,6 +587,9 @@ export class ClaudeRunner {
                     type: 'partial_assistant',
                     session_id: sessionId,
                     content: [{ type: 'text', id: `blk-${idx}`, delta: ev.delta.text ?? '' }],
+                    parts: partialAssistantToWireParts([
+                      { type: 'text', delta: ev.delta.text ?? '' },
+                    ]),
                   },
                   ctx,
                 )
@@ -598,6 +602,9 @@ export class ClaudeRunner {
                     content: [
                       { type: 'thinking', id: `blk-${idx}`, delta: ev.delta.thinking ?? '' },
                     ],
+                    parts: partialAssistantToWireParts([
+                      { type: 'thinking', delta: ev.delta.thinking ?? '' },
+                    ]),
                   },
                   ctx,
                 )
@@ -624,6 +631,7 @@ export class ClaudeRunner {
               }
               return { type: block.type, id: block.id ?? '' }
             })
+            const wireParts = partialAssistantToWireParts(content)
 
             send(
               ch,
@@ -631,6 +639,7 @@ export class ClaudeRunner {
                 type: 'partial_assistant',
                 session_id: sessionId,
                 content: blocks,
+                parts: wireParts,
               },
               ctx,
             )
@@ -638,6 +647,7 @@ export class ClaudeRunner {
             // GH#86: accumulate finalized assistant turns for the titler.
             const assistantContent = (message as any).message?.content ?? []
             titlerHistory.push({ role: 'assistant', content: assistantContent })
+            const wireParts = assistantContentToWireParts(assistantContent)
 
             send(
               ch,
@@ -646,6 +656,7 @@ export class ClaudeRunner {
                 session_id: sessionId,
                 uuid: (message as any).uuid,
                 content: assistantContent,
+                parts: wireParts,
               },
               ctx,
             )

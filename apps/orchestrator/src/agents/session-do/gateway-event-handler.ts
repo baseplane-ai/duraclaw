@@ -1,10 +1,12 @@
-import type { SessionMessage as WireSessionMessage } from '@duraclaw/shared-types'
+import type { WireMessagePart, SessionMessage as WireSessionMessage } from '@duraclaw/shared-types'
 import type { SessionMessage, SessionMessagePart } from 'agents/experimental/memory/session'
 import { eq } from 'drizzle-orm'
 import { agentSessions } from '~/db/schema'
 import { generateActionToken } from '~/lib/action-token'
 import { broadcastSessionRow } from '~/lib/broadcast-session'
 import type { ContextUsage, GatewayEvent } from '~/lib/types'
+import { broadcastMessages as broadcastMessagesImpl } from './broadcast'
+import { promoteToolPartToGate as promoteToolPartToGateImpl } from './gates'
 import {
   applyToolResult,
   assistantContentToParts,
@@ -13,9 +15,7 @@ import {
   isAssistantContentEmpty,
   mergeFinalAssistantParts,
   partialAssistantToParts,
-} from '../gateway-event-mapper'
-import { broadcastMessages as broadcastMessagesImpl } from './broadcast'
-import { promoteToolPartToGate as promoteToolPartToGateImpl } from './gates'
+} from './message-parts'
 import { handleRateLimit } from './resume-scheduler'
 import {
   syncCapabilitiesToD1 as syncCapabilitiesToD1Impl,
@@ -29,6 +29,14 @@ import {
   RUNAWAY_EMPTY_TURN_THRESHOLD,
   type SessionDOContext,
 } from './types'
+
+/**
+ * Map WireMessagePart → SessionMessagePart (identity today).
+ * The indirection allows the wire type to diverge from the SDK type.
+ */
+function wireToSessionParts(wire: WireMessagePart[]): SessionMessagePart[] {
+  return wire as unknown as SessionMessagePart[]
+}
 
 /**
  * Spec #101 Stage 5 — gateway-event dispatch extracted from
@@ -94,7 +102,9 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
 
     case 'partial_assistant': {
       self.clearAwaitingResponse()
-      const parts = partialAssistantToParts(event.content)
+      const parts = event.parts
+        ? wireToSessionParts(event.parts)
+        : partialAssistantToParts(event.content)
       const msgId = `msg-${self.turnCounter}`
 
       if (!self.currentTurnMessageId) {
@@ -239,7 +249,9 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
       }
 
       // Final assistant message — finalize streaming parts with final content
-      const newParts = assistantContentToParts(event.content as unknown[])
+      const newParts = event.parts
+        ? wireToSessionParts(event.parts)
+        : assistantContentToParts(event.content as unknown[])
       const msgId = self.currentTurnMessageId ?? `msg-${self.turnCounter}`
 
       // Merge finalizes any streaming text/reasoning parts (preserving the
