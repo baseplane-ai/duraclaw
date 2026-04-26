@@ -101,6 +101,12 @@ Layered on top:
   stop-hook blocks until the phase contract is satisfied or
   explicitly waived.
 
+<p align="center">
+  <img src="docs/screenshots/15-sessions-dashboard.png" alt="Duraclaw dashboard with 15 concurrent Claude sessions open as draggable tabs across baseplane, duraclaw, kata-wm, and other worktrees" width="100%">
+  <br>
+  <sub><em>Fifteen concurrent Claude sessions, one per worktree, fanned out as draggable tabs above a live chat. Sidebar = recents + worktree groups; status bar = per-session model, mode, and connection state.</em></sub>
+</p>
+
 ## Features
 
 A non-exhaustive map of what's actually shipped. See
