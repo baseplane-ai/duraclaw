@@ -30,8 +30,7 @@ import { createSession } from '~/lib/create-session'
 import {
   fetchGatewayFile as sharedFetchGatewayFile,
   fetchGatewayProjects as sharedFetchGatewayProjects,
-  listGatewayFiles as sharedListGatewayFiles,
-  parseFrontmatter as sharedParseFrontmatter,
+  getSpecStatus as sharedGetSpecStatus,
   resolveProjectPath as sharedResolveProjectPath,
 } from '~/lib/gateway-files'
 import { type PushPayload, sendPushNotification } from '~/lib/push'
@@ -372,13 +371,11 @@ async function fetchGithubPulls(env: ApiAppEnv['Bindings']): Promise<GhPull[]> {
 // via `buildChainRowFromContext` so the broadcast path shares the exact mapping.
 
 // Gateway-file helpers (parseFrontmatter, fetchGatewayFile, listGatewayFiles,
-// resolveProjectPath) moved to ~/lib/gateway-files. Local aliases preserved so
-// the rest of this file continues to type-check without env casts on every call.
-const parseFrontmatter = sharedParseFrontmatter
+// resolveProjectPath) live in ~/lib/gateway-files. Only fetchGatewayFile is
+// still called inline below; it gets a thin alias so the rest of this file
+// can pass the Hono-typed env without a cast at every call site.
 const fetchGatewayFile = (env: ApiAppEnv['Bindings'], projectName: string, relPath: string) =>
   sharedFetchGatewayFile(env as unknown as Env, projectName, relPath)
-const listGatewayFiles = (env: ApiAppEnv['Bindings'], projectName: string, dirPath: string) =>
-  sharedListGatewayFiles(env as unknown as Env, projectName, dirPath)
 
 export function createApiApp() {
   const app = new Hono<ApiAppEnv>()
@@ -2687,35 +2684,12 @@ export function createApiApp() {
     if (!project) {
       return c.json({ error: 'Missing required query param: project' }, 400)
     }
-
-    const entries = await listGatewayFiles(c.env, project, 'planning/specs')
-    if (!entries) {
-      return c.json<SpecStatusResponse>({ exists: false, status: null, path: null })
-    }
-
-    const pattern = new RegExp(`^${issueNumber}-.*\\.md$`)
-    const matches = entries.filter((e) => pattern.test(e.name))
-    if (matches.length === 0) {
-      return c.json<SpecStatusResponse>({ exists: false, status: null, path: null })
-    }
-
-    // Pick latest by `modified` timestamp (numeric or ISO string both work).
-    matches.sort((a, b) => {
-      const ta = a.modified ? new Date(a.modified as string | number).getTime() : 0
-      const tb = b.modified ? new Date(b.modified as string | number).getTime() : 0
-      return tb - ta
-    })
-    const winner = matches[0]
-    const relPath = winner.path ?? `planning/specs/${winner.name}`
-
-    const content = await fetchGatewayFile(c.env, project, relPath)
-    if (content === null) {
-      return c.json<SpecStatusResponse>({ exists: false })
-    }
-
-    const fm = parseFrontmatter(content)
-    const status = fm.status ?? null
-    return c.json<SpecStatusResponse>({ exists: true, status, path: relPath })
+    // Single source of truth lives in `lib/gateway-files.ts:getSpecStatus`.
+    // Resolution order: frontmatter `github_issue:` first (canonical),
+    // then filename prefix `^0*<n>-.*\.md$` (legacy / leading-zero
+    // tolerant). See helper docs for cost characteristics.
+    const result = await sharedGetSpecStatus(c.env, project, issueNumber)
+    return c.json<SpecStatusResponse>(result)
   })
 
   app.get('/api/chains/:issue/vp-status', async (c) => {

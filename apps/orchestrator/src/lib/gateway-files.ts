@@ -122,35 +122,96 @@ export function parseFrontmatter(markdown: string): Record<string, string> {
 }
 
 /**
- * Check the status of a spec file for a given issue number.
- * Returns `{exists:false}` if no spec file matches `<issue>-*.md`, else
- * `{exists:true, status}` parsed from the frontmatter.
+ * Resolve the spec file backing a given GitHub issue number.
+ *
+ * Resolution order — frontmatter wins over filename:
+ *
+ *   1. Read every `*.md` under `planning/specs/`, parse frontmatter, keep
+ *      files whose `github_issue:` matches `issueNumber`. If any match,
+ *      pick the latest by mtime. This is the canonical signal — specs
+ *      carry `github_issue: N` precisely so the filename can drift.
+ *   2. Fallback to filename prefix `^0*${issueNumber}-.*\.md$` (the legacy
+ *      contract). The leading-zero wildcard is the fix for the original
+ *      bug — Apr-16-batch specs use `0008-…`, `0015-…`, etc., and the
+ *      old `^${issueNumber}-` regex never matched them.
+ *
+ * Returns `{exists:false, status:null, path:null}` when no spec resolves.
+ *
+ * Cost: when (1) hits — list + N parallel reads + frontmatter parse for
+ * every spec (~50 in this repo). Cached 30s on the client; the server
+ * holds no cache, so every cold spec-status call pays this. The reads
+ * are best-effort: any individual failure drops that candidate but does
+ * not abort the resolution.
  */
 export async function getSpecStatus(
   env: Env,
   project: string,
   issueNumber: number,
-): Promise<{ exists: boolean; status: string | null }> {
+): Promise<{ exists: boolean; status: string | null; path: string | null }> {
   const entries = await listGatewayFiles(env, project, 'planning/specs')
-  if (!entries) return { exists: false, status: null }
+  if (!entries) return { exists: false, status: null, path: null }
 
-  const pattern = new RegExp(`^${issueNumber}-.*\\.md$`)
-  const matches = entries.filter((e) => pattern.test(e.name))
-  if (matches.length === 0) return { exists: false, status: null }
+  // Only consider .md files. Don't recurse — listGatewayFiles already
+  // requested `depth=1`, but defend against gateway implementations that
+  // ignore it.
+  const mdFiles = entries.filter((e) => e.name.endsWith('.md'))
+  if (mdFiles.length === 0) return { exists: false, status: null, path: null }
 
-  matches.sort((a, b) => {
-    const ta = a.modified ? new Date(a.modified as string | number).getTime() : 0
-    const tb = b.modified ? new Date(b.modified as string | number).getTime() : 0
-    return tb - ta
+  // Read every spec's content in parallel. Best-effort: a per-file fetch
+  // failure leaves that entry as `null` and is filtered out below.
+  const reads = await Promise.all(
+    mdFiles.map(async (entry) => {
+      const relPath = entry.path ?? `planning/specs/${entry.name}`
+      const content = await fetchGatewayFile(env, project, relPath)
+      if (content === null) return null
+      const fm = parseFrontmatter(content)
+      return { entry, relPath, fm }
+    }),
+  )
+  const candidates = reads.filter(
+    (r): r is { entry: GatewayFileEntry; relPath: string; fm: Record<string, string> } =>
+      r !== null,
+  )
+  if (candidates.length === 0) return { exists: false, status: null, path: null }
+
+  const mtime = (entry: GatewayFileEntry) =>
+    entry.modified ? new Date(entry.modified as string | number).getTime() : 0
+  const byMtimeDesc = (a: { entry: GatewayFileEntry }, b: { entry: GatewayFileEntry }) =>
+    mtime(b.entry) - mtime(a.entry)
+
+  // Pass 1 — frontmatter `github_issue:` is the canonical signal. Coerce
+  // through Number() so `"58"` and `"0058"` both compare to `58`.
+  const fmMatches = candidates.filter((c) => {
+    const raw = c.fm.github_issue
+    if (raw == null || raw === '' || raw === 'null') return false
+    return Number(raw) === issueNumber
   })
-  const winner = matches[0]
-  const relPath = winner.path ?? `planning/specs/${winner.name}`
+  if (fmMatches.length > 0) {
+    fmMatches.sort(byMtimeDesc)
+    const winner = fmMatches[0]
+    return {
+      exists: true,
+      status: winner.fm.status ?? null,
+      path: winner.relPath,
+    }
+  }
 
-  const content = await fetchGatewayFile(env, project, relPath)
-  if (content === null) return { exists: false, status: null }
+  // Pass 2 — filename prefix fallback for specs that pre-date or omit the
+  // `github_issue:` frontmatter convention. `^0*${n}-` handles both the
+  // bare `42-foo.md` and the zero-padded `0042-foo.md` shapes.
+  const namePattern = new RegExp(`^0*${issueNumber}-.*\\.md$`)
+  const nameMatches = candidates.filter((c) => namePattern.test(c.entry.name))
+  if (nameMatches.length > 0) {
+    nameMatches.sort(byMtimeDesc)
+    const winner = nameMatches[0]
+    return {
+      exists: true,
+      status: winner.fm.status ?? null,
+      path: winner.relPath,
+    }
+  }
 
-  const fm = parseFrontmatter(content)
-  return { exists: true, status: fm.status ?? null }
+  return { exists: false, status: null, path: null }
 }
 
 /**
