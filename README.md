@@ -39,15 +39,16 @@
 ## Table of Contents
 
 1. [What it is](#what-it-is)
-2. [What it is not](#what-it-is-not)
-3. [Architecture](#architecture)
-4. [Repository map](#repository-map)
-5. [Tech stack](#tech-stack)
-6. [Quickstart](#quickstart)
-7. [Common commands](#common-commands)
-8. [Deployment](#deployment)
-9. [Contributing](#contributing)
-10. [Roadmap](#roadmap)
+2. [Features](#features)
+3. [What it is not](#what-it-is-not)
+4. [Architecture](#architecture)
+5. [Repository map](#repository-map)
+6. [Tech stack](#tech-stack)
+7. [Quickstart](#quickstart)
+8. [Common commands](#common-commands)
+9. [Deployment](#deployment)
+10. [Contributing](#contributing)
+11. [Roadmap](#roadmap)
 
 ---
 
@@ -60,7 +61,7 @@ session is asking me a question right now?"* across a dozen of them.
 
 Duraclaw is the orchestration fabric that fixes that.
 
-A Cloudflare Workers frontend (TanStack Start + React 19) owns session
+A Cloudflare Workers frontend — a plain Vite 8 SPA built with React 19 and [TanStack Router](https://tanstack.com/router) for client routing, [Hono](https://hono.dev/) on the Worker side for API routes, deployed via the [`@cloudflare/vite-plugin`](https://developers.cloudflare.com/workers/vite-plugin/) — owns session
 lifecycle through three [Durable
 Objects](https://developers.cloudflare.com/durable-objects/) — `SessionDO`
 (per-session state + SQLite message history + event log), `UserSettingsDO`
@@ -90,16 +91,131 @@ Layered on top:
   stop-hook blocks until the phase contract is satisfied or
   explicitly waived.
 
+## Features
+
+A non-exhaustive map of what's actually shipped. See
+[`planning/progress.md`](planning/progress.md) for live phase / subphase
+status.
+
+**Sessions**
+
+- Many concurrent Claude Code sessions, each with its own runner
+  process and Durable Object
+- Session lifecycle: create, list, search, history, fork, rename,
+  abort, force-stop, delete, export
+- Per-session SQLite message history (live in the DO) mirrored to D1
+  for cross-device list views
+- Session resume across runner reaper / SSH disconnect / Worker
+  redeploy — `sdk_session_id` persists, transcripts replay from disk
+- Orphan-runner self-healing — `forkWithHistory` re-spawns a fresh SDK
+  session prefixed with the prior transcript when the runner is
+  unreachable
+- Rewind / branch navigation (DO-authored snapshots, no client-side
+  history mutation)
+- Tool-call approval gates (`AskUserQuestion`, `permission_request`)
+  with a per-session attention queue
+- Live `contextUsage` / cost / token / duration accounting
+- Per-session `event_log` (durable, 7-day retention) for replay /
+  diagnostics
+
+**Multi-session UI**
+
+- Multi-session tab bar with live status indicators
+- Status bar with connection / runner / WS state, attention badges,
+  cost / token meters
+- Cmd-K command menu for cross-session navigation
+- Quick-prompt input — fire a message into any session from the global
+  shell
+- Workspace / project switcher
+- Realtime collab cursors and presence (Y.js via `SessionCollabDO`)
+- Notification bell + drawer driven by per-event preferences
+- TanStack DB synced collections (`user_tabs`, `user_preferences`,
+  `projects`, `chains`) with optimistic mutations + WS-driven sync
+
+**Mobile (Android)**
+
+- Capacitor 8 native shell wrapping the same React UI
+- Capgo web-bundle OTA — JS-only releases ship via R2 with no APK reinstall
+- Native-APK fallback updater for Capacitor / plugin bumps
+- Native swaps: `@capacitor-community/sqlite` for OPFS, bearer auth
+  via `better-auth-capacitor`, FCM HTTP v1 for push, `useAgent` host
+  override for the Worker WSS endpoint
+- Wireless ADB sideload workflow for dev iteration
+
+**Push notifications (dual-channel)**
+
+- Web Push (VAPID) for browsers, FCM HTTP v1 for Android
+- Same `UserSettingsDO` subscription registry fans out both channels
+- Per-event preferences (`gate-required`, `runner-error`, `done`, ...)
+- Opt-in banner with permission-state persistence
+
+**Workflow CLI ([`kata`](packages/kata/))**
+
+- 7 modes: `research`, `planning`, `implementation`, `debug`, `task`,
+  `verify`, `freeform`
+- Phase tasks injected at session start (Setup → Work → Close)
+- **Exit-gate enforcement** — stop-hook blocks until the phase
+  contract is satisfied or explicitly waived
+- Mode-specific skill scripts (kata-setup, kata-research, kata-close,
+  kata-debug-methodology, kata-spec-review, ...)
+- Context auto-injection: `CLAUDE.md`, `AGENTS.md`,
+  `.claude/rules/<scope>.md`
+- Session evidence captured under `.kata/verification-evidence/`
+- Verification-policy CLI: per-subphase `verify:*` commands run real
+  curl + browser checks
+
+**Auth & access**
+
+- Better Auth on D1 with Drizzle adapter (email + OTP)
+- Per-session visibility: private / public / shared
+- Admin user management page
+- Feature-flag system with admin patch endpoints
+- Bootstrap-token + gateway-secret rotation paths
+
+**Backend hardening**
+
+- BufferedChannel ring (10K events / 50 MB) absorbs gateway / Worker
+  redeploys with at-most-one gap sentinel
+- Dial-back WSS with timing-safe token validation, 1/3/9/27/30s
+  reconnect ladder
+- Cron-scheduled cleanup of stale sessions / orphan runners
+- D1-mirrored session rows for fast list views, DO as live truth
+
+**Integrations**
+
+- GitHub webhooks (chains feature — issue → impl → verification flow)
+- Worktree-aware project discovery (`/api/gateway/projects`)
+- "Chains" workflow: claim issue → checkout worktree → run
+  implementation session → release
+
+**Developer ergonomics**
+
+- Per-worktree port derivation (`cksum % 800`) — clones don't collide
+- One-shot setup script (`scripts/setup-clone.sh`)
+- Real-curl + browser verification harnesses with no mocks
+- Tmux-managed local dev stack
+- PWA install with offline shell + service-worker update banner
+
 ## What it is not
 
+- **Not full feature-parity with the Claude Code CLI.** Sessions run
+  through `@anthropic-ai/claude-agent-sdk`, which exposes most of what
+  the CLI does — but a handful of CLI features (raw tmux UX, full
+  local-only operation, MCP-server flag wiring, `/`-command parity,
+  some plugin / extension surfaces) aren't reproduced here. Use the
+  CLI when you want a single local session with the full CLI surface;
+  use duraclaw when you want a fleet of remote, persistent,
+  observable sessions.
 - **Not a Claude wrapper or standalone chatbot.** Sessions run inside
   `@anthropic-ai/claude-agent-sdk` — duraclaw orchestrates them, it
   doesn't reimplement them.
 - **Not a one-click self-hosted app yet.** It assumes a Cloudflare
   Workers account, D1, R2, and a Linux VPS you control. The deploy
   pipeline is internal infra (see [Deployment](#deployment)).
-- **Not a replacement for the Claude Code CLI.** It complements it —
-  the CLI is still the right tool for one-off local sessions.
+- **Not iOS yet.** The Capacitor shell is Android-only today; iOS is on
+  the roadmap but not shipped.
+- **Not a hosted SaaS.** There's no `duraclaw.app` you can sign up
+  for. Read the code, lift ideas, run your own.
 
 ## Architecture
 
@@ -107,7 +223,7 @@ Layered on top:
 Browser
   |
   v
-CF Worker (TanStack Start) --- React UI + API routes
+CF Worker (Vite SPA + Hono) --- React UI + API routes
   |                            + SessionDO / UserSettingsDO / SessionCollabDO
   v
 SessionDO (1 per session) --- state + SQLite message history + event_log
@@ -144,7 +260,7 @@ rules under [`.claude/rules/`](.claude/rules/).
 
 | Path | What it does | Read more |
 |---|---|---|
-| [`apps/orchestrator`](apps/orchestrator) | CF Worker + TanStack Start: React UI, three Durable Objects (`SessionDO`, `UserSettingsDO`, `SessionCollabDO`), Better Auth on D1, dual-channel push fan-out | [`.claude/rules/orchestrator.md`](.claude/rules/orchestrator.md) |
+| [`apps/orchestrator`](apps/orchestrator) | Cloudflare Worker + Vite SPA: React UI (TanStack Router), Hono API routes, three Durable Objects (`SessionDO`, `UserSettingsDO`, `SessionCollabDO`), Better Auth on D1, dual-channel push fan-out | [`.claude/rules/orchestrator.md`](.claude/rules/orchestrator.md) |
 | [`apps/mobile`](apps/mobile) | Capacitor 8 Android shell + Capgo web-bundle OTA + native-APK fallback updater | [`apps/mobile/README.md`](apps/mobile/README.md) |
 | [`packages/agent-gateway`](packages/agent-gateway) | VPS spawn / list / reap control plane (Bun HTTP + systemd) | [`packages/agent-gateway/README.md`](packages/agent-gateway/README.md) |
 | [`packages/session-runner`](packages/session-runner) | Per-session Claude Agent SDK owner (one `query()` per process) | [`packages/session-runner/README.md`](packages/session-runner/README.md) |
@@ -162,7 +278,7 @@ Every major library duraclaw is built on, grouped by concern. Versions float on 
 **Frontend (`apps/orchestrator`)**
 
 - [React 19](https://react.dev/) + [React DOM](https://react.dev/) — UI runtime
-- [TanStack Start](https://tanstack.com/start) + [TanStack Router](https://tanstack.com/router) — full-stack React framework + file-based routing
+- [TanStack Router](https://tanstack.com/router) — file-based client-side routing (plain SPA, **not** TanStack Start — server APIs are served by Hono on the Worker side)
 - [TanStack DB](https://tanstack.com/db) + [TanStack Query](https://tanstack.com/query) + [TanStack Virtual](https://tanstack.com/virtual) — local-first reactive collections, query cache, list virtualization
 - [Vite 8](https://vite.dev/) + [`@cloudflare/vite-plugin`](https://www.npmjs.com/package/@cloudflare/vite-plugin) + [`@vitejs/plugin-react`](https://www.npmjs.com/package/@vitejs/plugin-react) — dev server + production build
 - [Tailwind CSS 4](https://tailwindcss.com/) + [`@tailwindcss/vite`](https://tailwindcss.com/) + [`tw-animate-css`](https://www.npmjs.com/package/tw-animate-css) — styling

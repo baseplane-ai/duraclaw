@@ -28,7 +28,7 @@ export function buildHashPlugin(): Plugin {
 
     // Write build-hash.json after the bundle is written
     writeBundle() {
-      // For CF Workers + TanStack Start, client assets go to dist/client
+      // For CF Workers + @cloudflare/vite-plugin, client assets go to dist/client
       const clientDir = path.resolve(outDir, '../client')
       const targetDir = fs.existsSync(clientDir) ? clientDir : outDir
 
