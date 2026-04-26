@@ -27,6 +27,7 @@ import { BufferedChannel, DialBackClient, type GapSentinel } from '@duraclaw/sha
 import type { ExecuteCommand, GatewayCommand, ResumeCommand } from '@duraclaw/shared-types'
 import { ClaudeAdapter, createAdapter, type RunnerAdapter } from './adapters/index.js'
 import { atomicOverwrite, atomicWriteOnce } from './atomic.js'
+import { resolveProject } from './project-resolver.js'
 import type { RunnerSessionContext } from './types.js'
 
 const META_INTERVAL_MS = 10_000
@@ -503,33 +504,48 @@ async function main(): Promise<void> {
       }
     } else if (runner.name === 'codex') {
       const execCmd = cmd as ExecuteCommand | ResumeCommand
-      await runner.run({
-        sessionId: argv.sessionId,
-        project: execCmd.project,
-        model: execCmd.type === 'execute' ? execCmd.model : undefined,
-        prompt: execCmd.prompt,
-        resumeSessionId: execCmd.type === 'resume' ? execCmd.runner_session_id : undefined,
-        env: process.env as unknown as Readonly<Record<string, string>>,
-        signal: ctx.abortController.signal,
-        codexModels: execCmd.codex_models,
-        onEvent: (event) => {
-          // BufferedChannel.send requires `seq` on every event — stamp
-          // monotonic seq from the same `ctx.nextSeq` counter Claude
-          // uses so codex sessions live on the same gap-detection rail.
-          channel.send({ ...(event as object), seq: ++ctx.nextSeq })
-          // Track meta-file invariants: last activity + seq + state.
-          ctx.meta.last_activity_ts = Date.now()
-          ctx.meta.last_event_seq = ctx.nextSeq
-          if ((event as { type?: string }).type === 'session.init') {
-            const ev = event as { runner_session_id?: string | null; model?: string | null }
-            ctx.meta.runner_session_id = ev.runner_session_id ?? null
-            if (ev.model) ctx.meta.model = ev.model
-          } else if ((event as { type?: string }).type === 'result') {
-            ctx.meta.turn_count++
-          }
-        },
-      })
-      ctx.meta.state = ctx.interrupted ? 'aborted' : 'completed'
+      // Resolve the project name (e.g. "duraclaw-dev1") to a full
+      // filesystem path before handing it to the adapter. The Codex SDK
+      // passes this as `--cd` to the CLI, which requires an absolute path.
+      const resolvedProject = await resolveProject(execCmd.project)
+      if (!resolvedProject) {
+        channel.send({
+          type: 'error',
+          session_id: argv.sessionId,
+          error: `Project "${execCmd.project}" not found`,
+          seq: ++ctx.nextSeq,
+        })
+        ctx.meta.state = 'completed'
+        // skip to shutdown
+      } else {
+        await runner.run({
+          sessionId: argv.sessionId,
+          project: resolvedProject,
+          model: execCmd.type === 'execute' ? execCmd.model : undefined,
+          prompt: execCmd.prompt,
+          resumeSessionId: execCmd.type === 'resume' ? execCmd.runner_session_id : undefined,
+          env: process.env as unknown as Readonly<Record<string, string>>,
+          signal: ctx.abortController.signal,
+          codexModels: execCmd.codex_models,
+          onEvent: (event) => {
+            // BufferedChannel.send requires `seq` on every event — stamp
+            // monotonic seq from the same `ctx.nextSeq` counter Claude
+            // uses so codex sessions live on the same gap-detection rail.
+            channel.send({ ...(event as object), seq: ++ctx.nextSeq })
+            // Track meta-file invariants: last activity + seq + state.
+            ctx.meta.last_activity_ts = Date.now()
+            ctx.meta.last_event_seq = ctx.nextSeq
+            if ((event as { type?: string }).type === 'session.init') {
+              const ev = event as { runner_session_id?: string | null; model?: string | null }
+              ctx.meta.runner_session_id = ev.runner_session_id ?? null
+              if (ev.model) ctx.meta.model = ev.model
+            } else if ((event as { type?: string }).type === 'result') {
+              ctx.meta.turn_count++
+            }
+          },
+        })
+        ctx.meta.state = ctx.interrupted ? 'aborted' : 'completed'
+      }
     } else {
       throw new Error(`adapter '${runner.name}' has no main.ts dispatch path yet`)
     }
