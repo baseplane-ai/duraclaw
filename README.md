@@ -193,17 +193,16 @@ status.
 - Per-worktree port derivation (`cksum % 800`) — clones don't collide
 - One-shot setup script (`scripts/setup-clone.sh`)
 - Real-curl + browser verification harnesses with no mocks
-- Tmux-managed local dev stack
 - PWA install with offline shell + service-worker update banner
 
 ## What it is not
 
 - **Not full feature-parity with the Claude Code CLI.** Sessions run
   through `@anthropic-ai/claude-agent-sdk`, which exposes most of what
-  the CLI does — but a handful of CLI features (raw tmux UX, full
-  local-only operation, MCP-server flag wiring, `/`-command parity,
-  some plugin / extension surfaces) aren't reproduced here. Use the
-  CLI when you want a single local session with the full CLI surface;
+  the CLI does — but a handful of CLI features (full local-only
+  operation, MCP-server flag wiring, `/`-command parity, some
+  plugin / extension surfaces) aren't reproduced here. Use the CLI
+  when you want a single local session with the full CLI surface;
   use duraclaw when you want a fleet of remote, persistent,
   observable sessions.
 - **Not a Claude wrapper or standalone chatbot.** Sessions run inside
