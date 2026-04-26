@@ -2,11 +2,12 @@
 initiative: runner-adapter-pluggable
 type: project
 issue_type: feature
-status: approved
+status: superseded
+superseded_by: planning/specs/107-codex-runner-revival.md
 priority: medium
 github_issue: 30
 created: 2026-04-20
-updated: 2026-04-20
+updated: 2026-04-26
 supersedes: planning/specs/0016-pluggable-agent-gateway.md
 phases:
   - id: p1
