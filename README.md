@@ -34,10 +34,11 @@
 > `scripts/install-orchestrator.sh` (Cloudflare side — D1, R2,
 > secrets, deploy) and `packages/agent-gateway/systemd/install.sh`
 > (VPS side — Bun + systemd). Bring your own Workers Paid account
-> and a Linux box with sudo. See [Quickstart →
-> Self-hosting](#self-hosting-on-a-vps--your-own-cloudflare-account)
-> and [Deployment](#deployment) for the two-branch story (self-host
-> vs. baseplane infra pipeline).
+> and a Linux box with sudo. The Capacitor Android shell ships in
+> this repo too — same source tree, same Worker — but its OTA
+> channel needs an extra upload step that lives in a separate deploy
+> pipeline (see [Deployment → Android shell + OTA
+> channel](#optional-android-shell--ota-channel)).
 
 > **Agent scope today: Claude only.** Every session runs against
 > [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk).
@@ -513,14 +514,14 @@ Run from the repo root:
 | `pnpm verify:smoke` | Real-curl + browser verification baseline (login, gateway, session, browser) |
 | `pnpm kata` | Workflow CLI — `pnpm kata enter <mode>` to start a structured session |
 
-> **Heads up — only matters in [Deployment branch B](#b-baseplane-infra-pipeline-this-forks-ci).**
-> If you're inside the baseplane infra setup, don't run `pnpm ship`,
-> `wrangler deploy`, or the gateway install script by hand — manual
-> deploys skip the mobile OTA bundle upload and strand every Android
-> client on the previous web bundle. Self-hosters in [branch
-> A](#a-self-hosters--your-own-cf-account) ignore this — those commands
-> are exactly the deploy path for you, since you're not shipping a
-> mobile APK channel.
+> **Heads up — only matters if you ship the Android shell.** If you're
+> running the Capacitor APK alongside the Worker, don't run `pnpm
+> ship` / `wrangler deploy` by hand without first building and
+> uploading the mobile OTA bundle to R2 — every native shell polls
+> `/api/mobile/updates/manifest`, sees no newer version, and stays on
+> whatever bundle the APK shipped with. See [Deployment → Android
+> shell + OTA channel](#optional-android-shell--ota-channel). Web-only
+> self-hosters can ignore this entirely; `wrangler deploy` is the deploy.
 
 For the full verification command set (`verify:auth`, `verify:gateway`,
 `verify:session`, `verify:browser`, ...) and the verification policy
@@ -528,42 +529,65 @@ that goes with them, see [`AGENTS.md`](AGENTS.md).
 
 ## Deployment
 
-There are **two deploy branches** — they don't share a code path, and
-mixing them is what causes the OTA-strand failure mode the heads-up in
-[Common commands](#common-commands) warns about. Pick one.
-
-### A. Self-hosters — your own CF account
+Two scripts ship the stack:
 
 ```bash
-bash scripts/install-orchestrator.sh        # CF Worker + D1 + R2
-bash packages/agent-gateway/systemd/install.sh   # VPS systemd unit
+bash scripts/install-orchestrator.sh             # CF Worker side
+bash packages/agent-gateway/systemd/install.sh   # VPS side
 ```
 
-That's it. Re-run either script idempotently to redeploy. Skip this
-section entirely; the rest of "Deployment" is about baseplane's CI.
+Re-run either to redeploy. That's the whole story for the web /
+desktop experience. The orchestrator install script stamps
+`VITE_APP_VERSION` into the build (from `git rev-parse --short HEAD`)
+so cache-busting and the OTA manifest both work without extra wiring.
 
-### B. Baseplane infra pipeline (this fork's CI)
+### Optional: Android shell + OTA channel
 
-The pipeline owns deploys for `dura.baseplane.ai`. Pushing to `main` on
-`origin` triggers a build that ships:
+The repo ships a [Capacitor 8 Android shell](apps/mobile/) — same
+React UI as the web, wrapped in a `capacitor://localhost` WebView that
+talks to your Worker over HTTPS / WSS. It's wired for OTA web-bundle
+updates (via [Capgo](https://capgo.app/)) so JS-only changes don't
+need an APK reinstall, with a native-APK fallback poll for Capacitor /
+plugin bumps.
 
-1. The **orchestrator** to Cloudflare Workers, with `VITE_APP_VERSION`
-   stamped in from `git rev-parse --short HEAD`.
-2. The **agent-gateway** to its systemd unit on the VPS.
-3. The **mobile OTA web bundle** (and `version.json` pointer) to the
-   `duraclaw-mobile` R2 bucket so the Android shell picks up the new
-   bundle on next launch via Capgo.
+This adds **one mandatory step before each Worker deploy**: build the
+web bundle, zip it for Capgo, and upload zip + `version.json` pointer
+to the `duraclaw-mobile` R2 bucket. If you skip it, every native shell
+polls `/api/mobile/updates/manifest`, sees no newer version, and stays
+on whatever bundle the APK shipped with — silently broken Android UX.
+The local-build half is in-tree:
 
-The OTA upload (step 3) is **mandatory before the Worker deploy** —
-running `wrangler deploy` by hand skips it and strands every Android
-client on whatever bundle the APK shipped with. That's the reason the
-heads-up callout is scoped baseplane-internal-only: in path B, manual
-deploys break the Android channel; in path A, you're not shipping an
-Android channel, so `wrangler deploy` is the deploy.
+```bash
+APP_VERSION=$(git rev-parse --short HEAD) \
+  VITE_APP_VERSION="$APP_VERSION" \
+  pnpm --filter @duraclaw/orchestrator build
 
-Mechanics, environment variables, and the OTA contract live in
-[`.claude/rules/deployment.md`](.claude/rules/deployment.md) and
-[`apps/mobile/README.md`](apps/mobile/README.md).
+bash scripts/build-mobile-ota-bundle.sh
+# emits apps/orchestrator/dist/client/mobile/{bundle-<sha>.zip, version.json}
+```
+
+The R2 upload half is **not in this repo**. Baseplane runs it from a
+separate private deploy pipeline that has `CLOUDFLARE_API_TOKEN` +
+`CLOUDFLARE_ACCOUNT_ID` in-env and uploads both files to
+`duraclaw-mobile/ota/`. Self-hosters who want the Android channel
+should wire equivalent automation themselves — a GitHub Actions job, a
+git post-receive hook on the VPS, or a make target — that runs in this
+order on every release: **`pnpm build` → `build-mobile-ota-bundle.sh` →
+R2 upload → `wrangler deploy`**. APK signing + Play Store wiring
+likewise lives outside this repo (the `app-release-signed.apk` is
+produced by `apps/mobile/scripts/build-android.sh` +
+`apps/mobile/scripts/sign-android.sh`, but you bring your own
+keystore and distribution channel).
+
+Web-only self-hosters can ignore everything in this subsection; the
+two install scripts above are the deploy.
+
+Full mechanics — `MOBILE_ASSETS` R2 binding, manifest route shape,
+Capgo `notifyAppReady` lifecycle, native-fallback poll, signing — live
+in [`apps/mobile/README.md`](apps/mobile/README.md) and
+[`.claude/rules/mobile.md`](.claude/rules/mobile.md);
+[`.claude/rules/deployment.md`](.claude/rules/deployment.md) is the
+short pipeline-contract version.
 
 ## Contributing
 
