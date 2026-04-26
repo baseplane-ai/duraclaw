@@ -34,6 +34,14 @@
 > self-hosting yet — running it assumes a Cloudflare Workers account, D1, R2,
 > and a Linux VPS you control.
 
+> **Agent scope today: Claude only.** Every session runs against
+> [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk).
+> The runner / DO wire and the gateway control plane are intentionally
+> SDK-agnostic, but there is exactly one executor wired in right now.
+> **Multi-agent / multi-provider** (Codex, Gemini, custom executors,
+> per-session model selection) is roadmap phase **10.x Platform
+> Evolution** — see [Roadmap](#roadmap).
+
 ---
 
 ## Table of Contents
@@ -50,6 +58,7 @@
 10. [Deployment](#deployment)
 11. [Contributing](#contributing)
 12. [Roadmap](#roadmap)
+13. [Acknowledgments](#acknowledgments)
 
 ---
 
@@ -257,6 +266,12 @@ duraclaw.
 - **Not a Claude wrapper or standalone chatbot.** Sessions run inside
   `@anthropic-ai/claude-agent-sdk` — duraclaw orchestrates them, it
   doesn't reimplement them.
+- **Not multi-agent yet.** Today every session is Claude. The runner
+  process and the gateway are deliberately SDK-shaped to make swapping
+  in other executors (Codex, Gemini, custom adapters) tractable, but
+  none of those are wired up. That work is roadmap phase **10.x
+  Platform Evolution** — see [Roadmap](#roadmap). If you need
+  multi-provider routing today, this isn't it.
 - **Not a one-click self-hosted app yet.** It assumes a Cloudflare
   Workers account, D1, R2, and a Linux VPS you control. The deploy
   pipeline is internal infra (see [Deployment](#deployment)).
@@ -506,6 +521,47 @@ See [`planning/progress.md`](planning/progress.md) for the live
 phase / subphase tracker, and
 [`planning/research/2026-04-01-product-roadmap.md`](planning/research/2026-04-01-product-roadmap.md)
 for the full product narrative.
+
+The roadmap is broken into ten phases:
+
+| Phase | Theme | Status |
+|---|---|---|
+| 0.x | Foundation — auth, routing, session ownership, mobile shell, CI, CLI parity | landing |
+| 1.x | Chat quality + mobile chat | landing |
+| 2.x | Multi-session dashboard | landing |
+| 3.x | Session management — rename, delete, export, rewind, compaction | landing |
+| 4.x | Push notifications + PWA | landed |
+| 5.x | File viewer + integrations (GitHub, kata state) | landing |
+| 6.x | Settings + auth + theming | landing |
+| 7.x | Advanced chat features — slash commands, input history, command palette | upcoming |
+| 8.x | Data layer + offline | upcoming |
+| 9.x | Backend hardening — observability, cleanup, lifecycle, rate limits | upcoming |
+| **10.x** | **Platform evolution — executor registry, multi-provider, multi-model, orchestration** | **upcoming** |
+
+**Phase 10.x is where the Claude-only constraint goes away.** It
+introduces an executor registry so the runner can host
+`@anthropic-ai/claude-agent-sdk` alongside other agent SDKs (OpenAI
+Codex, Google Gemini, custom adapters), per-session model and provider
+selection in the UI, and the orchestration glue to route each session
+to the right executor without changing the gateway / DO wire shape.
+
+## Acknowledgments
+
+A big thanks to **[Jeffrey Emanuel](https://github.com/Dicklesworthstone)**
+([@Dicklesworthstone](https://github.com/Dicklesworthstone)) — creator
+of the [**Agentic Coding Flywheel**](https://github.com/Dicklesworthstone/agentic_coding_flywheel_setup)
+ecosystem (the agent-flywheel VPS bootstrap, the
+[clawdbot skills + integrations](https://github.com/Dicklesworthstone/agent_flywheel_clawdbot_skills_and_integrations),
+the [beads-viewer dashboard](https://github.com/Dicklesworthstone/beads_viewer_for_agentic_coding_flywheel_setup),
+and the [curl|bash flywheel one-liners](https://github.com/Dicklesworthstone/curl_bash_one_liners_for_flywheel_tools)).
+Duraclaw's gateway-on-a-VPS / runner-per-session shape, the
+session-resume mindset, and the "let agents actually do real work
+without you babysitting them" philosophy all owe a real debt to that
+work.
+
+If you like duraclaw, go give those repos a star — most of the
+infrastructure thinking that went into this project came out of the
+flywheel ecosystem first.
 
 ## License
 
