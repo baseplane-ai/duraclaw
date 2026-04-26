@@ -1,20 +1,16 @@
+import type { SDKAssistantMessageError } from '@anthropic-ai/claude-agent-sdk'
+
 // ── Gateway Commands (Orchestrator → Gateway) ─────────────────────────
 
 export type GatewayCommand =
   | ExecuteCommand
   | ResumeCommand
   | StreamInputCommand
-  | PermissionResponseCommand
-  | AbortCommand
-  | StopCommand
-  | AnswerCommand
-  | RewindCommand
   | InterruptCommand
-  | GetContextUsageCommand
-  | SetModelCommand
-  | SetPermissionModeCommand
-  | StopTaskCommand
+  | StopCommand
   | PingCommand
+  | PermissionResponseCommand
+  | AnswerCommand
 
 export interface ExecuteCommand {
   type: 'execute'
@@ -72,50 +68,14 @@ export interface PermissionResponseCommand {
   allowed: boolean
 }
 
-export interface AbortCommand {
-  type: 'abort'
-  session_id: string
-}
-
 export interface StopCommand {
   type: 'stop'
   session_id: string
 }
 
-export interface RewindCommand {
-  type: 'rewind'
-  session_id: string
-  message_id: string
-  /** If true, preview what would change without modifying files */
-  dry_run?: boolean
-}
-
 export interface InterruptCommand {
   type: 'interrupt'
   session_id: string
-}
-
-export interface GetContextUsageCommand {
-  type: 'get-context-usage'
-  session_id: string
-}
-
-export interface SetModelCommand {
-  type: 'set-model'
-  session_id: string
-  model?: string
-}
-
-export interface SetPermissionModeCommand {
-  type: 'set-permission-mode'
-  session_id: string
-  mode: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto'
-}
-
-export interface StopTaskCommand {
-  type: 'stop-task'
-  session_id: string
-  task_id: string
 }
 
 export interface PingCommand {
@@ -155,31 +115,84 @@ export type GatewayEvent =
   | ErrorEvent
   | KataStateEvent
   | StoppedEvent
-  | ContextUsageEvent
-  | RewindResultEvent
   | RateLimitEvent
   | TaskStartedEvent
   | TaskProgressEvent
   | TaskNotificationEvent
-  | ModeTransitionEvent
-  | ModeTransitionTimeoutEvent
-  | ModeTransitionPreambleDegradedEvent
-  | ModeTransitionFlushTimeoutEvent
   | ChainAdvanceEvent
   | ChainStalledEvent
   | GapSentinelEvent
   | TitleUpdateEvent
-  | HeartbeatEvent
+  | SessionStateChangedEvent
+  | CompactBoundaryEvent
+  | ApiRetryEvent
 
 /**
- * Runner heartbeat — emitted every 15s by session-runner to prove liveness.
- * The DO uses this to bump `lastGatewayActivity`; the watchdog alarm detects
- * a stale session when heartbeats stop arriving. Not forwarded to clients.
+ * GH#102 / spec 102-sdk-peelback B1: SDK-native liveness signal.
+ *
+ * Translated by the runner from `SDKSessionStateChangedMessage` (3-value
+ * SDK enum) plus `SDKStatusMessage{status:'compacting'}` and
+ * `SDKAPIRetryMessage` (synthesised). Wire enum is wider than the SDK's
+ * `idle | running | requires_action` because the runner additionally
+ * exposes `compacting` and `api_retry` as transient liveness states
+ * derived from sibling SDK frames. Used by the DO to drive both
+ * `lastAnyEventTs` (residual watchdog) and `SessionMeta.status` /
+ * `SessionMeta.transient_state` mapping.
  */
-export interface HeartbeatEvent {
-  type: 'heartbeat'
+export interface SessionStateChangedEvent {
+  type: 'session_state_changed'
   session_id: string
-  seq: number
+  /**
+   * Stamped by the runner's BufferedChannel `send()` helper — callers never
+   * pass it explicitly. Always present on the wire.
+   */
+  seq?: number
+  state: 'idle' | 'running' | 'requires_action' | 'compacting' | 'api_retry'
+  ts: number
+}
+
+/**
+ * GH#102 / spec 102-sdk-peelback B11: SDK-native auto-compact boundary.
+ *
+ * Translated by the runner from `SDKCompactBoundaryMessage`. Persisted by
+ * the DO as a system-flavored `SessionMessage` (transcript-visible) and
+ * also broadcast as a dedicated gateway event for any UI consumer.
+ */
+export interface CompactBoundaryEvent {
+  type: 'compact_boundary'
+  session_id: string
+  seq?: number
+  trigger: 'manual' | 'auto'
+  pre_tokens: number
+  preserved_segment?: {
+    head_uuid: string
+    anchor_uuid: string
+    tail_uuid: string
+  }
+  ts: number
+}
+
+/**
+ * GH#102 / spec 102-sdk-peelback B12: dedicated `api_retry` event.
+ *
+ * Translated by the runner from `SDKAPIRetryMessage`. NOT persisted by
+ * the DO — retries are transient diagnostic state, not transcript
+ * content. Broadcast to the client which renders the `ApiRetryBanner`.
+ *
+ * `error` is the SDK `SDKAssistantMessageError` enum (7 values at
+ * @anthropic-ai/claude-agent-sdk@0.2.98), with `'unknown'` as a
+ * forward-compat fallback in case the SDK widens the enum.
+ */
+export interface ApiRetryEvent {
+  type: 'api_retry'
+  session_id: string
+  seq?: number
+  attempt: number
+  max_retries: number
+  retry_delay_ms: number
+  error_status: number | null
+  error: SDKAssistantMessageError | 'unknown'
+  ts: number
 }
 
 /**
@@ -216,45 +229,6 @@ export interface TitleUpdateEvent {
   turn_stamp: number
 }
 
-// ── Mode transition events (DO-synthesised for chain UX) ────────────
-//
-// Emitted by SessionDO when a chain-linked session receives a `kata_state`
-// event whose `currentMode` differs from the previous mode and
-// `continueSdk` is not set. These travel over the browser WS channel
-// alongside real runner events so the chain timeline UI can render them.
-
-export interface ModeTransitionEvent {
-  type: 'mode_transition'
-  session_id: string
-  from: string | null
-  to: string
-  issueNumber: number
-  at: string
-}
-
-export interface ModeTransitionTimeoutEvent {
-  type: 'mode_transition_timeout'
-  session_id: string
-  issueNumber: number
-  at: string
-  note: string
-}
-
-export interface ModeTransitionPreambleDegradedEvent {
-  type: 'mode_transition_preamble_degraded'
-  session_id: string
-  issueNumber: number
-  at: string
-  reason: string
-}
-
-export interface ModeTransitionFlushTimeoutEvent {
-  type: 'mode_transition_flush_timeout'
-  session_id: string
-  issueNumber: number
-  at: string
-}
-
 // ── Chain auto-advance events (DO-synthesised for chain UX P3) ──────
 //
 // Emitted by SessionDO when a chain-linked session terminates and the
@@ -280,23 +254,6 @@ export interface StoppedEvent {
   type: 'stopped'
   session_id: string
   runner_session_id: string | null
-}
-
-export interface ContextUsageEvent {
-  type: 'context_usage'
-  session_id: string
-  /** Full SDK response from query.getContextUsage() */
-  usage: Record<string, unknown>
-}
-
-export interface RewindResultEvent {
-  type: 'rewind_result'
-  session_id: string
-  can_rewind: boolean
-  error?: string
-  files_changed?: string[]
-  insertions?: number
-  deletions?: number
 }
 
 export interface RateLimitEvent {
@@ -459,6 +416,13 @@ export interface ResultEvent {
   num_turns: number | null
   is_error: boolean
   sdk_summary: string | null
+  /**
+   * GH#102 / spec 102-sdk-peelback B8: optional attachment with the latest
+   * context-usage snapshot from the SDK at turn-complete. Replaces the
+   * standalone (now-deleted) `ContextUsageEvent`. Best-effort — runner
+   * omits this if the SDK call throws or returns malformed data.
+   */
+  context_usage?: WireContextUsage
 }
 
 export interface ErrorEvent {
@@ -639,11 +603,10 @@ export interface KataStateEvent {
 // ── Context Usage (shared between DO + client) ─────────────────────
 //
 // Mirror of the canonical shape client-side code writes into
-// `sessionLiveStateCollection.contextUsage`. The SDK's
-// `query.getContextUsage()` returns a `Record<string, unknown>` on the wire
-// (see ContextUsageEvent.usage); this interface is the parsed /
-// strongly-typed projection used by UI consumers and by the new P3 REST
-// cache in SessionDO's `session_meta.context_usage_json` column.
+// `sessionLiveStateCollection.contextUsage`. UI-side camelCase used by
+// consumers and by the P3 REST cache in SessionDO's
+// `session_meta.context_usage_json` column. The wire-side sibling is
+// `WireContextUsage` (snake_case), carried on `ResultEvent.context_usage`.
 
 export interface ContextUsage {
   totalTokens: number
@@ -652,6 +615,26 @@ export interface ContextUsage {
   model?: string
   isAutoCompactEnabled?: boolean
   autoCompactThreshold?: number
+}
+
+/**
+ * Wire-side context-usage attachment carried on `ResultEvent.context_usage`.
+ * Snake_case to match the rest of the wire types. The UI-side camelCase
+ * `ContextUsage` (above) is the sibling — transform is applied at the
+ * SessionDO ingest boundary (`handleGatewayEvent('result')`).
+ *
+ * GH#102 / spec 102-sdk-peelback B8: replaces the standalone
+ * `ContextUsageEvent` (deleted) with an attachment on the `result` event
+ * so each turn-complete carries fresh token counts in one frame.
+ */
+export interface WireContextUsage {
+  input_tokens: number
+  output_tokens: number
+  total_tokens: number
+  max_tokens: number
+  percentage: number
+  model: string
+  auto_compact_at?: number
 }
 
 // ── Session State ────────────────────────────────────────────────────

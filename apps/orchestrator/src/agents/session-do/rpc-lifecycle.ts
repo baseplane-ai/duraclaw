@@ -266,7 +266,7 @@ export async function abortImpl(
     error: null,
     active_callback_token: undefined,
   })
-  sendToGateway(ctx, { type: 'abort', session_id: ctx.state.session_id ?? '' })
+  sendToGateway(ctx, { type: 'stop', session_id: ctx.state.session_id ?? '' })
   console.log(`[SessionDO:${ctx.ctx.id}] abort: ${reason ?? 'user request'}`)
   return { ok: true }
 }
@@ -307,7 +307,7 @@ export async function forceStopImpl(
 
   // Best-effort in-band abort — harmless if the WS is dead.
   if (sessionId) {
-    sendToGateway(ctx, { type: 'abort', session_id: sessionId })
+    sendToGateway(ctx, { type: 'stop', session_id: sessionId })
   }
 
   // Out-of-band SIGTERM via gateway HTTP. This is the slice that

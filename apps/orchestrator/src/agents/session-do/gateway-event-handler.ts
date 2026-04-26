@@ -4,7 +4,7 @@ import { eq } from 'drizzle-orm'
 import { agentSessions } from '~/db/schema'
 import { generateActionToken } from '~/lib/action-token'
 import { broadcastSessionRow } from '~/lib/broadcast-session'
-import type { ContextUsage, GatewayEvent } from '~/lib/types'
+import type { GatewayEvent } from '~/lib/types'
 import { broadcastMessages as broadcastMessagesImpl } from './broadcast'
 import { promoteToolPartToGate as promoteToolPartToGateImpl } from './gates'
 import {
@@ -788,49 +788,9 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
       break
     }
 
-    // and update `session_meta.context_usage_json` + cached_at. The original
-    // gateway_event broadcast is retained (per P3 brief Non-Goals: keep
-    // existing client handlers live until the deferred consumer-migration
-    // issue swaps them to REST).
-    case 'context_usage': {
-      const rawUsage = event.usage ?? {}
-      const parsed: ContextUsage = {
-        totalTokens: (rawUsage.totalTokens as number) ?? 0,
-        maxTokens: (rawUsage.maxTokens as number) ?? 0,
-        percentage: (rawUsage.percentage as number) ?? 0,
-        model: rawUsage.model as string | undefined,
-        isAutoCompactEnabled: rawUsage.isAutoCompactEnabled as boolean | undefined,
-        autoCompactThreshold: rawUsage.autoCompactThreshold as number | undefined,
-      }
-      // Drain any awaiters first so they settle on the fresh value rather
-      // than the pre-write cache.
-      const resolvers = self.contextUsageResolvers.splice(0)
-      for (const r of resolvers) {
-        try {
-          r.resolve(parsed)
-        } catch {
-          // Defensive: never let a resolver throw tank the event loop.
-        }
-      }
-      // Persist into the typed session_meta cache so subsequent calls
-      // within the 5s TTL hit the fresh row without re-probing.
-      try {
-        const cachedAt = Date.now()
-        ctx.do.sql`UPDATE session_meta
-          SET context_usage_json = ${JSON.stringify(parsed)},
-              context_usage_cached_at = ${cachedAt},
-              updated_at = ${cachedAt}
-          WHERE id = 1`
-      } catch (err) {
-        console.error(`[SessionDO:${ctx.ctx.id}] Failed to persist context_usage cache:`, err)
-      }
-      // Spec #37 B5: mirror context_usage onto the D1 session row with a 5s
-      // trailing-edge debounce so sidebar / history cards track live usage.
-      self.syncContextUsageToD1(JSON.stringify(parsed))
-      // Retained WS broadcast — consumer migration is a separate issue.
-      self.broadcastGatewayEvent(event)
-      break
-    }
+    // context_usage was folded into the `result` event by #102 — no
+    // separate wire event anymore. Context usage is now extracted from
+    // the result event's payload in the 'result' case above.
 
     // Events that don't produce message parts — just broadcast raw
     default: {

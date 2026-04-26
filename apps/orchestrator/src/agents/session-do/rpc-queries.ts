@@ -13,7 +13,6 @@ import {
 } from './broadcast'
 import { deriveSnapshotOps } from './history'
 import { hydrateFromGatewayImpl } from './hydrate-from-gateway'
-import { sendToGateway } from './runner-link'
 import type { SessionDOContext } from './types'
 
 /**
@@ -53,77 +52,19 @@ export async function getContextUsageImpl(ctx: SessionDOContext): Promise<{
       isCached: true,
     }
   }
-  if (!ctx.do.getGatewayConnectionId()) {
-    return {
-      contextUsage: cached?.value ?? null,
-      fetchedAt: cached ? new Date(cached.cachedAt).toISOString() : new Date().toISOString(),
-      isCached: true,
-    }
-  }
-  if (!ctx.do.contextUsageProbeInFlight) {
-    ctx.do.contextUsageProbeInFlight = probeContextUsageWithTimeoutImpl(ctx).finally(() => {
-      ctx.do.contextUsageProbeInFlight = null
-    })
-  }
-  try {
-    const value = await ctx.do.contextUsageProbeInFlight
-    const cachedAt = Date.now()
-    ctx.sql.exec(
-      `UPDATE session_meta
-        SET context_usage_json = ?,
-            context_usage_cached_at = ?,
-            updated_at = ?
-        WHERE id = 1`,
-      JSON.stringify(value),
-      cachedAt,
-      cachedAt,
-    )
-    return {
-      contextUsage: value,
-      fetchedAt: new Date(cachedAt).toISOString(),
-      isCached: false,
-    }
-  } catch {
-    return {
-      contextUsage: cached?.value ?? null,
-      fetchedAt: cached ? new Date(cached.cachedAt).toISOString() : new Date().toISOString(),
-      isCached: true,
-    }
+  // #102: get-context-usage command and context_usage event were removed.
+  // Context usage is now extracted from the result event. Always return
+  // the cached value (populated by the result event handler).
+  return {
+    contextUsage: cached?.value ?? null,
+    fetchedAt: cached ? new Date(cached.cachedAt).toISOString() : new Date().toISOString(),
+    isCached: true,
   }
 }
 
-/**
- * P3 B4: dispatch a `get-context-usage` GatewayCommand and await the
- * matched `context_usage` gateway_event. 3s timeout — if the runner is
- * unresponsive we reject and the caller falls back to stale / null
- * rather than blocking the Worker up to its CPU limit.
- */
-export function probeContextUsageWithTimeoutImpl(
-  ctx: SessionDOContext,
-): Promise<ContextUsage | null> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      // Remove this resolver so a late gateway reply doesn't leak into
-      // the next probe's resolver slot.
-      const idx = ctx.do.contextUsageResolvers.findIndex((r) => r.resolve === innerResolve)
-      if (idx >= 0) ctx.do.contextUsageResolvers.splice(idx, 1)
-      reject(new Error('probe_timeout'))
-    }, 3_000)
-    const innerResolve = (v: ContextUsage | null) => {
-      clearTimeout(timer)
-      resolve(v)
-    }
-    const innerReject = (e: unknown) => {
-      clearTimeout(timer)
-      reject(e)
-    }
-    ctx.do.contextUsageResolvers.push({ resolve: innerResolve, reject: innerReject })
-    sendToGateway(ctx, {
-      type: 'get-context-usage',
-      session_id: ctx.state.session_id ?? '',
-    })
-  })
-}
+// probeContextUsageWithTimeoutImpl removed by #102 — get-context-usage
+// command and context_usage event no longer exist on the wire. Context
+// usage is now extracted from the result event.
 
 export async function getKataStateImpl(
   ctx: SessionDOContext,

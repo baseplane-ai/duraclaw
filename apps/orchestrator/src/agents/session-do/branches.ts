@@ -142,44 +142,6 @@ export function serializeHistoryForFork(ctx: SessionDOContext): string {
 }
 
 /**
- * Body of the `@callable rewind` RPC. Sends a rewind GatewayCommand to
- * the runner, then DO-authors a snapshot of the trimmed history so all
- * connected clients converge without a gateway round-trip.
- */
-export async function rewindImpl(
-  ctx: SessionDOContext,
-  messageId: string,
-): Promise<{ ok: boolean; error?: string }> {
-  sendToGateway(ctx, {
-    type: 'rewind',
-    session_id: ctx.state.session_id ?? '',
-    message_id: messageId,
-  })
-  // DO-authored snapshot (B2): broadcast the trimmed history so all clients
-  // converge on the post-rewind view without round-tripping through gateway.
-  try {
-    const history = ctx.session.getHistory()
-    const idx = history.findIndex((m) => m.id === messageId)
-    const trimmed = idx >= 0 ? history.slice(0, idx + 1) : history
-    // GH#38 P1.4: emit SyncedCollectionFrame on the new messages wire.
-    // staleIds = rows present in current default leaf but NOT in trimmed.
-    const { ops } = deriveSnapshotOps<WireSessionMessage>({
-      oldLeaf: history as unknown as WireSessionMessage[],
-      newLeaf: trimmed as unknown as WireSessionMessage[],
-    })
-    for (const chunk of chunkOps(ops)) {
-      broadcastMessages(ctx, { ops: chunk })
-    }
-    // GH#38 P1.5 / B15: emit sibling branchInfo frame on the same DO
-    // turn. B10: React 18 auto-batches both deltas into a single commit.
-    broadcastBranchInfo(ctx, computeBranchInfo(ctx, trimmed))
-  } catch (err) {
-    console.error(`[SessionDO:${ctx.ctx.id}] Failed to broadcast rewind snapshot:`, err)
-  }
-  return { ok: true }
-}
-
-/**
  * Body of the `@callable resubmitMessage` RPC. Aborts any in-flight turn,
  * appends the new user message as a sibling branch off the original
  * message's parent, broadcasts a snapshot for the new branch leaf, then
@@ -192,7 +154,7 @@ export async function resubmitMessageImpl(
 ): Promise<{ ok: boolean; leafId?: string; error?: string }> {
   // 1. If streaming in progress, abort first
   if (ctx.do.currentTurnMessageId) {
-    sendToGateway(ctx, { type: 'abort', session_id: ctx.state.session_id ?? '' })
+    sendToGateway(ctx, { type: 'stop', session_id: ctx.state.session_id ?? '' })
     // Finalize orphaned streaming parts
     const existing = ctx.session.getMessage(ctx.do.currentTurnMessageId)
     if (existing) {

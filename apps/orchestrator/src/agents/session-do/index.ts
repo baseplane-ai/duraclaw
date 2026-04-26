@@ -28,7 +28,7 @@ import {
   fireRunawayInterruptImpl,
   recoverFromDroppedConnectionImpl,
 } from './awaiting'
-import { forkWithHistoryImpl, resubmitMessageImpl, rewindImpl } from './branches'
+import { forkWithHistoryImpl, resubmitMessageImpl } from './branches'
 import {
   broadcastGatewayEvent as broadcastGatewayEventImpl,
   broadcastMessages as broadcastMessagesImpl,
@@ -423,10 +423,6 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   }
   async getKataState(): Promise<{ kataState: KataSessionState | null; fetchedAt: string }> {
     return getKataStateImpl(this.moduleCtx)
-  }
-  @callable()
-  async rewind(messageId: string): Promise<{ ok: boolean; error?: string }> {
-    return rewindImpl(this.moduleCtx, messageId)
   }
   @callable()
   async getMessages(opts?: {

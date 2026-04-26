@@ -122,6 +122,8 @@ export async function handleModeTransitionImpl(
   )
 
   // 1. Announce the transition to browsers so the chain timeline UI picks it up.
+  // Synthetic DO-fabricated event for browser UI — not on the GatewayEvent
+  // wire union (which only covers runner→DO events).
   broadcastGatewayEventImpl(ctx, {
     type: 'mode_transition',
     session_id: sessionId,
@@ -129,7 +131,7 @@ export async function handleModeTransitionImpl(
     to: toMode,
     issueNumber,
     at: new Date().toISOString(),
-  })
+  } as any)
 
   // 2. Flush window — BufferedChannel has no in-flight-send introspection,
   //    so the best we can do is a short pause to let the runner's final
@@ -194,13 +196,14 @@ export async function handleModeTransitionImpl(
     console.warn(
       `[SessionDO:${ctx.ctx.id}] mode transition: runner did not exit within 5s — proceeding (token rotation in triggerGatewayDial will evict lingering runner via 4410)`,
     )
+    // Synthetic DO-fabricated event — not on the wire union.
     broadcastGatewayEventImpl(ctx, {
       type: 'mode_transition_timeout',
       session_id: sessionId,
       issueNumber,
       at: new Date().toISOString(),
       note: 'runner did not exit within 5s; proceeding with fresh spawn',
-    })
+    } as any)
   }
 
   // 5. Build preamble (degrade gracefully on failure).
@@ -277,13 +280,14 @@ Read the relevant artifacts before acting. Your kata state is already linked: wo
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err)
     console.error(`[SessionDO:${ctx.ctx.id}] buildModePreamble failed:`, err)
+    // Synthetic DO-fabricated event — not on the wire union.
     broadcastGatewayEventImpl(ctx, {
       type: 'mode_transition_preamble_degraded',
       session_id: sessionId,
       issueNumber,
       at: new Date().toISOString(),
       reason,
-    })
+    } as any)
     return degraded()
   }
 }

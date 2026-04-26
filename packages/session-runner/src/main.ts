@@ -27,13 +27,11 @@ import { BufferedChannel, DialBackClient, type GapSentinel } from '@duraclaw/sha
 import type { ExecuteCommand, GatewayCommand, ResumeCommand } from '@duraclaw/shared-types'
 import { atomicOverwrite, atomicWriteOnce } from './atomic.js'
 import { ClaudeRunner } from './claude-runner.js'
-import { handleQueryCommand, type QueueableCommand } from './commands.js'
 import type { RunnerSessionContext } from './types.js'
 
 const META_INTERVAL_MS = 10_000
 const META_FAILURE_LIMIT = 5
 const SIGTERM_GRACE_MS = 2_000
-const HEARTBEAT_INTERVAL_MS = 15_000
 
 interface Argv {
   sessionId: string
@@ -160,31 +158,18 @@ function handleIncomingCommand(msg: unknown, ctx: RunnerSessionContext, ch: Buff
         ctx.titler.maybePivotRetitle([], userText).catch(() => {})
       }
 
-      // Queue follow-up: if the SDK query is actively running (not
-      // between turns waiting on waitForNext), inject via streamInput()
-      // with priority 'next' so the message queues until the current
-      // turn completes — matching the TUI's queue-while-busy behavior.
-      // Explicit interrupts use the separate 'interrupt' command type.
-      if (ctx.query) {
-        const sdkMsg = {
-          type: 'user' as const,
-          message: { role: 'user' as const, content: msg.content },
+      // GH#102 / spec 102-sdk-peelback B4+B5: push onto the lifetime
+      // PushPullQueue. The single Query() pulls from this for the whole
+      // session — no per-turn streamInput half-close, no between-turns
+      // fallback queue.
+      if (ctx.userQueue) {
+        ctx.userQueue.push({
+          type: 'user',
+          message: { role: 'user', content: msg.content },
           parent_tool_use_id: null,
-          priority: 'next' as const,
-        }
-        async function* singleMessage() {
-          yield sdkMsg
-        }
-        ctx.query.streamInput(singleMessage()).catch((err: unknown) => {
-          console.error(
-            `[session-runner] streamInput error: ${err instanceof Error ? err.message : String(err)}`,
-          )
-          // Fall back to queue so the message isn't lost
-          ctx.messageQueue?.push(msg)
         })
-      } else if (ctx.messageQueue) {
-        // Between turns — queue for the next waitForNext() call
-        ctx.messageQueue.push(msg)
+      } else {
+        console.warn('[session-runner] stream-input arrived before userQueue was ready — dropping')
       }
       break
     }
@@ -218,68 +203,33 @@ function handleIncomingCommand(msg: unknown, ctx: RunnerSessionContext, ch: Buff
       }
       break
     }
-    case 'abort':
     case 'stop': {
+      // Close the lifetime queue first so the Query exhausts cleanly,
+      // then abort to trigger the SIGTERM/watchdog shutdown path if
+      // the SDK doesn't unwind on its own.
+      try {
+        ctx.userQueue?.close()
+      } catch {
+        /* close is idempotent in PushPullQueue; defensive */
+      }
       ctx.abortController.abort()
       break
     }
-    case 'interrupt':
-    case 'get-context-usage':
-    case 'set-model':
-    case 'set-permission-mode': {
-      const queueable = m as unknown as QueueableCommand
-      if (ctx.query) {
-        handleQueryCommand(ctx, queueable, ch).catch((err) => {
-          console.error(`[session-runner] handleQueryCommand error: ${(err as Error).message}`)
-        })
-      } else {
-        ctx.commandQueue.push(queueable)
-      }
-      break
-    }
-    case 'stop-task': {
-      const taskId = m.task_id
-      if (ctx.query && typeof taskId === 'string') {
-        ;(ctx.query as unknown as { stopTask: (id: string) => unknown }).stopTask(taskId)
-      }
-      break
-    }
-    case 'rewind': {
-      if (ctx.query) {
-        const q = ctx.query as unknown as {
-          rewindFiles: (
-            id: string,
-            opts: { dryRun?: boolean },
-          ) => Promise<{
-            canRewind: boolean
-            error?: string
-            filesChanged?: string[]
-            insertions?: number
-            deletions?: number
-          }>
-        }
-        q.rewindFiles(String(m.message_id), { dryRun: Boolean(m.dry_run) })
-          .then((result) => {
-            ch.send({
-              type: 'rewind_result',
-              session_id: ctx.sessionId,
-              can_rewind: result.canRewind,
-              error: result.error,
-              files_changed: result.filesChanged,
-              insertions: result.insertions,
-              deletions: result.deletions,
-              seq: ++ctx.nextSeq,
-            })
-          })
-          .catch((err: unknown) => {
-            ch.send({
-              type: 'error',
-              session_id: ctx.sessionId,
-              error: `Rewind failed: ${err instanceof Error ? err.message : String(err)}`,
-              seq: ++ctx.nextSeq,
-            })
-          })
-      }
+    case 'interrupt': {
+      // Mark the context as interrupted BEFORE calling q.interrupt(). On
+      // long-running / mid-tool-use sessions the SDK's query generator can
+      // throw rather than cleanly yield a result; the outer catch in
+      // claude-runner.ts uses this flag to suppress the `error` event and
+      // mark meta.state='aborted' so the session lands in `idle` ("just
+      // pausing") instead of `error` (genuine failure). The lifetime
+      // PushPullQueue is NOT touched — interrupt only stops the current
+      // turn; the queue stays open for the next stream-input.
+      ctx.interrupted = true
+      ctx.query?.interrupt().catch((err: unknown) => {
+        console.error(
+          `[session-runner] interrupt error: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      })
       break
     }
     case 'ping': {
@@ -401,18 +351,18 @@ async function main(): Promise<void> {
     },
   })
 
-  // Build the per-session context. `messageQueue` / `query` are filled by the
-  // runner once session.init arrives; `commandQueue` buffers DO->runner
-  // commands received before that moment.
+  // Build the per-session context. `userQueue` / `query` are filled by the
+  // runner at session start (userQueue is constructed before query() is
+  // invoked, so it's available to `stream-input` from the very first
+  // command after session.init).
   const ctx: RunnerSessionContext = {
     sessionId: argv.sessionId,
     abortController: new AbortController(),
     interrupted: false,
     pendingAnswer: null,
     pendingPermission: null,
-    messageQueue: null,
+    userQueue: null,
     query: null,
-    commandQueue: [],
     titler: null,
     nextSeq: 0,
     meta: {
@@ -467,17 +417,6 @@ async function main(): Promise<void> {
   await flushMeta()
   const metaTimer = setInterval(flushMeta, META_INTERVAL_MS)
 
-  // Heartbeat: prove liveness to the DO so its watchdog can detect silent
-  // runner death. The DO already bumps `lastGatewayActivity` on any gateway
-  // message (onMessage handler), so this lightweight event is sufficient.
-  const heartbeatTimer = setInterval(() => {
-    channel.send({
-      type: 'heartbeat',
-      session_id: argv.sessionId,
-      seq: ++ctx.nextSeq,
-    })
-  }, HEARTBEAT_INTERVAL_MS)
-
   // --- Step 10: SIGTERM handler ---
   let forcedExit = false
   const sigtermHandler = () => {
@@ -487,7 +426,6 @@ async function main(): Promise<void> {
       if (forcedExit) return
       forcedExit = true
       clearInterval(metaTimer)
-      clearInterval(heartbeatTimer)
       try {
         await atomicOverwrite(argv.metaFile, JSON.stringify(ctx.meta))
       } catch {
@@ -532,7 +470,6 @@ async function main(): Promise<void> {
   // --- Step 9: clean shutdown ---
   if (forcedExit) return // SIGTERM watchdog already handled the exit
   clearInterval(metaTimer)
-  clearInterval(heartbeatTimer)
   // Best-effort final meta flush — don't let it throw.
   try {
     await atomicOverwrite(argv.metaFile, JSON.stringify(ctx.meta))

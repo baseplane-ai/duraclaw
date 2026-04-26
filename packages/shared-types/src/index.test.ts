@@ -1,30 +1,22 @@
 import { describe, expect, test } from 'bun:test'
 import type {
-  ContextUsageEvent,
+  ApiRetryEvent,
+  CompactBoundaryEvent,
   DiscoveredSession,
   ExecuteCommand,
   GatewayCommand,
   GatewayEvent,
-  GetContextUsageCommand,
   InterruptCommand,
   KataSessionState,
   KataStateEvent,
   ProjectInfo,
-  RateLimitEvent,
   ResultEvent,
   ResumeCommand,
-  RewindCommand,
-  RewindResultEvent,
   SessionInitEvent,
   SessionSource,
   SessionStatus,
   SessionSummary,
-  SetModelCommand,
-  SetPermissionModeCommand,
-  StopTaskCommand,
   TaskNotificationEvent,
-  TaskProgressEvent,
-  TaskStartedEvent,
 } from './index'
 
 describe('sessionstate-deleted (#31 P5)', () => {
@@ -160,36 +152,9 @@ describe('shared-types: SDK feature expansion (#13)', () => {
     expect(disabled.thinking?.type).toBe('disabled')
   })
 
-  test('RewindCommand accepts dry_run field', () => {
-    const cmd: RewindCommand = {
-      type: 'rewind',
-      session_id: 'sess-1',
-      message_id: 'msg-1',
-      dry_run: true,
-    }
-    expect(cmd.dry_run).toBe(true)
-  })
-
-  test('new command types are part of GatewayCommand union', () => {
-    const interrupt: GatewayCommand = { type: 'interrupt', session_id: 's1' }
-    const getCtx: GatewayCommand = { type: 'get-context-usage', session_id: 's1' }
-    const setModel: GatewayCommand = {
-      type: 'set-model',
-      session_id: 's1',
-      model: 'claude-haiku-4-6',
-    }
-    const setPerm: GatewayCommand = {
-      type: 'set-permission-mode',
-      session_id: 's1',
-      mode: 'acceptEdits',
-    }
-    const stopTask: GatewayCommand = { type: 'stop-task', session_id: 's1', task_id: 't1' }
-
-    expect(interrupt.type).toBe('interrupt')
-    expect(getCtx.type).toBe('get-context-usage')
-    expect(setModel.type).toBe('set-model')
-    expect(setPerm.type).toBe('set-permission-mode')
-    expect(stopTask.type).toBe('stop-task')
+  test('InterruptCommand is part of GatewayCommand union', () => {
+    const cmd: GatewayCommand = { type: 'interrupt', session_id: 's1' }
+    expect(cmd.type).toBe('interrupt')
   })
 
   test('InterruptCommand has correct shape', () => {
@@ -198,40 +163,7 @@ describe('shared-types: SDK feature expansion (#13)', () => {
     expect(cmd.session_id).toBe('sess-1')
   })
 
-  test('SetModelCommand model is optional', () => {
-    const cmd: SetModelCommand = { type: 'set-model', session_id: 'sess-1' }
-    expect(cmd.model).toBeUndefined()
-  })
-
-  test('SetPermissionModeCommand accepts all valid modes', () => {
-    const modes = [
-      'default',
-      'acceptEdits',
-      'bypassPermissions',
-      'plan',
-      'dontAsk',
-      'auto',
-    ] as const
-    for (const mode of modes) {
-      const cmd: SetPermissionModeCommand = { type: 'set-permission-mode', session_id: 's1', mode }
-      expect(cmd.mode).toBe(mode)
-    }
-  })
-
-  test('new event types are part of GatewayEvent union', () => {
-    const ctxUsage: GatewayEvent = {
-      type: 'context_usage',
-      session_id: 's1',
-      usage: { totalTokens: 1000 },
-    }
-    const rewindResult: GatewayEvent = {
-      type: 'rewind_result',
-      session_id: 's1',
-      can_rewind: true,
-      files_changed: ['/tmp/test.ts'],
-      insertions: 5,
-      deletions: 2,
-    }
+  test('rate_limit and task_* events are part of GatewayEvent union', () => {
     const rateLimit: GatewayEvent = {
       type: 'rate_limit',
       session_id: 's1',
@@ -259,8 +191,6 @@ describe('shared-types: SDK feature expansion (#13)', () => {
       output_file: '/tmp/output.txt',
     }
 
-    expect(ctxUsage.type).toBe('context_usage')
-    expect(rewindResult.type).toBe('rewind_result')
     expect(rateLimit.type).toBe('rate_limit')
     expect(taskStarted.type).toBe('task_started')
     expect(taskProgress.type).toBe('task_progress')
@@ -280,38 +210,6 @@ describe('shared-types: SDK feature expansion (#13)', () => {
       }
       expect(event.status).toBe(status)
     }
-  })
-
-  test('RewindResultEvent error and files_changed are optional', () => {
-    const event: RewindResultEvent = {
-      type: 'rewind_result',
-      session_id: 's1',
-      can_rewind: false,
-    }
-    expect(event.can_rewind).toBe(false)
-    expect(event.error).toBeUndefined()
-    expect(event.files_changed).toBeUndefined()
-  })
-
-  test('ContextUsageEvent carries opaque usage payload', () => {
-    const event: ContextUsageEvent = {
-      type: 'context_usage',
-      session_id: 's1',
-      usage: {
-        totalTokens: 5000,
-        maxTokens: 100000,
-        percentage: 5,
-        model: 'claude-sonnet-4-6',
-        categories: [{ name: 'system', tokens: 1000 }],
-      },
-    }
-    expect((event.usage as any).totalTokens).toBe(5000)
-    expect((event.usage as any).model).toBe('claude-sonnet-4-6')
-  })
-
-  test('StopTaskCommand requires task_id', () => {
-    const cmd: StopTaskCommand = { type: 'stop-task', session_id: 's1', task_id: 'task-abc' }
-    expect(cmd.task_id).toBe('task-abc')
   })
 })
 
@@ -603,5 +501,61 @@ describe('shared-types: kata state fields (#29)', () => {
       kata_state: null,
     }
     expect(event.kata_state).toBeNull()
+  })
+})
+
+describe('shared-types: GH#102 SDK peel-back events', () => {
+  test('CompactBoundaryEvent is part of GatewayEvent union and carries preserved_segment', () => {
+    const event: CompactBoundaryEvent = {
+      type: 'compact_boundary',
+      session_id: 'sess-1',
+      seq: 42,
+      trigger: 'auto',
+      pre_tokens: 175_000,
+      preserved_segment: {
+        head_uuid: '11111111-1111-1111-1111-111111111111',
+        anchor_uuid: '22222222-2222-2222-2222-222222222222',
+        tail_uuid: '33333333-3333-3333-3333-333333333333',
+      },
+      ts: 1_700_000_000_000,
+    }
+    const widened: GatewayEvent = event
+    expect(widened.type).toBe('compact_boundary')
+    expect(event.trigger).toBe('auto')
+    expect(event.pre_tokens).toBe(175_000)
+    expect(event.preserved_segment?.anchor_uuid).toBe('22222222-2222-2222-2222-222222222222')
+  })
+
+  test('ApiRetryEvent with HTTP status assignable to GatewayEvent', () => {
+    const event: ApiRetryEvent = {
+      type: 'api_retry',
+      session_id: 'sess-1',
+      seq: 17,
+      attempt: 2,
+      max_retries: 10,
+      retry_delay_ms: 5_000,
+      error_status: 529,
+      error: 'server_error',
+      ts: 1_700_000_000_000,
+    }
+    const widened: GatewayEvent = event
+    expect(widened.type).toBe('api_retry')
+    expect(event.error_status).toBe(529)
+    expect(event.error).toBe('server_error')
+  })
+
+  test('ApiRetryEvent accepts null error_status and unknown error fallback', () => {
+    const event: ApiRetryEvent = {
+      type: 'api_retry',
+      session_id: 'sess-1',
+      attempt: 1,
+      max_retries: 10,
+      retry_delay_ms: 1_000,
+      error_status: null,
+      error: 'unknown',
+      ts: 1_700_000_000_000,
+    }
+    expect(event.error_status).toBeNull()
+    expect(event.error).toBe('unknown')
   })
 })

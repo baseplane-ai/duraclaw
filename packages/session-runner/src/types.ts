@@ -1,11 +1,13 @@
-import type {
-  ContentBlock,
-  GetContextUsageCommand,
-  InterruptCommand,
-  SetModelCommand,
-  SetPermissionModeCommand,
-} from '@duraclaw/shared-types'
+import type { ContentBlock } from '@duraclaw/shared-types'
+import type { PushPullQueue } from './push-pull-queue.js'
 import type { SessionTitler } from './titler.js'
+
+/** SDK user message shape used as the lifetime queue payload. */
+export interface SDKUserMsg {
+  type: 'user'
+  message: { role: 'user'; content: string | ContentBlock[] }
+  parent_tool_use_id: string | null
+}
 
 /**
  * Per-session context owned by the session-runner process.
@@ -29,21 +31,12 @@ export interface RunnerSessionContext {
     resolve: (allowed: boolean) => void
     reject: (err: Error) => void
   } | null
-  messageQueue: {
-    push: (msg: { role: 'user'; content: string | ContentBlock[] }) => void
-    waitForNext: () => Promise<{
-      type: 'user'
-      message: { role: 'user'; content: string | ContentBlock[] }
-      parent_tool_use_id: string | null
-    } | null>
-    done: () => void
-  } | null
+  /** Lifetime queue of user messages feeding the single Query() prompt.
+   * Constructed by ClaudeRunner; null before runSession starts and after
+   * the session ends. stream-input commands push onto this. */
+  userQueue: PushPullQueue<SDKUserMsg> | null
   /** SDK Query object — available after session.init, null before */
   query: import('@anthropic-ai/claude-agent-sdk').Query | null
-  /** Queue for commands received before Query is available */
-  commandQueue: Array<
-    InterruptCommand | SetModelCommand | SetPermissionModeCommand | GetContextUsageCommand
-  >
   /** GH#86: Haiku session titler. Set by ClaudeRunner.runSession() when
    * `cmd.titler_enabled` is true. Read by handleIncomingCommand for pivot
    * retitle on `stream-input`. */

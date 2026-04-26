@@ -623,26 +623,14 @@ describe('legacy gateway_event handling', () => {
     expect(mockInvalidateQueries).toHaveBeenCalledWith({ queryKey: ['sessions'] })
   })
 
-  test('context_usage events invalidate the sessions query', () => {
-    // Spec #37 P2b B16: context_usage is server-persisted on agent_sessions
-    // (context_usage_json) and reaches the client via the synced delta.
-    // The gateway_event handler is just an invalidate-pass-through.
-    renderHook(() => useCodingAgent('test-session'))
-
-    act(() => {
-      capturedUseAgentConfig?.onMessage?.(
-        makeWsMessage({
-          type: 'gateway_event',
-          event: {
-            type: 'context_usage',
-            usage: { totalTokens: 5000, maxTokens: 200000, percentage: 2.5 },
-          },
-        }),
-      )
-    })
-
-    expect(mockInvalidateQueries).toHaveBeenCalledWith({ queryKey: ['sessions'] })
-  })
+  // GH#102 / spec 102-sdk-peelback B7+B8: the `context_usage` GatewayEvent
+  // was deleted; the runner now attaches `context_usage` to every `result`
+  // event. The DO writes the new value into the `agent_sessions` row via
+  // `syncResultToD1` → `broadcastSessionRow`, which the synced-collection
+  // delta path delivers to the client. No client-side branch in the
+  // `gateway_event` handler is needed any more — the prior
+  // `context_usage events invalidate the sessions query` test is
+  // therefore intentionally absent.
 
   // Spec #37: `result` gateway_event client handler removed; cost /
   // duration / numTurns and the running → idle transition are all

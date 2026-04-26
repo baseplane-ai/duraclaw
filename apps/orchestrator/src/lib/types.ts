@@ -2,6 +2,7 @@
 
 // Re-export shared types
 export type {
+  ApiRetryEvent,
   BrowserCommand,
   ContentBlock,
   ContextUsage,

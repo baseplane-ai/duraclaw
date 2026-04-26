@@ -1691,15 +1691,14 @@ describe('claimSubmitId', () => {
   })
 })
 
-// ── P3 B4: getContextUsage cached-or-fresh + in-flight dedupe ──
+// ── P3 B4 (post-peelback): getContextUsage is a pure cache reader ──
 //
-// SessionDO uses TC39 decorators so can't be instantiated in tests. The
-// harness below mirrors the exact contract of SessionDO.getContextUsage:
-//   - 5s TTL cache-hit
-//   - single-flight probe dedupe
-//   - 3s timeout fallback to stale/null
-//   - UPDATE session_meta.context_usage_json on fresh probe success
-// It runs the identical code path against fake sql / fake sendToGateway.
+// As of the SDK interference peel-back (GH#102 P1.4 / Reduction A B8),
+// `get-context-usage` was cut from the wire and the runner now attaches
+// a `context_usage` field to every `result` event. That keeps
+// `session_meta.context_usage_json` fresh on a per-turn cadence, so the
+// DO RPC is now a trivial cache read — no probe, no in-flight dedupe,
+// no timeout fallback. The harness below mirrors that simpler contract.
 
 interface FakeContextUsage {
   totalTokens: number
@@ -1713,18 +1712,10 @@ function createContextUsageHarness(initial: {
     context_usage_json: string | null
     context_usage_cached_at: number | null
   }
-  hasGatewayConn: boolean
 }) {
   const row = initial.row ?? { context_usage_json: null, context_usage_cached_at: null }
-  const sends: string[] = []
-  const resolvers: Array<{
-    resolve: (v: FakeContextUsage | null) => void
-    reject: (e: unknown) => void
-  }> = []
-  let probeInFlight: Promise<FakeContextUsage | null> | null = null
-  let hasGatewayConn = initial.hasGatewayConn
 
-  function sql<T>(strings: TemplateStringsArray, ...values: unknown[]): T[] {
+  function sql<T>(strings: TemplateStringsArray, ..._values: unknown[]): T[] {
     const query = strings.join('?').trim()
     if (query.startsWith('SELECT context_usage_json, context_usage_cached_at FROM session_meta')) {
       return [
@@ -1734,32 +1725,7 @@ function createContextUsageHarness(initial: {
         },
       ] as T[]
     }
-    if (query.startsWith('UPDATE session_meta')) {
-      row.context_usage_json = values[0] as string | null
-      row.context_usage_cached_at = values[1] as number | null
-      return [] as T[]
-    }
     return [] as T[]
-  }
-
-  function probeWithTimeout(): Promise<FakeContextUsage | null> {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        const idx = resolvers.findIndex((r) => r.resolve === innerResolve)
-        if (idx >= 0) resolvers.splice(idx, 1)
-        reject(new Error('probe_timeout'))
-      }, 3_000)
-      const innerResolve = (v: FakeContextUsage | null) => {
-        clearTimeout(timer)
-        resolve(v)
-      }
-      const innerReject = (e: unknown) => {
-        clearTimeout(timer)
-        reject(e)
-      }
-      resolvers.push({ resolve: innerResolve, reject: innerReject })
-      sends.push('get-context-usage')
-    })
   }
 
   async function getContextUsage(): Promise<{
@@ -1779,79 +1745,17 @@ function createContextUsageHarness(initial: {
             cachedAt: r.context_usage_cached_at,
           }
         : null
-    const now = Date.now()
-    if (cached && now - cached.cachedAt < 5_000) {
-      return {
-        contextUsage: cached.value,
-        fetchedAt: new Date(cached.cachedAt).toISOString(),
-        isCached: true,
-      }
-    }
-    if (!hasGatewayConn) {
-      return {
-        contextUsage: cached?.value ?? null,
-        fetchedAt: cached ? new Date(cached.cachedAt).toISOString() : new Date().toISOString(),
-        isCached: true,
-      }
-    }
-    if (!probeInFlight) {
-      probeInFlight = probeWithTimeout().finally(() => {
-        probeInFlight = null
-      })
-    }
-    try {
-      const value = await probeInFlight
-      const cachedAt = Date.now()
-      sql`UPDATE session_meta
-        SET context_usage_json = ${JSON.stringify(value)},
-            context_usage_cached_at = ${cachedAt},
-            updated_at = ${cachedAt}
-        WHERE id = 1`
-      return {
-        contextUsage: value,
-        fetchedAt: new Date(cachedAt).toISOString(),
-        isCached: false,
-      }
-    } catch {
-      return {
-        contextUsage: cached?.value ?? null,
-        fetchedAt: cached ? new Date(cached.cachedAt).toISOString() : new Date().toISOString(),
-        isCached: true,
-      }
+    return {
+      contextUsage: cached?.value ?? null,
+      fetchedAt: cached ? new Date(cached.cachedAt).toISOString() : new Date().toISOString(),
+      isCached: true,
     }
   }
 
-  function deliver(value: FakeContextUsage | null) {
-    // Mirror SessionDO's handleGatewayEvent('context_usage') side effects.
-    const drained = resolvers.splice(0)
-    for (const res of drained) {
-      try {
-        res.resolve(value)
-      } catch {
-        // noop
-      }
-    }
-    const cachedAt = Date.now()
-    sql`UPDATE session_meta
-      SET context_usage_json = ${JSON.stringify(value)},
-          context_usage_cached_at = ${cachedAt},
-          updated_at = ${cachedAt}
-      WHERE id = 1`
-  }
-
-  return {
-    getContextUsage,
-    deliver,
-    sends,
-    resolvers,
-    row,
-    setGatewayConn(v: boolean) {
-      hasGatewayConn = v
-    },
-  }
+  return { getContextUsage, row }
 }
 
-describe('getContextUsage (P3 B4)', () => {
+describe('getContextUsage (post-peelback: pure cache read)', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-04-20T00:00:00Z'))
@@ -1860,80 +1764,43 @@ describe('getContextUsage (P3 B4)', () => {
     vi.useRealTimers()
   })
 
-  it('context-usage-rest-returns-cached-then-probes', async () => {
-    // Pre-seed a fresh cache (cached_at = now).
+  it('returns the cached value when session_meta has one', async () => {
     const cached: FakeContextUsage = { totalTokens: 1_000, maxTokens: 200_000, percentage: 0.5 }
     const h = createContextUsageHarness({
       row: {
         context_usage_json: JSON.stringify(cached),
         context_usage_cached_at: Date.now(),
       },
-      hasGatewayConn: true,
     })
-
-    // First call — fresh cache hit, no probe.
-    const first = await h.getContextUsage()
-    expect(first.isCached).toBe(true)
-    expect(first.contextUsage).toEqual(cached)
-    expect(h.sends).toHaveLength(0)
-
-    // Advance past the 5s TTL — next call must probe.
-    vi.advanceTimersByTime(6_000)
-    const pending = h.getContextUsage()
-    // Probe command was dispatched.
-    expect(h.sends).toHaveLength(1)
-    // Deliver fresh value.
-    const fresh: FakeContextUsage = { totalTokens: 2_000, maxTokens: 200_000, percentage: 1.0 }
-    h.deliver(fresh)
-    const second = await pending
-    expect(second.isCached).toBe(false)
-    expect(second.contextUsage).toEqual(fresh)
-    expect(h.row.context_usage_json).toBe(JSON.stringify(fresh))
+    const res = await h.getContextUsage()
+    expect(res.contextUsage).toEqual(cached)
+    expect(res.isCached).toBe(true)
+    expect(res.fetchedAt).toBe(new Date(Date.now()).toISOString())
   })
 
-  it('context-usage-inflight-dedupe', async () => {
-    // Cold cache, gateway connected — fire 3 concurrent calls.
-    const h = createContextUsageHarness({ hasGatewayConn: true })
-    const p1 = h.getContextUsage()
-    const p2 = h.getContextUsage()
-    const p3 = h.getContextUsage()
-    // Only one probe command dispatched despite 3 concurrent callers.
-    expect(h.sends).toHaveLength(1)
-    const value: FakeContextUsage = { totalTokens: 500, maxTokens: 200_000, percentage: 0.25 }
-    h.deliver(value)
-    const [r1, r2, r3] = await Promise.all([p1, p2, p3])
-    expect(r1.contextUsage).toEqual(value)
-    expect(r2.contextUsage).toEqual(value)
-    expect(r3.contextUsage).toEqual(value)
-    // All three share the same fresh probe → isCached:false on each.
-    expect(r1.isCached).toBe(false)
-    expect(r2.isCached).toBe(false)
-    expect(r3.isCached).toBe(false)
+  it('returns null + isCached:true when the cache is cold', async () => {
+    const h = createContextUsageHarness({})
+    const res = await h.getContextUsage()
+    expect(res.contextUsage).toBeNull()
+    expect(res.isCached).toBe(true)
   })
 
-  it('context-usage-no-gateway-returns-stale', async () => {
-    // Populate a stale cache, then take the gateway offline.
+  it('does not refresh the cache from the read path (writes happen on result events)', async () => {
+    // Stale cache (older than the old 5s TTL) — the post-peelback reader
+    // returns it unchanged. There is no probe, no UPDATE, no gateway
+    // round-trip. Cache freshness is the per-result event's job.
     const stale: FakeContextUsage = { totalTokens: 100, maxTokens: 200_000, percentage: 0.05 }
     const h = createContextUsageHarness({
       row: {
         context_usage_json: JSON.stringify(stale),
-        context_usage_cached_at: Date.now() - 10_000, // 10s ago, past the 5s TTL
+        context_usage_cached_at: Date.now() - 10_000,
       },
-      hasGatewayConn: false,
     })
     const res = await h.getContextUsage()
     expect(res.contextUsage).toEqual(stale)
     expect(res.isCached).toBe(true)
-    // No probe dispatched when the gateway is offline.
-    expect(h.sends).toHaveLength(0)
-  })
-
-  it('returns null + isCached:true when cold cache and no gateway', async () => {
-    const h = createContextUsageHarness({ hasGatewayConn: false })
-    const res = await h.getContextUsage()
-    expect(res.contextUsage).toBeNull()
-    expect(res.isCached).toBe(true)
-    expect(h.sends).toHaveLength(0)
+    // Underlying row is untouched by the read.
+    expect(h.row.context_usage_json).toBe(JSON.stringify(stale))
   })
 })
 
