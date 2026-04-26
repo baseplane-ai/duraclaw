@@ -1,32 +1,53 @@
-# kata
+<h1 align="center">kata</h1>
 
-Structured workflow CLI for [Claude Code](https://claude.ai/claude-code). Wraps sessions with modes, phase task enforcement, and a stop hook that blocks exit until phases are done.
+<p align="center">
+  <strong>Structured-workflow CLI for <a href="https://claude.ai/claude-code">Claude Code</a>.</strong><br>
+  Modes, phase tasks, context injection, and a stop hook that blocks exit<br>
+  until the phase contract is satisfied — so sessions actually finish.
+</p>
 
-Part of the [duraclaw](https://github.com/baseplane-ai/duraclaw) monorepo (`packages/kata/`).
+<p align="center">
+  <a href="#built-in-modes"><img alt="modes" src="https://img.shields.io/badge/modes-7%20built--in-orange?style=flat-square"></a>
+  <a href="#stop-conditions"><img alt="stop hook" src="https://img.shields.io/badge/exit%20gate-Stop%20hook-orange?style=flat-square"></a>
+  <a href="#install"><img alt="runtime" src="https://img.shields.io/badge/runtime-Bun-orange?style=flat-square"></a>
+  <a href="package.json"><img alt="version" src="https://img.shields.io/badge/version-0.5.1-orange?style=flat-square"></a>
+  <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-orange?style=flat-square"></a>
+</p>
+
+> **Status — actively used.** kata drives every Claude Code session in
+> the [duraclaw](https://github.com/baseplane-ai/duraclaw) monorepo (and
+> a handful of sibling projects). It's not on npm — it lives in
+> `packages/kata/` and runs straight off TypeScript via Bun. Clone the
+> repo, `kata setup`, and you're in.
+
+---
 
 ## Table of Contents
 
 1. [What kata does](#what-kata-does)
-2. [Install](#install)
-3. [Quick start](#quick-start)
-4. [Built-in modes](#built-in-modes)
-5. [How it works](#how-it-works)
+2. [Design principles](#design-principles)
+3. [30-second tour](#30-second-tour)
+4. [Install](#install)
+5. [Quick start](#quick-start)
+6. [Built-in modes](#built-in-modes)
+7. [How it works](#how-it-works)
    - [Mode lifecycle](#mode-lifecycle)
    - [Context injection](#context-injection)
    - [Planning → Implementation pipeline](#planning--implementation-pipeline)
    - [Hook chain](#hook-chain)
-6. [Stop conditions](#stop-conditions)
-7. [Skills](#skills)
-8. [Command reference](#command-reference)
-   - [Core commands](#core-commands)
-   - [Other commands](#other-commands)
-9. [Hooks reference](#hooks-reference)
-10. [Configuration (kata.yaml)](#configuration-katayaml)
-11. [Custom modes](#custom-modes)
-12. [Template system](#template-system)
-13. [Architecture](#architecture)
-14. [Comparison to similar tools](#comparison-to-similar-tools)
-15. [License](#license)
+8. [Stop conditions](#stop-conditions)
+9. [Skills](#skills)
+10. [Command reference](#command-reference)
+    - [Core commands](#core-commands)
+    - [Other commands](#other-commands)
+11. [Hooks reference](#hooks-reference)
+12. [Configuration (kata.yaml)](#configuration-katayaml)
+13. [Custom modes](#custom-modes)
+14. [Template system](#template-system)
+15. [Tech stack](#tech-stack)
+16. [Architecture](#architecture)
+17. [Comparison to similar tools](#comparison-to-similar-tools)
+18. [License](#license)
 
 ---
 
@@ -43,6 +64,71 @@ The root problem: Claude has no obligation to finish. Sessions are fire-and-forg
 3. **Blocks exit via Stop hook** — whenever Claude tries to end the session, the hook checks every stop condition for that mode (tasks complete, changes committed, tests passing). If anything's missing, the session is blocked with a clear list of what's left.
 
 The combination is what makes it work: context injection means Claude always knows the plan; the stop hook means it can't declare victory before the plan is done.
+
+---
+
+## Design principles
+
+Three invariants hold the whole thing together:
+
+> **1. The session can't end until the phase contract is satisfied.**
+> The `Stop` hook intercepts every exit attempt and runs the mode's
+> stop conditions. Unmet conditions block the exit and tell Claude
+> exactly what's left. No best-effort, no honor system.
+>
+> **2. Context is re-injected at every `SessionStart`, not chat history.**
+> Mode template, current phase, pending tasks, and project rules come
+> from disk via `kata prime`. Compaction can flatten the conversation;
+> the next user turn fires `SessionStart` and the full plan is back.
+>
+> **3. Mode behavior is data, not code.**
+> Every per-mode rule — issue requirement, stop conditions, deliverable
+> path, intent keywords, injected rules — lives in `kata.yaml`. No mode
+> name is hardcoded in TypeScript. New modes are config + a template
+> file, not a code patch.
+
+---
+
+## 30-second tour
+
+What a structured implementation session actually looks like end-to-end:
+
+```bash
+# 1. Enter the mode. kata pre-creates phase tasks with dependency chains.
+$ kata enter implementation --issue=42
+Building phase tasks for workflow: GH#42
+  Created step task: p0:read-spec
+  Created step task: p1:implement-change
+  Created step task: p2:write-tests
+  Created step task: p3:commit-and-push
+Native tasks written: ~/.claude/tasks/<sessionId>/ (12 tasks)
+
+# 2. Claude works through the tasks in dependency order.
+#    The user just asks; kata's already injected the plan, the rules,
+#    and the spec via SessionStart -> kata prime.
+#
+#    Phase 1 done -> TaskUpdate(p1:implement-change, completed)
+#    Phase 2 done -> TaskUpdate(p2:write-tests, completed)
+#    ...
+
+# 3. Claude tries to wrap up. The Stop hook fires.
+$ kata can-exit
+✗ Cannot exit:
+  1 task(s) still pending
+    - [9] GH#42: P3 - commit and push
+  Uncommitted changes in tracked files
+  Unpushed commits
+
+# 4. Claude finishes the missing pieces (commit + push), tries again.
+$ kata can-exit
+✓ All tasks complete. Can exit.
+
+$ kata exit
+```
+
+The same pattern works for `research`, `planning`, `task`, `verify`,
+`debug`. Different modes ship different stop conditions — see
+[Stop conditions](#stop-conditions) for the full matrix.
 
 ---
 
@@ -809,6 +895,48 @@ kata migrate [--dry-run]
 
 ---
 
+## Tech stack
+
+kata is deliberately small — the value is in the workflow design, not
+the surface area.
+
+**Runtime**
+
+- [Bun](https://bun.sh/) — runs `src/index.ts` directly via the
+  `#!/usr/bin/env bun` shebang. No build step, no `dist/`, no compile
+  cache. Bun is also the test runner.
+- [TypeScript 5.8](https://www.typescriptlang.org/) — source language; type-checked via `tsc --noEmit`.
+
+**Runtime dependencies**
+
+- [`zod`](https://zod.dev/) — schema validation for `SessionState`,
+  `ModeConfig`, `KataConfig`, and template frontmatter. Every JSON
+  read off disk is parsed through a Zod schema before any business
+  logic touches it.
+- [`js-yaml`](https://github.com/nodeca/js-yaml) — YAML parsing for
+  `.kata/kata.yaml`, `.kata/steps.yaml`, and template frontmatter.
+
+**Dev / harness**
+
+- [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk)
+  — drives the agentic eval harness in `eval/` (real tool execution
+  against fixture projects, used to regression-test workflow
+  enforcement).
+- [`tsx`](https://github.com/privatenumber/tsx) — fallback dev runner
+  for environments where Bun isn't available.
+
+**Integrates with**
+
+- [Claude Code](https://claude.ai/claude-code) — kata is a wrapper, not
+  a replacement. All hook events come from Claude Code's
+  `.claude/settings.json` registration.
+- Native [`TaskCreate` / `TaskList` / `TaskUpdate`](https://docs.anthropic.com/) — the task system kata pre-populates with phase tasks at `kata enter`.
+- The skill system — `~/.claude/skills/kata-{name}/SKILL.md` files are
+  loaded by Claude Code itself; kata just installs them and references
+  them from templates.
+
+---
+
 ## Architecture
 
 ### Source layout
@@ -857,7 +985,13 @@ An agentic eval harness in `eval/` drives Claude agents through kata scenarios w
 
 ## Comparison to similar tools
 
-The Claude Code ecosystem has several workflow and memory tools. Here's how `kata` fits in.
+The Claude Code ecosystem already has solid tools for memory, planning,
+and capability gating. kata isn't trying to replace any of them — it's
+filling a different gap.
+
+> **kata's unique angle:** the only tool focused on *enforcing that
+> sessions complete correctly* via the Stop hook, rather than helping
+> plan, remember, or restrict work.
 
 ### Beads (`@beads/bd`)
 **[github.com/steveyegge/beads](https://github.com/steveyegge/beads)**
@@ -889,7 +1023,9 @@ Parses PRDs into structured tasks using AI via MCP. Handles full task lifecycle 
 | [Task Master](https://github.com/eyaltoledano/claude-task-master) | PRD → structured backlog | None | Project |
 | **kata** | **Session phase enforcement** | **Stop hook blocks exit** | **Session** |
 
-`kata`'s unique position: the only tool focused on *enforcing that sessions complete correctly* via the Stop hook, rather than helping plan or remember work.
+The most natural pairing is `beads` + `kata`: beads carries memory
+across sessions, kata enforces that each session lands cleanly. The
+two operate at different scopes and don't overlap.
 
 ---
 
