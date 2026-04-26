@@ -29,13 +29,15 @@
 </p>
 
 > **Status — active development.** Built and used in-house at
-> [@baseplane-ai](https://github.com/baseplane-ai), but the repo is public
-> and self-hostable. The VPS side is a single-script install
-> (`packages/agent-gateway/systemd/install.sh` lays down the systemd
-> unit); the orchestrator side needs your own Cloudflare Workers account
-> with D1, R2, and a few secrets wired up
-> ([Quickstart](#quickstart) walks through both). Not one-click, but not
-> bespoke either.
+> [@baseplane-ai](https://github.com/baseplane-ai), but the repo is
+> public and self-hostable via two install scripts:
+> `scripts/install-orchestrator.sh` (Cloudflare side — D1, R2,
+> secrets, deploy) and `packages/agent-gateway/systemd/install.sh`
+> (VPS side — Bun + systemd). Bring your own Workers Paid account
+> and a Linux box with sudo. See [Quickstart →
+> Self-hosting](#self-hosting-on-a-vps--your-own-cloudflare-account)
+> and [Deployment](#deployment) for the two-branch story (self-host
+> vs. baseplane infra pipeline).
 
 > **Agent scope today: Claude only.** Every session runs against
 > [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk).
@@ -457,25 +459,41 @@ for the port-derivation table and per-worktree allocation rules.
 
 ### Self-hosting on a VPS + your own Cloudflare account
 
-If you're not the baseplane infra pipeline and just want to run your
-own copy:
+Two scripts, two halves of the stack:
 
 ```bash
 # 1. On a Linux VPS (Bun + systemd available):
 #    install the gateway as a systemd unit. It listens on
-#    127.0.0.1:$CC_GATEWAY_PORT and spawns one session-runner
-#    per session.
+#    127.0.0.1:$CC_GATEWAY_PORT and spawns one session-runner per session.
 bash packages/agent-gateway/systemd/install.sh
 
 # 2. From your laptop, deploy the orchestrator to your own CF account.
-#    Needs: a Workers paid plan (DO + SQLite-backed DOs), a D1 DB
-#    named `duraclaw-auth`, an R2 bucket for the mobile OTA bundle,
-#    plus secrets (CC_GATEWAY_URL, CC_GATEWAY_SECRET,
-#    WORKER_PUBLIC_URL, BETTER_AUTH_SECRET, BETTER_AUTH_URL).
-cd apps/orchestrator
-pnpm wrangler d1 migrations apply duraclaw-auth --remote
-pnpm wrangler deploy
+#    Interactive bootstrap — verifies wrangler login, creates D1 + R2,
+#    applies migrations, prompts for secrets, builds + deploys.
+bash scripts/install-orchestrator.sh
 ```
+
+`install-orchestrator.sh` handles everything except two account-specific
+edits to `apps/orchestrator/wrangler.toml` (the committed values are
+baseplane's): the `database_id` under `[[d1_databases]]` (the script
+prints yours after creation) and the `[[routes]]` block for
+`dura.baseplane.ai` (delete it if you don't own a custom domain — the
+worker will deploy at `<name>.<your-subdomain>.workers.dev` instead).
+The cleanest pattern is to copy `wrangler.toml` to `wrangler.local.toml`,
+edit those two stanzas, and run:
+
+```bash
+ORCH_CONFIG=wrangler.local.toml bash scripts/install-orchestrator.sh
+```
+
+Cloudflare prereqs: a **Workers Paid** plan (Durable Objects + SQLite-backed
+DOs are paid-tier features), and the script will create a D1 database
+(`duraclaw-auth` by default) and two R2 buckets (`duraclaw-mobile`,
+`duraclaw-session-media`) on first run. Required secrets the script
+prompts for: `CC_GATEWAY_URL`, `CC_GATEWAY_SECRET`, `WORKER_PUBLIC_URL`,
+`BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `SYNC_BROADCAST_SECRET`.
+Optional: `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` (Web Push) and
+`FCM_SERVICE_ACCOUNT_JSON` (Android push).
 
 Gateway internals + the systemd contract live in
 [`.claude/rules/gateway.md`](.claude/rules/gateway.md); orchestrator
@@ -495,15 +513,14 @@ Run from the repo root:
 | `pnpm verify:smoke` | Real-curl + browser verification baseline (login, gateway, session, browser) |
 | `pnpm kata` | Workflow CLI — `pnpm kata enter <mode>` to start a structured session |
 
-> **Heads up (baseplane-internal only).** If you're working inside the
-> baseplane infra setup, don't run `pnpm ship`, `wrangler deploy`, or
-> the gateway install script by hand — deploys are owned by the
-> pipeline, and doing it manually skips the mobile OTA bundle upload
-> and strands every Android client on the previous web bundle. See
-> [Deployment](#deployment). Self-hosters running their own CF
-> account ignore this — those commands are exactly the deploy path
-> for you (no OTA channel to break unless you're shipping the mobile
-> APK too).
+> **Heads up — only matters in [Deployment branch B](#b-baseplane-infra-pipeline-this-forks-ci).**
+> If you're inside the baseplane infra setup, don't run `pnpm ship`,
+> `wrangler deploy`, or the gateway install script by hand — manual
+> deploys skip the mobile OTA bundle upload and strand every Android
+> client on the previous web bundle. Self-hosters in [branch
+> A](#a-self-hosters--your-own-cf-account) ignore this — those commands
+> are exactly the deploy path for you, since you're not shipping a
+> mobile APK channel.
 
 For the full verification command set (`verify:auth`, `verify:gateway`,
 `verify:session`, `verify:browser`, ...) and the verification policy
@@ -511,8 +528,24 @@ that goes with them, see [`AGENTS.md`](AGENTS.md).
 
 ## Deployment
 
-The infra pipeline owns deploys. Pushing to `main` on `origin` triggers
-a build that ships:
+There are **two deploy branches** — they don't share a code path, and
+mixing them is what causes the OTA-strand failure mode the heads-up in
+[Common commands](#common-commands) warns about. Pick one.
+
+### A. Self-hosters — your own CF account
+
+```bash
+bash scripts/install-orchestrator.sh        # CF Worker + D1 + R2
+bash packages/agent-gateway/systemd/install.sh   # VPS systemd unit
+```
+
+That's it. Re-run either script idempotently to redeploy. Skip this
+section entirely; the rest of "Deployment" is about baseplane's CI.
+
+### B. Baseplane infra pipeline (this fork's CI)
+
+The pipeline owns deploys for `dura.baseplane.ai`. Pushing to `main` on
+`origin` triggers a build that ships:
 
 1. The **orchestrator** to Cloudflare Workers, with `VITE_APP_VERSION`
    stamped in from `git rev-parse --short HEAD`.
@@ -520,6 +553,13 @@ a build that ships:
 3. The **mobile OTA web bundle** (and `version.json` pointer) to the
    `duraclaw-mobile` R2 bucket so the Android shell picks up the new
    bundle on next launch via Capgo.
+
+The OTA upload (step 3) is **mandatory before the Worker deploy** —
+running `wrangler deploy` by hand skips it and strands every Android
+client on whatever bundle the APK shipped with. That's the reason the
+heads-up callout is scoped baseplane-internal-only: in path B, manual
+deploys break the Android channel; in path A, you're not shipping an
+Android channel, so `wrangler deploy` is the deploy.
 
 Mechanics, environment variables, and the OTA contract live in
 [`.claude/rules/deployment.md`](.claude/rules/deployment.md) and
