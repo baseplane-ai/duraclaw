@@ -23,7 +23,7 @@
 <p align="center">
   <a href="#architecture"><img alt="runtime" src="https://img.shields.io/badge/runtime-CF%20Workers%20%2B%20DO-orange?style=flat-square"></a>
   <a href="#architecture"><img alt="runner" src="https://img.shields.io/badge/runner-Bun%20%2B%20systemd-orange?style=flat-square"></a>
-  <a href="apps/orchestrator"><img alt="ui" src="https://img.shields.io/badge/UI-React%2019%20%2B%20TanStack%20Start-orange?style=flat-square"></a>
+  <a href="apps/orchestrator"><img alt="ui" src="https://img.shields.io/badge/UI-React%2019%20%2B%20Vite%20SPA-orange?style=flat-square"></a>
   <a href="apps/mobile"><img alt="mobile" src="https://img.shields.io/badge/mobile-Capacitor%208%20Android-orange?style=flat-square"></a>
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-orange?style=flat-square"></a>
 </p>
@@ -40,15 +40,16 @@
 
 1. [What it is](#what-it-is)
 2. [Features](#features)
-3. [What it is not](#what-it-is-not)
-4. [Architecture](#architecture)
-5. [Repository map](#repository-map)
-6. [Tech stack](#tech-stack)
-7. [Quickstart](#quickstart)
-8. [Common commands](#common-commands)
-9. [Deployment](#deployment)
-10. [Contributing](#contributing)
-11. [Roadmap](#roadmap)
+3. [Chat UI vs. the Claude Code CLI](#chat-ui-vs-the-claude-code-cli)
+4. [What it is not](#what-it-is-not)
+5. [Architecture](#architecture)
+6. [Repository map](#repository-map)
+7. [Tech stack](#tech-stack)
+8. [Quickstart](#quickstart)
+9. [Common commands](#common-commands)
+10. [Deployment](#deployment)
+11. [Contributing](#contributing)
+12. [Roadmap](#roadmap)
 
 ---
 
@@ -194,6 +195,54 @@ status.
 - One-shot setup script (`scripts/setup-clone.sh`)
 - Real-curl + browser verification harnesses with no mocks
 - PWA install with offline shell + service-worker update banner
+
+## Chat UI vs. the Claude Code CLI
+
+The Claude Code CLI is a single-pane terminal experience: streaming text,
+ANSI-rendered Markdown, ANSI-highlighted code blocks, inline tool-call
+log lines, and inline yes/no permission prompts — all stacked in one
+scrollback. It's fast, focused, and the source of truth for the agent
+loop.
+
+Duraclaw runs the same agent loop, but renders it through
+[`@duraclaw/ai-elements`](packages/ai-elements/) — a vendored fork of
+[Vercel AI Elements](https://ai-sdk.dev/elements) — so each event class
+gets its own purpose-built React surface instead of more scrollback.
+
+| Capability | Claude Code CLI | Duraclaw chat UI |
+|---|---|---|
+| Streaming assistant text | Token stream into terminal | `<Conversation>` + `<Message>` with progressive render |
+| Markdown | ANSI-rendered Markdown | [Streamdown](https://github.com/vercel/streamdown) with full GFM, tables, math, mermaid, CJK packs — **rendered while streaming** |
+| Code blocks | ANSI syntax highlight | `<CodeBlock>` powered by [Shiki](https://shiki.style/) with a copy button, language label, and theme-aware tokens |
+| Diffs | Plain text diff | Dedicated diff renderer with hunk grouping and side-by-side inline view |
+| Reasoning / thinking | Inline italic block | `<Reasoning>` — collapsible dedicated surface, separated from final answer |
+| Tool calls | Inline log lines | `<ToolCallList>` with collapsed summary + expandable args / output drill-down |
+| `Bash` tool output | Raw stdout | `<Terminal>` with `ansi-to-react` color rendering and exit-code chrome |
+| `Read` / `Glob` results | Path lists | `<FileTree>` rendered as an actual tree with expand / collapse |
+| `Edit` / `Write` results | Diff text | Diff component with file-path header and add/remove gutters |
+| `Grep` / search results | Line list | Grouped by file with line-number anchors and language-aware highlighting |
+| Test runner output | Raw text | `<TestResults>` + `<StackTrace>` cards with pass / fail summary and frame navigation |
+| Build / package output | Raw text | `<PackageInfo>`, `<EnvironmentVariables>`, `<SchemaDisplay>` typed renderers |
+| Git operations | Text log | `<Commit>` cards with hash, author, message, file list |
+| `WebFetch` / `WebSearch` | Title + snippet | `<WebPreview>` sandboxed iframe + `<InlineCitation>` with sources panel |
+| Plans | Markdown checklist | `<Plan>` with `<Checkpoint>` markers and live status per step |
+| Tasks / todo lists | Text list | `<Task>` cards driven by a stateful `<WorkflowProgress>` track |
+| Images | Path / link only | Inline image rendering + zoomable `<Image>` viewer |
+| Audio / video | Not supported | `<AudioPlayer>` + `media-chrome` wrappers |
+| Permission prompts | Inline `[y/n]` | `<Confirmation>` cards with action history and per-tool policy memory |
+| `AskUserQuestion` | Inline prompt | Rich gate UI with options, free-form fallback, and global attention queue |
+| Slash commands | Full local set (`/clear`, `/compact`, `/model`, `/mcp`, ...) | Cmd-K command palette + a subset of slash commands; full parity is **not** there yet |
+| Multi-session | One session per terminal | Multi-session tab bar with live status, attention badges, presence cursors |
+| Persistence | Local transcript on disk | Live in `SessionDO` SQLite + mirrored to D1 for cross-device list views + R2 for OTA |
+| Resume | `claude --continue` | Auto-resume across runner reaper / SSH / Worker redeploy via `sdk_session_id` |
+| Mobile | None | Capacitor 8 Android shell with the same chat surface |
+
+**Where the CLI still wins.** Full slash-command surface, MCP-server
+flag wiring, plugin / extension hooks, full local-only operation, and
+zero infra. If you want one local session with the entire CLI feature
+set, use the CLI. If you want a fleet of remote, persistent, observable
+sessions with rich per-event renderers and a phone in your pocket, use
+duraclaw.
 
 ## What it is not
 
