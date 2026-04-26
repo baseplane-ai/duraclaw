@@ -37,7 +37,7 @@ function createMockCtx(overrides?: Partial<RunnerSessionContext>): RunnerSession
     commandQueue: [],
     nextSeq: 0,
     meta: {
-      sdk_session_id: null,
+      runner_session_id: null,
       last_activity_ts: 0,
       last_event_seq: 0,
       cost: { input_tokens: 0, output_tokens: 0, usd: 0 },
@@ -113,7 +113,7 @@ describe('ClaudeRunner', () => {
         type: 'resume' as const,
         project: 'nonexistent-project-xyz-999',
         prompt: 'continue',
-        sdk_session_id: 'fake-session-id',
+        runner_session_id: 'fake-session-id',
       }
 
       await runner.resume(ch as any, cmd, ctx)
@@ -155,7 +155,7 @@ describe('ClaudeRunner', () => {
         type: 'resume' as const,
         project: 'nonexistent-project-xyz-999',
         prompt: 'continue',
-        sdk_session_id: 'fake-session-id',
+        runner_session_id: 'fake-session-id',
       }
 
       await runner.resume(ch as any, cmd, ctx)
@@ -731,7 +731,7 @@ describe('startKataWatcher leaf-attach regression', () => {
     const ctx = createMockCtx({
       sessionId: 'sess-test',
       meta: {
-        sdk_session_id: null,
+        runner_session_id: null,
         last_activity_ts: 0,
         last_event_seq: 0,
         cost: { input_tokens: 0, output_tokens: 0, usd: 0 },
@@ -746,7 +746,7 @@ describe('startKataWatcher leaf-attach regression', () => {
     // Simulate session.init: sdk id arrives, runner calls emitNow.
     // At this point the leaf dir doesn't exist yet — emitNow's read
     // returns null and attachLeafWatcher kicks the retry timer.
-    ctx.meta.sdk_session_id = sdkSessionId
+    ctx.meta.runner_session_id = sdkSessionId
     w.emitNow()
 
     // Wait for the first emit (will be `kata_state: null` since dir
@@ -803,7 +803,7 @@ describe('startKataWatcher leaf-attach regression', () => {
     const ctx = createMockCtx({
       sessionId: 'sess-test',
       meta: {
-        sdk_session_id: null,
+        runner_session_id: null,
         last_activity_ts: 0,
         last_event_seq: 0,
         cost: { input_tokens: 0, output_tokens: 0, usd: 0 },
@@ -819,7 +819,7 @@ describe('startKataWatcher leaf-attach regression', () => {
 
     const w = startKataWatcher(tmpProject, 'tmp-project', ch as any, ctx)
 
-    ctx.meta.sdk_session_id = sdkSessionId
+    ctx.meta.runner_session_id = sdkSessionId
     w.emitNow()
 
     await new Promise((r) => setTimeout(r, 100))

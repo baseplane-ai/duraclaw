@@ -49,7 +49,7 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
   } = agent
 
   // Spec #37 P2b: read the D1-mirrored session row for status / project /
-  // model / sdkSessionId. DO is authoritative — no client-side writes.
+  // model / runnerSessionId. DO is authoritative — no client-side writes.
   const session = useSession(sessionId)
 
   // GH#14 B7: derive a Map<parentMsgId, {current,total,siblings}> from the

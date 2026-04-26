@@ -270,7 +270,7 @@ export function SessionHistory() {
                   <TableCell>{formatCost(session.totalCostUsd)}</TableCell>
                   <TableCell>{session.numTurns ?? '-'}</TableCell>
                   <TableCell>
-                    {session.sdkSessionId &&
+                    {session.runnerSessionId &&
                       session.agent === 'claude' &&
                       session.origin === 'discovered' && (
                         <Button
@@ -285,7 +285,7 @@ export function SessionHistory() {
                                 body: JSON.stringify({
                                   project: session.project,
                                   prompt: 'resume',
-                                  sdk_session_id: session.sdkSessionId,
+                                  runner_session_id: session.runnerSessionId,
                                   agent: session.agent ?? 'claude',
                                 }),
                               })

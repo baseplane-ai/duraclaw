@@ -2,7 +2,7 @@ import type { SQL } from 'drizzle-orm'
 import { and, asc, desc, eq, inArray, isNull, like, ne, or, sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import { Hono } from 'hono'
-import { constantTimeEquals } from '~/agents/session-do-helpers'
+import { constantTimeEquals } from '~/agents/session-do/runner-link'
 import * as schema from '~/db/schema'
 import {
   agentSessions,
@@ -59,7 +59,7 @@ interface CreateSessionBody {
   prompt?: string | ContentBlock[]
   model?: string
   system_prompt?: string
-  sdk_session_id?: string
+  runner_session_id?: string
   agent?: string
   /** Optional GH issue number stamp — used by the kanban Start-next /
    *  drag-to-advance flow (GH#16 P3 U3) so the newly spawned session
@@ -1617,7 +1617,7 @@ export function createApiApp() {
       like(agentSessions.title, needle),
       like(agentSessions.summary, needle),
       like(agentSessions.agent, needle),
-      like(agentSessions.sdkSessionId, needle),
+      like(agentSessions.runnerSessionId, needle),
     )
     const whereExpr = scope ? and(scope, likeExpr) : likeExpr
     const db = getDb(c.env)
@@ -1820,7 +1820,7 @@ export function createApiApp() {
     interface GatewaySnapshot {
       session_id: string
       state: string
-      sdk_session_id: string | null
+      runner_session_id: string | null
       last_activity_ts: number | null
       cost: { input_tokens: number; output_tokens: number; usd: number }
       model: string | null
@@ -1849,14 +1849,14 @@ export function createApiApp() {
     // D1 does not support interactive BEGIN/COMMIT — use db.batch() for
     // atomic multi-statement writes.
     const syncable = snapshots.filter((s) => {
-      if (!s.sdk_session_id) {
+      if (!s.runner_session_id) {
         skipped++
         return false
       }
       return true
     })
     const updateStmts = syncable.map((s) => {
-      const sdkId = s.sdk_session_id as string // guarded by filter above
+      const runnerId = s.runner_session_id as string // guarded by filter above
       const lastActivity = s.last_activity_ts ? new Date(s.last_activity_ts).toISOString() : now
       const status = s.state === 'running' ? 'running' : 'idle'
       return db
@@ -1869,7 +1869,7 @@ export function createApiApp() {
           numTurns: s.turn_count || undefined,
           totalCostUsd: s.cost.usd || undefined,
         })
-        .where(eq(agentSessions.sdkSessionId, sdkId))
+        .where(eq(agentSessions.runnerSessionId, runnerId))
     })
 
     if (updateStmts.length > 0) {
@@ -1898,7 +1898,7 @@ export function createApiApp() {
         prompt: body.prompt as string | ContentBlock[],
         model: body.model,
         system_prompt: body.system_prompt,
-        sdk_session_id: body.sdk_session_id,
+        runner_session_id: body.runner_session_id,
         agent: body.agent,
         kataIssue: body.kataIssue,
         client_session_id: body.client_session_id,
@@ -2278,14 +2278,14 @@ export function createApiApp() {
     if (!stateResp.ok) {
       return c.json({ error: 'Could not read session state' }, 500)
     }
-    const sessionState = (await stateResp.json()) as { sdk_session_id?: string }
-    const sdkSessionId = sessionState.sdk_session_id
-    if (!sdkSessionId) {
-      return c.json({ error: 'Session has no SDK session ID — cannot fork' }, 400)
+    const sessionState = (await stateResp.json()) as { runner_session_id?: string }
+    const runnerSessionId = sessionState.runner_session_id
+    if (!runnerSessionId) {
+      return c.json({ error: 'Session has no runner session ID — cannot fork' }, 400)
     }
 
     const gatewayUrl = new URL(
-      `/projects/${encodeURIComponent(projectName)}/sessions/${encodeURIComponent(sdkSessionId)}/fork`,
+      `/projects/${encodeURIComponent(projectName)}/sessions/${encodeURIComponent(runnerSessionId)}/fork`,
       httpBase,
     )
 

@@ -27,8 +27,8 @@ Mismatched arity → `exit(2)` with a usage message on stderr. Missing `cmdFile`
 
 1. Parse argv, read `cmdFile`.
 2. Concurrent-resume guard: if `cmd.type === 'resume'` scan sibling
-   `*.meta.json` for a live `sdk_session_id` match; if one is found with a
-   live pid, write `{state:'failed', exit_code:2, error:'sdk_session_id already active'}`
+   `*.meta.json` for a live `runner_session_id` match; if one is found with a
+   live pid, write `{state:'failed', exit_code:2, error:'runner_session_id already active'}`
    and exit.
 3. Write `pidFile`.
 4. Build `BufferedChannel` (10K events / 50MB ring), start `DialBackClient`
@@ -48,7 +48,7 @@ Mismatched arity → `exit(2)` with a usage message on stderr. Missing `cmdFile`
 
 The SDK iterator is kept open after `type=result` — the runner blocks on a
 command queue waiting for the next `stream-input` from the DO, then runs
-another `query({resume: sdk_session_id})`. Exits only on abort, SIGTERM, or
+another `query({resume: runner_session_id})`. Exits only on abort, SIGTERM, or
 the DialBackClient firing `onTerminate` (close codes `4401`/`4410` or
 reconnect-cap exhaustion).
 

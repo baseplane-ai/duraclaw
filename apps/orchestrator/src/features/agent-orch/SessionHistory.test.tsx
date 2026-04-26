@@ -49,7 +49,7 @@ function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
 function makeDiscoveredSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return makeSession({
     id: 'discovered-1',
-    sdkSessionId: 'sdk-abc-123',
+    runnerSessionId: 'sdk-abc-123',
     agent: 'claude',
     origin: 'discovered',
     ...overrides,
@@ -297,7 +297,7 @@ describe('SessionHistory Resume button', () => {
     vi.stubGlobal('fetch', fetchMock)
   })
 
-  it('shows Resume button for discovered sessions with sdk_session_id', () => {
+  it('shows Resume button for discovered sessions with runner_session_id', () => {
     mockLiveQueryData = [makeDiscoveredSession()]
     render(<SessionHistory />)
     expect(screen.getByText('Resume')).toBeTruthy()
@@ -310,7 +310,7 @@ describe('SessionHistory Resume button', () => {
     expect(screen.queryByText('Resume')).toBeNull()
   })
 
-  it('calls POST /api/sessions with sdk_session_id when Resume is clicked', async () => {
+  it('calls POST /api/sessions with runner_session_id when Resume is clicked', async () => {
     mockLiveQueryData = [makeDiscoveredSession()]
     render(<SessionHistory />)
 
@@ -330,7 +330,7 @@ describe('SessionHistory Resume button', () => {
       const body = JSON.parse(postCall?.[1].body as string)
       expect(body.project).toBe('test-project')
       expect(body.prompt).toBe('resume')
-      expect(body.sdk_session_id).toBe('sdk-abc-123')
+      expect(body.runner_session_id).toBe('sdk-abc-123')
       expect(body.agent).toBe('claude')
     })
   })

@@ -435,7 +435,7 @@ export const spec = {
             type: 'string',
             enum: ['running', 'completed', 'failed', 'aborted', 'crashed'],
           },
-          sdk_session_id: { type: ['string', 'null'] },
+          runner_session_id: { type: ['string', 'null'] },
           last_activity_ts: { type: ['integer', 'null'] },
           last_event_seq: { type: 'integer' },
           cost: {
@@ -453,7 +453,7 @@ export const spec = {
         required: [
           'session_id',
           'state',
-          'sdk_session_id',
+          'runner_session_id',
           'last_activity_ts',
           'last_event_seq',
           'cost',

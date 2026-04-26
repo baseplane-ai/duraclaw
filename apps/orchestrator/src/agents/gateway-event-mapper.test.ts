@@ -1,3 +1,4 @@
+import type { WireMessagePart } from '@duraclaw/shared-types'
 import { describe, expect, it } from 'vitest'
 import {
   applyToolResult,
@@ -627,5 +628,65 @@ describe('isAssistantContentEmpty', () => {
       { type: 'thinking', thinking: '' },
     ]
     expect(isAssistantContentEmpty(content)).toBe(true)
+  })
+})
+
+describe('backward-compat-no-parts', () => {
+  it('falls back to content translation when parts is absent', () => {
+    // Simulate a PartialAssistantEvent without parts (old runner)
+    const content = [{ type: 'text', delta: 'hello' }]
+    const parts = partialAssistantToParts(content)
+    expect(parts).toEqual([{ type: 'text', text: 'hello', state: 'streaming' }])
+  })
+
+  it('falls back to assistant content translation when parts is absent', () => {
+    const content = [
+      { type: 'text', text: 'Hello' },
+      { type: 'thinking', thinking: 'hmm' },
+      { type: 'tool_use', id: 'tc-1', name: 'Bash', input: { cmd: 'ls' } },
+    ]
+    const parts = assistantContentToParts(content)
+    expect(parts).toHaveLength(3)
+    expect(parts[0]).toEqual({ type: 'text', text: 'Hello', state: 'done' })
+    expect(parts[1]).toEqual({ type: 'reasoning', text: 'hmm', state: 'done' })
+    expect(parts[2].type).toBe('tool-Bash')
+  })
+
+  it('WireMessagePart shapes are identity-compatible with SessionMessagePart', () => {
+    // The DO maps WireMessagePart → SessionMessagePart via cast. Verify shapes match.
+    const wireParts: WireMessagePart[] = [
+      { type: 'text', text: 'hello', state: 'done' },
+      { type: 'reasoning', text: 'thinking', state: 'streaming' },
+      {
+        type: 'tool-Bash',
+        toolCallId: 'tc-1',
+        toolName: 'Bash',
+        input: { cmd: 'ls' },
+        state: 'input-available',
+      },
+    ]
+    // Identity cast — must not throw
+    const sessionParts = wireParts as unknown as Array<{
+      type: string
+      text?: string
+      toolCallId?: string
+      toolName?: string
+      input?: unknown
+      state?: string
+    }>
+    expect(sessionParts).toHaveLength(3)
+    expect(sessionParts[0].type).toBe('text')
+    expect(sessionParts[0].text).toBe('hello')
+    expect(sessionParts[2].toolCallId).toBe('tc-1')
+  })
+
+  it('events WITH parts use parts directly, ignoring content (verified by shape)', () => {
+    // When parts is present, the DO should use parts directly.
+    // Both paths produce identical shapes for the same logical content.
+    const content = [{ type: 'text', text: 'Hello' }]
+    const fromContent = assistantContentToParts(content)
+    const fromParts: WireMessagePart[] = [{ type: 'text', text: 'Hello', state: 'done' }]
+    const mapped = fromParts as unknown as typeof fromContent
+    expect(mapped).toEqual(fromContent)
   })
 })

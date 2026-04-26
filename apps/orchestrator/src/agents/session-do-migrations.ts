@@ -320,4 +320,34 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
       sql.exec(`CREATE INDEX IF NOT EXISTS idx_event_log_tag_ts ON event_log (tag, ts)`)
     },
   },
+  {
+    version: 18,
+    description:
+      'Spec #101 P1.2: rename session_meta.sdk_session_id -> runner_session_id (terminology decoupled from Claude Agent SDK) and add capabilities_json for AdapterCapabilities relayed by runner on session.init. RENAME COLUMN requires SQLite 3.25+ (CF Workers ships 3.45+). Both ops are idempotent on re-run.',
+    up: (sql) => {
+      try {
+        sql.exec(`ALTER TABLE session_meta RENAME COLUMN sdk_session_id TO runner_session_id`)
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e)
+        // Idempotent: if already renamed (e.g. partial migration retry), the
+        // old column is missing — that's fine. Any other failure must surface.
+        if (
+          !msg.toLowerCase().includes('no such column') &&
+          !msg.toLowerCase().includes('duplicate column')
+        ) {
+          console.warn('[migration v18] unexpected error renaming sdk_session_id', e)
+          throw e
+        }
+      }
+      try {
+        sql.exec(`ALTER TABLE session_meta ADD COLUMN capabilities_json TEXT`)
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (!msg.toLowerCase().includes('duplicate column')) {
+          console.warn('[migration v18] unexpected error adding capabilities_json column', e)
+          throw e
+        }
+      }
+    },
+  },
 ]

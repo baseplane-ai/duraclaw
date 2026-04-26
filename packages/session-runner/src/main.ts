@@ -9,7 +9,7 @@
  *   1. Parse argv; bail to stderr + exit(2) on arity mismatch.
  *   2. Read cmd-file synchronously. On any failure → write exit-file
  *      `{state:"failed", exit_code:1, error}` and exit(1).
- *   3. Concurrent-resume guard: scan sibling *.meta.json for a live sdk_session_id match.
+ *   3. Concurrent-resume guard: scan sibling *.meta.json for a live runner_session_id match.
  *   4. Write pid-file (plain writeFile — nobody races us for this one).
  *   5. Dial DO via BufferedChannel + DialBackClient. Build RunnerSessionContext.
  *   6. Run runner.execute / runner.resume.
@@ -91,7 +91,7 @@ async function writeExitAndExit(
 
 /**
  * Concurrent-resume guard — block a second `resume` against a still-running
- * sdk_session_id. Scans sibling *.meta.json in the pid-file's directory.
+ * runner_session_id. Scans sibling *.meta.json in the pid-file's directory.
  * Meta files without a matching live pid are silently ignored.
  */
 async function hasLiveResume(cmd: ResumeCommand, pidFile: string): Promise<boolean> {
@@ -105,14 +105,14 @@ async function hasLiveResume(cmd: ResumeCommand, pidFile: string): Promise<boole
   for (const entry of entries) {
     if (!entry.endsWith('.meta.json')) continue
     const metaPath = path.join(dir, entry)
-    let parsed: { sdk_session_id?: unknown }
+    let parsed: { runner_session_id?: unknown }
     try {
       const raw = await fs.readFile(metaPath, 'utf8')
       parsed = JSON.parse(raw)
     } catch {
       continue
     }
-    if (parsed.sdk_session_id !== cmd.sdk_session_id) continue
+    if (parsed.runner_session_id !== cmd.runner_session_id) continue
 
     // Resolve sibling pid file: strip `.meta.json`, append `.pid`.
     const base = entry.slice(0, -'.meta.json'.length)
@@ -333,7 +333,7 @@ async function main(): Promise<void> {
     if (isLive) {
       return writeExitAndExit(
         argv.exitFile,
-        { state: 'failed', exit_code: 2, error: 'sdk_session_id already active' },
+        { state: 'failed', exit_code: 2, error: 'runner_session_id already active' },
         2,
       )
     }
@@ -416,7 +416,7 @@ async function main(): Promise<void> {
     titler: null,
     nextSeq: 0,
     meta: {
-      sdk_session_id: null,
+      runner_session_id: null,
       last_activity_ts: Date.now(),
       last_event_seq: 0,
       cost: { input_tokens: 0, output_tokens: 0, usd: 0 },

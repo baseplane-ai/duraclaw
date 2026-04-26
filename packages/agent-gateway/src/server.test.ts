@@ -280,7 +280,7 @@ describe('GET /sessions', () => {
     await fs.writeFile(
       nodePath.join(tmpDir, 'A.meta.json'),
       JSON.stringify({
-        sdk_session_id: 'sdk-A',
+        runner_session_id: 'sdk-A',
         last_activity_ts: 111,
         last_event_seq: 5,
         cost: { input_tokens: 10, output_tokens: 20, usd: 0.001 },
@@ -302,7 +302,7 @@ describe('GET /sessions', () => {
     await fs.writeFile(
       nodePath.join(tmpDir, 'B.meta.json'),
       JSON.stringify({
-        sdk_session_id: 'sdk-B',
+        runner_session_id: 'sdk-B',
         last_activity_ts: 222,
         last_event_seq: 42,
         cost: { input_tokens: 1000, output_tokens: 500, usd: 0.02 },
@@ -355,7 +355,7 @@ describe('GET /sessions/:id/status', () => {
     await fs.writeFile(
       nodePath.join(tmpDir, 'LIVE.meta.json'),
       JSON.stringify({
-        sdk_session_id: 'sdk-xyz',
+        runner_session_id: 'sdk-xyz',
         last_activity_ts: 1700000000000,
         last_event_seq: 7,
         cost: { input_tokens: 100, output_tokens: 50, usd: 0.0015 },
@@ -372,7 +372,7 @@ describe('GET /sessions/:id/status', () => {
       ok: true,
       session_id: 'LIVE',
       state: 'running',
-      sdk_session_id: 'sdk-xyz',
+      runner_session_id: 'sdk-xyz',
       last_activity_ts: 1700000000000,
       last_event_seq: 7,
       cost: { input_tokens: 100, output_tokens: 50, usd: 0.0015 },
@@ -393,7 +393,7 @@ describe('GET /sessions/:id/status', () => {
     const body = (await resp.json()) as Record<string, unknown>
     expect(body.ok).toBe(true)
     expect(body.state).toBe('running')
-    expect(body.sdk_session_id).toBeNull()
+    expect(body.runner_session_id).toBeNull()
     expect(body.last_activity_ts).toBeNull()
     expect(body.last_event_seq).toBe(0)
     expect(body.cost).toEqual({ input_tokens: 0, output_tokens: 0, usd: 0 })

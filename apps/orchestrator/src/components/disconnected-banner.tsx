@@ -1,7 +1,7 @@
 /**
  * DisconnectedBanner — renders above StatusBar when the session WS has
  * been disconnected for more than DISCONNECT_GRACE_MS and the session
- * has an sdk_session_id (i.e. there's an on-disk JSONL transcript to
+ * has a runner_session_id (i.e. there's an on-disk JSONL transcript to
  * resume from). The grace period keeps transient flaps (visibility
  * change, network hiccup, normal ConnectionManager reconnect) from
  * flashing the banner. Auto-retries the gateway dial once the grace
@@ -45,15 +45,15 @@ export function DisconnectedBanner({
   const wsReadyState = local?.wsReadyState ?? 3
   const status =
     useSessionStatus(sessionId) ?? (session?.status as SessionStatus | undefined) ?? 'idle'
-  const hasSdkSession = Boolean(session?.sdkSessionId)
+  const hasRunnerSession = Boolean(session?.runnerSessionId)
 
   // Baseline: eligible to eventually show if WS is not open, session is
-  // not actively streaming (idle), and there's an sdk_session_id to
+  // not actively streaming (idle), and there's a runner_session_id to
   // resume to. This is the trigger for the grace-period timer — NOT
   // the banner's visibility gate.
   const isDisconnected = wsReadyState !== 1
   const isRecoverable = status === 'idle'
-  const isEligible = isDisconnected && isRecoverable && hasSdkSession
+  const isEligible = isDisconnected && isRecoverable && hasRunnerSession
 
   // Track when the disconnected state started. Cleared the moment the
   // WS comes back or the session becomes non-recoverable, so a brief

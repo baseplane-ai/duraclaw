@@ -4,25 +4,30 @@ import { chunkOps } from '~/lib/chunk-frame'
 import { getSessionStatus } from '~/lib/vps-client'
 import { fingerprintAssistantContent } from './gateway-event-mapper'
 import {
+  findPendingGatePartByHistory as findPendingGatePart,
+  isPendingGatePart,
+} from './session-do/gates'
+import {
+  finalizeResultTurn,
+  repeatedTurnGuardStep,
+  runawayGuardStep,
+} from './session-do/gateway-event-handler'
+import { claimSubmitId, deriveSnapshotOps } from './session-do/history'
+import { loadTurnState } from './session-do/hydration'
+import {
   buildGatewayCallbackUrl,
   buildGatewayStartUrl,
-  claimSubmitId,
   constantTimeEquals,
+  getGatewayConnectionIdFromSql as getGatewayConnectionId,
+  validateGatewayToken,
+} from './session-do/runner-link'
+import { RECOVERY_GRACE_MS } from './session-do/types'
+import {
   DEFAULT_STALE_THRESHOLD_MS,
-  deriveSnapshotOps,
-  finalizeResultTurn,
-  findPendingGatePart,
-  getGatewayConnectionId,
-  isPendingGatePart,
-  loadTurnState,
   planAwaitingTimeout,
   planClearAwaiting,
-  RECOVERY_GRACE_MS,
-  repeatedTurnGuardStep,
   resolveStaleThresholdMs,
-  runawayGuardStep,
-  validateGatewayToken,
-} from './session-do-helpers'
+} from './session-do/watchdog'
 import { SESSION_DO_MIGRATIONS } from './session-do-migrations'
 
 /**
@@ -243,7 +248,7 @@ describe('SESSION_DO_MIGRATIONS', () => {
   describe('migration chain integrity', () => {
     it('has sequential version numbers', () => {
       const versions = SESSION_DO_MIGRATIONS.map((m) => m.version)
-      expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17])
+      expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18])
     })
 
     it('all migrations have descriptions', () => {
@@ -697,7 +702,7 @@ describe('getSessionStatus', () => {
         JSON.stringify({
           ok: true,
           state: 'running',
-          sdk_session_id: 'sdk-1',
+          runner_session_id: 'sdk-1',
           last_activity_ts: 1,
           last_event_seq: 0,
           cost: { input_tokens: 0, output_tokens: 0, usd: 0 },
@@ -722,7 +727,7 @@ describe('getSessionStatus', () => {
           JSON.stringify({
             ok: true,
             state: 'completed',
-            sdk_session_id: 'sdk',
+            runner_session_id: 'sdk',
             last_activity_ts: 0,
             last_event_seq: 0,
             cost: { input_tokens: 0, output_tokens: 0, usd: 0 },
@@ -1319,7 +1324,7 @@ describe('SessionDO status-aware recovery', () => {
     mockStatus({
       ok: true,
       state: 'running',
-      sdk_session_id: 'sdk-1',
+      runner_session_id: 'sdk-1',
       last_activity_ts: 1,
       last_event_seq: 0,
       cost: { input_tokens: 0, output_tokens: 0, usd: 0 },
@@ -1335,7 +1340,7 @@ describe('SessionDO status-aware recovery', () => {
     mockStatus({
       ok: true,
       state: 'completed',
-      sdk_session_id: null,
+      runner_session_id: null,
       last_activity_ts: 0,
       last_event_seq: 0,
       cost: { input_tokens: 0, output_tokens: 0, usd: 0 },
@@ -1359,7 +1364,7 @@ describe('SessionDO status-aware recovery', () => {
     mockStatus({
       ok: true,
       state,
-      sdk_session_id: 'sdk-1',
+      runner_session_id: 'sdk-1',
       last_activity_ts: 0,
       last_event_seq: 0,
       cost: { input_tokens: 0, output_tokens: 0, usd: 0 },
@@ -2083,7 +2088,7 @@ describe('session_meta persists across rehydrate (P5 B10)', () => {
     created_at: 'created_at',
     error: 'error',
     summary: 'summary',
-    sdk_session_id: 'sdk_session_id',
+    runner_session_id: 'runner_session_id',
     active_callback_token: 'active_callback_token',
     lastKataMode: 'last_kata_mode',
   }
@@ -2123,7 +2128,7 @@ describe('session_meta persists across rehydrate (P5 B10)', () => {
     created_at: '',
     error: null,
     summary: null,
-    sdk_session_id: null,
+    runner_session_id: null,
   }
 
   it('restores status / project / session_id after a simulated DO eviction', () => {
@@ -2139,7 +2144,7 @@ describe('session_meta persists across rehydrate (P5 B10)', () => {
       user_id: 'u1',
       num_turns: 3,
       created_at: '2026-01-01T00:00:00Z',
-      sdk_session_id: 'sdk-abc',
+      runner_session_id: 'sdk-abc',
     }
 
     const rehydrated = hydrateFromRow(persisted, DEFAULTS)
@@ -2152,7 +2157,7 @@ describe('session_meta persists across rehydrate (P5 B10)', () => {
     expect(rehydrated.prompt).toBe('help me')
     expect(rehydrated.userId).toBe('u1')
     expect(rehydrated.num_turns).toBe(3)
-    expect(rehydrated.sdk_session_id).toBe('sdk-abc')
+    expect(rehydrated.runner_session_id).toBe('sdk-abc')
   })
 
   it('no-ops when the session_meta row is missing (cold-start, pre-migration data)', () => {
@@ -3357,7 +3362,7 @@ describe('idle→running broadcasts status via updateState', () => {
 // `'idle'`, persists the failure as a visible system message, and
 // clears `active_callback_token` so the dead runner's WS is terminal.
 // `sendMessage` then accepts the next user turn via the isResumable
-// branch (idle + sdk_session_id) and dials a fresh resume runner.
+// branch (idle + runner_session_id) and dials a fresh resume runner.
 
 describe('error event transitions session to idle (not error) so user can resume', () => {
   type ErrorPartial = {
@@ -3391,27 +3396,27 @@ describe('error event transitions session to idle (not error) so user can resume
 
   // Mirrors the sendMessage resumable-branch gate
   // (session-do.ts lines 2465-2477): status must be 'idle' with an
-  // sdk_session_id for a post-error resume to be accepted.
+  // runner_session_id for a post-error resume to be accepted.
   //
   // Also mirrors the auto-heal that precedes the gate — if status is
   // 'running'/'waiting_gate' but no runner is attached, recovery runs
   // inline (flipping status to 'idle') before the gate is evaluated.
   function sendMessageAcceptsResume(state: {
     status: string
-    sdk_session_id: string | null
+    runner_session_id: string | null
     hasLiveRunner: boolean
   }): { ok: boolean; error?: string; healed?: boolean } {
     let status = state.status
     let healed = false
     if (!state.hasLiveRunner && (status === 'running' || status === 'waiting_gate')) {
-      // recoverFromDroppedConnection → status='idle', sdk_session_id preserved.
+      // recoverFromDroppedConnection → status='idle', runner_session_id preserved.
       status = 'idle'
       healed = true
     }
     const isResumable =
       !state.hasLiveRunner &&
       (status === 'idle' || status === 'error') &&
-      Boolean(state.sdk_session_id)
+      Boolean(state.runner_session_id)
     if (!state.hasLiveRunner && !isResumable) {
       return { ok: false, error: `Cannot send message: status is '${status}'`, healed }
     }
@@ -3446,12 +3451,12 @@ describe('error event transitions session to idle (not error) so user can resume
 
   it('sendMessage accepts the next user turn via isResumable branch (no more blocking error lock)', () => {
     // After the error event lands, the session is idle with a valid
-    // sdk_session_id (persisted from session.init). The runner's WS is
+    // runner_session_id (persisted from session.init). The runner's WS is
     // gone. This is exactly the resume path that was bricked while the
     // session sat in 'error'.
     const res = sendMessageAcceptsResume({
       status: 'idle',
-      sdk_session_id: 'sdk-sess-abc',
+      runner_session_id: 'sdk-sess-abc',
       hasLiveRunner: false,
     })
     expect(res.ok).toBe(true)
@@ -3461,24 +3466,24 @@ describe('error event transitions session to idle (not error) so user can resume
   it('sendMessage accepts the next user turn from terminal status=error (spec #80 B7 resumable contract)', () => {
     // `failAwaitingTurn()` flips to status='error' as a terminal-UI marker
     // but the same block's own comment promises "the session remains
-    // resumable via sdk_session_id". The gate honours that: a live
-    // sdk_session_id + no attached runner resumes on the next user turn.
+    // resumable via runner_session_id". The gate honours that: a live
+    // runner_session_id + no attached runner resumes on the next user turn.
     const errRes = sendMessageAcceptsResume({
       status: 'error',
-      sdk_session_id: 'sdk-sess-abc',
+      runner_session_id: 'sdk-sess-abc',
       hasLiveRunner: false,
     })
     expect(errRes.ok).toBe(true)
   })
 
   // Auto-heal for the stuck-running case: status='running' persisted in DO
-  // state, no gateway WS attached, sdk_session_id present. Before the fix,
+  // state, no gateway WS attached, runner_session_id present. Before the fix,
   // sendMessage returned "Cannot send message: status is 'running'"; after
   // the fix it runs recovery inline, flipping to idle, and accepts the turn.
   it('auto-heals stuck status:running with no runner (runs recovery inline)', () => {
     const res = sendMessageAcceptsResume({
       status: 'running',
-      sdk_session_id: 'sdk-sess-xyz',
+      runner_session_id: 'sdk-sess-xyz',
       hasLiveRunner: false,
     })
     expect(res.ok).toBe(true)
@@ -3488,7 +3493,7 @@ describe('error event transitions session to idle (not error) so user can resume
   it('auto-heals stuck status:waiting_gate with no runner', () => {
     const res = sendMessageAcceptsResume({
       status: 'waiting_gate',
-      sdk_session_id: 'sdk-sess-xyz',
+      runner_session_id: 'sdk-sess-xyz',
       hasLiveRunner: false,
     })
     expect(res.ok).toBe(true)
@@ -3498,7 +3503,7 @@ describe('error event transitions session to idle (not error) so user can resume
   it('does not auto-heal when the runner is attached (normal running path)', () => {
     const res = sendMessageAcceptsResume({
       status: 'running',
-      sdk_session_id: 'sdk-sess-xyz',
+      runner_session_id: 'sdk-sess-xyz',
       hasLiveRunner: true,
     })
     expect(res.ok).toBe(true)

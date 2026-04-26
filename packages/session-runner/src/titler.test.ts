@@ -51,7 +51,7 @@ function makeCtx(overrides?: Partial<RunnerSessionContext['meta']>): RunnerSessi
     commandQueue: [],
     nextSeq: 0,
     meta: {
-      sdk_session_id: null,
+      runner_session_id: null,
       last_activity_ts: 0,
       last_event_seq: 0,
       cost: { input_tokens: 0, output_tokens: 0, usd: 0 },
