@@ -104,8 +104,8 @@ These defaults are safe for local verification and can be overridden per shell:
 - Raw smoke artifacts live in `logs/verify/`
 - Phase/issue evidence lives in `.kata/verification-evidence/`
 - If you run `kata check-phase`, make sure the evidence file reflects the current commit
-- When a change touches auth, gateway proxying, session creation, or routing, run both `pnpm verify:gateway` and `pnpm verify:browser`
-- When a change touches session lifecycle, run `pnpm verify:session` and `pnpm verify:browser:session`
+- When a change touches auth, gateway proxying, session creation, or routing, prefer running both `pnpm verify:gateway` and `pnpm verify:browser` — pick the narrower one only if the change is clearly scoped to that layer.
+- When a change touches session lifecycle, run `pnpm verify:session` and `pnpm verify:browser:session`.
 
 ## Done Gate
 
@@ -145,5 +145,5 @@ That baseline now proves all of the following with real calls:
 
 Important launcher note:
 
-- The orchestrator must keep a live PTY. A detached launch that redirects process output directly to a file can make `/` and `/login` return empty HTML bodies even though the API routes still answer.
+- **Gotcha:** the orchestrator must keep a live PTY. A detached launch that redirects process output directly to a file can make `/` and `/login` return empty HTML bodies even though the API routes still answer.
 - `scripts/verify/dev-up.sh` avoids that by keeping the orchestrator inside tmux and logging with `tmux pipe-pane` instead of shell redirection.

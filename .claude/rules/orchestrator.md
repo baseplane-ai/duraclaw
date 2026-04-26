@@ -9,4 +9,4 @@ paths:
 - **Auth**: Better Auth with D1 via Drizzle. Per-request auth instance (D1 only available in request context). Login at `/login`, API at `/api/auth/*`
 - **Environment** (wrangler secrets): `CC_GATEWAY_URL` (http(s) URL to gateway), `CC_GATEWAY_SECRET` (bearer matched by gateway), `WORKER_PUBLIC_URL` (wss base the runner uses to dial the DO), `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`
 - **D1 Database**: `duraclaw-auth`
-- **Entry point**: `src/server.ts` exports DO classes + TanStack Start default handler
+- **Entry point**: `src/server.ts` exports the four DO classes + a `fetch` handler that routes WS upgrades via `routePartykitRequest` (PartyServer) and HTTP via the Hono app from `createApiApp()`. Static client assets are served by `env.ASSETS.fetch()`. There is no TanStack Start — this is a plain Vite SPA on the Worker.

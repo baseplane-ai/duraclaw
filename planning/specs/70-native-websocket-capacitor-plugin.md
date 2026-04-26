@@ -395,14 +395,15 @@ evidence. Update `planning/progress.md` and GH#70.
 
 ## Verification Plan
 
-All steps executed on the dev Pixel (`46211FDAQ00534`) at Tailscale IP
-`100.113.109.57` via wireless adb. Signed release APK required.
+All steps executed on a dev Android device (referenced as `$DEVICE_IP`
+in the snippets below — set it to the LAN or Tailscale IP of your dev
+device) via wireless adb. Signed release APK required.
 
 ### Pre-flight
 
 ```bash
 export PATH="/home/ubuntu/Android/sdk/platform-tools:$PATH"
-adb connect 100.113.109.57:<PORT>
+adb connect $DEVICE_IP:<PORT>
 adb devices  # confirm device status
 
 # Build + sign + install
@@ -412,7 +413,7 @@ cd apps/mobile
 pnpm cap sync android
 bash scripts/build-android.sh
 bash scripts/sign-android.sh
-adb -s 100.113.109.57:<PORT> install -r \
+adb -s $DEVICE_IP:<PORT> install -r \
   android/app/build/outputs/apk/release/app-release-signed.apk
 ```
 
@@ -420,12 +421,12 @@ adb -s 100.113.109.57:<PORT> install -r \
 
 ```bash
 # Clear logcat, launch app
-adb -s 100.113.109.57:<PORT> logcat -c
-adb -s 100.113.109.57:<PORT> shell monkey -p com.baseplane.duraclaw \
+adb -s $DEVICE_IP:<PORT> logcat -c
+adb -s $DEVICE_IP:<PORT> shell monkey -p com.baseplane.duraclaw \
   -c android.intent.category.LAUNCHER 1
 
 # Wait for login + session open, then:
-adb -s 100.113.109.57:<PORT> logcat -d -s Capacitor/NativeWs | head -20
+adb -s $DEVICE_IP:<PORT> logcat -d -s Capacitor/NativeWs | head -20
 ```
 
 **Expected:** At least 2 `[open]` lines — one for `user-stream`, one for `agent:<agentName>`. If a collab session is active, a third `[open]` for `collab:<sessionId>`.
@@ -437,17 +438,17 @@ adb -s 100.113.109.57:<PORT> logcat -d -s Capacitor/NativeWs | head -20
 ```bash
 # Start a session, send a message, wait for agent response to confirm OPEN
 # Lock phone screen (physical button or:)
-adb -s 100.113.109.57:<PORT> shell input keyevent 26  # KEYCODE_POWER (screen off)
+adb -s $DEVICE_IP:<PORT> shell input keyevent 26  # KEYCODE_POWER (screen off)
 
 # Wait 35 seconds
 sleep 35
 
 # Wake screen
-adb -s 100.113.109.57:<PORT> shell input keyevent 26  # KEYCODE_POWER (screen on)
-adb -s 100.113.109.57:<PORT> shell input swipe 540 2000 540 1000  # swipe to unlock
+adb -s $DEVICE_IP:<PORT> shell input keyevent 26  # KEYCODE_POWER (screen on)
+adb -s $DEVICE_IP:<PORT> shell input swipe 540 2000 540 1000  # swipe to unlock
 
 # Check logcat — should have NO [close] events during the 35s window
-adb -s 100.113.109.57:<PORT> logcat -d -s Capacitor/NativeWs | grep '\[close\]'
+adb -s $DEVICE_IP:<PORT> logcat -d -s Capacitor/NativeWs | grep '\[close\]'
 ```
 
 **Expected:** No `[close]` events during the 35s window. Socket `readyState` is still `OPEN` after unlock. Note: ping/pong frames are not visible in logcat (OkHttp handles them internally) — connection liveness is inferred from the absence of close events.
@@ -460,38 +461,38 @@ OkHttp's effective timeout is ~30s (one missed pong at the next ping interval), 
 
 ```bash
 # With active session, enable airplane mode on the Pixel
-adb -s 100.113.109.57:<PORT> shell cmd connectivity airplane-mode enable
+adb -s $DEVICE_IP:<PORT> shell cmd connectivity airplane-mode enable
 
 # Wait 40 seconds (past ~30s OkHttp ping timeout)
 sleep 40
 
 # Check logcat
-adb -s 100.113.109.57:<PORT> logcat -d -s Capacitor/NativeWs | grep '\[close\]'
+adb -s $DEVICE_IP:<PORT> logcat -d -s Capacitor/NativeWs | grep '\[close\]'
 ```
 
 **Expected:** `[close] id=<id> code=1006 reason=<SocketTimeoutException message> wasClean=false` for each open socket.
 
 ```bash
 # Disable airplane mode
-adb -s 100.113.109.57:<PORT> shell cmd connectivity airplane-mode disable
+adb -s $DEVICE_IP:<PORT> shell cmd connectivity airplane-mode disable
 ```
 
 ### VP-4: NetworkCallback fires on connectivity change
 
 ```bash
-adb -s 100.113.109.57:<PORT> logcat -c
+adb -s $DEVICE_IP:<PORT> logcat -c
 # Toggle Wi-Fi off on the device
-adb -s 100.113.109.57:<PORT> shell svc wifi disable
+adb -s $DEVICE_IP:<PORT> shell svc wifi disable
 sleep 3
-adb -s 100.113.109.57:<PORT> logcat -d -s Capacitor/NativeWs | grep networkChange
+adb -s $DEVICE_IP:<PORT> logcat -d -s Capacitor/NativeWs | grep networkChange
 ```
 
 **Expected:** `[networkChange] online=false transport=none` (or `transport=cell` if mobile data is active).
 
 ```bash
-adb -s 100.113.109.57:<PORT> shell svc wifi enable
+adb -s $DEVICE_IP:<PORT> shell svc wifi enable
 sleep 5
-adb -s 100.113.109.57:<PORT> logcat -d -s Capacitor/NativeWs | grep networkChange
+adb -s $DEVICE_IP:<PORT> logcat -d -s Capacitor/NativeWs | grep networkChange
 ```
 
 **Expected:** `[networkChange] online=true transport=wifi`.

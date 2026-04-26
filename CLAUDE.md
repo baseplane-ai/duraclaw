@@ -10,7 +10,7 @@ Duraclaw orchestrates Claude Code sessions across multiple VPS worktrees. A Clou
 Browser
   |
   v
-CF Worker (TanStack Start) --- React UI + API routes
+CF Worker (Vite SPA + Hono) --- React UI + API routes
   |
   v
 SessionDO (1 per session) --- state + SQLite message history
@@ -37,7 +37,7 @@ Key invariants:
 
 ```
 apps/
-  orchestrator/          # CF Workers + TanStack Start (React 19, Vite 7)
+  orchestrator/          # CF Workers + Vite 8 SPA + Hono API (React 19, TanStack Router)
   mobile/                # Capacitor 8 Android shell (thin client, GH#26)
 packages/
   agent-gateway/         # VPS control plane (Bun HTTP server, systemd)
@@ -52,9 +52,9 @@ planning/
 
 ## Tech Stack
 
-- **Runtime**: TypeScript 5.8, React 19, Vite 7
+- **Runtime**: TypeScript 5.8, React 19, Vite 8
 - **Monorepo**: pnpm workspaces + Turbo
-- **Orchestrator**: Cloudflare Workers, Durable Objects (Agents SDK v0.7), TanStack Start
+- **Orchestrator**: Cloudflare Workers, Durable Objects (Agents SDK v0.7), plain Vite 8 SPA + Hono API (TanStack Router on the client; no TanStack Start)
 - **Auth**: Better Auth with D1 (Drizzle adapter)
 - **Gateway**: Bun HTTP server — spawn/list/status/reap only
 - **Session-runner**: Bun-executable that wraps `@anthropic-ai/claude-agent-sdk` and dials the DO via `shared-transport`
