@@ -1,4 +1,4 @@
-import type { SessionMessage as WireSessionMessage } from '@duraclaw/shared-types'
+import type { AgentName, SessionMessage as WireSessionMessage } from '@duraclaw/shared-types'
 import type { SessionMessage } from 'agents/experimental/memory/session'
 import { contentToParts } from '~/lib/message-parts'
 import { promptToPreviewText } from '~/lib/prompt-preview'
@@ -21,6 +21,20 @@ import { DEFAULT_META, type SessionDOContext } from './types'
  * persistence all live here.
  */
 
+/**
+ * GH#107: known agent kinds the runner-side registry recognises.
+ * Validated at the DO boundary so we never spawn a VPS process for an
+ * unknown agent — `SpawnConfig.agent` is `string | undefined` (it
+ * crosses external/persisted boundaries) so we narrow it here.
+ */
+const KNOWN_AGENTS: ReadonlyArray<AgentName> = ['claude', 'codex']
+
+function validateAgent(agent: string | undefined): AgentName | undefined {
+  if (agent === undefined) return undefined
+  if (KNOWN_AGENTS.includes(agent as AgentName)) return agent as AgentName
+  throw new Error(`unknown_agent:${agent}`)
+}
+
 export async function spawnImpl(
   ctx: SessionDOContext,
   config: SpawnConfig,
@@ -38,6 +52,16 @@ export async function spawnImpl(
     ctx.state.status === 'pending'
   ) {
     return { ok: false, error: 'Session already active' }
+  }
+
+  // GH#107: reject unknown agents at the DO boundary BEFORE we mutate
+  // any state or spawn a VPS process. Surfaces via the same {ok,error}
+  // shape every other validation in this RPC uses.
+  let validatedAgent: AgentName | undefined
+  try {
+    validatedAgent = validateAgent(config.agent)
+  } catch (err) {
+    return { ok: false, error: (err as Error).message }
   }
 
   const now = new Date().toISOString()
@@ -89,7 +113,10 @@ export async function spawnImpl(
     project: config.project,
     prompt: config.prompt,
     model: config.model,
-    agent: config.agent,
+    // SpawnConfig.agent stays `string` for now (it reads persisted /
+    // external data — see GH#107 P1 spec). Validated above; the
+    // runner-side registry double-checks at boot.
+    agent: validatedAgent,
     system_prompt: config.system_prompt,
     allowed_tools: config.allowed_tools,
     max_turns: config.max_turns,
@@ -114,6 +141,14 @@ export async function resumeDiscoveredImpl(
     ctx.state.status === 'pending'
   ) {
     return { ok: false, error: 'Session already active' }
+  }
+
+  // GH#107: reject unknown agents at the DO boundary, same as spawnImpl.
+  let validatedAgent: AgentName | undefined
+  try {
+    validatedAgent = validateAgent(config.agent)
+  } catch (err) {
+    return { ok: false, error: (err as Error).message }
   }
 
   const now = new Date().toISOString()
@@ -162,7 +197,9 @@ export async function resumeDiscoveredImpl(
     project: config.project,
     prompt: config.prompt,
     runner_session_id: runnerSessionId,
-    agent: config.agent,
+    // See note in spawnImpl above — SpawnConfig.agent is wider than
+    // AgentName by design; validated at the wire boundary.
+    agent: validatedAgent,
   })
 
   console.log(

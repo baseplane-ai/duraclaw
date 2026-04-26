@@ -281,6 +281,24 @@ export const featureFlags = sqliteTable('feature_flags', {
   updatedAt: text('updated_at').notNull(),
 })
 
+/**
+ * GH#107 P2: admin-managed catalog of OpenAI Codex models.
+ *
+ * Read on `triggerGatewayDial` for codex sessions and injected onto
+ * the spawn payload as `cmd.codex_models`. CRUD via
+ * `/api/admin/codex-models*` (admin role gated). Seeded by migration
+ * 0024 with `gpt-5.1` (1M) and `o4-mini` (200k).
+ */
+export const codexModels = sqliteTable('codex_models', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull().unique(),
+  contextWindow: integer('context_window').notNull(),
+  maxOutputTokens: integer('max_output_tokens'),
+  enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
+  createdAt: text('created_at').notNull().default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').notNull().default(sql`(datetime('now'))`),
+})
+
 export const userPreferences = sqliteTable('user_preferences', {
   userId: text('user_id')
     .primaryKey()

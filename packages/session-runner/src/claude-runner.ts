@@ -9,6 +9,7 @@ import type {
   KataSessionState,
   ResumeCommand,
 } from '@duraclaw/shared-types'
+import { CLAUDE_CAPABILITIES } from './adapters/claude.js'
 import { buildCleanEnv } from './env.js'
 
 import { resolveProject } from './project-resolver.js'
@@ -579,6 +580,7 @@ export class ClaudeRunner {
               project: cmd.project,
               model,
               tools,
+              capabilities: CLAUDE_CAPABILITIES,
             },
             ctx,
           )

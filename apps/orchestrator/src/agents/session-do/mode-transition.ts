@@ -211,11 +211,18 @@ export async function handleModeTransitionImpl(
 
   // 6. Spawn fresh runner in the new mode. triggerGatewayDial handles any
   //    lingering runner via 4410 rotation.
+  // NOTE: GH#107 P1 narrows `ExecuteCommand.agent` to `AgentName`. Prior
+  // to this, `agent: toMode` was passed here with a kata mode value
+  // (`'planning'`, `'implementation'`, etc.) — that was always wrong:
+  // ClaudeRunner ignored `cmd.agent` entirely, so the field was a
+  // dead-letter on the wire. Dropped here so the runner-side adapter
+  // registry (which now treats `cmd.agent` authoritatively) defaults
+  // to ClaudeAdapter for chain mode transitions, preserving the
+  // pre-narrowing runtime behaviour.
   await triggerGatewayDialImpl(ctx, {
     type: 'execute',
     project: ctx.state.project,
     prompt: preamble,
-    agent: toMode,
     model: ctx.state.model ?? 'sonnet',
   })
 }

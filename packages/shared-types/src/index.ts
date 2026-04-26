@@ -2,6 +2,18 @@ import type { SDKAssistantMessageError } from '@anthropic-ai/claude-agent-sdk'
 
 // ── Gateway Commands (Orchestrator → Gateway) ─────────────────────────
 
+/**
+ * GH#107: Adapter-name discriminator on the wire. Narrows `agent` on
+ * `ExecuteCommand` / `ResumeCommand` so consumers (DO, gateway, runner,
+ * tests) share a single source of truth for valid runner adapters.
+ *
+ * Other persisted/external `agent` strings (`SessionSummary.agent`,
+ * `DiscoveredSession.agent`, `SessionSource.agent`, `SpawnConfig.agent`)
+ * stay as `string` for now — those read from D1 / external SDKs and
+ * narrowing them is a follow-up.
+ */
+export type AgentName = 'claude' | 'codex'
+
 export type GatewayCommand =
   | ExecuteCommand
   | ResumeCommand
@@ -31,7 +43,13 @@ export interface ExecuteCommand {
   /** Baseplane user ID (gateway-level metadata, not passed to Claude SDK) */
   user_id?: string
   /** Which agent to use. Defaults to 'claude' if omitted. */
-  agent?: string
+  agent?: AgentName
+  /**
+   * GH#107: Codex model catalog injected by the DO from D1 at spawn
+   * time. The CodexAdapter uses it for `availableProviders` and the
+   * per-turn context-window math; ignored by other adapters.
+   */
+  codex_models?: ReadonlyArray<{ name: string; context_window: number }>
   /** GH#86: enable Haiku-based session titler in the runner. Default false. */
   titler_enabled?: boolean
 }
@@ -96,7 +114,13 @@ export interface ResumeCommand {
   prompt: string | ContentBlock[]
   runner_session_id: string
   /** Which agent to use for resume. Defaults to 'claude' if omitted. */
-  agent?: string
+  agent?: AgentName
+  /**
+   * GH#107: Codex model catalog injected by the DO from D1 at spawn
+   * time. The CodexAdapter uses it for `availableProviders` and the
+   * per-turn context-window math; ignored by other adapters.
+   */
+  codex_models?: ReadonlyArray<{ name: string; context_window: number }>
   /** GH#86: enable Haiku-based session titler in the runner. Default false. */
   titler_enabled?: boolean
 }
