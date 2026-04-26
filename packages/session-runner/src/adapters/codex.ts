@@ -68,9 +68,12 @@ export class CodexAdapter implements RunnerAdapter {
     this.currentModel = opts.model ?? 'gpt-5.1'
 
     // The SDK accepts an `env` map; when present it does not inherit
-    // process.env. We pass through whatever main.ts handed us — gateway
-    // already built a clean env including OPENAI_API_KEY.
-    this.codex = new Codex({ env: { ...opts.env } })
+    // process.env. We pass through whatever main.ts handed us.
+    // `codexPathOverride` lets the SDK find the CLI binary even when PATH
+    // inside the spawned runner subprocess doesn't include ~/.bun/bin.
+    // Falls back to SDK default (PATH lookup) when the env var is unset.
+    const codexPath = opts.env.CODEX_BIN_PATH ?? opts.env.CODEX_PATH ?? undefined
+    this.codex = new Codex({ env: { ...opts.env }, codexPathOverride: codexPath })
 
     let runnerSessionId: string | null = null
     if (opts.resumeSessionId) {
