@@ -67,19 +67,6 @@ export class CodexAdapter implements RunnerAdapter {
     this.opts = opts
     this.currentModel = opts.model ?? 'gpt-5.1'
 
-    // B10: credential check before any SDK instantiation. Treat empty
-    // string as missing — `buildCleanEnv()` may forward an empty value
-    // when the worktree env file omits the key.
-    const apiKey = opts.env.OPENAI_API_KEY
-    if (!apiKey) {
-      opts.onEvent({
-        type: 'error',
-        session_id: opts.sessionId,
-        error: 'OPENAI_API_KEY not set [missing_credential_openai_api_key]',
-      })
-      return
-    }
-
     // The SDK accepts an `env` map; when present it does not inherit
     // process.env. We pass through whatever main.ts handed us — gateway
     // already built a clean env including OPENAI_API_KEY.

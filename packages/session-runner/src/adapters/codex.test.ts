@@ -91,26 +91,6 @@ describe('CodexAdapter', () => {
     ])
   })
 
-  it('codex-adapter-missing-credential: emits error and does not construct Codex', async () => {
-    const adapter = new CodexAdapter()
-    const { opts, events } = buildOpts({ env: {} })
-    await adapter.run(opts)
-    expect(codexMock.ctorCalls.length).toBe(0)
-    expect(codexMock.startThread).not.toHaveBeenCalled()
-    expect(events).toHaveLength(1)
-    expect(events[0].type).toBe('error')
-    expect(events[0].error).toContain('OPENAI_API_KEY not set')
-    expect(events[0].error).toContain('missing_credential_openai_api_key')
-  })
-
-  it('codex-adapter-missing-credential: empty-string key counts as missing', async () => {
-    const adapter = new CodexAdapter()
-    const { opts, events } = buildOpts({ env: { OPENAI_API_KEY: '' } })
-    await adapter.run(opts)
-    expect(codexMock.ctorCalls.length).toBe(0)
-    expect(events[0].type).toBe('error')
-  })
-
   it('codex-adapter-execute: starts thread, emits session.init with thread id, partial_assistant on text deltas, and result with context_usage', async () => {
     const adapter = new CodexAdapter()
     const fake = buildThread(null, [
@@ -323,32 +303,29 @@ describe('CodexAdapter', () => {
     expect(result?.context_usage.max_tokens).toBe(128_000)
   })
 
-  it('capabilities reflect codex_models when provided', () => {
+  it('capabilities reflect codex_models when provided', async () => {
     const adapter = new CodexAdapter()
-    // Set opts via run() short-circuit: run requires the env, so just
-    // call run with missing key to populate this.opts.
-    // Simpler: drive via the public capabilities getter after seeding opts
-    // through an aborted run. We use a workaround — kick a run with a
-    // fake codex that throws synchronously to populate opts then check.
-    const fakeOpts = {
+    // Seed this.opts by running with a pre-aborted signal — run() checks
+    // signal.aborted immediately after setting this.opts and returns early.
+    const abort = new AbortController()
+    abort.abort()
+    const fakeOpts: AdapterStartOptions = {
       sessionId: 's',
       project: '/p',
       prompt: '',
-      env: {},
-      signal: new AbortController().signal,
+      env: { OPENAI_API_KEY: 'test-key' },
+      signal: abort.signal,
       onEvent: () => {},
       codexModels: [
         { name: 'a', context_window: 1 },
         { name: 'b', context_window: 2 },
       ],
     }
-    // The capabilities getter only reads `this.opts?.codexModels`, so seed
-    // by issuing a missing-credential run (returns immediately, leaves
-    // `opts` populated).
-    return adapter.run(fakeOpts).then(() => {
-      expect(adapter.capabilities.availableProviders).toEqual([
-        { provider: 'openai', models: ['a', 'b'] },
-      ])
-    })
+    // startThread is called before the signal check; give it a minimal fake.
+    codexMock.startThread.mockReturnValueOnce(buildThread(null, []))
+    await adapter.run(fakeOpts)
+    expect(adapter.capabilities.availableProviders).toEqual([
+      { provider: 'openai', models: ['a', 'b'] },
+    ])
   })
 })
