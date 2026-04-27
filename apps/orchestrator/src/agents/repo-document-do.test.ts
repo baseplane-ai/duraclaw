@@ -8,17 +8,45 @@
 // contract, and a broadcast spy. Storage is a Map-backed fake supporting the
 // sql.exec patterns plus get/put/delete/setAlarm/deleteAlarm.
 
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
 
 // In-memory connection set the mocked YServer base shares with tests.
 const mockConnections = new Set<{
   id: string
   readyState: number
+  state?: unknown
   close: ReturnType<typeof vi.fn>
   setState: ReturnType<typeof vi.fn>
 }>()
 const broadcastSpy = vi.fn()
+
+// Drizzle / schema mocks for the B12 lazy-spawn path. The chain objects
+// are reused across tests; `drizzleSelectRows` is mutated per test to
+// shape the `select().from().where().limit()` result.
+let drizzleSelectRows: Array<{ projectId: string; docsWorktreePath: string | null }> = []
+const drizzleSelectChain = {
+  from: vi.fn(() => drizzleSelectChain),
+  where: vi.fn(() => drizzleSelectChain),
+  limit: vi.fn(async () => drizzleSelectRows),
+}
+const drizzleUpdateChain = {
+  set: vi.fn(() => drizzleUpdateChain),
+  where: vi.fn(async () => undefined),
+}
+vi.mock('drizzle-orm/d1', () => ({
+  drizzle: vi.fn(() => ({
+    select: vi.fn(() => drizzleSelectChain),
+    update: vi.fn(() => drizzleUpdateChain),
+  })),
+}))
+vi.mock('drizzle-orm', () => ({ eq: vi.fn((a, b) => ({ a, b })) }))
+vi.mock('~/db/schema', () => ({
+  projectMetadata: {
+    projectId: 'projectId-col',
+    docsWorktreePath: 'docsWorktreePath-col',
+  },
+}))
 
 vi.mock('y-partyserver', async () => {
   const Yjs = await import('yjs')
@@ -106,6 +134,9 @@ function makeCtx() {
     alarmAt = null
   })
 
+  // `waitUntil` just passes the promise through so tests can await it.
+  const waitUntil = vi.fn((p: Promise<unknown>) => p)
+
   return {
     ctx: {
       storage: {
@@ -116,6 +147,7 @@ function makeCtx() {
         setAlarm,
         deleteAlarm,
       },
+      waitUntil,
     },
     rows,
     kv,
@@ -148,6 +180,12 @@ beforeEach(() => {
   mockConnections.clear()
   broadcastSpy.mockClear()
   ;(getRequestSession as any).mockReset()
+  drizzleSelectRows = []
+  drizzleSelectChain.from.mockClear()
+  drizzleSelectChain.where.mockClear()
+  drizzleSelectChain.limit.mockClear()
+  drizzleUpdateChain.set.mockClear()
+  drizzleUpdateChain.where.mockClear()
 })
 
 // ── B1: y_state persistence ────────────────────────────────────────────
@@ -360,5 +398,220 @@ describe('RepoDocumentDO tombstone lifecycle', () => {
     expect(fixture.rows.has('snapshot')).toBe(false)
     expect(c1.close).toHaveBeenCalledWith(4412, 'document_deleted')
     expect(c2.close).toHaveBeenCalledWith(4412, 'document_deleted')
+  })
+})
+
+// ── B12: lazy-spawn trigger ────────────────────────────────────────────
+
+describe('RepoDocumentDO B12 lazy-spawn trigger', () => {
+  const projectId = 'abcdef0123456789'
+  const lazyEnv = {
+    DOCS_RUNNER_SECRET: 'docs-tok',
+    CC_GATEWAY_URL: 'http://gateway:9877',
+    CC_GATEWAY_SECRET: 'gw-tok',
+    AUTH_DB: {} as unknown as D1Database,
+  } as any
+
+  let fetchMock: ReturnType<typeof vi.fn>
+
+  beforeEach(() => {
+    ;(getRequestSession as any).mockResolvedValue({ userId: 'u1', role: 'user' })
+    fetchMock = vi.fn(async () => new Response('{}', { status: 202 }))
+    vi.stubGlobal('fetch', fetchMock)
+    vi.useFakeTimers({ shouldAdvanceTime: false })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  // Drive the 2s debounce + the chained promises that follow it.
+  async function fireDebounce() {
+    await vi.advanceTimersByTimeAsync(2000)
+    await vi.runAllTimersAsync()
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+  }
+
+  it('happy path: POSTs /docs-runners/start with the project payload after the 2s debounce', async () => {
+    drizzleSelectRows = [{ projectId, docsWorktreePath: '/data/projects/foo' }]
+    const { ctx } = makeCtx()
+    const sut = new RepoDocumentDO(ctx as any, lazyEnv)
+    await sut.onLoad()
+
+    const conn = makeConn('browser-1')
+    await sut.onConnect(
+      conn as any,
+      makeReqCtx(`wss://orch/repo/proj:foo.md?projectId=${projectId}`),
+    )
+
+    await fireDebounce()
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [calledUrl, init] = fetchMock.mock.calls[0]
+    expect(calledUrl).toBe('http://gateway:9877/docs-runners/start')
+    expect(init.method).toBe('POST')
+    expect(init.headers.Authorization).toBe('Bearer gw-tok')
+    expect(init.headers['Content-Type']).toBe('application/json')
+    expect(JSON.parse(init.body as string)).toEqual({
+      projectId,
+      docsWorktreePath: '/data/projects/foo',
+      bearer: 'docs-tok',
+    })
+  })
+
+  it('skips the POST when a docs-runner is already connected', async () => {
+    drizzleSelectRows = [{ projectId, docsWorktreePath: '/data/projects/foo' }]
+    const { ctx } = makeCtx()
+    const sut = new RepoDocumentDO(ctx as any, lazyEnv)
+    await sut.onLoad()
+
+    // Pre-attach a docs-runner peer.
+    const runner = makeConn('runner-1')
+    runner.state = { kind: 'docs-runner' }
+
+    const browser = makeConn('browser-1')
+    await sut.onConnect(
+      browser as any,
+      makeReqCtx(`wss://orch/repo/proj:foo.md?projectId=${projectId}`),
+    )
+
+    await fireDebounce()
+
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('broadcasts setup-required when docsWorktreePath is null', async () => {
+    drizzleSelectRows = [{ projectId, docsWorktreePath: null }]
+    const { ctx } = makeCtx()
+    const sut = new RepoDocumentDO(ctx as any, lazyEnv)
+    await sut.onLoad()
+
+    const conn = makeConn('browser-1')
+    await sut.onConnect(
+      conn as any,
+      makeReqCtx(`wss://orch/repo/proj:foo.md?projectId=${projectId}`),
+    )
+
+    await fireDebounce()
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(broadcastSpy).toHaveBeenCalledWith(
+      JSON.stringify({ kind: 'setup-required', projectId }),
+      undefined,
+    )
+  })
+
+  it('broadcasts setup-required when the projectMetadata row is missing', async () => {
+    drizzleSelectRows = []
+    const { ctx } = makeCtx()
+    const sut = new RepoDocumentDO(ctx as any, lazyEnv)
+    await sut.onLoad()
+
+    const conn = makeConn('browser-1')
+    await sut.onConnect(
+      conn as any,
+      makeReqCtx(`wss://orch/repo/proj:foo.md?projectId=${projectId}`),
+    )
+
+    await fireDebounce()
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(broadcastSpy).toHaveBeenCalledWith(
+      JSON.stringify({ kind: 'setup-required', projectId }),
+      undefined,
+    )
+  })
+
+  it('on gateway 400 docs_worktree_invalid clears the path and broadcasts setup-required', async () => {
+    drizzleSelectRows = [{ projectId, docsWorktreePath: '/data/projects/foo' }]
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ ok: false, error: 'docs_worktree_invalid' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+    const { ctx } = makeCtx()
+    const sut = new RepoDocumentDO(ctx as any, lazyEnv)
+    await sut.onLoad()
+
+    const conn = makeConn('browser-1')
+    await sut.onConnect(
+      conn as any,
+      makeReqCtx(`wss://orch/repo/proj:foo.md?projectId=${projectId}`),
+    )
+
+    await fireDebounce()
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(drizzleUpdateChain.set).toHaveBeenCalledTimes(1)
+    const setArg = drizzleUpdateChain.set.mock.calls[0][0]
+    expect(setArg.docsWorktreePath).toBeNull()
+    expect(typeof setArg.updatedAt).toBe('string')
+    expect(broadcastSpy).toHaveBeenCalledWith(
+      JSON.stringify({ kind: 'setup-required', projectId }),
+      undefined,
+    )
+  })
+
+  it('on fetch throw broadcasts spawn-failed and does not clear the path', async () => {
+    drizzleSelectRows = [{ projectId, docsWorktreePath: '/data/projects/foo' }]
+    fetchMock.mockRejectedValueOnce(new Error('network down'))
+    const { ctx } = makeCtx()
+    const sut = new RepoDocumentDO(ctx as any, lazyEnv)
+    await sut.onLoad()
+
+    const conn = makeConn('browser-1')
+    await sut.onConnect(
+      conn as any,
+      makeReqCtx(`wss://orch/repo/proj:foo.md?projectId=${projectId}`),
+    )
+
+    await fireDebounce()
+
+    expect(broadcastSpy).toHaveBeenCalledWith(
+      JSON.stringify({ kind: 'spawn-failed', reason: 'gateway_unreachable' }),
+      undefined,
+    )
+    expect(drizzleUpdateChain.set).not.toHaveBeenCalled()
+  })
+
+  it('skips the POST silently when within the 30s rate-limit window', async () => {
+    drizzleSelectRows = [{ projectId, docsWorktreePath: '/data/projects/foo' }]
+    const fixture = makeCtx()
+    fixture.kv.set('lastSpawnAttempt', Date.now() - 10_000)
+    const sut = new RepoDocumentDO(fixture.ctx as any, lazyEnv)
+    await sut.onLoad()
+
+    const conn = makeConn('browser-1')
+    await sut.onConnect(
+      conn as any,
+      makeReqCtx(`wss://orch/repo/proj:foo.md?projectId=${projectId}`),
+    )
+
+    await fireDebounce()
+
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('fires fetch and updates lastSpawnAttempt once the rate-limit window has expired', async () => {
+    drizzleSelectRows = [{ projectId, docsWorktreePath: '/data/projects/foo' }]
+    const fixture = makeCtx()
+    fixture.kv.set('lastSpawnAttempt', Date.now() - 35_000)
+    const sut = new RepoDocumentDO(fixture.ctx as any, lazyEnv)
+    await sut.onLoad()
+
+    const conn = makeConn('browser-1')
+    await sut.onConnect(
+      conn as any,
+      makeReqCtx(`wss://orch/repo/proj:foo.md?projectId=${projectId}`),
+    )
+
+    await fireDebounce()
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const stamped = fixture.kv.get('lastSpawnAttempt') as number
+    expect(typeof stamped).toBe('number')
+    expect(Math.abs(stamped - Date.now())).toBeLessThan(2500)
   })
 })

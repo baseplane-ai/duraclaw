@@ -3,6 +3,11 @@ import nodePath from 'node:path'
 import type { ServerWebSocket } from 'bun'
 import { verifyToken } from './auth.js'
 import { handleDeployState } from './deploy-state.js'
+import {
+  handleDocsRunnerStatus,
+  handleListDocsRunners,
+  handleStartDocsRunner,
+} from './docs-runner-handlers.js'
 import { handleFileContents, handleFileTree, handleGitStatus } from './files.js'
 import {
   handleKillSession,
@@ -134,6 +139,29 @@ const server = Bun.serve<WsData>({
         return json(400, { ok: false, error: 'invalid body' })
       }
       return handleStartSession(body, { logger: console })
+    }
+
+    // GET /docs-runners — list all known docs-runners
+    if (req.method === 'GET' && path === '/docs-runners') {
+      return handleListDocsRunners()
+    }
+
+    // GET /docs-runners/:projectId/status
+    const docsStatusMatch = path.match(/^\/docs-runners\/([^/]+)\/status$/)
+    if (req.method === 'GET' && docsStatusMatch) {
+      const [, projectId] = docsStatusMatch
+      return handleDocsRunnerStatus(projectId)
+    }
+
+    // POST /docs-runners/start — spawn detached docs-runner
+    if (req.method === 'POST' && path === '/docs-runners/start') {
+      let body: unknown
+      try {
+        body = await req.json()
+      } catch {
+        return json(400, { ok: false, error: 'invalid body' })
+      }
+      return handleStartDocsRunner(body, { logger: console })
     }
 
     // POST /debug/reap — dev-only on-demand reaper trigger (B6). Guarded by

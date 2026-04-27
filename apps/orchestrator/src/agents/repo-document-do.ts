@@ -19,10 +19,13 @@
  * hard-deletes the y_state row and force-closes any remaining peers.
  */
 
+import { eq } from 'drizzle-orm'
+import { drizzle } from 'drizzle-orm/d1'
 import type { Connection, ConnectionContext } from 'partyserver'
 import { YServer } from 'y-partyserver'
 import * as Y from 'yjs'
 import { getRequestSession } from '~/api/auth-session'
+import { projectMetadata } from '~/db/schema'
 import type { Env } from '~/lib/types'
 
 export class RepoDocumentDO extends YServer {
@@ -36,6 +39,18 @@ export class RepoDocumentDO extends YServer {
     debounceMaxWait: 10000,
     timeout: 5000,
   }
+
+  /**
+   * B12 lazy-spawn debounce timer. Browser connects schedule a 2-second
+   * grace window so a flurry of tab opens collapses to a single
+   * `POST /docs-runners/start` instead of N. Stored on `this` only —
+   * with `hibernate: true`, in-memory timers are evicted along with the
+   * DO; that's fine because the timer's only role is debounce, not
+   * durable scheduling. A new connect after rehydration just re-arms it.
+   * Held as a plain timer handle (not a promise) to keep the DO
+   * hibernation-safe.
+   */
+  private lazySpawnTimer: ReturnType<typeof setTimeout> | null = null
 
   private ensureTable() {
     this.ctx.storage.sql.exec(`
@@ -111,6 +126,117 @@ export class RepoDocumentDO extends YServer {
       return
     }
     connection.setState({ kind: 'browser', userId: session.userId })
+
+    // B12: lazy-spawn the docs-runner on first browser connect. The 2s
+    // debounce + once-per-DO timer guard collapses simultaneous tab
+    // opens into one POST.
+    await this.scheduleLazySpawn(url)
+  }
+
+  /**
+   * B12: schedule a 2-second debounce after a browser connect, then
+   * (if no docs-runner is already attached) POST the gateway's
+   * `/docs-runners/start`. Read `projectId` from the connect URL or
+   * fall back to a previously persisted value; persist when the URL
+   * supplies a fresher one. Skips silently if neither source has it.
+   *
+   * The timer body is wrapped in `ctx.waitUntil` so the worker keeps
+   * the DO alive long enough for the 2s wait + downstream fetch — a
+   * hibernating DO would otherwise drop the timer.
+   */
+  private async scheduleLazySpawn(url: URL): Promise<void> {
+    if (this.lazySpawnTimer !== null) return
+
+    const fromUrl = url.searchParams.get('projectId')
+    const stored = (await this.ctx.storage.get<string>('projectId')) ?? null
+    const projectId = fromUrl ?? stored
+    if (!projectId) {
+      console.warn('[repo-document-do] lazy-spawn skipped: no projectId on URL or in storage')
+      return
+    }
+    if (fromUrl && fromUrl !== stored) {
+      await this.ctx.storage.put('projectId', fromUrl)
+    }
+
+    const settled = new Promise<void>((resolve) => {
+      this.lazySpawnTimer = setTimeout(async () => {
+        this.lazySpawnTimer = null
+        try {
+          await this.runLazySpawn(projectId)
+        } catch (err) {
+          console.error('[repo-document-do] lazy-spawn failed', err)
+        } finally {
+          resolve()
+        }
+      }, 2000)
+    })
+
+    this.ctx.waitUntil(settled)
+  }
+
+  /**
+   * Inner body of the B12 lazy-spawn: runs after the 2s debounce.
+   * Returns silently if a docs-runner is already attached, the project
+   * is unconfigured (broadcasts `setup-required`), the rate-limit
+   * window hasn't elapsed, or the gateway acks. On gateway 400
+   * `docs_worktree_invalid` clears the stored path so the next connect
+   * surfaces the setup gate instead of looping. On a fetch throw
+   * broadcasts `spawn-failed`.
+   */
+  private async runLazySpawn(projectId: string): Promise<void> {
+    const env = this.env as Env
+
+    for (const conn of this.getConnections()) {
+      const state = (conn as { state?: { kind?: string } }).state
+      if (state?.kind === 'docs-runner') return
+    }
+
+    const db = drizzle(env.AUTH_DB)
+    const rows = await db
+      .select()
+      .from(projectMetadata)
+      .where(eq(projectMetadata.projectId, projectId))
+      .limit(1)
+    const row = rows[0]
+    if (!row?.docsWorktreePath) {
+      this.broadcast(JSON.stringify({ kind: 'setup-required', projectId }))
+      return
+    }
+
+    const lastSpawnAttempt = (await this.ctx.storage.get<number>('lastSpawnAttempt')) ?? 0
+    const now = Date.now()
+    if (now - lastSpawnAttempt < 30_000) return
+    await this.ctx.storage.put('lastSpawnAttempt', now)
+
+    let res: Response
+    try {
+      res = await fetch(`${env.CC_GATEWAY_URL}/docs-runners/start`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${env.CC_GATEWAY_SECRET}`,
+        },
+        body: JSON.stringify({
+          projectId,
+          docsWorktreePath: row.docsWorktreePath,
+          bearer: env.DOCS_RUNNER_SECRET,
+        }),
+      })
+    } catch {
+      this.broadcast(JSON.stringify({ kind: 'spawn-failed', reason: 'gateway_unreachable' }))
+      return
+    }
+
+    if (res.status === 400) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string }
+      if (body.error === 'docs_worktree_invalid') {
+        await db
+          .update(projectMetadata)
+          .set({ docsWorktreePath: null, updatedAt: new Date().toISOString() })
+          .where(eq(projectMetadata.projectId, projectId))
+        this.broadcast(JSON.stringify({ kind: 'setup-required', projectId }))
+      }
+    }
   }
 
   /**
@@ -192,6 +318,12 @@ export class RepoDocumentDO extends YServer {
     } finally {
       const active = Array.from(this.getConnections()).length
       if (active === 0) {
+        // B12: no peers left — cancel any pending lazy-spawn debounce so
+        // we don't fire a POST after the last browser walked away.
+        if (this.lazySpawnTimer !== null) {
+          clearTimeout(this.lazySpawnTimer)
+          this.lazySpawnTimer = null
+        }
         try {
           await this.onSave()
         } catch (err) {
