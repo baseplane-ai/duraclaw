@@ -1,5 +1,6 @@
 import { type FSWatcher, watch } from 'node:fs'
 import fs from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import nodePath from 'node:path'
 import type { SDKAssistantMessageError } from '@anthropic-ai/claude-agent-sdk'
 import type { BufferedChannel } from '@duraclaw/shared-transport'
@@ -20,6 +21,44 @@ import type { RunnerSessionContext, SDKUserMsg } from './types.js'
 
 /** Debounce interval for kata state file changes (ms). Matches gateway. */
 const KATA_DEBOUNCE_MS = 150
+
+/**
+ * Resolve a glibc-only path to the SDK's bundled Claude Code binary.
+ *
+ * Background: SDK 0.2.119 ships the Claude Code CLI as a per-platform
+ * native binary inside two optional dependency packages, both installed
+ * by pnpm regardless of the host: `@anthropic-ai/claude-agent-sdk-linux-
+ * x64-musl` and `@anthropic-ai/claude-agent-sdk-linux-x64`. The SDK's
+ * own lookup function tries the musl variant first via `require.resolve`
+ * — and `require.resolve` always succeeds because the package is on
+ * disk. It then exec's the MUSL-linked ELF, which silently ENOENT's on
+ * a glibc-only host (the binary's hard-coded interpreter
+ * `/lib/ld-musl-x86_64.so.1` is not present), the runner's catch
+ * captures it as a buffered `error` event, and the runner exits before
+ * the dial-back WS opens — so the DO never sees the error and the user
+ * sits on "Claude is thinking…" forever.
+ *
+ * Force-resolving the glibc variant here and passing it to the SDK as
+ * `pathToClaudeCodeExecutable` skips the SDK's musl-first lookup
+ * entirely. Returns `undefined` on platforms where the lookup fails
+ * (non-linux, missing optional dep) — the SDK falls back to its own
+ * lookup, which is the correct behavior on macOS / win32 where there's
+ * no musl variant in the candidate list.
+ */
+const claudeBinRequire = createRequire(import.meta.url)
+function resolveGlibcClaudeBinary(): string | undefined {
+  if (process.platform !== 'linux' || process.arch !== 'x64') return undefined
+  // The optional `linux-x64` and `linux-x64-musl` packages are hoisted into
+  // the SDK's own resolution scope (pnpm), not session-runner's, so a
+  // direct `require.resolve` from this module fails. Bridge through the
+  // SDK's package.json to pick up the SDK's resolution roots.
+  try {
+    const sdkPkgJson = claudeBinRequire.resolve('@anthropic-ai/claude-agent-sdk/package.json')
+    return createRequire(sdkPkgJson).resolve('@anthropic-ai/claude-agent-sdk-linux-x64/claude')
+  } catch {
+    return undefined
+  }
+}
 
 /**
  * SDK-accepted permission modes. Wider than the API allowlist could
@@ -556,6 +595,11 @@ export class ClaudeRunner {
         settingSources: ['user', 'project', 'local'],
         enableFileCheckpointing: true,
       }
+
+      // Force the glibc-bundled Claude Code binary on linux-x64 — see
+      // `resolveGlibcClaudeBinary` for the full rationale.
+      const glibcClaudeBin = resolveGlibcClaudeBinary()
+      if (glibcClaudeBin) options.pathToClaudeCodeExecutable = glibcClaudeBin
 
       if (cmd.type === 'execute') {
         if (cmd.model) options.model = cmd.model
