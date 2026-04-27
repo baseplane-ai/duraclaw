@@ -58,20 +58,22 @@ async function cachedFetch<T extends SpecStatusResponse | VpStatusResponse>(
 ): Promise<T> {
   const cached = cacheGet<T>(key)
   if (cached) return cached
+  // Only cache successful responses. A transient gateway hiccup (network
+  // error, 4xx/5xx) used to poison the cache for 30s with `{exists:false}`,
+  // producing a sticky "Spec not found" / "VP evidence not found" stall
+  // even after the gateway recovered. Server-side auto-advance was already
+  // hardened against this same failure mode (see `lib/auto-advance.ts:88`);
+  // this brings the client gate into line. The render returns `{exists:false}`
+  // for THIS call so the UI degrades gracefully — but the next render
+  // retries against a live fetch.
   try {
     const resp = await fetch(url)
-    if (!resp.ok) {
-      const miss = { exists: false } as T
-      statusCache.set(key, { at: Date.now(), data: miss })
-      return miss
-    }
+    if (!resp.ok) return { exists: false } as T
     const data = (await resp.json()) as T
     statusCache.set(key, { at: Date.now(), data })
     return data
   } catch {
-    const miss = { exists: false } as T
-    statusCache.set(key, { at: Date.now(), data: miss })
-    return miss
+    return { exists: false } as T
   }
 }
 

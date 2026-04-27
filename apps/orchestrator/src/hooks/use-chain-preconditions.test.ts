@@ -244,4 +244,69 @@ describe('checkPrecondition — project query param transmission', () => {
       expect(res.reason).toContain('project context')
     })
   })
+
+  /**
+   * Regression: a transient gateway/network blip used to be cached as
+   * `{exists:false}` for 30s, producing a sticky "Spec not found" stall
+   * even after recovery. The fix only caches successful responses; the
+   * second call after a failure must hit the network again.
+   */
+  describe('transient failures must not poison the cache', () => {
+    function planningChain() {
+      return uniqueChain({
+        column: 'planning',
+        sessions: [
+          {
+            id: 's1',
+            kataMode: 'planning',
+            status: 'idle',
+            lastActivity: '2026-04-25T00:00:00Z',
+            createdAt: '2026-04-25T00:00:00Z',
+            project: 'duraclaw-dev6',
+          },
+        ],
+      })
+    }
+
+    it('a 5xx response does NOT poison the cache — next call retries live', async () => {
+      fetchMock
+        .mockResolvedValueOnce(new Response('upstream gateway hiccup', { status: 502 }))
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ exists: true, status: 'approved' }), { status: 200 }),
+        )
+      const c = planningChain()
+      const first = await checkPrecondition(c, [])
+      expect(first.canAdvance).toBe(false)
+      expect(first.reason).toBe('Spec not found')
+      // Second call must re-fetch (cache was NOT populated by the failure).
+      const second = await checkPrecondition(c, [])
+      expect(second.canAdvance).toBe(true)
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    })
+
+    it('a network rejection does NOT poison the cache', async () => {
+      fetchMock
+        .mockRejectedValueOnce(new TypeError('network down'))
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ exists: true, status: 'approved' }), { status: 200 }),
+        )
+      const c = planningChain()
+      const first = await checkPrecondition(c, [])
+      expect(first.canAdvance).toBe(false)
+      const second = await checkPrecondition(c, [])
+      expect(second.canAdvance).toBe(true)
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    })
+
+    it('a successful response IS cached (sanity — 30s TTL still applies)', async () => {
+      fetchMock.mockResolvedValueOnce(
+        new Response(JSON.stringify({ exists: true, status: 'approved' }), { status: 200 }),
+      )
+      const c = planningChain()
+      await checkPrecondition(c, [])
+      await checkPrecondition(c, [])
+      // Second call served from cache — only one fetch.
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    })
+  })
 })
