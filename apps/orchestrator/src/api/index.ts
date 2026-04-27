@@ -8,6 +8,7 @@ import {
   agentSessions,
   auditLog,
   featureFlags,
+  projectMetadata,
   projects as projectsTable,
   userPreferences,
   userPresence,
@@ -834,6 +835,171 @@ export function createApiApp() {
     // Immutable — each image has a unique key (session + message + part index).
     headers.set('Cache-Control', 'public, max-age=31536000, immutable')
     return new Response(obj.body, { headers })
+  })
+
+  // GH#27 P1.1 (B2): projectMetadata UPSERT + read.
+  //
+  // Dual-auth (mirrors the B3 WS pattern, inline-style — same shape as
+  // `/api/sessions/:id/tool-approval` above): accept EITHER a valid
+  // Better Auth session cookie (browser path, e.g. the docs-worktree
+  // modal) OR `Authorization: Bearer <DOCS_RUNNER_SECRET>` (gateway
+  // path, called at project-discovery time). Bearer is checked
+  // timing-safe via `constantTimeEquals`. When DOCS_RUNNER_SECRET is
+  // unset, the bearer path is closed entirely (still 401).
+  //
+  // Mounted BEFORE `app.use('/api/*', authMiddleware)` so the bearer
+  // path bypasses the cookie-only middleware.
+  //
+  // `projectId` URL param is constrained to exactly 16 lowercase hex
+  // chars — matches the spec's `sha256(originUrl).slice(0,16)` shape
+  // and the UUID-fallback (also 16 hex after stripping dashes). Any
+  // other shape returns 400 to keep the surface area tight.
+  const PROJECT_ID_RE = /^[0-9a-f]{16}$/
+
+  function projectMetadataAuth(
+    c: import('hono').Context<ApiAppEnv>,
+  ): Promise<{ ok: true } | { ok: false; res: Response }> {
+    const authHeader = c.req.header('authorization') ?? ''
+    if (authHeader.startsWith('Bearer ')) {
+      const expected = c.env.DOCS_RUNNER_SECRET
+      const provided = authHeader.slice(7)
+      if (expected && constantTimeEquals(provided, expected)) {
+        return Promise.resolve({ ok: true } as const)
+      }
+      return Promise.resolve({
+        ok: false as const,
+        res: c.json({ error: 'Unauthorized' }, 401),
+      })
+    }
+    // Fall back to session cookie auth.
+    return getRequestSession(c.env, c.req.raw).then((session) => {
+      if (!session) {
+        return { ok: false as const, res: c.json({ error: 'Unauthorized' }, 401) }
+      }
+      return { ok: true as const }
+    })
+  }
+
+  app.patch('/api/projects/:projectId', async (c) => {
+    const projectId = c.req.param('projectId')
+    if (!PROJECT_ID_RE.test(projectId)) {
+      return c.json({ error: 'Invalid projectId' }, 400)
+    }
+
+    const auth = await projectMetadataAuth(c)
+    if (!auth.ok) return auth.res
+
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return c.json({ error: 'Invalid body' }, 400)
+    }
+
+    // Validate field types. We accept missing keys (partial patch) and
+    // accept `null` for nullable columns (originUrl, docsWorktreePath)
+    // as an explicit "clear this column" signal. `projectName` is
+    // NOT NULL in schema → reject explicit null.
+    const patch: Partial<typeof projectMetadata.$inferInsert> = {}
+
+    if ('projectName' in body) {
+      const v = body.projectName
+      if (typeof v !== 'string' || v.length === 0) {
+        return c.json({ error: 'projectName must be a non-empty string' }, 400)
+      }
+      patch.projectName = v
+    }
+    if ('originUrl' in body) {
+      const v = body.originUrl
+      if (v !== null && typeof v !== 'string') {
+        return c.json({ error: 'originUrl must be a string or null' }, 400)
+      }
+      patch.originUrl = v
+    }
+    if ('docsWorktreePath' in body) {
+      const v = body.docsWorktreePath
+      if (v !== null && typeof v !== 'string') {
+        return c.json({ error: 'docsWorktreePath must be a string or null' }, 400)
+      }
+      patch.docsWorktreePath = v
+    }
+    if ('tombstoneGraceDays' in body) {
+      const v = body.tombstoneGraceDays
+      if (typeof v !== 'number' || !Number.isInteger(v) || v < 1) {
+        return c.json({ error: 'tombstoneGraceDays must be a positive integer' }, 400)
+      }
+      patch.tombstoneGraceDays = v
+    }
+
+    const knownKeys = new Set([
+      'projectName',
+      'originUrl',
+      'docsWorktreePath',
+      'tombstoneGraceDays',
+    ])
+    for (const key of Object.keys(body)) {
+      if (!knownKeys.has(key)) {
+        return c.json({ error: `Unknown field: ${key}` }, 400)
+      }
+    }
+
+    const db = getDb(c.env)
+    const now = new Date().toISOString()
+
+    const existing = await db
+      .select()
+      .from(projectMetadata)
+      .where(eq(projectMetadata.projectId, projectId))
+      .limit(1)
+
+    if (existing.length === 0) {
+      // Insert path. `projectName` is NOT NULL — must be supplied on
+      // first-touch unless we synthesise. Keep it strict: require
+      // projectName on create. If not supplied, fall back to projectId
+      // (so the gateway can call PATCH with `{}` and still create the
+      // row — projectName is later overwritten on the next discovery).
+      const inserted = await db
+        .insert(projectMetadata)
+        .values({
+          projectId,
+          projectName: patch.projectName ?? projectId,
+          originUrl: patch.originUrl ?? null,
+          docsWorktreePath: patch.docsWorktreePath ?? null,
+          tombstoneGraceDays: patch.tombstoneGraceDays ?? 7,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning()
+      return c.json(inserted[0])
+    }
+
+    // Update path — merge supplied fields, advance updatedAt, leave
+    // createdAt untouched.
+    const updated = await db
+      .update(projectMetadata)
+      .set({ ...patch, updatedAt: now })
+      .where(eq(projectMetadata.projectId, projectId))
+      .returning()
+    return c.json(updated[0])
+  })
+
+  app.get('/api/projects/:projectId', async (c) => {
+    const projectId = c.req.param('projectId')
+    if (!PROJECT_ID_RE.test(projectId)) {
+      return c.json({ error: 'Invalid projectId' }, 400)
+    }
+
+    const auth = await projectMetadataAuth(c)
+    if (!auth.ok) return auth.res
+
+    const db = getDb(c.env)
+    const rows = await db
+      .select()
+      .from(projectMetadata)
+      .where(eq(projectMetadata.projectId, projectId))
+      .limit(1)
+    if (rows.length === 0) {
+      return c.json({ error: 'Project not found' }, 404)
+    }
+    return c.json(rows[0])
   })
 
   app.use('/api/*', authMiddleware)

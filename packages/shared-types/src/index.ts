@@ -944,3 +944,9 @@ export interface SyncedCollectionFrame<TRow = unknown> {
    */
   sessionStatus?: SessionStatus
 }
+
+// ── Shared workspace helpers ──────────────────────────────────────────
+
+// GH#27 B2: SHA-256-based projectId / entityId derivation usable from
+// the browser, the Worker, and the Bun runner.
+export * from './entity-id.js'

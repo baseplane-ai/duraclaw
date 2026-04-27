@@ -76,6 +76,17 @@ AXI_A_BRIDGE_PORT="${AXI_A_BRIDGE_PORT:-$_DERIVED_AXI_A_BRIDGE_PORT}"
 AXI_B_BRIDGE_PORT="${AXI_B_BRIDGE_PORT:-$_DERIVED_AXI_B_BRIDGE_PORT}"
 export BROWSER_A_PORT BROWSER_B_PORT AXI_A_BRIDGE_PORT AXI_B_BRIDGE_PORT
 
+# Docs-runner port derivation (P1.1 / GH#27). Range 15800–16599 sits in
+# the next clean 800-block after the AXI bridge (15000–15799), avoiding
+# overlap with Gateway (9800–10599), Browser/AXI (11000–14799), single-
+# AXI (15000–15799), and Orchestrator (43000–43799). VERIFY_DOCS_RUNNER_PORT
+# is the explicit-pin override knob (mirrors VERIFY_GATEWAY_PORT idiom);
+# CC_DOCS_RUNNER_PORT is then exported unconditionally so child processes
+# agree on the advertised value.
+_DERIVED_DOCS_RUNNER_PORT=$((15800 + _WORKTREE_PORT_OFFSET))
+VERIFY_DOCS_RUNNER_PORT="${VERIFY_DOCS_RUNNER_PORT:-$_DERIVED_DOCS_RUNNER_PORT}"
+export CC_DOCS_RUNNER_PORT="$VERIFY_DOCS_RUNNER_PORT"
+
 # Per-worktree Chrome profile and axi state dirs — prevents cookie/session
 # cross-contamination when multiple worktrees run dual-browser verify.
 _WORKTREE_SLUG="$(basename "$VERIFY_ROOT")"

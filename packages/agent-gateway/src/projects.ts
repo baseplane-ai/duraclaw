@@ -1,7 +1,9 @@
 import { execFile } from 'node:child_process'
+import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { promisify } from 'node:util'
+import { deriveProjectId } from '@duraclaw/shared-types'
 import type { PrInfo, ProjectInfo } from './types.js'
 
 const execFileAsync = promisify(execFile)
@@ -210,6 +212,102 @@ async function walkProjectDirs(): Promise<Array<{ name: string; path: string }>>
 }
 
 /**
+ * GH#27 P1.1-C: Resolve a stable 16-char projectId for a project.
+ *
+ * - Prefer the SHA-256-derived ID from the git remote `origin` URL
+ *   (deterministic across clones — matches `deriveProjectId` in
+ *   `@duraclaw/shared-types`).
+ * - Fall back to a persisted UUID at `<projectRoot>/.duraclaw/project-id`
+ *   when no origin is configured. Slice to 16 hex chars (strip dashes)
+ *   so the locally-minted ID has the same shape as derived IDs — every
+ *   downstream consumer (orchestrator, RepoDocumentDO routing, browser
+ *   editor) treats projectId as exactly 16 lowercase-hex chars.
+ *
+ * Idempotent: re-running on the same project returns the same ID
+ * (derived path is pure; minted path is read-then-write).
+ */
+async function resolveProjectId(projectPath: string, originUrl: string | null): Promise<string> {
+  if (originUrl) return deriveProjectId(originUrl)
+
+  const idDir = path.join(projectPath, '.duraclaw')
+  const idFile = path.join(idDir, 'project-id')
+
+  try {
+    const existing = (await fs.readFile(idFile, 'utf8')).trim()
+    if (existing) return existing
+  } catch {
+    // file missing → mint below
+  }
+
+  // Mint a fresh ID. crypto.randomUUID() is 36 chars with dashes; the
+  // hex digits alone are 32 chars. Slice to 16 to match the shape of
+  // derived IDs (sha256 → 16-char hex prefix).
+  const minted = crypto.randomUUID().replace(/-/g, '').slice(0, 16)
+  await fs.mkdir(idDir, { recursive: true })
+  await fs.writeFile(idFile, minted, 'utf8')
+  return minted
+}
+
+/**
+ * GH#27 P1.1-C: Compute projectId for a discovered project and
+ * PATCH the orchestrator's `/api/projects/:projectId` endpoint with
+ * `{ projectName, originUrl }`. The orchestrator upserts the
+ * `projectMetadata` row so downstream DO lazy-spawn lookups (B12)
+ * always find a record.
+ *
+ * Failure handling: any fetch / network failure is logged but never
+ * thrown — discovery must not depend on orchestrator reachability.
+ * The next discovery cycle retries.
+ *
+ * Returns the resolved projectId so callers (tests + future code)
+ * can assert on it.
+ */
+export async function registerProjectWithOrchestrator(
+  projectPath: string,
+  originUrl: string | null,
+): Promise<string | null> {
+  // Bail early when the gateway has no orchestrator URL or runner
+  // secret configured. This avoids:
+  //   - minting `.duraclaw/project-id` into real repos during local
+  //     dev / unit tests where the orchestrator isn't reachable;
+  //   - issuing a PATCH that would 401 anyway.
+  // Registration resumes automatically once the env vars land
+  // (next discovery cycle).
+  const workerUrl = process.env.WORKER_PUBLIC_URL ?? ''
+  const secret = process.env.DOCS_RUNNER_SECRET ?? ''
+  if (!workerUrl || !secret) return null
+
+  const projectId = await resolveProjectId(projectPath, originUrl)
+  const projectName = path.basename(projectPath)
+
+  const httpBase = workerUrl.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+  const url = new URL(`/api/projects/${projectId}`, httpBase)
+
+  try {
+    const resp = await fetch(url.toString(), {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${secret}`,
+      },
+      body: JSON.stringify({ projectName, originUrl }),
+    })
+    if (!resp.ok) {
+      console.warn(
+        `[agent-gateway] PATCH /api/projects/${projectId} returned ${resp.status} — orchestrator row not updated`,
+      )
+    }
+  } catch (err) {
+    console.warn(
+      `[agent-gateway] PATCH /api/projects/${projectId} failed`,
+      err instanceof Error ? err.message : err,
+    )
+  }
+
+  return projectId
+}
+
+/**
  * Discover all git repos under /data/projects/ (up to PROJECT_MAX_DEPTH).
  * When PROJECT_PATTERNS is set, only repos whose relative name begins with
  * one of those prefixes are returned.
@@ -228,6 +326,10 @@ export async function discoverProjects(
         getAheadBehind(fullPath, branch),
         getPrInfo(fullPath, branch),
       ])
+      // GH#27 P1.1-C: register the project with the orchestrator.
+      // Fire-and-forget — failures are logged inside the helper and
+      // never abort discovery.
+      void registerProjectWithOrchestrator(fullPath, repo_origin)
       return {
         name,
         path: fullPath,
