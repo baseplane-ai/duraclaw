@@ -122,6 +122,7 @@ export class GeminiCliAdapter implements RunnerAdapter {
   private unknownModelWarned = false
   private turnQueue: PushPullQueue<string> = new PushPullQueue<string>()
   private currentChild: ReturnType<typeof Bun.spawn> | null = null
+  private sigkillTimer: ReturnType<typeof setTimeout> | null = null
   private disposed = false
 
   get capabilities(): AdapterCapabilities {
@@ -445,7 +446,8 @@ export class GeminiCliAdapter implements RunnerAdapter {
       /* ignore */
     }
     // 2s SIGKILL fallback (spec B7)
-    setTimeout(() => {
+    this.sigkillTimer = setTimeout(() => {
+      this.sigkillTimer = null
       try {
         child.kill('SIGKILL')
       } catch {
@@ -461,6 +463,10 @@ export class GeminiCliAdapter implements RunnerAdapter {
       this.currentChild?.kill('SIGKILL')
     } catch {
       /* ignore */
+    }
+    if (this.sigkillTimer !== null) {
+      clearTimeout(this.sigkillTimer)
+      this.sigkillTimer = null
     }
     try {
       this.turnQueue.close()

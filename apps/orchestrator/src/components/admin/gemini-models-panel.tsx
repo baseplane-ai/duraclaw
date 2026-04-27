@@ -1,3 +1,4 @@
+import type React from 'react'
 import { useCallback, useEffect, useState } from 'react'
 import { Button } from '~/components/ui/button'
 import { Input } from '~/components/ui/input'
@@ -197,9 +198,7 @@ export function GeminiModelsPanel() {
               <Input
                 placeholder="e.g. auto-gemini-3"
                 value={draftName}
-                onChange={(e) =>
-                  setDraftName((e.target as unknown as { value: string }).value ?? '')
-                }
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setDraftName(e.target.value)}
               />
             </TableCell>
             <TableCell>
@@ -207,8 +206,8 @@ export function GeminiModelsPanel() {
                 inputMode="numeric"
                 placeholder="1000000"
                 value={draftContext}
-                onChange={(e) =>
-                  setDraftContext((e.target as unknown as { value: string }).value ?? '')
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  setDraftContext(e.target.value)
                 }
               />
             </TableCell>
