@@ -18,6 +18,13 @@ import { PwaInstallBanner } from '~/components/pwa-install-banner'
 import { QuickPromptInput } from '~/components/quick-prompt-input'
 import { StatusBar } from '~/components/status-bar'
 import { TabBar } from '~/components/tab-bar'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '~/components/ui/select'
 import { sessionsCollection } from '~/db/sessions-collection'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { useSwipeTabs } from '~/hooks/use-swipe-tabs'
@@ -461,6 +468,15 @@ function AgentDetailWithSpawn({
   return <AgentDetailView name={sessionId} agent={agent} />
 }
 
+const DRAFT_MODEL_OPTIONS = [
+  { value: 'claude-opus-4-7', label: 'claude-opus-4-7', agent: 'claude' },
+  { value: 'claude-opus-4-6', label: 'claude-opus-4-6', agent: 'claude' },
+  { value: 'claude-sonnet-4-6', label: 'claude-sonnet-4-6', agent: 'claude' },
+  { value: 'claude-haiku-4-5', label: 'claude-haiku-4-5', agent: 'claude' },
+  { value: 'gpt-5.4', label: 'codex — gpt-5.4', agent: 'codex' },
+  { value: 'gpt-5.4-mini', label: 'codex — gpt-5.4-mini', agent: 'codex' },
+]
+
 /**
  * Pre-spawn view rendered into a draft tab. Mirrors AgentDetailView's layout
  * (empty ChatThread + StatusBar + MessageInput) so the user lands in a blank
@@ -478,14 +494,26 @@ function DraftDetailView({
   onSpawn: (config: SpawnFormConfig & { newTab?: boolean }) => void
 }) {
   const { preferences } = useUserDefaults()
+  const [selectedModel, setSelectedModel] = useState(() => {
+    return (
+      DRAFT_MODEL_OPTIONS.find((m) => m.value === preferences.model)?.value ??
+      DRAFT_MODEL_OPTIONS[0].value
+    )
+  })
+
+  // Sync when preferences load asynchronously.
+  useEffect(() => {
+    if (preferences.model) setSelectedModel(preferences.model)
+  }, [preferences.model])
+
+  const currentModel =
+    DRAFT_MODEL_OPTIONS.find((m) => m.value === selectedModel) ?? DRAFT_MODEL_OPTIONS[0]
 
   const handleSend = useCallback(
     (content: string | ContentBlock[]) => {
-      const model = preferences.model ?? 'claude-opus-4-7'
-      const agent = model.startsWith('gpt-') ? 'codex' : 'claude'
-      onSpawn({ project, model, agent, prompt: content })
+      onSpawn({ project, model: currentModel.value, agent: currentModel.agent, prompt: content })
     },
-    [project, preferences.model, onSpawn],
+    [project, currentModel, onSpawn],
   )
 
   const branchInfo = useMemo(
@@ -508,6 +536,20 @@ function DraftDetailView({
         onSendSuggestion={handleSend}
       />
       <StatusBar sessionId={null} />
+      <div className="flex items-center gap-2 px-3 pb-1">
+        <Select value={selectedModel} onValueChange={setSelectedModel}>
+          <SelectTrigger className="h-7 w-auto min-w-40 rounded-full text-xs font-mono">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {DRAFT_MODEL_OPTIONS.map((m) => (
+              <SelectItem key={m.value} value={m.value} className="text-xs font-mono">
+                {m.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
       <MessageInput onSend={handleSend} draftKey={draftId} />
     </div>
   )
