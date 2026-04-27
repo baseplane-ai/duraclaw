@@ -4,6 +4,7 @@ import type { ServerWebSocket } from 'bun'
 import { verifyToken } from './auth.js'
 import { handleDeployState } from './deploy-state.js'
 import {
+  handleDocsRunnerHealth,
   handleDocsRunnerStatus,
   handleListDocsFiles,
   handleListDocsRunners,
@@ -152,6 +153,16 @@ const server = Bun.serve<WsData>({
     if (req.method === 'GET' && docsStatusMatch) {
       const [, projectId] = docsStatusMatch
       return handleDocsRunnerStatus(projectId)
+    }
+
+    // GET /docs-runners/:projectId/health — proxy to the runner's loopback
+    // /health endpoint. Forwards 200 + body on success, 502
+    // `docs_runner_unreachable` on fetch throw/timeout. The orchestrator
+    // passes `?healthPort=` since the gateway has no config of its own.
+    const docsHealthMatch = path.match(/^\/docs-runners\/([^/]+)\/health$/)
+    if (req.method === 'GET' && docsHealthMatch) {
+      const [, projectId] = docsHealthMatch
+      return await handleDocsRunnerHealth(projectId, url.searchParams)
     }
 
     // GET /docs-runners/:projectId/files — directory walk fallback when

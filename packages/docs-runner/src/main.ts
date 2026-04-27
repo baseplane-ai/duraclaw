@@ -263,9 +263,11 @@ export async function main(): Promise<void> {
   // Cmd-file overrides file-config; file-config replaces hardcoded defaults.
   // ENOENT → loadConfig already returns DEFAULT_CONFIG with a single warn.
   let fileConfig: Awaited<ReturnType<typeof loadConfig>>['config']
+  let configSource: 'file' | 'default' = 'default'
   try {
     const loaded = await loadConfig(cmd.docsWorktreePath)
     fileConfig = loaded.config
+    configSource = loaded.source
   } catch (err) {
     return writeExitAndExit(
       argv.exitFile,
@@ -533,6 +535,7 @@ export async function main(): Promise<void> {
         errors,
         reconnects: meta.reconnects,
         per_file,
+        config_present: configSource === 'file',
       }
     }
     healthServer = new HealthServer({

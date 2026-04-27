@@ -1,30 +1,47 @@
 /**
- * DocsFileTree (GH#27 P1.6 WU-C)
+ * DocsFileTree (GH#27 P1.6 WU-C, P1.7 WU-B)
  *
  * Left-pane tree of markdown files in the project's docs worktree.
  * Files are grouped into directories by splitting `relPath` on `/`.
  * Click a leaf to select it; the parent route owns the selection state.
  *
- * The `state` field hinted at in the spec (live / cold / dirty) comes from
- * the P1.7 health proxy and is not yet wired here — see TODO below.
+ * Per-file state dots come from the docs-runner's `/health` `per_file`
+ * snapshot (proxied via `/api/docs-runners/:projectId/health`). Mapping:
+ *   syncing      → green
+ *   starting     → gray
+ *   disconnected → orange
+ *   tombstoned   → red (also strikethrough — handled by `tombstoned` prop)
+ *   error        → red
+ *   missing/unknown → no dot
  */
 
 import { ChevronDown, ChevronRight, FileText } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { cn } from '~/lib/utils'
 
+export type DocsFileState = 'syncing' | 'starting' | 'disconnected' | 'tombstoned' | 'error'
+
 export interface DocsFile {
   relPath: string
   lastModified: number
-  // TODO(GH#27 p1.7): state: 'live' | 'cold' | 'dirty' — populated by the
-  // health proxy. Render a colored dot once available.
-  state?: string
 }
 
 export interface DocsFileTreeProps {
   files: DocsFile[]
   selected: string | null
   onSelect: (relPath: string) => void
+  /**
+   * relPaths whose owning DO has broadcast a `tombstone-pending` awareness
+   * signal. The tree renders strikethrough on these rows so the user
+   * sees the pending soft-delete (B10/B20). Defaults to an empty set.
+   */
+  tombstoned?: Set<string>
+  /**
+   * Per-file connection state from the docs-runner health proxy. Drives
+   * the colored dot next to each file. Map keyed by `relPath`. Missing
+   * entries render no dot.
+   */
+  fileStates?: Map<string, DocsFileState> | Record<string, DocsFileState>
 }
 
 interface TreeDir {
@@ -81,8 +98,44 @@ function buildTree(files: DocsFile[]): TreeNode[] {
   return root.children
 }
 
-export function DocsFileTree({ files, selected, onSelect }: DocsFileTreeProps) {
+const EMPTY_TOMBSTONED: ReadonlySet<string> = new Set()
+
+function lookupState(
+  fileStates: DocsFileTreeProps['fileStates'],
+  relPath: string,
+): DocsFileState | undefined {
+  if (!fileStates) return undefined
+  if (fileStates instanceof Map) return fileStates.get(relPath)
+  return (fileStates as Record<string, DocsFileState>)[relPath]
+}
+
+const STATE_DOT_CLASSES: Record<DocsFileState, string> = {
+  syncing: 'bg-green-500',
+  starting: 'bg-gray-400',
+  disconnected: 'bg-orange-500',
+  tombstoned: 'bg-red-500',
+  error: 'bg-red-500',
+}
+
+function StateDot({ state }: { state: DocsFileState }) {
+  return (
+    <span
+      data-testid={`docs-tree-state-dot-${state}`}
+      title={state}
+      className={cn('size-2 shrink-0 rounded-full', STATE_DOT_CLASSES[state])}
+    />
+  )
+}
+
+export function DocsFileTree({
+  files,
+  selected,
+  onSelect,
+  tombstoned,
+  fileStates,
+}: DocsFileTreeProps) {
   const tree = useMemo(() => buildTree(files), [files])
+  const tombs = tombstoned ?? EMPTY_TOMBSTONED
 
   if (files.length === 0) {
     return (
@@ -101,6 +154,8 @@ export function DocsFileTree({ files, selected, onSelect }: DocsFileTreeProps) {
           depth={0}
           selected={selected}
           onSelect={onSelect}
+          tombstoned={tombs}
+          fileStates={fileStates}
         />
       ))}
     </div>
@@ -112,26 +167,41 @@ interface TreeNodeViewProps {
   depth: number
   selected: string | null
   onSelect: (relPath: string) => void
+  tombstoned: ReadonlySet<string>
+  fileStates?: DocsFileTreeProps['fileStates']
 }
 
-function TreeNodeView({ node, depth, selected, onSelect }: TreeNodeViewProps) {
+function TreeNodeView({
+  node,
+  depth,
+  selected,
+  onSelect,
+  tombstoned,
+  fileStates,
+}: TreeNodeViewProps) {
   const [open, setOpen] = useState(true)
 
   if (node.type === 'file') {
     const isSelected = selected === node.file.relPath
+    const isTombstoned = tombstoned.has(node.file.relPath)
+    const state = lookupState(fileStates, node.file.relPath)
     return (
       <button
         type="button"
         data-testid={`docs-tree-file-${node.file.relPath}`}
+        data-tombstoned={isTombstoned ? '1' : undefined}
+        data-state={state}
         onClick={() => onSelect(node.file.relPath)}
         className={cn(
           'flex items-center gap-1.5 rounded px-2 py-1 text-left hover:bg-accent hover:text-accent-foreground',
           isSelected && 'bg-accent font-medium text-accent-foreground',
+          isTombstoned && 'text-muted-foreground line-through',
         )}
         style={{ paddingLeft: 8 + depth * 12 }}
       >
         <FileText className="size-3.5 shrink-0 text-muted-foreground" />
         <span className="truncate">{node.name}</span>
+        {state && <StateDot state={state} />}
       </button>
     )
   }
@@ -161,6 +231,8 @@ function TreeNodeView({ node, depth, selected, onSelect }: TreeNodeViewProps) {
               depth={depth + 1}
               selected={selected}
               onSelect={onSelect}
+              tombstoned={tombstoned}
+              fileStates={fileStates}
             />
           ))}
         </div>

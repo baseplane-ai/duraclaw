@@ -3,6 +3,7 @@ import os from 'node:os'
 import nodePath from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  handleDocsRunnerHealth,
   handleDocsRunnerStatus,
   handleListDocsFiles,
   handleListDocsRunners,
@@ -319,6 +320,98 @@ describe('GET /docs-runners/:projectId/status', () => {
     expect(body.ok).toBe(true)
     expect(body.state).toBe('running')
     expect(body.session_id).toBe(PROJECT_ID)
+  })
+})
+
+// ────────────────────────────────────────────────────────────────────
+// GET /docs-runners/:projectId/health
+// ────────────────────────────────────────────────────────────────────
+
+describe('GET /docs-runners/:projectId/health', () => {
+  it('400 on bad projectId', async () => {
+    const resp = await handleDocsRunnerHealth('not-hex', new URLSearchParams())
+    expect(resp.status).toBe(400)
+    expect(await resp.json()).toEqual({ error: 'invalid projectId' })
+  })
+
+  it('forwards upstream 200 body and X-Docs-Runner-Version header', async () => {
+    const upstreamBody = {
+      status: 'ok',
+      version: '0.1.0',
+      uptime_ms: 123,
+      files: 1,
+      syncing: 1,
+      disconnected: 0,
+      tombstoned: 0,
+      errors: 0,
+      reconnects: 0,
+      per_file: [{ path: 'README.md', state: 'syncing', last_sync_ts: 1, error_count: 0 }],
+      config_present: true,
+    }
+    const calls: string[] = []
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      calls.push(typeof input === 'string' ? input : input.toString())
+      return new Response(JSON.stringify(upstreamBody), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          'x-docs-runner-version': '0.1.0',
+        },
+      })
+    }) as unknown as typeof fetch
+
+    const resp = await handleDocsRunnerHealth(PROJECT_ID, new URLSearchParams(), { fetcher })
+
+    expect(resp.status).toBe(200)
+    expect(resp.headers.get('X-Docs-Runner-Version')).toBe('0.1.0')
+    expect(await resp.json()).toEqual(upstreamBody)
+
+    // Default port is 9878 when no `healthPort` query param is supplied.
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toBe('http://127.0.0.1:9878/health')
+  })
+
+  it('honours an explicit healthPort query param', async () => {
+    const calls: string[] = []
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      calls.push(typeof input === 'string' ? input : input.toString())
+      return new Response('{}', { status: 200 })
+    }) as unknown as typeof fetch
+    const params = new URLSearchParams({ healthPort: '15858' })
+    const resp = await handleDocsRunnerHealth(PROJECT_ID, params, { fetcher })
+    expect(resp.status).toBe(200)
+    expect(calls[0]).toBe('http://127.0.0.1:15858/health')
+  })
+
+  it('400 on invalid healthPort', async () => {
+    const fetcher = vi.fn() as unknown as typeof fetch
+    const params = new URLSearchParams({ healthPort: 'banana' })
+    const resp = await handleDocsRunnerHealth(PROJECT_ID, params, { fetcher })
+    expect(resp.status).toBe(400)
+    expect(await resp.json()).toEqual({ error: 'invalid healthPort' })
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+
+  it('502 docs_runner_unreachable when fetch throws', async () => {
+    const fetcher = vi.fn(async () => {
+      throw new Error('ECONNREFUSED')
+    }) as unknown as typeof fetch
+    const resp = await handleDocsRunnerHealth(PROJECT_ID, new URLSearchParams(), { fetcher })
+    expect(resp.status).toBe(502)
+    expect(await resp.json()).toEqual({ error: 'docs_runner_unreachable' })
+  })
+
+  it('forwards upstream non-2xx status + body verbatim', async () => {
+    const fetcher = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ status: 'down' }), {
+          status: 503,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+    ) as unknown as typeof fetch
+    const resp = await handleDocsRunnerHealth(PROJECT_ID, new URLSearchParams(), { fetcher })
+    expect(resp.status).toBe(503)
+    expect(await resp.json()).toEqual({ status: 'down' })
   })
 })
 

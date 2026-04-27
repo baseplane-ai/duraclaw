@@ -421,6 +421,72 @@ export async function handleListDocsFiles(
   return json(200, { files: out })
 }
 
+// ── GET /docs-runners/:projectId/health ────────────────────────────
+
+/** Default health port the docs-runner listens on (see main.ts). */
+export const DEFAULT_DOCS_RUNNER_HEALTH_PORT = 9878
+
+/** Timeout for the upstream `/health` fetch — keep snappy so the orchestrator's own 5 s budget is the dominant one. */
+const DOCS_HEALTH_FETCH_TIMEOUT_MS = 3_000
+
+export interface DocsRunnerHealthOpts {
+  /** Injectable fetcher (tests). Defaults to `globalThis.fetch`. */
+  fetcher?: typeof fetch
+}
+
+/**
+ * Handle GET /docs-runners/:projectId/health. Proxies to the docs-runner's
+ * own loopback `/health` endpoint at `127.0.0.1:${healthPort}` (default
+ * 9878). The gateway has no config of its own here — the orchestrator
+ * passes the configured port via `?healthPort=`.
+ *
+ * Response semantics:
+ *   - upstream 2xx           → forward 200 + body, propagate `X-Docs-Runner-Version`
+ *   - upstream non-2xx       → forward status + body
+ *   - fetch throw / timeout  → 502 `docs_runner_unreachable`
+ */
+export async function handleDocsRunnerHealth(
+  projectId: string,
+  searchParams: URLSearchParams,
+  opts: DocsRunnerHealthOpts = {},
+): Promise<Response> {
+  if (!PROJECT_ID_RE.test(projectId)) {
+    return json(400, { error: 'invalid projectId' })
+  }
+
+  const portParam = searchParams.get('healthPort')
+  let healthPort = DEFAULT_DOCS_RUNNER_HEALTH_PORT
+  if (portParam !== null) {
+    const parsed = Number.parseInt(portParam, 10)
+    if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 65535) {
+      return json(400, { error: 'invalid healthPort' })
+    }
+    healthPort = parsed
+  }
+
+  const fetcher = opts.fetcher ?? fetch
+  let upstream: Response
+  try {
+    upstream = await fetcher(`http://127.0.0.1:${healthPort}/health`, {
+      signal: AbortSignal.timeout(DOCS_HEALTH_FETCH_TIMEOUT_MS),
+    })
+  } catch {
+    return json(502, { error: 'docs_runner_unreachable' })
+  }
+
+  const text = await upstream.text()
+  const headers: Record<string, string> = {
+    'Content-Type': upstream.headers.get('Content-Type') ?? 'application/json',
+  }
+  const version = upstream.headers.get('x-docs-runner-version')
+  if (version) headers['X-Docs-Runner-Version'] = version
+
+  return new Response(text, {
+    status: upstream.status,
+    headers,
+  })
+}
+
 // ── GET /docs-runners/:projectId/status ────────────────────────────
 
 export interface DocsRunnerStatusOpts {

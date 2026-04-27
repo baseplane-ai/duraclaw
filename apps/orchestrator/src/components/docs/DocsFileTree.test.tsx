@@ -40,4 +40,32 @@ describe('DocsFileTree', () => {
     fireEvent.click(screen.getByTestId('docs-tree-file-planning/foo.md'))
     expect(onSelect).toHaveBeenCalledWith('planning/foo.md')
   })
+
+  it('renders a colored state dot for files with a known state', () => {
+    const files = [
+      { relPath: 'a.md', lastModified: 1 },
+      { relPath: 'b.md', lastModified: 2 },
+      { relPath: 'c.md', lastModified: 3 },
+    ]
+    const fileStates = new Map<string, 'syncing' | 'disconnected' | 'starting'>([
+      ['a.md', 'syncing'],
+      ['b.md', 'disconnected'],
+    ])
+    render(
+      <DocsFileTree files={files} selected={null} onSelect={() => {}} fileStates={fileStates} />,
+    )
+
+    const a = screen.getByTestId('docs-tree-file-a.md')
+    expect(a.getAttribute('data-state')).toBe('syncing')
+    expect(a.querySelector('[data-testid="docs-tree-state-dot-syncing"]')).toBeTruthy()
+
+    const b = screen.getByTestId('docs-tree-file-b.md')
+    expect(b.getAttribute('data-state')).toBe('disconnected')
+    expect(b.querySelector('[data-testid="docs-tree-state-dot-disconnected"]')).toBeTruthy()
+
+    // c.md has no fileStates entry → no dot
+    const c = screen.getByTestId('docs-tree-file-c.md')
+    expect(c.getAttribute('data-state')).toBeNull()
+    expect(c.querySelector('[data-testid^="docs-tree-state-dot-"]')).toBeNull()
+  })
 })

@@ -2032,6 +2032,88 @@ export function createApiApp() {
     })
   })
 
+  // GH#27 P1.7 WU-B: GET /api/docs-runners/:projectId/health
+  //
+  // Proxy to the gateway's `GET /docs-runners/:projectId/health`, which
+  // in turn forwards the docs-runner's loopback `/health`. Used by the
+  // docs route to drive per-file state indicators and the
+  // ConfigMissingBanner (`config_present === false`).
+  //
+  // Status semantics:
+  //   - upstream 200          → forward 200 + body
+  //   - upstream 502          → pass through as-is (the gateway's
+  //                             `docs_runner_unreachable` is not a gateway
+  //                             error — the runner is down or not started)
+  //   - upstream 5xx (other)  → 502 `gateway_error` with upstreamStatus
+  //   - fetch throw / timeout → 503 `gateway_unavailable`
+  //   - 404 if no projectMetadata row.
+  app.get('/api/docs-runners/:projectId/health', async (c) => {
+    const projectId = c.req.param('projectId')
+    if (!PROJECT_ID_RE.test(projectId)) {
+      return c.json({ error: 'Invalid projectId' }, 400)
+    }
+
+    const db = getDb(c.env)
+    const rows = await db
+      .select()
+      .from(projectMetadata)
+      .where(eq(projectMetadata.projectId, projectId))
+      .limit(1)
+    if (rows.length === 0) {
+      return c.json(
+        {
+          error: 'project_not_configured',
+          message: 'No metadata for this project',
+        },
+        404,
+      )
+    }
+
+    if (!c.env.CC_GATEWAY_URL) {
+      return c.json({ error: 'CC_GATEWAY_URL not configured' }, 500)
+    }
+    const httpBase = c.env.CC_GATEWAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+    const url = new URL(`/docs-runners/${projectId}/health`, httpBase)
+
+    const headers: Record<string, string> = {}
+    if (c.env.CC_GATEWAY_SECRET) {
+      headers.Authorization = `Bearer ${c.env.CC_GATEWAY_SECRET}`
+    }
+
+    let resp: Response
+    try {
+      resp = await fetch(url.toString(), {
+        headers,
+        signal: AbortSignal.timeout(5000),
+      })
+    } catch {
+      return c.json({ error: 'gateway_unavailable' }, 503)
+    }
+
+    // 502 from the gateway is the docs-runner-unreachable signal —
+    // pass through as-is so the UI can distinguish "runner down" from
+    // "gateway down".
+    if (resp.status === 502) {
+      const text = await resp.text()
+      return new Response(text, {
+        status: 502,
+        headers: { 'Content-Type': resp.headers.get('Content-Type') ?? 'application/json' },
+      })
+    }
+
+    if (resp.status >= 500) {
+      return c.json({ error: 'gateway_error', upstreamStatus: resp.status }, 502)
+    }
+
+    const text = await resp.text()
+    const outHeaders: Record<string, string> = {
+      'Content-Type': resp.headers.get('Content-Type') ?? 'application/json',
+    }
+    const ver = resp.headers.get('x-docs-runner-version')
+    if (ver) outHeaders['X-Docs-Runner-Version'] = ver
+    return new Response(text, { status: resp.status, headers: outHeaders })
+  })
+
   // ── Feature Flags (GH#86) ─────────────────────────────────────────
 
   app.get('/api/admin/feature-flags', async (c) => {

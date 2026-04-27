@@ -12,6 +12,7 @@ const baseSnapshot: HealthSnapshot = {
   errors: 0,
   reconnects: 0,
   per_file: [],
+  config_present: true,
 }
 
 let active: HealthServer | null = null
@@ -39,13 +40,29 @@ describe('HealthServer', () => {
     const res = await fetch(`http://127.0.0.1:${port}/health`)
     expect(res.status).toBe(200)
     expect(res.headers.get('content-type')).toMatch(/application\/json/)
+    expect(res.headers.get('x-docs-runner-version')).toBe('0.0.0-test')
     const body = (await res.json()) as HealthSnapshot
     expect(body.status).toBe('ok')
     expect(body.version).toBe('0.0.0-test')
     expect(body.uptime_ms).toBe(1234)
+    expect(body.config_present).toBe(true)
 
     await server.stop()
     active = null
+  })
+
+  it('surfaces config_present=false when supplied by the snapshot factory', async () => {
+    const port = ephemeralPort()
+    const server = new HealthServer({
+      port,
+      snapshot: () => ({ ...baseSnapshot, config_present: false }),
+    })
+    active = server
+    await server.start()
+
+    const res = await fetch(`http://127.0.0.1:${port}/health`)
+    const body = (await res.json()) as HealthSnapshot
+    expect(body.config_present).toBe(false)
   })
 
   it('returns 404 for unknown paths', async () => {

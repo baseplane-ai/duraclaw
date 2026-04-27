@@ -29,6 +29,12 @@ export interface HealthSnapshot {
   errors: number
   reconnects: number
   per_file: HealthFileEntry[]
+  /**
+   * Whether `duraclaw-docs.yaml` was found and parsed at startup.
+   * Derived from `loadConfig().source === 'file'`. The orchestrator
+   * uses this to render the "Create docs config" nudge banner.
+   */
+  config_present: boolean
 }
 
 export interface HealthServerOptions {
@@ -48,8 +54,14 @@ export class HealthServer {
     if (this.server) return
     const server = http.createServer((req, res) => {
       if (req.method === 'GET' && req.url === '/health') {
-        const body = JSON.stringify(this.opts.snapshot())
-        res.writeHead(200, { 'content-type': 'application/json' })
+        const snap = this.opts.snapshot()
+        const body = JSON.stringify(snap)
+        res.writeHead(200, {
+          'content-type': 'application/json',
+          // P1.8 hardening — let the orchestrator log the upstream version
+          // alongside its own. Forwarded by the gateway as-is.
+          'x-docs-runner-version': snap.version,
+        })
         res.end(body)
         return
       }

@@ -25,16 +25,43 @@ import { BlockNoteSchema, defaultBlockSpecs } from '@blocknote/core'
 import { BlockNoteView } from '@blocknote/mantine'
 import { useCreateBlockNote } from '@blocknote/react'
 import { DOCS_YDOC_FRAGMENT_NAME, deriveEntityId } from '@duraclaw/shared-types'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import useYProvider from 'y-partyserver/react'
 import * as Y from 'yjs'
 import { useSession } from '~/lib/auth-client'
 import { partyHost } from '~/lib/platform'
 import { colorForUserId } from '~/lib/presence-colors'
+import type { ConnectedPeer } from './ConnectedPeersChip'
+
+/**
+ * Out-of-band signals piggybacked on awareness from the DO/runner side.
+ *   - `setup-required` → projectMetadata.docsWorktreePath is null;
+ *     surface DocsWorktreeSetup modal (B12 → B19).
+ *   - `tombstone-pending` → runner observed a delete on `relPath`;
+ *     UI flips to strikethrough (B10 → B20).
+ *   - `tombstone-cancelled` → file reappeared before the alarm fired;
+ *     clear the strikethrough.
+ */
+export type DocsAwarenessSignal =
+  | { kind: 'setup-required'; projectId?: string }
+  | { kind: 'tombstone-pending'; relPath?: string; tombstoneAt?: number }
+  | { kind: 'tombstone-cancelled'; relPath?: string }
 
 export interface DocsEditorProps {
   projectId: string
   relPath: string
+  /**
+   * Called on every awareness update with the current peer set (excluding
+   * the local clientId). The route lifts this so the chip lives in the
+   * page header even though this component owns the provider.
+   */
+  onPeersChange?: (peers: ConnectedPeer[]) => void
+  /**
+   * Called when any peer publishes a `setup-required`, `tombstone-pending`,
+   * or `tombstone-cancelled` awareness record. The route bubbles the
+   * signal into modal / strikethrough state.
+   */
+  onAwarenessSignal?: (signal: DocsAwarenessSignal) => void
 }
 
 /**
@@ -83,10 +110,28 @@ export function DocsEditor(props: DocsEditorProps) {
 
   // Key on entityId so a file switch fully unmounts/remounts the
   // collab+editor stack — no Y.Doc / provider state leakage between docs.
-  return <DocsEditorInner key={entityId} entityId={entityId} relPath={props.relPath} />
+  return (
+    <DocsEditorInner
+      key={entityId}
+      entityId={entityId}
+      relPath={props.relPath}
+      onPeersChange={props.onPeersChange}
+      onAwarenessSignal={props.onAwarenessSignal}
+    />
+  )
 }
 
-function DocsEditorInner({ entityId, relPath }: { entityId: string; relPath: string }) {
+function DocsEditorInner({
+  entityId,
+  relPath,
+  onPeersChange,
+  onAwarenessSignal,
+}: {
+  entityId: string
+  relPath: string
+  onPeersChange?: (peers: ConnectedPeer[]) => void
+  onAwarenessSignal?: (signal: DocsAwarenessSignal) => void
+}) {
   // Fresh Y.Doc per (entityId) — guaranteed by the parent's `key=entityId`,
   // useMemo guards against StrictMode double-mount churn.
   const ydoc = useMemo(() => {
@@ -124,6 +169,99 @@ function DocsEditorInner({ entityId, relPath }: { entityId: string; relPath: str
       user: { name: userName, color: userColor },
     },
   })
+
+  // Publish our own awareness identity so peers (other browsers + the
+  // docs-runner) can render us in their ConnectedPeersChip. We mark
+  // ourselves `kind: 'human'`; the docs-runner sets `kind: 'docs-runner'`
+  // (see packages/docs-runner/src/yjs-protocol.ts). The chip filters on
+  // this discriminator at render time.
+  //
+  // Note on cursor overlay: BlockNote shows a cursor for any awareness
+  // peer that publishes a selection. The docs-runner deliberately never
+  // sets a selection, so no runner cursor overlay renders without an
+  // explicit filter on our side. (See P1.7 WU-A spec.)
+  useEffect(() => {
+    const awareness = provider.awareness
+    awareness.setLocalStateField('user', {
+      name: userName,
+      color: userColor,
+      kind: 'human',
+    })
+    return () => {
+      // Clear our identity on unmount/file-switch so peers don't see a
+      // ghost. y-protocols also drops the state on WS close, but doing
+      // it eagerly avoids a stale entry mid-tab-switch.
+      awareness.setLocalStateField('user', null)
+    }
+  }, [provider, userName, userColor])
+
+  // Stash the latest signal callback in a ref so the awareness handler
+  // doesn't churn on every parent re-render — only the provider identity
+  // should drive subscribe/unsubscribe.
+  const signalRef = useRef(onAwarenessSignal)
+  signalRef.current = onAwarenessSignal
+  const peersRef = useRef(onPeersChange)
+  peersRef.current = onPeersChange
+
+  const handleAwarenessUpdate = useCallback(() => {
+    const awareness = provider.awareness
+    const localId = ydoc.clientID
+    const states = awareness.getStates() as Map<number, Record<string, unknown>>
+    const peers: ConnectedPeer[] = []
+    for (const [clientId, state] of states) {
+      if (clientId === localId) continue
+      const user = (state.user ?? {}) as {
+        name?: string
+        color?: string
+        kind?: string
+        host?: string
+        version?: string
+      }
+      peers.push({
+        clientId,
+        kind: user.kind,
+        name: user.name,
+        color: user.color,
+        host: user.host,
+        version: user.version,
+      })
+
+      // Out-of-band signals (B10/B12). Per the GH#27 spec these ride on
+      // awareness records; the discriminator is `state.kind` (top-level)
+      // OR `state.signal.kind`, so we check both shapes for forward-compat.
+      const signalKind =
+        (state.kind as string | undefined) ??
+        (state.signal as { kind?: string } | undefined)?.kind ??
+        undefined
+      if (
+        signalKind === 'setup-required' ||
+        signalKind === 'tombstone-pending' ||
+        signalKind === 'tombstone-cancelled'
+      ) {
+        const cb = signalRef.current
+        if (cb) {
+          // Pass through projectId / relPath / tombstoneAt if present.
+          cb({
+            kind: signalKind,
+            ...(state as Record<string, unknown>),
+          } as DocsAwarenessSignal)
+        }
+      }
+    }
+    const cb = peersRef.current
+    if (cb) cb(peers)
+  }, [provider, ydoc])
+
+  useEffect(() => {
+    const awareness = provider.awareness
+    awareness.on('update', handleAwarenessUpdate)
+    // Fire once on subscribe so the parent gets the initial snapshot
+    // (peers already present at mount time).
+    handleAwarenessUpdate()
+    return () => {
+      awareness.off('update', handleAwarenessUpdate)
+    }
+  }, [provider, handleAwarenessUpdate])
 
   // Provider + Y.Doc lifetime is tied to (entityId). Tear down on
   // unmount so a file switch doesn't leak the WS / awareness.
