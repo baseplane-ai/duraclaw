@@ -5,7 +5,7 @@ const EVENT_LOG_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 
 /**
  * Persist a structured log event to SQLite + mirror to console for
- * wrangler tail. Every `[gate]` / `[conn]` / `[rpc]` log should flow
+ * wrangler tail. Every `[gate]` / `[conn]` / `[rpc]` / `[reap]` log should flow
  * through here so the event is durable and queryable via `getEventLog`.
  */
 export function logEvent(

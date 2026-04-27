@@ -1,5 +1,6 @@
 import { type FSWatcher, watch } from 'node:fs'
 import fs from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import nodePath from 'node:path'
 import type { SDKAssistantMessageError } from '@anthropic-ai/claude-agent-sdk'
 import type { BufferedChannel } from '@duraclaw/shared-transport'
@@ -7,6 +8,7 @@ import type {
   ExecuteCommand,
   GatewayEvent,
   KataSessionState,
+  PermissionMode,
   ResumeCommand,
 } from '@duraclaw/shared-types'
 import { CLAUDE_CAPABILITIES } from './adapters/claude.js'
@@ -19,6 +21,91 @@ import type { RunnerSessionContext, SDKUserMsg } from './types.js'
 
 /** Debounce interval for kata state file changes (ms). Matches gateway. */
 const KATA_DEBOUNCE_MS = 150
+
+/**
+ * Resolve a glibc-only path to the SDK's bundled Claude Code binary.
+ *
+ * Background: SDK 0.2.119 ships the Claude Code CLI as a per-platform
+ * native binary inside two optional dependency packages, both installed
+ * by pnpm regardless of the host: `@anthropic-ai/claude-agent-sdk-linux-
+ * x64-musl` and `@anthropic-ai/claude-agent-sdk-linux-x64`. The SDK's
+ * own lookup function tries the musl variant first via `require.resolve`
+ * — and `require.resolve` always succeeds because the package is on
+ * disk. It then exec's the MUSL-linked ELF, which silently ENOENT's on
+ * a glibc-only host (the binary's hard-coded interpreter
+ * `/lib/ld-musl-x86_64.so.1` is not present), the runner's catch
+ * captures it as a buffered `error` event, and the runner exits before
+ * the dial-back WS opens — so the DO never sees the error and the user
+ * sits on "Claude is thinking…" forever.
+ *
+ * Force-resolving the glibc variant here and passing it to the SDK as
+ * `pathToClaudeCodeExecutable` skips the SDK's musl-first lookup
+ * entirely. Returns `undefined` on platforms where the lookup fails
+ * (non-linux, missing optional dep) — the SDK falls back to its own
+ * lookup, which is the correct behavior on macOS / win32 where there's
+ * no musl variant in the candidate list.
+ */
+const claudeBinRequire = createRequire(import.meta.url)
+function resolveGlibcClaudeBinary(): string | undefined {
+  if (process.platform !== 'linux' || process.arch !== 'x64') return undefined
+  // The optional `linux-x64` and `linux-x64-musl` packages are hoisted into
+  // the SDK's own resolution scope (pnpm), not session-runner's, so a
+  // direct `require.resolve` from this module fails. Bridge through the
+  // SDK's package.json to pick up the SDK's resolution roots.
+  try {
+    const sdkPkgJson = claudeBinRequire.resolve('@anthropic-ai/claude-agent-sdk/package.json')
+    return createRequire(sdkPkgJson).resolve('@anthropic-ai/claude-agent-sdk-linux-x64/claude')
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * SDK-accepted permission modes. Wider than the API allowlist could
+ * theoretically hold (a stale legacy `'acceptAll'` row in
+ * `user_preferences.permission_mode` would land here untyped). Any
+ * value outside this set is silently demoted to `'default'` rather
+ * than crashing the SDK boot.
+ */
+const SDK_PERMISSION_MODES: ReadonlySet<PermissionMode> = new Set([
+  'default',
+  'acceptEdits',
+  'bypassPermissions',
+  'plan',
+  'dontAsk',
+  'auto',
+])
+
+export function resolvePermissionMode(value: string | undefined): PermissionMode {
+  if (value && SDK_PERMISSION_MODES.has(value as PermissionMode)) {
+    return value as PermissionMode
+  }
+  return 'default'
+}
+
+/**
+ * SDK-accepted effort levels. The DO already converts the user-pref
+ * `effort` column at injection time (`mapEffortPref`), so anything
+ * landing here is already validated. This second guard exists for
+ * defence-in-depth: a stale legacy value that somehow slipped past —
+ * or a future SDK pin that narrows the union — gets demoted to
+ * `'high'` (matches the user_preferences D1 default) instead of
+ * crashing the SDK boot.
+ */
+type EffortLevel = NonNullable<ExecuteCommand['effort']>
+const SDK_EFFORT_LEVELS: ReadonlySet<EffortLevel> = new Set([
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+])
+
+export function resolveEffort(value: string | undefined): EffortLevel | undefined {
+  if (value === undefined) return undefined
+  if (SDK_EFFORT_LEVELS.has(value as EffortLevel)) return value as EffortLevel
+  return 'high'
+}
 
 /**
  * Read the kata session state for a specific SDK session id.
@@ -296,10 +383,28 @@ export async function handleCanUseTool(
       questions: rawQuestions,
     })
 
+    // Stamp pending_gate and flush BEFORE parking so the reaper can see
+    // that the session is parked at a gate (B1/B2/B3 spec behaviors).
+    ctx.meta.pending_gate = { type: 'ask_user', tool_call_id: id, parked_at_ts: Date.now() }
+    try {
+      await ctx.flushMeta?.()
+    } catch (flushErr) {
+      console.warn(
+        `[gate] pending_gate meta flush failed toolUseID=${id} reason=${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+      )
+    }
+
     // No timeout — the agent waits indefinitely for the user to answer.
     // The user can still abort the session, which fires `signal` and rejects.
     try {
       const answers = await new Promise<Record<string, string>>((resolve, reject) => {
+        // Guard: if signal already aborted before we re-entered (e.g. the
+        // await flushMeta() above yielded and the caller aborted in the
+        // meantime), reject immediately — the event would never fire.
+        if (signal.aborted) {
+          reject(new Error('Session aborted'))
+          return
+        }
         ctx.pendingAnswer = { resolve, reject }
 
         signal.addEventListener(
@@ -324,6 +429,15 @@ export async function handleCanUseTool(
         `[gate] canUseTool AskUserQuestion rejected toolUseID=${id} duration_ms=${Date.now() - askedAt} reason=${err instanceof Error ? err.message : String(err)}`,
       )
       throw err
+    } finally {
+      ctx.meta.pending_gate = null
+      try {
+        await ctx.flushMeta?.()
+      } catch (flushErr) {
+        console.warn(
+          `[gate] pending_gate clear flush failed toolUseID=${id} reason=${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+        )
+      }
     }
   }
 
@@ -336,20 +450,50 @@ export async function handleCanUseTool(
     input,
   })
 
+  // Stamp pending_gate and flush BEFORE parking so the reaper can see
+  // that the session is parked at a gate (B1/B2/B3 spec behaviors).
+  ctx.meta.pending_gate = { type: 'permission_request', tool_call_id: id, parked_at_ts: Date.now() }
+  try {
+    await ctx.flushMeta?.()
+  } catch (flushErr) {
+    console.warn(
+      `[gate] pending_gate meta flush failed toolUseID=${id} reason=${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+    )
+  }
+
   // No timeout — the agent waits indefinitely for the user to decide.
   // The user can still abort the session, which fires `signal` and rejects.
-  const allowed = await new Promise<boolean>((resolve, reject) => {
-    ctx.pendingPermission = { resolve, reject }
-
-    signal.addEventListener(
-      'abort',
-      () => {
-        ctx.pendingPermission = null
+  let allowed: boolean
+  try {
+    allowed = await new Promise<boolean>((resolve, reject) => {
+      // Guard: if signal already aborted before we re-entered (e.g. the
+      // await flushMeta() above yielded and the caller aborted in the
+      // meantime), reject immediately — the event would never fire.
+      if (signal.aborted) {
         reject(new Error('Session aborted'))
-      },
-      { once: true },
-    )
-  })
+        return
+      }
+      ctx.pendingPermission = { resolve, reject }
+
+      signal.addEventListener(
+        'abort',
+        () => {
+          ctx.pendingPermission = null
+          reject(new Error('Session aborted'))
+        },
+        { once: true },
+      )
+    })
+  } finally {
+    ctx.meta.pending_gate = null
+    try {
+      await ctx.flushMeta?.()
+    } catch (flushErr) {
+      console.warn(
+        `[gate] pending_gate clear flush failed toolUseID=${id} reason=${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+      )
+    }
+  }
 
   // Note: the SDK's runtime Zod validator requires `updatedInput` on every
   // 'allow' result (the `.d.ts` marks it optional but the schema doesn't).
@@ -446,11 +590,16 @@ export class ClaudeRunner {
         abortController: ac,
         cwd: projectPath,
         env: buildCleanEnv(),
-        permissionMode: 'default',
+        permissionMode: resolvePermissionMode(cmd.permission_mode),
         includePartialMessages: true,
         settingSources: ['user', 'project', 'local'],
         enableFileCheckpointing: true,
       }
+
+      // Force the glibc-bundled Claude Code binary on linux-x64 — see
+      // `resolveGlibcClaudeBinary` for the full rationale.
+      const glibcClaudeBin = resolveGlibcClaudeBinary()
+      if (glibcClaudeBin) options.pathToClaudeCodeExecutable = glibcClaudeBin
 
       if (cmd.type === 'execute') {
         if (cmd.model) options.model = cmd.model
@@ -459,7 +608,8 @@ export class ClaudeRunner {
         if (cmd.max_turns) options.maxTurns = cmd.max_turns
         if (cmd.max_budget_usd) options.maxBudgetUsd = cmd.max_budget_usd
         if (cmd.thinking) options.thinking = cmd.thinking
-        if (cmd.effort) options.effort = cmd.effort
+        const effort = resolveEffort(cmd.effort)
+        if (effort) options.effort = effort
       } else {
         // resume
         options.resume = cmd.runner_session_id

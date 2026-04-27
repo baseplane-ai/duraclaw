@@ -180,7 +180,20 @@ describe('POST /api/sessions', () => {
     })
   })
 
-  it('returns 400 when project or prompt is missing', async () => {
+  it('returns 400 when project is missing (prompt is now optional — deferred-runner flow)', async () => {
+    const app = makeApp(env)
+    const res = await app.request('/api/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'do stuff' }),
+    })
+
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toMatch(/Missing required field/)
+  })
+
+  it('accepts a session create with no prompt (deferred-runner) and returns 201', async () => {
     const app = makeApp(env)
     const res = await app.request('/api/sessions', {
       method: 'POST',
@@ -188,9 +201,9 @@ describe('POST /api/sessions', () => {
       body: JSON.stringify({ project: 'my-project' }),
     })
 
-    expect(res.status).toBe(400)
-    const body = (await res.json()) as { error: string }
-    expect(body.error).toMatch(/Missing required fields/)
+    expect(res.status).toBe(201)
+    const body = (await res.json()) as { session_id: string }
+    expect(body.session_id).toBe('new-do-id')
   })
 
   it('creates a session and returns session_id', async () => {

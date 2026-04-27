@@ -10,6 +10,7 @@ const DEFAULT_STALE_THRESHOLD_MS = 30 * 60_000
 const DEFAULT_SIGTERM_GRACE_MS = 10_000
 const DEFAULT_CMD_ORPHAN_MAX_AGE_MS = 5 * 60_000
 const DEFAULT_TERMINAL_FILE_MAX_AGE_MS = 60 * 60_000
+const PENDING_GATE_MAX_AGE_MS = 24 * 60 * 60_000
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -204,6 +205,41 @@ export function createReaper(opts: ReaperOptions): Reaper {
     killTimers.set(sessionId, timer)
   }
 
+  function reportReapDecision(
+    sessionId: string,
+    decision: 'skip-pending-gate' | 'kill-stale' | 'kill-dead-runner',
+    attrs: Record<string, unknown>,
+  ): void {
+    const workerPublicUrl = process.env.WORKER_PUBLIC_URL ?? ''
+    const gatewaySecret = process.env.CC_GATEWAY_SECRET ?? ''
+    if (!workerPublicUrl) return
+    const url = `${workerPublicUrl}/api/gateway/sessions/${sessionId}/reap-decision`
+    fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${gatewaySecret}`,
+      },
+      body: JSON.stringify({ decision, attrs }),
+      signal: AbortSignal.timeout(2000),
+    })
+      .then((res) => {
+        if (!res.ok) {
+          logger.warn(
+            `[reaper] rpc-failed sessionId=${sessionId} decision=${decision} status=${res.status}`,
+          )
+        }
+      })
+      .catch((err) => {
+        logger.warn(
+          `[reaper] rpc-failed sessionId=${sessionId} decision=${decision} err=${(err as Error).message}`,
+        )
+      })
+  }
+
+  // Per-directory reap helper. Extracted so `reapOnce` can sweep both the
+  // session-runner sessions dir AND any docs-runner extras configured by
+  // the gateway (e.g. docs-runner scratch dir under /run/duraclaw/docs).
   async function reapDir(
     dir: string,
     report: ReapReport,
@@ -276,11 +312,34 @@ export function createReaper(opts: ReaperOptions): Reaper {
         // Previously SIGTERMed and still alive? The watchdog handles escalation
         // via setTimeout; here we only need to detect NEW stale sessions.
         if (stale && !awaitingKill.has(sessionId)) {
+          // Re-read meta to check for fresh pending_gate (runner may have just parked)
+          const freshMeta = await readJsonIfExists<MetaFile>(metaPath)
+          const pg = freshMeta?.pending_gate
+          if (pg && typeof pg.parked_at_ts === 'number') {
+            const parkedAgeMs = currentNow - pg.parked_at_ts
+            if (parkedAgeMs <= PENDING_GATE_MAX_AGE_MS) {
+              logger.info(
+                `[reaper] skip-pending-gate sessionId=${sessionId} type=${pg.type} tool_call_id=${pg.tool_call_id} parked_age_ms=${parkedAgeMs}`,
+              )
+              reportReapDecision(sessionId, 'skip-pending-gate', {
+                type: pg.type,
+                tool_call_id: pg.tool_call_id,
+                parked_age_ms: parkedAgeMs,
+                last_activity_age_ms: lastActivityTs !== null ? currentNow - lastActivityTs : null,
+              })
+              continue
+            }
+            // pending_gate exists but exceeded sanity threshold — fall through to SIGTERM
+          }
           try {
             logger.info(
               `[reaper] stale session sessionId=${sessionId} alive=true last_activity_ts=${lastActivityTs} — SIGTERM`,
             )
             kill(pid, 'SIGTERM')
+            reportReapDecision(sessionId, 'kill-stale', {
+              pid,
+              last_activity_age_ms: lastActivityTs !== null ? currentNow - lastActivityTs : null,
+            })
             awaitingKill.set(sessionId, { pid, termedAt: currentNow })
             report.sigtermed.push(sessionId)
             scheduleSigkillWatchdog(sessionId, pid)
@@ -319,6 +378,10 @@ export function createReaper(opts: ReaperOptions): Reaper {
           if (result === 'written') {
             report.markedCrashed.push(sessionId)
             logger.info(`[reaper] crash marked sessionId=${sessionId} duration_ms=${durationMs}`)
+            reportReapDecision(sessionId, 'kill-dead-runner', {
+              pid: pid ?? null,
+              duration_ms: durationMs,
+            })
           } else {
             logger.info(`[reaper] exit file already present, skipping sessionId=${sessionId}`)
           }

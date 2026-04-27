@@ -104,9 +104,13 @@ const PREF_PATCH_KEYS = new Set([
   'defaultChainAutoAdvance',
 ])
 
+// Mirrors the Claude Agent SDK's `PermissionMode` union. Keep in sync
+// with `PermissionMode` in `@duraclaw/shared-types` and the SDK's
+// `sdk.d.ts`. `acceptAll` was historically accepted here but the SDK
+// has no such mode — it would be silently demoted to `'default'` by
+// the runner, so reject it at the API boundary.
 const PERMISSION_MODES = new Set([
   'default',
-  'acceptAll',
   'acceptEdits',
   'bypassPermissions',
   'plan',
@@ -114,6 +118,8 @@ const PERMISSION_MODES = new Set([
   'auto',
 ])
 const THINKING_MODES = new Set(['adaptive', 'enabled', 'disabled'])
+// Mirrors the Claude Agent SDK's `EffortLevel` union (sdk.d.ts).
+// `'xhigh'` was added in SDK v0.2.119 (Claude 4.7).
 const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
 
 function getDb(env: ApiAppEnv['Bindings']) {
@@ -727,6 +733,67 @@ export function createApiApp() {
     }
 
     return c.body(null, 204)
+  })
+
+  // ── Gateway reap-decision bridge ──────────────────────────────────────────
+  // Posted by the gateway reaper on every kill/skip decision.
+  // Bypasses authMiddleware — auth is Bearer CC_GATEWAY_SECRET, timing-safe.
+  app.post('/api/gateway/sessions/:id/reap-decision', async (c) => {
+    const expected = c.env.CC_GATEWAY_SECRET
+    if (!expected) {
+      return c.json({ error: 'CC_GATEWAY_SECRET not configured' }, 401)
+    }
+    const authHeader = c.req.header('authorization') ?? ''
+    const provided = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
+    if (!constantTimeEquals(provided, expected)) {
+      return c.json({ error: 'unauthorized' }, 401)
+    }
+
+    const body = (await c.req.json().catch(() => null)) as {
+      decision?: unknown
+      attrs?: unknown
+    } | null
+
+    const VALID_DECISIONS = ['skip-pending-gate', 'kill-stale', 'kill-dead-runner'] as const
+    type ReapDecision = (typeof VALID_DECISIONS)[number]
+
+    if (
+      !body ||
+      typeof body.decision !== 'string' ||
+      !(VALID_DECISIONS as readonly string[]).includes(body.decision)
+    ) {
+      return c.json({ error: 'invalid request' }, 400)
+    }
+
+    const decision = body.decision as ReapDecision
+    const attrs =
+      body.attrs && typeof body.attrs === 'object' && !Array.isArray(body.attrs)
+        ? (body.attrs as Record<string, unknown>)
+        : {}
+
+    const sessionId = c.req.param('id')
+    const doId = getSessionDoId(c.env, sessionId)
+    const stub = c.env.SESSION_AGENT.get(doId)
+
+    try {
+      // Cast: DO RPC types aren't auto-exposed on the stub; @callable routes correctly at runtime.
+      await (
+        stub as unknown as {
+          recordReapDecision: (args: {
+            decision: ReapDecision
+            attrs: Record<string, unknown>
+          }) => Promise<{ ok: true }>
+        }
+      ).recordReapDecision({ decision, attrs })
+    } catch (err) {
+      // SessionDO not found or RPC error — log and return 404
+      console.warn(
+        `[reap-decision] RPC failed sessionId=${sessionId} err=${(err as Error).message}`,
+      )
+      return c.json({ error: 'session not found' }, 404)
+    }
+
+    return c.json({ ok: true })
   })
 
   // Mobile OTA updater manifest — public endpoint (no auth). Capacitor
@@ -2234,7 +2301,7 @@ export function createApiApp() {
       userId,
       {
         project: body.project ?? '',
-        prompt: body.prompt as string | ContentBlock[],
+        prompt: body.prompt,
         model: body.model,
         system_prompt: body.system_prompt,
         runner_session_id: body.runner_session_id,

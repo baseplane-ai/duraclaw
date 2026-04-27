@@ -99,6 +99,40 @@ export async function recoverFromDroppedConnectionImpl(ctx: SessionDOContext): P
     ctx.do.persistTurnState()
   }
 
+  // If the runner crashed before producing a partial_assistant (e.g. SDK
+  // boot failure before WS dial-back), no `clearAwaitingResponse` ever
+  // ran, the tail of history is still the awaiting user turn, and
+  // `findAwaitingReason` (in ChatThread) pins "Claude is thinking…"
+  // forever — the gate is "tail is a user row", not "awaiting part
+  // present", so just stripping the part is not enough. Strip the part
+  // AND append a system row so the tail flips and the bubble closes.
+  // Idempotent: planClearAwaiting returns null on the second pass.
+  const awaitingPlan = planClearAwaiting(ctx.session.getHistory())
+  if (awaitingPlan !== null) {
+    safeUpdateMessageImpl(ctx, awaitingPlan.updated)
+    broadcastMessagesImpl(ctx, [awaitingPlan.updated as unknown as WireSessionMessage])
+
+    ctx.do.turnCounter++
+    const noticeMsgId = `err-${ctx.do.turnCounter}`
+    const noticeMsg: SessionMessage = {
+      id: noticeMsgId,
+      role: 'system',
+      parts: [
+        {
+          type: 'text',
+          text: '⚠ Runner did not respond — connection lost before any reply. Send a message to retry.',
+        },
+      ],
+      createdAt: new Date(),
+    }
+    try {
+      await ctx.do.safeAppendMessage(noticeMsg)
+      broadcastMessagesImpl(ctx, [noticeMsg as unknown as WireSessionMessage])
+    } catch (err) {
+      console.error(`[SessionDO:${ctx.ctx.id}] Recovery: failed to append notice row:`, err)
+    }
+  }
+
   // Transition to idle (session may be resumable via runner_session_id).
   // Clear active_callback_token — the runner that owned it is gone.
   ctx.do.updateState({

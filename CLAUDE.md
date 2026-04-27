@@ -92,7 +92,7 @@ pnpm --filter @duraclaw/session-runner build   # Emits dist/main.js with #!/usr/
   retention, GC'd on `onStart`) AND mirrors to `console.log` for live
   `wrangler tail`. Use tag prefixes consistently: `gate` for
   AskUserQuestion / permission lifecycle, `conn` for WS connection
-  events, `rpc` for callable entry/exit. Query via the `getEventLog()`
+  events, `rpc` for callable entry/exit, `reap` for reaper kill/skip decisions originating on the gateway and forwarded via recordReapDecision RPC. Query via the `getEventLog()`
   RPC (`{tag?, sinceTs?, limit?}`) — no external log infra needed for
   per-session replay. Runner-side logs still go to `console.log` (they
   land in `/run/duraclaw/sessions/{id}.log` on the VPS).

@@ -36,6 +36,11 @@ export interface MetaFile {
   model: string | null
   turn_count: number
   state: 'running' | 'completed' | 'failed' | 'aborted' | 'crashed'
+  pending_gate?: {
+    type: 'ask_user' | 'permission_request'
+    tool_call_id: string
+    parked_at_ts: number
+  } | null
 }
 
 /**

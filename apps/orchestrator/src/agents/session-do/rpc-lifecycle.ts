@@ -67,6 +67,12 @@ export async function spawnImpl(
   const now = new Date().toISOString()
   const id = ctx.ctx.id.toString()
 
+  // spawn() requires a prompt — the prompt-less init path is initializeImpl.
+  if (config.prompt === undefined) {
+    return { ok: false, error: 'spawn requires a prompt; call initialize for prompt-less create' }
+  }
+  const promptForSpawn: string | import('~/lib/types').ContentBlock[] = config.prompt
+
   const freshState: SessionMeta = {
     ...DEFAULT_META,
     status: 'running',
@@ -79,10 +85,13 @@ export async function spawnImpl(
     // see `~/lib/prompt-preview`. Message parts preserve the full
     // ContentBlock[] fidelity; `SessionMeta.prompt` is only for state
     // snapshots / logs.
-    prompt: promptToPreviewText(config.prompt),
+    prompt: promptToPreviewText(promptForSpawn),
     started_at: now,
     created_at: ctx.state.created_at || now,
     updated_at: now,
+    // GH (deferred-runner): persist agent so the fresh-execute fallback in
+    // sendMessageImpl can recover it after a hibernation / reaper kill.
+    agent: validatedAgent ?? null,
   }
   ctx.do.setState(freshState)
   ctx.do.persistMetaPatch(freshState)
@@ -93,7 +102,7 @@ export async function spawnImpl(
   const userMsg: SessionMessage & { canonical_turn_id?: string } = {
     id: userMsgId,
     role: 'user',
-    parts: [...contentToParts(config.prompt), buildAwaitingPartImpl('first_token')],
+    parts: [...contentToParts(promptForSpawn), buildAwaitingPartImpl('first_token')],
     createdAt: new Date(),
     canonical_turn_id: userMsgId,
   }
@@ -111,7 +120,7 @@ export async function spawnImpl(
   void triggerGatewayDialImpl(ctx, {
     type: 'execute',
     project: config.project,
-    prompt: config.prompt,
+    prompt: promptForSpawn,
     model: config.model,
     // SpawnConfig.agent stays `string` for now (it reads persisted /
     // external data — see GH#107 P1 spec). Validated above; the
@@ -124,7 +133,66 @@ export async function spawnImpl(
   })
 
   console.log(
-    `[SessionDO:${id}] spawn: ${config.project} "${typeof config.prompt === 'string' ? config.prompt.slice(0, 80) : '[content blocks]'}"`,
+    `[SessionDO:${id}] spawn: ${config.project} "${typeof promptForSpawn === 'string' ? promptForSpawn.slice(0, 80) : '[content blocks]'}"`,
+  )
+  return { ok: true, session_id: id }
+}
+
+/**
+ * Prompt-less session init for the deferred-runner flow. Sets up SessionMeta
+ * (project, model, agent, userId) without persisting a user message and
+ * without dialling the gateway. The session sits at status='idle' until the
+ * first sendMessage triggers the fresh-execute fallback in sendMessageImpl.
+ *
+ * Idempotent against double-create: if the DO already has a project set, we
+ * treat the call as a no-op success rather than overwriting state.
+ */
+export async function initializeImpl(
+  ctx: SessionDOContext,
+  config: SpawnConfig,
+): Promise<{ ok: boolean; session_id?: string; error?: string }> {
+  const id = ctx.ctx.id.toString()
+
+  // Idempotency — if the DO already has any meaningful state, don't clobber.
+  // A retry of /create from the same client_session_id should be safe.
+  if (
+    ctx.state.status === 'running' ||
+    ctx.state.status === 'waiting_gate' ||
+    ctx.state.status === 'pending'
+  ) {
+    return { ok: false, error: 'Session already active' }
+  }
+  if (ctx.state.project && ctx.state.project === config.project) {
+    return { ok: true, session_id: id }
+  }
+
+  let validatedAgent: AgentName | undefined
+  try {
+    validatedAgent = validateAgent(config.agent)
+  } catch (err) {
+    return { ok: false, error: (err as Error).message }
+  }
+
+  const now = new Date().toISOString()
+  const initState: SessionMeta = {
+    ...DEFAULT_META,
+    status: 'idle',
+    session_id: id,
+    userId: ctx.state.userId,
+    project: config.project,
+    project_path: config.project,
+    model: config.model ?? null,
+    prompt: '',
+    started_at: null,
+    created_at: ctx.state.created_at || now,
+    updated_at: now,
+    agent: validatedAgent ?? null,
+  }
+  ctx.do.setState(initState)
+  ctx.do.persistMetaPatch(initState)
+
+  console.log(
+    `[SessionDO:${id}] initialize: ${config.project} agent=${validatedAgent ?? '(default)'} model=${config.model ?? '(default)'} (no runner; deferred to first sendMessage)`,
   )
   return { ok: true, session_id: id }
 }
@@ -154,6 +222,12 @@ export async function resumeDiscoveredImpl(
   const now = new Date().toISOString()
   const id = ctx.ctx.id.toString()
 
+  // resumeDiscovered is invoked from /create when a runner_session_id is
+  // already known (the gateway saw an alive runner the DO didn't know
+  // about). The original /create payload always carries a prompt for this
+  // path; default defensively if it's somehow absent.
+  const resumePrompt: string | import('~/lib/types').ContentBlock[] = config.prompt ?? ''
+
   const resumeState: SessionMeta = {
     ...DEFAULT_META,
     status: 'running',
@@ -163,11 +237,12 @@ export async function resumeDiscoveredImpl(
     project_path: config.project,
     model: config.model ?? null,
     // Readable preview — not a JSON blob. See `~/lib/prompt-preview`.
-    prompt: promptToPreviewText(config.prompt),
+    prompt: promptToPreviewText(resumePrompt),
     started_at: now,
     created_at: ctx.state.created_at || now,
     updated_at: now,
     runner_session_id: runnerSessionId,
+    agent: validatedAgent ?? null,
   }
   ctx.do.setState(resumeState)
   ctx.do.persistMetaPatch(resumeState)
@@ -180,7 +255,7 @@ export async function resumeDiscoveredImpl(
   const userMsg: SessionMessage & { canonical_turn_id?: string } = {
     id: userMsgId,
     role: 'user',
-    parts: contentToParts(config.prompt),
+    parts: contentToParts(resumePrompt),
     createdAt: new Date(),
     canonical_turn_id: userMsgId,
   }
@@ -195,7 +270,7 @@ export async function resumeDiscoveredImpl(
   void triggerGatewayDialImpl(ctx, {
     type: 'resume',
     project: config.project,
-    prompt: config.prompt,
+    prompt: resumePrompt,
     runner_session_id: runnerSessionId,
     // See note in spawnImpl above — SpawnConfig.agent is wider than
     // AgentName by design; validated at the wire boundary.
