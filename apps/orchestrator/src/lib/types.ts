@@ -6,6 +6,7 @@ export type {
   BrowserCommand,
   ContentBlock,
   ContextUsage,
+  ExecuteCommand,
   GateResponse,
   GatewayCommand,
   GatewayEvent,

@@ -45,6 +45,24 @@ export function resolvePermissionMode(value: string | undefined): PermissionMode
 }
 
 /**
+ * SDK-accepted effort levels. The DO already converts the user-pref
+ * `effort` column at injection time (`mapEffortPref`), so anything
+ * landing here is already validated. This second guard exists for
+ * defence-in-depth: a stale legacy `'xhigh'` row that somehow slipped
+ * past — or a future SDK pin that narrows the union — gets demoted to
+ * `'high'` (matches the user_preferences D1 default) instead of
+ * crashing the SDK boot.
+ */
+type EffortLevel = NonNullable<ExecuteCommand['effort']>
+const SDK_EFFORT_LEVELS: ReadonlySet<EffortLevel> = new Set(['low', 'medium', 'high', 'max'])
+
+export function resolveEffort(value: string | undefined): EffortLevel | undefined {
+  if (value === undefined) return undefined
+  if (SDK_EFFORT_LEVELS.has(value as EffortLevel)) return value as EffortLevel
+  return 'high'
+}
+
+/**
  * Read the kata session state for a specific SDK session id.
  *
  * GH#73: replaces the previous "scan all sessions by mtime" algorithm. When
@@ -540,7 +558,8 @@ export class ClaudeRunner {
         if (cmd.max_turns) options.maxTurns = cmd.max_turns
         if (cmd.max_budget_usd) options.maxBudgetUsd = cmd.max_budget_usd
         if (cmd.thinking) options.thinking = cmd.thinking
-        if (cmd.effort) options.effort = cmd.effort
+        const effort = resolveEffort(cmd.effort)
+        if (effort) options.effort = effort
       } else {
         // resume
         options.resume = cmd.runner_session_id

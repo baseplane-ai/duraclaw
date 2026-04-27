@@ -7,6 +7,7 @@ import {
   handleCanUseTool,
   isIdleStop,
   mapError,
+  resolveEffort,
   resolvePermissionMode,
 } from './claude-runner.js'
 import type { RunnerSessionContext } from './types.js'
@@ -747,5 +748,27 @@ describe('resolvePermissionMode', () => {
     expect(resolvePermissionMode('acceptAll')).toBe('default')
     expect(resolvePermissionMode('')).toBe('default')
     expect(resolvePermissionMode('not-a-mode')).toBe('default')
+  })
+})
+
+describe('resolveEffort', () => {
+  it('passes through every SDK-known effort level', () => {
+    expect(resolveEffort('low')).toBe('low')
+    expect(resolveEffort('medium')).toBe('medium')
+    expect(resolveEffort('high')).toBe('high')
+    expect(resolveEffort('max')).toBe('max')
+  })
+
+  it('returns undefined when no preference is set (caller skips field)', () => {
+    expect(resolveEffort(undefined)).toBe(undefined)
+  })
+
+  it("demotes legacy / unknown values to 'high'", () => {
+    // 'xhigh' is valid for the Codex adapter but not for the Claude
+    // SDK. The DO mapper drops it before injection, but this guard
+    // catches anything that slips through.
+    expect(resolveEffort('xhigh')).toBe('high')
+    expect(resolveEffort('')).toBe('high')
+    expect(resolveEffort('extreme')).toBe('high')
   })
 })

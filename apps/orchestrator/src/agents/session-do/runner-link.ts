@@ -1,6 +1,6 @@
 import { timingSafeEqual } from 'node:crypto'
 
-import type { GatewayCommand, PermissionMode } from '~/lib/types'
+import type { ExecuteCommand, GatewayCommand, PermissionMode } from '~/lib/types'
 import { getSessionStatus } from '~/lib/vps-client'
 import { RECOVERY_GRACE_MS, type SessionDOContext } from './types'
 import { clearRecoveryGraceTimer, scheduleWatchdog } from './watchdog'
@@ -69,6 +69,46 @@ export function validateGatewayToken(sql: SqlFn, token: string | null): boolean 
     return true
   } catch {
     return false
+  }
+}
+
+/**
+ * D1-flat-string -> SDK discriminated-union converter for the user's
+ * `thinking_mode` preference. Returns `undefined` for unknown values
+ * so the caller skips the field rather than passing garbage to the SDK.
+ *
+ * The SDK's `thinking` shape carries optional `budgetTokens` and
+ * `display`; user_preferences only stores the mode discriminator, so
+ * the SDK's defaults apply for the inner fields.
+ */
+export function mapThinkingPref(mode: string | null | undefined): ExecuteCommand['thinking'] {
+  switch (mode) {
+    case 'adaptive':
+      return { type: 'adaptive' }
+    case 'enabled':
+      return { type: 'enabled' }
+    case 'disabled':
+      return { type: 'disabled' }
+    default:
+      return undefined
+  }
+}
+
+/**
+ * D1-flat-string -> SDK literal converter for the user's `effort`
+ * preference. Returns `undefined` for unknown values (including the
+ * legacy `'xhigh'` that the API allowlist used to accept but the SDK
+ * has no mapping for) so the caller skips the field.
+ */
+export function mapEffortPref(value: string | null | undefined): ExecuteCommand['effort'] {
+  switch (value) {
+    case 'low':
+    case 'medium':
+    case 'high':
+    case 'max':
+      return value
+    default:
+      return undefined
   }
 }
 
@@ -174,30 +214,48 @@ export async function triggerGatewayDial(
     cmd = { ...cmd, titler_enabled: titlerEnabled }
   }
 
-  // Inject the user's `permission_mode` preference onto every spawn /
-  // resume payload. Reads from D1 `user_preferences.permission_mode`
-  // for `ctx.state.userId`. Fail-open: on D1 miss the runner falls
-  // back to `'default'`. Runner-side validation rejects unknown
-  // values, so a stale legacy row (e.g. 'acceptAll') is safe.
+  // Inject user_preferences onto spawn / resume payloads. Reads from
+  // D1 `user_preferences` for `ctx.state.userId` in a single query.
+  // Fail-open per field: on D1 miss / unknown value the runner falls
+  // back to its hardcoded default. `permission_mode` applies to both
+  // execute and resume; the rest only on execute because the runner
+  // only reads them on the execute branch (resume inherits from the
+  // prior runner_session). Lifting them to resume is a follow-up.
   if (cmd.type === 'execute' || cmd.type === 'resume') {
     const userId = ctx.state.userId
     if (userId) {
       try {
         const row = await ctx.env.AUTH_DB.prepare(
-          'SELECT permission_mode FROM user_preferences WHERE user_id = ?',
+          'SELECT permission_mode, thinking_mode, effort, max_budget FROM user_preferences WHERE user_id = ?',
         )
           .bind(userId)
-          .first<{ permission_mode: string | null }>()
-        const mode = row?.permission_mode
-        if (mode) {
-          cmd = { ...cmd, permission_mode: mode as PermissionMode }
+          .first<{
+            permission_mode: string | null
+            thinking_mode: string | null
+            effort: string | null
+            max_budget: number | null
+          }>()
+
+        if (row?.permission_mode) {
+          cmd = { ...cmd, permission_mode: row.permission_mode as PermissionMode }
+        }
+
+        // The remaining three only apply on execute — resume ignores
+        // them today (see comment above). Skip the wire bytes on resume.
+        if (cmd.type === 'execute') {
+          const thinking = mapThinkingPref(row?.thinking_mode)
+          if (thinking) cmd = { ...cmd, thinking }
+
+          const effort = mapEffortPref(row?.effort)
+          if (effort) cmd = { ...cmd, effort }
+
+          if (typeof row?.max_budget === 'number' && row.max_budget > 0) {
+            cmd = { ...cmd, max_budget_usd: row.max_budget }
+          }
         }
       } catch (err) {
-        console.error(
-          `[SessionDO:${ctx.ctx.id}] Failed to read user_preferences.permission_mode from D1:`,
-          err,
-        )
-        // Proceed without — runner falls back to 'default'.
+        console.error(`[SessionDO:${ctx.ctx.id}] Failed to read user_preferences from D1:`, err)
+        // Proceed without — runner falls back to its hardcoded defaults.
       }
     }
   }
