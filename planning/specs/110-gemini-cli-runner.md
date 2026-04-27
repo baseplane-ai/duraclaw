@@ -2,7 +2,7 @@
 initiative: gemini-cli-runner
 type: project
 issue_type: feature
-status: draft
+status: approved
 priority: medium
 github_issue: 110
 created: 2026-04-27
