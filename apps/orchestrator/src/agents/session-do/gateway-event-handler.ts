@@ -389,9 +389,9 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
           {
             title: ctx.state.project || 'Duraclaw',
             body: `Asking: ${((event.questions?.[0] as Record<string, unknown>)?.question as string)?.slice(0, 100) || 'Question'}`,
-            url: `/?session=${ctx.state.session_id}`,
-            tag: `session-${ctx.state.session_id}`,
-            sessionId: ctx.state.session_id ?? '',
+            url: `/?session=${ctx.do.name}`,
+            tag: `session-${ctx.do.name}`,
+            sessionId: ctx.do.name,
             actions: [{ action: 'open', title: 'Open' }],
           },
           'blocked',
@@ -426,7 +426,7 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
         (async () => {
           try {
             const actionToken = await generateActionToken(
-              ctx.state.session_id ?? '',
+              ctx.do.name,
               event.tool_call_id,
               ctx.env.BETTER_AUTH_SECRET,
             )
@@ -434,9 +434,9 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
               {
                 title: ctx.state.project || 'Duraclaw',
                 body: `Needs permission: ${event.tool_name}`,
-                url: `/?session=${ctx.state.session_id}`,
-                tag: `session-${ctx.state.session_id}`,
-                sessionId: ctx.state.session_id ?? '',
+                url: `/?session=${ctx.do.name}`,
+                tag: `session-${ctx.do.name}`,
+                sessionId: ctx.do.name,
                 actionToken,
                 actions: [
                   { action: 'approve', title: 'Allow' },
@@ -593,9 +593,9 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
             {
               title: ctx.state.project || 'Duraclaw',
               body: `Completed (${ctx.state.num_turns} turns, $${(ctx.state.total_cost_usd ?? 0).toFixed(2)})`,
-              url: `/?session=${ctx.state.session_id}`,
-              tag: `session-${ctx.state.session_id}`,
-              sessionId: ctx.state.session_id ?? '',
+              url: `/?session=${ctx.do.name}`,
+              tag: `session-${ctx.do.name}`,
+              sessionId: ctx.do.name,
               actions: [
                 { action: 'open', title: 'Open' },
                 { action: 'new-session', title: 'New Session' },
@@ -610,9 +610,9 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
             {
               title: ctx.state.project || 'Duraclaw',
               body: `Failed: ${event.result || 'Session failed'}`,
-              url: `/?session=${ctx.state.session_id}`,
-              tag: `session-${ctx.state.session_id}`,
-              sessionId: ctx.state.session_id ?? '',
+              url: `/?session=${ctx.do.name}`,
+              tag: `session-${ctx.do.name}`,
+              sessionId: ctx.do.name,
             },
             'error',
           ),
@@ -768,9 +768,9 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
           {
             title: ctx.state.project || 'Duraclaw',
             body: `Error: ${event.error}`,
-            url: `/?session=${ctx.state.session_id}`,
-            tag: `session-${ctx.state.session_id}`,
-            sessionId: ctx.state.session_id ?? '',
+            url: `/?session=${ctx.do.name}`,
+            tag: `session-${ctx.do.name}`,
+            sessionId: ctx.do.name,
           },
           'error',
         ),
