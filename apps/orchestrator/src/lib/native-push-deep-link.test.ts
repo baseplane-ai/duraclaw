@@ -22,6 +22,24 @@ vi.mock('~/lib/platform', () => ({
   isNative: () => isNativeMock(),
 }))
 
+// Capture lifecycle subscribers so tests can fire foreground/visible events.
+type LifecycleEvent = 'foreground' | 'background' | 'online' | 'offline' | 'visible' | 'hidden'
+const lifecycleListeners = new Set<(event: LifecycleEvent) => void>()
+vi.mock('~/lib/connection-manager/lifecycle', () => ({
+  lifecycleEventSource: {
+    subscribe: (fn: (event: LifecycleEvent) => void) => {
+      lifecycleListeners.add(fn)
+      return () => {
+        lifecycleListeners.delete(fn)
+      }
+    },
+  },
+}))
+
+function fireLifecycle(event: LifecycleEvent): void {
+  for (const fn of lifecycleListeners) fn(event)
+}
+
 import {
   __resetForTests,
   __setPendingDeepLinkForTests,
@@ -39,6 +57,7 @@ function fireTap(data: Record<string, unknown>): void {
 describe('native-push-deep-link', () => {
   beforeEach(() => {
     listeners.clear()
+    lifecycleListeners.clear()
     mockAddListener.mockClear()
     isNativeMock.mockReturnValue(true)
     __resetForTests()
@@ -130,5 +149,69 @@ describe('native-push-deep-link', () => {
     isNativeMock.mockReturnValue(false)
     await initNativePushDeepLink()
     expect(mockAddListener).not.toHaveBeenCalled()
+  })
+
+  it('lifecycle foreground drains pending into a late subscriber (warm-start race)', async () => {
+    // Tap arrives BEFORE any subscriber has registered (the warm-start
+    // race that the bug exhibits in the wild).
+    await initNativePushDeepLink()
+    fireTap({ url: '/?session=warm' })
+
+    // Now React mounts and registers its subscriber.
+    const fn = vi.fn()
+    subscribeDeepLink(fn)
+    expect(fn).not.toHaveBeenCalled()
+
+    // Capacitor's `App.appStateChange` fires `foreground` ~30ms later.
+    fireLifecycle('foreground')
+    expect(fn).toHaveBeenCalledWith('warm')
+  })
+
+  it('lifecycle visible also drains pending', async () => {
+    await initNativePushDeepLink()
+    fireTap({ url: '/?session=vis' })
+
+    const fn = vi.fn()
+    subscribeDeepLink(fn)
+
+    fireLifecycle('visible')
+    expect(fn).toHaveBeenCalledWith('vis')
+  })
+
+  it('lifecycle drain skipped (slot retained) when no subscribers', async () => {
+    await initNativePushDeepLink()
+    fireTap({ url: '/?session=retained' })
+
+    // Lifecycle fires before any subscriber registers — slot must be
+    // retained so the cold-start `consumePendingDeepLink()` path can
+    // still pick it up.
+    fireLifecycle('foreground')
+
+    expect(consumePendingDeepLink()).toBe('retained')
+  })
+
+  it('lifecycle background / online / offline / hidden do NOT drain', async () => {
+    await initNativePushDeepLink()
+    fireTap({ url: '/?session=stay' })
+
+    const fn = vi.fn()
+    subscribeDeepLink(fn)
+
+    fireLifecycle('background')
+    fireLifecycle('online')
+    fireLifecycle('offline')
+    fireLifecycle('hidden')
+    expect(fn).not.toHaveBeenCalled()
+
+    // Slot still retained for a real foreground.
+    fireLifecycle('foreground')
+    expect(fn).toHaveBeenCalledWith('stay')
+  })
+
+  it('__resetForTests detaches the lifecycle subscription', async () => {
+    await initNativePushDeepLink()
+    expect(lifecycleListeners.size).toBe(1)
+    __resetForTests()
+    expect(lifecycleListeners.size).toBe(0)
   })
 })

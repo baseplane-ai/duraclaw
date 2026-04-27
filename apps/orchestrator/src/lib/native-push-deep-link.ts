@@ -10,10 +10,30 @@
  * "restore last-active tab" cold-start path so the user lands on the
  * notified session instead of whatever was active before.
  *
+ * Three drain channels feed the same `subscribers` set / pending slot,
+ * to cover every delivery window observed on Android Capacitor:
+ *
+ *   1. Tap handler (`pushNotificationActionPerformed`) — fires when the
+ *      OS hands the tap to Capacitor. On warm-start this often arrives
+ *      BEFORE React has flushed `AgentOrchContent`'s `useEffect`, so the
+ *      `subscribers` set is empty at this point and pending is retained.
+ *
+ *   2. Lifecycle drain (`foreground` / `visible`) — fires ~30 ms after
+ *      the tap on warm-start (per adb logcat). By the time it arrives
+ *      React has rendered, the subscriber is registered, and we can fan
+ *      out the retained pending session id. This is the channel that
+ *      fixes the warm-start "lands on previous tab" bug.
+ *
+ *   3. `consumePendingDeepLink()` — cold-start path. Called once from
+ *      `AgentOrchContent`'s mount effect to drain any pending slot left
+ *      over from a tap that fired before React mounted (e.g., when the
+ *      app was fully killed and the OS launched it from the tap).
+ *
  * Web builds short-circuit on `!isNative()` — `@capacitor/push-notifications`
  * is dynamic-imported so it stays out of the web bundle.
  */
 
+import { lifecycleEventSource } from '~/lib/connection-manager/lifecycle'
 import { isNative } from '~/lib/platform'
 
 type DeepLinkSubscriber = (sessionId: string) => void
@@ -21,11 +41,13 @@ const subscribers = new Set<DeepLinkSubscriber>()
 
 let pendingDeepLink: string | null = null
 let initialized = false
+let lifecycleUnsub: (() => void) | null = null
 
 /**
  * Subscribe to live deep-link tap events. The subscriber receives the
  * target session id whenever a `pushNotificationActionPerformed` tap is
- * processed. Returns an unsubscribe function.
+ * processed (or when the lifecycle drain re-fires a retained tap on the
+ * next foreground / visible event — see the module docstring).
  *
  * Used by `AgentOrchContent` to react to taps that arrive AFTER first
  * mount (warm-start, foreground, or post-mount cold-start delivery).
@@ -35,9 +57,44 @@ let initialized = false
  */
 export function subscribeDeepLink(fn: DeepLinkSubscriber): () => void {
   subscribers.add(fn)
+  console.info(`[push] subscribe count=${subscribers.size}`)
   return () => {
     subscribers.delete(fn)
+    console.info(`[push] unsubscribe count=${subscribers.size}`)
   }
+}
+
+/**
+ * Drain `pendingDeepLink` to the live subscribers, if any. Returns true
+ * iff a fanout actually happened. When `subscribers.size === 0` the slot
+ * is RETAINED (not cleared) so the next drain channel — either a later
+ * lifecycle event or `consumePendingDeepLink()` from a fresh mount — can
+ * still pick it up. The cold-start path expects this retention semantics.
+ */
+function fanoutPending(reason: string): boolean {
+  if (!pendingDeepLink) return false
+  const sessionId = extractSessionId(pendingDeepLink)
+  if (!sessionId) {
+    // Malformed slot — clear so we don't retry forever.
+    pendingDeepLink = null
+    return false
+  }
+  if (subscribers.size === 0) {
+    console.info(
+      `[push] fanout (${reason}) skipped — subscribers=0, retained pending=${pendingDeepLink}`,
+    )
+    return false
+  }
+  console.info(`[push] fanout (${reason}) — subscribers=${subscribers.size} sessionId=${sessionId}`)
+  pendingDeepLink = null
+  for (const fn of subscribers) {
+    try {
+      fn(sessionId)
+    } catch (err) {
+      console.warn('[push] subscriber threw:', err)
+    }
+  }
+  return true
 }
 
 /**
@@ -90,19 +147,29 @@ export async function initNativePushDeepLink(): Promise<void> {
 
       // Normalise to a same-origin relative URL for `pendingDeepLink`.
       pendingDeepLink = `/?session=${sessionId}`
-      console.info('[push] notification tap → pending deep-link:', pendingDeepLink)
+      console.info(
+        `[push] notification tap → pending deep-link: ${pendingDeepLink} (subscribers=${subscribers.size})`,
+      )
 
-      // Notify any live subscribers (warm-start / post-mount taps).
-      // Cold-start taps that arrive before React mounts are picked up
-      // via `consumePendingDeepLink()` instead.
-      for (const fn of subscribers) {
-        try {
-          fn(sessionId)
-        } catch (err) {
-          console.warn('[push] subscriber threw:', err)
-        }
-      }
+      // Try to deliver immediately. If subscribers is empty (warm-start
+      // race: tap handler runs before React flushes the subscribe
+      // effect), `fanoutPending` retains the slot so the lifecycle
+      // drain (or a later `consumePendingDeepLink`) can pick it up.
+      fanoutPending('tap')
     })
+
+    // Lifecycle drain — on every `foreground` / `visible` event,
+    // attempt to drain the pending slot. This is the warm-start fix:
+    // by the time the lifecycle event fires (~30 ms after the OS hands
+    // the tap to Capacitor on Android), React has flushed
+    // `AgentOrchContent`'s subscribe effect and we can fan out.
+    if (!lifecycleUnsub) {
+      lifecycleUnsub = lifecycleEventSource.subscribe((event) => {
+        if (event === 'foreground' || event === 'visible') {
+          fanoutPending(`lifecycle:${event}`)
+        }
+      })
+    }
   } catch (err) {
     console.warn('[push] native deep-link setup failed:', err)
   }
@@ -129,6 +196,10 @@ export function __resetForTests(): void {
   pendingDeepLink = null
   initialized = false
   subscribers.clear()
+  if (lifecycleUnsub) {
+    lifecycleUnsub()
+    lifecycleUnsub = null
+  }
 }
 
 /**
