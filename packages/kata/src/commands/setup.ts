@@ -371,9 +371,14 @@ function migrateStaleProjectLevelHooks(projectRoot: string): void {
   for (const [event, entries] of Object.entries(existingHooks)) {
     const kept: any[] = []
     for (const entry of entries) {
-      const isKata = entry.hooks?.some(
-        (h: any) => typeof h.command === 'string' && wmHookPattern.test(h.command),
-      )
+      // Support both nested format { hooks: [{command}] } and flat format { command }
+      // Cast to any to handle legacy flat-command entries not in the HookEntry type
+      const isKata =
+        (typeof (entry as any).command === 'string' &&
+          wmHookPattern.test((entry as any).command)) ||
+        entry.hooks?.some(
+          (h: any) => typeof h.command === 'string' && wmHookPattern.test(h.command),
+        )
       if (isKata) {
         removedCount++
       } else {
