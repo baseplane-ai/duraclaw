@@ -8,6 +8,7 @@ import {
   readCanonicalTasks,
   writeCanonicalTask,
 } from '../native-tasks/canonical-store.js'
+import { readNativeTaskFiles } from './enter/task-factory.js'
 import { findProjectDir, getStateFilePath } from '../session/lookup.js'
 import { readState } from '../state/reader.js'
 
@@ -53,7 +54,8 @@ function resolveSessionId(args: string[]): string {
  */
 async function taskList(args: string[]): Promise<void> {
   const sessionId = resolveSessionId(args)
-  const tasks = readCanonicalTasks(sessionId)
+  // Use readNativeTaskFiles so live mirror statuses are merged into canonical before listing
+  const tasks = readNativeTaskFiles(sessionId)
 
   if (args.includes('--json')) {
     process.stdout.write(`${JSON.stringify(tasks, null, 2)}\n`)

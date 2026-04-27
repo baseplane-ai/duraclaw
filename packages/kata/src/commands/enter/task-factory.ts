@@ -2,7 +2,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { readCanonicalTasks, writeCanonicalTasks } from '../../native-tasks/canonical-store.js'
+import { readCanonicalTasks, writeCanonicalTask, writeCanonicalTasks } from '../../native-tasks/canonical-store.js'
 import { resolveTemplatePath } from '../../session/lookup.js'
 import type { Hint, SubphasePattern } from '../../validation/index.js'
 import type { SpecPhase } from '../../yaml/index.js'
@@ -580,7 +580,38 @@ export function readNativeTaskFiles(sessionId: string): NativeTask[] {
   // Try canonical store first (.kata/sessions/{id}/native-tasks/)
   try {
     const canonical = readCanonicalTasks(sessionId)
-    if (canonical.length > 0) return canonical
+    if (canonical.length > 0) {
+      // Merge live status from the Claude mirror (~/.claude/tasks/{sessionId}/*.json)
+      // Claude's native TaskUpdate tool writes status changes there, not back to canonical.
+      const tasksDir = getNativeTasksDir(sessionId)
+      const changed: NativeTask[] = []
+      if (existsSync(tasksDir)) {
+        const taskMap = new Map<string, NativeTask>(canonical.map((t) => [t.id, t]))
+        try {
+          for (const entry of readdirSync(tasksDir)) {
+            if (!entry.endsWith('.json')) continue
+            try {
+              const raw = JSON.parse(readFileSync(join(tasksDir, entry), 'utf-8')) as Partial<NativeTask>
+              const id = raw.id ?? entry.replace(/\.json$/, '')
+              const task = taskMap.get(id)
+              if (task && raw.status && raw.status !== task.status) {
+                task.status = raw.status
+                changed.push(task)
+              }
+            } catch { /* skip invalid mirror files */ }
+          }
+        } catch { /* skip if mirror dir is unreadable */ }
+      }
+      // Write synced statuses back to canonical so subsequent reads are consistent
+      if (changed.length > 0) {
+        for (const task of changed) {
+          try {
+            writeCanonicalTask(sessionId, task)
+          } catch { /* skip write failures */ }
+        }
+      }
+      return canonical
+    }
   } catch { /* fall through to legacy path */ }
 
   // Legacy: read from ~/.claude/tasks/
