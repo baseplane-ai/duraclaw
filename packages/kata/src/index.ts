@@ -33,6 +33,7 @@ import { review as reviewCommand } from './commands/review.js'
 import { setup } from './commands/setup.js'
 import { status } from './commands/status.js'
 import { suggest } from './commands/suggest.js'
+import { task } from './commands/task.js'
 import { teardown } from './commands/teardown.js'
 import { testBaseline } from './commands/test-baseline.js'
 import { update } from './commands/update.js'
@@ -204,6 +205,10 @@ async function main() {
 
       case 'interview':
         await interview(commandArgs)
+        break
+
+      case 'task':
+        await task(commandArgs)
         break
 
       case 'hook':

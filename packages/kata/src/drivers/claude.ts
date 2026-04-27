@@ -1,6 +1,6 @@
 // src/drivers/claude.ts
 // Claude Code driver — stub implementation (fleshed out in P1.2)
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { execSync } from 'node:child_process'
@@ -8,12 +8,37 @@ import type { CanonicalHookInput, CanonicalHookOutput, Driver, NativeTask, Nativ
 import { findProjectDir } from '../session/lookup.js'
 import { hasActiveBackgroundAgents as checkActiveAgents } from '../commands/hook.js'
 import { mergeHooksIntoSettings, type SettingsJson } from '../commands/setup.js'
+import { readCanonicalTasks } from '../native-tasks/canonical-store.js'
 
-const stubNativeTaskStore: NativeTaskStore = {
-  async read(_taskId: string): Promise<NativeTask | null> { return null },
-  async write(_task: NativeTask): Promise<void> {},
-  async list(): Promise<NativeTask[]> { return [] },
-  async refreshDriverState(_sessionId: string): Promise<void> {},
+const claudeNativeTaskStore: NativeTaskStore = {
+  async read(_taskId: string): Promise<NativeTask | null> {
+    // Individual reads go through canonical store directly
+    return null
+  },
+  async write(_task: NativeTask): Promise<void> {
+    // Writes go through canonical store; this is called after canonical write
+  },
+  async list(): Promise<NativeTask[]> {
+    // List goes through canonical store directly
+    return []
+  },
+  async refreshDriverState(sessionId: string): Promise<void> {
+    // Mirror canonical tasks to ~/.claude/tasks/{sessionId}/
+    const tasks = readCanonicalTasks(sessionId)
+    const claudeDir = join(homedir(), '.claude', 'tasks', sessionId)
+
+    // Clear and rewrite
+    if (existsSync(claudeDir)) rmSync(claudeDir, { recursive: true })
+    mkdirSync(claudeDir, { recursive: true })
+
+    for (const task of tasks) {
+      writeFileSync(
+        join(claudeDir, `${task.id}.json`),
+        `${JSON.stringify(task, null, 2)}\n`,
+        'utf-8',
+      )
+    }
+  },
 }
 
 export const claudeDriver: Driver = {
@@ -109,7 +134,7 @@ export const claudeDriver: Driver = {
     return {}
   },
 
-  nativeTaskStore: stubNativeTaskStore,
+  nativeTaskStore: claudeNativeTaskStore,
 
   skillsDir(scope: 'user' | 'project', cwd?: string): string {
     if (scope === 'user') return join(homedir(), '.claude', 'skills')

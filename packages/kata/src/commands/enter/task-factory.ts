@@ -2,6 +2,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { readCanonicalTasks, writeCanonicalTasks } from '../../native-tasks/canonical-store.js'
 import { resolveTemplatePath } from '../../session/lookup.js'
 import type { Hint, SubphasePattern } from '../../validation/index.js'
 import type { SpecPhase } from '../../yaml/index.js'
@@ -480,6 +481,16 @@ export function writeNativeTaskFiles(
     }
   }
 
+  // Also write to canonical store (.kata/sessions/{sessionId}/native-tasks/)
+  if (!dryRun) {
+    try {
+      writeCanonicalTasks(sessionId, nativeTasks)
+    } catch {
+      // Canonical store write is best-effort during enter
+      // (findProjectDir may fail in edge cases)
+    }
+  }
+
   // Dry-run: print resolved task preview to stderr
   if (dryRun) {
     // biome-ignore lint/suspicious/noConsole: intentional CLI output
@@ -566,6 +577,13 @@ function deriveActiveForm(title: string): string {
  * Returns empty array if directory doesn't exist or has no valid tasks
  */
 export function readNativeTaskFiles(sessionId: string): NativeTask[] {
+  // Try canonical store first (.kata/sessions/{id}/native-tasks/)
+  try {
+    const canonical = readCanonicalTasks(sessionId)
+    if (canonical.length > 0) return canonical
+  } catch { /* fall through to legacy path */ }
+
+  // Legacy: read from ~/.claude/tasks/
   const tasksDir = getNativeTasksDir(sessionId)
   if (!existsSync(tasksDir)) {
     return []
