@@ -240,16 +240,20 @@ export async function handleHttpRequest(
     try {
       let resetsAt: string | undefined
       try {
-        const body = (await request.clone().json()) as { resets_at?: unknown } | null
+        const body = (await request.json()) as { resets_at?: unknown } | null
         if (body && typeof body.resets_at === 'string') resetsAt = body.resets_at
       } catch {
         // Tolerate missing / non-JSON body — synth event uses fallback.
       }
       const sessionId = ctx.do.name
-      void handleRateLimit(ctx, {
+      handleRateLimit(ctx, {
         type: 'rate_limit',
         session_id: sessionId,
         rate_limit_info: resetsAt ? { resets_at: resetsAt } : {},
+      }).catch((err) => {
+        ctx.logEvent('error', 'failover', 'handleRateLimit unhandled rejection', {
+          error: err instanceof Error ? err.message : String(err),
+        })
       })
       return new Response(JSON.stringify({ ok: true }), {
         headers: { 'Content-Type': 'application/json' },

@@ -43,6 +43,14 @@ export function appendTranscriptImpl(
 ): void {
   const subpath = key.subpath ?? ''
   try {
+    // Per-key seq is assigned by reading the current MAX and incrementing
+    // in a JS loop. This pattern relies on the Durable Object single-writer
+    // invariant — DO event handlers run serially per-DO, so no two
+    // `appendTranscriptImpl` calls can interleave between the SELECT and
+    // the final INSERT. If we ever multiplex transcript writes across DOs
+    // for the same session_id we'd need a real sequence (UPSERT with
+    // `MAX(seq)+1` in a single statement, or an AUTOINCREMENT + ORDER BY
+    // id at read time).
     const cursor = ctx.sql.exec<NextSeqRow>(
       `SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM session_transcript
        WHERE session_id = ? AND subpath = ?`,

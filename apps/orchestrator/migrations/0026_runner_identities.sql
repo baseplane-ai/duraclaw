@@ -14,6 +14,9 @@
 -- cooldown_until is a SQLite-format datetime string. The selection
 -- query uses `cooldown_until < datetime('now')` for lazy expiry, so no
 -- background cleanup job is needed.
+-- NOTE: id has no DEFAULT — the application generates UUIDs via
+-- Drizzle's $defaultFn(() => crypto.randomUUID()). SQL-only INSERTs
+-- (e.g. via wrangler shell) MUST provide an explicit id.
 CREATE TABLE IF NOT EXISTS runner_identities (
   id TEXT PRIMARY KEY,
   name TEXT UNIQUE NOT NULL,

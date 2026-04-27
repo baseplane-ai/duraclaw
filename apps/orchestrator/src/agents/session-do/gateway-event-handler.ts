@@ -651,7 +651,7 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
       if (event.error === 'rate_limit' || event.error === 'authentication_failed') {
         const failoverReason: 'rate_limit' | 'auth_error' =
           event.error === 'rate_limit' ? 'rate_limit' : 'auth_error'
-        void handleRateLimit(
+        handleRateLimit(
           ctx,
           {
             type: 'rate_limit',
@@ -661,7 +661,11 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
             rate_limit_info: {},
           },
           failoverReason,
-        )
+        ).catch((err) => {
+          ctx.logEvent('error', 'failover', 'handleRateLimit unhandled rejection', {
+            error: err instanceof Error ? err.message : String(err),
+          })
+        })
       }
       break
     }
@@ -841,7 +845,11 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
       // Spec #101 Stage 3: route rate-limit events through the
       // resume-scheduler module. Currently a stub that falls through
       // to the broadcast path; CAAM logic will land here.
-      void handleRateLimit(ctx, event)
+      handleRateLimit(ctx, event).catch((err) => {
+        ctx.logEvent('error', 'failover', 'handleRateLimit unhandled rejection', {
+          error: err instanceof Error ? err.message : String(err),
+        })
+      })
       self.broadcastGatewayEvent(event)
       break
     }
