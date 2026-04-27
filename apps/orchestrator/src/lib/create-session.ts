@@ -15,6 +15,7 @@ import { eq } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import * as schema from '~/db/schema'
 import { agentSessions } from '~/db/schema'
+import { broadcastChainRow } from '~/lib/broadcast-chain'
 import { broadcastSessionRow } from '~/lib/broadcast-session'
 import { resolveProjectPath } from '~/lib/gateway-files'
 import { promptToPreviewText } from '~/lib/prompt-preview'
@@ -180,6 +181,15 @@ export async function createSession(
   }
 
   await broadcastSessionRow(env, executionCtx, sessionId, 'insert')
+
+  // Spec: kanban board reactivity. New chain-tagged sessions reshape the
+  // chain summary (column derives from sessions, sessions list grows by
+  // one). Without this delta the board only repaints on cold load or the
+  // eventual SessionDO `syncKataToD1` broadcast — visibly stale for the
+  // few seconds between spawn and first kata-state event.
+  if (typeof params.kataIssue === 'number' && Number.isFinite(params.kataIssue)) {
+    await broadcastChainRow(env, executionCtx, params.kataIssue, { actorUserId: userId })
+  }
 
   return { ok: true, sessionId }
 }

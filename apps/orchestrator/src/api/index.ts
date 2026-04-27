@@ -16,6 +16,7 @@ import {
 } from '~/db/schema'
 import { validateActionToken } from '~/lib/action-token'
 import { createAuth } from '~/lib/auth'
+import { broadcastChainRow } from '~/lib/broadcast-chain'
 import { broadcastSessionRow } from '~/lib/broadcast-session'
 import {
   fanoutSessionViewerChange,
@@ -2433,6 +2434,10 @@ export function createApiApp() {
     const result = await checkoutWorktree(db, { issueNumber, worktree, modeAtCheckout }, userId)
 
     if (result.ok) {
+      // The reservation lives on `ChainSummary.worktreeReservation`;
+      // without this broadcast the board card's "checked out" badge
+      // and conflict detection lag behind the actual D1 state.
+      await broadcastChainRow(c.env, c.executionCtx, issueNumber, { actorUserId: userId })
       return c.json({ reservation: result.reservation })
     }
     if (result.status === 409) {
@@ -2474,6 +2479,10 @@ export function createApiApp() {
         details: JSON.stringify({ issueNumber, worktree: r.worktree }),
       })
     }
+
+    // Reservation removal flips the chain card's badge — fanout the
+    // rebuilt summary so every connected board repaints.
+    await broadcastChainRow(c.env, c.executionCtx, issueNumber, { actorUserId: userId })
 
     return c.json({ released: true, count: targets.length })
   })
@@ -2544,6 +2553,10 @@ export function createApiApp() {
         }),
       })
     }
+
+    // Same rationale as `/release` — the chain card's reservation badge
+    // changes shape and every connected board needs to repaint.
+    await broadcastChainRow(c.env, c.executionCtx, issueNumber, { actorUserId: userId })
 
     return c.json({ released: true, forced: true, count: targets.length })
   })
