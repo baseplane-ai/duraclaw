@@ -8,6 +8,13 @@ export {
   normalisedMarkdown,
   yDocToMarkdown,
 } from './blocknote-bridge.js'
+export {
+  configPath,
+  DEFAULT_CONFIG,
+  DEFAULT_CONFIG_YAML,
+  type DocsRunnerConfig,
+  loadConfig,
+} from './config.js'
 export type { FilePipelineOptions, FilePipelineState } from './file-pipeline.js'
 export { FilePipeline } from './file-pipeline.js'
 export type {

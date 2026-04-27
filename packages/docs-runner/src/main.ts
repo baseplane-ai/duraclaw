@@ -14,10 +14,13 @@
 
 import './jsdom-bootstrap.js'
 
+import { spawnSync } from 'node:child_process'
+import fsSync from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { atomicOverwrite, atomicWriteOnce } from './atomic.js'
 import { createBlockNoteEditor } from './blocknote-bridge.js'
+import { configPath, DEFAULT_CONFIG_YAML, loadConfig } from './config.js'
 import { HashStore } from './content-hash.js'
 import { FilePipeline, type FilePipelineState } from './file-pipeline.js'
 import { globToRegExp } from './glob-match.js'
@@ -30,16 +33,7 @@ const META_FAILURE_LIMIT = 5
 const SIGTERM_GRACE_MS = 2_000
 const STARTUP_FILES_GRACE_MS = 30_000
 const DEFAULT_HEALTH_PORT = 9878
-const DEFAULT_WATCH_PATTERNS = ['**/*.md']
-const DEFAULT_IGNORED_PATTERNS = [
-  'node_modules/**',
-  '.git/**',
-  'dist/**',
-  'build/**',
-  '.duraclaw-docs/**',
-]
 const VERSION = '0.1.0'
-const START_CONCURRENCY = 8
 
 interface DocsRunnerCommand {
   type: 'docs-runner'
@@ -65,6 +59,52 @@ interface MetaSnapshot {
   last_activity_ts: number
   files: number
   reconnects: number
+}
+
+/**
+ * `docs-runner init <docsWorktreePath>` — bootstrap helper run by humans
+ * during project setup. Writes a default `duraclaw-docs.yaml` and, if the
+ * target directory isn't already a git worktree, creates one via
+ * `git worktree add <path> main` from the caller's cwd.
+ *
+ * Idempotent re: the config file — refuses to overwrite an existing one
+ * (exit 0, stderr warn). Exits non-zero only if the worktree spawn fails
+ * or the path arg is missing.
+ */
+export async function runInit(docsWorktreePath: string): Promise<never> {
+  const resolved = path.resolve(docsWorktreePath)
+
+  // Bootstrap worktree if missing. Treat the directory as "already a
+  // worktree" if `<path>/.git` exists (file form for linked worktrees,
+  // dir form for the primary checkout).
+  const gitMarker = path.join(resolved, '.git')
+  const dirExists = fsSync.existsSync(resolved)
+  const isWorktree = dirExists && fsSync.existsSync(gitMarker)
+  if (!isWorktree) {
+    const result = spawnSync('git', ['worktree', 'add', resolved, 'main'], {
+      stdio: 'inherit',
+      cwd: process.cwd(),
+    })
+    if (result.status !== 0) {
+      const code = typeof result.status === 'number' ? result.status : 1
+      process.stderr.write(
+        `[docs-runner] git worktree add failed (exit ${code}) for path=${resolved}\n`,
+      )
+      process.exit(code)
+    }
+  }
+
+  const cfgPath = configPath(resolved)
+  if (fsSync.existsSync(cfgPath)) {
+    process.stderr.write(
+      `[docs-runner] config already exists, refusing to overwrite (${cfgPath})\n`,
+    )
+    process.exit(0)
+  }
+
+  await fs.writeFile(cfgPath, DEFAULT_CONFIG_YAML)
+  process.stdout.write(`[docs-runner] initialized docs worktree at ${resolved}\n`)
+  process.exit(0)
 }
 
 export function parseArgv(args: string[]): Argv {
@@ -155,7 +195,19 @@ async function startInChunks<T>(
 }
 
 export async function main(): Promise<void> {
-  const argv = parseArgv(process.argv.slice(2))
+  const rawArgs = process.argv.slice(2)
+  if (rawArgs[0] === 'init') {
+    if (rawArgs.length < 2) {
+      process.stderr.write(
+        '[docs-runner] missing path argument\n' + 'usage: docs-runner init <docs-worktree-path>\n',
+      )
+      process.exit(2)
+    }
+    await runInit(rawArgs[1])
+    return
+  }
+
+  const argv = parseArgv(rawArgs)
   const startTime = Date.now()
 
   // --- Step 2: read cmd-file ---
@@ -207,18 +259,48 @@ export async function main(): Promise<void> {
     reconnects: 0,
   }
 
+  // --- Step 5a: load per-worktree file config (watch / exclude / tombstone). ---
+  // Cmd-file overrides file-config; file-config replaces hardcoded defaults.
+  // ENOENT → loadConfig already returns DEFAULT_CONFIG with a single warn.
+  let fileConfig: Awaited<ReturnType<typeof loadConfig>>['config']
+  try {
+    const loaded = await loadConfig(cmd.docsWorktreePath)
+    fileConfig = loaded.config
+  } catch (err) {
+    return writeExitAndExit(
+      argv.exitFile,
+      {
+        state: 'failed',
+        exit_code: 1,
+        error: `config invalid: ${(err as Error).message}`,
+      },
+      1,
+    )
+  }
+
+  // Connect-concurrency env override (DOCS_RUNNER_CONNECT_CONCURRENCY).
+  // Read inside main() so re-runs in tests pick up env changes.
+  const START_CONCURRENCY = (() => {
+    const v = process.env.DOCS_RUNNER_CONNECT_CONCURRENCY
+    const n = v ? Number.parseInt(v, 10) : NaN
+    return Number.isFinite(n) && n > 0 ? n : 8
+  })()
+
   let editor: ReturnType<typeof createBlockNoteEditor>
   const hashStore = new HashStore(cmd.docsWorktreePath)
   const writer = new SuppressedWriter(cmd.docsWorktreePath)
   const pipelines = new Map<string, FilePipeline>()
   const fileStates = new Map<string, FilePipelineState>()
+  const fileErrors = new Map<string, number>()
   let watcher: Watcher | null = null
   let healthServer: HealthServer | null = null
   let metaTimer: ReturnType<typeof setInterval> | null = null
   let consecutiveMetaFailures = 0
 
-  const watchPatterns = cmd.watch ?? DEFAULT_WATCH_PATTERNS
-  const ignoredPatterns = cmd.ignored ?? DEFAULT_IGNORED_PATTERNS
+  // Cmd-file overrides file-config (which itself replaces hardcoded defaults
+  // from `loadConfig`'s DEFAULT_CONFIG when duraclaw-docs.yaml is absent).
+  const watchPatterns = cmd.watch ?? fileConfig.watch
+  const ignoredPatterns = cmd.ignored ?? fileConfig.exclude
   const patternRx = watchPatterns.map(globToRegExp)
   const ignoredRx = ignoredPatterns.map(globToRegExp)
 
@@ -246,6 +328,14 @@ export async function main(): Promise<void> {
   // Local non-null binding so the closures below don't need `cmd!`.
   const cfg = cmd
 
+  // Token-rotation handler is assigned inside the try-block (after
+  // `makePipeline` is in scope). `onTerminate` captures the var via
+  // closure, so the runtime value is the assigned function by the time any
+  // pipeline can fire a terminal event.
+  let handleTokenRotation: () => Promise<void> = async () => {
+    /* assigned inside try-block */
+  }
+
   try {
     editor = createBlockNoteEditor()
     await hashStore.load()
@@ -269,20 +359,71 @@ export async function main(): Promise<void> {
             // The DO confirmed the doc is gone. Drop the entry.
             pipelines.delete(relPath)
             fileStates.delete(relPath)
+            fileErrors.delete(relPath)
+          } else if (reason === 'token_rotated') {
+            handleTokenRotation().catch((err) => {
+              console.error(`[docs-runner] token-rotation handler threw: ${(err as Error).message}`)
+            })
           }
-          // For other terminal reasons (invalid_token / token_rotated /
-          // reconnect_exhausted) we keep the pipeline registered so the
-          // health snapshot reflects the error. P1.8 will harden this with
-          // restart logic.
+          // For all non-`document_deleted` reasons, count this as a per-file
+          // error so the health snapshot reflects it.
+          if (reason !== 'document_deleted') {
+            fileErrors.set(relPath, (fileErrors.get(relPath) ?? 0) + 1)
+          }
         },
         onStateChange: (state) => {
           fileStates.set(relPath, state)
+          // Reset the per-file error counter only on successful sync.
+          if (state === 'syncing') fileErrors.set(relPath, 0)
           meta.last_activity_ts = Date.now()
         },
       })
       pipelines.set(relPath, p)
       fileStates.set(relPath, 'starting')
       return p
+    }
+
+    // --- Token rotation: on 4410 from any pipeline, re-read DOCS_RUNNER_SECRET
+    // from env and force-reconnect ALL live pipelines with the new bearer
+    // (shared-bearer rotation semantics, spec p4). Singleton-guarded so
+    // concurrent 4410s on multiple files only run the cycle once.
+    let rotationInFlight: Promise<void> | null = null
+    handleTokenRotation = async (): Promise<void> => {
+      if (rotationInFlight) return rotationInFlight
+      rotationInFlight = (async () => {
+        const fresh = process.env.DOCS_RUNNER_SECRET
+        if (!fresh) {
+          console.error('[docs-runner] token-rotation: DOCS_RUNNER_SECRET unset; cannot reconnect')
+          return
+        }
+        cfg.bearer = fresh
+        console.warn(
+          '[docs-runner] token-rotation: re-read DOCS_RUNNER_SECRET; reconnecting all pipelines',
+        )
+        const entries = [...pipelines.entries()]
+        for (const [relPath, p] of entries) {
+          try {
+            await p.stop()
+          } catch {
+            /* best-effort */
+          }
+          pipelines.delete(relPath)
+          const fresh2 = makePipeline(relPath)
+          try {
+            await fresh2.start()
+          } catch (err) {
+            console.error(
+              `[docs-runner] reconnect after rotation failed relPath=${relPath}: ${(err as Error).message}`,
+            )
+            fileStates.set(relPath, 'error')
+          }
+        }
+      })()
+      try {
+        await rotationInFlight
+      } finally {
+        rotationInFlight = null
+      }
     }
 
     await startInChunks(initialFiles, START_CONCURRENCY, async (relPath) => {
@@ -373,7 +514,7 @@ export async function main(): Promise<void> {
           path: relPath,
           state: st,
           last_sync_ts: meta.last_activity_ts,
-          error_count: 0,
+          error_count: fileErrors.get(relPath) ?? 0,
         })
       }
       const watcherAlive = watcher?.isAlive() ?? false
@@ -466,6 +607,24 @@ export async function main(): Promise<void> {
       }
       try {
         await Promise.all([...pipelines.values()].map((p) => p.stop()))
+      } catch {
+        /* best-effort */
+      }
+      // Reap hash-store entries for tombstoned files so they don't linger
+      // across restarts (spec p4: "Reap hash-store + connection-state on
+      // process exit"). Best-effort — don't block exit on persistence errors.
+      try {
+        for (const [relPath, st] of fileStates.entries()) {
+          if (st === 'tombstoned') {
+            try {
+              await hashStore.delete(relPath)
+            } catch (err) {
+              console.warn(
+                `[docs-runner] hash-store reap failed relPath=${relPath}: ${(err as Error).message}`,
+              )
+            }
+          }
+        }
       } catch {
         /* best-effort */
       }

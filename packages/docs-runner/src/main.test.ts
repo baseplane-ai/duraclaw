@@ -1,8 +1,8 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { main, parseArgv } from './main.js'
+import { main, parseArgv, runInit } from './main.js'
 
 describe('docs-runner main: argv parsing', () => {
   let exitSpy: ReturnType<typeof vi.spyOn>
@@ -90,5 +90,65 @@ describe('docs-runner main: cmd-file parse failure', () => {
     const payload = JSON.parse(raw) as { state: string; error?: string }
     expect(payload.state).toBe('failed')
     expect(payload.error).toMatch(/unsupported cmd.type/)
+  })
+})
+
+describe('docs-runner main: init subcommand', () => {
+  let dir: string
+  let exitSpy: ReturnType<typeof vi.spyOn>
+  let stderrSpy: ReturnType<typeof vi.spyOn>
+  let stdoutSpy: ReturnType<typeof vi.spyOn>
+  const originalArgv = process.argv
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'duraclaw-docs-init-'))
+    exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`exit_${code ?? 0}`)
+    }) as unknown as ReturnType<typeof vi.spyOn>
+    stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true) as unknown as ReturnType<typeof vi.spyOn>
+    stdoutSpy = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation(() => true) as unknown as ReturnType<typeof vi.spyOn>
+  })
+
+  afterEach(async () => {
+    process.argv = originalArgv
+    exitSpy.mockRestore()
+    stderrSpy.mockRestore()
+    stdoutSpy.mockRestore()
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('writes default yaml when worktree exists and config is absent', async () => {
+    // Pre-create .git so worktree-bootstrap step is skipped.
+    await mkdir(join(dir, '.git'), { recursive: true })
+
+    await expect(runInit(dir)).rejects.toThrow(/exit_0/)
+
+    const cfg = await readFile(join(dir, 'duraclaw-docs.yaml'), 'utf8')
+    expect(cfg).toMatch(/watch:/)
+    expect(cfg).toMatch(/tombstone_grace_days: 7/)
+  })
+
+  it('refuses to overwrite an existing config file', async () => {
+    await mkdir(join(dir, '.git'), { recursive: true })
+    const cfgPath = join(dir, 'duraclaw-docs.yaml')
+    await writeFile(cfgPath, '# custom')
+
+    await expect(runInit(dir)).rejects.toThrow(/exit_0/)
+
+    const after = await readFile(cfgPath, 'utf8')
+    expect(after).toBe('# custom')
+    const calls = (stderrSpy.mock.calls as unknown[][]).map((c) => String(c[0]))
+    expect(calls.some((c) => c.includes('refusing to overwrite'))).toBe(true)
+  })
+
+  it('exits 2 with usage when path arg is missing', async () => {
+    process.argv = ['bun', 'main.ts', 'init']
+    await expect(main()).rejects.toThrow(/exit_2/)
+    const calls = (stderrSpy.mock.calls as unknown[][]).map((c) => String(c[0]))
+    expect(calls.some((c) => c.includes('usage: docs-runner init'))).toBe(true)
   })
 })
