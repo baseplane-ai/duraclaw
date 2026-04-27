@@ -20,6 +20,7 @@ import {
   resolveTemplatePath,
 } from '../session/lookup.js'
 import { readState, stateExists } from '../state/reader.js'
+import { writeState } from '../state/writer.js'
 import type { SessionState } from '../state/schema.js'
 import {
   appendEdit,
@@ -157,6 +158,14 @@ export async function handleSessionStart(input: Record<string, unknown>): Promis
   const sessionId = input.session_id as string | undefined
 
   try {
+    // B26: Check if state file exists before init so we know if this is a fresh session.
+    // "First write wins" — only write driver on the first SessionStart (new session_id).
+    // New session or /clear → new session_id → state file absent → write driver after init.
+    // Compact or resume → same session_id → state file present → skip (already written).
+    const driverName = input._driver as string | undefined
+    const stateFileForDriver = sessionId ? await getStateFilePath(sessionId) : undefined
+    const isNewSession = stateFileForDriver ? !(await stateExists(stateFileForDriver)) : false
+
     // Import and run init (silently capture its output)
     // No --force: session_id handles lifecycle naturally.
     // New session or /clear → new session_id → fresh state created.
@@ -165,6 +174,12 @@ export async function handleSessionStart(input: Record<string, unknown>): Promis
     const initArgs: string[] = []
     if (sessionId) initArgs.push(`--session=${sessionId}`)
     await captureConsoleLog(() => init(initArgs))
+
+    // B26: Write driver after init if this was a fresh session (idempotent — first write wins)
+    if (isNewSession && stateFileForDriver && driverName) {
+      const state = await readState(stateFileForDriver)
+      await writeState(stateFileForDriver, { ...state, driver: driverName as 'claude' | 'codex' })
+    }
 
     // Delegate to prime for the full kata hints context
     const { prime } = await import('./prime.js')
@@ -1526,6 +1541,9 @@ export async function hook(args: string[]): Promise<void> {
   if (!isKataProject(cwd)) {
     return  // exit 0 with empty stdout
   }
+
+  // Inject driver name so handlers can persist it (B26)
+  rawInput._driver = driverName
 
   // Execute handler with raw input (handlers still consume Record<string, unknown>)
   // TODO(P1.3-future): refactor handlers to consume CanonicalHookInput
