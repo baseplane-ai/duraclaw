@@ -17,6 +17,7 @@ type WmConfig = Record<string, unknown> & {
   wm_version?: string
 }
 
+import { detectInstalled } from '../drivers/index.js'
 import { getKataConfigPath, loadKataConfig } from '../config/kata-config.js'
 import { findProjectDir, getPackageRoot, getSessionsDir } from '../session/lookup.js'
 import { installUserSkills, scaffoldBatteries } from './scaffold-batteries.js'
@@ -348,7 +349,7 @@ function resolveProjectRoot(cwd: string, explicitCwd: boolean): string {
  * Write config files and register hooks (full setup — used by --yes path).
  * Merges with existing kata.yaml so re-running does not lose custom config.
  */
-function applySetup(cwd: string, profile: SetupProfile, explicitCwd: boolean): void {
+async function applySetup(cwd: string, profile: SetupProfile, explicitCwd: boolean): Promise<void> {
   const projectRoot = resolveProjectRoot(cwd, explicitCwd)
 
   // Build merged config (existing kata.yaml fields win over auto-detected defaults)
@@ -371,9 +372,17 @@ function applySetup(cwd: string, profile: SetupProfile, explicitCwd: boolean): v
     // Config may not exist yet during first setup
   }
   const wmBin = resolveWmBin(binaryOverride)
+
+  // Write project-level hooks (backward compat — B9 migration removes these later)
   const settings = readSettings(projectRoot)
   const wmHooks = buildHookEntries(wmBin)
   writeSettings(projectRoot, mergeHooksIntoSettings(settings, wmHooks))
+
+  // Also register hooks at user-level for each detected driver
+  const installed = detectInstalled()
+  for (const driver of installed) {
+    await driver.writeHookRegistration(wmBin)
+  }
 }
 
 /**
@@ -396,7 +405,7 @@ export async function setup(args: string[]): Promise<void> {
   const profile = getDefaultProfile(projectRoot)
   if (parsed.yes) {
     // --yes: write everything with auto-detected defaults
-    applySetup(parsed.cwd, profile, parsed.explicitCwd)
+    await applySetup(parsed.cwd, profile, parsed.explicitCwd)
 
     // Deprecation notice for --batteries flag
     if (parsed.batteries) {
@@ -411,15 +420,24 @@ export async function setup(args: string[]): Promise<void> {
     // Install user-scoped skills
     const userSkillsResult = installUserSkills()
 
+    // Driver detection for summary
+    const installed = detectInstalled()
+    const driverNames = installed.map((d) => d.name)
+    const allDrivers = ['claude', 'codex'] as const
+    const missing = allDrivers.filter((n) => !driverNames.includes(n))
+
     // Unified output summary
     process.stdout.write('kata setup complete:\n')
     process.stdout.write(`  Project: ${profile.project_name}\n`)
     process.stdout.write(`  Config: .kata/kata.yaml\n`)
-    process.stdout.write(`  Hooks: .claude/settings.json\n`)
+    process.stdout.write(`  Hooks: registered for: ${driverNames.join(', ')}\n`)
     process.stdout.write(`  Spec templates: ${result.specTemplates.length}\n`)
     process.stdout.write(
       `  User skills: ${userSkillsResult.installed.length} installed to ~/.claude/skills/\n`,
     )
+    if (missing.length > 0) {
+      process.stdout.write(`  (${missing.join(', ')} not installed; run kata setup again after install)\n`)
+    }
 
     process.stdout.write('\nOptional: add shorthand to package.json scripts:\n')
     process.stdout.write('  "kata": "kata"\n')

@@ -1,9 +1,20 @@
 // src/drivers/codex.ts
 // OpenAI Codex CLI driver — stub implementation (fleshed out in P1.2)
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { execSync } from 'node:child_process'
 import type { CanonicalHookInput, CanonicalHookOutput, Driver, NativeTask, NativeTaskStore } from './types.js'
+
+// Codex hooks.json uses the same nested structure as Claude's settings.json
+interface HookEntry {
+  matcher?: string
+  hooks?: Array<{ type: string; command: string; timeout?: number }>
+}
+interface CodexHooksFile {
+  hooks?: Record<string, HookEntry[]>
+  [key: string]: unknown
+}
 
 const stubNativeTaskStore: NativeTaskStore = {
   async read(_taskId: string): Promise<NativeTask | null> { return null },
@@ -24,12 +35,66 @@ export const codexDriver: Driver = {
     }
   },
 
-  async writeHookRegistration(_hookCommand: string): Promise<void> {
-    throw new Error('codexDriver.writeHookRegistration not yet implemented (P1.2)')
+  async writeHookRegistration(hookCommand: string): Promise<void> {
+    const bin = `"${hookCommand}"`
+    // Codex hooks.json uses the same nested format as Claude's settings.json:
+    // { hooks: { EventName: [{ matcher?, hooks: [{ type, command, timeout? }] }] } }
+    const kataHooks: Record<string, HookEntry[]> = {
+      SessionStart: [{ hooks: [{ type: 'command', command: `${bin} hook session-start --driver=codex` }] }],
+      UserPromptSubmit: [{ hooks: [{ type: 'command', command: `${bin} hook user-prompt --driver=codex` }] }],
+      Stop: [{ hooks: [{ type: 'command', command: `${bin} hook stop-conditions --driver=codex`, timeout: 30 }] }],
+      PreToolUse: [{ hooks: [{ type: 'command', command: `${bin} hook pre-tool-use --driver=codex`, timeout: 30 }] }],
+      PostToolUse: [{ hooks: [{ type: 'command', command: `${bin} hook post-tool-use --driver=codex` }] }],
+    }
+
+    const hooksPath = join(homedir(), '.codex', 'hooks.json')
+    let fileContent: CodexHooksFile = {}
+    if (existsSync(hooksPath)) {
+      try {
+        fileContent = JSON.parse(readFileSync(hooksPath, 'utf-8')) as CodexHooksFile
+      } catch { /* ignore parse errors */ }
+    }
+
+    const existing = fileContent.hooks ?? {}
+    const kataMarker = /\bhook (session-start|user-prompt|stop-conditions|pre-tool-use|post-tool-use)\b/
+    const merged: Record<string, HookEntry[]> = {}
+    const allEvents = new Set([...Object.keys(existing), ...Object.keys(kataHooks)])
+
+    for (const event of allEvents) {
+      const existingEntries = existing[event] ?? []
+      const newEntries = kataHooks[event] ?? []
+      // Keep non-kata entries
+      const nonKata = existingEntries.filter((entry) =>
+        !entry.hooks?.some((h) => typeof h.command === 'string' && kataMarker.test(h.command)),
+      )
+      merged[event] = [...nonKata, ...newEntries]
+    }
+
+    mkdirSync(join(homedir(), '.codex'), { recursive: true })
+    writeFileSync(hooksPath, `${JSON.stringify({ ...fileContent, hooks: merged }, null, 2)}\n`, 'utf-8')
   },
 
   async removeHookRegistration(): Promise<void> {
-    throw new Error('codexDriver.removeHookRegistration not yet implemented (P1.2)')
+    const hooksPath = join(homedir(), '.codex', 'hooks.json')
+    if (!existsSync(hooksPath)) return
+
+    let fileContent: CodexHooksFile = {}
+    try {
+      fileContent = JSON.parse(readFileSync(hooksPath, 'utf-8')) as CodexHooksFile
+    } catch { return }
+
+    const existing = fileContent.hooks ?? {}
+    const kataMarker = /\bhook (session-start|user-prompt|stop-conditions|pre-tool-use|post-tool-use)\b/
+    const cleaned: Record<string, HookEntry[]> = {}
+
+    for (const [event, entries] of Object.entries(existing)) {
+      const kept = entries.filter((entry) =>
+        !entry.hooks?.some((h) => typeof h.command === 'string' && kataMarker.test(h.command)),
+      )
+      if (kept.length > 0) cleaned[event] = kept
+    }
+
+    writeFileSync(hooksPath, `${JSON.stringify({ ...fileContent, hooks: Object.keys(cleaned).length > 0 ? cleaned : undefined }, null, 2)}\n`, 'utf-8')
   },
 
   parseHookInput(stdin: string, _event: string): CanonicalHookInput {

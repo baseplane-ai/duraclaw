@@ -1,9 +1,13 @@
 // src/drivers/claude.ts
 // Claude Code driver — stub implementation (fleshed out in P1.2)
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { execSync } from 'node:child_process'
 import type { CanonicalHookInput, CanonicalHookOutput, Driver, NativeTask, NativeTaskStore } from './types.js'
+import { findProjectDir } from '../session/lookup.js'
+import { hasActiveBackgroundAgents as checkActiveAgents } from '../commands/hook.js'
+import { mergeHooksIntoSettings, type SettingsJson } from '../commands/setup.js'
 
 const stubNativeTaskStore: NativeTaskStore = {
   async read(_taskId: string): Promise<NativeTask | null> { return null },
@@ -24,12 +28,54 @@ export const claudeDriver: Driver = {
     }
   },
 
-  async writeHookRegistration(_hookCommand: string): Promise<void> {
-    throw new Error('claudeDriver.writeHookRegistration not yet implemented (P1.2)')
+  async writeHookRegistration(hookCommand: string): Promise<void> {
+    const bin = `"${hookCommand}"`
+    const wmHooks: Record<string, Array<{ hooks: Array<{ type: string; command: string; timeout?: number }> }>> = {
+      SessionStart: [{ hooks: [{ type: 'command', command: `${bin} hook session-start --driver=claude` }] }],
+      UserPromptSubmit: [{ hooks: [{ type: 'command', command: `${bin} hook user-prompt --driver=claude` }] }],
+      Stop: [{ hooks: [{ type: 'command', command: `${bin} hook stop-conditions --driver=claude`, timeout: 30 }] }],
+      PreToolUse: [{ hooks: [{ type: 'command', command: `${bin} hook pre-tool-use --driver=claude`, timeout: 30 }] }],
+      PostToolUse: [{ hooks: [{ type: 'command', command: `${bin} hook post-tool-use --driver=claude` }] }],
+    }
+
+    const settingsPath = join(homedir(), '.claude', 'settings.json')
+    let settings: SettingsJson = {}
+    if (existsSync(settingsPath)) {
+      try {
+        settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) as SettingsJson
+      } catch { /* ignore parse errors */ }
+    }
+
+    const merged = mergeHooksIntoSettings(settings, wmHooks)
+    mkdirSync(join(homedir(), '.claude'), { recursive: true })
+    writeFileSync(settingsPath, `${JSON.stringify(merged, null, 2)}\n`, 'utf-8')
   },
 
   async removeHookRegistration(): Promise<void> {
-    throw new Error('claudeDriver.removeHookRegistration not yet implemented (P1.2)')
+    const settingsPath = join(homedir(), '.claude', 'settings.json')
+    if (!existsSync(settingsPath)) return
+
+    let settings: SettingsJson = {}
+    try {
+      settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) as SettingsJson
+    } catch { return }
+
+    const existingHooks = settings.hooks ?? {}
+    const cleanedHooks: Record<string, Array<{ hooks: Array<{ type: string; command: string; timeout?: number }> }>> = {}
+    const wmHookPattern = /\bhook (session-start|user-prompt|stop-conditions|mode-gate|task-deps|task-evidence|pre-tool-use|post-tool-use)\b/
+
+    for (const [event, entries] of Object.entries(existingHooks)) {
+      const kept = entries.filter((entry) =>
+        !entry.hooks?.some((h) => typeof h.command === 'string' && wmHookPattern.test(h.command))
+      )
+      if (kept.length > 0) cleanedHooks[event] = kept
+    }
+
+    const cleaned: SettingsJson = {
+      ...settings,
+      hooks: Object.keys(cleanedHooks).length > 0 ? cleanedHooks : undefined,
+    }
+    writeFileSync(settingsPath, `${JSON.stringify(cleaned, null, 2)}\n`, 'utf-8')
   },
 
   parseHookInput(stdin: string, _event: string): CanonicalHookInput {
@@ -82,8 +128,29 @@ export const claudeDriver: Driver = {
     )
   },
 
-  async hasActiveBackgroundAgents(_sessionId: string): Promise<boolean> {
-    // Real implementation in P1.2 — reads ~/.claude/projects/.../*.jsonl
-    return false
+  async hasActiveBackgroundAgents(sessionId: string): Promise<boolean> {
+    // Resolve transcript path (same logic as hook.ts resolveTranscriptPath)
+    let transcriptPath: string | undefined
+    try {
+      const projectDir = findProjectDir()
+      if (projectDir) {
+        const encoded = projectDir.replace(/\//g, '-')
+        const transcriptDir = join(homedir(), '.claude', 'projects', encoded)
+        const candidate = join(transcriptDir, `${sessionId}.jsonl`)
+        if (existsSync(candidate)) {
+          transcriptPath = candidate
+        } else {
+          // Fallback: scan projects dir
+          const projectsDir = join(homedir(), '.claude', 'projects')
+          if (existsSync(projectsDir)) {
+            for (const dir of readdirSync(projectsDir)) {
+              const c = join(projectsDir, dir, `${sessionId}.jsonl`)
+              if (existsSync(c)) { transcriptPath = c; break }
+            }
+          }
+        }
+      }
+    } catch { /* ignore */ }
+    return checkActiveAgents(transcriptPath)
   },
 }

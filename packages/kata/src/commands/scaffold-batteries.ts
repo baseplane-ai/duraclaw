@@ -354,5 +354,28 @@ export function installUserSkills(
     }
   }
 
+  // Dual-install: also copy to ~/.agents/skills/ for codex compatibility
+  const agentsSkillsDir = join(homeDir, '.agents', 'skills')
+  for (const entry of readdirSync(skillsSrc, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const skillName = entry.name
+    const srcDir = join(skillsSrc, skillName)
+    const destDir = join(agentsSkillsDir, skillName)
+
+    if (existsSync(destDir)) {
+      if (update) {
+        for (const file of readdirSync(srcDir)) {
+          copyFileSync(join(srcDir, file), join(destDir, file))
+        }
+      }
+      // If not updating, skip (already exists)
+    } else {
+      mkdirSync(destDir, { recursive: true })
+      for (const file of readdirSync(srcDir)) {
+        copyFileSync(join(srcDir, file), join(destDir, file))
+      }
+    }
+  }
+
   return result
 }

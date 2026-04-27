@@ -32,6 +32,7 @@ function parseArgs(args: string[]): {
 function createDefaultState(sessionId: string): SessionState {
   return {
     sessionId,
+    driver: 'claude',
     workflowId: '',
     sessionType: 'default',
     currentMode: 'default',

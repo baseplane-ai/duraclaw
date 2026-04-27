@@ -39,6 +39,7 @@ export const SessionStateSchema = z
   .object({
     // Session identity
     sessionId: z.string().uuid().optional(), // Optional for legacy files
+    driver: z.enum(['claude', 'codex']).optional().default('claude'),
     workflowId: z.string().optional(), // Optional for legacy files
     issueNumber: z.number().nullable().optional(), // Can be null in legacy files
     issueType: z.string().optional(), // e.g., "task", "feature", "bug", "chore"

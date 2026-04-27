@@ -52,6 +52,7 @@ export function parseArgs(args: string[]): ParsedArgs {
 export function createDefaultState(sessionId: string): SessionState {
   return {
     sessionId,
+    driver: 'claude',
     workflowId: '',
     sessionType: 'default',
     currentMode: 'default',
