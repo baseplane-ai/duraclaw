@@ -10,33 +10,22 @@
 import type { SessionSummary } from '@duraclaw/shared-types'
 import { createTransaction } from '@tanstack/db'
 import { useNavigate, useSearch } from '@tanstack/react-router'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Header } from '~/components/layout/header'
 import { Main } from '~/components/layout/main'
 import { PushOptInBanner } from '~/components/push-opt-in-banner'
 import { PwaInstallBanner } from '~/components/pwa-install-banner'
 import { QuickPromptInput } from '~/components/quick-prompt-input'
-import { StatusBar } from '~/components/status-bar'
 import { TabBar } from '~/components/tab-bar'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '~/components/ui/select'
 import { sessionsCollection } from '~/db/sessions-collection'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { useSwipeTabs } from '~/hooks/use-swipe-tabs'
-import { getTabSyncSnapshot, isDraftTabId, newDraftTabId, useTabSync } from '~/hooks/use-tab-sync'
+import { getTabSyncSnapshot, useTabSync } from '~/hooks/use-tab-sync'
 import { useUserDefaults } from '~/hooks/use-user-defaults'
 import { consumePendingDeepLink, subscribeDeepLink } from '~/lib/native-push-deep-link'
 import { apiUrl } from '~/lib/platform'
 import { promptToPreviewText } from '~/lib/prompt-preview'
-import type { ContentBlock } from '~/lib/types'
 import { AgentDetailView } from './AgentDetailView'
-import { ChatThread } from './ChatThread'
-import { MessageInput } from './MessageInput'
 import type { SpawnFormConfig } from './SpawnAgentForm'
 import { type SpawnConfig, useCodingAgent } from './use-coding-agent'
 
@@ -53,16 +42,8 @@ function AgentOrchContent() {
     (search as { newSessionProject?: string }).newSessionProject ?? null
   const searchNewTab = (search as { newTab?: boolean }).newTab ?? false
 
-  const {
-    openTabs,
-    activeSessionId,
-    tabProjects,
-    openTab,
-    closeTab,
-    replaceTab,
-    setActive,
-    reorder,
-  } = useTabSync()
+  const { openTabs, activeSessionId, tabProjects, openTab, closeTab, setActive, reorder } =
+    useTabSync()
 
   // Deep-link: URL has ?session=X → open & activate that tab.
   // If it's already in the Y.Map, just activates it. If the session
@@ -278,16 +259,11 @@ function AgentOrchContent() {
       })
       setQuickPromptHint(null)
 
-      const activeDraft = isDraftTabId(activeSessionId) ? activeSessionId : null
-      if (activeDraft) {
-        replaceTab(
-          activeDraft,
-          clientSessionId,
-          config.newTab ? undefined : { dedupProject: config.project },
-        )
-      } else {
-        openTab(clientSessionId, { project: config.project, forceNewTab: config.newTab })
-      }
+      // Draft tabs are gone (deferred-runner flow): "new session" / "+"
+      // already created a real session via directCreateSession. handleSpawn
+      // is now only used by QuickPromptInput's prompt-and-submit no-tab
+      // empty state, where there's no draft to replace.
+      openTab(clientSessionId, { project: config.project, forceNewTab: config.newTab })
       navigate({ to: '/', search: { session: clientSessionId } })
 
       // Surface POST failures without blocking UI. If the server rejects the
@@ -297,7 +273,7 @@ function AgentOrchContent() {
         console.error('[AgentOrch] Spawn failed:', err)
       })
     },
-    [navigate, openTab, replaceTab, activeSessionId],
+    [navigate, openTab],
   )
 
   const handleSelectSession = useCallback(
@@ -325,30 +301,99 @@ function AgentOrchContent() {
     [openTabs, closeTab, navigate],
   )
 
+  // Default model + agent for direct-create new sessions. Falls back to
+  // user preferences when available so the click-through matches whatever
+  // the user normally chooses.
+  const { preferences } = useUserDefaults()
+
+  // Direct-create a real session for a project — no draft tab, no form.
+  // We mint a client-side session id, optimistic-insert the row into
+  // sessionsCollection, and POST /api/sessions with no prompt. The DO
+  // initializes in `idle`; the runner is dialled lazily on the first
+  // sendMessage. Phantom sessions (no first message ever sent) sit at
+  // status='idle' indefinitely and cost nothing — that's the point.
+  const directCreateSession = useCallback(
+    (project: string, opts: { newTab: boolean }) => {
+      const clientSessionId = `sess-${crypto.randomUUID()}`
+      const now = new Date().toISOString()
+      const model =
+        NEW_SESSION_MODEL_OPTIONS.find((m) => m.value === preferences.model)?.value ??
+        NEW_SESSION_MODEL_OPTIONS[0].value
+      const agent = NEW_SESSION_MODEL_OPTIONS.find((m) => m.value === model)?.agent ?? 'claude'
+
+      const optimisticRow: SessionSummary = {
+        id: clientSessionId,
+        userId: null,
+        project,
+        status: 'idle',
+        model,
+        prompt: '',
+        agent,
+        origin: 'duraclaw',
+        createdAt: now,
+        updatedAt: now,
+        lastActivity: now,
+        archived: false,
+      }
+
+      const tx = createTransaction({
+        mutationFn: async () => {
+          const resp = await fetch(apiUrl('/api/sessions'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({
+              client_session_id: clientSessionId,
+              project,
+              model,
+              agent,
+              // No prompt — DO routes to initialize() and sits idle until
+              // the first sendMessage triggers the fresh-execute fallback.
+            }),
+          })
+          if (!resp.ok) {
+            throw new Error(`Failed to create session: ${resp.status}`)
+          }
+        },
+      })
+
+      const coll = sessionsCollection as unknown as {
+        insert: (row: SessionSummary) => void
+        has: (key: string) => boolean
+      }
+      tx.mutate(() => {
+        if (!coll.has(clientSessionId)) coll.insert(optimisticRow)
+      })
+
+      // Don't set spawnConfig — there's no prompt to spawn with. The
+      // AgentDetailWithSpawn auto-spawn is gated on spawnConfig being
+      // set, so it stays dormant. The first user keystroke goes through
+      // sendMessage which the DO routes to the fresh-execute fallback.
+      setSpawnConfig(null)
+      setQuickPromptHint(null)
+
+      openTab(clientSessionId, { project, forceNewTab: opts.newTab })
+      navigate({ to: '/', search: { session: clientSessionId } })
+
+      tx.isPersisted.promise.catch((err) => {
+        console.error('[AgentOrch] Direct-create session failed:', err)
+      })
+    },
+    [navigate, openTab, preferences.model],
+  )
+
   const handleNewSessionInTab = useCallback(
     (project: string) => {
-      setSpawnConfig(null)
-      setQuickPromptHint({ project, newTab: false })
-      // Drop the current project's tab and open an active draft tab in
-      // its place. The composer renders inside this tab's content slot;
-      // on first send, handleSpawn swaps the draft id for the real one.
-      const draftId = newDraftTabId()
-      openTab(draftId, { project, forceNewTab: false })
-      navigate({ to: '/', search: { session: draftId } })
+      directCreateSession(project, { newTab: false })
     },
-    [navigate, openTab],
+    [directCreateSession],
   )
 
   const handleNewTabForProject = useCallback(
     (project: string) => {
-      setSpawnConfig(null)
-      setQuickPromptHint({ project, newTab: true })
-      // Open a draft tab alongside any existing tab for this project.
-      const draftId = newDraftTabId()
-      openTab(draftId, { project, forceNewTab: true })
-      navigate({ to: '/', search: { session: draftId } })
+      directCreateSession(project, { newTab: true })
     },
-    [navigate, openTab],
+    [directCreateSession],
   )
 
   const { swipeProps, swipeDir } = useSwipeTabs(handleSelectSession, activeSessionId)
@@ -410,18 +455,11 @@ function AgentOrchContent() {
           }
           style={{ flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column' }}
         >
-          {activeSessionId && !isDraftTabId(activeSessionId) ? (
+          {activeSessionId ? (
             <AgentDetailWithSpawn
               key={activeSessionId}
               sessionId={activeSessionId}
               spawnConfig={spawnConfig}
-            />
-          ) : activeSessionId && isDraftTabId(activeSessionId) && tabProjects[activeSessionId] ? (
-            <DraftDetailView
-              key={`draft-${activeSessionId}`}
-              draftId={activeSessionId}
-              project={tabProjects[activeSessionId]}
-              onSpawn={handleSpawn}
             />
           ) : (
             <QuickPromptInput
@@ -482,7 +520,7 @@ function AgentDetailWithSpawn({
   return <AgentDetailView name={sessionId} agent={agent} />
 }
 
-const DRAFT_MODEL_OPTIONS = [
+const NEW_SESSION_MODEL_OPTIONS = [
   { value: 'claude-opus-4-7', label: 'claude-opus-4-7', agent: 'claude' },
   { value: 'claude-opus-4-6', label: 'claude-opus-4-6', agent: 'claude' },
   { value: 'claude-sonnet-4-6', label: 'claude-sonnet-4-6', agent: 'claude' },
@@ -490,81 +528,3 @@ const DRAFT_MODEL_OPTIONS = [
   { value: 'gpt-5.4', label: 'codex — gpt-5.4', agent: 'codex' },
   { value: 'gpt-5.4-mini', label: 'codex — gpt-5.4-mini', agent: 'codex' },
 ]
-
-/**
- * Pre-spawn view rendered into a draft tab. Mirrors AgentDetailView's layout
- * (empty ChatThread + StatusBar + MessageInput) so the user lands in a blank
- * chat rather than the centered picker form. On first send, `handleSpawn`
- * replaces the draft tab id with the real session id and the regular
- * AgentDetailWithSpawn takes over.
- */
-function DraftDetailView({
-  draftId,
-  project,
-  onSpawn,
-}: {
-  draftId: string
-  project: string
-  onSpawn: (config: SpawnFormConfig & { newTab?: boolean }) => void
-}) {
-  const { preferences } = useUserDefaults()
-  const [selectedModel, setSelectedModel] = useState(() => {
-    return (
-      DRAFT_MODEL_OPTIONS.find((m) => m.value === preferences.model)?.value ??
-      DRAFT_MODEL_OPTIONS[0].value
-    )
-  })
-
-  // Sync when preferences load asynchronously.
-  useEffect(() => {
-    if (preferences.model) setSelectedModel(preferences.model)
-  }, [preferences.model])
-
-  const currentModel =
-    DRAFT_MODEL_OPTIONS.find((m) => m.value === selectedModel) ?? DRAFT_MODEL_OPTIONS[0]
-
-  const handleSend = useCallback(
-    (content: string | ContentBlock[]) => {
-      onSpawn({ project, model: currentModel.value, agent: currentModel.agent, prompt: content })
-    },
-    [project, currentModel, onSpawn],
-  )
-
-  const branchInfo = useMemo(
-    () => new Map<string, { current: number; total: number; siblings: string[] }>(),
-    [],
-  )
-
-  const noopResolveGate = useCallback(async () => undefined, [])
-
-  return (
-    <div
-      className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden"
-      data-testid="draft-detail-view"
-    >
-      <ChatThread
-        messages={[]}
-        isConnecting={false}
-        onResolveGate={noopResolveGate}
-        branchInfo={branchInfo}
-        onSendSuggestion={handleSend}
-      />
-      <StatusBar sessionId={null} />
-      <div className="flex items-center gap-2 px-3 pb-1">
-        <Select value={selectedModel} onValueChange={setSelectedModel}>
-          <SelectTrigger className="h-7 w-auto min-w-40 rounded-full text-xs font-mono">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {DRAFT_MODEL_OPTIONS.map((m) => (
-              <SelectItem key={m.value} value={m.value} className="text-xs font-mono">
-                {m.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-      <MessageInput onSend={handleSend} draftKey={draftId} />
-    </div>
-  )
-}

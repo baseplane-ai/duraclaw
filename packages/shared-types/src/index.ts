@@ -704,8 +704,13 @@ export type SessionStatus =
 
 export interface SpawnConfig {
   project: string
-  /** Initial message — plain text or structured content blocks (text + images). */
-  prompt: string | ContentBlock[]
+  /**
+   * Initial message — plain text or structured content blocks (text + images).
+   * Optional: when omitted at session-creation time, the DO is initialised in
+   * `idle` with no runner spawned; the runner is dialled lazily on the first
+   * `sendMessage` (fresh-execute fallback). See SessionDO.initialize.
+   */
+  prompt?: string | ContentBlock[]
   model?: string
   /** Which agent adapter to use (e.g. 'claude', 'codex'). Defaults to 'claude'. */
   agent?: string

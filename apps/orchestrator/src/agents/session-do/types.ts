@@ -110,6 +110,7 @@ export const DEFAULT_META: SessionMeta = {
   title_confidence: null,
   title_set_at_turn: null,
   title_source: null,
+  agent: null,
 }
 
 // Map `SessionMeta` keys to their `session_meta` column names. Keys not in
@@ -140,4 +141,5 @@ export const META_COLUMN_MAP: Partial<Record<keyof SessionMeta, string>> = {
   title_confidence: 'title_confidence',
   title_set_at_turn: 'title_set_at_turn',
   title_source: 'title_source',
+  agent: 'agent',
 }
