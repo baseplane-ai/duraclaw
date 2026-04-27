@@ -117,8 +117,11 @@ const PERMISSION_MODES = new Set([
   'auto',
 ])
 const THINKING_MODES = new Set(['adaptive', 'enabled', 'disabled'])
-// Mirrors the Claude Agent SDK's `EffortLevel` union (sdk.d.ts).
-// `'xhigh'` was added in SDK v0.2.119 (Claude 4.7).
+// Note: `'xhigh'` is accepted because the Codex adapter supports it
+// (see packages/kata/src/providers/codex.ts). The Claude Agent SDK has
+// no such level — `mapEffortPref` in runner-link.ts drops `'xhigh'`
+// before injecting onto the Claude wire shape, and `resolveEffort`
+// in claude-runner.ts demotes it to `'high'` if it arrives anyway.
 const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
 
 function getDb(env: ApiAppEnv['Bindings']) {

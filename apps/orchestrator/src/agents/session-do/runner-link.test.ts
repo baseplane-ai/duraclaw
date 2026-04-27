@@ -34,8 +34,8 @@ describe('mapEffortPref', () => {
     expect(mapEffortPref('max')).toBe('max')
   })
 
-  it('passes through SDK-supported `xhigh` (added in SDK 0.2.119)', () => {
-    expect(mapEffortPref('xhigh')).toBe('xhigh')
+  it('drops legacy `xhigh` (codex-only) so it never reaches Claude SDK', () => {
+    expect(mapEffortPref('xhigh')).toBeUndefined()
   })
 
   it('returns undefined for null / undefined / unknown', () => {
