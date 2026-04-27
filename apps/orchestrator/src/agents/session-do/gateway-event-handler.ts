@@ -588,11 +588,21 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
       // Discovered-session fan-out is now owned by the cron in
       // src/api/scheduled.ts (#7 p6); SessionDO no longer mirrors here.
       if (!event.is_error) {
+        // Body = last assistant message text (SDK `result` field). Falls
+        // back to the stats line only when the SDK didn't emit a result
+        // string (rare — adapters that don't surface a final turn text).
+        const lastAssistantText = typeof event.result === 'string' ? event.result.trim() : ''
+        const PUSH_BODY_MAX = 200
+        const completedBody = lastAssistantText
+          ? lastAssistantText.length > PUSH_BODY_MAX
+            ? `${lastAssistantText.slice(0, PUSH_BODY_MAX - 1).trimEnd()}…`
+            : lastAssistantText
+          : `Completed (${ctx.state.num_turns} turns, $${(ctx.state.total_cost_usd ?? 0).toFixed(2)})`
         ctx.ctx.waitUntil(
           self.dispatchPush(
             {
               title: ctx.state.project || 'Duraclaw',
-              body: `Completed (${ctx.state.num_turns} turns, $${(ctx.state.total_cost_usd ?? 0).toFixed(2)})`,
+              body: completedBody,
               url: `/?session=${ctx.do.name}`,
               tag: `session-${ctx.do.name}`,
               sessionId: ctx.do.name,
