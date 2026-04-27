@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import {
   findProjectDir,
   getSessionsDir,
@@ -20,6 +20,7 @@ import {
   resolveTemplatePath,
 } from '../session/lookup.js'
 import { readState, stateExists } from '../state/reader.js'
+import { writeState } from '../state/writer.js'
 import type { SessionState } from '../state/schema.js'
 import {
   appendEdit,
@@ -28,6 +29,8 @@ import {
   toGitRelative,
 } from '../tracking/edits-log.js'
 import { isNativeTasksEnabled } from '../utils/tasks-check.js'
+import { getDriver } from '../drivers/index.js'
+import type { Driver } from '../drivers/types.js'
 import type { Gate } from '../validation/schemas.js'
 import { type PlaceholderContext, resolvePlaceholders } from './enter/placeholder.js'
 import { readNativeTaskFiles } from './enter/task-factory.js'
@@ -155,6 +158,14 @@ export async function handleSessionStart(input: Record<string, unknown>): Promis
   const sessionId = input.session_id as string | undefined
 
   try {
+    // B26: Check if state file exists before init so we know if this is a fresh session.
+    // "First write wins" — only write driver on the first SessionStart (new session_id).
+    // New session or /clear → new session_id → state file absent → write driver after init.
+    // Compact or resume → same session_id → state file present → skip (already written).
+    const driverName = input._driver as string | undefined
+    const stateFileForDriver = sessionId ? await getStateFilePath(sessionId) : undefined
+    const isNewSession = stateFileForDriver ? !(await stateExists(stateFileForDriver)) : false
+
     // Import and run init (silently capture its output)
     // No --force: session_id handles lifecycle naturally.
     // New session or /clear → new session_id → fresh state created.
@@ -163,6 +174,12 @@ export async function handleSessionStart(input: Record<string, unknown>): Promis
     const initArgs: string[] = []
     if (sessionId) initArgs.push(`--session=${sessionId}`)
     await captureConsoleLog(() => init(initArgs))
+
+    // B26: Write driver after init if this was a fresh session (idempotent — first write wins)
+    if (isNewSession && stateFileForDriver && driverName) {
+      const state = await readState(stateFileForDriver)
+      await writeState(stateFileForDriver, { ...state, driver: driverName as 'claude' | 'codex' })
+    }
 
     // Delegate to prime for the full kata hints context
     const { prime } = await import('./prime.js')
@@ -1419,13 +1436,40 @@ const hookHandlers: Record<string, (input: Record<string, unknown>) => Promise<v
   'task-evidence': handlePreToolUse,
 }
 
+// ── Canonical hook event mapping (for future driver translation) ──
+const HOOK_TO_CANONICAL: Record<string, string> = {
+  'session-start': 'SessionStart',
+  'user-prompt': 'UserPromptSubmit',
+  'pre-tool-use': 'PreToolUse',
+  'stop-conditions': 'Stop',
+  'post-tool-use': 'PostToolUse',
+  'mode-gate': 'PreToolUse',
+  'task-deps': 'PreToolUse',
+  'task-evidence': 'PreToolUse',
+}
+
 /**
  * Parse command line arguments for hook command
  */
-function parseHookArgs(args: string[]): { hookName: string; remaining: string[] } {
-  const hookName = args[0] ?? ''
-  const remaining = args.slice(1)
-  return { hookName, remaining }
+function parseHookArgs(args: string[]): { hookName: string; driver: string; sessionId?: string; remaining: string[] } {
+  let hookName = ''
+  let driver = 'claude'  // default for backward compat
+  let sessionId: string | undefined
+  const remaining: string[] = []
+
+  for (const arg of args) {
+    if (arg.startsWith('--driver=')) {
+      driver = arg.slice('--driver='.length)
+    } else if (arg.startsWith('--session=')) {
+      sessionId = arg.slice('--session='.length)
+    } else if (!hookName) {
+      hookName = arg
+    } else {
+      remaining.push(arg)
+    }
+  }
+
+  return { hookName, driver, sessionId, remaining }
 }
 
 /**
@@ -1443,11 +1487,29 @@ function parseHookArgs(args: string[]): { hookName: string; remaining: string[] 
  *   task-deps        - Check task dependencies
  *   task-evidence    - Check git status for task evidence
  */
+/**
+ * Walk up from cwd looking for .kata/kata.yaml.
+ * Returns true if found, false otherwise.
+ * Used as the no-op gate (B12) — hooks exit silently outside kata-managed projects.
+ */
+function isKataProject(cwd: string): boolean {
+  let dir = cwd
+  while (true) {
+    if (existsSync(join(dir, '.kata', 'kata.yaml'))) return true
+    // Stop at git boundary to prevent escaping into parent projects
+    if (existsSync(join(dir, '.git'))) return false
+    const parent = dirname(dir)
+    if (parent === dir) break  // reached filesystem root
+    dir = parent
+  }
+  return false
+}
+
 export async function hook(args: string[]): Promise<void> {
-  const { hookName } = parseHookArgs(args)
+  const { hookName, driver: driverName } = parseHookArgs(args)
 
   if (!hookName) {
-    process.stderr.write('Usage: kata hook <name>\n')
+    process.stderr.write('Usage: kata hook <name> [--driver=claude|codex]\n')
     process.stderr.write(`Available hooks: ${Object.keys(hookHandlers).join(', ')}\n`)
     process.exitCode = 1
     return
@@ -1461,9 +1523,29 @@ export async function hook(args: string[]): Promise<void> {
     return
   }
 
-  // Read stdin JSON input
-  const input = await readStdinJson()
+  // Resolve driver (defaults to 'claude' for backward compat)
+  let driver: Driver
+  try {
+    driver = getDriver(driverName as 'claude' | 'codex')
+  } catch {
+    process.stderr.write(`Unknown driver: ${driverName}\n`)
+    process.exitCode = 1
+    return
+  }
 
-  // Execute handler
-  await handler(input)
+  // Read stdin JSON input
+  const rawInput = await readStdinJson()
+
+  // B12: No-op gate — if cwd is not inside a kata-managed project, exit 0 silently
+  const cwd = (rawInput.cwd as string) || process.cwd()
+  if (!isKataProject(cwd)) {
+    return  // exit 0 with empty stdout
+  }
+
+  // Inject driver name so handlers can persist it (B26)
+  rawInput._driver = driverName
+
+  // Execute handler with raw input (handlers still consume Record<string, unknown>)
+  // TODO(P1.3-future): refactor handlers to consume CanonicalHookInput
+  await handler(rawInput)
 }

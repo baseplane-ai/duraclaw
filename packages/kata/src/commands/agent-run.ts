@@ -25,6 +25,7 @@
  *   codex:   all-or-nothing (bypass), no per-tool filtering
  */
 
+import { getDefaultProvider } from '../config/kata-config.js'
 import { getProvider } from '../providers/index.js'
 import { listPrompts } from '../providers/prompt.js'
 import { runAgentStep } from '../providers/step-runner.js'
@@ -50,7 +51,7 @@ interface AgentRunArgs {
 
 function parseAgentRunArgs(args: string[]): AgentRunArgs {
   const result: AgentRunArgs = {
-    provider: 'claude',
+    provider: getDefaultProvider(),
     context: [],
     gate: false,
     dryRun: false,

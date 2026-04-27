@@ -2,7 +2,7 @@
 // For guided setup, use the /kata-config skill in Claude Code.
 // Hook registration uses 'kata hook <name>' commands in .claude/settings.json.
 import { execSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import jsYaml from 'js-yaml'
 import { getDefaultProfile, type SetupProfile } from '../config/setup-profile.js'
@@ -17,6 +17,7 @@ type WmConfig = Record<string, unknown> & {
   wm_version?: string
 }
 
+import { detectInstalled } from '../drivers/index.js'
 import { getKataConfigPath, loadKataConfig } from '../config/kata-config.js'
 import { findProjectDir, getPackageRoot, getSessionsDir } from '../session/lookup.js'
 import { installUserSkills, scaffoldBatteries } from './scaffold-batteries.js'
@@ -345,10 +346,77 @@ function resolveProjectRoot(cwd: string, explicitCwd: boolean): string {
 }
 
 /**
+ * B9: Migrate stale project-level kata hook entries.
+ * Removes kata-managed entries from <projectRoot>/.claude/settings.json (project-level).
+ * Non-kata entries preserved. File deleted if empty after removal.
+ * Idempotent — no-op when no stale entries present.
+ */
+function migrateStaleProjectLevelHooks(projectRoot: string): void {
+  const settingsPath = join(projectRoot, '.claude', 'settings.json')
+  if (!existsSync(settingsPath)) return
+
+  let settings: SettingsJson = {}
+  try {
+    settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) as SettingsJson
+  } catch {
+    return
+  }
+
+  const existingHooks = settings.hooks ?? {}
+  const wmHookPattern =
+    /\bhook (session-start|user-prompt|stop-conditions|mode-gate|task-deps|task-evidence|pre-tool-use|post-tool-use)\b/
+  let removedCount = 0
+  const cleanedHooks: Record<string, any[]> = {}
+
+  for (const [event, entries] of Object.entries(existingHooks)) {
+    const kept: any[] = []
+    for (const entry of entries) {
+      // Support both nested format { hooks: [{command}] } and flat format { command }
+      // Cast to any to handle legacy flat-command entries not in the HookEntry type
+      const isKata =
+        (typeof (entry as any).command === 'string' &&
+          wmHookPattern.test((entry as any).command)) ||
+        entry.hooks?.some(
+          (h: any) => typeof h.command === 'string' && wmHookPattern.test(h.command),
+        )
+      if (isKata) {
+        removedCount++
+      } else {
+        kept.push(entry)
+      }
+    }
+    if (kept.length > 0) cleanedHooks[event] = kept
+  }
+
+  if (removedCount === 0) return
+
+  // Write cleaned settings or delete if empty
+  if (
+    Object.keys(cleanedHooks).length === 0 &&
+    Object.keys(settings).filter((k) => k !== 'hooks').length === 0
+  ) {
+    // File has nothing left — delete it
+    unlinkSync(settingsPath)
+  } else {
+    const cleaned: SettingsJson = { ...settings }
+    if (Object.keys(cleanedHooks).length > 0) {
+      cleaned.hooks = cleanedHooks
+    } else {
+      delete cleaned.hooks
+    }
+    writeFileSync(settingsPath, `${JSON.stringify(cleaned, null, 2)}\n`, 'utf-8')
+  }
+
+  process.stdout.write(
+    `kata setup: migrated stale .claude/settings.json hooks → user-level (${removedCount} entries removed)\n`,
+  )
+}
+
+/**
  * Write config files and register hooks (full setup — used by --yes path).
  * Merges with existing kata.yaml so re-running does not lose custom config.
  */
-function applySetup(cwd: string, profile: SetupProfile, explicitCwd: boolean): void {
+async function applySetup(cwd: string, profile: SetupProfile, explicitCwd: boolean): Promise<void> {
   const projectRoot = resolveProjectRoot(cwd, explicitCwd)
 
   // Build merged config (existing kata.yaml fields win over auto-detected defaults)
@@ -371,9 +439,15 @@ function applySetup(cwd: string, profile: SetupProfile, explicitCwd: boolean): v
     // Config may not exist yet during first setup
   }
   const wmBin = resolveWmBin(binaryOverride)
-  const settings = readSettings(projectRoot)
-  const wmHooks = buildHookEntries(wmBin)
-  writeSettings(projectRoot, mergeHooksIntoSettings(settings, wmHooks))
+
+  // B9: Clean stale project-level kata hooks before writing fresh ones
+  migrateStaleProjectLevelHooks(projectRoot)
+
+  // Register hooks at user-level for each detected driver
+  const installed = detectInstalled()
+  for (const driver of installed) {
+    await driver.writeHookRegistration(wmBin)
+  }
 }
 
 /**
@@ -396,7 +470,7 @@ export async function setup(args: string[]): Promise<void> {
   const profile = getDefaultProfile(projectRoot)
   if (parsed.yes) {
     // --yes: write everything with auto-detected defaults
-    applySetup(parsed.cwd, profile, parsed.explicitCwd)
+    await applySetup(parsed.cwd, profile, parsed.explicitCwd)
 
     // Deprecation notice for --batteries flag
     if (parsed.batteries) {
@@ -411,15 +485,24 @@ export async function setup(args: string[]): Promise<void> {
     // Install user-scoped skills
     const userSkillsResult = installUserSkills()
 
+    // Driver detection for summary
+    const installed = detectInstalled()
+    const driverNames = installed.map((d) => d.name)
+    const allDrivers = ['claude', 'codex'] as const
+    const missing = allDrivers.filter((n) => !driverNames.includes(n))
+
     // Unified output summary
     process.stdout.write('kata setup complete:\n')
     process.stdout.write(`  Project: ${profile.project_name}\n`)
     process.stdout.write(`  Config: .kata/kata.yaml\n`)
-    process.stdout.write(`  Hooks: .claude/settings.json\n`)
+    process.stdout.write(`  Hooks: registered for: ${driverNames.join(', ')}\n`)
     process.stdout.write(`  Spec templates: ${result.specTemplates.length}\n`)
     process.stdout.write(
       `  User skills: ${userSkillsResult.installed.length} installed to ~/.claude/skills/\n`,
     )
+    if (missing.length > 0) {
+      process.stdout.write(`  (${missing.join(', ')} not installed; run kata setup again after install)\n`)
+    }
 
     process.stdout.write('\nOptional: add shorthand to package.json scripts:\n')
     process.stdout.write('  "kata": "kata"\n')

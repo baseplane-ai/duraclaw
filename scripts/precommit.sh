@@ -25,7 +25,8 @@ staged_files="$(
     grep -E '\.(ts|tsx|js|jsx|json)$' |
     grep -v 'routeTree\.gen\.ts$' |
     grep -v '\.config\.' |
-    grep -v '^packages/kata/' || true
+    grep -v '^packages/kata/' |
+    grep -v '^\.' || true
 )"
 
 if [[ -n "$staged_files" ]]; then

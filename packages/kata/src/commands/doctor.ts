@@ -3,7 +3,9 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
+import { homedir } from 'node:os'
 import { loadKataConfig } from '../config/kata-config.js'
+import { codexDriver } from '../drivers/codex.js'
 import { findProjectDir, getPackageRoot, getSessionsDir } from '../session/lookup.js'
 import { isNativeTasksEnabled } from '../utils/tasks-check.js'
 import { resolveWmBin } from './setup.js'
@@ -269,7 +271,6 @@ export async function doctor(args: string[]): Promise<void> {
     })
     if (parsed.fix) {
       // Write the flag into ~/.claude/settings.json
-      const { homedir } = await import('node:os')
       const userSettingsPath = path.join(homedir(), '.claude', 'settings.json')
       let userSettings: Record<string, unknown> = {}
       if (existsSync(userSettingsPath)) {
@@ -295,6 +296,78 @@ export async function doctor(args: string[]): Promise<void> {
       check: 'native_tasks',
       status: 'ok',
       message: 'Native tasks enabled (CLAUDE_CODE_ENABLE_TASKS)',
+      fixable: false,
+    })
+  }
+
+  // ── Codex driver checks (B22, B23) ──────────────────────────────────────────
+  if (codexDriver.isInstalled()) {
+    // B22: Codex hooks registered in ~/.codex/hooks.json
+    const codexHooksFile = path.join(homedir(), '.codex', 'hooks.json')
+    let codexHooksRegistered = false
+    if (existsSync(codexHooksFile)) {
+      try {
+        const raw = readFileSync(codexHooksFile, 'utf-8')
+        const parsed = JSON.parse(raw) as Record<string, unknown>
+        const hooks = (parsed.hooks ?? parsed) as Record<string, unknown[]>
+        codexHooksRegistered = Object.values(hooks).some(
+          (entries) =>
+            Array.isArray(entries) &&
+            entries.some((e: any) =>
+              e.hooks?.some?.(
+                // Match "hook session-start" (subcommand only) to tolerate both bare
+              // `kata hook …` and quoted `"/path/to/kata" hook …` command forms.
+              (h: any) => typeof h.command === 'string' && / hook (session-start|user-prompt|stop-conditions|pre-tool-use|post-tool-use)/.test(h.command),
+              ),
+            ),
+        )
+      } catch {
+        /* ignore parse errors */
+      }
+    }
+
+    if (codexHooksRegistered) {
+      diagnostics.push({
+        check: 'codex_hooks',
+        status: 'ok',
+        message: 'Codex hooks registered in ~/.codex/hooks.json',
+        fixable: false,
+      })
+    } else {
+      diagnostics.push({
+        check: 'codex_hooks',
+        status: 'warning',
+        message: 'Codex installed but kata hooks not registered — run kata setup to register',
+        fixable: true,
+      })
+    }
+
+    // B23: AGENTS.md present at project root
+    try {
+      const projectDir = getProjectDir(parsed.fix)
+      if (existsSync(path.join(projectDir, 'AGENTS.md'))) {
+        diagnostics.push({
+          check: 'agents_md',
+          status: 'ok',
+          message: 'AGENTS.md present',
+          fixable: false,
+        })
+      } else {
+        diagnostics.push({
+          check: 'agents_md',
+          status: 'warning',
+          message: "AGENTS.md missing — codex won't auto-load project context",
+          fixable: false,
+        })
+      }
+    } catch {
+      /* getProjectDir failed — skip */
+    }
+  } else {
+    diagnostics.push({
+      check: 'codex_driver',
+      status: 'ok',
+      message: 'Codex not installed (skipping codex checks)',
       fixable: false,
     })
   }

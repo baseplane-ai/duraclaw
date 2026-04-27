@@ -1,14 +1,15 @@
 project:
   name: duraclaw
-  build_command: pnpm build
   test_command: pnpm test
-  test_file_pattern: "*.test.ts,*.spec.ts,*.test.tsx,*.spec.tsx"
   ci: null
+  build_command: pnpm build
+  test_file_pattern: '*.test.ts,*.spec.ts,*.test.tsx,*.spec.tsx'
 spec_path: planning/specs
 research_path: planning/research
 session_retention_days: 7
 reviews:
   spec_review: true
+  code_reviewer: null
   code_review: true
   code_reviewers:
     - claude
@@ -88,8 +89,8 @@ modes:
       - One spec phase at a time. Complete IMPL + TEST + REVIEW before moving to the next phase.
       - Read the spec first — understand ALL phases before writing any code. Spec non-goals are off-limits.
       - >-
-        Git workflow: large features use a PR workflow — work on a feature branch and open a PR at session close via
-        `gh pr create`. Smaller changes commit and push directly to main. Judge size by scope: multi-phase specs,
+        Git workflow: large features use a PR workflow — work on a feature branch and open a PR at session close via `gh
+        pr create`. Smaller changes commit and push directly to main. Judge size by scope: multi-phase specs,
         cross-cutting changes, or risky/breaking work → PR. Single-phase, contained, low-risk changes → direct push.
         When in doubt, prefer a PR.
     issue_handling: required

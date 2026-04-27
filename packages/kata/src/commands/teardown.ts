@@ -5,6 +5,7 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { getKataConfigPath } from '../config/kata-config.js'
+import { detectInstalled } from '../drivers/index.js'
 import { findProjectDir } from '../session/lookup.js'
 
 /**
@@ -153,6 +154,12 @@ export async function teardown(args: string[]): Promise<void> {
     actions.push(`Delete: .kata/kata.yaml`)
   }
 
+  // Check for user-level hook registrations
+  const installed = detectInstalled()
+  if (installed.length > 0) {
+    actions.push(`Remove user-level hooks for: ${installed.map(d => d.name).join(', ')}`)
+  }
+
   // No actions needed
   if (actions.length === 0) {
     process.stdout.write('Nothing to teardown. kata is not configured in this project.\n')
@@ -179,12 +186,23 @@ export async function teardown(args: string[]): Promise<void> {
   }
 
   // Execute teardown
-  // 1. Update settings.json (remove kata hooks)
+  // 1. Update project-level settings.json (remove kata hooks)
   if (removed.length > 0 && hasSettings) {
     writeFileSync(settingsPath, `${JSON.stringify(cleaned, null, 2)}\n`, 'utf-8')
   }
 
-  // 2. Delete kata.yaml
+  // 2. Remove user-level kata hooks for all installed drivers (B27)
+  const installedDrivers = detectInstalled()
+  for (const driver of installedDrivers) {
+    try {
+      await driver.removeHookRegistration()
+    } catch { /* best-effort */ }
+  }
+  if (installedDrivers.length > 0) {
+    process.stdout.write(`  Removed user-level hooks for: ${installedDrivers.map(d => d.name).join(', ')}\n`)
+  }
+
+  // 3. Delete kata.yaml
   if (existsSync(kataYamlPath)) {
     unlinkSync(kataYamlPath)
   }
