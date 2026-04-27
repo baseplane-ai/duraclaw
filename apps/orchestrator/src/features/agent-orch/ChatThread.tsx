@@ -490,6 +490,15 @@ interface ChatThreadProps {
   branchInfo?: Map<string, { current: number; total: number; siblings: string[] }>
   onBranchNavigate?: (messageId: string, direction: 'prev' | 'next') => void
   onSendSuggestion?: (text: string) => void
+  /**
+   * Caller-side hint that this session has prior turns. When `true`, an
+   * empty `messages` array is treated as hydrate-in-progress (render the
+   * skeleton) rather than as a draft / never-spawned session (which would
+   * render the "Start a conversation" suggestion-chip empty state). This
+   * exists because Capacitor SQLite hydrates asynchronously on mobile, so
+   * `messages.length === 0` briefly holds even for sessions with history.
+   */
+  expectsMessages?: boolean
 }
 
 function renderPart(
@@ -1141,6 +1150,7 @@ export function ChatThread({
   branchInfo,
   onBranchNavigate,
   onSendSuggestion,
+  expectsMessages = false,
 }: ChatThreadProps) {
   const awaitingReason = useMemo(() => findAwaitingReason(messages), [messages])
 
@@ -1166,7 +1176,7 @@ export function ChatThread({
     return (
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" role="log">
         <div className="flex-1 overflow-y-auto overflow-x-hidden p-2">
-          {isConnecting ? (
+          {isConnecting || expectsMessages ? (
             <div className="space-y-6">
               <div className="flex items-start gap-3">
                 <Skeleton className="size-8 rounded-full" />
