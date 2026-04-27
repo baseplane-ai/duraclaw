@@ -353,10 +353,17 @@ export class GeminiCliAdapter implements RunnerAdapter {
     }
 
     const exitCode = await child.exited
+    // Child exited cleanly — cancel any pending SIGKILL escalation.
+    if (this.sigkillTimer !== null) {
+      clearTimeout(this.sigkillTimer)
+      this.sigkillTimer = null
+    }
     this.currentChild = null
 
     if (exitCode !== 0 && !this.disposed && !this.opts.signal.aborted) {
-      // Drain stderr for error context (capped at 4KB)
+      // Drain stderr for error context (capped at 4KB). Safe in Bun: stderr is
+      // a separate ReadableStream from stdout and is buffered independently —
+      // the parseJsonlStream loop above only consumes child.stdout.
       let stderrText = ''
       try {
         const buf = await new Response(child.stderr).text()
