@@ -26,6 +26,9 @@ vi.mock('./agents/session-collab-do', () => ({
 vi.mock('./agents/session-collab-do-legacy', () => ({
   SessionCollabDO: class {},
 }))
+vi.mock('./agents/repo-document-do', () => ({
+  RepoDocumentDO: class {},
+}))
 
 // partyserver imports `cloudflare:workers` which the node ESM loader
 // can't resolve. Stub the only export server.ts uses.
