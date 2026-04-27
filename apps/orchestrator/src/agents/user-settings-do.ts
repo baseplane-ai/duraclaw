@@ -16,11 +16,11 @@
 
 import { DurableObject } from 'cloudflare:workers'
 import type { SyncedCollectionFrame } from '@duraclaw/shared-types'
-import { eq } from 'drizzle-orm'
+import { and, eq } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import { getRequestSession } from '~/api/auth-session'
 import * as schema from '~/db/schema'
-import type { Env } from '~/lib/types'
+import type { Env, SessionStatus } from '~/lib/types'
 
 const MAX_BROADCAST_BODY = 256 * 1024 // 256 KiB
 const USER_ID_ATTACHMENT_KEY = 'userId'
@@ -93,7 +93,86 @@ export class UserSettingsDO extends DurableObject<Env> {
       }
     }
 
+    // Substate prime — see primeSessionStatusForSocket(). D1 `agent_sessions.status`
+    // only carries the coarse `running`/`idle`/`error` axis, so a cold-loaded
+    // browser tab can't tell `running` from `waiting_gate` until the next DO
+    // transition fires `broadcastStatusToOwner`. Push a one-shot `session_status`
+    // delta to the just-accepted socket so the tab strip's amber/violet rings
+    // are correct from the first paint. Fire-and-forget via waitUntil so the
+    // 101 Upgrade response isn't gated on N DO RPCs.
+    this.ctx.waitUntil(this.primeSessionStatusForSocket(server, session.userId))
+
     return new Response(null, { status: 101, webSocket: client })
+  }
+
+  /**
+   * Push a single `session_status` synced-collection delta to one socket
+   * carrying the DO-authoritative `state.status` for every session whose
+   * D1 row is `'running'` (i.e. potentially in a substate the D1 mirror
+   * doesn't carry). Sessions whose D1 status is `idle`/`error` are skipped
+   * because their D1 mirror is already accurate as a cold-load fallback.
+   *
+   * Bounded by the user's count of in-flight sessions (cap defensively at
+   * 200). Failures are logged and swallowed — the prime is a best-effort
+   * UX optimisation, not a correctness path.
+   */
+  private async primeSessionStatusForSocket(socket: WebSocket, userId: string): Promise<void> {
+    try {
+      const db = drizzle(this.env.AUTH_DB, { schema })
+      const rows = await db
+        .select({ id: schema.agentSessions.id })
+        .from(schema.agentSessions)
+        .where(
+          and(eq(schema.agentSessions.userId, userId), eq(schema.agentSessions.status, 'running')),
+        )
+        .limit(200)
+
+      if (rows.length === 0) return
+
+      const results = await Promise.allSettled(
+        rows.map(async (row) => {
+          const doId = this.env.SESSION_AGENT.idFromName(row.id)
+          const stub = this.env.SESSION_AGENT.get(doId)
+          const resp = await stub.fetch(
+            new Request('https://session/status', {
+              headers: {
+                'x-partykit-room': row.id,
+                'x-user-id': userId,
+              },
+            }),
+          )
+          if (!resp.ok) return null
+          const body = (await resp.json()) as { status?: string }
+          if (!body.status) return null
+          return { id: row.id, status: body.status as SessionStatus }
+        }),
+      )
+
+      const ops: Array<{ type: 'update'; value: { id: string; status: SessionStatus } }> = []
+      for (const r of results) {
+        if (r.status !== 'fulfilled' || r.value == null) continue
+        ops.push({ type: 'update', value: r.value })
+      }
+      if (ops.length === 0) return
+
+      const frame: SyncedCollectionFrame<{ id: string; status: SessionStatus }> = {
+        type: 'synced-collection-delta',
+        collection: 'session_status',
+        ops,
+      }
+
+      // Send to the just-connected socket only — this is a per-socket prime,
+      // not a fanout. Other sockets (other devices) get their own prime when
+      // they connect; broadcasting here would duplicate-deliver to peers that
+      // already have correct state.
+      try {
+        socket.send(JSON.stringify(frame))
+      } catch (err) {
+        console.warn('[user-settings-do] prime send failed', err)
+      }
+    } catch (err) {
+      console.error('[user-settings-do] primeSessionStatusForSocket failed', err)
+    }
   }
 
   private async handleBroadcast(request: Request): Promise<Response> {

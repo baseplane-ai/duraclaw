@@ -18,9 +18,11 @@ vi.mock('cloudflare:workers', () => {
   return { DurableObject }
 })
 
-// Mock drizzle/d1 — the DO's only D1 interaction is presence insert/delete.
+// Mock drizzle/d1 — DO interactions are presence insert/delete plus the
+// `agent_sessions` SELECT used by the cold-connect substate prime.
 const insertCalls: any[] = []
 const deleteCalls: any[] = []
+let mockSelectRows: Array<{ id: string }> = []
 vi.mock('drizzle-orm/d1', () => ({
   drizzle: () => ({
     insert: (table: unknown) => ({
@@ -35,6 +37,13 @@ vi.mock('drizzle-orm/d1', () => ({
         deleteCalls.push({ table, clause })
       },
     }),
+    select: () => ({
+      from: () => ({
+        where: () => ({
+          limit: async () => mockSelectRows,
+        }),
+      }),
+    }),
   }),
 }))
 
@@ -43,6 +52,7 @@ vi.mock(import('drizzle-orm'), async (importOriginal) => {
   return {
     ...actual,
     eq: ((a: unknown, b: unknown) => ({ a, b })) as any,
+    and: ((...clauses: unknown[]) => ({ and: clauses })) as any,
   }
 })
 
@@ -61,14 +71,19 @@ function makeCtx() {
   const accepted: WebSocket[] = []
   const attachments = new WeakMap<WebSocket, unknown>()
   const sqlExec = vi.fn(() => ({ toArray: () => [] }))
+  const waitUntilTasks: Promise<unknown>[] = []
   const ctx = {
     storage: { sql: { exec: sqlExec } },
     acceptWebSocket: vi.fn((ws: WebSocket) => {
       accepted.push(ws)
     }),
     getWebSockets: () => [] as WebSocket[],
+    waitUntil: (p: Promise<unknown>) => {
+      waitUntilTasks.push(p)
+    },
     _accepted: accepted,
     _attachments: attachments,
+    _waitUntilTasks: waitUntilTasks,
   }
   return ctx
 }
@@ -321,6 +336,97 @@ describe('UserSettingsDO WebSocket upgrade', () => {
       if (!/status/.test(String(err))) throw err
     }
     expect(insertCalls.length).toBe(0)
+  })
+
+  // Substate prime — D1 carries `running`/`idle`/`error` only, so on cold
+  // socket connect we fan out to each running session's DO and push the
+  // current substate (e.g. `waiting_gate`) on the just-accepted socket so
+  // tab rings render correctly from the first paint.
+  it('primes the just-accepted socket with session_status from running sessions', async () => {
+    mockedGetRequestSession.mockResolvedValue({
+      userId: 'u1',
+      role: 'user',
+      session: {},
+      user: {},
+    })
+    mockSelectRows = [{ id: 'sess-A' }, { id: 'sess-B' }]
+    const fetchSpy = vi.fn(async (req: Request) => {
+      const url = new URL(req.url)
+      if (url.pathname === '/status') {
+        const room = req.headers.get('x-partykit-room')
+        const status = room === 'sess-A' ? 'waiting_gate' : 'running'
+        return new Response(JSON.stringify({ status }), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      return new Response('not found', { status: 404 })
+    })
+    const SESSION_AGENT = {
+      idFromName: (name: string) => name,
+      get: () => ({ fetch: fetchSpy }),
+    }
+    const { instance, ctx } = makeDO({ SESSION_AGENT })
+    const req = new Request('http://do/parties/user-settings/u1', {
+      headers: { Upgrade: 'websocket' },
+    })
+    try {
+      await instance.fetch(req)
+    } catch (err) {
+      if (!/status/.test(String(err))) throw err
+    }
+    // Drain waitUntil tasks so the fire-and-forget prime resolves.
+    await Promise.all(ctx._waitUntilTasks)
+
+    // The just-accepted socket should have received a single
+    // session_status delta with both running sessions' substates.
+    const acceptedSocket = ctx._accepted[0] as any
+    const sentFrames = acceptedSocket._sent.map((s: string) => JSON.parse(s))
+    const primeFrame = sentFrames.find(
+      (f: { collection?: string }) => f.collection === 'session_status',
+    )
+    expect(primeFrame).toBeDefined()
+    expect(primeFrame.type).toBe('synced-collection-delta')
+    expect(primeFrame.ops).toHaveLength(2)
+    const byId = new Map(
+      primeFrame.ops.map((op: { value: { id: string; status: string } }) => [
+        op.value.id,
+        op.value.status,
+      ]),
+    )
+    expect(byId.get('sess-A')).toBe('waiting_gate')
+    expect(byId.get('sess-B')).toBe('running')
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not send a prime frame when the user has no running sessions', async () => {
+    mockedGetRequestSession.mockResolvedValue({
+      userId: 'u1',
+      role: 'user',
+      session: {},
+      user: {},
+    })
+    mockSelectRows = []
+    const fetchSpy = vi.fn()
+    const SESSION_AGENT = {
+      idFromName: (name: string) => name,
+      get: () => ({ fetch: fetchSpy }),
+    }
+    const { instance, ctx } = makeDO({ SESSION_AGENT })
+    const req = new Request('http://do/parties/user-settings/u1', {
+      headers: { Upgrade: 'websocket' },
+    })
+    try {
+      await instance.fetch(req)
+    } catch (err) {
+      if (!/status/.test(String(err))) throw err
+    }
+    await Promise.all(ctx._waitUntilTasks)
+    expect(fetchSpy).not.toHaveBeenCalled()
+    const acceptedSocket = ctx._accepted[0] as any
+    const sentFrames = acceptedSocket._sent.map((s: string) => JSON.parse(s))
+    expect(sentFrames.find((f: { collection?: string }) => f.collection === 'session_status')).toBe(
+      undefined,
+    )
   })
 })
 

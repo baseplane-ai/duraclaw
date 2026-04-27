@@ -266,6 +266,18 @@ export async function handleHttpRequest(
 
   // P3: REST scaffolding for kataState (B5). Reads the D1 mirror (source
   // of truth) so the route returns a value even when the runner is dead.
+  // Lightweight status probe — returns the in-memory `state.status` only.
+  // Used by `UserSettingsDO.handleWebSocketUpgrade` to prime a freshly-
+  // connected user-stream socket with current substates (`waiting_gate`,
+  // `pending`, etc.) that the D1 `agent_sessions.status` mirror doesn't
+  // carry. Reads no SQLite, runs no D1 queries — just reflects the DO's
+  // already-hydrated state.
+  if (request.method === 'GET' && url.pathname === '/status') {
+    return new Response(JSON.stringify({ status: ctx.state.status }), {
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
   if (request.method === 'GET' && url.pathname === '/kata-state') {
     try {
       const body = await ctx.do.getKataState()
