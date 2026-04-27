@@ -438,12 +438,7 @@ async function applySetup(cwd: string, profile: SetupProfile, explicitCwd: boole
   // B9: Clean stale project-level kata hooks before writing fresh ones
   migrateStaleProjectLevelHooks(projectRoot)
 
-  // Write project-level hooks (backward compat — B9 migration removes these later)
-  const settings = readSettings(projectRoot)
-  const wmHooks = buildHookEntries(wmBin)
-  writeSettings(projectRoot, mergeHooksIntoSettings(settings, wmHooks))
-
-  // Also register hooks at user-level for each detected driver
+  // Register hooks at user-level for each detected driver
   const installed = detectInstalled()
   for (const driver of installed) {
     await driver.writeHookRegistration(wmBin)

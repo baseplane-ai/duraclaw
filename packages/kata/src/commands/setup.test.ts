@@ -73,33 +73,20 @@ describe('setup --yes', () => {
     expect(existsSync(join(tmpDir, '.kata', 'sessions'))).toBe(true)
   })
 
-  it('creates settings.json with 3 default hooks', async () => {
+  it('does not write project-level settings.json (hooks go to user-level only)', async () => {
     await captureSetup(['--yes'], tmpDir)
 
+    // B8/B9: setup no longer writes project-level hooks — only user-level (~/.claude/settings.json)
     const settingsPath = join(tmpDir, '.claude', 'settings.json')
-    expect(existsSync(settingsPath)).toBe(true)
-
-    const settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) as {
-      hooks: Record<string, unknown[]>
-    }
-    expect(settings.hooks).toBeDefined()
-    expect(settings.hooks.SessionStart).toBeDefined()
-    expect(settings.hooks.UserPromptSubmit).toBeDefined()
-    expect(settings.hooks.Stop).toBeDefined()
+    expect(existsSync(settingsPath)).toBe(false)
   })
 
-  it('registers PreToolUse hook by default', async () => {
+  it('does not create project-level PreToolUse hook entry', async () => {
     await captureSetup(['--yes'], tmpDir)
 
+    // Hooks are registered at user level by driver.writeHookRegistration, not at project level
     const settingsPath = join(tmpDir, '.claude', 'settings.json')
-    const settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) as {
-      hooks: Record<string, unknown[]>
-    }
-
-    // PreToolUse is always registered (consolidated into a single entry)
-    expect(settings.hooks.PreToolUse).toBeDefined()
-    expect(Array.isArray(settings.hooks.PreToolUse)).toBe(true)
-    expect(settings.hooks.PreToolUse.length).toBe(1)
+    expect(existsSync(settingsPath)).toBe(false)
   })
 
   it('is idempotent (re-run preserves existing)', async () => {
@@ -120,28 +107,24 @@ describe('setup --yes', () => {
     expect(secondConfig.research_path).toBe(firstConfig.research_path)
   })
 
-  it('preserves existing non-kata hooks', async () => {
-    // Create a pre-existing settings.json with non-kata hooks
-    // Use a command that does NOT match the kata hook pattern
-    // (the pattern matches '\bhook (session-start|...)' so 'my-custom-hook session-start' would match)
+  it('preserves existing project-level settings.json without adding kata hooks to it', async () => {
+    // Create a pre-existing project-level settings.json with non-kata hooks
     mkdirSync(join(tmpDir, '.claude'), { recursive: true })
-    writeFileSync(
-      join(tmpDir, '.claude', 'settings.json'),
-      JSON.stringify({
-        hooks: {
-          SessionStart: [
-            {
-              hooks: [
-                {
-                  type: 'command',
-                  command: 'my-custom-startup-script --init',
-                },
-              ],
-            },
-          ],
-        },
-      }),
-    )
+    const originalContent = JSON.stringify({
+      hooks: {
+        SessionStart: [
+          {
+            hooks: [
+              {
+                type: 'command',
+                command: 'my-custom-startup-script --init',
+              },
+            ],
+          },
+        ],
+      },
+    })
+    writeFileSync(join(tmpDir, '.claude', 'settings.json'), originalContent)
 
     await captureSetup(['--yes'], tmpDir)
 
@@ -150,21 +133,23 @@ describe('setup --yes', () => {
       hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>
     }
 
-    // Should have both custom hook and kata hook for SessionStart
+    // B8/B9: kata setup no longer writes to project-level settings.json.
+    // The custom hook should still be there (file untouched), but NO kata hooks
+    // should have been added at project level.
     const sessionStartEntries = settings.hooks.SessionStart
-    expect(sessionStartEntries.length).toBeGreaterThanOrEqual(2)
+    expect(sessionStartEntries.length).toBe(1)
 
-    // Custom hook should be preserved
+    // Custom hook should be preserved unchanged
     const hasCustomHook = sessionStartEntries.some((entry) =>
       entry.hooks?.some((h) => h.command === 'my-custom-startup-script --init'),
     )
     expect(hasCustomHook).toBe(true)
 
-    // kata hook should be present
+    // No kata hook should be present at project level
     const hasWmHook = sessionStartEntries.some((entry) =>
       entry.hooks?.some((h) => h.command.includes('hook session-start')),
     )
-    expect(hasWmHook).toBe(true)
+    expect(hasWmHook).toBe(false)
   })
 
   it('works without .kata/sessions/ existing', async () => {
