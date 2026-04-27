@@ -728,6 +728,67 @@ export function createApiApp() {
     return c.body(null, 204)
   })
 
+  // ── Gateway reap-decision bridge ──────────────────────────────────────────
+  // Posted by the gateway reaper on every kill/skip decision.
+  // Bypasses authMiddleware — auth is Bearer CC_GATEWAY_SECRET, timing-safe.
+  app.post('/api/gateway/sessions/:id/reap-decision', async (c) => {
+    const expected = c.env.CC_GATEWAY_SECRET
+    if (!expected) {
+      return c.json({ error: 'CC_GATEWAY_SECRET not configured' }, 401)
+    }
+    const authHeader = c.req.header('authorization') ?? ''
+    const provided = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
+    if (!constantTimeEquals(provided, expected)) {
+      return c.json({ error: 'unauthorized' }, 401)
+    }
+
+    const body = (await c.req.json().catch(() => null)) as {
+      decision?: unknown
+      attrs?: unknown
+    } | null
+
+    const VALID_DECISIONS = ['skip-pending-gate', 'kill-stale', 'kill-dead-runner'] as const
+    type ReapDecision = (typeof VALID_DECISIONS)[number]
+
+    if (
+      !body ||
+      typeof body.decision !== 'string' ||
+      !(VALID_DECISIONS as readonly string[]).includes(body.decision)
+    ) {
+      return c.json({ error: 'invalid request' }, 400)
+    }
+
+    const decision = body.decision as ReapDecision
+    const attrs =
+      body.attrs && typeof body.attrs === 'object' && !Array.isArray(body.attrs)
+        ? (body.attrs as Record<string, unknown>)
+        : {}
+
+    const sessionId = c.req.param('id')
+    const doId = getSessionDoId(c.env, sessionId)
+    const stub = c.env.SESSION_AGENT.get(doId)
+
+    try {
+      // Cast: DO RPC types aren't auto-exposed on the stub; @callable routes correctly at runtime.
+      await (
+        stub as unknown as {
+          recordReapDecision: (args: {
+            decision: ReapDecision
+            attrs: Record<string, unknown>
+          }) => Promise<{ ok: true }>
+        }
+      ).recordReapDecision({ decision, attrs })
+    } catch (err) {
+      // SessionDO not found or RPC error — log and return 404
+      console.warn(
+        `[reap-decision] RPC failed sessionId=${sessionId} err=${(err as Error).message}`,
+      )
+      return c.json({ error: 'session not found' }, 404)
+    }
+
+    return c.json({ ok: true })
+  })
+
   // Mobile OTA updater manifest — public endpoint (no auth). Capacitor
   // shell POSTs {platform, version_name}; we return {version, url} when the
   // deployed web bundle is newer, or {message} when it's current. The

@@ -383,6 +383,7 @@ async function main(): Promise<void> {
       model: null,
       turn_count: 0,
       state: 'running',
+      pending_gate: null,
     },
   }
 
@@ -421,6 +422,10 @@ async function main(): Promise<void> {
       }
     }
   }
+  // Expose flushMeta on ctx so claude-runner.ts can call it at gate sites
+  // (stamp pending_gate before parking, clear in finally).
+  ctx.flushMeta = flushMeta
+
   // First snapshot immediately so the meta-file exists before the runner
   // produces its first event — the reaper's staleness check can pick it up.
   // Errors here count toward the same budget.

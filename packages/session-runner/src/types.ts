@@ -52,5 +52,14 @@ export interface RunnerSessionContext {
     model: string | null
     turn_count: number
     state: 'running' | 'completed' | 'failed' | 'aborted' | 'crashed'
+    pending_gate?: {
+      type: 'ask_user' | 'permission_request'
+      tool_call_id: string
+      parked_at_ts: number
+    } | null
   }
+  /** Flush the meta snapshot to disk immediately. Assigned by main() after
+   * constructing the flushMeta closure; optional so claude-runner.ts can call
+   * it without a hard dependency on the closure. */
+  flushMeta?: () => Promise<void>
 }

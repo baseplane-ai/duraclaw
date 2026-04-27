@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { chunkOps } from '~/lib/chunk-frame'
 import { getSessionStatus } from '~/lib/vps-client'
 import { fingerprintAssistantContent } from './gateway-event-mapper'
+import { getEventLogImpl, logEvent } from './session-do/event-log'
 import {
   findPendingGatePartByHistory as findPendingGatePart,
   isPendingGatePart,
@@ -22,7 +23,7 @@ import {
   getGatewayConnectionIdFromSql as getGatewayConnectionId,
   validateGatewayToken,
 } from './session-do/runner-link'
-import { RECOVERY_GRACE_MS } from './session-do/types'
+import { RECOVERY_GRACE_MS, type SessionDOContext } from './session-do/types'
 import {
   DEFAULT_STALE_THRESHOLD_MS,
   planAwaitingTimeout,
@@ -4512,5 +4513,101 @@ describe('repeatedTurnGuardStep (repeated-content runaway guard)', () => {
       if (d.shouldFire && fireOnTurn === -1) fireOnTurn = turn
     }
     expect(fireOnTurn).toBe(THRESHOLD)
+  })
+})
+
+// ── GH#113 P1.2: logEvent + getEventLogImpl — reap tag ───────────────────
+//
+// SessionDO can't be instantiated in vitest (TC39 decorators). These tests
+// exercise the extracted `logEvent` and `getEventLogImpl` functions directly
+// against an in-memory SQLite-stub context, verifying that reap-decision
+// events are written and queryable by tag.
+
+describe('logEvent + getEventLogImpl — reap tag', () => {
+  function makeCtx() {
+    // Minimal SQLite-backed context using the Cloudflare `sqlite` in-process API.
+    // In vitest running under Bun with CF bindings, we use a simple in-memory store.
+    // The event_log table is created by migration v17; here we replicate the minimal
+    // schema needed for the two calls.
+    const rows: Array<{
+      seq: number
+      ts: number
+      level: string
+      tag: string
+      message: string
+      attrs: string | null
+    }> = []
+    let nextSeq = 1
+    const sql = {
+      exec: (q: string, ...args: unknown[]) => {
+        if (q.includes('INSERT INTO event_log')) {
+          // args: ts, level, tag, message, attrs
+          rows.push({
+            seq: nextSeq++,
+            ts: args[0] as number,
+            level: args[1] as string,
+            tag: args[2] as string,
+            message: args[3] as string,
+            attrs: args[4] as string | null,
+          })
+          return { count: 1 }
+        }
+        if (q.includes('SELECT seq') && q.includes('FROM event_log')) {
+          // Support tag= filter and sinceTs via positional args
+          // Pattern: SELECT ... WHERE tag = ? AND ts >= ? ORDER BY seq DESC LIMIT ?
+          //      or: SELECT ... WHERE ts >= ? ORDER BY seq DESC LIMIT ?
+          const hasTagFilter = q.includes('tag = ?')
+          let filtered = rows
+          if (hasTagFilter) {
+            const tag = args[0] as string
+            const sinceTs = args[1] as number
+            const limit = args[2] as number
+            filtered = rows.filter((r) => r.tag === tag && r.ts >= sinceTs).slice(-limit)
+          } else {
+            const sinceTs = args[0] as number
+            const limit = args[1] as number
+            filtered = rows.filter((r) => r.ts >= sinceTs).slice(-limit)
+          }
+          // Return an iterable (cursor-like)
+          return filtered.slice().reverse()[Symbol.iterator]()
+        }
+        return { count: 0 }
+      },
+    }
+    return { sql } as unknown as SessionDOContext
+  }
+
+  it('logEvent writes a row with tag=reap and getEventLogImpl returns it', () => {
+    const ctx = makeCtx()
+    logEvent(ctx, 'info', 'reap', 'decision=skip-pending-gate', {
+      type: 'ask_user',
+      tool_call_id: 'tu_test',
+      parked_age_ms: 300_000,
+    })
+
+    const rows = getEventLogImpl(ctx, { tag: 'reap', limit: 10 })
+    expect(rows).toHaveLength(1)
+    const row = rows[0]
+    expect(row.tag).toBe('reap')
+    expect(row.level).toBe('info')
+    expect(row.message).toBe('decision=skip-pending-gate')
+    const attrs = JSON.parse(row.attrs ?? '{}')
+    expect(attrs.type).toBe('ask_user')
+    expect(attrs.tool_call_id).toBe('tu_test')
+    expect(attrs.parked_age_ms).toBe(300_000)
+  })
+
+  it('multiple decisions write separate rows each queryable by tag=reap', () => {
+    const ctx = makeCtx()
+    logEvent(ctx, 'info', 'reap', 'decision=kill-stale', {
+      pid: 1234,
+      last_activity_age_ms: 2000_000,
+    })
+    logEvent(ctx, 'info', 'reap', 'decision=kill-dead-runner', { pid: 5678, duration_ms: 99000 })
+    logEvent(ctx, 'info', 'gate', 'some gate event', {}) // different tag, should NOT appear
+
+    const rows = getEventLogImpl(ctx, { tag: 'reap', limit: 10 })
+    expect(rows).toHaveLength(2)
+    expect(rows.map((r) => r.message)).toEqual(['decision=kill-stale', 'decision=kill-dead-runner'])
   })
 })

@@ -395,6 +395,14 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     return getEventLogImpl(this.moduleCtx, opts)
   }
   @callable()
+  async recordReapDecision(args: {
+    decision: 'skip-pending-gate' | 'kill-stale' | 'kill-dead-runner'
+    attrs?: Record<string, unknown>
+  }): Promise<{ ok: true }> {
+    logEvent(this.moduleCtx, 'info', 'reap', `decision=${args.decision}`, args.attrs ?? {})
+    return { ok: true }
+  }
+  @callable()
   async sendMessage(
     content: string | ContentBlock[],
     opts?: SendMessageOpts,
