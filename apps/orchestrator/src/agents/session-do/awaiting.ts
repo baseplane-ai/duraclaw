@@ -99,6 +99,14 @@ export async function recoverFromDroppedConnectionImpl(ctx: SessionDOContext): P
     ctx.do.persistTurnState()
   }
 
+  // Strip any tail-user `awaiting_response@pending` part. If the runner
+  // crashed before producing a partial_assistant (e.g. SDK boot failure
+  // before WS dial-back), `clearAwaitingResponseImpl` was never called,
+  // and the tail-user-row gate in `findAwaitingReason` keeps the
+  // "Claude is thinking…" bubble pinned indefinitely. Recovery is the
+  // last terminal hook before status flips to idle, so do it here.
+  ctx.do.clearAwaitingResponse()
+
   // Transition to idle (session may be resumable via runner_session_id).
   // Clear active_callback_token — the runner that owned it is gone.
   ctx.do.updateState({
