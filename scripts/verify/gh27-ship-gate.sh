@@ -37,10 +37,11 @@ fail() {
 TEST_DURATION_SEC="${TEST_DURATION_SEC:-180}"
 PROJECT_ID="${PROJECT_ID:-gh27-shipgate}"
 DOCS_WORKTREE="${DOCS_WORKTREE:-$REPO_ROOT}"
-TARGET_FILE="planning/specs/0018.md"
+TARGET_FILE="${TARGET_FILE:-planning/specs/27-docs-as-yjs-dialback-runners.md}"
 ORCHESTRATOR_PORT="${ORCHESTRATOR_PORT:-${VERIFY_ORCH_PORT:-43054}}"
 HEALTH_PORT="${HEALTH_PORT:-${CC_DOCS_RUNNER_PORT:-9899}}"
-DOCS_RUNNER_SECRET_VAL="${DOCS_RUNNER_SECRET:-shipgate-token}"
+DOCS_RUNNER_SECRET_VAL="${DOCS_RUNNER_SECRET:-$(grep -E '^DOCS_RUNNER_SECRET=' "$REPO_ROOT/apps/orchestrator/.dev.vars" 2>/dev/null | head -n1 | cut -d= -f2-)}"
+DOCS_RUNNER_SECRET_VAL="${DOCS_RUNNER_SECRET_VAL:-shipgate-token}"
 
 require_cmd curl
 require_cmd sha256sum
@@ -84,10 +85,10 @@ cat > "$CMD_FILE" <<EOF
   "type": "docs-runner",
   "projectId": "${PROJECT_ID}",
   "docsWorktreePath": "${DOCS_WORKTREE}",
-  "callbackBase": "wss://localhost:${ORCHESTRATOR_PORT}/api/collab/repo-document",
+  "callbackBase": "ws://127.0.0.1:${ORCHESTRATOR_PORT}/api/collab/repo-document",
   "bearer": "${DOCS_RUNNER_SECRET_VAL}",
-  "watch": ["planning/specs/0018.md"],
-  "ignored": [],
+  "watch": ["${TARGET_FILE}"],
+  "ignored": ["node_modules/**", ".git/**", "dist/**", ".turbo/**", "logs/**", "tmp/**", ".kata/**", "spike-*/**"],
   "healthPort": ${HEALTH_PORT}
 }
 EOF

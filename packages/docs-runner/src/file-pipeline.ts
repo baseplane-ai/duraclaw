@@ -25,13 +25,21 @@ import { BufferedChannel, DialBackDocClient } from '@duraclaw/shared-transport'
 import { deriveEntityId } from '@duraclaw/shared-types'
 import * as awarenessProtocol from 'y-protocols/awareness'
 import * as Y from 'yjs'
-import { markdownToYDoc } from './blocknote-bridge.js'
+import { markdownToYDoc, yDocToMarkdown } from './blocknote-bridge.js'
 import { type HashStore, hashOfNormalisedMarkdown } from './content-hash.js'
 import { createLogger, type Logger } from './logger.js'
 import { assertWithinRoot } from './path-safety.js'
 import { reconcileOnAttach } from './reconcile.js'
 import type { SuppressedWriter } from './writer.js'
 import { type YjsRunnerIdentity, YjsTransport } from './yjs-protocol.js'
+
+/**
+ * Coalesce window for remote-update→disk fan-out (B7 lines 343–362).
+ * Multiple Y.Doc updates that arrive within this window are folded into a
+ * single disk write, which keeps fast-typing browser peers from causing
+ * fsync storms while preserving live-editor latency.
+ */
+const REMOTE_FLUSH_DEBOUNCE_MS = 150
 
 export type FilePipelineState = 'starting' | 'syncing' | 'disconnected' | 'tombstoned' | 'error'
 
@@ -91,6 +99,17 @@ export class FilePipeline {
    * a half-applied disk→Y.Doc bridge call (P1.9 graceful-shutdown spec).
    */
   private readonly inFlight: Set<Promise<void>> = new Set()
+  /**
+   * Debounce timer for remote-update→disk fan-out. Coalesces bursty
+   * incoming updates (rapid browser typing) into one write per
+   * REMOTE_FLUSH_DEBOUNCE_MS window. Cleared on stop().
+   */
+  private remoteFlushTimer: ReturnType<typeof setTimeout> | null = null
+  /**
+   * Listener installed on `this.ydoc` once `start()` has finished
+   * reconcileOnAttach. Captured so `stop()` can detach it.
+   */
+  private remoteUpdateListener: ((update: Uint8Array, origin: unknown) => void) | null = null
 
   constructor(opts: FilePipelineOptions) {
     this.opts = opts
@@ -145,13 +164,23 @@ export class FilePipeline {
       channel: this.channel,
       onCommand: (frame) => transport.handleIncoming(frame),
       onStateChange: (st) => {
-        // Map dial-back lifecycle to our health state. `open` is
-        // intentionally NOT wired to 'syncing' here — `syncing` only fires
-        // once reconcile has settled.
+        // Map dial-back lifecycle to our health state.
         if (st === 'open') {
           if (!this.syncStep1Sent) {
+            // First-ever connection: send sync step 1; state flips to
+            // 'syncing' below once start()'s reconcile finishes.
             this.syncStep1Sent = true
             transport.sendSyncStep1()
+          } else {
+            // Reconnect after a drop: re-send sync step 1 so the
+            // y-protocols handshake re-syncs, then optimistically flip
+            // back to 'syncing' so /health flips to 'ok'. (The
+            // first-ever connection's transport.synced promise has
+            // already resolved, so there's nothing to await here.)
+            transport.sendSyncStep1()
+            if (this.currentState !== 'tombstoned' && this.currentState !== 'error') {
+              this.setState('syncing')
+            }
           }
         } else if (st === 'reconnecting' || st === 'connecting') {
           if (this.currentState !== 'tombstoned' && this.currentState !== 'error') {
@@ -188,7 +217,65 @@ export class FilePipeline {
       editor: this.opts.editor,
     })
 
+    // Wire the continuous remote-update→disk fan-out (B7 lines 343–362).
+    // YjsTransport.handleIncoming applies inbound updates with the
+    // transport instance itself as the Y origin. We listen for updates
+    // whose origin === transport (i.e. came off the wire from a peer)
+    // and serialise the resulting Y.Doc back to disk via the suppressed
+    // writer, debounced to avoid fsync storms on bursty editor traffic.
+    //
+    // Echoes from our own onLocalChange (origin === undefined) are
+    // ignored here — they're already on disk.
+    const remoteUpdateListener = (_update: Uint8Array, origin: unknown) => {
+      if (origin !== transport) return
+      this.scheduleRemoteFlush()
+    }
+    this.ydoc.on('update', remoteUpdateListener)
+    this.remoteUpdateListener = remoteUpdateListener
+
     this.setState('syncing')
+  }
+
+  /**
+   * Schedule a debounced disk-write of the current Y.Doc state. Multiple
+   * scheduleRemoteFlush calls within REMOTE_FLUSH_DEBOUNCE_MS coalesce
+   * into a single write. The actual write goes through `track()` so
+   * `stop()` awaits it before tearing down the doc.
+   */
+  private scheduleRemoteFlush(): void {
+    if (this.stopped || this.currentState === 'tombstoned') return
+    if (this.remoteFlushTimer) return
+    this.remoteFlushTimer = setTimeout(() => {
+      this.remoteFlushTimer = null
+      void this.track(this.flushRemoteToDisk()).catch((err) => {
+        this.log.warn('remote_flush.failed', {
+          file: this.opts.relPath,
+          err: (err as Error).message,
+        })
+      })
+    }, REMOTE_FLUSH_DEBOUNCE_MS)
+  }
+
+  /**
+   * Serialise the current Y.Doc to markdown and write to disk via the
+   * suppressed writer. B8/B9-aware: skips the write if the resulting
+   * markdown matches the last committed hash (idempotent for repeated
+   * fan-outs of identical state); the SuppressedWriter then adds a
+   * suppression entry so the watcher doesn't bounce the change back to
+   * the DO.
+   */
+  private async flushRemoteToDisk(): Promise<void> {
+    if (this.stopped || this.currentState === 'tombstoned') return
+    const md = await yDocToMarkdown(this.ydoc, this.opts.editor)
+    const newHash = await hashOfNormalisedMarkdown(md)
+    if (newHash === this.opts.hashStore.get(this.opts.relPath)) {
+      // Already on disk in this exact form — nothing to do.
+      return
+    }
+    // Persist hash BEFORE write so a crash mid-write doesn't leave the
+    // hash store stale (matches B8 ordering invariant in doLocalChange).
+    await this.opts.hashStore.set(this.opts.relPath, newHash)
+    await this.opts.writer.write(this.opts.relPath, md)
   }
 
   /**
@@ -311,6 +398,19 @@ export class FilePipeline {
   async stop(): Promise<void> {
     if (this.stopped) return
     this.stopped = true
+
+    if (this.remoteFlushTimer) {
+      clearTimeout(this.remoteFlushTimer)
+      this.remoteFlushTimer = null
+    }
+    if (this.remoteUpdateListener) {
+      try {
+        this.ydoc.off('update', this.remoteUpdateListener)
+      } catch {
+        /* best-effort */
+      }
+      this.remoteUpdateListener = null
+    }
 
     if (this.inFlight.size > 0) {
       const pending = [...this.inFlight]
