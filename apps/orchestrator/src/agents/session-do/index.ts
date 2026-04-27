@@ -136,6 +136,16 @@ export interface SessionMeta {
    * Null on rehydrate of pre-v19 sessions — fresh-execute defaults to 'claude'.
    */
   agent?: string | null
+  /**
+   * GH#119 P3: alarm-loop retry counter for the `waiting_identity` state.
+   * Bumps on each alarm tick that finds zero available identities; resets
+   * to 0 on a successful failover or terminal session state. Capped at 30
+   * (≈30min @ 60s ticks) before the session is declared failed with
+   * `error: 'All identities exhausted'`. Persisted in
+   * `session_meta.waiting_identity_retries` (migration v21) so the counter
+   * survives DO hibernation between alarm ticks.
+   */
+  waiting_identity_retries: number
 }
 
 /**

@@ -641,6 +641,28 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
           ),
         )
       }
+
+      // GH#119 P3: SDK error-discriminator routing. When the runner stamps
+      // `error: 'rate_limit' | 'authentication_failed'` on the result, fan
+      // out to the failover handler so we cool down the current identity
+      // and resume under a fresh one. The result event itself stays on
+      // its existing pipeline (terminal-state side-effects above) — the
+      // failover dial happens additively, not as a substitute.
+      if (event.error === 'rate_limit' || event.error === 'authentication_failed') {
+        const failoverReason: 'rate_limit' | 'auth_error' =
+          event.error === 'rate_limit' ? 'rate_limit' : 'auth_error'
+        void handleRateLimit(
+          ctx,
+          {
+            type: 'rate_limit',
+            session_id: event.session_id,
+            // No `resets_at` available on the result-error path; the
+            // failover handler falls back to a +30min cooldown.
+            rate_limit_info: {},
+          },
+          failoverReason,
+        )
+      }
       break
     }
 
@@ -868,6 +890,14 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
     // runner instead of crashing the WS handler.
     case 'transcript-rpc':
       handleTranscriptRpc(ctx, event)
+      break
+
+    // GH#119 P3: failover events are DO-authored — the runner never
+    // emits one. Listed here to satisfy the exhaustiveness check on
+    // `GatewayEvent`; if a stray frame arrives we relay it to clients
+    // rather than dropping it so any chained DO consumer still sees it.
+    case 'failover':
+      self.broadcastGatewayEvent(event)
       break
 
     default: {

@@ -111,6 +111,7 @@ export const DEFAULT_META: SessionMeta = {
   title_set_at_turn: null,
   title_source: null,
   agent: null,
+  waiting_identity_retries: 0,
 }
 
 // Map `SessionMeta` keys to their `session_meta` column names. Keys not in
@@ -142,4 +143,5 @@ export const META_COLUMN_MAP: Partial<Record<keyof SessionMeta, string>> = {
   title_set_at_turn: 'title_set_at_turn',
   title_source: 'title_source',
   agent: 'agent',
+  waiting_identity_retries: 'waiting_identity_retries',
 }

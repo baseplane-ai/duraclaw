@@ -1,4 +1,5 @@
 import type { SpawnConfig } from '~/lib/types'
+import { handleRateLimit } from './resume-scheduler'
 import { transcriptCountImpl } from './transcript'
 import type { SessionDOContext } from './types'
 
@@ -224,6 +225,38 @@ export async function handleHttpRequest(
     } catch (err) {
       return new Response(
         JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } },
+      )
+    }
+  }
+
+  // GH#119 P3: dev-only failover trigger for VP-3 verification. Synthesises
+  // a `RateLimitEvent` with the optional `resets_at` from the request body
+  // and routes it through the real failover handler — same identity-cooldown
+  // write, same LRU resume spawn as a runner-emitted rate_limit. The public
+  // Hono route gates on `ENABLE_DEBUG_ENDPOINTS === 'true'`; this handler
+  // trusts pre-validated calls.
+  if (request.method === 'POST' && url.pathname === '/debug/simulate-rate-limit') {
+    try {
+      let resetsAt: string | undefined
+      try {
+        const body = (await request.clone().json()) as { resets_at?: unknown } | null
+        if (body && typeof body.resets_at === 'string') resetsAt = body.resets_at
+      } catch {
+        // Tolerate missing / non-JSON body — synth event uses fallback.
+      }
+      const sessionId = ctx.do.name
+      void handleRateLimit(ctx, {
+        type: 'rate_limit',
+        session_id: sessionId,
+        rate_limit_info: resetsAt ? { resets_at: resetsAt } : {},
+      })
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: { 'Content-Type': 'application/json' },
+      })
+    } catch (err) {
+      return new Response(
+        JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }),
         { status: 500, headers: { 'Content-Type': 'application/json' } },
       )
     }

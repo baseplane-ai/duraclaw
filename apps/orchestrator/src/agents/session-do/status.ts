@@ -27,12 +27,27 @@ import { META_COLUMN_MAP, type SessionDOContext } from './types'
  */
 export function updateState(ctx: SessionDOContext, partial: Partial<SessionMeta>): void {
   const prevStatus = ctx.state.status
+  // GH#119 P3: canonical reset point for the waiting_identity retry
+  // counter. Any transition into a terminal state (`idle` / `error`) or
+  // a successful failover (`failover`) clears the counter so a future
+  // rate-limit on the same session starts the alarm-loop budget fresh.
+  // The caller may override by passing an explicit
+  // `waiting_identity_retries` in `partial` (handleRateLimit /
+  // checkWaitingIdentity do this when bumping or zeroing intentionally).
+  let normalized: Partial<SessionMeta> = partial
+  if (
+    partial.status !== undefined &&
+    partial.waiting_identity_retries === undefined &&
+    (partial.status === 'idle' || partial.status === 'error' || partial.status === 'failover')
+  ) {
+    normalized = { ...partial, waiting_identity_retries: 0 }
+  }
   ctx.do.setState({
     ...ctx.state,
-    ...partial,
+    ...normalized,
     updated_at: new Date().toISOString(),
   })
-  persistMetaPatch(ctx, partial)
+  persistMetaPatch(ctx, normalized)
 
   // Push a status-only frame to all connected clients whenever the
   // status field actually changes. This ensures the client sees every

@@ -386,4 +386,22 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
         ON session_transcript (created_at)`)
     },
   },
+  {
+    version: 21,
+    description:
+      'GH#119 P3: Add session_meta.waiting_identity_retries to persist the alarm-loop retry counter across DO hibernation. Counter increments on each alarm tick that finds zero available identities; resets to 0 on successful failover or session terminal state. Used to enforce the 30-attempt (≈30min) ceiling before declaring the session failed with "All identities exhausted".',
+    up: (sql) => {
+      try {
+        sql.exec(
+          `ALTER TABLE session_meta ADD COLUMN waiting_identity_retries INTEGER NOT NULL DEFAULT 0`,
+        )
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (!msg.toLowerCase().includes('duplicate column')) {
+          console.warn('[migration v21] unexpected error adding waiting_identity_retries column', e)
+          throw e
+        }
+      }
+    },
+  },
 ]

@@ -183,6 +183,31 @@ export function sendToGateway(ctx: SessionDOContext, cmd: GatewayCommand): void 
 }
 
 /**
+ * GH#119 P2/P3: query D1 for the next available runner identity using
+ * the LRU `(status, cooldown_until, last_used_at)` ordering. Returns
+ * `null` when no identity is available (catalog empty / every row
+ * disabled or on cooldown). Throws on D1 error so callers can decide
+ * how to fail (selectAndStampIdentity swallows; failover handler logs
+ * + bails).
+ *
+ * `last_used_at IS NULL DESC` puts never-used identities first (they're
+ * the most natural pick over an LRU sweep); after that ASC orders the
+ * remainder by oldest-use-first.
+ */
+export async function findAvailableIdentity(
+  ctx: SessionDOContext,
+): Promise<{ id: string; name: string; home_path: string } | null> {
+  const row = await ctx.env.AUTH_DB.prepare(
+    `SELECT id, name, home_path FROM runner_identities
+       WHERE status = 'available'
+         AND (cooldown_until IS NULL OR cooldown_until < datetime('now'))
+       ORDER BY last_used_at IS NULL DESC, last_used_at ASC
+       LIMIT 1`,
+  ).first<{ id: string; name: string; home_path: string }>()
+  return row ?? null
+}
+
+/**
  * GH#119 P2: pick an available runner identity via LRU, stamp
  * `runner_home` onto the command, bump `last_used_at`, and mirror the
  * identity name onto the `agent_sessions` D1 row.
@@ -199,16 +224,7 @@ export async function selectAndStampIdentity<C extends ExecuteCommand | ResumeCo
   cmd: C,
 ): Promise<C> {
   try {
-    // `last_used_at IS NULL DESC` puts never-used identities first
-    // (they're the most natural pick over an LRU sweep); after that
-    // ASC orders the remainder by oldest-use-first.
-    const row = await ctx.env.AUTH_DB.prepare(
-      `SELECT id, name, home_path FROM runner_identities
-         WHERE status = 'available'
-           AND (cooldown_until IS NULL OR cooldown_until < datetime('now'))
-         ORDER BY last_used_at IS NULL DESC, last_used_at ASC
-         LIMIT 1`,
-    ).first<{ id: string; name: string; home_path: string }>()
+    const row = await findAvailableIdentity(ctx)
 
     if (!row) {
       ctx.logEvent('info', 'identity', 'no identity available — using gateway default')
@@ -274,19 +290,23 @@ export async function triggerGatewayDial(
 
   // GH#86: inject titler_enabled into execute/resume commands. Read from
   // D1 feature_flags (5-min cached). Fail-open (default true) so new
-  // deploys work before the admin toggles anything.
+  // deploys work before the admin toggles anything. Preserves a caller-
+  // supplied explicit value so failover paths can force-enable.
   if (cmd.type === 'execute' || cmd.type === 'resume') {
     const titlerEnabled = await ctx.do.getFeatureFlagEnabled('haiku_titler', true)
-    cmd = { ...cmd, titler_enabled: titlerEnabled }
+    cmd = { ...cmd, titler_enabled: cmd.titler_enabled ?? titlerEnabled }
   }
 
   // GH#119: inject session_store_enabled into execute/resume commands.
   // Default-OFF — the SessionStore mirror is opt-in until P3 (auto-failover)
-  // ships. P3 flips the flag on globally for sessions that require failover
-  // support; before then, runners stay on filesystem-only behavior.
+  // ships. P3's failover handler force-enables the flag on the resume
+  // command (so the new identity loads from DO SQLite, not the prior
+  // identity's local disk); the `cmd.session_store_enabled ??` lookup
+  // preserves that explicit `true` instead of overwriting it with the
+  // global feature-flag value.
   if (cmd.type === 'execute' || cmd.type === 'resume') {
     const sessionStoreEnabled = await ctx.do.getFeatureFlagEnabled('session_store', false)
-    cmd = { ...cmd, session_store_enabled: sessionStoreEnabled }
+    cmd = { ...cmd, session_store_enabled: cmd.session_store_enabled ?? sessionStoreEnabled }
   }
 
   // Inject user_preferences onto spawn / resume payloads. Reads from

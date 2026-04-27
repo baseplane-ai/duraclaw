@@ -213,6 +213,7 @@ export type GatewayEvent =
   | CompactBoundaryEvent
   | ApiRetryEvent
   | TranscriptRpcRequestEvent
+  | FailoverEvent
 
 /**
  * GH#119 P1.1: RUNNER -> DO request over the dial-back WS.
@@ -387,7 +388,30 @@ export interface StoppedEvent {
 export interface RateLimitEvent {
   type: 'rate_limit'
   session_id: string
-  rate_limit_info: Record<string, unknown>
+  rate_limit_info: {
+    /**
+     * GH#119: ISO timestamp when the rate limit resets. Used by the
+     * failover handler to set `cooldown_until` on the rate-limited
+     * identity. When absent, the handler uses a +30min fallback.
+     */
+    resets_at?: string
+    [k: string]: unknown
+  }
+}
+
+/**
+ * GH#119 P3: emitted when the DO swaps the runner identity due to
+ * rate-limit or auth-error. Broadcast to clients so the StatusBar can
+ * show "Switching accounts...". The actual session resume happens via
+ * the normal `triggerGatewayDial({type:'resume',...})` flow; this
+ * event is observability-only.
+ */
+export interface FailoverEvent {
+  type: 'failover'
+  session_id: string
+  from_identity: string
+  to_identity: string
+  reason: 'rate_limit' | 'auth_error'
 }
 
 export interface TaskStartedEvent {
@@ -551,6 +575,15 @@ export interface ResultEvent {
    * omits this if the SDK call throws or returns malformed data.
    */
   context_usage?: WireContextUsage
+  /**
+   * GH#119 P3: optional SDK error discriminator stamped by the runner
+   * when `is_error === true`. The DO routes `'rate_limit'` and
+   * `'authentication_failed'` through the failover handler; other
+   * values fall through to the normal terminal-error path. Forward-
+   * compatible — runners that don't stamp this still produce a normal
+   * is_error result that the existing pipeline handles.
+   */
+  error?: string | null
 }
 
 export interface ErrorEvent {
@@ -774,6 +807,10 @@ export type SessionStatus =
   | 'waiting_input'
   | 'waiting_permission'
   | 'waiting_gate'
+  // GH#119 P3: no identity available; alarm-loop polling
+  | 'waiting_identity'
+  // GH#119 P3: transient — selecting next identity + resuming
+  | 'failover'
   | 'error'
 
 // SessionState deleted (#31 P5 / B10). Status / gate / result are now derived

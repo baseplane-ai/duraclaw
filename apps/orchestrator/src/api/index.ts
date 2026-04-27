@@ -2180,8 +2180,8 @@ export function createApiApp() {
 
   // GH#119 P1.1: dev-only transcript-entry count (VP-1 verification).
   // Gated on `ENABLE_DEBUG_ENDPOINTS === 'true'` — anything else 404s so
-  // production deployments don't expose internal diagnostics. P1.4 will
-  // reuse this gate pattern for the simulate-rate-limit endpoint.
+  // production deployments don't expose internal diagnostics. P3 reuses
+  // the same gate for the simulate-rate-limit endpoint below.
   app.get('/api/sessions/:id/debug/transcript-count', async (c) => {
     if (c.env.ENABLE_DEBUG_ENDPOINTS !== 'true') {
       return c.json({ error: 'Not found' }, 404)
@@ -2209,6 +2209,49 @@ export function createApiApp() {
       return c.json({ error: 'Session not found' }, response.status === 403 ? 403 : 404)
     }
     const body = (await response.json()) as { count: number }
+    return c.json(body)
+  })
+
+  // GH#119 P3: dev-only failover trigger (VP-3 verification). Forwards an
+  // optional `{ resets_at }` body to the DO's `/debug/simulate-rate-limit`
+  // route which synthesises a real `RateLimitEvent` and routes it through
+  // the failover handler. Gated on `ENABLE_DEBUG_ENDPOINTS === 'true'`.
+  app.post('/api/sessions/:id/debug/simulate-rate-limit', async (c) => {
+    if (c.env.ENABLE_DEBUG_ENDPOINTS !== 'true') {
+      return c.json({ error: 'Not found' }, 404)
+    }
+    const userId = c.get('userId')
+    const access = await getAccessibleSession(c.env, c.req.param('id'), userId, c.get('role'))
+    if (!access.ok) {
+      return c.json({ error: 'Session not found' }, 404)
+    }
+    const sessionId = access.session.id
+    const doId = getSessionDoId(c.env, sessionId)
+    const sessionDO = c.env.SESSION_AGENT.get(doId)
+    let bodyJson: string
+    try {
+      const raw = (await c.req.json().catch(() => null)) as { resets_at?: unknown } | null
+      bodyJson = JSON.stringify(
+        raw && typeof raw.resets_at === 'string' ? { resets_at: raw.resets_at } : {},
+      )
+    } catch {
+      bodyJson = '{}'
+    }
+    const response = await sessionDO.fetch(
+      new Request('https://session/debug/simulate-rate-limit', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-partykit-room': sessionId,
+          'x-user-id': userId,
+        },
+        body: bodyJson,
+      }),
+    )
+    if (!response.ok) {
+      return c.json({ error: 'Session not found' }, response.status === 403 ? 403 : 404)
+    }
+    const body = (await response.json()) as { ok: boolean }
     return c.json(body)
   })
 
