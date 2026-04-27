@@ -71,6 +71,8 @@ export interface ExecuteCommand {
   codex_models?: ReadonlyArray<{ name: string; context_window: number }>
   /** GH#86: enable Haiku-based session titler in the runner. Default false. */
   titler_enabled?: boolean
+  /** GH#119: enable DO-side SessionStore mirror for account failover. Default false. */
+  session_store_enabled?: boolean
 }
 
 // Content block types matching Anthropic API format
@@ -165,6 +167,8 @@ export interface ResumeCommand {
   codex_models?: ReadonlyArray<{ name: string; context_window: number }>
   /** GH#86: enable Haiku-based session titler in the runner. Default false. */
   titler_enabled?: boolean
+  /** GH#119: enable DO-side SessionStore mirror for account failover. Default false. */
+  session_store_enabled?: boolean
 }
 
 // ── Gateway Events (Gateway → Orchestrator) ────────────────────────────

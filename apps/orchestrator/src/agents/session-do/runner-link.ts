@@ -214,6 +214,15 @@ export async function triggerGatewayDial(
     cmd = { ...cmd, titler_enabled: titlerEnabled }
   }
 
+  // GH#119: inject session_store_enabled into execute/resume commands.
+  // Default-OFF — the SessionStore mirror is opt-in until P3 (auto-failover)
+  // ships. P3 flips the flag on globally for sessions that require failover
+  // support; before then, runners stay on filesystem-only behavior.
+  if (cmd.type === 'execute' || cmd.type === 'resume') {
+    const sessionStoreEnabled = await ctx.do.getFeatureFlagEnabled('session_store', false)
+    cmd = { ...cmd, session_store_enabled: sessionStoreEnabled }
+  }
+
   // Inject user_preferences onto spawn / resume payloads. Reads from
   // D1 `user_preferences` for `ctx.state.userId` in a single query.
   // Fail-open per field: on D1 miss / unknown value the runner falls

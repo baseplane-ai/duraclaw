@@ -28,6 +28,7 @@ import type { ExecuteCommand, GatewayCommand, ResumeCommand } from '@duraclaw/sh
 import { ClaudeAdapter, createAdapter, type RunnerAdapter } from './adapters/index.js'
 import { atomicOverwrite, atomicWriteOnce } from './atomic.js'
 import { resolveProject } from './project-resolver.js'
+import { WsTranscriptRpc } from './transcript-rpc.js'
 import type { RunnerSessionContext } from './types.js'
 
 const META_INTERVAL_MS = 10_000
@@ -247,6 +248,20 @@ function handleIncomingCommand(msg: unknown, ctx: RunnerSessionContext, ch: Buff
       ch.send({ type: 'pong', seq: ++ctx.nextSeq })
       break
     }
+    case 'transcript-rpc-response': {
+      // GH#119: route SessionStore RPC replies back to the runner-side
+      // multiplexer. `handleResponse` is a no-op when rpc_id is unknown
+      // (defensive against late replies after cancelAll).
+      const rpcId = typeof m.rpc_id === 'string' ? m.rpc_id : null
+      if (!rpcId) {
+        console.warn('[session-runner] transcript-rpc-response missing rpc_id — dropping')
+        break
+      }
+      const errMsg =
+        typeof m.error === 'string' ? m.error : m.error == null ? null : String(m.error)
+      ctx.transcriptRpc?.handleResponse(rpcId, m.result, errMsg)
+      break
+    }
   }
 }
 
@@ -387,6 +402,17 @@ async function main(): Promise<void> {
     },
   }
 
+  // GH#119: TranscriptRpc piggybacks on the dial-back WS. Construct
+  // before the DialBackClient so the incoming-command dispatcher can
+  // route `transcript-rpc-response` frames into it. The send function
+  // drops the call straight onto BufferedChannel — `seq` is stamped by
+  // `channel.send()` (every frame on this WS is ordered, including the
+  // RPC bytes, so gap-detection on the DO side covers RPC traffic too).
+  const transcriptRpc = new WsTranscriptRpc(argv.sessionId, (frame) => {
+    channel.send({ ...frame, seq: ++ctx.nextSeq })
+  })
+  ctx.transcriptRpc = transcriptRpc
+
   const dialBackClient = new DialBackClient({
     callbackUrl: argv.callbackUrl,
     bearer: argv.bearer,
@@ -400,6 +426,10 @@ async function main(): Promise<void> {
     onTerminate: (reason) => {
       console.warn(`[session-runner] dial-back terminated: ${reason} — aborting SDK query`)
       ctx.meta.state = 'aborted'
+      // GH#119: reject any in-flight TranscriptRpc calls before aborting
+      // so the SDK observes a prompt error instead of waiting on the 30s
+      // timeout. The reason string is forwarded so logs correlate.
+      ctx.transcriptRpc?.cancelAll(`dial-back terminated: ${reason}`)
       ctx.abortController.abort()
     },
   })
