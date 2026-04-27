@@ -244,9 +244,10 @@ cleanup_stale_pidfile() {
 # overrides live in $VERIFY_ROOT/.env (also gitignored, sourced first).
 sync_dev_vars() {
   local dev_vars="$VERIFY_ROOT/apps/orchestrator/.dev.vars"
-  local managed_keys=(BETTER_AUTH_URL CC_GATEWAY_URL CC_GATEWAY_SECRET WORKER_PUBLIC_URL BOOTSTRAP_TOKEN SYNC_BROADCAST_SECRET)
+  local managed_keys=(BETTER_AUTH_URL CC_GATEWAY_URL CC_GATEWAY_SECRET WORKER_PUBLIC_URL BOOTSTRAP_TOKEN SYNC_BROADCAST_SECRET DOCS_RUNNER_SECRET)
   local secret="${CC_GATEWAY_SECRET:-${CC_GATEWAY_API_TOKEN:-}}"
   local sync_broadcast_secret="${SYNC_BROADCAST_SECRET:-dev-sync-broadcast-secret-change-me}"
+  local docs_runner_secret="${DOCS_RUNNER_SECRET:-dev-docs-runner-secret-change-me}"
 
   if [[ -z "$secret" ]]; then
     echo "sync_dev_vars: CC_GATEWAY_SECRET / CC_GATEWAY_API_TOKEN unset in \$VERIFY_ROOT/.env — gateway auth will fail" >&2
@@ -284,6 +285,7 @@ CC_GATEWAY_URL=$VERIFY_GATEWAY_WS_URL
 CC_GATEWAY_SECRET=$secret
 WORKER_PUBLIC_URL=$VERIFY_ORCH_URL
 SYNC_BROADCAST_SECRET=$sync_broadcast_secret
+DOCS_RUNNER_SECRET=$docs_runner_secret
 EOF
   if [[ -n "${BOOTSTRAP_TOKEN:-}" ]]; then
     printf 'BOOTSTRAP_TOKEN=%s\n' "$BOOTSTRAP_TOKEN" >>"$tmp"

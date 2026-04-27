@@ -44,6 +44,7 @@ export interface Env {
   SESSION_AGENT: DurableObjectNamespace
   USER_SETTINGS: DurableObjectNamespace
   SESSION_COLLAB: DurableObjectNamespace
+  REPO_DOCUMENT: DurableObjectNamespace
   /** Set to '1' via wrangler secret to short-circuit all non-/login traffic to a 503 maintenance page (#7 cutover). */
   MAINTENANCE_MODE?: string
   ASSETS: Fetcher

@@ -46,6 +46,13 @@ class_name = "SessionCollabDOv2"
 name = "SESSION_COLLAB_LEGACY"
 class_name = "SessionCollabDO"
 
+# Per-file collaborative document DO (GH#27). One DO per (projectId, relPath)
+# pair, addressed via env.REPO_DOCUMENT.idFromName(entityId) where
+# entityId = sha256(projectId + ':' + relPath).slice(0,16).
+[[durable_objects.bindings]]
+name = "REPO_DOCUMENT"
+class_name = "RepoDocumentDO"
+
 # DO migrations — collapsed for fresh deploy on baseplane-ai account.
 # The old worker (on the codevibesmatter account) held the prior v1..v5 chain;
 # here we start at the final SQLite-backed shape.
@@ -92,6 +99,14 @@ deleted_classes = ["ProjectRegistry"]
 [[migrations]]
 tag = "v6"
 new_sqlite_classes = ["SessionCollabDOv2"]
+
+# v7: introduce RepoDocumentDO for per-file collab Yjs (GH#27 P1.2 B1).
+# Backs the /api/collab/repo-document/:entityId/ws route. One DO per
+# (projectId, relPath) entityId. SQLite-backed for y_state persistence
+# (clone of SessionCollabDOv2 shape) plus tombstone state via alarm API.
+[[migrations]]
+tag = "v7"
+new_sqlite_classes = ["RepoDocumentDO"]
 
 # D1 database for auth — `c5b4d822` on Ben@baseplane.ai (account
 # `87bd3030`), where the infra pipeline deploys. Do NOT let wrangler

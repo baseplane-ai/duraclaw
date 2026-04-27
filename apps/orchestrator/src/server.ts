@@ -1,6 +1,7 @@
 import { eq } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import { routePartykitRequest } from 'partyserver'
+import { RepoDocumentDO } from './agents/repo-document-do'
 import { SessionCollabDOv2 } from './agents/session-collab-do'
 import { SessionCollabDO } from './agents/session-collab-do-legacy'
 import { SessionDO } from './agents/session-do'
@@ -72,6 +73,16 @@ function corsHeaders(origin: string | null, env: Env): HeadersInit | null {
 //   /parties/session-collab/:room    — partyserver's default URL (from useYProvider)
 // They both route to the same SESSION_COLLAB DO.
 const COLLAB_WS_ROUTE = /^(?:\/api\/collab\/([^/]+)\/ws|\/parties\/session-collab\/([^/]+))$/
+
+// Per-file repo-document collab WS (GH#27 P1.2 B1) — entityId is
+// sha256(projectId+':'+relPath).slice(0,16). Auth is dual: cookie (browser)
+// OR ?role=docs-runner&token=<DOCS_RUNNER_SECRET> (runner). Both auth paths
+// are enforced inside RepoDocumentDO.onConnect, NOT here, because the
+// runner has no Better Auth cookie. We only do upstream extraction of
+// entityId here. The /parties/repo-document/:entityId branch is dispatched
+// automatically by routePartykitRequest below.
+const REPO_DOC_WS_ROUTE = /^\/api\/collab\/repo-document\/([^/]+)\/ws$/
+
 const apiApp = createApiApp()
 
 export default {
@@ -118,6 +129,11 @@ export default {
     // routePartykitRequest kebab-cases the binding name, so USER_SETTINGS
     // is reachable as the `user-settings` party. Auth (cookie userId ==
     // path userId) is enforced inside the DO's onConnect.
+    //
+    // Note (GH#27 P1.2 B1): /parties/repo-document/:entityId also flows
+    // through this dispatch — the REPO_DOCUMENT binding kebab-cases to
+    // `repo-document`. The canonical route /api/collab/repo-document/:entityId/ws
+    // is handled separately by REPO_DOC_WS_ROUTE below.
     if (url.pathname.startsWith('/parties/')) {
       const partyResp = await routePartykitRequest(
         request,
@@ -148,6 +164,21 @@ export default {
       const headers = new Headers(request.headers)
       headers.set('x-partykit-room', sessionId)
       headers.set('x-user-id', authSession.userId)
+      return stub.fetch(new Request(request, { headers }))
+    }
+
+    // Per-file repo-document collab WS (GH#27 P1.2 B1). No upstream auth
+    // check — both cookie (browser) and bearer (?role=docs-runner&token=...)
+    // are enforced inside RepoDocumentDO.onConnect, which needs the raw
+    // request URL to read the runner's query-string token.
+    const repoDocMatch = url.pathname.match(REPO_DOC_WS_ROUTE)
+    if (repoDocMatch && request.headers.get('Upgrade') === 'websocket') {
+      const entityId = repoDocMatch[1]
+      if (!entityId) return new Response('Invalid entity ID', { status: 400 })
+      const doId = env.REPO_DOCUMENT.idFromName(entityId)
+      const stub = env.REPO_DOCUMENT.get(doId)
+      const headers = new Headers(request.headers)
+      headers.set('x-partykit-room', entityId)
       return stub.fetch(new Request(request, { headers }))
     }
 
@@ -219,7 +250,7 @@ export default {
   scheduled,
 }
 
-export { SessionCollabDO, SessionCollabDOv2, SessionDO, UserSettingsDO }
+export { RepoDocumentDO, SessionCollabDO, SessionCollabDOv2, SessionDO, UserSettingsDO }
 
 // Stub: wrangler needs this class exported for the v5 deleted_classes
 // migration to apply. Once the migration has run on the infra pipeline's
