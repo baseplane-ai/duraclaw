@@ -2,7 +2,7 @@
 // For guided setup, use the /kata-config skill in Claude Code.
 // Hook registration uses 'kata hook <name>' commands in .claude/settings.json.
 import { execSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import jsYaml from 'js-yaml'
 import { getDefaultProfile, type SetupProfile } from '../config/setup-profile.js'
@@ -346,6 +346,68 @@ function resolveProjectRoot(cwd: string, explicitCwd: boolean): string {
 }
 
 /**
+ * B9: Migrate stale project-level kata hook entries.
+ * Removes kata-managed entries from <projectRoot>/.claude/settings.json (project-level).
+ * Non-kata entries preserved. File deleted if empty after removal.
+ * Idempotent — no-op when no stale entries present.
+ */
+function migrateStaleProjectLevelHooks(projectRoot: string): void {
+  const settingsPath = join(projectRoot, '.claude', 'settings.json')
+  if (!existsSync(settingsPath)) return
+
+  let settings: SettingsJson = {}
+  try {
+    settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) as SettingsJson
+  } catch {
+    return
+  }
+
+  const existingHooks = settings.hooks ?? {}
+  const wmHookPattern =
+    /\bhook (session-start|user-prompt|stop-conditions|mode-gate|task-deps|task-evidence|pre-tool-use|post-tool-use)\b/
+  let removedCount = 0
+  const cleanedHooks: Record<string, any[]> = {}
+
+  for (const [event, entries] of Object.entries(existingHooks)) {
+    const kept: any[] = []
+    for (const entry of entries) {
+      const isKata = entry.hooks?.some(
+        (h: any) => typeof h.command === 'string' && wmHookPattern.test(h.command),
+      )
+      if (isKata) {
+        removedCount++
+      } else {
+        kept.push(entry)
+      }
+    }
+    if (kept.length > 0) cleanedHooks[event] = kept
+  }
+
+  if (removedCount === 0) return
+
+  // Write cleaned settings or delete if empty
+  if (
+    Object.keys(cleanedHooks).length === 0 &&
+    Object.keys(settings).filter((k) => k !== 'hooks').length === 0
+  ) {
+    // File has nothing left — delete it
+    unlinkSync(settingsPath)
+  } else {
+    const cleaned: SettingsJson = { ...settings }
+    if (Object.keys(cleanedHooks).length > 0) {
+      cleaned.hooks = cleanedHooks
+    } else {
+      delete cleaned.hooks
+    }
+    writeFileSync(settingsPath, `${JSON.stringify(cleaned, null, 2)}\n`, 'utf-8')
+  }
+
+  process.stdout.write(
+    `kata setup: migrated stale .claude/settings.json hooks → user-level (${removedCount} entries removed)\n`,
+  )
+}
+
+/**
  * Write config files and register hooks (full setup — used by --yes path).
  * Merges with existing kata.yaml so re-running does not lose custom config.
  */
@@ -372,6 +434,9 @@ async function applySetup(cwd: string, profile: SetupProfile, explicitCwd: boole
     // Config may not exist yet during first setup
   }
   const wmBin = resolveWmBin(binaryOverride)
+
+  // B9: Clean stale project-level kata hooks before writing fresh ones
+  migrateStaleProjectLevelHooks(projectRoot)
 
   // Write project-level hooks (backward compat — B9 migration removes these later)
   const settings = readSettings(projectRoot)

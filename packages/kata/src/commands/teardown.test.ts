@@ -1,7 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import * as os from 'node:os'
 import { join } from 'node:path'
+
+// Mock detectInstalled to return [] so tests focus on project-level teardown
+mock.module('../drivers/index.js', () => ({
+  detectInstalled: () => [],
+}))
 
 function makeTmpDir(): string {
   const dir = join(
