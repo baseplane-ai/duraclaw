@@ -50,6 +50,7 @@ import type {
   VpStatusResponse,
 } from '~/lib/types'
 import { adminCodexModelsRoutes } from './admin-codex-models'
+import { adminIdentitiesRoutes } from './admin-identities'
 import { authMiddleware } from './auth-middleware'
 import { authRoutes } from './auth-routes'
 import { getRequestSession } from './auth-session'
@@ -908,6 +909,12 @@ export function createApiApp() {
   // GH#107 P2: admin-only codex_models CRUD. Mounted after authMiddleware
   // so `c.get('role')` is populated; the sub-app asserts admin role.
   app.route('/api/admin/codex-models', adminCodexModelsRoutes())
+
+  // GH#119 P2: admin-only runner_identities CRUD. Same auth pattern as
+  // codex-models. The DO reads this catalog on triggerGatewayDial and
+  // selects an identity via LRU; the gateway sets HOME from the
+  // selected identity's home_path.
+  app.route('/api/admin/identities', adminIdentitiesRoutes())
 
   // ── User settings (tabs) — direct D1 CRUD (B-API-2) ──────────────
 

@@ -184,6 +184,19 @@ export async function handleStartSession(
     ((cmd as { worktree?: string }).worktree ?? '?')
   logger.info(`[gateway] /sessions/start sessionId=${sessionId} ${cmdSummary}`)
 
+  // GH#119 P2: when the DO selected a runner identity, it stamps the
+  // identity's HOME path on `cmd.runner_home`. Inject it into the spawn
+  // env so the runner picks up identity-scoped Claude auth from
+  // `<runner_home>/.claude/.credentials.json`. Tolerate stale/garbled
+  // wire shapes silently — runner_home is opt-in and the gateway falls
+  // back to its own HOME when omitted.
+  const runnerHome = (cmd as { runner_home?: unknown }).runner_home
+  const spawnEnv: Record<string, string | undefined> = {
+    ...buildCleanEnv(),
+    SESSIONS_DIR: dir,
+    ...(typeof runnerHome === 'string' && runnerHome.length > 0 ? { HOME: runnerHome } : {}),
+  }
+
   const logHandle = await fs.open(logFile, 'a', 0o600)
   try {
     const spawnFn = opts.spawnFn ?? defaultSpawn
@@ -193,7 +206,7 @@ export async function handleStartSession(
       {
         stdio: ['ignore', logHandle.fd, logHandle.fd],
         detached: true,
-        env: { ...buildCleanEnv(), SESSIONS_DIR: dir },
+        env: spawnEnv as Record<string, string>,
       },
     )
     child.unref()

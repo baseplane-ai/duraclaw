@@ -1,7 +1,8 @@
 import { timingSafeEqual } from 'node:crypto'
 
-import type { ExecuteCommand, GatewayCommand, PermissionMode } from '~/lib/types'
+import type { ExecuteCommand, GatewayCommand, PermissionMode, ResumeCommand } from '~/lib/types'
 import { getSessionStatus } from '~/lib/vps-client'
+import { syncIdentityNameToD1 } from './status'
 import { RECOVERY_GRACE_MS, type SessionDOContext } from './types'
 import { clearRecoveryGraceTimer, scheduleWatchdog } from './watchdog'
 
@@ -182,6 +183,71 @@ export function sendToGateway(ctx: SessionDOContext, cmd: GatewayCommand): void 
 }
 
 /**
+ * GH#119 P2: pick an available runner identity via LRU, stamp
+ * `runner_home` onto the command, bump `last_used_at`, and mirror the
+ * identity name onto the `agent_sessions` D1 row.
+ *
+ * Fail-open: any D1 error returns the original `cmd` unchanged so the
+ * gateway uses its own HOME (the pre-GH#119 default). The same applies
+ * when the catalog is empty / every row is on cooldown.
+ *
+ * Extracted from `triggerGatewayDial` so the LRU / cooldown / fail-open
+ * branches are unit-testable without a full DO harness.
+ */
+export async function selectAndStampIdentity<C extends ExecuteCommand | ResumeCommand>(
+  ctx: SessionDOContext,
+  cmd: C,
+): Promise<C> {
+  try {
+    // `last_used_at IS NULL DESC` puts never-used identities first
+    // (they're the most natural pick over an LRU sweep); after that
+    // ASC orders the remainder by oldest-use-first.
+    const row = await ctx.env.AUTH_DB.prepare(
+      `SELECT id, name, home_path FROM runner_identities
+         WHERE status = 'available'
+           AND (cooldown_until IS NULL OR cooldown_until < datetime('now'))
+         ORDER BY last_used_at IS NULL DESC, last_used_at ASC
+         LIMIT 1`,
+    ).first<{ id: string; name: string; home_path: string }>()
+
+    if (!row) {
+      ctx.logEvent('info', 'identity', 'no identity available — using gateway default')
+      return cmd
+    }
+
+    const next = { ...cmd, runner_home: row.home_path }
+    try {
+      await ctx.env.AUTH_DB.prepare(
+        `UPDATE runner_identities
+             SET last_used_at = datetime('now'), updated_at = datetime('now')
+             WHERE id = ?`,
+      )
+        .bind(row.id)
+        .run()
+    } catch (err) {
+      ctx.logEvent('warn', 'identity', 'failed to update last_used_at', {
+        identityId: row.id,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+    ctx.logEvent('info', 'identity', `selected ${row.name}`, {
+      identityId: row.id,
+      homePath: row.home_path,
+    })
+    // Mirror onto the D1 `agent_sessions` row + broadcast so the UI
+    // sees which identity owns the session. Failure here is swallowed
+    // inside the helper.
+    await syncIdentityNameToD1(ctx, row.name, new Date().toISOString())
+    return next
+  } catch (err) {
+    ctx.logEvent('warn', 'identity', 'identity selection failed — using gateway default', {
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return cmd
+  }
+}
+
+/**
  * Trigger the gateway to dial back into this DO via outbound WS.
  *
  * Lifecycle (per B4b):
@@ -284,6 +350,14 @@ export async function triggerGatewayDial(
         // Proceed without — adapter falls back to hardcoded defaults.
       }
     }
+  }
+
+  // GH#119 P2: select a runner identity via LRU and stamp `runner_home`
+  // onto the spawn command. Extracted to a free helper so unit tests can
+  // exercise the LRU / cooldown / fail-open / zero-identities branches
+  // without spinning up a DO harness — see `identity-selection.test.ts`.
+  if (cmd.type === 'execute' || cmd.type === 'resume') {
+    cmd = await selectAndStampIdentity(ctx, cmd)
   }
 
   const callback_token = crypto.randomUUID()

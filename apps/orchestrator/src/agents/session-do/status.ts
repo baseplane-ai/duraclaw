@@ -142,6 +142,36 @@ export async function syncRunnerSessionIdToD1(
 }
 
 /**
+ * GH#119 P2: persist the runner identity name onto the D1
+ * `agent_sessions` row and broadcast. Called from `triggerGatewayDial`
+ * after the DO selects an identity via LRU. The UI reads this column
+ * via the synced `agent_sessions` collection so the active identity is
+ * visible in the session sidebar (P4 surface).
+ *
+ * Best-effort: a D1 hiccup or broadcast failure must not crash the
+ * spawn path, so the helper logs the error and returns rather than
+ * throwing.
+ */
+export async function syncIdentityNameToD1(
+  ctx: SessionDOContext,
+  identityName: string | null,
+  updatedAt: string,
+): Promise<void> {
+  try {
+    const sessionId = ctx.do.name
+    await ctx.do.d1
+      .update(agentSessions)
+      .set({ identityName, messageSeq: ctx.do.messageSeq, updatedAt })
+      .where(eq(agentSessions.id, sessionId))
+    await broadcastSessionRow(ctx.env, ctx.ctx, sessionId, 'update')
+  } catch (err) {
+    ctx.logEvent('warn', 'identity', 'failed to sync identity_name to D1', {
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+}
+
+/**
  * Spec #101 P1.2 B7: persist runner-reported AdapterCapabilities onto
  * the D1 row + broadcast. Stored as serialized JSON in
  * `agent_sessions.capabilities_json` so the sidebar / agent-detail

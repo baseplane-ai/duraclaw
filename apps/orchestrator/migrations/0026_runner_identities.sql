@@ -1,0 +1,31 @@
+-- GH#119 P2: runner_identities — admin-managed catalog of Claude runner
+-- identities. Each row maps an identity name (e.g. 'work1') to a HOME
+-- directory containing isolated Claude auth (~/.claude/.credentials.json
+-- per identity). The DO selects an available identity via LRU at
+-- triggerGatewayDial time and passes the selected home_path to the
+-- gateway as `runner_home`; the gateway sets HOME in the spawn env so
+-- the runner picks up the identity-scoped credentials.
+--
+-- Status values:
+--   'available'  — selectable by LRU
+--   'cooldown'   — temporarily unavailable (post-rate-limit; lazy expiry)
+--   'disabled'   — admin-disabled, never selected
+--
+-- cooldown_until is a SQLite-format datetime string. The selection
+-- query uses `cooldown_until < datetime('now')` for lazy expiry, so no
+-- background cleanup job is needed.
+CREATE TABLE IF NOT EXISTS runner_identities (
+  id TEXT PRIMARY KEY,
+  name TEXT UNIQUE NOT NULL,
+  home_path TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'available',
+  cooldown_until TEXT,
+  last_used_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_runner_identities_status_cooldown
+  ON runner_identities (status, cooldown_until);
+CREATE INDEX IF NOT EXISTS idx_runner_identities_last_used_at
+  ON runner_identities (last_used_at);

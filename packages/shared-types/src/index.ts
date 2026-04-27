@@ -73,6 +73,14 @@ export interface ExecuteCommand {
   titler_enabled?: boolean
   /** GH#119: enable DO-side SessionStore mirror for account failover. Default false. */
   session_store_enabled?: boolean
+  /**
+   * GH#119: HOME directory for the runner identity. The gateway sets
+   * `HOME=<runner_home>` in the spawn env so the runner picks up the
+   * identity-scoped Claude auth at `~/.claude/.credentials.json`.
+   * Optional — when omitted, the gateway uses its own HOME (current
+   * behavior, preserved when no identities are configured).
+   */
+  runner_home?: string
 }
 
 // Content block types matching Anthropic API format
@@ -169,6 +177,14 @@ export interface ResumeCommand {
   titler_enabled?: boolean
   /** GH#119: enable DO-side SessionStore mirror for account failover. Default false. */
   session_store_enabled?: boolean
+  /**
+   * GH#119: HOME directory for the runner identity. The gateway sets
+   * `HOME=<runner_home>` in the spawn env so the runner picks up the
+   * identity-scoped Claude auth at `~/.claude/.credentials.json`.
+   * Optional — when omitted, the gateway uses its own HOME (current
+   * behavior, preserved when no identities are configured).
+   */
+  runner_home?: string
 }
 
 // ── Gateway Events (Gateway → Orchestrator) ────────────────────────────
