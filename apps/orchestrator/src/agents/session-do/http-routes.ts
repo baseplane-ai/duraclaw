@@ -32,6 +32,12 @@ export async function handleHttpRequest(
       let result: { ok: boolean; session_id?: string; error?: string }
       if (body.runner_session_id) {
         result = await ctx.do.resumeDiscovered(body, body.runner_session_id)
+      } else if (body.prompt === undefined || body.prompt === null) {
+        // Deferred-runner flow: create the DO + SessionMeta now, defer the
+        // gateway dial until the user's first sendMessage. The fresh-execute
+        // fallback in sendMessageImpl reads project/model/agent from
+        // SessionMeta to compose the dial.
+        result = await ctx.do.initialize(body)
       } else {
         result = await ctx.do.spawn(body)
       }

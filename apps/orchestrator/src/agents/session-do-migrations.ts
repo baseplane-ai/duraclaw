@@ -350,4 +350,20 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 19,
+    description:
+      'Add session_meta.agent so the runner-adapter choice survives the deferred-runner flow: a session can be created (D1 + DO) without a prompt and the runner only dials on the first sendMessage. The fresh-execute fallback in sendMessageImpl reads `agent` from SessionMeta to decide which runner adapter to spawn.',
+    up: (sql) => {
+      try {
+        sql.exec(`ALTER TABLE session_meta ADD COLUMN agent TEXT`)
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (!msg.toLowerCase().includes('duplicate column')) {
+          console.warn('[migration v19] unexpected error adding agent column', e)
+          throw e
+        }
+      }
+    },
+  },
 ]

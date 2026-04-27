@@ -114,7 +114,18 @@ export async function sendMessageImpl(
   const isResumable =
     !hasLiveRunner && (status === 'idle' || status === 'error') && ctx.state.runner_session_id
 
-  if (!hasLiveRunner && !isResumable) {
+  // Deferred-runner flow: a session created via initializeImpl sits at
+  // status='idle' with no runner_session_id until the first user turn
+  // arrives. Treat that as a fresh-execute trigger — dial the gateway with
+  // the user's content as the initial prompt. Project must be set (it's
+  // populated by /create), otherwise we have nothing to spawn against.
+  const isFreshSpawnable =
+    !hasLiveRunner &&
+    !ctx.state.runner_session_id &&
+    (status === 'idle' || status === 'error') &&
+    Boolean(ctx.state.project)
+
+  if (!hasLiveRunner && !isResumable && !isFreshSpawnable) {
     return { ok: false, error: `Cannot send message: status is '${status}'` }
   }
 
@@ -123,7 +134,7 @@ export async function sendMessageImpl(
   // the user message. Otherwise the message lands in history, the
   // triggerGatewayDial bail flips status to idle, and the user perceives
   // a "silent no-op" with nothing in the transcript to explain it.
-  if (!hasLiveRunner && isResumable) {
+  if (!hasLiveRunner && (isResumable || isFreshSpawnable)) {
     if (!ctx.env.CC_GATEWAY_URL || !ctx.env.WORKER_PUBLIC_URL) {
       console.error(
         `[SessionDO:${ctx.ctx.id}] sendMessage preflight: CC_GATEWAY_URL=${Boolean(ctx.env.CC_GATEWAY_URL)} WORKER_PUBLIC_URL=${Boolean(ctx.env.WORKER_PUBLIC_URL)} — gateway not configured`,
@@ -241,6 +252,24 @@ export async function sendMessageImpl(
       project: ctx.state.project,
       prompt: content,
       runner_session_id: ctx.state.runner_session_id ?? '',
+    })
+  } else if (isFreshSpawnable) {
+    // Deferred-runner flow: this is the session's first turn. Dial the
+    // gateway with type='execute' carrying the user's content as the
+    // initial prompt. Project / model / agent come from SessionMeta
+    // (populated by initializeImpl). started_at is stamped now since
+    // this is effectively when the session "starts running".
+    const startedAt = new Date().toISOString()
+    ctx.do.updateState({ status: 'running', error: null, started_at: startedAt })
+    ctx.do.persistMetaPatch({ started_at: startedAt })
+    void triggerGatewayDialImpl(ctx, {
+      type: 'execute',
+      project: ctx.state.project,
+      prompt: content,
+      model: ctx.state.model ?? undefined,
+      agent: (ctx.state.agent ?? undefined) as
+        | import('@duraclaw/shared-types').AgentName
+        | undefined,
     })
   }
 

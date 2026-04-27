@@ -58,6 +58,7 @@ import {
   abortImpl,
   type ForceStopResult,
   forceStopImpl,
+  initializeImpl,
   interruptImpl,
   reattachImpl,
   resumeDiscoveredImpl,
@@ -127,6 +128,13 @@ export interface SessionMeta {
   title_confidence?: number | null
   title_set_at_turn?: number | null
   title_source?: 'user' | 'haiku' | null
+  /**
+   * Runner adapter choice (e.g. 'claude', 'codex'). Persisted so the
+   * deferred-runner flow can recover it on the first sendMessage when the
+   * runner is being dialled fresh (no runner_session_id, no live runner).
+   * Null on rehydrate of pre-v19 sessions — fresh-execute defaults to 'claude'.
+   */
+  agent?: string | null
 }
 
 /**
@@ -342,6 +350,16 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     runnerSessionId: string,
   ): Promise<{ ok: boolean; session_id?: string; error?: string }> {
     return resumeDiscoveredImpl(this.moduleCtx, config, runnerSessionId)
+  }
+  /**
+   * Prompt-less initialize for the deferred-runner flow (called from /create
+   * when the body has no prompt). Sets up SessionMeta but does not dial the
+   * gateway — runner spawns lazily on the first sendMessage.
+   */
+  async initialize(
+    config: SpawnConfig,
+  ): Promise<{ ok: boolean; session_id?: string; error?: string }> {
+    return initializeImpl(this.moduleCtx, config)
   }
 
   handleGatewayEvent(event: GatewayEvent) {

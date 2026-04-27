@@ -1970,7 +1970,7 @@ export function createApiApp() {
       userId,
       {
         project: body.project ?? '',
-        prompt: body.prompt as string | ContentBlock[],
+        prompt: body.prompt,
         model: body.model,
         system_prompt: body.system_prompt,
         runner_session_id: body.runner_session_id,
