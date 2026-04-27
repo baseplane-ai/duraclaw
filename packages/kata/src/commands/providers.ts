@@ -12,6 +12,7 @@ import { execSync } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import jsYaml from 'js-yaml'
+import { getDefaultProvider } from '../config/kata-config.js'
 import { findProjectDir } from '../session/lookup.js'
 
 export interface ProviderStatus {
@@ -133,9 +134,9 @@ function writeProviderConfig(statuses: ProviderStatus[]): void {
   const available = statuses.filter((s) => s.installed).map((s) => s.name)
 
   config.providers = {
-    default: available[0] ?? 'claude',
+    default: available[0] ?? getDefaultProvider(),
     available,
-    judge_provider: available[0] ?? 'claude',
+    judge_provider: available[0] ?? getDefaultProvider(),
     judge_model: null,
   }
 

@@ -16,7 +16,7 @@
 import { execSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { loadKataConfig } from '../config/kata-config.js'
+import { getDefaultProvider, loadKataConfig } from '../config/kata-config.js'
 import type { AgentStepConfig } from '../validation/schemas.js'
 import { getProvider } from './index.js'
 import { loadPrompt } from './prompt.js'
@@ -65,11 +65,11 @@ function resolveProvider(providerRef: string): string {
   if (match) {
     const config = loadKataConfig()
     const key = match[1]
-    if (key === 'default') return config.providers?.default ?? 'claude'
-    if (key === 'code_reviewer') return config.reviews?.code_reviewer ?? 'claude'
+    if (key === 'default') return config.providers?.default ?? getDefaultProvider()
+    if (key === 'code_reviewer') return config.reviews?.code_reviewer ?? getDefaultProvider()
     if (key === 'spec_reviewer')
-      return config.reviews?.spec_reviewer ?? config.providers?.default ?? 'claude'
-    if (key === 'judge_provider') return config.providers?.judge_provider ?? 'claude'
+      return config.reviews?.spec_reviewer ?? config.providers?.default ?? getDefaultProvider()
+    if (key === 'judge_provider') return config.providers?.judge_provider ?? getDefaultProvider()
     return providerRef // unrecognized key, pass through
   }
   return providerRef

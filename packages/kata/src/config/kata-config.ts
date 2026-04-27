@@ -219,6 +219,19 @@ export function clearKataConfigCache(): void {
 }
 
 /**
+ * Returns the default provider name from kata.yaml `default_provider` field.
+ * Falls back to 'claude' when unset or when not in a kata project.
+ */
+export function getDefaultProvider(): string {
+  try {
+    const config = loadKataConfig()
+    return (config as Record<string, unknown>).default_provider as string ?? 'claude'
+  } catch {
+    return 'claude'
+  }
+}
+
+/**
  * Resolve mode aliases to canonical mode name.
  * @param config - KataConfig with modes section
  * @param mode - Mode name or alias
