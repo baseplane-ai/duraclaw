@@ -9,6 +9,7 @@ import {
 } from './session-do/gates'
 import {
   finalizeResultTurn,
+  handleGatewayEvent,
   repeatedTurnGuardStep,
   runawayGuardStep,
 } from './session-do/gateway-event-handler'
@@ -3375,6 +3376,42 @@ describe('error event transitions session to idle (not error) so user can resume
     })
     expect(res.ok).toBe(true)
     expect(res.healed).toBe(false)
+  })
+})
+
+// ── GH#102 / spec 102-sdk-peelback B1: session_state_changed broadcast ─
+
+describe('gateway-event-handler — session_state_changed broadcast', () => {
+  // Regression for the legacy-drop bug: prior to this fix, the default
+  // branch of `handleGatewayEvent` matched `session_state_changed` in
+  // `LEGACY_DROPPED_EVENT_TYPES` and silently swallowed every transient
+  // compacting / api_retry / running frame. UI lost the ability to
+  // render mid-conversation sub-states during long auto-compact windows.
+  it('broadcasts session_state_changed with state=compacting (no legacy drop)', () => {
+    const broadcastGatewayEvent = vi.fn()
+    const event = {
+      type: 'session_state_changed' as const,
+      session_id: 'sess-abc',
+      state: 'compacting' as const,
+      ts: 1_700_000_000,
+    }
+    const ctx = {
+      do: { broadcastGatewayEvent },
+      state: { session_id: 'sess-abc' },
+      session: { getMessage: () => undefined, getHistory: () => [] },
+      sql: (() => []) as unknown,
+      env: {} as unknown,
+      ctx: { id: { toString: () => 'do-id' }, waitUntil: () => {} } as unknown,
+      broadcast: () => {},
+      getConnections: () => [],
+      logEvent: () => {},
+      // biome-ignore lint/suspicious/noExplicitAny: minimal mock for handler
+    } as any
+
+    handleGatewayEvent(ctx, event)
+
+    expect(broadcastGatewayEvent).toHaveBeenCalledTimes(1)
+    expect(broadcastGatewayEvent).toHaveBeenCalledWith(event)
   })
 })
 

@@ -792,59 +792,69 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
     // separate wire event anymore. Context usage is now extracted from
     // the result event's payload in the 'result' case above.
 
-    // Events that don't produce message parts — just broadcast raw
-    default: {
-      // GH#50 B9: tolerant drop for legacy events from in-flight pre-B7
-      // runners during the rollout window. These frames are logged once
-      // then silently dropped.
-      const type = (event as { type: string }).type
-      if (type === 'heartbeat') {
-        // Runner heartbeat — liveness proof. `lastGatewayActivity` was
-        // already bumped by the generic `onMessage` handler; nothing else
-        // to do. Not broadcast to clients.
-        break
-      }
-      if (type === 'rate_limit') {
-        // Spec #101 Stage 3: route rate-limit events through the
-        // resume-scheduler module. Currently a stub that falls through
-        // to the default broadcast path; CAAM logic will land here.
-        void handleRateLimit(ctx, event as Extract<GatewayEvent, { type: 'rate_limit' }>)
-        self.broadcastGatewayEvent(event)
-        break
-      }
-      if (type === 'session_state_changed') {
-        const sid =
-          (event as { session_id?: string | null }).session_id ?? ctx.state.session_id ?? null
-        // GH#50 B9: tolerant log-once-then-drop for legacy event types
-        // (`heartbeat`, `session_state_changed`) emitted by pre-P3 runners
-        // during the rollout window. Liveness bump (B1) runs BEFORE this
-        // drop so the legacy frame still refreshes the TTL — clients with
-        // P2 shipped never see a flap.
-        if (!ctx.do.loggedLegacyEventTypes.has(type)) {
-          console.warn(
-            `[session-do] dropped legacy event type=${type} sessionId=${sid ?? 'unknown'}`,
-          )
-          ctx.do.loggedLegacyEventTypes.add(type)
-        }
-        break
-      }
-      // rewind_result, task_started, task_progress, task_notification —
-      // broadcast as-is
+    case 'rate_limit': {
+      // Spec #101 Stage 3: route rate-limit events through the
+      // resume-scheduler module. Currently a stub that falls through
+      // to the broadcast path; CAAM logic will land here.
+      void handleRateLimit(ctx, event)
       self.broadcastGatewayEvent(event)
+      break
+    }
+
+    case 'task_started':
+      self.broadcastGatewayEvent(event)
+      break
+
+    case 'task_progress':
+      self.broadcastGatewayEvent(event)
+      break
+
+    case 'task_notification':
+      self.broadcastGatewayEvent(event)
+      break
+
+    case 'chain_advance':
+      self.broadcastGatewayEvent(event)
+      break
+
+    case 'chain_stalled':
+      self.broadcastGatewayEvent(event)
+      break
+
+    case 'compact_boundary':
+      self.broadcastGatewayEvent(event)
+      break
+
+    case 'api_retry':
+      self.broadcastGatewayEvent(event)
+      break
+
+    // GH#102 / spec 102-sdk-peelback B1: SDK-native liveness signal.
+    // Broadcast-only — DO does not mutate ctx.state.status from this
+    // event; the existing result/sendMessage/spawn handlers drive status
+    // transitions. The frame goes to clients so transient
+    // compacting/api_retry/running indicators can render.
+    case 'session_state_changed':
+      self.broadcastGatewayEvent(event)
+      break
+
+    default: {
+      // TS exhaustiveness — every member of GatewayEvent must be handled above.
+      // If you see a build error here, you've added a new event type to the
+      // GatewayEvent union without wiring up a case in this switch.
+      const _exhaustive: never = event
+      // Runtime resilience: if an out-of-version runner ships an event type
+      // before this DO knows about it, log + drop rather than throw. The
+      // exhaustiveness check above prevents the in-tree case at compile time.
+      console.warn(
+        `[session-do] unhandled gateway event type=${(_exhaustive as { type: string }).type ?? 'unknown'}`,
+      )
       break
     }
   }
 }
 
 // ── Stage 6 absorbed helpers (formerly session-do-helpers.ts) ──────────
-
-/**
- * GH#50 B9: legacy event types that pre-B7 session-runners still emit
- * while parked in `waitForNext()`. They are logged-once-then-dropped by
- * `handleGatewayEvent`'s default branch.
- */
-export const LEGACY_DROPPED_EVENT_TYPES = ['heartbeat', 'session_state_changed'] as const
-export type LegacyDroppedEventType = (typeof LEGACY_DROPPED_EVENT_TYPES)[number]
 
 /**
  * GH#75 P1.2 B7: source-ordering invariant for the `result` event handler.

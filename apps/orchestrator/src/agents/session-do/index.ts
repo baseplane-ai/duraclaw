@@ -167,8 +167,6 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     resolve: (v: ContextUsage | null) => void
     reject: (e: unknown) => void
   }> = []
-  /** GH#50 B9: dedupe set for legacy-event drop logs. */
-  loggedLegacyEventTypes = new Set<string>()
   /** GH#86: D1 feature-flag cache (TTL'd). Read by triggerGatewayDial; fail-open on D1 errors. */
   featureFlagCache = new Map<string, { enabled: boolean; expiresAt: number }>()
 
