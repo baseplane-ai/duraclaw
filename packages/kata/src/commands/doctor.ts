@@ -315,7 +315,9 @@ export async function doctor(args: string[]): Promise<void> {
             Array.isArray(entries) &&
             entries.some((e: any) =>
               e.hooks?.some?.(
-                (h: any) => typeof h.command === 'string' && h.command.includes('kata hook'),
+                // Match "hook session-start" (subcommand only) to tolerate both bare
+              // `kata hook …` and quoted `"/path/to/kata" hook …` command forms.
+              (h: any) => typeof h.command === 'string' && / hook (session-start|user-prompt|stop-conditions|pre-tool-use|post-tool-use)/.test(h.command),
               ),
             ),
         )
