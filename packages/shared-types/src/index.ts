@@ -36,6 +36,7 @@ export type GatewayCommand =
   | PingCommand
   | PermissionResponseCommand
   | AnswerCommand
+  | TranscriptRpcResponseCommand
 
 export interface ExecuteCommand {
   type: 'execute'
@@ -125,6 +126,24 @@ export interface AnswerCommand {
   answers: Record<string, string>
 }
 
+/**
+ * GH#119 P1.1: DO -> RUNNER reply for `transcript-rpc` requests.
+ *
+ * The runner-side TranscriptRpc multiplexer correlates this response
+ * with its original request via `rpc_id`. Method-specific result is
+ * carried on `result` (or `null` when `error` is set); `error` is a
+ * human-readable message on failure (`null` on success).
+ */
+export interface TranscriptRpcResponseCommand {
+  type: 'transcript-rpc-response'
+  session_id: string
+  rpc_id: string
+  /** Method-specific result. null when error is set. */
+  result: unknown
+  /** null on success; human-readable error message on failure. */
+  error: string | null
+}
+
 // Resume command (session recovery with follow-up prompt)
 export interface ResumeCommand {
   type: 'resume'
@@ -173,6 +192,48 @@ export type GatewayEvent =
   | SessionStateChangedEvent
   | CompactBoundaryEvent
   | ApiRetryEvent
+  | TranscriptRpcRequestEvent
+
+/**
+ * GH#119 P1.1: RUNNER -> DO request over the dial-back WS.
+ *
+ * Carries an opaque `rpc_id` the DO echoes back on the response so the
+ * runner-side multiplexer can correlate concurrent calls. `method`
+ * selects the SessionStore op; `params` is the method-specific shape
+ * (validated server-side by the dispatcher).
+ */
+export interface TranscriptRpcRequestEvent {
+  type: 'transcript-rpc'
+  session_id: string
+  rpc_id: string
+  method: 'appendTranscript' | 'loadTranscript' | 'listTranscriptSubkeys' | 'deleteTranscript'
+  params: Record<string, unknown>
+}
+
+/**
+ * GH#119 P1.1: mirror of the Claude Agent SDK `SessionStore` key shape.
+ * Replicated here so the wire contract is decoupled from the SDK's
+ * `@alpha` types.
+ */
+export interface TranscriptSessionKey {
+  projectKey: string
+  sessionId: string
+  /** Optional subpath (subagent transcripts). Empty string when omitted. */
+  subpath?: string
+}
+
+/**
+ * GH#119 P1.1: mirror of the SDK's `SessionStoreEntry` — opaque,
+ * type-discriminated JSONL line. We don't constrain the shape beyond
+ * `type` so the SDK can evolve its entry vocabulary without forcing a
+ * shared-types bump.
+ */
+export interface TranscriptEntry {
+  type: string
+  uuid?: string
+  timestamp?: string
+  [k: string]: unknown
+}
 
 /**
  * GH#102 / spec 102-sdk-peelback B1: SDK-native liveness signal.

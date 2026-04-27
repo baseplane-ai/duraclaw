@@ -74,6 +74,22 @@ describe('SESSION_DO_MIGRATIONS', () => {
     )
     expect(titleAlters).toHaveLength(0)
   })
+
+  it('includes a v20 migration that creates the session_transcript table', () => {
+    const v20 = SESSION_DO_MIGRATIONS.find((m) => m.version === 20)
+    expect(v20).toBeDefined()
+    expect(v20!.description.toLowerCase()).toContain('session_transcript')
+  })
+
+  it('v20 issues the CREATE TABLE session_transcript on a fresh sql', () => {
+    const sql = new FakeSql()
+    runMigrations(sql, SESSION_DO_MIGRATIONS)
+    expect(sql.appliedVersions.has(20)).toBe(true)
+    const created = sql.statements.some((s) =>
+      /CREATE TABLE\s+IF NOT EXISTS\s+session_transcript/i.test(s.query),
+    )
+    expect(created).toBe(true)
+  })
 })
 
 describe('TitleUpdateEvent (GH#86)', () => {

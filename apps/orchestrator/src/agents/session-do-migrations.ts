@@ -366,4 +366,24 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 20,
+    description:
+      'GH#119 P1.1: Add session_transcript table for DO-side mirror of the Claude Agent SDK SessionStore (account-failover foundation). Persists JSONL transcript entries keyed by (project_key, session_id, subpath). seq is per (session_id, subpath) and assigned at insert time. 30-day retention enforced on DO start.',
+    up: (sql) => {
+      sql.exec(`CREATE TABLE IF NOT EXISTS session_transcript (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_key TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        subpath TEXT NOT NULL DEFAULT '',
+        seq INTEGER NOT NULL,
+        entry_json TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`)
+      sql.exec(`CREATE INDEX IF NOT EXISTS idx_transcript_lookup
+        ON session_transcript (session_id, subpath, seq)`)
+      sql.exec(`CREATE INDEX IF NOT EXISTS idx_transcript_created_at
+        ON session_transcript (created_at)`)
+    },
+  },
 ]

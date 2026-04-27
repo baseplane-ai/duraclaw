@@ -1,4 +1,5 @@
 import type { SpawnConfig } from '~/lib/types'
+import { transcriptCountImpl } from './transcript'
 import type { SessionDOContext } from './types'
 
 /**
@@ -218,6 +219,25 @@ export async function handleHttpRequest(
       }
       return new Response(JSON.stringify({ id: body.clientId }), {
         status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    } catch (err) {
+      return new Response(
+        JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } },
+      )
+    }
+  }
+
+  // GH#119 P1.1: dev-only transcript-entry count for VP-1 verification.
+  // The public Hono route gates on `c.env.ENABLE_DEBUG_ENDPOINTS === 'true'`
+  // before forwarding here, so this DO handler does not need its own gate
+  // — only the API layer reaches it.
+  if (request.method === 'GET' && url.pathname === '/debug/transcript-count') {
+    try {
+      const sessionId = url.searchParams.get('session_id') ?? ctx.do.name
+      const count = transcriptCountImpl(ctx, sessionId)
+      return new Response(JSON.stringify({ count }), {
         headers: { 'Content-Type': 'application/json' },
       })
     } catch (err) {

@@ -86,6 +86,7 @@ import {
   syncWorktreeInfoToD1 as syncWorktreeInfoToD1Impl,
   updateState as updateStateImpl,
 } from './status'
+import { gcTranscript } from './transcript'
 import { DEFAULT_META, type SessionDOContext } from './types'
 import { runAlarm } from './watchdog'
 
@@ -212,6 +213,7 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     this.moduleCtx = moduleCtx
     await runHydration(this.moduleCtx)
     gcEventLog(this.moduleCtx)
+    gcTranscript(this.moduleCtx)
   }
 
   async onRequest(request: Request): Promise<Response> {

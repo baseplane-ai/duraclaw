@@ -2171,6 +2171,40 @@ export function createApiApp() {
     return c.json(body)
   })
 
+  // GH#119 P1.1: dev-only transcript-entry count (VP-1 verification).
+  // Gated on `ENABLE_DEBUG_ENDPOINTS === 'true'` — anything else 404s so
+  // production deployments don't expose internal diagnostics. P1.4 will
+  // reuse this gate pattern for the simulate-rate-limit endpoint.
+  app.get('/api/sessions/:id/debug/transcript-count', async (c) => {
+    if (c.env.ENABLE_DEBUG_ENDPOINTS !== 'true') {
+      return c.json({ error: 'Not found' }, 404)
+    }
+    const userId = c.get('userId')
+    const access = await getAccessibleSession(c.env, c.req.param('id'), userId, c.get('role'))
+    if (!access.ok) {
+      return c.json({ error: 'Session not found' }, 404)
+    }
+    const sessionId = access.session.id
+    const doId = getSessionDoId(c.env, sessionId)
+    const sessionDO = c.env.SESSION_AGENT.get(doId)
+    const response = await sessionDO.fetch(
+      new Request(
+        `https://session/debug/transcript-count?session_id=${encodeURIComponent(sessionId)}`,
+        {
+          headers: {
+            'x-partykit-room': sessionId,
+            'x-user-id': userId,
+          },
+        },
+      ),
+    )
+    if (!response.ok) {
+      return c.json({ error: 'Session not found' }, response.status === 403 ? 403 : 404)
+    }
+    const body = (await response.json()) as { count: number }
+    return c.json(body)
+  })
+
   // P3 B5: REST endpoint for kata state, backed by the D1 mirror. Survives
   // runner teardown — the D1 row persists even when the runner is dead.
   app.get('/api/sessions/:id/kata-state', async (c) => {

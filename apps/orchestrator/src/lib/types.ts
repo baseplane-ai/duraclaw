@@ -93,6 +93,11 @@ export interface Env {
    *  browsers must authenticate with this secret. Required for broadcast
    *  calls; missing secret means the DO rejects every broadcast with 401. */
   SYNC_BROADCAST_SECRET?: string
+  /** GH#119: gate dev-only debug endpoints (transcript-count, simulate-rate-limit, ...).
+   *  Set to the literal string `'true'` to enable. Anything else (incl. unset)
+   *  causes the API layer to 404 the route. P1.4 will reuse this gate for the
+   *  simulate-rate-limit endpoint. */
+  ENABLE_DEBUG_ENDPOINTS?: string
 }
 
 // ── D1 row response shapes (issue #7 p2) ───────────────────────────
