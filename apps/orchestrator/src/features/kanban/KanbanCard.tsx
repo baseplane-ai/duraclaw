@@ -10,10 +10,8 @@ import { useDraggable } from '@dnd-kit/core'
 import { useLiveQuery } from '@tanstack/react-db'
 import { useCallback, useMemo, useState } from 'react'
 import { toast } from 'sonner'
-import { PipelineDots } from '~/components/layout/nav-sessions'
 import { Button } from '~/components/ui/button'
 import { projectsCollection } from '~/db/projects-collection'
-import type { SessionRecord } from '~/db/session-record'
 import { formatTimeAgo } from '~/features/agent-orch/session-utils'
 import { WorktreeConflictModal } from '~/features/chain/WorktreeConflictModal'
 import { useChainAutoAdvance } from '~/hooks/use-chain-auto-advance'
@@ -174,12 +172,6 @@ export function KanbanCard({ chain }: KanbanCardProps) {
   const worktree = chain.worktreeReservation?.worktree ?? null
   const currentMode = focus?.kataMode ?? chain.column
 
-  // PipelineDots expects SessionRecord[]. ChainSummary.sessions carry the
-  // fields it reads (status, kataMode); numTurns is absent but only
-  // matters for the "completed" dot colouring — treated as 0 which is a
-  // safe under-report. Cast is deliberate.
-  const sessionsForDots = chain.sessions as unknown as SessionRecord[]
-
   const hasActive = hasActiveSession(chain)
   const startLabel = nextMode ? `Start ${nextLabel}` : ''
   const disabledTitle = loading
@@ -199,8 +191,13 @@ export function KanbanCard({ chain }: KanbanCardProps) {
         {...listeners}
       >
         <div className="flex items-start justify-between gap-2">
-          <div className="line-clamp-2 min-w-0 flex-1 text-xs font-medium leading-snug">
-            <span className="text-muted-foreground">#{chain.issueNumber}</span> {chain.issueTitle}
+          <div className="min-w-0 flex-1">
+            <div className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+              #{chain.issueNumber}
+            </div>
+            <div className="line-clamp-2 text-sm font-medium leading-snug" title={chain.issueTitle}>
+              {chain.issueTitle}
+            </div>
           </div>
           <button
             type="button"
@@ -225,7 +222,6 @@ export function KanbanCard({ chain }: KanbanCardProps) {
           </button>
         </div>
         <div className="flex min-w-0 items-center gap-2 text-[11px]">
-          <PipelineDots sessions={sessionsForDots} />
           {focus ? (
             <span className="min-w-0 flex-1 truncate text-muted-foreground">
               {shortMode(focus.kataMode)} &middot; {shortStatusLabel(focus)}
