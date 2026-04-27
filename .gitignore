@@ -55,3 +55,8 @@ apps/orchestrator/dump.json
 apps/orchestrator/export.sql
 apps/orchestrator/prod-snapshot.sql
 apps/orchestrator/backfill.sql
+
+# GH#27 docs-runner: per-worktree hash-store artefact created when the
+# runner runs against a worktree that doesn't have its own .duraclaw-docs
+# (e.g. ship-gate against the repo root).
+.duraclaw-docs/

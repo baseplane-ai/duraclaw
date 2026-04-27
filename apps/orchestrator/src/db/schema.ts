@@ -299,6 +299,28 @@ export const codexModels = sqliteTable('codex_models', {
   updatedAt: text('updated_at').notNull().default(sql`(datetime('now'))`),
 })
 
+/**
+ * GH#27 P1.1: project metadata for docs-as-Yjs dial-back runners.
+ *
+ * One row per logical project (16-char SHA-based projectId). Carries
+ * the user-supplied `docsWorktreePath` (where the docs runner mounts
+ * the project's docs tree) and a `tombstoneGraceDays` retention knob
+ * for soft-deleted docs. Created/updated timestamps are ISO-8601
+ * strings to match the surrounding `agent_sessions` / `projects`
+ * convention. Column names are camelCase (matching the spec's B2 task
+ * list shape) — distinct from the older snake_case tables in this
+ * file but consistent with how the docs API will surface them.
+ */
+export const projectMetadata = sqliteTable('projectMetadata', {
+  projectId: text('projectId').primaryKey(),
+  projectName: text('projectName').notNull(),
+  originUrl: text('originUrl'),
+  docsWorktreePath: text('docsWorktreePath'),
+  tombstoneGraceDays: integer('tombstoneGraceDays').notNull().default(7),
+  createdAt: text('createdAt').notNull(),
+  updatedAt: text('updatedAt').notNull(),
+})
+
 export const userPreferences = sqliteTable('user_preferences', {
   userId: text('user_id')
     .primaryKey()
