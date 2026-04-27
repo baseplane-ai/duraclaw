@@ -12,7 +12,7 @@ import type { SDKAssistantMessageError } from '@anthropic-ai/claude-agent-sdk'
  * stay as `string` for now — those read from D1 / external SDKs and
  * narrowing them is a follow-up.
  */
-export type AgentName = 'claude' | 'codex'
+export type AgentName = 'claude' | 'codex' | 'gemini'
 
 export type GatewayCommand =
   | ExecuteCommand
@@ -50,6 +50,8 @@ export interface ExecuteCommand {
    * per-turn context-window math; ignored by other adapters.
    */
   codex_models?: ReadonlyArray<{ name: string; context_window: number }>
+  /** GH#110: Gemini model catalog injected by the DO from D1 at spawn time. */
+  gemini_models?: ReadonlyArray<{ name: string; context_window: number }>
   /** GH#86: enable Haiku-based session titler in the runner. Default false. */
   titler_enabled?: boolean
 }
@@ -121,6 +123,8 @@ export interface ResumeCommand {
    * per-turn context-window math; ignored by other adapters.
    */
   codex_models?: ReadonlyArray<{ name: string; context_window: number }>
+  /** GH#110: Gemini model catalog injected by the DO from D1 at spawn time. */
+  gemini_models?: ReadonlyArray<{ name: string; context_window: number }>
   /** GH#86: enable Haiku-based session titler in the runner. Default false. */
   titler_enabled?: boolean
 }

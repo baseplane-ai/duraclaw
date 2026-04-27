@@ -1,6 +1,7 @@
 import type { AgentName } from '@duraclaw/shared-types'
 import { ClaudeAdapter } from './claude.js'
 import { CodexAdapter } from './codex.js'
+import { GeminiAdapter } from './gemini.js'
 import type { RunnerAdapter } from './types.js'
 
 /**
@@ -11,6 +12,7 @@ import type { RunnerAdapter } from './types.js'
 const registry: Partial<Record<AgentName, () => RunnerAdapter>> = {
   claude: () => new ClaudeAdapter(),
   codex: () => new CodexAdapter(),
+  gemini: () => new GeminiAdapter(),
 }
 
 export function createAdapter(agent: AgentName | undefined): RunnerAdapter {

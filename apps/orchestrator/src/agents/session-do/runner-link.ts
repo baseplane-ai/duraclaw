@@ -191,6 +191,23 @@ export async function triggerGatewayDial(
     }
   }
 
+  // GH#110: inject gemini_models catalog onto gemini spawn payloads. Reads
+  // from D1 `gemini_models WHERE enabled = 1`. Fail-open: on D1 read
+  // failure the runner falls back to the adapter's hardcoded defaults.
+  if (cmd.type === 'execute' || cmd.type === 'resume') {
+    if (cmd.agent === 'gemini') {
+      try {
+        const result = await ctx.env.AUTH_DB.prepare(
+          'SELECT name, context_window FROM gemini_models WHERE enabled = 1 ORDER BY name',
+        ).all<{ name: string; context_window: number }>()
+        cmd = { ...cmd, gemini_models: result.results ?? [] }
+      } catch (err) {
+        console.error(`[SessionDO:${ctx.ctx.id}] Failed to read gemini_models from D1:`, err)
+        // Proceed without — adapter falls back to hardcoded defaults.
+      }
+    }
+  }
+
   const callback_token = crypto.randomUUID()
 
   // Ordering invariant: close the old gateway WS FIRST, then rotate the
