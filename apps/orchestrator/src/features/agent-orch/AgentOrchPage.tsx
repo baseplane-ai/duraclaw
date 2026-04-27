@@ -160,6 +160,20 @@ function AgentOrchContent() {
     }
   }, [activeSessionId, openTabs, setActive, navigate, searchSessionId])
 
+  // Follow peer-driven activeSessionId changes into the URL. useTabSync's
+  // follow effect advances `activeSessionId` when a peer device swaps the
+  // session inside the tab the user is viewing; without this watcher the
+  // URL would stay pinned to the stale id and the deep-link effect would
+  // bounce activeSessionId back. Skip until cold-start has run so we don't
+  // race the initial restore. `replace: true` so peer-driven follow
+  // doesn't pollute browser history.
+  useEffect(() => {
+    if (!coldStartedRef.current) return
+    if (!activeSessionId) return
+    if (activeSessionId === searchSessionId) return
+    navigate({ to: '/', search: { session: activeSessionId }, replace: true })
+  }, [activeSessionId, searchSessionId, navigate])
+
   const [spawnConfig, setSpawnConfig] = useState<
     (SpawnConfig & { targetSessionId?: string }) | null
   >(null)

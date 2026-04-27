@@ -18,7 +18,7 @@
 
 import { describe, expect, it } from 'vitest'
 import type { TabMeta } from '~/lib/types'
-import { collectReplaceTabDedupIds, computeInsertOrder } from './use-tab-sync'
+import { collectReplaceTabDedupIds, computeFollowMap, computeInsertOrder } from './use-tab-sync'
 
 type Entry = {
   order: number
@@ -153,5 +153,85 @@ describe('collectReplaceTabDedupIds', () => {
       { id: 'r3', sessionId: 'draft:xyz', meta: {} },
     ]
     expect(collectReplaceTabDedupIds(rows, 'draft:xyz', 'sess-2', 'proj-a')).toEqual(['r1', 'r2'])
+  })
+})
+
+// ─── current-session follow map (cross-device) ──────────────────────
+//
+// Peer devices broadcast tab-row deltas via the synced collection; the
+// hook diffs them across renders so the local view follows whichever
+// session ends up inside the tab the user is on.
+
+describe('computeFollowMap', () => {
+  it('pairs same-row sessionId swaps (replaceTab PATCH path)', () => {
+    // A peer (or this device's own draft → real swap) updates the row's
+    // sessionId in place. Same row id, new sessionId.
+    const prev = [{ id: 'r1', sessionId: 'draft:abc', project: 'proj-a' }]
+    const curr = [{ id: 'r1', sessionId: 'sess-real', project: 'proj-a' }]
+    const map = computeFollowMap(prev, curr)
+    expect(map.get('draft:abc')).toBe('sess-real')
+  })
+
+  it('pairs delete+insert by project (openTab one-tab-per-project path)', () => {
+    // Peer started a new session in proj-a — its `openTab` deleted the
+    // existing proj-a row and inserted a fresh one with a different id.
+    const prev = [{ id: 'r1', sessionId: 'sess-old', project: 'proj-a' }]
+    const curr = [{ id: 'r2', sessionId: 'sess-new', project: 'proj-a' }]
+    const map = computeFollowMap(prev, curr)
+    expect(map.get('sess-old')).toBe('sess-new')
+  })
+
+  it('does not pair across different projects', () => {
+    // Tab for proj-a deleted, separate tab for proj-b inserted — these
+    // are unrelated and must not be merged.
+    const prev = [{ id: 'r1', sessionId: 'sess-old', project: 'proj-a' }]
+    const curr = [{ id: 'r2', sessionId: 'sess-new', project: 'proj-b' }]
+    const map = computeFollowMap(prev, curr)
+    expect(map.size).toBe(0)
+  })
+
+  it('skips delete+insert pairing when the project is ambiguous', () => {
+    // Two tabs deleted for proj-a, one inserted: the pairing is
+    // ambiguous — we'd rather no-op than guess. Same goes for the
+    // mirror (one deleted, two inserted).
+    const prev = [
+      { id: 'r1', sessionId: 'sess-1', project: 'proj-a' },
+      { id: 'r2', sessionId: 'sess-2', project: 'proj-a' },
+    ]
+    const curr = [{ id: 'r3', sessionId: 'sess-3', project: 'proj-a' }]
+    const map = computeFollowMap(prev, curr)
+    expect(map.size).toBe(0)
+  })
+
+  it('emits no entries when rows are unchanged', () => {
+    const prev = [{ id: 'r1', sessionId: 'sess-1', project: 'proj-a' }]
+    const curr = [{ id: 'r1', sessionId: 'sess-1', project: 'proj-a' }]
+    expect(computeFollowMap(prev, curr).size).toBe(0)
+  })
+
+  it('does not pair project-less rows by anything other than row id', () => {
+    // A row with no project that vanishes and a different row with no
+    // project that appears must NOT be paired — the project-fallback
+    // rule would otherwise merge unrelated ad-hoc tabs.
+    const prev = [{ id: 'r1', sessionId: 'sess-old' }]
+    const curr = [{ id: 'r2', sessionId: 'sess-new' }]
+    expect(computeFollowMap(prev, curr).size).toBe(0)
+  })
+
+  it('prefers row-id swap over project pairing when both could match', () => {
+    // r1 swapped sessionId in-place AND a separate proj-a row turnover
+    // happened. The row-id swap is unambiguous; the project pairing
+    // for r1 must not overwrite it.
+    const prev = [
+      { id: 'r1', sessionId: 'draft:x', project: 'proj-a' },
+      { id: 'r2', sessionId: 'sess-old', project: 'proj-b' },
+    ]
+    const curr = [
+      { id: 'r1', sessionId: 'sess-real', project: 'proj-a' },
+      { id: 'r3', sessionId: 'sess-new', project: 'proj-b' },
+    ]
+    const map = computeFollowMap(prev, curr)
+    expect(map.get('draft:x')).toBe('sess-real')
+    expect(map.get('sess-old')).toBe('sess-new')
   })
 })
