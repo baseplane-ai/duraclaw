@@ -17,7 +17,8 @@ import {
   DndContext,
   type DragEndEvent,
   KeyboardSensor,
-  PointerSensor,
+  MouseSensor,
+  TouchSensor,
   useSensor,
   useSensors,
 } from '@dnd-kit/core'
@@ -113,7 +114,14 @@ export function KanbanBoard() {
     return out
   }, [filtered])
 
-  const sensors = useSensors(useSensor(PointerSensor), useSensor(KeyboardSensor))
+  // Touch needs a long-press to activate so horizontal lane scrolling
+  // (overflow-x-auto on KanbanLane) still works. Mouse uses a small
+  // distance threshold so accidental clicks don't initiate a drag.
+  const sensors = useSensors(
+    useSensor(MouseSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 5 } }),
+    useSensor(KeyboardSensor),
+  )
 
   // Drag-driven confirmation modal state.
   const [pendingAdvance, setPendingAdvance] = useState<{
