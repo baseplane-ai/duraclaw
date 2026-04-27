@@ -58,6 +58,11 @@ interface FixtureOpts {
     cost?: { input_tokens: number; output_tokens: number; usd: number }
     model?: string | null
     turn_count?: number
+    pending_gate?: {
+      type: 'ask_user' | 'permission_request'
+      tool_call_id: string
+      parked_at_ts: number
+    } | null
   }
   exit?: {
     state: 'completed' | 'failed' | 'aborted' | 'crashed'
@@ -82,18 +87,19 @@ async function writeSession(dir: string, f: FixtureOpts): Promise<void> {
   }
   if (f.meta) {
     const metaPath = nodePath.join(dir, `${f.id}.meta.json`)
-    await fs.writeFile(
-      metaPath,
-      JSON.stringify({
-        runner_session_id: f.meta.runner_session_id ?? null,
-        last_activity_ts: f.meta.last_activity_ts ?? null,
-        last_event_seq: f.meta.last_event_seq ?? 0,
-        cost: f.meta.cost ?? { input_tokens: 0, output_tokens: 0, usd: 0 },
-        model: f.meta.model ?? null,
-        turn_count: f.meta.turn_count ?? 0,
-        state: f.meta.state ?? 'running',
-      }),
-    )
+    const metaObj: Record<string, unknown> = {
+      runner_session_id: f.meta.runner_session_id ?? null,
+      last_activity_ts: f.meta.last_activity_ts ?? null,
+      last_event_seq: f.meta.last_event_seq ?? 0,
+      cost: f.meta.cost ?? { input_tokens: 0, output_tokens: 0, usd: 0 },
+      model: f.meta.model ?? null,
+      turn_count: f.meta.turn_count ?? 0,
+      state: f.meta.state ?? 'running',
+    }
+    if (f.meta.pending_gate !== undefined) {
+      metaObj.pending_gate = f.meta.pending_gate
+    }
+    await fs.writeFile(metaPath, JSON.stringify(metaObj))
   }
   if (f.exit) {
     const exitPath = nodePath.join(dir, `${f.id}.exit`)
@@ -358,6 +364,103 @@ describe('createReaper.reapOnce', () => {
 
     expect(report.terminalFilesDeleted).toEqual([])
     await expect(fs.stat(nodePath.join(tmpDir, 'RECENT-DONE.exit'))).resolves.toBeDefined()
+  })
+
+  it('skips SIGTERM when pending_gate is fresh (parked <24h) and session is stale', async () => {
+    // Session has stale last_activity_ts (>30min) but fresh pending_gate (5min)
+    await writeSession(tmpDir, {
+      id: 'GATED',
+      pid: 8000,
+      meta: {
+        last_activity_ts: FIXED_NOW - 31 * 60_000,
+        pending_gate: {
+          type: 'ask_user',
+          tool_call_id: 'tu_test',
+          parked_at_ts: FIXED_NOW - 5 * 60_000,
+        },
+      },
+    })
+    const killCalls: Array<[number, string]> = []
+    const logger = mkLogger()
+    const reaper = createReaper(
+      baseOpts({
+        livenessCheck: (pid) => pid === 8000,
+        kill: (pid, sig) => killCalls.push([pid, sig]),
+        logger,
+      }),
+    )
+
+    const report = await reaper.reapOnce()
+    reaper.stop()
+
+    expect(report.sigtermed).toEqual([])
+    expect(killCalls).toEqual([])
+    expect(
+      logger.infoCalls.some((l) => l.includes('skip-pending-gate') && l.includes('GATED')),
+    ).toBe(true)
+  })
+
+  it('SIGTERMs when pending_gate.parked_at_ts exceeds 24h sanity threshold', async () => {
+    await writeSession(tmpDir, {
+      id: 'STALE-GATE',
+      pid: 9000,
+      meta: {
+        last_activity_ts: FIXED_NOW - 31 * 60_000,
+        pending_gate: {
+          type: 'ask_user',
+          tool_call_id: 'tu_test',
+          parked_at_ts: FIXED_NOW - 25 * 60 * 60_000,
+        },
+      },
+    })
+    const killCalls: Array<[number, string]> = []
+    const logger = mkLogger()
+    const reaper = createReaper(
+      baseOpts({
+        livenessCheck: (pid) => pid === 9000,
+        kill: (pid, sig) => killCalls.push([pid, sig]),
+        logger,
+      }),
+    )
+
+    const report = await reaper.reapOnce()
+    reaper.stop()
+
+    expect(report.sigtermed).toEqual(['STALE-GATE'])
+    expect(killCalls).toEqual([[9000, 'SIGTERM']])
+  })
+
+  it('writes crash marker for dead pid even when pending_gate is set', async () => {
+    // Write meta with pending_gate set but the pid doesn't exist (dead runner)
+    await writeSession(tmpDir, {
+      id: 'DEAD-GATED',
+      pid: 99999, // very high PID unlikely to be alive
+      meta: {
+        last_activity_ts: FIXED_NOW - 31 * 60_000,
+        pending_gate: {
+          type: 'permission_request',
+          tool_call_id: 'tu_dead',
+          parked_at_ts: FIXED_NOW - 5 * 60_000,
+        },
+      },
+    })
+    const killCalls: Array<[number, string]> = []
+    const reaper = createReaper(
+      baseOpts({
+        livenessCheck: () => false, // pid is dead
+        kill: (pid, sig) => killCalls.push([pid, sig]),
+      }),
+    )
+
+    const report = await reaper.reapOnce()
+    reaper.stop()
+
+    // Dead pids get crash marker, NOT SIGTERM (pending_gate doesn't affect this path)
+    expect(report.markedCrashed).toEqual(['DEAD-GATED'])
+    expect(report.sigtermed).toEqual([])
+    expect(killCalls).toEqual([])
+    const exitContent = await fs.readFile(nodePath.join(tmpDir, 'DEAD-GATED.exit'), 'utf8')
+    expect(JSON.parse(exitContent).state).toBe('crashed')
   })
 
   it('start() fires one immediate pass and schedules an interval; stop() cancels future passes', async () => {

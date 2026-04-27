@@ -296,10 +296,22 @@ export async function handleCanUseTool(
       questions: rawQuestions,
     })
 
+    // Stamp pending_gate and flush BEFORE parking so the reaper can see
+    // that the session is parked at a gate (B1/B2/B3 spec behaviors).
+    ctx.meta.pending_gate = { type: 'ask_user', tool_call_id: id, parked_at_ts: Date.now() }
+    await ctx.flushMeta?.()
+
     // No timeout — the agent waits indefinitely for the user to answer.
     // The user can still abort the session, which fires `signal` and rejects.
     try {
       const answers = await new Promise<Record<string, string>>((resolve, reject) => {
+        // Guard: if signal already aborted before we re-entered (e.g. the
+        // await flushMeta() above yielded and the caller aborted in the
+        // meantime), reject immediately — the event would never fire.
+        if (signal.aborted) {
+          reject(new Error('Session aborted'))
+          return
+        }
         ctx.pendingAnswer = { resolve, reject }
 
         signal.addEventListener(
@@ -324,6 +336,9 @@ export async function handleCanUseTool(
         `[gate] canUseTool AskUserQuestion rejected toolUseID=${id} duration_ms=${Date.now() - askedAt} reason=${err instanceof Error ? err.message : String(err)}`,
       )
       throw err
+    } finally {
+      ctx.meta.pending_gate = null
+      await ctx.flushMeta?.()
     }
   }
 
@@ -336,20 +351,38 @@ export async function handleCanUseTool(
     input,
   })
 
+  // Stamp pending_gate and flush BEFORE parking so the reaper can see
+  // that the session is parked at a gate (B1/B2/B3 spec behaviors).
+  ctx.meta.pending_gate = { type: 'permission_request', tool_call_id: id, parked_at_ts: Date.now() }
+  await ctx.flushMeta?.()
+
   // No timeout — the agent waits indefinitely for the user to decide.
   // The user can still abort the session, which fires `signal` and rejects.
-  const allowed = await new Promise<boolean>((resolve, reject) => {
-    ctx.pendingPermission = { resolve, reject }
-
-    signal.addEventListener(
-      'abort',
-      () => {
-        ctx.pendingPermission = null
+  let allowed: boolean
+  try {
+    allowed = await new Promise<boolean>((resolve, reject) => {
+      // Guard: if signal already aborted before we re-entered (e.g. the
+      // await flushMeta() above yielded and the caller aborted in the
+      // meantime), reject immediately — the event would never fire.
+      if (signal.aborted) {
         reject(new Error('Session aborted'))
-      },
-      { once: true },
-    )
-  })
+        return
+      }
+      ctx.pendingPermission = { resolve, reject }
+
+      signal.addEventListener(
+        'abort',
+        () => {
+          ctx.pendingPermission = null
+          reject(new Error('Session aborted'))
+        },
+        { once: true },
+      )
+    })
+  } finally {
+    ctx.meta.pending_gate = null
+    await ctx.flushMeta?.()
+  }
 
   // Note: the SDK's runtime Zod validator requires `updatedInput` on every
   // 'allow' result (the `.d.ts` marks it optional but the schema doesn't).

@@ -9,6 +9,7 @@ const DEFAULT_STALE_THRESHOLD_MS = 30 * 60_000
 const DEFAULT_SIGTERM_GRACE_MS = 10_000
 const DEFAULT_CMD_ORPHAN_MAX_AGE_MS = 5 * 60_000
 const DEFAULT_TERMINAL_FILE_MAX_AGE_MS = 60 * 60_000
+const PENDING_GATE_MAX_AGE_MS = 24 * 60 * 60_000
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -287,6 +288,19 @@ export function createReaper(opts: ReaperOptions): Reaper {
         // Previously SIGTERMed and still alive? The watchdog handles escalation
         // via setTimeout; here we only need to detect NEW stale sessions.
         if (stale && !awaitingKill.has(sessionId)) {
+          // Re-read meta to check for fresh pending_gate (runner may have just parked)
+          const freshMeta = await readJsonIfExists<MetaFile>(metaPath)
+          const pg = freshMeta?.pending_gate
+          if (pg && typeof pg.parked_at_ts === 'number') {
+            const parkedAgeMs = currentNow - pg.parked_at_ts
+            if (parkedAgeMs <= PENDING_GATE_MAX_AGE_MS) {
+              logger.info(
+                `[reaper] skip-pending-gate sessionId=${sessionId} type=${pg.type} tool_call_id=${pg.tool_call_id} parked_age_ms=${parkedAgeMs}`,
+              )
+              continue
+            }
+            // pending_gate exists but exceeded sanity threshold — fall through to SIGTERM
+          }
           try {
             logger.info(
               `[reaper] stale session sessionId=${sessionId} alive=true last_activity_ts=${lastActivityTs} — SIGTERM`,
