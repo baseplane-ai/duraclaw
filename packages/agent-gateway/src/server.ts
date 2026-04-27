@@ -5,6 +5,7 @@ import { verifyToken } from './auth.js'
 import { handleDeployState } from './deploy-state.js'
 import {
   handleDocsRunnerStatus,
+  handleListDocsFiles,
   handleListDocsRunners,
   handleStartDocsRunner,
 } from './docs-runner-handlers.js'
@@ -151,6 +152,15 @@ const server = Bun.serve<WsData>({
     if (req.method === 'GET' && docsStatusMatch) {
       const [, projectId] = docsStatusMatch
       return handleDocsRunnerStatus(projectId)
+    }
+
+    // GET /docs-runners/:projectId/files — directory walk fallback when
+    // the runner is absent or 502s. Caller passes `?docsWorktreePath=`
+    // since the gateway has no D1 access.
+    const docsFilesMatch = path.match(/^\/docs-runners\/([^/]+)\/files$/)
+    if (req.method === 'GET' && docsFilesMatch) {
+      const [, projectId] = docsFilesMatch
+      return await handleListDocsFiles(projectId, url.searchParams)
     }
 
     // POST /docs-runners/start — spawn detached docs-runner

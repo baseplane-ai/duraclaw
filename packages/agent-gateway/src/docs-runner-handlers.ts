@@ -292,6 +292,135 @@ export async function handleListDocsRunners(opts: ListDocsRunnersOpts = {}): Pro
   return json(200, { ok: true, runners })
 }
 
+// ── GET /docs-runners/:projectId/files ─────────────────────────────
+
+/** Cap on number of markdown files returned. */
+const MAX_FILES = 5000
+
+/** Names of directories to skip during the walk (regardless of depth). */
+const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', '.duraclaw-docs'])
+
+/** Injectable readdir/stat for tests. */
+export type ReaddirFn = (
+  p: string,
+) => Promise<Array<{ name: string; isDirectory: () => boolean; isFile: () => boolean }>>
+
+export type StatMtimeFn = (p: string) => Promise<{ mtimeMs: number }>
+
+export interface ListDocsFilesOpts {
+  statFn?: StatFn
+  readdir?: ReaddirFn
+  statMtime?: StatMtimeFn
+}
+
+const defaultReaddir: ReaddirFn = async (p) => {
+  const dirents = await fs.readdir(p, { withFileTypes: true })
+  return dirents.map((d) => ({
+    name: d.name,
+    isDirectory: () => d.isDirectory(),
+    isFile: () => d.isFile(),
+  }))
+}
+
+const defaultStatMtime: StatMtimeFn = async (p) => {
+  const s = await fs.stat(p)
+  return { mtimeMs: s.mtimeMs }
+}
+
+/**
+ * Handle GET /docs-runners/:projectId/files. Walks `docsWorktreePath` (passed
+ * as a query param because the gateway has no D1 access) and returns all
+ * markdown files with mtime. Skips hidden dirs, node_modules, dist, build,
+ * .duraclaw-docs. Caps at MAX_FILES.
+ */
+export async function handleListDocsFiles(
+  projectId: string,
+  searchParams: URLSearchParams,
+  opts: ListDocsFilesOpts = {},
+): Promise<Response> {
+  if (!PROJECT_ID_RE.test(projectId)) {
+    return json(400, { error: 'invalid projectId' })
+  }
+
+  const docsWorktreePath = searchParams.get('docsWorktreePath')
+  if (!docsWorktreePath) {
+    return json(400, { error: 'docs_worktree_path_required' })
+  }
+
+  const validity = await validateDocsWorktreePath(docsWorktreePath, opts.statFn)
+  if (!validity.ok) {
+    return json(400, { error: 'docs_worktree_invalid' })
+  }
+
+  const readdir = opts.readdir ?? defaultReaddir
+  const statMtime = opts.statMtime ?? defaultStatMtime
+
+  const out: Array<{ relPath: string; lastModified: number }> = []
+
+  // Iterative walk — small call stack for deep trees.
+  const stack: string[] = [docsWorktreePath]
+  let rootMissing = false
+
+  walk: while (stack.length > 0) {
+    const dir = stack.pop()
+    if (!dir) break
+    let dirents: Awaited<ReturnType<ReaddirFn>>
+    try {
+      dirents = await readdir(dir)
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException).code
+      // ENOENT on the root dir → 404. ENOENT mid-walk (a subdir vanished)
+      // is non-fatal — skip it.
+      if (code === 'ENOENT') {
+        if (dir === docsWorktreePath) {
+          rootMissing = true
+          break
+        }
+        continue
+      }
+      return json(500, { error: 'directory_walk_failed' })
+    }
+
+    for (const dirent of dirents) {
+      // Skip hidden entries and well-known noise dirs.
+      if (dirent.name.startsWith('.')) continue
+      if (SKIP_DIRS.has(dirent.name)) continue
+
+      const fullPath = nodePath.join(dir, dirent.name)
+
+      if (dirent.isDirectory()) {
+        stack.push(fullPath)
+        continue
+      }
+
+      if (!dirent.isFile()) continue
+      if (!dirent.name.endsWith('.md')) continue
+
+      let mtimeMs: number
+      try {
+        const s = await statMtime(fullPath)
+        mtimeMs = s.mtimeMs
+      } catch (err: unknown) {
+        const code = (err as NodeJS.ErrnoException).code
+        if (code === 'ENOENT') continue
+        return json(500, { error: 'directory_walk_failed' })
+      }
+
+      const rel = nodePath.relative(docsWorktreePath, fullPath).split(nodePath.sep).join('/')
+      out.push({ relPath: rel, lastModified: Math.round(mtimeMs) })
+
+      if (out.length >= MAX_FILES) break walk
+    }
+  }
+
+  if (rootMissing) {
+    return json(404, { error: 'docs_worktree_not_found' })
+  }
+
+  out.sort((a, b) => a.relPath.localeCompare(b.relPath))
+  return json(200, { files: out })
+}
+
 // ── GET /docs-runners/:projectId/status ────────────────────────────
 
 export interface DocsRunnerStatusOpts {

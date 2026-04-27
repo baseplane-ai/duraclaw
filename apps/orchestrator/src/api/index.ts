@@ -1946,6 +1946,92 @@ export function createApiApp() {
     return c.json({ ok: true, visibility: body.visibility })
   })
 
+  // GH#27 P1.6 WU-B: GET /api/projects/:projectId/docs-files
+  //
+  // Proxy endpoint that lets the UI list markdown files in the project's
+  // configured docs worktree. Reads `docsWorktreePath` from D1
+  // `projectMetadata`, then proxies to the gateway's
+  // `GET /docs-runners/:projectId/files?docsWorktreePath=...` directory
+  // walker. The gateway is the only side with FS access; the worker just
+  // forwards the call with the bearer-token gateway auth.
+  //
+  // Auth: cookie session (provided by `app.use('/api/*', authMiddleware)`
+  // mounted above). Project-visibility is intentionally permissive for
+  // v1 — see TODO below.
+  //
+  // Status semantics (per spec phase p5a):
+  //   - 200      → forwarded gateway 200 body
+  //   - 4xx      → forwarded gateway status + body
+  //   - 502      → gateway responded but with 5xx
+  //   - 503      → gateway unreachable / network failure / timeout. UI
+  //                renders a retry chip on this code, NOT an empty state.
+  //   - 404      → no projectMetadata row OR docsWorktreePath is null
+  //                (project not configured for docs).
+  app.get('/api/projects/:projectId/docs-files', async (c) => {
+    const projectId = c.req.param('projectId')
+    if (!PROJECT_ID_RE.test(projectId)) {
+      return c.json({ error: 'Invalid projectId' }, 400)
+    }
+
+    // TODO(GH#27): once per-project visibility/ownership lands for
+    // projectMetadata, gate this on the caller being a member of the
+    // project. For v1 any authenticated user can read the file list —
+    // the gateway validates `docsWorktreePath` server-side, so this
+    // is not a path-traversal boundary.
+
+    const db = getDb(c.env)
+    const rows = await db
+      .select()
+      .from(projectMetadata)
+      .where(eq(projectMetadata.projectId, projectId))
+      .limit(1)
+    if (rows.length === 0 || !rows[0].docsWorktreePath) {
+      return c.json(
+        {
+          error: 'project_not_configured',
+          message: 'No docs worktree configured for this project',
+        },
+        404,
+      )
+    }
+    const docsWorktreePath = rows[0].docsWorktreePath
+
+    if (!c.env.CC_GATEWAY_URL) {
+      return c.json({ error: 'CC_GATEWAY_URL not configured' }, 500)
+    }
+    const httpBase = c.env.CC_GATEWAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+    const url = new URL(`/docs-runners/${projectId}/files`, httpBase)
+    url.searchParams.set('docsWorktreePath', docsWorktreePath)
+
+    const headers: Record<string, string> = {}
+    if (c.env.CC_GATEWAY_SECRET) {
+      headers.Authorization = `Bearer ${c.env.CC_GATEWAY_SECRET}`
+    }
+
+    let resp: Response
+    try {
+      resp = await fetch(url.toString(), {
+        headers,
+        signal: AbortSignal.timeout(5000),
+      })
+    } catch {
+      return c.json({ error: 'gateway_unavailable' }, 503)
+    }
+
+    if (resp.status >= 500) {
+      return c.json({ error: 'gateway_error', upstreamStatus: resp.status }, 502)
+    }
+
+    // 2xx and 4xx: forward body + status verbatim. Body is JSON for
+    // the contract we care about; on the off-chance the gateway emits
+    // a non-JSON response we still forward the bytes.
+    const text = await resp.text()
+    return new Response(text, {
+      status: resp.status,
+      headers: { 'Content-Type': resp.headers.get('Content-Type') ?? 'application/json' },
+    })
+  })
+
   // ── Feature Flags (GH#86) ─────────────────────────────────────────
 
   app.get('/api/admin/feature-flags', async (c) => {

@@ -4,9 +4,12 @@ import nodePath from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   handleDocsRunnerStatus,
+  handleListDocsFiles,
   handleListDocsRunners,
   handleStartDocsRunner,
+  type ReaddirFn,
   type StatFn,
+  type StatMtimeFn,
 } from './docs-runner-handlers.js'
 import type { SpawnFn } from './handlers.js'
 import type { LivenessCheck } from './session-state.js'
@@ -316,5 +319,164 @@ describe('GET /docs-runners/:projectId/status', () => {
     expect(body.ok).toBe(true)
     expect(body.state).toBe('running')
     expect(body.session_id).toBe(PROJECT_ID)
+  })
+})
+
+// ────────────────────────────────────────────────────────────────────
+// GET /docs-runners/:projectId/files
+// ────────────────────────────────────────────────────────────────────
+
+describe('GET /docs-runners/:projectId/files', () => {
+  const DOCS_PATH = '/data/projects/duraclaw'
+
+  it('returns 400 if no docsWorktreePath param', async () => {
+    const resp = await handleListDocsFiles(PROJECT_ID, new URLSearchParams())
+    expect(resp.status).toBe(400)
+    expect(await resp.json()).toEqual({ error: 'docs_worktree_path_required' })
+  })
+
+  it('returns 400 if path fails validation (outside /data/projects pattern)', async () => {
+    const params = new URLSearchParams({ docsWorktreePath: '/etc' })
+    const resp = await handleListDocsFiles(PROJECT_ID, params, {
+      statFn: fakeProjectsStat,
+    })
+    expect(resp.status).toBe(400)
+    expect(await resp.json()).toEqual({ error: 'docs_worktree_invalid' })
+  })
+
+  it('returns 400 on bad projectId (not 16-char hex)', async () => {
+    const params = new URLSearchParams({ docsWorktreePath: DOCS_PATH })
+    const resp = await handleListDocsFiles('not-hex', params, {
+      statFn: fakeProjectsStat,
+    })
+    expect(resp.status).toBe(400)
+    expect(await resp.json()).toEqual({ error: 'invalid projectId' })
+  })
+
+  it('returns 404 if directory missing (root ENOENT)', async () => {
+    const params = new URLSearchParams({ docsWorktreePath: DOCS_PATH })
+    const readdir: ReaddirFn = async () => {
+      const err: NodeJS.ErrnoException = Object.assign(new Error('ENOENT'), {
+        code: 'ENOENT',
+      })
+      throw err
+    }
+    const resp = await handleListDocsFiles(PROJECT_ID, params, {
+      statFn: fakeProjectsStat,
+      readdir,
+    })
+    expect(resp.status).toBe(404)
+    expect(await resp.json()).toEqual({ error: 'docs_worktree_not_found' })
+  })
+
+  it('walks and returns markdown files with mtime; ignores non-md and node_modules', async () => {
+    type Entry = { name: string; isDirectory: () => boolean; isFile: () => boolean }
+    const tree: Record<string, Entry[]> = {
+      [DOCS_PATH]: [
+        { name: 'a.md', isDirectory: () => false, isFile: () => true },
+        { name: 'b.md', isDirectory: () => false, isFile: () => true },
+        { name: 'subdir', isDirectory: () => true, isFile: () => false },
+        { name: 'node_modules', isDirectory: () => true, isFile: () => false },
+      ],
+      [`${DOCS_PATH}/subdir`]: [
+        { name: 'c.md', isDirectory: () => false, isFile: () => true },
+        { name: 'ignored.txt', isDirectory: () => false, isFile: () => true },
+      ],
+      [`${DOCS_PATH}/node_modules`]: [
+        { name: 'skip.md', isDirectory: () => false, isFile: () => true },
+      ],
+    }
+    const readdir: ReaddirFn = async (p) => {
+      const r = tree[p]
+      if (!r) {
+        const err: NodeJS.ErrnoException = Object.assign(new Error('ENOENT'), {
+          code: 'ENOENT',
+        })
+        throw err
+      }
+      return r
+    }
+    const mtimes: Record<string, number> = {
+      [`${DOCS_PATH}/a.md`]: 1714234567890.7,
+      [`${DOCS_PATH}/b.md`]: 1714234999000.2,
+      [`${DOCS_PATH}/subdir/c.md`]: 1714235111111.4,
+    }
+    const statMtime: StatMtimeFn = async (p) => {
+      if (mtimes[p] === undefined) throw new Error(`unexpected stat: ${p}`)
+      return { mtimeMs: mtimes[p] }
+    }
+
+    const params = new URLSearchParams({ docsWorktreePath: DOCS_PATH })
+    const resp = await handleListDocsFiles(PROJECT_ID, params, {
+      statFn: fakeProjectsStat,
+      readdir,
+      statMtime,
+    })
+    expect(resp.status).toBe(200)
+    const body = (await resp.json()) as {
+      files: Array<{ relPath: string; lastModified: number }>
+    }
+    expect(body.files.map((f) => f.relPath)).toEqual(['a.md', 'b.md', 'subdir/c.md'])
+    for (const f of body.files) {
+      expect(typeof f.lastModified).toBe('number')
+      expect(f.lastModified).toBeGreaterThan(0)
+      expect(Number.isInteger(f.lastModified)).toBe(true)
+    }
+    // Verify rounding actually happened on a fractional mtime
+    const a = body.files.find((f) => f.relPath === 'a.md')
+    expect(a?.lastModified).toBe(Math.round(1714234567890.7))
+  })
+
+  it('skips hidden dirs and node_modules/dist/build/.duraclaw-docs', async () => {
+    type Entry = { name: string; isDirectory: () => boolean; isFile: () => boolean }
+    const dir = (n: string): Entry => ({
+      name: n,
+      isDirectory: () => true,
+      isFile: () => false,
+    })
+    const file = (n: string): Entry => ({
+      name: n,
+      isDirectory: () => false,
+      isFile: () => true,
+    })
+    const tree: Record<string, Entry[]> = {
+      [DOCS_PATH]: [
+        file('keep.md'),
+        dir('node_modules'),
+        dir('dist'),
+        dir('build'),
+        dir('.duraclaw-docs'),
+        dir('.git'),
+        dir('.hidden'),
+      ],
+      // If the walker mistakenly recurses, these would surface in the output.
+      [`${DOCS_PATH}/node_modules`]: [file('nm.md')],
+      [`${DOCS_PATH}/dist`]: [file('dist.md')],
+      [`${DOCS_PATH}/build`]: [file('build.md')],
+      [`${DOCS_PATH}/.duraclaw-docs`]: [file('hash.md')],
+      [`${DOCS_PATH}/.git`]: [file('git.md')],
+      [`${DOCS_PATH}/.hidden`]: [file('hidden.md')],
+    }
+    const readdir: ReaddirFn = async (p) => {
+      const r = tree[p]
+      if (!r) throw new Error(`unexpected readdir: ${p}`)
+      return r
+    }
+    const statMtime: StatMtimeFn = async () => ({ mtimeMs: 1 })
+
+    const params = new URLSearchParams({ docsWorktreePath: DOCS_PATH })
+    const resp = await handleListDocsFiles(PROJECT_ID, params, {
+      statFn: fakeProjectsStat,
+      readdir,
+      statMtime,
+    })
+    expect(resp.status).toBe(200)
+    const body = (await resp.json()) as {
+      files: Array<{ relPath: string; lastModified: number }>
+    }
+    expect(body.files.map((f) => f.relPath)).toEqual(['keep.md'])
+    for (const f of body.files) {
+      expect(f.relPath).not.toMatch(/node_modules|dist|build|\.duraclaw-docs|\.git|\.hidden/)
+    }
   })
 })
