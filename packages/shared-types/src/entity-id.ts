@@ -18,6 +18,15 @@
  */
 export const DOCS_YDOC_FRAGMENT_NAME = 'document-store' as const
 
+/**
+ * Yjs Y.Map name carrying parsed YAML frontmatter for a markdown doc.
+ * Populated by the docs-runner's blocknote-bridge on `markdownToYDoc`
+ * and consumed on `yDocToMarkdown` to round-trip the `---\n...\n---\n`
+ * block. Centralised here so the runner, the DO, and the browser
+ * editor all bind to the same key (P1.9).
+ */
+export const DOCS_YDOC_META_MAP_NAME = 'meta' as const
+
 async function sha256Hex16(input: string): Promise<string> {
   const bytes = new TextEncoder().encode(input)
   const digest = await crypto.subtle.digest('SHA-256', bytes)

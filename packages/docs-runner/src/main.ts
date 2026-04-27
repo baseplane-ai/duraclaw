@@ -17,6 +17,7 @@ import './jsdom-bootstrap.js'
 import { spawnSync } from 'node:child_process'
 import fsSync from 'node:fs'
 import fs from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 import { atomicOverwrite, atomicWriteOnce } from './atomic.js'
 import { createBlockNoteEditor } from './blocknote-bridge.js'
@@ -30,6 +31,8 @@ import {
   HealthServer,
   type HealthSnapshot,
 } from './health-server.js'
+import { createLogger } from './logger.js'
+import { createMetrics } from './metrics.js'
 import { Watcher } from './watcher.js'
 import { SuppressedWriter } from './writer.js'
 
@@ -214,6 +217,14 @@ export async function main(): Promise<void> {
 
   const argv = parseArgv(rawArgs)
   const startTime = Date.now()
+  const runnerIdentity = {
+    kind: 'docs-runner' as const,
+    host: os.hostname(),
+    version: VERSION,
+    projectId: argv.projectId,
+  }
+  const runnerLogger = createLogger({ projectId: argv.projectId })
+  const metrics = createMetrics()
 
   // --- Step 2: read cmd-file ---
   let cmd: DocsRunnerCommand | null = null
@@ -315,6 +326,11 @@ export async function main(): Promise<void> {
   const patternRx = watchPatterns.map(globToRegExp)
   const ignoredRx = ignoredPatterns.map(globToRegExp)
 
+  runnerLogger.info('config.loaded', {
+    source: configSource,
+    watch: watchPatterns.length,
+  })
+
   async function startupFailure(err: Error): Promise<never> {
     console.error(`[docs-runner] startup failed: ${err.stack ?? err.message}`)
     if (metaTimer) clearInterval(metaTimer)
@@ -364,6 +380,8 @@ export async function main(): Promise<void> {
         hashStore,
         writer,
         editor,
+        logger: runnerLogger,
+        identity: runnerIdentity,
         onTerminate: (reason) => {
           console.warn(`[docs-runner] pipeline terminated relPath=${relPath} reason=${reason}`)
           if (reason === 'document_deleted') {
@@ -385,7 +403,12 @@ export async function main(): Promise<void> {
         onStateChange: (state) => {
           fileStates.set(relPath, state)
           // Reset the per-file error counter only on successful sync.
-          if (state === 'syncing') fileErrors.set(relPath, 0)
+          if (state === 'syncing') {
+            fileErrors.set(relPath, 0)
+            metrics.syncs_ok++
+          } else if (state === 'error') {
+            metrics.syncs_err++
+          }
           meta.last_activity_ts = Date.now()
         },
       })
@@ -408,9 +431,7 @@ export async function main(): Promise<void> {
           return
         }
         cfg.bearer = fresh
-        console.warn(
-          '[docs-runner] token-rotation: re-read DOCS_RUNNER_SECRET; reconnecting all pipelines',
-        )
+        runnerLogger.warn('token.rotated', { pipelines: pipelines.size })
         const entries = [...pipelines.entries()]
         for (const [relPath, p] of entries) {
           try {
@@ -422,6 +443,7 @@ export async function main(): Promise<void> {
           const fresh2 = makePipeline(relPath)
           try {
             await fresh2.start()
+            metrics.reconnects++
           } catch (err) {
             console.error(
               `[docs-runner] reconnect after rotation failed relPath=${relPath}: ${(err as Error).message}`,
@@ -453,6 +475,7 @@ export async function main(): Promise<void> {
     // all initial pipelines — even if every individual `start()` failed,
     // we've at least observed the filesystem. /health flips out of `down`.
     enumerationComplete = true
+    runnerLogger.info('startup.enumeration_complete', { files: meta.files })
 
     // --- Step 7: watcher ---
     watcher = new Watcher({
@@ -496,6 +519,7 @@ export async function main(): Promise<void> {
       onUnlink: (relPath) => {
         const pipeline = pipelines.get(relPath)
         if (!pipeline) return
+        metrics.tombstones_started++
         pipeline
           .onLocalUnlink()
           .catch((err) => {
@@ -553,6 +577,7 @@ export async function main(): Promise<void> {
         reconnects: meta.reconnects,
         per_file,
         config_present: configSource === 'file',
+        metrics: { ...metrics },
       }
     }
     healthServer = new HealthServer({
@@ -589,7 +614,7 @@ export async function main(): Promise<void> {
   const sigtermHandler = () => {
     if (shuttingDown) return
     shuttingDown = true
-    console.warn('[docs-runner] SIGTERM received — shutting down')
+    runnerLogger.warn('shutdown.signal_received', { signal: 'SIGTERM' })
     meta.state = 'aborted'
 
     const watchdog = setTimeout(async () => {
@@ -620,16 +645,20 @@ export async function main(): Promise<void> {
     watchdog.unref()
 
     ;(async () => {
+      runnerLogger.info('shutdown.watcher_stopping')
       try {
         await watcher?.stop()
       } catch {
         /* best-effort */
       }
+      runnerLogger.info('shutdown.watcher_stopped')
       try {
         await Promise.all([...pipelines.values()].map((p) => p.stop()))
       } catch {
         /* best-effort */
       }
+      runnerLogger.info('shutdown.pipelines_stopped', { count: pipelines.size })
+      runnerLogger.info('shutdown.workers_stopped')
       // Reap hash-store entries for tombstoned files so they don't linger
       // across restarts (spec p4: "Reap hash-store + connection-state on
       // process exit"). Best-effort — don't block exit on persistence errors.
@@ -653,6 +682,7 @@ export async function main(): Promise<void> {
       } catch {
         /* best-effort */
       }
+      runnerLogger.info('shutdown.health_stopped')
       if (metaTimer) clearInterval(metaTimer)
       try {
         await atomicOverwrite(argv.metaFile, JSON.stringify(meta))
@@ -675,6 +705,7 @@ export async function main(): Promise<void> {
       } catch (err) {
         console.error(`[docs-runner] exit-file write failed: ${(err as Error).message}`)
       }
+      runnerLogger.info('shutdown.complete', { duration_ms: Date.now() - startTime })
       process.exit(0)
     })().catch((err) => {
       console.error(`[docs-runner] graceful shutdown threw: ${(err as Error).message}`)

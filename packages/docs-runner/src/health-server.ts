@@ -10,6 +10,7 @@
  */
 
 import http from 'node:http'
+import type { Metrics } from './metrics.js'
 
 export interface HealthFileEntry {
   path: string
@@ -35,6 +36,11 @@ export interface HealthSnapshot {
    * uses this to render the "Create docs config" nudge banner.
    */
   config_present: boolean
+  /**
+   * Process-lifetime monotonic counters (P1.9). Surfaced in the tray for
+   * per-project health glance.
+   */
+  metrics: Metrics
 }
 
 export interface HealthServerOptions {

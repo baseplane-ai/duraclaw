@@ -28,9 +28,10 @@ import * as awarenessProtocol from 'y-protocols/awareness'
 import * as Y from 'yjs'
 import { markdownToYDoc } from './blocknote-bridge.js'
 import { type HashStore, hashOfNormalisedMarkdown } from './content-hash.js'
+import { createLogger, type Logger } from './logger.js'
 import { reconcileOnAttach } from './reconcile.js'
 import type { SuppressedWriter } from './writer.js'
-import { YjsTransport } from './yjs-protocol.js'
+import { type YjsRunnerIdentity, YjsTransport } from './yjs-protocol.js'
 
 export type FilePipelineState = 'starting' | 'syncing' | 'disconnected' | 'tombstoned' | 'error'
 
@@ -48,6 +49,16 @@ export interface FilePipelineOptions {
   onTerminate: (reason: string) => void
   /** Reports per-file health state up to main.ts for the /health snapshot. */
   onStateChange: (state: FilePipelineState) => void
+  /**
+   * Optional structured logger (P1.9). Defaults to a no-base logger when
+   * omitted so unit tests / library callers don't need to wire one up.
+   */
+  logger?: Logger
+  /**
+   * Optional runner identity broadcast on the local awareness state.
+   * Plumbed straight into `YjsTransport`.
+   */
+  identity?: YjsRunnerIdentity
 }
 
 /**
@@ -72,6 +83,14 @@ export class FilePipeline {
   private started = false
   private stopped = false
   private syncStep1Sent = false
+  private readonly log: Logger
+  /**
+   * In-flight watcher-driven write operations (onLocalChange / onLocalAdd /
+   * onLocalUnlink). `stop()` awaits this set with a 1.5s timeout BEFORE
+   * tearing down transport / dial-back / ydoc, so a SIGTERM can't interrupt
+   * a half-applied disk→Y.Doc bridge call (P1.9 graceful-shutdown spec).
+   */
+  private readonly inFlight: Set<Promise<void>> = new Set()
 
   constructor(opts: FilePipelineOptions) {
     this.opts = opts
@@ -81,6 +100,7 @@ export class FilePipeline {
     // parent `DialBackClient` still requires a channel reference for its
     // attach/detach lifecycle hooks. A scratch channel satisfies that.
     this.channel = new BufferedChannel({ logger: console })
+    this.log = opts.logger ?? createLogger()
   }
 
   state(): FilePipelineState {
@@ -112,6 +132,7 @@ export class FilePipeline {
         // re-syncs anything we miss.
         this.dialBack?.send(frame)
       },
+      identity: this.opts.identity,
     })
     this.transport = transport
 
@@ -171,6 +192,25 @@ export class FilePipeline {
   }
 
   /**
+   * Wraps an async unit of write-path work so `stop()` can await pending
+   * writes before tearing down transport / dial-back / ydoc. Self-cleans
+   * on settle (success or failure) so a long-lived pipeline doesn't leak
+   * resolved promises into the set.
+   */
+  private async track<T>(work: Promise<T>): Promise<T> {
+    const sentinel = work.then(
+      () => undefined,
+      () => undefined,
+    ) as Promise<void>
+    this.inFlight.add(sentinel)
+    try {
+      return await work
+    } finally {
+      this.inFlight.delete(sentinel)
+    }
+  }
+
+  /**
    * Watcher `change` event: re-read disk, B8-gate against last hash, push
    * through bridge into the Y.Doc (which fans out via YjsTransport).
    *
@@ -179,6 +219,10 @@ export class FilePipeline {
    * re-pushing the same content on restart.
    */
   async onLocalChange(): Promise<void> {
+    return this.track(this.doLocalChange())
+  }
+
+  private async doLocalChange(): Promise<void> {
     if (this.stopped || this.currentState === 'tombstoned') return
     const absPath = path.resolve(this.opts.rootPath, this.opts.relPath)
     let md: string
@@ -201,7 +245,7 @@ export class FilePipeline {
   /** Watcher `add` event for a path that was previously absent. */
   async onLocalAdd(): Promise<void> {
     // The B8 gate handles the "nothing changed" path identically to onLocalChange.
-    await this.onLocalChange()
+    return this.track(this.doLocalChange())
   }
 
   /**
@@ -210,6 +254,10 @@ export class FilePipeline {
    * `document_deleted`, which routes us to state `'tombstoned'`.
    */
   async onLocalUnlink(): Promise<void> {
+    return this.track(this.doLocalUnlink())
+  }
+
+  private async doLocalUnlink(): Promise<void> {
     if (this.stopped || this.currentState === 'tombstoned') return
     if (!this.entityId) return
     const httpBase = toHttpBase(this.opts.callbackBase)
@@ -224,16 +272,20 @@ export class FilePipeline {
         body: JSON.stringify({ relPath: this.opts.relPath }),
       })
       if (!res.ok) {
-        console.warn(
-          `[file-pipeline] tombstone POST failed status=${res.status} entityId=${this.entityId}`,
-        )
+        this.log.warn('tombstone.post_failed', {
+          entityId: this.entityId,
+          status: res.status,
+          file: this.opts.relPath,
+        })
         // We still set tombstoned locally — the file is gone from disk; the
         // DO will hard-delete on its own grace timer once the WS drops.
       }
     } catch (err) {
-      console.warn(
-        `[file-pipeline] tombstone POST threw for entityId=${this.entityId}: ${(err as Error).message}`,
-      )
+      this.log.warn('tombstone.post_threw', {
+        entityId: this.entityId,
+        file: this.opts.relPath,
+        err,
+      })
     }
     // Drop the local hash so a future `add` of the same path is treated as
     // a fresh seed.
@@ -246,10 +298,42 @@ export class FilePipeline {
     await this.stop()
   }
 
-  /** Stop transport, dial-back, etc. Idempotent. */
+  /**
+   * Stop transport, dial-back, etc. Idempotent.
+   *
+   * P1.9 shutdown contract: BEFORE tearing down the dial-back / ydoc, await
+   * any in-flight watcher-driven writes (onLocalChange / onLocalAdd /
+   * onLocalUnlink). A 1.5s race timeout caps the wait so a runaway writer
+   * can't extend past main.ts's 2s SIGTERM watchdog. On timeout we log
+   * `shutdown.flush_timeout` and proceed with the destructive teardown
+   * regardless.
+   */
   async stop(): Promise<void> {
     if (this.stopped) return
     this.stopped = true
+
+    if (this.inFlight.size > 0) {
+      const pending = [...this.inFlight]
+      let timer: ReturnType<typeof setTimeout> | null = null
+      const timeout = new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), 1_500)
+      })
+      try {
+        const outcome = await Promise.race([
+          Promise.allSettled(pending).then(() => 'flushed' as const),
+          timeout,
+        ])
+        if (outcome === 'timeout') {
+          this.log.warn('shutdown.flush_timeout', {
+            file: this.opts.relPath,
+            inFlight: this.inFlight.size,
+          })
+        }
+      } finally {
+        if (timer) clearTimeout(timer)
+      }
+    }
+
     try {
       this.transport?.destroy()
     } catch {

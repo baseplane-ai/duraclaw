@@ -18,6 +18,13 @@ const baseSnapshot: HealthSnapshot = {
   reconnects: 0,
   per_file: [],
   config_present: true,
+  metrics: {
+    syncs_ok: 0,
+    syncs_err: 0,
+    reconnects: 0,
+    tombstones_started: 0,
+    tombstones_cancelled: 0,
+  },
 }
 
 let active: HealthServer | null = null
@@ -79,6 +86,38 @@ describe('HealthServer', () => {
     const res = await fetch(`http://127.0.0.1:${port}/nope`)
     expect(res.status).toBe(404)
     await res.text() // drain body so the conn closes cleanly
+  })
+
+  it('exposes the 5 metrics counter keys in the snapshot body', async () => {
+    const port = ephemeralPort()
+    const server = new HealthServer({
+      port,
+      snapshot: () => ({
+        ...baseSnapshot,
+        metrics: {
+          syncs_ok: 4,
+          syncs_err: 1,
+          reconnects: 2,
+          tombstones_started: 3,
+          tombstones_cancelled: 0,
+        },
+      }),
+    })
+    active = server
+    await server.start()
+
+    const res = await fetch(`http://127.0.0.1:${port}/health`)
+    const body = (await res.json()) as HealthSnapshot
+    expect(body.metrics).toBeDefined()
+    expect(Object.keys(body.metrics).sort()).toEqual([
+      'reconnects',
+      'syncs_err',
+      'syncs_ok',
+      'tombstones_cancelled',
+      'tombstones_started',
+    ])
+    expect(body.metrics.syncs_ok).toBe(4)
+    expect(body.metrics.tombstones_started).toBe(3)
   })
 
   it('reflects live snapshot changes between requests', async () => {

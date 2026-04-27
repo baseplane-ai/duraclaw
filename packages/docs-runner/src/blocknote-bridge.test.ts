@@ -1,6 +1,6 @@
 import './jsdom-bootstrap.js'
 
-import { DOCS_YDOC_FRAGMENT_NAME } from '@duraclaw/shared-types'
+import { DOCS_YDOC_FRAGMENT_NAME, DOCS_YDOC_META_MAP_NAME } from '@duraclaw/shared-types'
 import { describe, expect, it } from 'vitest'
 import * as Y from 'yjs'
 import { markdownToYDoc, normalisedMarkdown, yDocToMarkdown } from './blocknote-bridge.js'
@@ -75,5 +75,65 @@ describe('blocknote-bridge — markdown ↔ Y.Doc round-trip', () => {
     await markdownToYDoc('# Hello\n', ydoc)
     const fragment = ydoc.getXmlFragment(DOCS_YDOC_FRAGMENT_NAME)
     expect(fragment.length).toBeGreaterThan(0)
+  })
+})
+
+describe('blocknote-bridge — frontmatter handling (P1.9)', () => {
+  it('markdownToYDoc populates Y.Map(meta) from frontmatter', async () => {
+    const input = ['---', 'title: Hello', 'tags:', '  - a', '  - b', '---', '', '# Body', ''].join(
+      '\n',
+    )
+    const ydoc = new Y.Doc()
+    await markdownToYDoc(input, ydoc)
+    const meta = ydoc.getMap(DOCS_YDOC_META_MAP_NAME).toJSON()
+    expect(meta.title).toBe('Hello')
+    expect(meta.tags).toEqual(['a', 'b'])
+  })
+
+  it('yDocToMarkdown round-trips frontmatter as a leading --- block', async () => {
+    const input = ['---', 'title: Hello', 'count: 3', '---', '', '# Body', ''].join('\n')
+    const ydoc = new Y.Doc()
+    await markdownToYDoc(input, ydoc)
+    const out = await yDocToMarkdown(ydoc)
+    expect(out.startsWith('---\n')).toBe(true)
+    expect(out).toMatch(/title: Hello/)
+    expect(out).toMatch(/count: 3/)
+    expect(out).toMatch(/\n---\n/)
+    expect(out).toContain('Body')
+  })
+
+  it('markdownToYDoc on a populated ydoc replaces meta keys (sets new, removes old)', async () => {
+    const ydoc = new Y.Doc()
+    await markdownToYDoc(
+      ['---', 'title: Old', 'old_only: gone', '---', '', '# Body', ''].join('\n'),
+      ydoc,
+    )
+    await markdownToYDoc(
+      ['---', 'title: New', 'new_only: kept', '---', '', '# Body', ''].join('\n'),
+      ydoc,
+    )
+    const meta = ydoc.getMap(DOCS_YDOC_META_MAP_NAME).toJSON()
+    expect(meta.title).toBe('New')
+    expect(meta.new_only).toBe('kept')
+    expect('old_only' in meta).toBe(false)
+  })
+
+  it('pure-body markdown (no frontmatter) round-trips without a leading --- block', async () => {
+    const input = '# Hello\n\nA paragraph.\n'
+    const ydoc = new Y.Doc()
+    await markdownToYDoc(input, ydoc)
+    const out = await yDocToMarkdown(ydoc)
+    expect(out.startsWith('---')).toBe(false)
+    expect(out).toContain('Hello')
+    const meta = ydoc.getMap(DOCS_YDOC_META_MAP_NAME).toJSON()
+    expect(Object.keys(meta)).toEqual([])
+  })
+
+  it('normalisedMarkdown preserves frontmatter through canonicalisation', async () => {
+    const input = ['---', 'title: Hello', '---', '', '# Body', ''].join('\n')
+    const out = await normalisedMarkdown(input)
+    expect(out.startsWith('---\n')).toBe(true)
+    expect(out).toMatch(/title: Hello/)
+    expect(out).toContain('Body')
   })
 })

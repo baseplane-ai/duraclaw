@@ -28,10 +28,23 @@ import type * as Y from 'yjs'
 export const MESSAGE_SYNC = 0
 export const MESSAGE_AWARENESS = 1
 
+export interface YjsRunnerIdentity {
+  kind: 'docs-runner'
+  host: string
+  version: string
+  projectId: string
+}
+
 export interface YjsTransportOptions {
   ydoc: Y.Doc
   awareness: awarenessProtocol.Awareness
   send: (frame: Uint8Array) => void
+  /**
+   * Optional richer identity broadcast on awareness as the `user` field.
+   * Browsers can render a presence chip showing host/version/projectId.
+   * Falls back to `{ kind: 'docs-runner' }` when omitted.
+   */
+  identity?: YjsRunnerIdentity
 }
 
 export class YjsTransport {
@@ -56,7 +69,7 @@ export class YjsTransport {
     })
 
     // Identify ourselves to remote peers (browsers can render a presence chip).
-    this.awareness.setLocalStateField('user', { kind: 'docs-runner' })
+    this.awareness.setLocalStateField('user', opts.identity ?? { kind: 'docs-runner' })
 
     this.onDocUpdate = (update, origin) => this.broadcastUpdate(update, origin)
     this.onAwarenessUpdate = () => this.broadcastAwareness()
