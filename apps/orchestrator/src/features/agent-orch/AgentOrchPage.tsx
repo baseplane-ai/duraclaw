@@ -20,7 +20,7 @@ import { TabBar } from '~/components/tab-bar'
 import { sessionsCollection } from '~/db/sessions-collection'
 import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { useSwipeTabs } from '~/hooks/use-swipe-tabs'
-import { getTabSyncSnapshot, useTabSync } from '~/hooks/use-tab-sync'
+import { getTabSyncSnapshot, isDraftTabId, useTabSync } from '~/hooks/use-tab-sync'
 import { useUserDefaults } from '~/hooks/use-user-defaults'
 import { consumePendingDeepLink, subscribeDeepLink } from '~/lib/native-push-deep-link'
 import { apiUrl } from '~/lib/platform'
@@ -42,8 +42,16 @@ function AgentOrchContent() {
     (search as { newSessionProject?: string }).newSessionProject ?? null
   const searchNewTab = (search as { newTab?: boolean }).newTab ?? false
 
-  const { openTabs, activeSessionId, tabProjects, openTab, closeTab, setActive, reorder } =
-    useTabSync()
+  const {
+    openTabs,
+    activeSessionId,
+    tabProjects,
+    openTab,
+    replaceTab,
+    closeTab,
+    setActive,
+    reorder,
+  } = useTabSync()
 
   // Deep-link: URL has ?session=X → open & activate that tab.
   // If it's already in the Y.Map, just activates it. If the session
@@ -259,11 +267,21 @@ function AgentOrchContent() {
       })
       setQuickPromptHint(null)
 
-      // Draft tabs are gone (deferred-runner flow): "new session" / "+"
-      // already created a real session via directCreateSession. handleSpawn
-      // is now only used by QuickPromptInput's prompt-and-submit no-tab
-      // empty state, where there's no draft to replace.
-      openTab(clientSessionId, { project: config.project, forceNewTab: config.newTab })
+      // The sidebar "+ New session" button still seeds a draft tab id
+      // (sess-uuid is reserved for direct-create). Submitting a prompt from
+      // its QuickPromptInput swaps the draft id for the real session id in
+      // place — without `replaceTab`, the draft tab would linger alongside
+      // the new real one.
+      const activeDraft = isDraftTabId(activeSessionId) ? activeSessionId : null
+      if (activeDraft) {
+        replaceTab(
+          activeDraft,
+          clientSessionId,
+          config.newTab ? undefined : { dedupProject: config.project },
+        )
+      } else {
+        openTab(clientSessionId, { project: config.project, forceNewTab: config.newTab })
+      }
       navigate({ to: '/', search: { session: clientSessionId } })
 
       // Surface POST failures without blocking UI. If the server rejects the
@@ -273,7 +291,7 @@ function AgentOrchContent() {
         console.error('[AgentOrch] Spawn failed:', err)
       })
     },
-    [navigate, openTab],
+    [navigate, openTab, replaceTab, activeSessionId],
   )
 
   const handleSelectSession = useCallback(
@@ -455,7 +473,7 @@ function AgentOrchContent() {
           }
           style={{ flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column' }}
         >
-          {activeSessionId ? (
+          {activeSessionId && !isDraftTabId(activeSessionId) ? (
             <AgentDetailWithSpawn
               key={activeSessionId}
               sessionId={activeSessionId}
