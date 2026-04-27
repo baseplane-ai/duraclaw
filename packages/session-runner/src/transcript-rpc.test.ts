@@ -141,6 +141,26 @@ describe('WsTranscriptRpc', () => {
     expect(rpc.pendingCount).toBe(0)
   })
 
+  it('per-call timeoutMs overrides the constructor default — timer scheduled with override window', async () => {
+    const send = vi.fn()
+    const { setTimer, clearTimer, fire, timers } = makeFakeTimers()
+    const rpc = new WsTranscriptRpc('sess-1', send, {
+      setTimer,
+      clearTimer,
+      timeoutMs: 30_000,
+    })
+
+    const promise = rpc.call('loadTranscript', { x: 1 }, { timeoutMs: 120_000 })
+    expect(timers).toHaveLength(1)
+    expect(timers[0].ms).toBe(120_000)
+
+    fire(0)
+    await expect(promise).rejects.toThrow(/timeout/)
+    await expect(promise).rejects.toThrow(/loadTranscript/)
+    await expect(promise).rejects.toThrow(/120000ms/)
+    expect(rpc.pendingCount).toBe(0)
+  })
+
   it('cancelAll(reason) rejects all pending; subsequent handleResponse is silent', async () => {
     const send = vi.fn()
     const { setTimer, clearTimer } = makeFakeTimers()

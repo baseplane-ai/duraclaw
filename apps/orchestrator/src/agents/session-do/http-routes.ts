@@ -236,6 +236,13 @@ export async function handleHttpRequest(
   // write, same LRU resume spawn as a runner-emitted rate_limit. The public
   // Hono route gates on `ENABLE_DEBUG_ENDPOINTS === 'true'`; this handler
   // trusts pre-validated calls.
+  //
+  // We `await` `handleRateLimit` here (unlike the production rate_limit /
+  // result-error paths in `gateway-event-handler.ts`, which fire-and-forget
+  // because they run inside the WS dispatch loop and blocking would be
+  // wrong) so VP-3 verification is not racy: the response only returns
+  // after the failover side-effects (identity-cooldown write + LRU resume
+  // spawn) have settled.
   if (request.method === 'POST' && url.pathname === '/debug/simulate-rate-limit') {
     try {
       let resetsAt: string | undefined
@@ -246,18 +253,25 @@ export async function handleHttpRequest(
         // Tolerate missing / non-JSON body — synth event uses fallback.
       }
       const sessionId = ctx.do.name
-      handleRateLimit(ctx, {
-        type: 'rate_limit',
-        session_id: sessionId,
-        rate_limit_info: resetsAt ? { resets_at: resetsAt } : {},
-      }).catch((err) => {
-        ctx.logEvent('error', 'failover', 'handleRateLimit unhandled rejection', {
+      try {
+        await handleRateLimit(ctx, {
+          type: 'rate_limit',
+          session_id: sessionId,
+          rate_limit_info: resetsAt ? { resets_at: resetsAt } : {},
+        })
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      } catch (err) {
+        ctx.logEvent('error', 'failover', 'simulate-rate-limit handleRateLimit threw', {
           error: err instanceof Error ? err.message : String(err),
         })
-      })
-      return new Response(JSON.stringify({ ok: true }), {
-        headers: { 'Content-Type': 'application/json' },
-      })
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
     } catch (err) {
       return new Response(
         JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }),

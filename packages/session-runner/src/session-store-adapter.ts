@@ -20,10 +20,18 @@
  * `listSessions` / `listSessionSummaries` — they're only invoked through
  * `listSessions({sessionStore})`, which we don't expose to consumers
  * today.
+ *
+ * **Per-call timeout for `load`** — the SDK sets `loadTimeoutMs = 120_000`
+ * on resume, but the RPC's constructor default is 30s. We override the
+ * per-call timeout to match the SDK so a slow `loadTranscript` (large
+ * transcript + DO cold-start) doesn't fail at the RPC layer with budget
+ * remaining at the SDK layer. Other methods keep the 30s default.
  */
 
 import type { SessionKey, SessionStore, SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk'
 import type { TranscriptRpc } from './transcript-rpc.js'
+
+const LOAD_TIMEOUT_MS = 120_000
 
 export class DuraclavSessionStore implements SessionStore {
   constructor(private readonly rpc: TranscriptRpc) {}
@@ -33,7 +41,11 @@ export class DuraclavSessionStore implements SessionStore {
   }
 
   async load(key: SessionKey): Promise<SessionStoreEntry[] | null> {
-    return this.rpc.call<SessionStoreEntry[] | null>('loadTranscript', { key })
+    return this.rpc.call<SessionStoreEntry[] | null>(
+      'loadTranscript',
+      { key },
+      { timeoutMs: LOAD_TIMEOUT_MS },
+    )
   }
 
   async delete(key: SessionKey): Promise<void> {

@@ -11,11 +11,19 @@ import { DuraclavSessionStore } from './session-store-adapter'
 import type { TranscriptRpc, TranscriptRpcMethod } from './transcript-rpc'
 
 class MockRpc implements TranscriptRpc {
-  calls: Array<{ method: TranscriptRpcMethod; params: Record<string, unknown> }> = []
+  calls: Array<{
+    method: TranscriptRpcMethod
+    params: Record<string, unknown>
+    opts?: { timeoutMs?: number }
+  }> = []
   result: unknown = null
   error: Error | null = null
-  async call<T>(method: TranscriptRpcMethod, params: Record<string, unknown>): Promise<T> {
-    this.calls.push({ method, params })
+  async call<T>(
+    method: TranscriptRpcMethod,
+    params: Record<string, unknown>,
+    opts?: { timeoutMs?: number },
+  ): Promise<T> {
+    this.calls.push({ method, params, opts })
     if (this.error) throw this.error
     return this.result as T
   }
@@ -49,6 +57,31 @@ describe('DuraclavSessionStore', () => {
     expect(mock.calls).toHaveLength(1)
     expect(mock.calls[0].method).toBe('loadTranscript')
     expect(mock.calls[0].params).toEqual({ key: SAMPLE_KEY })
+  })
+
+  it('load passes 120s per-call timeout override so the RPC matches the SDK loadTimeoutMs', async () => {
+    const mock = new MockRpc()
+    mock.result = null
+    const store = new DuraclavSessionStore(mock)
+
+    await store.load(SAMPLE_KEY)
+    expect(mock.calls).toHaveLength(1)
+    expect(mock.calls[0].opts).toEqual({ timeoutMs: 120_000 })
+  })
+
+  it('append/delete/listSubkeys keep the RPC default timeout (no override passed)', async () => {
+    const mock = new MockRpc()
+    mock.result = []
+    const store = new DuraclavSessionStore(mock)
+
+    await store.append(SAMPLE_KEY, [{ type: 'user' }])
+    await store.delete(SAMPLE_KEY)
+    await store.listSubkeys(SAMPLE_KEY)
+
+    expect(mock.calls).toHaveLength(3)
+    expect(mock.calls[0].opts).toBeUndefined()
+    expect(mock.calls[1].opts).toBeUndefined()
+    expect(mock.calls[2].opts).toBeUndefined()
   })
 
   it('load returns rpc result verbatim — entries array passes through', async () => {

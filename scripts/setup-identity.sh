@@ -131,6 +131,16 @@ fi
 
 # --- --register path ---
 
+# `jq` is a runtime dependency of --register only — the bootstrap path above
+# (HOME skeleton creation) does not need it. We build the JSON payload via
+# `jq -n --arg` so values containing `"`, `\`, or newlines in $NAME / $HOME_PATH
+# can't break out of the JSON shape (a naive `printf '{"name":"%s",...}'`
+# would emit malformed JSON or worse).
+if ! command -v jq >/dev/null 2>&1; then
+  echo "[setup-identity] error: --register requires 'jq' (install with apt-get install jq)" >&2
+  exit 1
+fi
+
 ORCH_URL="${ORCH_URL:-http://localhost:43613}"
 TOKEN="${ADMIN_TOKEN:-}"
 if [[ -z "$TOKEN" ]]; then
@@ -143,7 +153,7 @@ if [[ -z "$TOKEN" ]]; then
 fi
 
 echo "[setup-identity] Registering '$NAME' at ${ORCH_URL}/api/admin/identities"
-payload=$(printf '{"name":"%s","home_path":"%s"}' "$NAME" "$HOME_PATH")
+payload=$(jq -n --arg n "$NAME" --arg p "$HOME_PATH" '{name: $n, home_path: $p}')
 http_code=$(curl -sS -o /tmp/setup-identity.resp -w '%{http_code}' \
   -X POST "${ORCH_URL}/api/admin/identities" \
   -H "Content-Type: application/json" \

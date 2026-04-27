@@ -30,8 +30,19 @@ import type { TranscriptRpcRequestEvent } from '@duraclaw/shared-types'
 
 /** Public contract — keeps the SessionStore adapter decoupled from the wire. */
 export interface TranscriptRpc {
-  /** Send an RPC and await the response. Throws on timeout or WS error. */
-  call<T>(method: TranscriptRpcMethod, params: Record<string, unknown>): Promise<T>
+  /**
+   * Send an RPC and await the response. Throws on timeout or WS error.
+   *
+   * `opts.timeoutMs` overrides the constructor default for this single call —
+   * used by `loadTranscript` so the RPC's per-call window matches the SDK's
+   * `loadTimeoutMs` (120s) and a slow load on a cold-start DO doesn't fail
+   * at the RPC layer with budget still remaining at the SDK layer.
+   */
+  call<T>(
+    method: TranscriptRpcMethod,
+    params: Record<string, unknown>,
+    opts?: { timeoutMs?: number },
+  ): Promise<T>
 }
 
 export type TranscriptRpcMethod = TranscriptRpcRequestEvent['method']
@@ -80,15 +91,20 @@ export class WsTranscriptRpc implements TranscriptRpc {
     this.clearTimer = opts.clearTimer ?? clearTimeout
   }
 
-  call<T>(method: TranscriptRpcMethod, params: Record<string, unknown>): Promise<T> {
+  call<T>(
+    method: TranscriptRpcMethod,
+    params: Record<string, unknown>,
+    opts?: { timeoutMs?: number },
+  ): Promise<T> {
     const rpcId = crypto.randomUUID()
+    const timeoutMs = opts?.timeoutMs ?? this.timeoutMs
     return new Promise<T>((resolve, reject) => {
       const timer = this.setTimer(() => {
         const entry = this.pending.get(rpcId)
         if (!entry) return
         this.pending.delete(rpcId)
-        reject(new Error(`TranscriptRpc timeout: ${method} after ${this.timeoutMs}ms`))
-      }, this.timeoutMs)
+        reject(new Error(`TranscriptRpc timeout: ${method} after ${timeoutMs}ms`))
+      }, timeoutMs)
       this.pending.set(rpcId, {
         resolve: resolve as (value: unknown) => void,
         reject,
