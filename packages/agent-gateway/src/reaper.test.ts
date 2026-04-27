@@ -502,3 +502,123 @@ describe('createReaper.reapOnce', () => {
     expect(report.scanned).toBe(1)
   })
 })
+
+// ── GH#113 P1.2: reportReapDecision fire-and-forget RPC ──────────────
+//
+// Stubs globalThis.fetch and verifies that `reportReapDecision` fires
+// the correct POST shape when the reaper skips a session due to a
+// fresh pending_gate, and that fetch failures are swallowed gracefully.
+
+describe('reportReapDecision — fire-and-forget RPC', () => {
+  // Save/restore fetch and env vars
+  let originalFetch: unknown
+  let originalWorkerUrl: string | undefined
+  let originalSecret: string | undefined
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch
+    originalWorkerUrl = process.env.WORKER_PUBLIC_URL
+    originalSecret = process.env.CC_GATEWAY_SECRET
+    process.env.WORKER_PUBLIC_URL = 'https://worker.example.com'
+    process.env.CC_GATEWAY_SECRET = 'test-secret'
+  })
+
+  afterEach(async () => {
+    ;(globalThis as { fetch: unknown }).fetch = originalFetch
+    if (originalWorkerUrl === undefined) {
+      delete process.env.WORKER_PUBLIC_URL
+    } else {
+      process.env.WORKER_PUBLIC_URL = originalWorkerUrl
+    }
+    if (originalSecret === undefined) {
+      delete process.env.CC_GATEWAY_SECRET
+    } else {
+      process.env.CC_GATEWAY_SECRET = originalSecret
+    }
+  })
+
+  it('POSTs reap-decision with decision=skip-pending-gate when pending_gate is fresh', async () => {
+    const fetchCalls: Array<{ url: string; init: RequestInit }> = []
+    ;(globalThis as { fetch: unknown }).fetch = async (
+      url: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      fetchCalls.push({ url: String(url), init: init ?? {} })
+      return new Response(JSON.stringify({ ok: true }), { status: 200 })
+    }
+
+    // Fresh pending_gate + stale last_activity_ts
+    await writeSession(tmpDir, {
+      id: 'REPORT-SKIP',
+      pid: 11000,
+      meta: {
+        last_activity_ts: FIXED_NOW - 31 * 60_000,
+        pending_gate: {
+          type: 'ask_user',
+          tool_call_id: 'tu_report',
+          parked_at_ts: FIXED_NOW - 5 * 60_000,
+        },
+      },
+    })
+
+    const reaper = createReaper(
+      baseOpts({
+        livenessCheck: (pid) => pid === 11000,
+        kill: () => {},
+      }),
+    )
+    await reaper.reapOnce()
+    reaper.stop()
+
+    // Allow fetch promise to settle (fire-and-forget is .then/.catch, not awaited)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    expect(fetchCalls).toHaveLength(1)
+    const call = fetchCalls[0]
+    expect(call.url).toBe(
+      'https://worker.example.com/api/gateway/sessions/REPORT-SKIP/reap-decision',
+    )
+    const body = JSON.parse(call.init.body as string)
+    expect(body.decision).toBe('skip-pending-gate')
+    expect(body.attrs.type).toBe('ask_user')
+    expect(body.attrs.tool_call_id).toBe('tu_report')
+  })
+
+  it('logs rpc-failed and does not throw when fetch rejects', async () => {
+    ;(globalThis as { fetch: unknown }).fetch = async () => {
+      throw new Error('network unreachable')
+    }
+
+    await writeSession(tmpDir, {
+      id: 'REPORT-FAIL',
+      pid: 12000,
+      meta: {
+        last_activity_ts: FIXED_NOW - 31 * 60_000,
+        pending_gate: {
+          type: 'ask_user',
+          tool_call_id: 'tu_fail',
+          parked_at_ts: FIXED_NOW - 5 * 60_000,
+        },
+      },
+    })
+
+    const logger = mkLogger()
+    const reaper = createReaper(
+      baseOpts({
+        livenessCheck: (pid) => pid === 12000,
+        kill: () => {},
+        logger,
+      }),
+    )
+    // Should not throw even though fetch rejects
+    await expect(reaper.reapOnce()).resolves.toBeDefined()
+    reaper.stop()
+
+    // Give the fire-and-forget promise time to settle
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    expect(
+      logger.warnCalls.some((l) => l.includes('rpc-failed') && l.includes('REPORT-FAIL')),
+    ).toBe(true)
+  })
+})

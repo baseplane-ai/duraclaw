@@ -152,6 +152,9 @@ export function createReaper(opts: ReaperOptions): Reaper {
   const terminalFileMaxAgeMs = opts.terminalFileMaxAgeMs ?? DEFAULT_TERMINAL_FILE_MAX_AGE_MS
   const logger = opts.logger ?? defaultLogger
 
+  const WORKER_PUBLIC_URL = process.env.WORKER_PUBLIC_URL ?? ''
+  const CC_GATEWAY_SECRET = process.env.CC_GATEWAY_SECRET ?? ''
+
   // Cadence state
   let interval: ReturnType<typeof setInterval> | null = null
 
@@ -195,6 +198,36 @@ export function createReaper(opts: ReaperOptions): Reaper {
       ;(timer as { unref: () => void }).unref()
     }
     killTimers.set(sessionId, timer)
+  }
+
+  function reportReapDecision(
+    sessionId: string,
+    decision: 'skip-pending-gate' | 'kill-stale' | 'kill-dead-runner',
+    attrs: Record<string, unknown>,
+  ): void {
+    if (!WORKER_PUBLIC_URL) return
+    const url = `${WORKER_PUBLIC_URL}/api/gateway/sessions/${sessionId}/reap-decision`
+    fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${CC_GATEWAY_SECRET}`,
+      },
+      body: JSON.stringify({ decision, attrs }),
+      signal: AbortSignal.timeout(2000),
+    })
+      .then((res) => {
+        if (!res.ok) {
+          logger.warn(
+            `[reaper] rpc-failed sessionId=${sessionId} decision=${decision} status=${res.status}`,
+          )
+        }
+      })
+      .catch((err) => {
+        logger.warn(
+          `[reaper] rpc-failed sessionId=${sessionId} decision=${decision} err=${(err as Error).message}`,
+        )
+      })
   }
 
   async function reapOnce(): Promise<ReapReport> {
@@ -297,6 +330,12 @@ export function createReaper(opts: ReaperOptions): Reaper {
               logger.info(
                 `[reaper] skip-pending-gate sessionId=${sessionId} type=${pg.type} tool_call_id=${pg.tool_call_id} parked_age_ms=${parkedAgeMs}`,
               )
+              reportReapDecision(sessionId, 'skip-pending-gate', {
+                type: pg.type,
+                tool_call_id: pg.tool_call_id,
+                parked_age_ms: parkedAgeMs,
+                last_activity_age_ms: lastActivityTs !== null ? currentNow - lastActivityTs : null,
+              })
               continue
             }
             // pending_gate exists but exceeded sanity threshold — fall through to SIGTERM
@@ -306,6 +345,10 @@ export function createReaper(opts: ReaperOptions): Reaper {
               `[reaper] stale session sessionId=${sessionId} alive=true last_activity_ts=${lastActivityTs} — SIGTERM`,
             )
             kill(pid, 'SIGTERM')
+            reportReapDecision(sessionId, 'kill-stale', {
+              pid,
+              last_activity_age_ms: lastActivityTs !== null ? currentNow - lastActivityTs : null,
+            })
             awaitingKill.set(sessionId, { pid, termedAt: currentNow })
             report.sigtermed.push(sessionId)
             scheduleSigkillWatchdog(sessionId, pid)
@@ -344,6 +387,10 @@ export function createReaper(opts: ReaperOptions): Reaper {
           if (result === 'written') {
             report.markedCrashed.push(sessionId)
             logger.info(`[reaper] crash marked sessionId=${sessionId} duration_ms=${durationMs}`)
+            reportReapDecision(sessionId, 'kill-dead-runner', {
+              pid: pid ?? null,
+              duration_ms: durationMs,
+            })
           } else {
             logger.info(`[reaper] exit file already present, skipping sessionId=${sessionId}`)
           }
