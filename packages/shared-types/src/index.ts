@@ -910,6 +910,15 @@ export interface SessionSummary {
   contextUsageJson?: string | null
   worktreeInfoJson?: string | null
   visibility?: 'public' | 'private'
+  /**
+   * GH#119: which runner identity owns this session. Populated by the DO at
+   * spawn time (P2) via syncIdentityNameToD1; surfaces in the session sidebar
+   * so operators can see which identity (e.g. 'work1' vs 'personal') is
+   * active. The wire shape uses camelCase because broadcastSessionRow
+   * `SELECT * FROM agent_sessions` via Drizzle, which returns TS field names
+   * (the column itself is `identity_name`).
+   */
+  identityName?: string | null
 }
 
 // ── Stored Message (for SQLite persistence) ─────────────────────────
