@@ -1,6 +1,7 @@
 import { unlink as fsUnlink, mkdir } from 'node:fs/promises'
-import { dirname, resolve } from 'node:path'
+import { dirname } from 'node:path'
 import { atomicOverwrite } from './atomic.js'
+import { assertWithinRoot } from './path-safety.js'
 
 /**
  * Write-back loop suppression (B9).
@@ -27,12 +28,21 @@ export class SuppressedWriter {
   }
 
   /**
+   * Defence-in-depth path-traversal check. `relPath` may originate from
+   * remote Yjs state pushed by a peer, so reject anything that escapes
+   * `rootPath` BEFORE writing or unlinking on disk.
+   */
+  private resolveSafe(relPath: string): string {
+    return assertWithinRoot(this.rootPath, relPath)
+  }
+
+  /**
    * Atomic write of `contents` to `relPath` (relative to `rootPath`). Suppress
    * entry is recorded BEFORE the write so that there is no window in which
    * chokidar could observe the change without the suppress marker present.
    */
   async write(relPath: string, contents: string): Promise<void> {
-    const absPath = resolve(this.rootPath, relPath)
+    const absPath = this.resolveSafe(relPath)
     // Record suppression BEFORE the fs visible change (B9 invariant).
     this.suppressedPaths.set(absPath, Date.now())
     await mkdir(dirname(absPath), { recursive: true })
@@ -44,7 +54,7 @@ export class SuppressedWriter {
    * the resulting chokidar `unlink` event doesn't fire B10's tombstone.
    */
   async unlink(relPath: string): Promise<void> {
-    const absPath = resolve(this.rootPath, relPath)
+    const absPath = this.resolveSafe(relPath)
     this.suppressedPaths.set(absPath, Date.now())
     try {
       await fsUnlink(absPath)

@@ -1,11 +1,11 @@
 import './jsdom-bootstrap.js'
 
 import fs from 'node:fs/promises'
-import path from 'node:path'
 import type { ServerBlockNoteEditor } from '@blocknote/server-util'
 import type * as Y from 'yjs'
 import { markdownToYDoc, yDocToMarkdown } from './blocknote-bridge.js'
 import { type HashStore, hashOfNormalisedMarkdown } from './content-hash.js'
+import { assertWithinRoot } from './path-safety.js'
 import type { SuppressedWriter } from './writer.js'
 
 /**
@@ -76,7 +76,7 @@ async function readDiskMd(absPath: string): Promise<string | null> {
 
 export async function reconcileOnAttach(opts: ReconcileOptions): Promise<ReconcileResult> {
   const { rootPath, relPath, ydoc, hashStore, writer, editor } = opts
-  const absPath = path.resolve(rootPath, relPath)
+  const absPath = assertWithinRoot(rootPath, relPath)
 
   const diskMarkdown = await readDiskMd(absPath)
   const doMarkdown = await yDocToMarkdown(ydoc, editor)

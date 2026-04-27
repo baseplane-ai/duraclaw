@@ -72,4 +72,14 @@ describe('SuppressedWriter', () => {
     const contents = await readFile(join(dir, 'a/b/c/deep.md'), 'utf8')
     expect(contents).toBe('deep\n')
   })
+
+  it('write rejects relPath that escapes the root', async () => {
+    const w = new SuppressedWriter(dir)
+    await expect(w.write('../escape.md', 'pwned\n')).rejects.toThrow('path escapes worktree root')
+  })
+
+  it('unlink rejects relPath that escapes the root', async () => {
+    const w = new SuppressedWriter(dir)
+    await expect(w.unlink('../escape.md')).rejects.toThrow('path escapes worktree root')
+  })
 })

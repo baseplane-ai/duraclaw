@@ -335,8 +335,20 @@ export class RepoDocumentDO extends YServer {
 }
 
 function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false
-  let mismatch = 0
-  for (let i = 0; i < a.length; i++) mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i)
-  return mismatch === 0
+  // Constant-time string compare. We deliberately do NOT short-circuit on
+  // a length mismatch — that would leak the expected secret's length via
+  // timing. Instead we run the XOR loop over `max(a.length, b.length)`
+  // bytes (padding the shorter side with NULs) and OR the length delta
+  // into the diff accumulator, so the work performed and the answer are
+  // independent of where the inputs first diverge.
+  const aLen = a.length
+  const bLen = b.length
+  const len = Math.max(aLen, bLen)
+  let diff = aLen ^ bLen
+  for (let i = 0; i < len; i++) {
+    const ca = i < aLen ? a.charCodeAt(i) : 0
+    const cb = i < bLen ? b.charCodeAt(i) : 0
+    diff |= ca ^ cb
+  }
+  return diff === 0
 }

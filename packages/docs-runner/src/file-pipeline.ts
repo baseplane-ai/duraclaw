@@ -20,7 +20,6 @@
  */
 
 import fs from 'node:fs/promises'
-import path from 'node:path'
 import type { ServerBlockNoteEditor } from '@blocknote/server-util'
 import { BufferedChannel, DialBackDocClient } from '@duraclaw/shared-transport'
 import { deriveEntityId } from '@duraclaw/shared-types'
@@ -29,6 +28,7 @@ import * as Y from 'yjs'
 import { markdownToYDoc } from './blocknote-bridge.js'
 import { type HashStore, hashOfNormalisedMarkdown } from './content-hash.js'
 import { createLogger, type Logger } from './logger.js'
+import { assertWithinRoot } from './path-safety.js'
 import { reconcileOnAttach } from './reconcile.js'
 import type { SuppressedWriter } from './writer.js'
 import { type YjsRunnerIdentity, YjsTransport } from './yjs-protocol.js'
@@ -224,7 +224,7 @@ export class FilePipeline {
 
   private async doLocalChange(): Promise<void> {
     if (this.stopped || this.currentState === 'tombstoned') return
-    const absPath = path.resolve(this.opts.rootPath, this.opts.relPath)
+    const absPath = assertWithinRoot(this.opts.rootPath, this.opts.relPath)
     let md: string
     try {
       md = await fs.readFile(absPath, 'utf8')

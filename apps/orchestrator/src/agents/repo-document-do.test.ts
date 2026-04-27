@@ -247,6 +247,54 @@ describe('RepoDocumentDO onConnect dual-auth', () => {
     expect(conn.setState).not.toHaveBeenCalled()
   })
 
+  // Defense-in-depth coverage for the constant-time bearer compare. These
+  // pin the behavior we care about — length mismatch and prefix-only
+  // matches both reject — without leaking timing on input length.
+  it('rejects a runner token that is a prefix of the secret (length mismatch)', async () => {
+    const { ctx } = makeCtx()
+    const sut = new RepoDocumentDO(ctx as any, { DOCS_RUNNER_SECRET: 'correct' } as any)
+    await sut.onLoad()
+
+    const conn = makeConn('runner-prefix')
+    await sut.onConnect(
+      conn as any,
+      makeReqCtx('wss://orch/repo/proj:foo.md?role=docs-runner&token=corr'),
+    )
+
+    expect(conn.close).toHaveBeenCalledWith(4401, 'invalid_token')
+    expect(conn.setState).not.toHaveBeenCalled()
+  })
+
+  it('rejects a runner token that is longer than the secret (length mismatch)', async () => {
+    const { ctx } = makeCtx()
+    const sut = new RepoDocumentDO(ctx as any, { DOCS_RUNNER_SECRET: 'correct' } as any)
+    await sut.onLoad()
+
+    const conn = makeConn('runner-long')
+    await sut.onConnect(
+      conn as any,
+      makeReqCtx('wss://orch/repo/proj:foo.md?role=docs-runner&token=correct-and-then-some'),
+    )
+
+    expect(conn.close).toHaveBeenCalledWith(4401, 'invalid_token')
+    expect(conn.setState).not.toHaveBeenCalled()
+  })
+
+  it('rejects a same-length but different runner token', async () => {
+    const { ctx } = makeCtx()
+    const sut = new RepoDocumentDO(ctx as any, { DOCS_RUNNER_SECRET: 'correct' } as any)
+    await sut.onLoad()
+
+    const conn = makeConn('runner-samelen')
+    await sut.onConnect(
+      conn as any,
+      makeReqCtx('wss://orch/repo/proj:foo.md?role=docs-runner&token=COrrect'),
+    )
+
+    expect(conn.close).toHaveBeenCalledWith(4401, 'invalid_token')
+    expect(conn.setState).not.toHaveBeenCalled()
+  })
+
   it('accepts a browser connection with a valid session cookie', async () => {
     ;(getRequestSession as any).mockResolvedValueOnce({ userId: 'u1', role: 'user' })
     const { ctx } = makeCtx()

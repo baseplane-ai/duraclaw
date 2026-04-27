@@ -119,7 +119,7 @@ export async function validateDocsWorktreePath(
 
   for (const prefix of prefixes) {
     const allowed = `${PROJECTS_ROOT}/${prefix}`
-    if (p === allowed || p.startsWith(`${allowed}/`) || p.startsWith(allowed)) {
+    if (p === allowed || p.startsWith(`${allowed}/`)) {
       return { ok: true }
     }
   }

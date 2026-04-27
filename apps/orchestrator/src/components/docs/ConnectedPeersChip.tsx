@@ -14,6 +14,15 @@
 
 import { Monitor } from 'lucide-react'
 
+// Awareness-sourced color values arrive over the wire from arbitrary
+// peers; render them only after validating they're a 6-digit hex color.
+// This keeps the inline `style={{ backgroundColor }}` write safe from
+// CSS-injection payloads (e.g. `red; background: url(...)`).
+const HEX_COLOR_RE = /^#[0-9a-f]{6}$/i
+function safeColor(c: unknown, fallback = '#9ca3af'): string {
+  return typeof c === 'string' && HEX_COLOR_RE.test(c) ? c : fallback
+}
+
 export interface ConnectedPeer {
   clientId: number
   kind?: string
@@ -50,7 +59,7 @@ export function ConnectedPeersChip({ peers }: ConnectedPeersChipProps) {
         // Default: render as a human peer (covers `kind === 'human'`
         // and any unknown kinds — better to surface than to hide).
         const name = p.name ?? 'Anonymous'
-        const color = p.color ?? '#9ca3af'
+        const color = safeColor(p.color)
         return (
           <span
             key={`human-${p.clientId}`}

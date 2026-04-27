@@ -177,6 +177,28 @@ describe('POST /docs-runners/start', () => {
     expect(await resp.json()).toEqual({ ok: false, error: 'docs_worktree_invalid' })
   })
 
+  it('400 "docs_worktree_invalid" on prefix-bypass attempt (e.g. /data/projects/duraclaw-evil)', async () => {
+    // Allow-list prefix is "duraclaw" → "/data/projects/duraclaw". A bare
+    // string-prefix check would WRONGLY accept "/data/projects/duraclaw-evil"
+    // because it starts with the same characters. The validator must reject
+    // it because the next character isn't a path separator.
+    process.env.PROJECT_PATTERNS = 'duraclaw'
+    const evilPath = '/data/projects/duraclaw-evil'
+    const statFn: StatFn = async (p) => {
+      if (p === evilPath) return { isDirectory: () => true }
+      return null
+    }
+    const { fn: spawnFn } = mkSpawnSpy()
+    const resp = await handleStartDocsRunner(validBody({ docsWorktreePath: evilPath }), {
+      docsRunnersDir: tmpDir,
+      binResolver: async () => '/x',
+      spawnFn,
+      statFn,
+    })
+    expect(resp.status).toBe(400)
+    expect(await resp.json()).toEqual({ ok: false, error: 'docs_worktree_invalid' })
+  })
+
   it('400 "docs_worktree_invalid" when path does not exist', async () => {
     const { fn: spawnFn } = mkSpawnSpy()
     const resp = await handleStartDocsRunner(
