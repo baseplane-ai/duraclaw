@@ -5,6 +5,7 @@ import type { UserPreferences } from '~/lib/types'
 const DEFAULTS: UserPreferences = {
   permissionMode: 'default',
   model: 'claude-opus-4-7',
+  codexModel: 'gpt-5.1',
   maxBudget: null,
   thinkingMode: 'adaptive',
   effort: 'xhigh',

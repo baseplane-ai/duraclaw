@@ -92,6 +92,7 @@ const TAB_PATCH_KEYS = new Set(['sessionId', 'position', 'meta'])
 const PREF_PATCH_KEYS = new Set([
   'permissionMode',
   'model',
+  'codexModel',
   'maxBudget',
   'thinkingMode',
   'effort',
@@ -1089,6 +1090,7 @@ export function createApiApp() {
       userId,
       permissionMode: 'default',
       model: 'claude-opus-4-7',
+      codexModel: 'gpt-5.1',
       maxBudget: null,
       thinkingMode: 'adaptive',
       effort: 'xhigh',

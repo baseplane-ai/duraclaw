@@ -1,0 +1,11 @@
+-- GH#-: split user_preferences.model into per-driver defaults.
+--
+-- The settings UI grew an [Claude]/[Codex] tab split (parallel to the
+-- driver-coexistence work in GH#109). Each tab needs its own remembered
+-- model so switching tabs doesn't clobber the other driver's pick.
+--
+-- `model` keeps Claude's default (legacy semantic preserved — every
+-- existing row already holds a claude-* string). `codex_model` is the
+-- codex-side counterpart; default seeds with `gpt-5.1` to match the
+-- enabled row in the `codex_models` admin catalog (migration 0024).
+ALTER TABLE user_preferences ADD COLUMN codex_model TEXT DEFAULT 'gpt-5.1';

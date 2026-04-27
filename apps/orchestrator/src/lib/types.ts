@@ -259,6 +259,7 @@ export interface UserPreferencesRow {
   userId: string
   permissionMode: string | null
   model: string | null
+  codexModel: string | null
   maxBudget: number | null
   thinkingMode: string | null
   effort: string | null

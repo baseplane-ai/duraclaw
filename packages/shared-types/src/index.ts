@@ -833,6 +833,7 @@ export interface BranchInfoRow {
 export interface UserPreferences {
   permissionMode: string
   model: string
+  codexModel: string
   maxBudget: number | null
   thinkingMode: string
   effort: string

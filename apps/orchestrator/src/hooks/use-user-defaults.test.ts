@@ -8,6 +8,7 @@ import { useUserDefaults } from './use-user-defaults'
 const DEFAULTS = {
   permissionMode: 'default',
   model: 'claude-opus-4-7',
+  codexModel: 'gpt-5.1',
   maxBudget: null,
   thinkingMode: 'adaptive',
   effort: 'xhigh',
@@ -55,6 +56,7 @@ describe('useUserDefaults', () => {
     const serverPrefs = {
       permissionMode: 'bypassPermissions',
       model: 'claude-sonnet-4-20250514',
+      codexModel: 'gpt-5.1',
       maxBudget: 10,
       thinkingMode: 'enabled',
       effort: 'medium',

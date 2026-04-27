@@ -17,6 +17,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '~/components/ui/select'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '~/components/ui/tabs'
 import { VisibilityBadge } from '~/components/visibility-badge'
 import { useLayout } from '~/context/layout-provider'
 import { useTheme } from '~/context/theme-provider'
@@ -26,14 +27,26 @@ import { useUserDefaults } from '~/hooks/use-user-defaults'
 import { signOut, useSession as useAuthSession } from '~/lib/auth-client'
 import { apiUrl } from '~/lib/platform'
 
-const MODEL_OPTIONS = [
+const CLAUDE_MODELS = [
   { value: 'claude-opus-4-7', label: 'claude-opus-4-7' },
   { value: 'claude-opus-4-6', label: 'claude-opus-4-6' },
   { value: 'claude-sonnet-4-6', label: 'claude-sonnet-4-6' },
   { value: 'claude-haiku-4-5', label: 'claude-haiku-4-5' },
-  { value: 'gpt-5.4', label: 'codex — gpt-5.4' },
-  { value: 'gpt-5.4-mini', label: 'codex — gpt-5.4-mini' },
 ]
+
+const CODEX_MODELS = [
+  { value: 'gpt-5.1', label: 'gpt-5.1' },
+  { value: 'gpt-5.4', label: 'gpt-5.4' },
+  { value: 'gpt-5.4-mini', label: 'gpt-5.4-mini' },
+  { value: 'o4-mini', label: 'o4-mini' },
+]
+
+function isCodexModel(model: string | undefined): boolean {
+  if (!model) return false
+  return (
+    CODEX_MODELS.some((m) => m.value === model) || model.startsWith('gpt-') || model === 'o4-mini'
+  )
+}
 
 const PERMISSION_MODES = [
   { value: 'default', label: 'Default', description: 'Ask for permission on risky actions' },
@@ -125,6 +138,46 @@ function DefaultsSection() {
     )
   }
 
+  // The settings UI is per-driver (tabs below). Each tab persists to its
+  // own column — `model` for Claude, `codexModel` for Codex — and they
+  // don't shadow each other. SpawnAgentForm picks which one to send based
+  // on the driver the user selects at spawn time. We default the visible
+  // tab to whichever driver `preferences.model` looks like, so users who
+  // historically had `model: 'gpt-5.4'` (pre-split) still land on the
+  // Codex surface on first paint.
+  const defaultTab = isCodexModel(preferences.model) ? 'codex' : 'claude'
+
+  const handleClaudeModelChange = (value: string) => {
+    updatePreferences({ model: value })
+  }
+  const handleCodexModelChange = (value: string) => {
+    updatePreferences({ codexModel: value })
+  }
+
+  const maxBudgetField = (
+    <div className="space-y-2">
+      <Label htmlFor="max-budget">Max Budget (USD)</Label>
+      <Input
+        id="max-budget"
+        type="number"
+        min={0}
+        step={0.5}
+        className="w-full max-w-xs"
+        placeholder="No limit"
+        value={preferences.maxBudget ?? ''}
+        onChange={(e) => {
+          const val = e.target.value
+          updatePreferences({
+            maxBudget: val === '' ? null : Number.parseFloat(val),
+          })
+        }}
+      />
+      <p className="text-xs text-muted-foreground">
+        Maximum spend per session. Leave empty for no limit.
+      </p>
+    </div>
+  )
+
   return (
     <Card>
       <CardHeader>
@@ -133,111 +186,131 @@ function DefaultsSection() {
           Default values for new sessions. These can be overridden per session.
         </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-6">
-        {/* Permission Mode */}
-        <div className="space-y-3">
-          <Label className="text-sm font-medium">Permission Mode</Label>
-          <RadioGroup
-            value={preferences.permissionMode}
-            onValueChange={(value) => updatePreferences({ permissionMode: value })}
-            className="grid gap-2"
-          >
-            {PERMISSION_MODES.map((mode) => (
-              <div key={mode.value} className="flex items-start gap-2">
-                <RadioGroupItem value={mode.value} id={`perm-${mode.value}`} className="mt-0.5" />
-                <div className="grid gap-0.5">
-                  <Label htmlFor={`perm-${mode.value}`} className="cursor-pointer text-sm">
-                    {mode.label}
-                  </Label>
-                  <p className="text-xs text-muted-foreground">{mode.description}</p>
-                </div>
-              </div>
-            ))}
-          </RadioGroup>
-        </div>
+      <CardContent>
+        <Tabs defaultValue={defaultTab} className="w-full">
+          <TabsList>
+            <TabsTrigger value="claude">Claude</TabsTrigger>
+            <TabsTrigger value="codex">Codex</TabsTrigger>
+          </TabsList>
 
-        {/* Model */}
-        <div className="space-y-2">
-          <Label htmlFor="default-model">Model</Label>
-          <Select
-            value={preferences.model}
-            onValueChange={(value) => updatePreferences({ model: value })}
-          >
-            <SelectTrigger id="default-model" className="w-full max-w-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {MODEL_OPTIONS.map((m) => (
-                <SelectItem key={m.value} value={m.value}>
-                  {m.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
+          <TabsContent value="claude" className="space-y-6 pt-4">
+            {/* Permission Mode */}
+            <div className="space-y-3">
+              <Label className="text-sm font-medium">Permission Mode</Label>
+              <RadioGroup
+                value={preferences.permissionMode}
+                onValueChange={(value) => updatePreferences({ permissionMode: value })}
+                className="grid gap-2"
+              >
+                {PERMISSION_MODES.map((mode) => (
+                  <div key={mode.value} className="flex items-start gap-2">
+                    <RadioGroupItem
+                      value={mode.value}
+                      id={`perm-${mode.value}`}
+                      className="mt-0.5"
+                    />
+                    <div className="grid gap-0.5">
+                      <Label htmlFor={`perm-${mode.value}`} className="cursor-pointer text-sm">
+                        {mode.label}
+                      </Label>
+                      <p className="text-xs text-muted-foreground">{mode.description}</p>
+                    </div>
+                  </div>
+                ))}
+              </RadioGroup>
+            </div>
 
-        {/* Max Budget */}
-        <div className="space-y-2">
-          <Label htmlFor="max-budget">Max Budget (USD)</Label>
-          <Input
-            id="max-budget"
-            type="number"
-            min={0}
-            step={0.5}
-            className="w-full max-w-xs"
-            placeholder="No limit"
-            value={preferences.maxBudget ?? ''}
-            onChange={(e) => {
-              const val = e.target.value
-              updatePreferences({
-                maxBudget: val === '' ? null : Number.parseFloat(val),
-              })
-            }}
-          />
-          <p className="text-xs text-muted-foreground">
-            Maximum spend per session. Leave empty for no limit.
-          </p>
-        </div>
+            {/* Claude Model */}
+            <div className="space-y-2">
+              <Label htmlFor="claude-model">Model</Label>
+              <Select
+                value={isCodexModel(preferences.model) ? CLAUDE_MODELS[0].value : preferences.model}
+                onValueChange={handleClaudeModelChange}
+              >
+                <SelectTrigger id="claude-model" className="w-full max-w-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {CLAUDE_MODELS.map((m) => (
+                    <SelectItem key={m.value} value={m.value}>
+                      {m.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
 
-        {/* Thinking Mode */}
-        <div className="space-y-2">
-          <Label htmlFor="thinking-mode">Thinking Mode</Label>
-          <Select
-            value={preferences.thinkingMode}
-            onValueChange={(value) => updatePreferences({ thinkingMode: value })}
-          >
-            <SelectTrigger id="thinking-mode" className="w-full max-w-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {THINKING_MODES.map((m) => (
-                <SelectItem key={m.value} value={m.value}>
-                  {m.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
+            {/* Thinking Mode */}
+            <div className="space-y-2">
+              <Label htmlFor="thinking-mode">Thinking Mode</Label>
+              <Select
+                value={preferences.thinkingMode}
+                onValueChange={(value) => updatePreferences({ thinkingMode: value })}
+              >
+                <SelectTrigger id="thinking-mode" className="w-full max-w-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {THINKING_MODES.map((m) => (
+                    <SelectItem key={m.value} value={m.value}>
+                      {m.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
 
-        {/* Effort */}
-        <div className="space-y-2">
-          <Label htmlFor="effort">Effort</Label>
-          <Select
-            value={preferences.effort}
-            onValueChange={(value) => updatePreferences({ effort: value })}
-          >
-            <SelectTrigger id="effort" className="w-full max-w-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {EFFORT_OPTIONS.map((m) => (
-                <SelectItem key={m.value} value={m.value}>
-                  {m.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
+            {/* Effort */}
+            <div className="space-y-2">
+              <Label htmlFor="effort">Effort</Label>
+              <Select
+                value={preferences.effort}
+                onValueChange={(value) => updatePreferences({ effort: value })}
+              >
+                <SelectTrigger id="effort" className="w-full max-w-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {EFFORT_OPTIONS.map((m) => (
+                    <SelectItem key={m.value} value={m.value}>
+                      {m.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {maxBudgetField}
+          </TabsContent>
+
+          <TabsContent value="codex" className="space-y-6 pt-4">
+            {/* Codex Model */}
+            <div className="space-y-2">
+              <Label htmlFor="codex-model">Model</Label>
+              <Select
+                value={preferences.codexModel ?? CODEX_MODELS[0].value}
+                onValueChange={handleCodexModelChange}
+              >
+                <SelectTrigger id="codex-model" className="w-full max-w-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {CODEX_MODELS.map((m) => (
+                    <SelectItem key={m.value} value={m.value}>
+                      {m.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Permission, thinking, and effort defaults are Claude-only — codex spawns use the
+                codex CLI's native settings.
+              </p>
+            </div>
+
+            {maxBudgetField}
+          </TabsContent>
+        </Tabs>
       </CardContent>
     </Card>
   )

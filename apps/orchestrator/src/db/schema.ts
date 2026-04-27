@@ -305,6 +305,7 @@ export const userPreferences = sqliteTable('user_preferences', {
     .references(() => users.id, { onDelete: 'cascade' }),
   permissionMode: text('permission_mode').default('default'),
   model: text('model').default('claude-opus-4-6'),
+  codexModel: text('codex_model').default('gpt-5.1'),
   maxBudget: real('max_budget'),
   thinkingMode: text('thinking_mode').default('adaptive'),
   effort: text('effort').default('high'),
