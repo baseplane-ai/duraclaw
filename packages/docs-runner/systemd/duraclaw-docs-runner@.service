@@ -1,0 +1,65 @@
+# Duraclaw docs-runner systemd template unit (GH#27 P1.8).
+#
+# This is a *template* unit — the trailing `@` means systemd instantiates it
+# per-instance, with `%i` bound to the instance string passed at enable
+# time. For the docs-runner, `%i` is the projectId, e.g.
+#
+#   sudo systemctl enable --now duraclaw-docs-runner@<projectId>.service
+#
+# This unit is intended for the local-tray launcher (spec 0015). On the
+# v1 VPS the docs-runner is spawned lazily by the agent-gateway, not by
+# systemd. The tray will override `ExecStart` (or drop in a replacement
+# unit) to point at whichever bin path it ships.
+#
+# Per-project lifecycle:
+#   - One unit instance per project owning a docs-runner.
+#   - The runtime dir at /run/duraclaw/docs-runners/ holds the
+#     {projectId}.{cmd,pid,exit,meta.json} files for that instance.
+#   - KillMode=process + SendSIGKILL=no mirror the agent-gateway pattern
+#     so a unit restart doesn't sweep any side processes the runner spawns.
+#   - RuntimeDirectoryPreserve=yes keeps /run/duraclaw/docs-runners/ alive
+#     across restarts so the {cmd,pid,exit,meta.json} files survive.
+
+[Unit]
+Description=Duraclaw docs-runner for project %i
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+# `ExecStart` is a placeholder — the tray (or the operator) overrides this
+# via a drop-in (`/etc/systemd/system/duraclaw-docs-runner@.service.d/*.conf`)
+# or by editing this file in-place to point at the bin path the runner is
+# installed at on this host. The 5-argv contract is:
+#   docs-runner <projectId> <cmd-file> <pid-file> <exit-file> <meta-file>
+ExecStart=/usr/local/lib/duraclaw/docs-runner %i /run/duraclaw/docs-runners/%i.cmd /run/duraclaw/docs-runners/%i.pid /run/duraclaw/docs-runners/%i.exit /run/duraclaw/docs-runners/%i.meta.json
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Mirror the agent-gateway pattern (#1 decoupling): only kill the main PID
+# on stop/restart so any side processes the runner has spawned are not
+# swept along with it.
+KillMode=process
+SendSIGKILL=no
+
+# Runtime state directory — systemd creates /run/duraclaw and
+# /run/duraclaw/docs-runners (0700) and manages their lifetime.
+# docs-runner writes its pid/meta/exit files under
+# /run/duraclaw/docs-runners/. Preserve=yes keeps the directory across
+# unit restarts so live runner files survive.
+RuntimeDirectory=duraclaw duraclaw/docs-runners
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+
+# Security hardening (mirrors agent-gateway).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=false
+ReadWritePaths=/data/projects /home/ubuntu/.claude /tmp
+
+[Install]
+WantedBy=multi-user.target

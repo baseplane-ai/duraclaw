@@ -24,7 +24,12 @@ import { configPath, DEFAULT_CONFIG_YAML, loadConfig } from './config.js'
 import { HashStore } from './content-hash.js'
 import { FilePipeline, type FilePipelineState } from './file-pipeline.js'
 import { globToRegExp } from './glob-match.js'
-import { type HealthFileEntry, HealthServer, type HealthSnapshot } from './health-server.js'
+import {
+  deriveStatus,
+  type HealthFileEntry,
+  HealthServer,
+  type HealthSnapshot,
+} from './health-server.js'
 import { Watcher } from './watcher.js'
 import { SuppressedWriter } from './writer.js'
 
@@ -298,6 +303,10 @@ export async function main(): Promise<void> {
   let healthServer: HealthServer | null = null
   let metaTimer: ReturnType<typeof setInterval> | null = null
   let consecutiveMetaFailures = 0
+  // P1.8 — flips to true once the initial `startInChunks(...)` walk has
+  // dispatched all initial pipelines. Until then, /health reports `down`
+  // (B14 threshold tree). Stays true for the rest of the process lifetime.
+  let enumerationComplete = false
 
   // Cmd-file overrides file-config (which itself replaces hardcoded defaults
   // from `loadConfig`'s DEFAULT_CONFIG when duraclaw-docs.yaml is absent).
@@ -440,6 +449,10 @@ export async function main(): Promise<void> {
       }
     })
     meta.files = pipelines.size
+    // Initial enumeration is "done" the moment the dir walk has dispatched
+    // all initial pipelines — even if every individual `start()` failed,
+    // we've at least observed the filesystem. /health flips out of `down`.
+    enumerationComplete = true
 
     // --- Step 7: watcher ---
     watcher = new Watcher({
@@ -520,10 +533,14 @@ export async function main(): Promise<void> {
         })
       }
       const watcherAlive = watcher?.isAlive() ?? false
-      const filesEmptyTooLong = meta.files === 0 && now - startTime > STARTUP_FILES_GRACE_MS
-      let status: HealthSnapshot['status'] = 'ok'
-      if (!watcherAlive || filesEmptyTooLong) status = 'down'
-      else if (disconnected > 0) status = 'degraded'
+      const status = deriveStatus({
+        watcherAlive,
+        enumerationComplete,
+        filesCount: meta.files,
+        uptimeMs: now - startTime,
+        disconnected,
+        startupGraceMs: STARTUP_FILES_GRACE_MS,
+      })
       return {
         status,
         version: VERSION,

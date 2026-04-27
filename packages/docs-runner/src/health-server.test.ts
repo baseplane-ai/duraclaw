@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { HealthServer, type HealthSnapshot } from './health-server.js'
+import {
+  type DeriveStatusInputs,
+  deriveStatus,
+  HealthServer,
+  type HealthSnapshot,
+} from './health-server.js'
 
 const baseSnapshot: HealthSnapshot = {
   status: 'ok',
@@ -93,5 +98,77 @@ describe('HealthServer', () => {
     counter = 5
     const b = (await (await fetch(`http://127.0.0.1:${port}/health`)).json()) as HealthSnapshot
     expect(b.files).toBe(5)
+  })
+})
+
+describe('deriveStatus (B14 threshold tree)', () => {
+  const baseInputs: DeriveStatusInputs = {
+    watcherAlive: true,
+    enumerationComplete: true,
+    filesCount: 3,
+    uptimeMs: 5_000,
+    disconnected: 0,
+    startupGraceMs: 30_000,
+  }
+
+  it('returns ok in the happy path', () => {
+    expect(deriveStatus(baseInputs)).toBe('ok')
+  })
+
+  it('returns down when watcher is dead', () => {
+    expect(deriveStatus({ ...baseInputs, watcherAlive: false })).toBe('down')
+  })
+
+  it('returns down when initial enumeration has not completed', () => {
+    expect(deriveStatus({ ...baseInputs, enumerationComplete: false })).toBe('down')
+  })
+
+  it('returns down when files=0 and uptime exceeds the grace window', () => {
+    expect(
+      deriveStatus({
+        ...baseInputs,
+        filesCount: 0,
+        uptimeMs: 30_001,
+        startupGraceMs: 30_000,
+      }),
+    ).toBe('down')
+  })
+
+  it('stays ok when files=0 but still within the grace window', () => {
+    expect(
+      deriveStatus({
+        ...baseInputs,
+        filesCount: 0,
+        uptimeMs: 5_000,
+        startupGraceMs: 30_000,
+      }),
+    ).toBe('ok')
+  })
+
+  it('returns degraded when at least one non-tombstoned file is disconnected', () => {
+    expect(deriveStatus({ ...baseInputs, disconnected: 1 })).toBe('degraded')
+  })
+
+  it('prefers down over degraded when both conditions hold', () => {
+    expect(
+      deriveStatus({
+        ...baseInputs,
+        watcherAlive: false,
+        disconnected: 2,
+      }),
+    ).toBe('down')
+  })
+
+  it('is tombstone-neutral — ok when disconnected=0 even if tombstoned files exist', () => {
+    // Tombstoned files are excluded from `disconnected` by the caller, so
+    // here we only need to assert that disconnected=0 yields ok regardless
+    // of any other implied tombstone count.
+    expect(
+      deriveStatus({
+        ...baseInputs,
+        filesCount: 5, // tracked files, ignoring tombstoned ones
+        disconnected: 0,
+      }),
+    ).toBe('ok')
   })
 })

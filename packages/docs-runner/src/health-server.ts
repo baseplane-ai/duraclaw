@@ -42,6 +42,47 @@ export interface HealthServerOptions {
   snapshot: () => HealthSnapshot
 }
 
+/**
+ * Inputs for the B14 status threshold tree (P1.8).
+ *
+ * Tombstoned files are intentionally excluded — `disconnected` here is the
+ * count of non-tombstoned files in the `disconnected` state. The caller
+ * (main.ts snapshot()) is responsible for that exclusion.
+ */
+export interface DeriveStatusInputs {
+  /** Result of `watcher.isAlive()`; `false` if the watcher hasn't started or is dead. */
+  watcherAlive: boolean
+  /** Whether the initial `startInChunks(...)` directory walk has completed. */
+  enumerationComplete: boolean
+  /** Number of currently tracked (non-tombstoned) files. */
+  filesCount: number
+  /** Process uptime in ms (`Date.now() - startTime`). */
+  uptimeMs: number
+  /** Count of non-tombstoned files in the `disconnected` state. */
+  disconnected: number
+  /** Grace window during which `filesCount === 0` is tolerated (default 30_000 in main). */
+  startupGraceMs: number
+}
+
+/**
+ * Pure threshold tree from B14 (spec 27 line 477-480). Evaluated in order;
+ * first match wins:
+ *   - down: watcher dead, OR initial enumeration not done, OR
+ *           files === 0 && uptime > startupGraceMs.
+ *   - degraded: any non-tombstoned file in `disconnected`.
+ *   - ok: otherwise.
+ */
+export function deriveStatus(inputs: DeriveStatusInputs): HealthSnapshot['status'] {
+  const filesEmptyTooLong = inputs.filesCount === 0 && inputs.uptimeMs > inputs.startupGraceMs
+  if (!inputs.watcherAlive || !inputs.enumerationComplete || filesEmptyTooLong) {
+    return 'down'
+  }
+  if (inputs.disconnected > 0) {
+    return 'degraded'
+  }
+  return 'ok'
+}
+
 export class HealthServer {
   private readonly opts: HealthServerOptions
   private server: http.Server | null = null
