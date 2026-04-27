@@ -96,15 +96,15 @@ export function mapThinkingPref(mode: string | null | undefined): ExecuteCommand
 
 /**
  * D1-flat-string -> SDK literal converter for the user's `effort`
- * preference. Returns `undefined` for unknown values (including the
- * legacy `'xhigh'` that the API allowlist used to accept but the SDK
- * has no mapping for) so the caller skips the field.
+ * preference. Returns `undefined` for unknown values so the caller
+ * skips the field rather than passing garbage to the SDK.
  */
 export function mapEffortPref(value: string | null | undefined): ExecuteCommand['effort'] {
   switch (value) {
     case 'low':
     case 'medium':
     case 'high':
+    case 'xhigh':
     case 'max':
       return value
     default:

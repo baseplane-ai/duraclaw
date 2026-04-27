@@ -48,13 +48,19 @@ export function resolvePermissionMode(value: string | undefined): PermissionMode
  * SDK-accepted effort levels. The DO already converts the user-pref
  * `effort` column at injection time (`mapEffortPref`), so anything
  * landing here is already validated. This second guard exists for
- * defence-in-depth: a stale legacy `'xhigh'` row that somehow slipped
- * past — or a future SDK pin that narrows the union — gets demoted to
+ * defence-in-depth: a stale legacy value that somehow slipped past —
+ * or a future SDK pin that narrows the union — gets demoted to
  * `'high'` (matches the user_preferences D1 default) instead of
  * crashing the SDK boot.
  */
 type EffortLevel = NonNullable<ExecuteCommand['effort']>
-const SDK_EFFORT_LEVELS: ReadonlySet<EffortLevel> = new Set(['low', 'medium', 'high', 'max'])
+const SDK_EFFORT_LEVELS: ReadonlySet<EffortLevel> = new Set([
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+])
 
 export function resolveEffort(value: string | undefined): EffortLevel | undefined {
   if (value === undefined) return undefined

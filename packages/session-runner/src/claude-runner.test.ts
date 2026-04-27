@@ -756,6 +756,7 @@ describe('resolveEffort', () => {
     expect(resolveEffort('low')).toBe('low')
     expect(resolveEffort('medium')).toBe('medium')
     expect(resolveEffort('high')).toBe('high')
+    expect(resolveEffort('xhigh')).toBe('xhigh')
     expect(resolveEffort('max')).toBe('max')
   })
 
@@ -763,11 +764,7 @@ describe('resolveEffort', () => {
     expect(resolveEffort(undefined)).toBe(undefined)
   })
 
-  it("demotes legacy / unknown values to 'high'", () => {
-    // 'xhigh' is valid for the Codex adapter but not for the Claude
-    // SDK. The DO mapper drops it before injection, but this guard
-    // catches anything that slips through.
-    expect(resolveEffort('xhigh')).toBe('high')
+  it("demotes unknown values to 'high'", () => {
     expect(resolveEffort('')).toBe('high')
     expect(resolveEffort('extreme')).toBe('high')
   })

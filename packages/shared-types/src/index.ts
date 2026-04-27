@@ -50,7 +50,7 @@ export interface ExecuteCommand {
     | { type: 'adaptive'; display?: 'summarized' | 'omitted' }
     | { type: 'enabled'; budgetTokens?: number; display?: 'summarized' | 'omitted' }
     | { type: 'disabled' }
-  effort?: 'low' | 'medium' | 'high' | 'max'
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
   /**
    * SDK permission mode. Injected by the DO from `user_preferences.permission_mode`
    * at spawn time. Runner falls back to `'default'` when omitted.
