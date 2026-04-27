@@ -1,6 +1,6 @@
 import { timingSafeEqual } from 'node:crypto'
 
-import type { GatewayCommand } from '~/lib/types'
+import type { GatewayCommand, PermissionMode } from '~/lib/types'
 import { getSessionStatus } from '~/lib/vps-client'
 import { RECOVERY_GRACE_MS, type SessionDOContext } from './types'
 import { clearRecoveryGraceTimer, scheduleWatchdog } from './watchdog'
@@ -172,6 +172,34 @@ export async function triggerGatewayDial(
   if (cmd.type === 'execute' || cmd.type === 'resume') {
     const titlerEnabled = await ctx.do.getFeatureFlagEnabled('haiku_titler', true)
     cmd = { ...cmd, titler_enabled: titlerEnabled }
+  }
+
+  // Inject the user's `permission_mode` preference onto every spawn /
+  // resume payload. Reads from D1 `user_preferences.permission_mode`
+  // for `ctx.state.userId`. Fail-open: on D1 miss the runner falls
+  // back to `'default'`. Runner-side validation rejects unknown
+  // values, so a stale legacy row (e.g. 'acceptAll') is safe.
+  if (cmd.type === 'execute' || cmd.type === 'resume') {
+    const userId = ctx.state.userId
+    if (userId) {
+      try {
+        const row = await ctx.env.AUTH_DB.prepare(
+          'SELECT permission_mode FROM user_preferences WHERE user_id = ?',
+        )
+          .bind(userId)
+          .first<{ permission_mode: string | null }>()
+        const mode = row?.permission_mode
+        if (mode) {
+          cmd = { ...cmd, permission_mode: mode as PermissionMode }
+        }
+      } catch (err) {
+        console.error(
+          `[SessionDO:${ctx.ctx.id}] Failed to read user_preferences.permission_mode from D1:`,
+          err,
+        )
+        // Proceed without — runner falls back to 'default'.
+      }
+    }
   }
 
   // GH#107: inject codex_models catalog onto codex spawn payloads. Reads

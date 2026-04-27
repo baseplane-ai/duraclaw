@@ -14,6 +14,19 @@ import type { SDKAssistantMessageError } from '@anthropic-ai/claude-agent-sdk'
  */
 export type AgentName = 'claude' | 'codex'
 
+/**
+ * Claude Agent SDK permission mode. Must stay in sync with the SDK's
+ * `PermissionMode` union (sdk.d.ts) — extending here without SDK
+ * support means the runner's fallback path swallows the value silently.
+ */
+export type PermissionMode =
+  | 'default'
+  | 'acceptEdits'
+  | 'bypassPermissions'
+  | 'plan'
+  | 'dontAsk'
+  | 'auto'
+
 export type GatewayCommand =
   | ExecuteCommand
   | ResumeCommand
@@ -38,6 +51,11 @@ export interface ExecuteCommand {
     | { type: 'enabled'; budgetTokens?: number; display?: 'summarized' | 'omitted' }
     | { type: 'disabled' }
   effort?: 'low' | 'medium' | 'high' | 'max'
+  /**
+   * SDK permission mode. Injected by the DO from `user_preferences.permission_mode`
+   * at spawn time. Runner falls back to `'default'` when omitted.
+   */
+  permission_mode?: PermissionMode
   /** Baseplane organization ID (gateway-level metadata, not passed to Claude SDK) */
   org_id?: string
   /** Baseplane user ID (gateway-level metadata, not passed to Claude SDK) */
@@ -113,6 +131,11 @@ export interface ResumeCommand {
   project: string
   prompt: string | ContentBlock[]
   runner_session_id: string
+  /**
+   * SDK permission mode. Injected by the DO from `user_preferences.permission_mode`
+   * at resume time so user-preference changes apply on the next spawn/resume.
+   */
+  permission_mode?: PermissionMode
   /** Which agent to use for resume. Defaults to 'claude' if omitted. */
   agent?: AgentName
   /**

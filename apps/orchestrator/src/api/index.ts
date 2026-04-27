@@ -103,9 +103,13 @@ const PREF_PATCH_KEYS = new Set([
   'defaultChainAutoAdvance',
 ])
 
+// Mirrors the Claude Agent SDK's `PermissionMode` union. Keep in sync
+// with `PermissionMode` in `@duraclaw/shared-types` and the SDK's
+// `sdk.d.ts`. `acceptAll` was historically accepted here but the SDK
+// has no such mode — it would be silently demoted to `'default'` by
+// the runner, so reject it at the API boundary.
 const PERMISSION_MODES = new Set([
   'default',
-  'acceptAll',
   'acceptEdits',
   'bypassPermissions',
   'plan',

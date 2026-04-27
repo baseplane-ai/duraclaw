@@ -2,7 +2,13 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ClaudeRunner, handleCanUseTool, isIdleStop, mapError } from './claude-runner.js'
+import {
+  ClaudeRunner,
+  handleCanUseTool,
+  isIdleStop,
+  mapError,
+  resolvePermissionMode,
+} from './claude-runner.js'
 import type { RunnerSessionContext } from './types.js'
 
 /**
@@ -718,5 +724,28 @@ describe('mapError (GH#102 B12 forward-compat)', () => {
     } finally {
       warnSpy.mockRestore()
     }
+  })
+})
+
+describe('resolvePermissionMode', () => {
+  it('passes through every SDK-known mode', () => {
+    expect(resolvePermissionMode('default')).toBe('default')
+    expect(resolvePermissionMode('acceptEdits')).toBe('acceptEdits')
+    expect(resolvePermissionMode('bypassPermissions')).toBe('bypassPermissions')
+    expect(resolvePermissionMode('plan')).toBe('plan')
+    expect(resolvePermissionMode('dontAsk')).toBe('dontAsk')
+    expect(resolvePermissionMode('auto')).toBe('auto')
+  })
+
+  it("falls back to 'default' when undefined (no preference set)", () => {
+    expect(resolvePermissionMode(undefined)).toBe('default')
+  })
+
+  it("falls back to 'default' on legacy or garbage values", () => {
+    // 'acceptAll' lived in the API allowlist historically but the SDK
+    // has no such mode — defensive demote rather than crash on boot.
+    expect(resolvePermissionMode('acceptAll')).toBe('default')
+    expect(resolvePermissionMode('')).toBe('default')
+    expect(resolvePermissionMode('not-a-mode')).toBe('default')
   })
 })

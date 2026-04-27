@@ -7,6 +7,7 @@ import type {
   ExecuteCommand,
   GatewayEvent,
   KataSessionState,
+  PermissionMode,
   ResumeCommand,
 } from '@duraclaw/shared-types'
 import { CLAUDE_CAPABILITIES } from './adapters/claude.js'
@@ -19,6 +20,29 @@ import type { RunnerSessionContext, SDKUserMsg } from './types.js'
 
 /** Debounce interval for kata state file changes (ms). Matches gateway. */
 const KATA_DEBOUNCE_MS = 150
+
+/**
+ * SDK-accepted permission modes. Wider than the API allowlist could
+ * theoretically hold (a stale legacy `'acceptAll'` row in
+ * `user_preferences.permission_mode` would land here untyped). Any
+ * value outside this set is silently demoted to `'default'` rather
+ * than crashing the SDK boot.
+ */
+const SDK_PERMISSION_MODES: ReadonlySet<PermissionMode> = new Set([
+  'default',
+  'acceptEdits',
+  'bypassPermissions',
+  'plan',
+  'dontAsk',
+  'auto',
+])
+
+export function resolvePermissionMode(value: string | undefined): PermissionMode {
+  if (value && SDK_PERMISSION_MODES.has(value as PermissionMode)) {
+    return value as PermissionMode
+  }
+  return 'default'
+}
 
 /**
  * Read the kata session state for a specific SDK session id.
@@ -503,7 +527,7 @@ export class ClaudeRunner {
         abortController: ac,
         cwd: projectPath,
         env: buildCleanEnv(),
-        permissionMode: 'default',
+        permissionMode: resolvePermissionMode(cmd.permission_mode),
         includePartialMessages: true,
         settingSources: ['user', 'project', 'local'],
         enableFileCheckpointing: true,

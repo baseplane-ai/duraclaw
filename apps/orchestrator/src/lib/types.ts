@@ -10,6 +10,7 @@ export type {
   GatewayCommand,
   GatewayEvent,
   KataSessionState,
+  PermissionMode,
   PrInfo,
   ProjectInfo,
   ResumeCommand,
