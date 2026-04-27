@@ -89,7 +89,12 @@ describe('advanceChain', () => {
     const spawnBody = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string)
     expect(spawnBody.project).toBe('duraclaw-dev4')
     expect(spawnBody.kataIssue).toBe(82)
-    expect(spawnBody.agent).toBe('research')
+    // GH#107 regression guard: `agent` on POST /api/sessions is the runner
+    // driver (`claude` | `codex`) and is rejected by `validateAgent()` for
+    // anything else. Chain advance must NOT pass the kata mode here — the
+    // mode rides on the `enter <mode>` prompt instead.
+    expect(spawnBody.agent).toBeUndefined()
+    expect(spawnBody.prompt).toBe('enter research --issue=82')
   })
 
   it('returns error when backlog chain has neither sessions nor projectOverride', async () => {

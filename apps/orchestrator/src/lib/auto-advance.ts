@@ -215,9 +215,18 @@ export async function tryAutoAdvance(
       userId,
       {
         project,
-        prompt: `enter ${nextMode}`,
+        // Issue-number flag tracks `kata enter <mode> --issue=N` syntax;
+        // implementation / verify / debug modes need the link to claim
+        // and write evidence, and auto-advance always knows the issue.
+        prompt: `enter ${nextMode} --issue=${kataIssue}`,
         model: 'sonnet',
-        agent: nextMode,
+        // GH#107 narrowed `agent` to the runner driver (`claude` | `codex`)
+        // and the DO now rejects anything else via `validateAgent()`. The
+        // kata mode is communicated to the runner via the `enter <mode>`
+        // prompt above; omitting `agent` lets create-session default to
+        // 'claude'. Passing `agent: nextMode` here was a pre-existing
+        // semantic confusion that started failing the auto-advance spawn
+        // with a generic 500 the moment GH#107 landed.
         kataIssue,
       },
       spawnCtx,

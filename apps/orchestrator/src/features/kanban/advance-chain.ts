@@ -60,7 +60,18 @@ async function abortSession(sessionId: string): Promise<void> {
 
 export async function spawnChainSession(input: {
   project: string
-  agent: string
+  /**
+   * Kata mode the new session should enter (research/planning/
+   * implementation/verify/debug/task/freeform). NOT the runner driver —
+   * the mode is communicated to the runner via the `enter <mode>` prompt
+   * and the chain row's eventual `kataMode` reporting. The `agent` field
+   * on `POST /api/sessions` is the runner driver (`claude` | `codex`,
+   * GH#107) and is intentionally omitted here so it defaults to claude.
+   * Conflating the two used to silently work; since GH#107 added DO-side
+   * `validateAgent()` it surfaces as a 500 ("Spawn failed: 500") on every
+   * advance click.
+   */
+  mode: string
   issueNumber: number
   model?: string
   prompt?: string
@@ -71,11 +82,14 @@ export async function spawnChainSession(input: {
     body: JSON.stringify({
       project: input.project,
       // Server requires a non-empty prompt; use a kata-mode placeholder
-      // so the runner starts immediately. The real mode prompt is the
-      // agent's system prompt + kata mode config.
-      prompt: input.prompt ?? `enter ${input.agent}`,
+      // so the runner starts immediately. Issue-number flag tracks
+      // `kata enter <mode> --issue=N` syntax — modes like implementation
+      // / verify / debug require the issue link to claim and write
+      // evidence, and chain advance always knows the issue from
+      // `chain.issueNumber`. The real mode prompt is the agent's system
+      // prompt + kata mode config.
+      prompt: input.prompt ?? `enter ${input.mode} --issue=${input.issueNumber}`,
       model: input.model ?? 'sonnet',
-      agent: input.agent,
       kataIssue: input.issueNumber,
     }),
   })
@@ -135,7 +149,7 @@ export async function advanceChain(
     }
     const sessionId = await spawnChainSession({
       project,
-      agent: nextMode,
+      mode: nextMode,
       issueNumber: chain.issueNumber,
     })
     return { ok: true, sessionId }

@@ -149,10 +149,14 @@ describe('tryAutoAdvance', () => {
     expect(call[1]).toBe('user-1')
     expect(call[2]).toMatchObject({
       project: 'duraclaw',
-      prompt: 'enter verify',
-      agent: 'verify',
+      prompt: 'enter verify --issue=42',
       kataIssue: 42,
     })
+    // GH#107 regression guard: `agent` on createSession is the runner
+    // driver (`claude` | `codex`); the kata mode rides on `prompt`
+    // instead. Passing the mode here would trip `validateAgent()` and
+    // collapse to a generic 500.
+    expect(call[2].agent).toBeUndefined()
   })
 
   it('honours per-chain override (autoAdvance:true) even if global default is false', async () => {
