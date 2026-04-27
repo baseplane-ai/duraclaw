@@ -152,9 +152,6 @@ export function createReaper(opts: ReaperOptions): Reaper {
   const terminalFileMaxAgeMs = opts.terminalFileMaxAgeMs ?? DEFAULT_TERMINAL_FILE_MAX_AGE_MS
   const logger = opts.logger ?? defaultLogger
 
-  const WORKER_PUBLIC_URL = process.env.WORKER_PUBLIC_URL ?? ''
-  const CC_GATEWAY_SECRET = process.env.CC_GATEWAY_SECRET ?? ''
-
   // Cadence state
   let interval: ReturnType<typeof setInterval> | null = null
 
@@ -205,13 +202,15 @@ export function createReaper(opts: ReaperOptions): Reaper {
     decision: 'skip-pending-gate' | 'kill-stale' | 'kill-dead-runner',
     attrs: Record<string, unknown>,
   ): void {
-    if (!WORKER_PUBLIC_URL) return
-    const url = `${WORKER_PUBLIC_URL}/api/gateway/sessions/${sessionId}/reap-decision`
+    const workerPublicUrl = process.env.WORKER_PUBLIC_URL ?? ''
+    const gatewaySecret = process.env.CC_GATEWAY_SECRET ?? ''
+    if (!workerPublicUrl) return
+    const url = `${workerPublicUrl}/api/gateway/sessions/${sessionId}/reap-decision`
     fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${CC_GATEWAY_SECRET}`,
+        Authorization: `Bearer ${gatewaySecret}`,
       },
       body: JSON.stringify({ decision, attrs }),
       signal: AbortSignal.timeout(2000),

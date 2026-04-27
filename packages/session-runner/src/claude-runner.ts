@@ -299,7 +299,13 @@ export async function handleCanUseTool(
     // Stamp pending_gate and flush BEFORE parking so the reaper can see
     // that the session is parked at a gate (B1/B2/B3 spec behaviors).
     ctx.meta.pending_gate = { type: 'ask_user', tool_call_id: id, parked_at_ts: Date.now() }
-    await ctx.flushMeta?.()
+    try {
+      await ctx.flushMeta?.()
+    } catch (flushErr) {
+      console.warn(
+        `[gate] pending_gate meta flush failed toolUseID=${id} reason=${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+      )
+    }
 
     // No timeout — the agent waits indefinitely for the user to answer.
     // The user can still abort the session, which fires `signal` and rejects.
@@ -338,7 +344,13 @@ export async function handleCanUseTool(
       throw err
     } finally {
       ctx.meta.pending_gate = null
-      await ctx.flushMeta?.()
+      try {
+        await ctx.flushMeta?.()
+      } catch (flushErr) {
+        console.warn(
+          `[gate] pending_gate clear flush failed toolUseID=${id} reason=${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+        )
+      }
     }
   }
 
@@ -354,7 +366,13 @@ export async function handleCanUseTool(
   // Stamp pending_gate and flush BEFORE parking so the reaper can see
   // that the session is parked at a gate (B1/B2/B3 spec behaviors).
   ctx.meta.pending_gate = { type: 'permission_request', tool_call_id: id, parked_at_ts: Date.now() }
-  await ctx.flushMeta?.()
+  try {
+    await ctx.flushMeta?.()
+  } catch (flushErr) {
+    console.warn(
+      `[gate] pending_gate meta flush failed toolUseID=${id} reason=${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+    )
+  }
 
   // No timeout — the agent waits indefinitely for the user to decide.
   // The user can still abort the session, which fires `signal` and rejects.
@@ -381,7 +399,13 @@ export async function handleCanUseTool(
     })
   } finally {
     ctx.meta.pending_gate = null
-    await ctx.flushMeta?.()
+    try {
+      await ctx.flushMeta?.()
+    } catch (flushErr) {
+      console.warn(
+        `[gate] pending_gate clear flush failed toolUseID=${id} reason=${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+      )
+    }
   }
 
   // Note: the SDK's runtime Zod validator requires `updatedInput` on every

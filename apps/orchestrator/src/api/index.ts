@@ -769,6 +769,7 @@ export function createApiApp() {
     const stub = c.env.SESSION_AGENT.get(doId)
 
     try {
+      // Cast: DO RPC types aren't auto-exposed on the stub; @callable routes correctly at runtime.
       await (
         stub as unknown as {
           recordReapDecision: (args: {
