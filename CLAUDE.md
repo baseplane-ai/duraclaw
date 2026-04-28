@@ -64,7 +64,7 @@ planning/
 ## Key Commands
 
 ```bash
-pnpm build              # Build all packages (tsup for workspace libs)
+pnpm build              # Build all packages (tsup for libs; bun build for VPS binaries)
 pnpm typecheck          # Typecheck all packages
 pnpm test               # Run vitest suites across the workspace
 pnpm dev                # Dev mode (all packages)
@@ -74,13 +74,17 @@ cd apps/orchestrator
 pnpm dev                # Local dev (Vite + miniflare)
 pnpm ship               # Build + wrangler deploy (do NOT run manually -- see Deployment)
 
-# Gateway (local)
+# Gateway (local dev)
 cd packages/agent-gateway
 bun run src/server.ts   # Starts on 127.0.0.1:$CC_GATEWAY_PORT (default 9877)
                         # Docs-runner uses $CC_DOCS_RUNNER_PORT (also derived per-worktree, see .claude/rules/worktree-setup.md)
 
-# Session-runner binary build
-pnpm --filter @duraclaw/session-runner build   # Emits dist/main.js with #!/usr/bin/env bun shebang
+# VPS binary bundles (gateway + both runners) — single self-contained
+# files via `scripts/bundle-bin.sh` (bun build --target=bun + atomic mv).
+# Production systemd runs the bundle, never source. See .claude/rules/deployment.md.
+pnpm --filter @duraclaw/agent-gateway  build   # -> packages/agent-gateway/dist/server.js
+pnpm --filter @duraclaw/session-runner build   # -> packages/session-runner/dist/main.js (shebanged, +x)
+pnpm --filter @duraclaw/docs-runner    build   # -> packages/docs-runner/dist/main.js   (shebanged, +x)
 ```
 
 ## Conventions
