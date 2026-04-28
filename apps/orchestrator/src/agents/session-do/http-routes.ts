@@ -284,9 +284,20 @@ export async function handleHttpRequest(
   // The public Hono route gates on `c.env.ENABLE_DEBUG_ENDPOINTS === 'true'`
   // before forwarding here, so this DO handler does not need its own gate
   // — only the API layer reaches it.
+  //
+  // `session_transcript.session_id` stores the SDK runner_session_id (the
+  // value the SDK passes to `SessionStore.append()`), NOT the duraclaw
+  // session id (`ctx.do.name`). Default to `ctx.state.runner_session_id`
+  // so the API route can call us without knowing the SDK id. The
+  // `?session_id=` override remains for tests and ad-hoc lookups.
   if (request.method === 'GET' && url.pathname === '/debug/transcript-count') {
     try {
-      const sessionId = url.searchParams.get('session_id') ?? ctx.do.name
+      const sessionId = url.searchParams.get('session_id') ?? ctx.state.runner_session_id ?? ''
+      if (!sessionId) {
+        return new Response(JSON.stringify({ count: 0, reason: 'no runner_session_id yet' }), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
       const count = transcriptCountImpl(ctx, sessionId)
       return new Response(JSON.stringify({ count }), {
         headers: { 'Content-Type': 'application/json' },

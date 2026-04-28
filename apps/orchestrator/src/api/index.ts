@@ -2194,16 +2194,16 @@ export function createApiApp() {
     const sessionId = access.session.id
     const doId = getSessionDoId(c.env, sessionId)
     const sessionDO = c.env.SESSION_AGENT.get(doId)
+    // Don't pass `session_id` here — the duraclaw session id is not the
+    // SDK runner_session_id stored in `session_transcript.session_id`. The
+    // DO resolves the correct id from its own `state.runner_session_id`.
     const response = await sessionDO.fetch(
-      new Request(
-        `https://session/debug/transcript-count?session_id=${encodeURIComponent(sessionId)}`,
-        {
-          headers: {
-            'x-partykit-room': sessionId,
-            'x-user-id': userId,
-          },
+      new Request('https://session/debug/transcript-count', {
+        headers: {
+          'x-partykit-room': sessionId,
+          'x-user-id': userId,
         },
-      ),
+      }),
     )
     if (!response.ok) {
       return c.json({ error: 'Session not found' }, response.status === 403 ? 403 : 404)
