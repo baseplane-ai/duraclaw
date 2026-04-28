@@ -1,8 +1,9 @@
 /**
  * @vitest-environment jsdom
  */
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, cleanup, fireEvent, render, screen } from '~/test-utils'
 
 // ── Mocks ──────────────────────────────────────────────────────────
 

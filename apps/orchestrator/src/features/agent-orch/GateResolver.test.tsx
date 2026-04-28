@@ -4,8 +4,8 @@
  * GateResolver tests — verifies structured AskUserQuestion rendering and interaction.
  */
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen } from '~/test-utils'
 import { GateResolver } from './GateResolver'
 
 afterEach(cleanup)

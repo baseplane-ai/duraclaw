@@ -4,8 +4,8 @@
  * ChatThread tests — verifies MessageBranch rendering and branch navigation.
  */
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen } from '~/test-utils'
 
 // Mock ai-elements to avoid complex dependency chain
 vi.mock('@duraclaw/ai-elements', () => ({
