@@ -244,14 +244,11 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
   const model = session?.model ?? null
   const contextUsage = parseJsonField<ContextUsage>(session?.contextUsageJson ?? null)
   const kataState = parseJsonField<KataSessionState>(session?.kataStateJson ?? null)
-  // DO-side `syncWorktreeInfoToD1` is defined but unwired (see
-  // session-do.ts:2352), so `worktreeInfoJson` is always null today. Fall
-  // back to deriving the branch/PR segment from `projectsCollection` —
-  // which is synced from the gateway with live git state — keyed by the
-  // session's project name. Restores the pre-spec-#37 branch + PR display
-  // in the status bar until the DO-side writer lands.
-  const worktreeInfoFromDo = parseJsonField<WorktreeInfo>(session?.worktreeInfoJson ?? null)
-  const worktreeInfo = worktreeInfoFromDo ?? worktreeInfoFromProjects
+  // GH#115 P1.4: the legacy `worktreeInfoJson` column was dropped (the
+  // DO-side writer was never wired). Branch/PR segments are derived from
+  // `projectsCollection`, which is synced from the gateway with live
+  // git state and keyed by the session's project name.
+  const worktreeInfo = worktreeInfoFromProjects
 
   return (
     <div

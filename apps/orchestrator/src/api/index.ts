@@ -12,8 +12,9 @@ import {
   projects as projectsTable,
   userPreferences,
   userPresence,
+  users,
   userTabs,
-  worktreeReservations,
+  worktrees,
 } from '~/db/schema'
 import { validateActionToken } from '~/lib/action-token'
 import { createAuth } from '~/lib/auth'
@@ -37,6 +38,7 @@ import {
 } from '~/lib/gateway-files'
 import { type PushPayload, sendPushNotification } from '~/lib/push'
 import { sendFcmNotification } from '~/lib/push-fcm'
+import { bindWorktreeById, reserveFreshWorktree, rowToDto } from '~/lib/reserve-worktree'
 import type {
   AgentSessionRow,
   ChainSummary,
@@ -57,6 +59,8 @@ import { authMiddleware } from './auth-middleware'
 import { authRoutes } from './auth-routes'
 import { getRequestSession } from './auth-session'
 import type { ApiAppEnv } from './context'
+import { runWorktreesJanitor } from './scheduled'
+import type { ReservedBy, SessionWorktreeParam, WorktreeRow } from './worktrees-types'
 
 interface CreateSessionBody {
   project?: string
@@ -77,6 +81,14 @@ interface CreateSessionBody {
    *  background. Must not match the 64-char hex shape used by DO
    *  `idFromString` (see `getSessionDoId`). */
   client_session_id?: string
+  /**
+   * GH#115: optional worktree reservation. `{kind:'fresh'}` allocates a
+   * fresh clone from the registry pool; `{id}` binds to an explicit id
+   * (e.g. inherited from chain predecessor). Absent => no reservation;
+   * the runner falls back to today's gateway-side project-path lookup.
+   * See planning/specs/115-worktrees-first-class-resource.md §B-API-5.
+   */
+  worktree?: SessionWorktreeParam
 }
 
 const ACTIVE_STATUSES = ['running', 'waiting_input', 'waiting_permission'] as const
@@ -126,6 +138,20 @@ const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
 
 function getDb(env: ApiAppEnv['Bindings']) {
   return drizzle(env.AUTH_DB, { schema })
+}
+
+/**
+ * GH#115: validate a `ReservedBy` payload from a `POST /api/worktrees`
+ * body. Accepts the three known kinds; `id` must be either a non-empty
+ * string or a positive integer (kataIssue uses numeric id).
+ */
+function isValidReservedBy(value: unknown): value is ReservedBy {
+  if (!value || typeof value !== 'object') return false
+  const v = value as { kind?: unknown; id?: unknown }
+  if (v.kind !== 'arc' && v.kind !== 'session' && v.kind !== 'manual') return false
+  if (typeof v.id === 'string') return v.id.length > 0
+  if (typeof v.id === 'number') return Number.isInteger(v.id) && v.id > 0
+  return false
 }
 
 /**
@@ -607,13 +633,30 @@ export function createApiApp() {
       return c.json({ ignored: true })
     }
 
+    // GH#115 P1.4: issue-closed releases the arc-bound reservation by
+    // flipping the row to `cleanup` (the P1.7 janitor owns hard-delete
+    // after grace, not this handler). Idempotent — a closed issue with
+    // no active reservation produces 0 affected rows.
     const db = getDb(c.env)
-    const deleted = await db
-      .delete(worktreeReservations)
-      .where(eq(worktreeReservations.issueNumber, issueNumber))
-      .returning({ worktree: worktreeReservations.worktree })
+    const now = Date.now()
+    const updated = await db
+      .update(worktrees)
+      .set({ releasedAt: now, status: 'cleanup', lastTouchedAt: now })
+      .where(
+        and(
+          sql`json_extract(${worktrees.reservedBy}, '$.kind') = 'arc'`,
+          sql`json_extract(${worktrees.reservedBy}, '$.id') = ${issueNumber}`,
+          isNull(worktrees.releasedAt),
+        ),
+      )
+      .returning({ id: worktrees.id, path: worktrees.path })
 
-    return c.json({ released: true, issueNumber, deleted: deleted.length })
+    return c.json({
+      released: true,
+      issueNumber,
+      deleted: updated.length,
+      paths: updated.map((u) => u.path),
+    })
   })
 
   // ── Gateway → Worker project sync (GH#32 phase p4) ────────────────
@@ -735,6 +778,180 @@ export function createApiApp() {
     }
 
     return c.body(null, 204)
+  })
+
+  // ── Gateway → Worker worktree-discovery sweep (GH#115 P1.3) ───────
+  //
+  // Batch upsert of clones the gateway observed under /data/projects/.
+  // Per B-DISCOVERY-1: idempotent INSERT-OR-UPDATE keyed by `path`.
+  //   - INSERT: status derived from classification (free vs held);
+  //     ownerId resolved from request payload → CC_DEFAULT_DISCOVERY_OWNER_USER_ID
+  //     env fallback. Validates user exists; surfaces a per-clone error
+  //     in errors[] if neither resolves.
+  //   - UPDATE: refresh `branch` (when changed) + `lastTouchedAt`. Does
+  //     NOT re-classify reservedBy / status / ownerId — those are sticky
+  //     after first INSERT until explicit DELETE+re-INSERT.
+  //
+  // Per-clone errors do NOT fail the batch — they're returned in
+  // `errors[]` so the gateway can log + retry on next sweep.
+  //
+  // Bypasses authMiddleware — auth is Bearer CC_GATEWAY_SECRET, timing-safe.
+  app.post('/api/gateway/worktrees/upsert', async (c) => {
+    const expected = c.env.CC_GATEWAY_SECRET
+    if (!expected) {
+      return c.json({ error: 'CC_GATEWAY_SECRET not configured' }, 401)
+    }
+    const authHeader = c.req.header('authorization') ?? ''
+    const provided = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
+    if (!constantTimeEquals(provided, expected)) {
+      return c.json({ error: 'unauthorized' }, 401)
+    }
+
+    const body = (await c.req.json().catch(() => null)) as {
+      clones?: unknown
+    } | null
+    if (!body || !Array.isArray(body.clones)) {
+      return c.json({ error: 'invalid body: expected {clones: SweptClone[]}' }, 400)
+    }
+
+    type IncomingClone = {
+      path?: unknown
+      branch?: unknown
+      reservedBy?: unknown
+      reservationOwnerUserId?: unknown
+    }
+
+    const upserted: Array<{ path: string; action: 'inserted' | 'updated' | 'unchanged' }> = []
+    const errors: Array<{ path: string; error: string }> = []
+    const fallbackOwner = c.env.CC_DEFAULT_DISCOVERY_OWNER_USER_ID ?? ''
+    const db = getDb(c.env)
+
+    // Cache the validated fallback owner per request — skip the users
+    // SELECT on every clone in the batch.
+    let fallbackOwnerValid: boolean | null = null
+    async function fallbackOwnerExists(): Promise<boolean> {
+      if (fallbackOwnerValid !== null) return fallbackOwnerValid
+      if (!fallbackOwner) {
+        fallbackOwnerValid = false
+        return false
+      }
+      const rows = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.id, fallbackOwner))
+        .limit(1)
+      fallbackOwnerValid = rows.length > 0
+      return fallbackOwnerValid
+    }
+
+    const validatedOwners = new Map<string, boolean>()
+    async function ownerExists(id: string): Promise<boolean> {
+      if (validatedOwners.has(id)) return validatedOwners.get(id) as boolean
+      const rows = await db.select({ id: users.id }).from(users).where(eq(users.id, id)).limit(1)
+      const exists = rows.length > 0
+      validatedOwners.set(id, exists)
+      return exists
+    }
+
+    for (const raw of body.clones as IncomingClone[]) {
+      if (
+        !raw ||
+        typeof raw !== 'object' ||
+        typeof raw.path !== 'string' ||
+        raw.path.length === 0
+      ) {
+        errors.push({
+          path: typeof raw?.path === 'string' ? raw.path : '<unknown>',
+          error: 'invalid_path',
+        })
+        continue
+      }
+      const cPath = raw.path
+      const branch = typeof raw.branch === 'string' && raw.branch.length > 0 ? raw.branch : null
+
+      // Validate reservedBy (matches isValidReservedBy contract).
+      let reservedByJson: string | null = null
+      if (raw.reservedBy !== undefined && raw.reservedBy !== null) {
+        if (!isValidReservedBy(raw.reservedBy)) {
+          errors.push({ path: cPath, error: 'invalid_reservedBy' })
+          continue
+        }
+        reservedByJson = JSON.stringify(raw.reservedBy)
+      }
+
+      // Look up by `path` (UNIQUE).
+      const existing = await db.select().from(worktrees).where(eq(worktrees.path, cPath)).limit(1)
+
+      if (existing.length === 0) {
+        // INSERT path. Resolve ownerId.
+        let ownerId: string | null = null
+        const requestedOwner =
+          typeof raw.reservationOwnerUserId === 'string' && raw.reservationOwnerUserId.length > 0
+            ? raw.reservationOwnerUserId
+            : null
+
+        if (requestedOwner) {
+          if (await ownerExists(requestedOwner)) {
+            ownerId = requestedOwner
+          } else {
+            errors.push({ path: cPath, error: 'invalid_owner' })
+            continue
+          }
+        } else if (await fallbackOwnerExists()) {
+          ownerId = fallbackOwner
+        } else {
+          errors.push({ path: cPath, error: 'no_owner_resolvable' })
+          continue
+        }
+
+        const status = reservedByJson ? 'held' : 'free'
+        const now = Date.now()
+        // 16-char id matches the migration 0027 scheme (lower(hex(randomblob(8)))).
+        const id = crypto.randomUUID().replace(/-/g, '').slice(0, 16)
+
+        try {
+          await db.insert(worktrees).values({
+            id,
+            path: cPath,
+            branch,
+            status,
+            reservedBy: reservedByJson,
+            releasedAt: null,
+            createdAt: now,
+            lastTouchedAt: now,
+            ownerId,
+          })
+          upserted.push({ path: cPath, action: 'inserted' })
+        } catch (err) {
+          // UNIQUE conflict on path is the most likely cause (concurrent
+          // sweep insert) — re-read and treat as update on next pass.
+          errors.push({
+            path: cPath,
+            error: `insert_failed: ${(err as Error).message ?? String(err)}`,
+          })
+        }
+        continue
+      }
+
+      // UPDATE path. Refresh branch (if changed) + lastTouchedAt.
+      // Sticky: do NOT update reservedBy / status / ownerId.
+      const row = existing[0]
+      const branchChanged = branch !== null && row.branch !== branch
+      const now = Date.now()
+
+      if (branchChanged) {
+        await db
+          .update(worktrees)
+          .set({ branch, lastTouchedAt: now })
+          .where(eq(worktrees.path, cPath))
+        upserted.push({ path: cPath, action: 'updated' })
+      } else {
+        await db.update(worktrees).set({ lastTouchedAt: now }).where(eq(worktrees.path, cPath))
+        upserted.push({ path: cPath, action: 'unchanged' })
+      }
+    }
+
+    return c.json({ upserted, errors }, 200)
   })
 
   // ── Gateway reap-decision bridge ──────────────────────────────────────────
@@ -2221,6 +2438,17 @@ export function createApiApp() {
     return c.json({ ok: true, id: flagId, enabled: body.enabled })
   })
 
+  // GH#115 §B-JANITOR-3: manual worktree sweep for operators. Runs the
+  // same DELETE logic as the worker cron synchronously and returns the
+  // deleted ids so an admin can confirm the result without tailing
+  // wrangler logs. Same idle-window resolution as the cron (env
+  // `CC_WORKTREE_IDLE_WINDOW_SECS`, default 24h).
+  app.post('/api/admin/worktrees/sweep', async (c) => {
+    if (c.get('role') !== 'admin') return c.json({ error: 'Forbidden' }, 403)
+    const result = await runWorktreesJanitor(c.env as unknown as Env)
+    return c.json(result, 200)
+  })
+
   app.post('/api/sessions/sync', async (c) => {
     const _userId = c.get('userId')
 
@@ -2304,6 +2532,151 @@ export function createApiApp() {
     return c.json({ updated, skipped, total: snapshots.length })
   })
 
+  // ── Worktrees registry (GH#115) ──────────────────────────────────────
+  // Reservable-resource API over /data/projects/* clones. See spec
+  // planning/specs/115-worktrees-first-class-resource.md §B-API-1..5.
+  // The legacy `worktreeReservations` table was dropped in P1.4; the
+  // chain endpoints below now operate on this table directly.
+
+  app.post('/api/worktrees', async (c) => {
+    const userId = c.get('userId')
+    const body = (await c.req.json().catch(() => null)) as {
+      kind?: string
+      reservedBy?: unknown
+    } | null
+    if (!body || body.kind !== 'fresh' || !isValidReservedBy(body.reservedBy)) {
+      return c.json({ error: 'invalid_request' }, 400)
+    }
+    const db = getDb(c.env)
+    const result = await reserveFreshWorktree(db, body.reservedBy, userId)
+    if (!result.ok) {
+      return c.json(
+        {
+          error: 'pool_exhausted',
+          freeCount: result.freeCount,
+          totalCount: result.totalCount,
+          hint: 'Run scripts/setup-clone.sh on the VPS to add a clone to the pool.',
+        },
+        503,
+      )
+    }
+    return c.json(result.row, 200)
+  })
+
+  app.get('/api/worktrees', async (c) => {
+    const userId = c.get('userId')
+    const role = c.get('role')
+    const status = c.req.query('status')
+    const kind = c.req.query('kind')
+    const id = c.req.query('id')
+    const db = getDb(c.env)
+    const conditions: SQL[] = []
+    if (status) conditions.push(eq(worktrees.status, status))
+    if (kind) conditions.push(sql`json_extract(${worktrees.reservedBy}, '$.kind') = ${kind}`)
+    if (id) conditions.push(sql`json_extract(${worktrees.reservedBy}, '$.id') = ${id}`)
+    // GH#115 review: scope to owner for non-admins.
+    if (role !== 'admin') {
+      conditions.push(eq(worktrees.ownerId, userId))
+    }
+    const rows = conditions.length
+      ? await db
+          .select()
+          .from(worktrees)
+          .where(and(...conditions))
+      : await db.select().from(worktrees)
+    return c.json({ worktrees: rows.map(rowToDto) })
+  })
+
+  app.post('/api/worktrees/:id/release', async (c) => {
+    const userId = c.get('userId')
+    const role = c.get('role')
+    const id = c.req.param('id')
+    const db = getDb(c.env)
+    // Look up the row first to check ownership.
+    const existing = await db.select().from(worktrees).where(eq(worktrees.id, id)).limit(1)
+    if (existing.length === 0) return c.json({ error: 'not_found' }, 404)
+    if (existing[0].ownerId !== userId && role !== 'admin') {
+      return c.json({ error: 'not_owner' }, 403)
+    }
+    const now = Date.now()
+    const updated = await db
+      .update(worktrees)
+      .set({ releasedAt: now, status: 'cleanup', lastTouchedAt: now })
+      .where(eq(worktrees.id, id))
+      .returning()
+    return c.json(rowToDto(updated[0]), 200)
+  })
+
+  app.delete('/api/worktrees/:id', async (c) => {
+    if (c.get('role') !== 'admin') return c.json({ error: 'Forbidden' }, 403)
+    const id = c.req.param('id')
+    const db = getDb(c.env)
+    // Null out FK references first — the schema's
+    // `agent_sessions.worktreeId REFERENCES worktrees(id)` has no
+    // ON DELETE SET NULL clause (SQLite can't ALTER it post-creation),
+    // so a referenced row would otherwise wedge on FK_CONSTRAINT_FAILED.
+    await db
+      .update(agentSessions)
+      .set({ worktreeId: null, updatedAt: new Date().toISOString() })
+      .where(eq(agentSessions.worktreeId, id))
+    const deleted = await db
+      .delete(worktrees)
+      .where(eq(worktrees.id, id))
+      .returning({ id: worktrees.id })
+    if (deleted.length === 0) return c.json({ error: 'not_found' }, 404)
+    return c.json({ ok: true, id: deleted[0].id }, 200)
+  })
+
+  // ── Kata-CLI worktree reservation (GH#115 P1.6) ──────────────────────
+  // Mirrors POST /api/worktrees but Bearer-authed via CC_GATEWAY_SECRET so
+  // the kata CLI can reserve from an unauth shell context. The CLI runs
+  // on the same VPS as the gateway and shares CC_GATEWAY_SECRET via
+  // .env / .dev.vars; ownerId resolves to CC_DEFAULT_DISCOVERY_OWNER_USER_ID
+  // (same fallback the gateway sweep uses on /api/gateway/worktrees/upsert).
+  // Bypasses authMiddleware — auth is Bearer CC_GATEWAY_SECRET, timing-safe.
+  app.post('/api/kata/worktrees/reserve', async (c) => {
+    const expected = c.env.CC_GATEWAY_SECRET
+    if (!expected) {
+      return c.json({ error: 'CC_GATEWAY_SECRET not configured' }, 401)
+    }
+    const authHeader = c.req.header('authorization') ?? ''
+    const provided = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
+    if (!constantTimeEquals(provided, expected)) {
+      return c.json({ error: 'unauthorized' }, 401)
+    }
+
+    const body = (await c.req.json().catch(() => null)) as {
+      kind?: string
+      reservedBy?: unknown
+    } | null
+    if (!body || body.kind !== 'fresh' || !isValidReservedBy(body.reservedBy)) {
+      return c.json({ error: 'invalid_request' }, 400)
+    }
+
+    const fallbackOwner = c.env.CC_DEFAULT_DISCOVERY_OWNER_USER_ID ?? ''
+    if (!fallbackOwner) {
+      return c.json(
+        { error: 'no_owner_resolvable', hint: 'Set CC_DEFAULT_DISCOVERY_OWNER_USER_ID' },
+        503,
+      )
+    }
+
+    const db = getDb(c.env)
+    const result = await reserveFreshWorktree(db, body.reservedBy, fallbackOwner)
+    if (!result.ok) {
+      return c.json(
+        {
+          error: 'pool_exhausted',
+          freeCount: result.freeCount,
+          totalCount: result.totalCount,
+          hint: 'Run scripts/setup-clone.sh on the VPS to add a clone to the pool.',
+        },
+        503,
+      )
+    }
+    return c.json(result.row, 200)
+  })
+
   app.post('/api/sessions', async (c) => {
     const userId = c.get('userId')
     const body = (await c.req.json()) as CreateSessionBody
@@ -2320,12 +2693,13 @@ export function createApiApp() {
         agent: body.agent,
         kataIssue: body.kataIssue,
         client_session_id: body.client_session_id,
+        worktree: body.worktree,
       },
       c.executionCtx,
     )
 
     if (!result.ok) {
-      return c.json({ error: result.error }, result.status as 400 | 500)
+      return c.json({ error: result.error }, result.status as 400 | 404 | 409 | 500 | 503)
     }
     return c.json({ session_id: result.sessionId }, 201)
   })
@@ -2745,7 +3119,14 @@ export function createApiApp() {
       return c.json({ error: 'Session not found' }, 404)
     }
 
-    const body = (await c.req.json()) as { up_to_message_id?: string; title?: string }
+    const body = (await c.req.json()) as {
+      up_to_message_id?: string
+      title?: string
+      // GH#115 P1.5 / B-FORK-1: optional override. Default inherits parent's
+      // worktreeId; explicit id binds via bindWorktreeById against the new
+      // session id. Same-`reservedBy` re-acquire and free-eligible rows pass.
+      worktreeId?: string
+    }
     const projectName = access.session.project
     const httpBase = (c.env.CC_GATEWAY_URL ?? '')
       .replace(/^wss:/, 'https:')
@@ -2779,6 +3160,31 @@ export function createApiApp() {
       return c.json({ error: 'Session has no runner session ID — cannot fork' }, 400)
     }
 
+    // GH#115 P1.5 / B-FORK-1: resolve the worktreeId for the forked
+    // session. Default inherits the parent's; the body may override with
+    // any free-eligible or same-`reservedBy` clone. We bind eagerly
+    // BEFORE the gateway POST so a 409/404 short-circuits without
+    // creating a dangling SDK fork.
+    const db = getDb(c.env)
+    let resolvedWorktreeId: string | null = access.session.worktreeId ?? null
+    if (typeof body.worktreeId === 'string' && body.worktreeId.length > 0) {
+      const bind = await bindWorktreeById(
+        db,
+        body.worktreeId,
+        { kind: 'session', id: access.session.id },
+        userId,
+      )
+      if (!bind.ok && bind.kind === 'not_found') {
+        return c.json({ error: 'worktree_not_found' }, 404)
+      }
+      if (!bind.ok && bind.kind === 'conflict') {
+        return c.json({ error: 'worktree_conflict' }, 409)
+      }
+      if (bind.ok) {
+        resolvedWorktreeId = bind.row.id
+      }
+    }
+
     const gatewayUrl = new URL(
       `/projects/${encodeURIComponent(projectName)}/sessions/${encodeURIComponent(runnerSessionId)}/fork`,
       httpBase,
@@ -2799,6 +3205,46 @@ export function createApiApp() {
     }
 
     const result = (await response.json()) as { session_id: string }
+
+    // GH#115 P1.5: persist worktreeId on the new agent_sessions row.
+    // The gateway-driven INSERT may not have happened yet — UPSERT so
+    // our value wins regardless of arrival order. Mirrors the minimal
+    // baseRow shape used by `lib/create-session.ts`.
+    if (resolvedWorktreeId) {
+      try {
+        const now = new Date().toISOString()
+        // GH#115 review: inherit parent's agent/visibility/model/kataIssue
+        // so Codex / private parents don't get silently rewritten to
+        // claude+public on the fork UPSERT.
+        await db
+          .insert(agentSessions)
+          .values({
+            id: result.session_id,
+            userId,
+            project: projectName,
+            status: 'running',
+            model: access.session.model ?? null,
+            agent: access.session.agent ?? 'claude',
+            kataIssue: access.session.kataIssue ?? null,
+            visibility: (access.session.visibility ?? 'public') as 'public' | 'private',
+            createdAt: now,
+            updatedAt: now,
+            lastActivity: now,
+            origin: 'duraclaw',
+            archived: false,
+            worktreeId: resolvedWorktreeId,
+          } as typeof agentSessions.$inferInsert)
+          .onConflictDoUpdate({
+            target: agentSessions.id,
+            set: { worktreeId: resolvedWorktreeId, updatedAt: now },
+          })
+      } catch (err) {
+        console.error(
+          `[fork] Failed to persist worktreeId=${resolvedWorktreeId} on session ${result.session_id}:`,
+          err,
+        )
+      }
+    }
 
     await broadcastSessionRow(c.env, c.executionCtx, result.session_id, 'insert')
 
@@ -2907,21 +3353,48 @@ export function createApiApp() {
       return c.json({ error: 'Invalid issue number' }, 400)
     }
 
+    // GH#115 P1.4: legacy body fields (`worktree`, `modeAtCheckout`) are
+    // accepted for back-compat but ignored — the new helper keys on
+    // `worktreeId` derived from the chain's most-recent session, and the
+    // `mode` label is informational only.
     const body = (await c.req.json().catch(() => null)) as {
       worktree?: unknown
       modeAtCheckout?: unknown
     } | null
-    if (!body || typeof body.worktree !== 'string' || body.worktree.length === 0) {
-      return c.json({ error: 'Missing required field: worktree' }, 400)
-    }
-    const worktree = body.worktree
     const modeAtCheckout =
-      typeof body.modeAtCheckout === 'string' && body.modeAtCheckout.length > 0
+      body && typeof body.modeAtCheckout === 'string' && body.modeAtCheckout.length > 0
         ? body.modeAtCheckout
         : 'implementation'
 
     const db = getDb(c.env)
-    const result = await checkoutWorktree(db, { issueNumber, worktree, modeAtCheckout }, userId)
+
+    // Resolve issueNumber -> worktreeId via the chain's most-recent
+    // session that has a worktreeId. Mirrors the resolution in
+    // `buildChainRow` (~/lib/chains.ts) so the checkout binds the
+    // already-allocated row instead of re-allocating from the pool.
+    const sessionRows = await db
+      .select({ worktreeId: agentSessions.worktreeId })
+      .from(agentSessions)
+      .where(eq(agentSessions.kataIssue, issueNumber))
+      .orderBy(desc(agentSessions.createdAt))
+    const sessionWithWt = sessionRows.find((s) => s.worktreeId)
+    const worktreeId = sessionWithWt?.worktreeId ?? null
+
+    if (!worktreeId) {
+      return c.json(
+        {
+          error: 'no_worktree_for_chain',
+          hint: 'Reserve via POST /api/worktrees first, or spawn a session with worktree:{kind:"fresh"}',
+        },
+        400,
+      )
+    }
+
+    const result = await checkoutWorktree(
+      db,
+      { worktreeId, mode: modeAtCheckout, reservedBy: { kind: 'arc', id: issueNumber } },
+      userId,
+    )
 
     if (result.ok) {
       // The reservation lives on `ChainSummary.worktreeReservation`;
@@ -2933,6 +3406,9 @@ export function createApiApp() {
     if (result.status === 409) {
       return c.json({ conflict: result.conflict, message: result.message }, 409)
     }
+    if (result.status === 404) {
+      return c.json({ error: result.error }, 404)
+    }
     return c.json({ error: result.error }, 500)
   })
 
@@ -2943,30 +3419,40 @@ export function createApiApp() {
       return c.json({ error: 'Invalid issue number' }, 400)
     }
 
+    // GH#115 P1.4: release flips the arc-bound row to `cleanup` instead
+    // of hard-deleting (the P1.7 janitor owns hard-delete after grace).
+    // Owner-only; non-owners must use /force-release (stale gate).
     const db = getDb(c.env)
     const targets = await db
       .select()
-      .from(worktreeReservations)
-      .where(eq(worktreeReservations.issueNumber, issueNumber))
+      .from(worktrees)
+      .where(
+        and(
+          sql`json_extract(${worktrees.reservedBy}, '$.kind') = 'arc'`,
+          sql`json_extract(${worktrees.reservedBy}, '$.id') = ${issueNumber}`,
+          isNull(worktrees.releasedAt),
+        ),
+      )
     if (targets.length === 0) {
       // Idempotent — no reservation means nothing to release.
       return c.json({ released: true, count: 0 })
     }
 
-    // Ownership check — only the reservation owner may call /release.
-    // Non-owners must use /force-release (which enforces the stale gate).
     const nonOwned = targets.filter((r) => r.ownerId !== userId)
     if (nonOwned.length > 0) {
-      return c.json({ error: 'not_owner', reservation: nonOwned[0] }, 403)
+      return c.json({ error: 'not_owner', reservation: rowToDto(nonOwned[0]) }, 403)
     }
 
-    await db.delete(worktreeReservations).where(eq(worktreeReservations.issueNumber, issueNumber))
-
+    const now = Date.now()
     for (const r of targets) {
+      await db
+        .update(worktrees)
+        .set({ releasedAt: now, status: 'cleanup', lastTouchedAt: now })
+        .where(eq(worktrees.id, r.id))
       await db.insert(auditLog).values({
         action: 'reservation_released',
         userId,
-        details: JSON.stringify({ issueNumber, worktree: r.worktree }),
+        details: JSON.stringify({ issueNumber, worktreeId: r.id, path: r.path }),
       })
     }
 
@@ -2991,23 +3477,22 @@ export function createApiApp() {
     if (!body || body.confirmation !== true) {
       return c.json({ message: 'Missing confirmation' }, 400)
     }
+    // GH#115 P1.4: legacy `worktree` (project-name) filter still accepted;
+    // applied as a path-suffix match against the new `worktrees.path`
+    // (`/data/projects/<name>`) so old clients stay wired.
     const worktreeFilter = typeof body.worktree === 'string' ? body.worktree : undefined
 
     const db = getDb(c.env)
+    const baseWhere = and(
+      sql`json_extract(${worktrees.reservedBy}, '$.kind') = 'arc'`,
+      sql`json_extract(${worktrees.reservedBy}, '$.id') = ${issueNumber}`,
+    )
     const targets = worktreeFilter
       ? await db
           .select()
-          .from(worktreeReservations)
-          .where(
-            and(
-              eq(worktreeReservations.issueNumber, issueNumber),
-              eq(worktreeReservations.worktree, worktreeFilter),
-            ),
-          )
-      : await db
-          .select()
-          .from(worktreeReservations)
-          .where(eq(worktreeReservations.issueNumber, issueNumber))
+          .from(worktrees)
+          .where(and(baseWhere, eq(worktrees.path, `/data/projects/${worktreeFilter}`)))
+      : await db.select().from(worktrees).where(baseWhere)
 
     if (targets.length === 0) {
       return c.json({ message: 'No reservation for this chain' }, 404)
@@ -3015,31 +3500,36 @@ export function createApiApp() {
 
     const staleCutoff = Date.now() - FORCE_RELEASE_STALE_MS
     for (const r of targets) {
-      const lastActivityMs = new Date(r.lastActivityAt).getTime()
-      const isStale = !!r.stale || (Number.isFinite(lastActivityMs) && lastActivityMs < staleCutoff)
+      const isStale = r.lastTouchedAt < staleCutoff
       if (!isStale) {
         return c.json(
           {
             message: 'Reservation not stale enough',
             staleAfterDays: FORCE_RELEASE_STALE_DAYS,
-            lastActivity: r.lastActivityAt,
+            lastActivity: new Date(r.lastTouchedAt).toISOString(),
           },
           403,
         )
       }
     }
 
-    // All targets pass the gate — delete + audit.
+    // All targets pass the gate — flip to cleanup + audit. Janitor (P1.7)
+    // owns hard-delete after grace.
+    const now = Date.now()
     for (const r of targets) {
-      await db.delete(worktreeReservations).where(eq(worktreeReservations.worktree, r.worktree))
+      await db
+        .update(worktrees)
+        .set({ releasedAt: now, status: 'cleanup', lastTouchedAt: now })
+        .where(eq(worktrees.id, r.id))
       await db.insert(auditLog).values({
         action: 'force_release_worktree',
         userId,
         details: JSON.stringify({
           issueNumber,
-          worktree: r.worktree,
+          worktreeId: r.id,
+          path: r.path,
           previousOwner: r.ownerId,
-          heldSince: r.heldSince,
+          createdAt: r.createdAt,
         }),
       })
     }
@@ -3120,16 +3610,26 @@ export function createApiApp() {
       sessionsByIssue.set(s.kataIssue, list)
     }
 
-    const allReservations = issueNumArray.length
-      ? await db
-          .select()
-          .from(worktreeReservations)
-          .where(inArray(worktreeReservations.issueNumber, issueNumArray))
+    // GH#115 P1.4: chain reservation is the worktrees row referenced by
+    // ANY session in the chain (all arc sessions share one FK). Bulk-
+    // fetch the unique non-null worktreeIds, then resolve per-issue.
+    const worktreeIds = Array.from(
+      new Set(allSessions.map((s) => s.worktreeId).filter((x): x is string => !!x)),
+    )
+    const allWorktrees = worktreeIds.length
+      ? await db.select().from(worktrees).where(inArray(worktrees.id, worktreeIds))
       : []
-    const reservationByIssue = new Map<number, (typeof allReservations)[number]>()
-    for (const r of allReservations) {
-      if (!reservationByIssue.has(r.issueNumber)) {
-        reservationByIssue.set(r.issueNumber, r)
+    const worktreeById = new Map(allWorktrees.map((w) => [w.id, w]))
+
+    const reservationByIssue = new Map<number, WorktreeRow | null>()
+    for (const issueNumber of allIssueNumbers) {
+      const sessions = sessionsByIssue.get(issueNumber) ?? []
+      const sessionWithWt = sessions.find((s) => s.worktreeId)
+      if (sessionWithWt?.worktreeId) {
+        const w = worktreeById.get(sessionWithWt.worktreeId)
+        reservationByIssue.set(issueNumber, w ? rowToDto(w) : null)
+      } else {
+        reservationByIssue.set(issueNumber, null)
       }
     }
 

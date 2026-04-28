@@ -178,26 +178,54 @@ export async function tryAutoAdvance(
   }
 
   // 4. Worktree checkout for code-touching successors.
+  // GH#115 P1.4: keyed on the predecessor session's `worktreeId` (FK
+  // into `worktrees`), not the legacy `(issueNumber, project)` tuple.
+  // Sessions pre-dating GH#115 may have `worktreeId=null` — in that
+  // case skip the checkout; the new kata auto-reserve (P1.6) will
+  // provision one on first mode entry.
+  let predecessorWorktreeId: string | null = null
   if (CODE_TOUCHING_MODES.has(nextMode)) {
-    try {
-      const co = await checkoutWorktree(
-        db,
-        { issueNumber: kataIssue, worktree: project, modeAtCheckout: nextMode },
-        userId,
-      )
-      if (!co.ok) {
-        if (co.status === 409) {
-          return {
-            action: 'stalled',
-            reason: `Worktree held by chain #${co.conflict.issueNumber}`,
+    const pre = await db
+      .select({ worktreeId: agentSessions.worktreeId })
+      .from(agentSessions)
+      .where(eq(agentSessions.id, params.sessionId))
+      .limit(1)
+    predecessorWorktreeId = pre[0]?.worktreeId ?? null
+
+    if (predecessorWorktreeId) {
+      try {
+        const co = await checkoutWorktree(
+          db,
+          {
+            worktreeId: predecessorWorktreeId,
+            mode: nextMode,
+            reservedBy: { kind: 'arc', id: kataIssue },
+          },
+          userId,
+        )
+        if (!co.ok) {
+          if (co.status === 409) {
+            return {
+              action: 'stalled',
+              reason: `Worktree held by ${co.conflict.reservedBy?.kind ?? '?'}:${co.conflict.reservedBy?.id ?? '?'}`,
+            }
           }
+          if (co.status === 404) {
+            return {
+              action: 'error',
+              error: `Worktree ${predecessorWorktreeId} no longer exists`,
+            }
+          }
+          return { action: 'error', error: co.error }
         }
-        return { action: 'error', error: co.error }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        return { action: 'error', error: `Worktree checkout failed: ${msg}` }
       }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      return { action: 'error', error: `Worktree checkout failed: ${msg}` }
     }
+    // (predecessor has no worktreeId; successor will reserve on its own
+    // via kata auto-reserve in P1.6 — until then, we skip silently to
+    // preserve back-compat with pre-GH#115 chains.)
   }
 
   // 5. Spawn the successor session. When the caller (SessionDO) provides
@@ -228,6 +256,10 @@ export async function tryAutoAdvance(
         // semantic confusion that started failing the auto-advance spawn
         // with a generic 500 the moment GH#107 landed.
         kataIssue,
+        // GH#115 P1.4: successor inherits predecessor's clone reservation
+        // via the worktrees FK. Same-`reservedBy` idempotency in
+        // `bindWorktreeById` guarantees the row is reused, not re-allocated.
+        ...(predecessorWorktreeId ? { worktree: { id: predecessorWorktreeId } } : {}),
       },
       spawnCtx,
     )

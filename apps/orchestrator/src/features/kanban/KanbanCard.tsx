@@ -19,7 +19,7 @@ import { useChainCheckout } from '~/hooks/use-chain-checkout'
 import { useNextModePrecondition } from '~/hooks/use-chain-preconditions'
 import { useTabSync } from '~/hooks/use-tab-sync'
 import { isChainSessionCompleted } from '~/lib/chains'
-import type { ChainSummary, WorktreeReservation } from '~/lib/types'
+import type { ChainSummary, ChainWorktreeReservation } from '~/lib/types'
 import { AdvanceConfirmModal } from './AdvanceConfirmModal'
 import { advanceChain, chainProject, hasActiveSession } from './advance-chain'
 
@@ -64,7 +64,7 @@ export function KanbanCard({ chain }: KanbanCardProps) {
   const { forceRelease } = useChainCheckout()
   const [modalOpen, setModalOpen] = useState(false)
   const [pending, setPending] = useState(false)
-  const [conflict, setConflict] = useState<WorktreeReservation | null>(null)
+  const [conflict, setConflict] = useState<ChainWorktreeReservation | null>(null)
   // Backlog-bootstrap: when a chain has zero sessions, the user picks a
   // worktree via the Advance modal. Empty-string = "no selection yet", which
   // is what disables the confirm button.
@@ -155,7 +155,18 @@ export function KanbanCard({ chain }: KanbanCardProps) {
   const handleForceRelease = useCallback(async () => {
     if (!conflict) return
     setPending(true)
-    const res = await forceRelease(conflict.issueNumber, conflict.worktree)
+    // GH#115: under the new wire shape, the chain's owning issue rides on
+    // `reservedBy.id` for `kind:'arc'` reservations (always the case for
+    // chain-driven holds). The legacy `worktree` (project name) is the
+    // path's basename. Falls back to the card's chain.issueNumber when the
+    // conflicting reservation is non-arc (defensive — shouldn't reach the
+    // chain UI today).
+    const conflictIssue =
+      conflict.reservedBy?.kind === 'arc' && typeof conflict.reservedBy.id === 'number'
+        ? conflict.reservedBy.id
+        : chain.issueNumber
+    const conflictWorktree = conflict.path.split('/').pop()
+    const res = await forceRelease(conflictIssue, conflictWorktree)
     if (!res.ok) {
       setPending(false)
       toast.error(res.error ?? 'Force release failed')
@@ -165,11 +176,14 @@ export function KanbanCard({ chain }: KanbanCardProps) {
     setConflict(null)
     setPending(false)
     await runAdvance()
-  }, [conflict, forceRelease, runAdvance])
+  }, [conflict, forceRelease, runAdvance, chain.issueNumber])
 
   const focus = pickFocusSession(chain.sessions)
   const focusTs = focus?.lastActivity ?? focus?.createdAt ?? chain.lastActivity
-  const worktree = chain.worktreeReservation?.worktree ?? null
+  // GH#115: legacy `worktree` (project name) is the basename of the new
+  // `path` field. Used for the chain card's worktree label and conflict-
+  // modal display.
+  const worktree = chain.worktreeReservation?.path.split('/').pop() ?? null
   const currentMode = focus?.kataMode ?? chain.column
 
   const hasActive = hasActiveSession(chain)

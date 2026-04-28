@@ -105,6 +105,11 @@ export interface Env {
    *  dial-back to RepoDocumentDO (B3). When unset, those bearer-paths
    *  reject with 401; cookie-authed browser callers still work. */
   DOCS_RUNNER_SECRET?: string
+  /** GH#115: fallback ownerId for worktree rows discovered by the
+   *  gateway sweep when the .duraclaw/reservation.json doesn't carry a
+   *  `userId`. Required for the gateway-sweep RPC; must reference an
+   *  existing users(id). */
+  CC_DEFAULT_DISCOVERY_OWNER_USER_ID?: string
   /** GH#129: base directory under which every runner identity's HOME
    *  lives. The DO derives `runner_home` as `${IDENTITY_HOME_BASE}/${name}`
    *  at spawn time and stamps it onto the gateway command. Defaults to
@@ -148,10 +153,13 @@ export interface AgentSessionRow {
   errorCode: string | null
   kataStateJson: string | null
   contextUsageJson: string | null
-  worktreeInfoJson: string | null
   kataMode: string | null
   kataIssue: number | null
   kataPhase: string | null
+  /** GH#115: FK into `worktrees(id)`. NULL for read-only modes (research,
+   *  planning, freeform) and pre-115 sessions whose backfill couldn't
+   *  resolve a row. */
+  worktreeId: string | null
   visibility: 'public' | 'private'
 }
 
@@ -216,18 +224,19 @@ export interface SessionViewerRow {
 }
 
 /**
- * Chain-level worktree checkout reservation (GH#16 Feature 3E). One row per
- * currently-checked-out worktree — owner holds the worktree for the lifetime
- * of the chain driving `issueNumber`. Serves as the TypeScript API contract
- * for `/api/worktrees/*` endpoints (U2) and the force-release webhook (U3).
+ * GH#115 P4: chain-level worktree reservation projected onto the chain
+ * summary wire shape. Mirrors the post-115 `worktrees(id)` row plus a
+ * derived `stale` boolean for the kanban force-release UI gate.
  */
-export interface WorktreeReservation {
-  issueNumber: number
-  worktree: string
+export interface ChainWorktreeReservation {
+  id: string
+  path: string
+  branch: string | null
+  status: 'free' | 'held' | 'active' | 'cleanup'
+  reservedBy: { kind: 'arc' | 'session' | 'manual'; id: string | number } | null
   ownerId: string
-  heldSince: string // ISO
-  lastActivityAt: string // ISO
-  modeAtCheckout: string
+  releasedAt: number | null
+  lastTouchedAt: number
   stale: boolean
 }
 
@@ -252,13 +261,7 @@ export interface ChainSummary {
     createdAt: string
     project: string
   }>
-  worktreeReservation: {
-    worktree: string
-    heldSince: string
-    lastActivityAt: string
-    ownerId: string
-    stale: boolean
-  } | null
+  worktreeReservation: ChainWorktreeReservation | null
   prNumber?: number
   lastActivity: string
 }

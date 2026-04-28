@@ -6,6 +6,7 @@ import {
 } from './broadcast'
 import { safeUpdateMessage as safeUpdateMessageImpl } from './history'
 import { hydrateFromGatewayImpl } from './hydrate-from-gateway'
+import { maybeReleaseWorktreeOnTerminal } from './maybe-release-worktree'
 import { finalizeStreamingParts } from './message-parts'
 import { sendToGateway } from './runner-link'
 import { RECOVERY_GRACE_MS, type SessionDOContext } from './types'
@@ -141,6 +142,9 @@ export async function recoverFromDroppedConnectionImpl(ctx: SessionDOContext): P
     active_callback_token: undefined,
   })
 
+  // GH#115 §B-LIFECYCLE-2: terminal-transition release-on-close.
+  maybeReleaseWorktreeOnTerminal(ctx)
+
   // Notify connected clients
   broadcastToClientsImpl(
     ctx,
@@ -193,4 +197,6 @@ export function fireRunawayInterruptImpl(
   ctx.do.recentTurnFingerprints = []
   ctx.do.currentTurnMessageId = null
   ctx.do.persistTurnState()
+  // GH#115 §B-LIFECYCLE-2: terminal-transition release-on-close.
+  maybeReleaseWorktreeOnTerminal(ctx)
 }

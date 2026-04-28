@@ -133,6 +133,12 @@ export const SessionStateSchema = z
 
     // Workflow directory (for task-based tracking)
     workflowDir: z.string().optional(),
+
+    // GH#115 §B-KATA-1: worktreeId reserved for code-touching modes.
+    // Persisted so subsequent `kata enter` calls in the same session
+    // reuse it (idempotency at the kata layer; orchestrator also
+    // enforces same-`reservedBy` idempotency).
+    worktreeId: z.string().optional(),
   })
   .passthrough() // Allow extra fields from legacy state files
 

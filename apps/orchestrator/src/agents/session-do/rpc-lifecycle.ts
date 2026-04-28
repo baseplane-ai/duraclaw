@@ -8,6 +8,7 @@ import { buildAwaitingPart as buildAwaitingPartImpl } from './branches'
 import { broadcastMessages as broadcastMessagesImpl } from './broadcast'
 import { clearPendingGateParts as clearPendingGatePartsImpl } from './gates'
 import type { SessionMeta } from './index'
+import { maybeReleaseWorktreeOnTerminal } from './maybe-release-worktree'
 import { sendToGateway, triggerGatewayDial as triggerGatewayDialImpl } from './runner-link'
 import { DEFAULT_META, type SessionDOContext } from './types'
 
@@ -79,7 +80,11 @@ export async function spawnImpl(
     session_id: id,
     userId: ctx.state.userId,
     project: config.project,
-    project_path: config.project,
+    // GH#115: prefer ctx.state.project_path (set by /create body from
+    // the resolved worktree path) over the project name fallback. Pre-
+    // 115 callers don't set project_path on the body, so the empty
+    // string falls back to config.project (today's behavior).
+    project_path: ctx.state.project_path || config.project,
     model: config.model ?? null,
     // Store a readable preview, not a JSON blob of base64 image data —
     // see `~/lib/prompt-preview`. Message parts preserve the full
@@ -92,6 +97,9 @@ export async function spawnImpl(
     // GH (deferred-runner): persist agent so the fresh-execute fallback in
     // sendMessageImpl can recover it after a hibernation / reaper kill.
     agent: validatedAgent ?? null,
+    // GH#115: preserve worktreeId already stamped onto SessionMeta by
+    // the /create handler (via http-routes.ts).
+    worktreeId: ctx.state.worktreeId ?? null,
   }
   ctx.do.setState(freshState)
   ctx.do.persistMetaPatch(freshState)
@@ -180,13 +188,17 @@ export async function initializeImpl(
     session_id: id,
     userId: ctx.state.userId,
     project: config.project,
-    project_path: config.project,
+    // GH#115: prefer ctx.state.project_path (set by /create body) over
+    // the project name fallback. See spawnImpl note.
+    project_path: ctx.state.project_path || config.project,
     model: config.model ?? null,
     prompt: '',
     started_at: null,
     created_at: ctx.state.created_at || now,
     updated_at: now,
     agent: validatedAgent ?? null,
+    // GH#115: preserve worktreeId already stamped by /create handler.
+    worktreeId: ctx.state.worktreeId ?? null,
   }
   ctx.do.setState(initState)
   ctx.do.persistMetaPatch(initState)
@@ -234,7 +246,9 @@ export async function resumeDiscoveredImpl(
     session_id: id,
     userId: ctx.state.userId,
     project: config.project,
-    project_path: config.project,
+    // GH#115: prefer ctx.state.project_path (set by /create body) over
+    // the project name fallback. See spawnImpl note.
+    project_path: ctx.state.project_path || config.project,
     model: config.model ?? null,
     // Readable preview — not a JSON blob. See `~/lib/prompt-preview`.
     prompt: promptToPreviewText(resumePrompt),
@@ -243,6 +257,8 @@ export async function resumeDiscoveredImpl(
     updated_at: now,
     runner_session_id: runnerSessionId,
     agent: validatedAgent ?? null,
+    // GH#115: preserve worktreeId already stamped by /create handler.
+    worktreeId: ctx.state.worktreeId ?? null,
   }
   ctx.do.setState(resumeState)
   ctx.do.persistMetaPatch(resumeState)
@@ -364,6 +380,9 @@ export async function stopImpl(
     sendToGateway(ctx, { type: 'stop', session_id: ctx.state.session_id ?? '' })
   }
 
+  // GH#115 §B-LIFECYCLE-2: terminal-transition release-on-close.
+  maybeReleaseWorktreeOnTerminal(ctx)
+
   console.log(`[SessionDO:${ctx.ctx.id}] stop: ${reason ?? 'user request'}`)
   return { ok: true }
 }
@@ -379,6 +398,8 @@ export async function abortImpl(
     active_callback_token: undefined,
   })
   sendToGateway(ctx, { type: 'stop', session_id: ctx.state.session_id ?? '' })
+  // GH#115 §B-LIFECYCLE-2: terminal-transition release-on-close.
+  maybeReleaseWorktreeOnTerminal(ctx)
   console.log(`[SessionDO:${ctx.ctx.id}] abort: ${reason ?? 'user request'}`)
   return { ok: true }
 }
@@ -416,6 +437,9 @@ export async function forceStopImpl(
     error: null,
     active_callback_token: undefined,
   })
+
+  // GH#115 §B-LIFECYCLE-2: terminal-transition release-on-close.
+  maybeReleaseWorktreeOnTerminal(ctx)
 
   // Best-effort in-band abort — harmless if the WS is dead.
   if (sessionId) {

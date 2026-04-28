@@ -13,6 +13,7 @@ import { broadcastSessionRow } from '~/lib/broadcast-session'
 import type { GatewayEvent } from '~/lib/types'
 import { broadcastMessages as broadcastMessagesImpl } from './broadcast'
 import { promoteToolPartToGate as promoteToolPartToGateImpl } from './gates'
+import { maybeReleaseWorktreeOnTerminal } from './maybe-release-worktree'
 import {
   applyToolResult,
   assistantContentToParts,
@@ -697,6 +698,11 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
           .maybeAutoAdvanceChain()
           .catch((err) => console.error('[session-do] post-stop chain:', err)),
       )
+      // GH#115 §B-LIFECYCLE-2: release-on-close. Last-session check
+      // inside the helper handles arc-shared chains where a successor
+      // is still running. Fire-and-forget; the cron janitor is the
+      // safety net if this ever fails.
+      maybeReleaseWorktreeOnTerminal(ctx)
       break
     }
 
@@ -824,6 +830,8 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
           'error',
         ),
       )
+      // GH#115 §B-LIFECYCLE-2: release-on-close (terminal error path).
+      maybeReleaseWorktreeOnTerminal(ctx)
       break
     }
 

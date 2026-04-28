@@ -111,6 +111,7 @@ export const DEFAULT_META: SessionMeta = {
   title_set_at_turn: null,
   title_source: null,
   agent: null,
+  worktreeId: null,
   waiting_identity_retries: 0,
 }
 
@@ -143,5 +144,6 @@ export const META_COLUMN_MAP: Partial<Record<keyof SessionMeta, string>> = {
   title_set_at_turn: 'title_set_at_turn',
   title_source: 'title_source',
   agent: 'agent',
+  worktreeId: 'worktree_id',
   waiting_identity_retries: 'waiting_identity_retries',
 }

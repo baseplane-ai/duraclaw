@@ -99,11 +99,11 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
     return () => statusBarClear()
   }, [statusBarClear])
 
-  // Spec #37 P2b / B7: DO is authoritative for worktreeInfo. The
-  // `projectsCollection` live query is kept so existing `matchedProject`
-  // dependants (if any are added later) stay wired without a client-side
-  // upsert path. The DO pushes worktreeInfoJson through sessionsCollection
-  // delta frames.
+  // GH#115 P1.4: the legacy `worktreeInfoJson` mirror was dropped (it
+  // was never wired). Branch/PR display reads from `projectsCollection`
+  // (synced from the gateway with live git state). The live query is
+  // kept here so any future `matchedProject` dependants stay wired
+  // without a client-side upsert path.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   useLiveQuery((q) => q.from({ p: projectsCollection as any }))
 

@@ -73,6 +73,14 @@ export interface ExecuteCommand {
   gemini_models?: ReadonlyArray<{ name: string; context_window: number }>
   /** GH#86: enable Haiku-based session titler in the runner. Default false. */
   titler_enabled?: boolean
+  /**
+   * GH#115: absolute path on the VPS to the reserved clone (e.g.
+   * `/data/projects/duraclaw-dev2`). When present, the runner uses
+   * this verbatim as the working directory; when absent (callers that
+   * predate worktree reservation), the runner falls back to its
+   * default project-path resolution (gateway-side `/projects/<name>`).
+   */
+  worktree_path?: string
   /** GH#119: enable DO-side SessionStore mirror for account failover. Default false. */
   session_store_enabled?: boolean
   /**
@@ -179,6 +187,14 @@ export interface ResumeCommand {
   gemini_models?: ReadonlyArray<{ name: string; context_window: number }>
   /** GH#86: enable Haiku-based session titler in the runner. Default false. */
   titler_enabled?: boolean
+  /**
+   * GH#115: absolute path on the VPS to the reserved clone (e.g.
+   * `/data/projects/duraclaw-dev2`). When present, the runner uses
+   * this verbatim as the working directory; when absent (callers that
+   * predate worktree reservation), the runner falls back to its
+   * default project-path resolution (gateway-side `/projects/<name>`).
+   */
+  worktree_path?: string
   /** GH#119: enable DO-side SessionStore mirror for account failover. Default false. */
   session_store_enabled?: boolean
   /**
@@ -912,7 +928,6 @@ export interface SessionSummary {
   errorCode?: string | null
   kataStateJson?: string | null
   contextUsageJson?: string | null
-  worktreeInfoJson?: string | null
   visibility?: 'public' | 'private'
   /**
    * GH#119: which runner identity owns this session. Populated by the DO at

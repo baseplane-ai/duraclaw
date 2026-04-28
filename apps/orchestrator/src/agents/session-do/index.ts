@@ -83,7 +83,6 @@ import {
 import {
   persistMetaPatch as persistMetaPatchImpl,
   syncContextUsageToD1 as syncContextUsageToD1Impl,
-  syncWorktreeInfoToD1 as syncWorktreeInfoToD1Impl,
   updateState as updateStateImpl,
 } from './status'
 import { gcTranscript } from './transcript'
@@ -121,6 +120,9 @@ export interface SessionMeta {
    */
   capabilities: AdapterCapabilities | null
   active_callback_token?: string
+  /** GH#115: FK into D1 worktrees(id). Used to source `worktree_path`
+   *  for ExecuteCommand / ResumeCommand. NULL until first reserve. */
+  worktreeId?: string | null
   lastKataMode?: string
   /** GH#73: true once runner observed `run-end.json`. Gate for chain auto-advance. */
   lastRunEnded?: boolean
@@ -330,11 +332,6 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   get d1() {
     return drizzle(this.env.AUTH_DB, { schema })
   }
-  // #37 P1b: stub kept for follow-up worktree-info attach. Do not remove.
-  // biome-ignore lint/correctness/noUnusedPrivateClassMembers: intentional, see above
-  private async syncWorktreeInfoToD1(worktreeInfoJson: string | null, updatedAt: string) {
-    return syncWorktreeInfoToD1Impl(this.moduleCtx, worktreeInfoJson, updatedAt)
-  }
   syncContextUsageToD1(json: string) {
     return syncContextUsageToD1Impl(this.moduleCtx, this.contextUsageDebounce, json)
   }
@@ -442,8 +439,9 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   @callable()
   async forkWithHistory(
     content: string | ContentBlock[],
+    opts?: { worktreeId?: string | null },
   ): Promise<{ ok: boolean; error?: string }> {
-    return forkWithHistoryImpl(this.moduleCtx, content)
+    return forkWithHistoryImpl(this.moduleCtx, content, opts)
   }
   @callable()
   async interrupt(): Promise<{ ok: boolean; error?: string }> {

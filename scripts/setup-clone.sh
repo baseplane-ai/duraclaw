@@ -11,9 +11,16 @@
 #   5. Prints the derived port pair so you know your URLs
 #
 # Usage:
-#   scripts/setup-clone.sh                    # interactive — prompts for secrets
-#   scripts/setup-clone.sh --from /path/.env  # copy secrets from another worktree's .env
-#   scripts/setup-clone.sh --skip-install     # skip pnpm install
+#   scripts/setup-clone.sh                              # interactive — prompts for secrets
+#   scripts/setup-clone.sh --from /path/.env            # copy secrets from another worktree's .env
+#   scripts/setup-clone.sh --skip-install               # skip pnpm install
+#   scripts/setup-clone.sh --reserve-for=arc:200        # stamp .duraclaw/reservation.json
+#   scripts/setup-clone.sh --reserve-for=session:abcd   # session-bound reservation
+#   scripts/setup-clone.sh --reserve-for=manual:branch  # manual operator reservation
+#
+# --reserve-for writes <ROOT>/.duraclaw/reservation.json so the gateway
+# auto-discovery sweep (GH#115) classifies the clone correctly on first
+# pass instead of falling back to the branch heuristic.
 #
 # ============================================================================
 
@@ -24,6 +31,12 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 FROM_ENV=""
 SKIP_INSTALL=false
+RESERVE_FOR=""
+
+usage() {
+  echo "Usage: $0 [--from /path/to/.env] [--skip-install] [--reserve-for=<kind>:<id>]" >&2
+  echo "  <kind> ∈ { arc, session, manual }; arc <id> is parsed as integer." >&2
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -35,9 +48,17 @@ while [[ $# -gt 0 ]]; do
       SKIP_INSTALL=true
       shift
       ;;
+    --reserve-for=*)
+      RESERVE_FOR="${1#--reserve-for=}"
+      shift
+      ;;
+    --reserve-for)
+      RESERVE_FOR="$2"
+      shift 2
+      ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: $0 [--from /path/to/.env] [--skip-install]" >&2
+      usage
       exit 1
       ;;
   esac
@@ -104,6 +125,70 @@ source "$ROOT/scripts/verify/common.sh"
 sync_dev_vars
 echo "[.dev.vars] Written to $ROOT/apps/orchestrator/.dev.vars"
 
+# ---- Step 3b: Optional .duraclaw/reservation.json (GH#115) ----
+
+if [[ -n "$RESERVE_FOR" ]]; then
+  if [[ "$RESERVE_FOR" != *:* ]]; then
+    echo "[reserve] Invalid --reserve-for value: '$RESERVE_FOR' (expected <kind>:<id>)" >&2
+    usage
+    exit 1
+  fi
+  RESERVE_KIND="${RESERVE_FOR%%:*}"
+  RESERVE_ID="${RESERVE_FOR#*:}"
+
+  case "$RESERVE_KIND" in
+    arc|session|manual) ;;
+    *)
+      echo "[reserve] Invalid kind: '$RESERVE_KIND' (must be arc, session, or manual)" >&2
+      exit 1
+      ;;
+  esac
+
+  if [[ -z "$RESERVE_ID" ]]; then
+    echo "[reserve] Missing id after kind in '$RESERVE_FOR'" >&2
+    exit 1
+  fi
+
+  # arc id is an integer (GitHub issue number); session/manual are
+  # arbitrary strings. Emit the JSON literal accordingly.
+  if [[ "$RESERVE_KIND" == "arc" ]]; then
+    if ! [[ "$RESERVE_ID" =~ ^[0-9]+$ ]]; then
+      echo "[reserve] arc id must be a positive integer (got '$RESERVE_ID')" >&2
+      exit 1
+    fi
+    ID_LITERAL="$RESERVE_ID"
+  else
+    # JSON-quote the string id and escape any embedded quotes/backslashes.
+    ESCAPED_ID="${RESERVE_ID//\\/\\\\}"
+    ESCAPED_ID="${ESCAPED_ID//\"/\\\"}"
+    ID_LITERAL="\"$ESCAPED_ID\""
+  fi
+
+  RESERVE_USER_ID="${CC_DEFAULT_DISCOVERY_OWNER_USER_ID:-}"
+
+  mkdir -p "$ROOT/.duraclaw"
+  RESERVATION_FILE="$ROOT/.duraclaw/reservation.json"
+  if [[ -n "$RESERVE_USER_ID" ]]; then
+    ESCAPED_USER="${RESERVE_USER_ID//\\/\\\\}"
+    ESCAPED_USER="${ESCAPED_USER//\"/\\\"}"
+    cat > "$RESERVATION_FILE" <<EOF
+{
+  "kind": "$RESERVE_KIND",
+  "id": $ID_LITERAL,
+  "userId": "$ESCAPED_USER"
+}
+EOF
+  else
+    cat > "$RESERVATION_FILE" <<EOF
+{
+  "kind": "$RESERVE_KIND",
+  "id": $ID_LITERAL
+}
+EOF
+  fi
+  echo "[reserve] Wrote $RESERVATION_FILE"
+fi
+
 # ---- Step 4: Install deps ----
 
 if [[ "$SKIP_INSTALL" == "true" ]]; then
@@ -129,6 +214,9 @@ echo ""
 echo "Worktree:     $ROOT"
 echo "Orch port:    $VERIFY_ORCH_PORT  → http://127.0.0.1:$VERIFY_ORCH_PORT"
 echo "Gateway port: $CC_GATEWAY_PORT   → http://127.0.0.1:$CC_GATEWAY_PORT"
+if [[ -n "$RESERVE_FOR" ]]; then
+  echo "Reservation:  $RESERVE_FOR (GH#115; gateway sweep will register on next pass)"
+fi
 echo ""
 echo "Start local stack:  scripts/verify/dev-up.sh"
 echo "Stop local stack:   scripts/verify/dev-down.sh"

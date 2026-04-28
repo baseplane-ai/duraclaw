@@ -25,10 +25,22 @@ export async function handleHttpRequest(
         userId?: string
         runner_session_id?: string
         project_path?: string
+        /** GH#115: FK into worktrees(id), persisted onto SessionMeta. */
+        worktreeId?: string | null
       }
       const userId = request.headers.get('x-user-id') ?? body.userId ?? null
       if (userId) {
         ctx.do.updateState({ userId })
+      }
+      // GH#115: persist worktreeId on SessionMeta so triggerGatewayDial
+      // can stamp `worktree_path` on execute/resume commands. The
+      // `project_path` is also taken from the body when set so the
+      // resolved clone path replaces today's gateway-side fallback.
+      if (typeof body.worktreeId === 'string' && body.worktreeId.length > 0) {
+        ctx.do.updateState({ worktreeId: body.worktreeId })
+      }
+      if (typeof body.project_path === 'string' && body.project_path.length > 0) {
+        ctx.do.updateState({ project_path: body.project_path })
       }
 
       let result: { ok: boolean; session_id?: string; error?: string }

@@ -23,6 +23,7 @@ import { spec as openapiSpec } from './openapi.js'
 import { discoverProjects, resolveProject } from './projects.js'
 import { getOrCreateReaper, startReaper, stopReaper } from './reaper.js'
 import type { WsData } from './types.js'
+import { runWorktreeSweepOnce, startWorktreeSweep } from './worktree-sweep.js'
 
 /** Decode a captured project-name URL segment (e.g. `packages%2Fnanobanana`). */
 function decodeProjectName(raw: string): string | null {
@@ -134,6 +135,12 @@ const server = Bun.serve<WsData>({
 
     // POST /sessions/start — spawn detached session-runner (B4)
     if (req.method === 'POST' && path === '/sessions/start') {
+      // GH#115 P1.3 (B-DISCOVERY-1): lazy-upsert the worktree registry on
+      // every spawn so a brand-new clone appears on first use without
+      // waiting up to 60s for the periodic timer. Fire-and-forget;
+      // idempotent against the periodic timer running concurrently.
+      void runWorktreeSweepOnce()
+
       let body: unknown
       try {
         body = await req.json()
@@ -517,6 +524,19 @@ if (
   )
 }
 
+// ── Worktree auto-discovery sweep (GH#115 P1.3) ─────────────────────
+//
+// Scans /data/projects/* clones every CC_WORKTREE_SWEEP_INTERVAL_MS
+// (default 60s); classifies by HEAD branch + .duraclaw/reservation.json;
+// upserts /api/gateway/worktrees/upsert. The sweep itself is a no-op
+// when WORKER_PUBLIC_URL / CC_GATEWAY_SECRET are missing (it runs
+// locally but skips the RPC). Disabled entirely under NODE_ENV=test /
+// VITEST so unit-test imports don't schedule a background interval.
+const worktreeSweepHandle = startWorktreeSweep()
+if (worktreeSweepHandle) {
+  console.log('[agent-gateway] Worktree-sweep active')
+}
+
 console.log(`[agent-gateway] Listening on http://127.0.0.1:${PORT}`)
 
 // Start the reaper (B6). Runs one pass immediately, then every 5 minutes.
@@ -547,6 +567,10 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     if (projectSyncTimer) {
       clearInterval(projectSyncTimer)
       projectSyncTimer = null
+    }
+
+    if (worktreeSweepHandle) {
+      worktreeSweepHandle.stop()
     }
 
     server.stop()

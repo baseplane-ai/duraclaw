@@ -1,6 +1,6 @@
 import type { AdapterCapabilities } from '@duraclaw/shared-types'
-import { and, eq } from 'drizzle-orm'
-import { agentSessions, worktreeReservations } from '~/db/schema'
+import { eq } from 'drizzle-orm'
+import { agentSessions, worktrees } from '~/db/schema'
 import { broadcastSessionRow } from '~/lib/broadcast-session'
 import type { KataSessionState } from '~/lib/types'
 import { broadcastChainUpdate, broadcastStatusFrame, broadcastStatusToOwner } from './broadcast'
@@ -274,48 +274,22 @@ export async function syncKataAllToD1(
     console.error(`[SessionDO:${ctx.ctx.id}] Failed to sync kata (all) to D1:`, err)
   }
 
-  // Mirror `syncKataToD1` side effects: refresh worktree reservation
-  // last_activity_at (clears stale flag) and broadcast updated chains row.
-  if (kataState?.issueNumber != null && ctx.state.project) {
+  // GH#115 P1.4: refresh `worktrees.lastTouchedAt` keyed by the session's
+  // worktreeId (FK on agent_sessions). Drops the legacy
+  // `(issueNumber, project)` join + `stale=false` write — staleness is
+  // derived in the chain projection (see `buildChainRowFromContext`).
+  if (kataState?.issueNumber != null && ctx.state.worktreeId) {
     try {
       await ctx.do.d1
-        .update(worktreeReservations)
-        .set({ lastActivityAt: updatedAt, stale: false })
-        .where(
-          and(
-            eq(worktreeReservations.issueNumber, kataState.issueNumber),
-            eq(worktreeReservations.worktree, ctx.state.project),
-          ),
-        )
+        .update(worktrees)
+        .set({ lastTouchedAt: Date.now() })
+        .where(eq(worktrees.id, ctx.state.worktreeId))
     } catch (err) {
-      console.error(`[SessionDO:${ctx.ctx.id}] failed to refresh reservation activity:`, err)
+      console.error(`[SessionDO:${ctx.ctx.id}] failed to refresh worktree lastTouchedAt:`, err)
     }
   }
 
   broadcastChainUpdate(ctx, kataState?.issueNumber ?? null)
-}
-
-/**
- * Spec #37 P1b: defined but not yet wired — there is no callsite in the
- * DO that builds a WorktreeInfo JSON object today. Leaving this in place
- * so the follow-up (worktree-info resolution) can attach without a new
- * helper. Do not remove.
- */
-export async function syncWorktreeInfoToD1(
-  ctx: SessionDOContext,
-  worktreeInfoJson: string | null,
-  updatedAt: string,
-): Promise<void> {
-  try {
-    const sessionId = ctx.do.name
-    await ctx.do.d1
-      .update(agentSessions)
-      .set({ worktreeInfoJson, messageSeq: ctx.do.messageSeq, updatedAt })
-      .where(eq(agentSessions.id, sessionId))
-    await broadcastSessionRow(ctx.env, ctx.ctx, sessionId, 'update')
-  } catch (err) {
-    console.error(`[SessionDO:${ctx.ctx.id}] Failed to sync worktree_info_json to D1:`, err)
-  }
 }
 
 /**

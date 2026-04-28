@@ -173,7 +173,11 @@ export const agentSessions = sqliteTable(
     errorCode: text('error_code'),
     kataStateJson: text('kata_state_json'),
     contextUsageJson: text('context_usage_json'),
-    worktreeInfoJson: text('worktree_info_json'),
+    // GH#115: FK into worktrees(id). NULL for sessions in read-only
+    // kata modes (research, planning, freeform); populated by kata
+    // auto-reserve for code-touching modes. Backfilled from the prior
+    // (kataIssue, project) tuple by migration 0027.
+    worktreeId: text('worktreeId'),
     visibility: text('visibility').notNull().default('public'),
   },
   (t) => ({
@@ -223,21 +227,36 @@ export const userTabs = sqliteTable(
   }),
 )
 
-export const worktreeReservations = sqliteTable(
-  'worktree_reservations',
+/**
+ * GH#115: registry over /data/projects/* clones. Decouples worktree
+ * reservation from kataIssue so debug, freeform, side-arc, and arc-bound
+ * sessions all share one primitive. See planning/specs/115-worktrees-
+ * first-class-resource.md §B-SCHEMA-1.
+ *
+ * `reservedBy` is a JSON blob `{kind: 'arc'|'session'|'manual', id}`
+ * and is NULL only when status='free'. `released_at` is set when the
+ * row enters the cleanup grace window (B-LIFECYCLE-1).
+ */
+export const worktrees = sqliteTable(
+  'worktrees',
   {
-    worktree: text('worktree').primaryKey(),
-    issueNumber: integer('issue_number').notNull(),
-    ownerId: text('owner_id')
+    id: text('id').primaryKey(),
+    path: text('path').notNull().unique(),
+    branch: text('branch'),
+    status: text('status').notNull().default('held'),
+    reservedBy: text('reservedBy'),
+    releasedAt: integer('released_at'),
+    createdAt: integer('createdAt').notNull(),
+    lastTouchedAt: integer('lastTouchedAt').notNull(),
+    ownerId: text('ownerId')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
-    heldSince: text('held_since').notNull(),
-    lastActivityAt: text('last_activity_at').notNull(),
-    modeAtCheckout: text('mode_at_checkout').notNull(),
-    stale: integer('stale', { mode: 'boolean' }).notNull().default(false),
   },
   (t) => ({
-    byIssue: index('idx_wt_res_issue').on(t.issueNumber),
+    byReservedBy: index('idx_worktrees_reservedBy').on(
+      sql`json_extract(${t.reservedBy}, '$.kind')`,
+      sql`json_extract(${t.reservedBy}, '$.id')`,
+    ),
   }),
 )
 

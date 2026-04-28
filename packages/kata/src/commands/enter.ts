@@ -115,6 +115,11 @@ function outputRules(
   console.error('')
 }
 
+import {
+  getOrchestratorBaseUrl,
+  PoolExhaustedError,
+  reserveWorktreeIfNeeded,
+} from '../lib/reserve-worktree.js'
 import { parseGitStatusPaths, writeBaseline } from '../tracking/edits-log.js'
 import { createDefaultState, parseArgs } from './enter/cli.js'
 import { createDoctrineNotesFile, createFdNotesFile } from './enter/notes.js'
@@ -732,9 +737,57 @@ export async function enter(args: string[]): Promise<void> {
     _resolvedSubjects = nativeTasks.map((t) => t.subject)
   }
 
+  // GH#115 §B-KATA-1: code-touching modes auto-reserve a worktree.
+  // Idempotent — the orchestrator returns the same row on same-
+  // `reservedBy` re-acquire. Read-only modes skip; missing
+  // orchestrator URL (e.g. CI / non-duraclaw projects) also skips.
+  const orchUrl = getOrchestratorBaseUrl()
+  let reservedWorktreeId: string | undefined = updated.worktreeId
+  if (orchUrl && !parsed.dryRun) {
+    try {
+      const outcome = await reserveWorktreeIfNeeded({
+        orchestratorBaseUrl: orchUrl,
+        sessionId,
+        mode: canonical,
+        kataIssue: issueNum,
+      })
+      if (outcome.kind === 'reserved') {
+        reservedWorktreeId = outcome.row.id
+        // biome-ignore lint/suspicious/noConsole: intentional CLI output
+        console.log(
+          `[kata] Reserved worktree: ${outcome.row.path}` +
+            (outcome.row.branch ? ` (branch: ${outcome.row.branch})` : ''),
+        )
+      } else if (outcome.kind === 'skipped' && outcome.reason === 'no_auth') {
+        // biome-ignore lint/suspicious/noConsole: intentional CLI debug
+        console.error(
+          '[kata] Skipping worktree reservation (CC_GATEWAY_SECRET not in env). ' +
+            'Source $REPO_ROOT/.env or export CC_GATEWAY_SECRET before running kata.',
+        )
+      }
+    } catch (err) {
+      if (err instanceof PoolExhaustedError) {
+        // Pool exhausted is a fatal failure — kata can't enter a
+        // code-touching mode without a clone, and the operator needs
+        // to take action (run scripts/setup-clone.sh on the VPS).
+        // biome-ignore lint/suspicious/noConsole: intentional CLI fatal output
+        console.error(`[kata] ${err.message}`)
+        process.exit(1)
+      }
+      // biome-ignore lint/suspicious/noConsole: intentional CLI warning
+      console.warn(
+        `[kata] Worktree reservation failed: ${(err as Error).message}. Continuing without reservation.`,
+      )
+    }
+  } else if (!orchUrl && !parsed.dryRun) {
+    // biome-ignore lint/suspicious/noConsole: intentional CLI debug
+    console.error('[kata] Skipping worktree reservation (orchestrator URL not configured).')
+  }
+
   const finalState: SessionState = {
     ...updated,
     workflowDir,
+    ...(reservedWorktreeId ? { worktreeId: reservedWorktreeId } : {}),
   }
 
   // Skip state write in dry-run mode

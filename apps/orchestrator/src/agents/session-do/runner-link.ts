@@ -2,6 +2,7 @@ import { timingSafeEqual } from 'node:crypto'
 
 import type { ExecuteCommand, GatewayCommand, PermissionMode, ResumeCommand } from '~/lib/types'
 import { getSessionStatus } from '~/lib/vps-client'
+import { maybeReleaseWorktreeOnTerminal } from './maybe-release-worktree'
 import { syncIdentityNameToD1 } from './status'
 import { RECOVERY_GRACE_MS, type SessionDOContext } from './types'
 import { clearRecoveryGraceTimer, scheduleWatchdog } from './watchdog'
@@ -309,6 +310,8 @@ export async function triggerGatewayDial(
   if (!gatewayUrl || !workerPublicUrl) {
     console.error(`[SessionDO:${ctx.ctx.id}] CC_GATEWAY_URL or WORKER_PUBLIC_URL not configured`)
     ctx.do.updateState({ status: 'idle', error: 'Gateway URL or Worker URL not configured' })
+    // GH#115 §B-LIFECYCLE-2: terminal-transition release-on-close.
+    maybeReleaseWorktreeOnTerminal(ctx)
     return
   }
 
@@ -331,6 +334,16 @@ export async function triggerGatewayDial(
   if (cmd.type === 'execute' || cmd.type === 'resume') {
     const sessionStoreEnabled = await ctx.do.getFeatureFlagEnabled('session_store', false)
     cmd = { ...cmd, session_store_enabled: cmd.session_store_enabled ?? sessionStoreEnabled }
+  }
+
+  // GH#115: stamp the resolved clone path onto execute/resume commands.
+  // The runner uses `worktree_path` verbatim as cwd; absent => runner
+  // falls back to its default project-path resolution (back-compat for
+  // pre-115 callers).
+  if (cmd.type === 'execute' || cmd.type === 'resume') {
+    if (ctx.state.project_path) {
+      cmd = { ...cmd, worktree_path: ctx.state.project_path }
+    }
   }
 
   // Inject user_preferences onto spawn / resume payloads. Reads from

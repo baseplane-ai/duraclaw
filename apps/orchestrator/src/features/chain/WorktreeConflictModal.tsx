@@ -20,12 +20,12 @@ import {
   DialogTitle,
 } from '~/components/ui/dialog'
 import { formatTimeAgo } from '~/features/agent-orch/session-utils'
-import type { WorktreeReservation } from '~/lib/types'
+import type { ChainWorktreeReservation } from '~/lib/types'
 
 export interface WorktreeConflictModalProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  conflict: WorktreeReservation
+  conflict: ChainWorktreeReservation
   /** Called when user clicks "Pick different worktree". Parent shows picker. */
   onPickDifferent: () => void
   /** Called when user confirms force-release. Parent calls API. */
@@ -51,7 +51,14 @@ export function WorktreeConflictModal({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            Worktree {conflict.worktree} is held by chain #{conflict.issueNumber}
+            {/* GH#115: legacy `worktree` (project name) is now the basename
+                of the new `path`; legacy `issueNumber` is `reservedBy.id`
+                when the holder is an arc (the only case that reaches this
+                modal in the chain flow). */}
+            Worktree {conflict.path.split('/').pop() || conflict.path} is held by{' '}
+            {conflict.reservedBy?.kind === 'arc'
+              ? `chain #${conflict.reservedBy.id}`
+              : `${conflict.reservedBy?.kind ?? 'unknown'}:${conflict.reservedBy?.id ?? '?'}`}
           </DialogTitle>
           {conflictTitle ? <DialogDescription>{conflictTitle}</DialogDescription> : null}
         </DialogHeader>
@@ -61,12 +68,8 @@ export function WorktreeConflictModal({
             <span className="font-medium text-foreground">owner:</span> {conflict.ownerId}
           </li>
           <li>
-            <span className="font-medium text-foreground">held since:</span>{' '}
-            {formatTimeAgo(conflict.heldSince)}
-          </li>
-          <li>
             <span className="font-medium text-foreground">last activity:</span>{' '}
-            {formatTimeAgo(conflict.lastActivityAt)}
+            {formatTimeAgo(new Date(conflict.lastTouchedAt).toISOString())}
           </li>
           <li>
             <span className="font-medium text-foreground">stale:</span>{' '}

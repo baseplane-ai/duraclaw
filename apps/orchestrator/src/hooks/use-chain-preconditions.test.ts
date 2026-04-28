@@ -160,18 +160,25 @@ describe('checkPrecondition — project query param transmission', () => {
       expect(res).toEqual({ canAdvance: true, reason: '', nextMode: 'implementation' })
     })
 
-    it('falls back to worktreeReservation.worktree when no sessions present', async () => {
+    it('falls back to worktreeReservation.path basename when no sessions present', async () => {
       fetchMock.mockResolvedValueOnce(
         new Response(JSON.stringify({ exists: true, status: 'approved' }), { status: 200 }),
       )
       const c = uniqueChain({
         column: 'planning',
         sessions: [],
+        // GH#115 wire shape: chain summary projects the worktrees row
+        // with `path` (full clone path); the precondition hook derives
+        // the legacy project-name from the basename.
         worktreeReservation: {
-          worktree: 'duraclaw-dev2',
-          heldSince: '2026-04-25T00:00:00Z',
-          lastActivityAt: '2026-04-25T00:00:00Z',
+          id: 'wt-xyz',
+          path: '/data/projects/duraclaw-dev2',
+          branch: null,
+          status: 'held',
+          reservedBy: { kind: 'arc', id: 27 },
           ownerId: 'u1',
+          releasedAt: null,
+          lastTouchedAt: Date.now(),
           stale: false,
         },
       })

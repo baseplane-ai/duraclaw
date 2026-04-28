@@ -1,8 +1,11 @@
 import type { BranchInfoRow, SessionMessage as WireSessionMessage } from '@duraclaw/shared-types'
 import type { SessionMessage } from 'agents/experimental/memory/session'
+import { eq } from 'drizzle-orm'
+import { agentSessions } from '~/db/schema'
 import type { AwaitingReason, AwaitingResponsePart } from '~/lib/awaiting-response'
 import { chunkOps } from '~/lib/chunk-frame'
 import { contentToParts } from '~/lib/message-parts'
+import { bindWorktreeById } from '~/lib/reserve-worktree'
 import type { ContentBlock } from '~/lib/types'
 import { broadcastBranchInfo, broadcastMessages } from './broadcast'
 import {
@@ -239,9 +242,56 @@ export async function resubmitMessageImpl(
 export async function forkWithHistoryImpl(
   ctx: SessionDOContext,
   content: string | ContentBlock[],
+  opts?: { worktreeId?: string | null },
 ): Promise<{ ok: boolean; error?: string }> {
   if (!ctx.state.project) {
     return { ok: false, error: 'Session has no project — cannot fork.' }
+  }
+
+  // GH#115 P1.5 / B-FORK-1: optional worktreeId override. Default
+  // inherits the parent's `ctx.state.worktreeId` (no-op — same DO,
+  // same session). When the caller passes an explicit id different
+  // from the current one, validate via `bindWorktreeById` against
+  // `{kind:'session', id:<doId>}` (fork-with-history doesn't carry
+  // kataIssue) and re-stamp `project_path` so the next gateway dial
+  // routes the runner into the new clone. On 409 / 404 we return
+  // early — the fork is not attempted.
+  if (opts?.worktreeId && opts.worktreeId !== ctx.state.worktreeId) {
+    const ownerUserId = ctx.state.userId
+    if (!ownerUserId) {
+      return { ok: false, error: 'Cannot rebind worktree without authenticated owner.' }
+    }
+    const sessionIdStr = ctx.ctx.id.toString()
+    const bindResult = await bindWorktreeById(
+      ctx.do.d1,
+      opts.worktreeId,
+      { kind: 'session', id: sessionIdStr },
+      ownerUserId,
+    )
+    if (!bindResult.ok) {
+      if (bindResult.kind === 'not_found') {
+        return { ok: false, error: `Worktree ${opts.worktreeId} not found.` }
+      }
+      const existing = bindResult.existing
+      return {
+        ok: false,
+        error: `Worktree ${opts.worktreeId} held by ${existing.reservedBy?.kind ?? '?'}:${existing.reservedBy?.id ?? '?'}.`,
+      }
+    }
+    updateState(ctx, {
+      worktreeId: bindResult.row.id,
+      project_path: bindResult.row.path,
+    })
+    // Also persist the new worktreeId on the D1 agent_sessions row so
+    // the chain projection + sessions list stays consistent.
+    try {
+      await ctx.do.d1
+        .update(agentSessions)
+        .set({ worktreeId: bindResult.row.id, updatedAt: new Date().toISOString() })
+        .where(eq(agentSessions.id, sessionIdStr))
+    } catch (err) {
+      console.error(`[SessionDO:${ctx.ctx.id}] forkWithHistory: D1 worktreeId update failed:`, err)
+    }
   }
 
   // Build a compact transcript from local history (safe to read even when
