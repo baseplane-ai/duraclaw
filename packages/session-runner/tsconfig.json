@@ -4,7 +4,8 @@
     "outDir": "dist",
     "rootDir": "src",
     "lib": ["ES2022", "DOM"],
-    "composite": false
+    "composite": false,
+    "types": ["bun-types"]
   },
   "include": ["src"],
   "exclude": ["src/**/*.test.ts"]

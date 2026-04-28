@@ -300,6 +300,24 @@ export const codexModels = sqliteTable('codex_models', {
 })
 
 /**
+ * GH#110 P2: admin-managed catalog of Google Gemini models.
+ *
+ * Read on `triggerGatewayDial` for gemini sessions and injected onto
+ * the spawn payload as `cmd.gemini_models`. CRUD via
+ * `/api/admin/gemini-models*` (admin role gated). Seeded by migration
+ * 0026 with 5 models.
+ */
+export const geminiModels = sqliteTable('gemini_models', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull().unique(),
+  contextWindow: integer('context_window').notNull(),
+  maxOutputTokens: integer('max_output_tokens'),
+  enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+})
+
+/**
  * GH#27 P1.1: project metadata for docs-as-Yjs dial-back runners.
  *
  * One row per logical project (16-char SHA-based projectId). Carries
