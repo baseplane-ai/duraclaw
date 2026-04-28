@@ -36,6 +36,18 @@ const ButtonShell = styled(View, {
   justifyContent: 'center',
   gap: '$2',
   flexShrink: 0,
+  // GH#130 follow-up: Tamagui's `styled(View)` defaults to RN-style
+  // `align-self: auto` which inherits `align-items: stretch` from a
+  // flex-column parent (every Tamagui-shimmed CardContent / CardFooter /
+  // Stack qualifies). The shadcn original rendered into plain `<div>`
+  // (display: block) where `display: inline-flex` on the button kept it
+  // at content width. Post-Tamagui, single-button card contents (Sign
+  // Out in AccountSection, Force Refresh in SystemSection) stretch full
+  // card width — visible regression on the dogfood deploy. Pin the
+  // cross-axis to flex-start so buttons keep their natural width by
+  // default; consumers that need stretch can opt in via `className=
+  // "self-stretch"` or `className="w-full"`.
+  alignSelf: 'flex-start',
   borderRadius: '$md',
   cursor: 'pointer',
   outlineWidth: 0,

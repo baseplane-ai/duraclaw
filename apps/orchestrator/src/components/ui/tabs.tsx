@@ -23,11 +23,40 @@ import { cn } from '~/lib/utils'
 //  - focus-visible:* / disabled:* / dark:* prefix selectors.
 //  - [&_svg]:* descendant selectors.
 //  - [calc(100%-1px)] arbitrary-value height for the trigger.
+//
+// GH#130 follow-up — the Tamagui v2-rc.41 compiler with `extract: true`
+// silently drops several styled() props from the emitted atomic CSS:
+//  - `padding: 3` (numeric shorthand resolved against `space.3`) — no
+//    `_paddingTop-t-space-3` etc. emitted, so the muted pill loses its
+//    inner inset.
+//  - `borderRadius: '$lg'` — no `_btlr-t-radius-lg` etc. emitted, so the
+//    pill loses its rounding.
+//  - `color: '$mutedForeground'` — no `_color-mutedForeground` emitted,
+//    so the inactive trigger text inherits the page foreground colour.
+//  Same root-cause family as the Button buttonVariants() fallback in
+//  78d4484/93a074e. In dev mode Tamagui's runtime fallback fills these
+//  in (TabsList renders correctly with `pnpm dev`), but in the
+//  production build the missing atoms produce the "inline plain text"
+//  regression reported on `code.8020os.com` (issue #130 comment).
+//  Layer Tailwind utilities for the dropped visuals so they render
+//  through CSS variables regardless of compiler extraction.
 
 const TABS_ROOT_CLASSES = 'flex flex-col gap-2'
 
+const TABS_LIST_ESCAPE_CLASSES = 'rounded-lg p-[3px] text-muted-foreground'
+
 const TABS_TRIGGER_ESCAPE_CLASSES =
   "h-[calc(100%-1px)] text-sm font-medium whitespace-nowrap text-foreground transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-background data-[state=active]:shadow-sm dark:text-muted-foreground dark:data-[state=active]:border-input dark:data-[state=active]:bg-input/30 dark:data-[state=active]:text-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4"
+
+// GH#130 follow-up — `flex-1` lives in className, not the styled() shell.
+// Tamagui's `flex: 1` expands to `_flexGrow-1 _flexShrink-1 _fb-0px
+// _minHeight-0px` (RN-style). The `_minHeight-0px` atom collapses
+// TabsContent below intrinsic height when the grandparent (CardContent /
+// Tabs Root) has no fixed height, then the production build's content
+// surface clips the overflowing children — the "RadioGroup collapsed to
+// 1 row" symptom on the dogfood deploy. Tailwind's `.flex-1` (`flex: 1
+// 1 0%`) leaves `min-height: auto` so content drives the height.
+const TABS_CONTENT_ESCAPE_CLASSES = 'flex-1'
 
 const TabsListShell = styled(TabsPrimitive.List, {
   name: 'TabsList',
@@ -42,10 +71,7 @@ const TabsListShell = styled(TabsPrimitive.List, {
   width: 'fit-content',
   alignItems: 'center',
   justifyContent: 'center',
-  borderRadius: '$lg',
   backgroundColor: '$muted',
-  padding: 3,
-  color: '$mutedForeground',
 })
 
 const TabsTriggerShell = styled(TabsPrimitive.Trigger, {
@@ -64,7 +90,6 @@ const TabsTriggerShell = styled(TabsPrimitive.Trigger, {
 
 const TabsContentShell = styled(TabsPrimitive.Content, {
   name: 'TabsContent',
-  flex: 1,
   outlineWidth: 0,
 })
 
@@ -78,7 +103,7 @@ function TabsList({ className, ...props }: React.ComponentProps<typeof TabsPrimi
   return (
     <TabsListShell
       data-slot="tabs-list"
-      className={cn(className)}
+      className={cn(TABS_LIST_ESCAPE_CLASSES, className)}
       {...(props as React.ComponentProps<typeof TabsListShell>)}
     />
   )
@@ -98,7 +123,7 @@ function TabsContent({ className, ...props }: React.ComponentProps<typeof TabsPr
   return (
     <TabsContentShell
       data-slot="tabs-content"
-      className={cn(className)}
+      className={cn(TABS_CONTENT_ESCAPE_CLASSES, className)}
       {...(props as React.ComponentProps<typeof TabsContentShell>)}
     />
   )
