@@ -1,6 +1,7 @@
 import type { SessionMessage as WireSessionMessage } from '@duraclaw/shared-types'
 import type { SessionMessage } from 'agents/experimental/memory/session'
 import { contentToParts } from '~/lib/message-parts'
+import { promptToPreviewText } from '~/lib/prompt-preview'
 import type { ContentBlock } from '~/lib/types'
 import { listSessions } from '~/lib/vps-client'
 import {
@@ -14,6 +15,7 @@ import {
 } from './broadcast'
 import { claimSubmitId } from './history'
 import { sendToGateway, triggerGatewayDial as triggerGatewayDialImpl } from './runner-link'
+import { syncPromptToD1 } from './status'
 import type { SessionDOContext } from './types'
 
 /**
@@ -259,9 +261,28 @@ export async function sendMessageImpl(
     // initial prompt. Project / model / agent come from SessionMeta
     // (populated by initializeImpl). started_at is stamped now since
     // this is effectively when the session "starts running".
+    //
+    // Also mirror the first-message preview into SessionMeta.prompt
+    // (auto-persists to session_meta SQLite via persistMetaPatch) and
+    // the D1 agent_sessions.prompt column. Without this, the sidebar's
+    // displayName fallback chain (title || summary || prompt || id) is
+    // stuck on `id.slice(0,8)` until the runner-side haiku titler fires
+    // — which requires ≥1500 transcript tokens and so never lands for
+    // short conversations. Mirrors what spawnImpl already does at
+    // creation time when the session is created WITH an initial prompt.
     const startedAt = new Date().toISOString()
-    ctx.do.updateState({ status: 'running', error: null, started_at: startedAt })
+    const previewText = promptToPreviewText(content)
+    const metaPatch: Partial<typeof ctx.state> = {
+      status: 'running',
+      error: null,
+      started_at: startedAt,
+    }
+    if (previewText) metaPatch.prompt = previewText
+    ctx.do.updateState(metaPatch)
     ctx.do.persistMetaPatch({ started_at: startedAt })
+    if (previewText) {
+      ctx.ctx.waitUntil(syncPromptToD1(ctx, previewText, startedAt))
+    }
     void triggerGatewayDialImpl(ctx, {
       type: 'execute',
       project: ctx.state.project,

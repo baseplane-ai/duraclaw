@@ -187,6 +187,41 @@ export async function syncIdentityNameToD1(
 }
 
 /**
+ * Mirror the session's first-message preview onto the D1 row + broadcast.
+ *
+ * Used by the deferred-runner / `isFreshSpawnable` branch in
+ * `sendMessageImpl`: a session created without an initial prompt
+ * (`directCreateSession` → `initializeImpl`) lands in D1 with
+ * `prompt = ''`, so the sidebar's `displayName` fallback chain
+ * (`title || summary || prompt || id.slice(0,8)`) collapses to the
+ * session-id prefix. Once the user submits the first turn, write the
+ * preview text back so the sidebar shows something meaningful before
+ * the runner-side haiku titler eventually fires (which only triggers
+ * at ≥1500 transcript tokens — far too late for short conversations).
+ *
+ * Called only on the first turn of a deferred session. The other
+ * sendMessage branches (live-runner stream-input, post-reaper resume)
+ * intentionally leave `prompt` untouched — overwriting it with the most
+ * recent turn would erase the original session intent.
+ */
+export async function syncPromptToD1(
+  ctx: SessionDOContext,
+  prompt: string,
+  updatedAt: string,
+): Promise<void> {
+  try {
+    const sessionId = ctx.do.name
+    await ctx.do.d1
+      .update(agentSessions)
+      .set({ prompt, updatedAt })
+      .where(eq(agentSessions.id, sessionId))
+    await broadcastSessionRow(ctx.env, ctx.ctx, sessionId, 'update')
+  } catch (err) {
+    console.error(`[SessionDO:${ctx.ctx.id}] Failed to sync prompt to D1:`, err)
+  }
+}
+
+/**
  * Spec #101 P1.2 B7: persist runner-reported AdapterCapabilities onto
  * the D1 row + broadcast. Stored as serialized JSON in
  * `agent_sessions.capabilities_json` so the sidebar / agent-detail
