@@ -22,6 +22,7 @@ vi.mock('cloudflare:workers', () => {
 // `agent_sessions` SELECT used by the cold-connect substate prime.
 const insertCalls: any[] = []
 const deleteCalls: any[] = []
+const selectCalls: { whereClause: unknown; orderByClause: unknown; limit: number }[] = []
 let mockSelectRows: Array<{ id: string }> = []
 vi.mock('drizzle-orm/d1', () => ({
   drizzle: () => ({
@@ -39,8 +40,13 @@ vi.mock('drizzle-orm/d1', () => ({
     }),
     select: () => ({
       from: () => ({
-        where: () => ({
-          limit: async () => mockSelectRows,
+        where: (whereClause: unknown) => ({
+          orderBy: (orderByClause: unknown) => ({
+            limit: async (limit: number) => {
+              selectCalls.push({ whereClause, orderByClause, limit })
+              return mockSelectRows
+            },
+          }),
         }),
       }),
     }),
@@ -51,7 +57,9 @@ vi.mock(import('drizzle-orm'), async (importOriginal) => {
   const actual = await importOriginal()
   return {
     ...actual,
-    eq: ((a: unknown, b: unknown) => ({ a, b })) as any,
+    eq: ((a: unknown, b: unknown) => ({ op: 'eq', a, b })) as any,
+    gt: ((a: unknown, b: unknown) => ({ op: 'gt', a, b })) as any,
+    desc: ((a: unknown) => ({ op: 'desc', a })) as any,
     and: ((...clauses: unknown[]) => ({ and: clauses })) as any,
   }
 })
@@ -263,6 +271,7 @@ describe('UserSettingsDO WebSocket upgrade', () => {
     mockedGetRequestSession.mockReset()
     insertCalls.length = 0
     deleteCalls.length = 0
+    selectCalls.length = 0
   })
 
   it('rejects unauthenticated upgrades with 401', async () => {
@@ -338,11 +347,13 @@ describe('UserSettingsDO WebSocket upgrade', () => {
     expect(insertCalls.length).toBe(0)
   })
 
-  // Substate prime — D1 carries `running`/`idle`/`error` only, so on cold
-  // socket connect we fan out to each running session's DO and push the
-  // current substate (e.g. `waiting_gate`) on the just-accepted socket so
-  // tab rings render correctly from the first paint.
-  it('primes the just-accepted socket with session_status from running sessions', async () => {
+  // Substate prime — D1 `agent_sessions.status` is no longer authoritative
+  // (post-`ea01ca5`), so the prime asks every recently-active SessionDO
+  // for its DO-authoritative `state.status` and pushes those substates
+  // (e.g. `waiting_gate`) on the just-accepted socket so tab rings
+  // render correctly from the first paint AND after every user-stream
+  // reconnect.
+  it('primes the just-accepted socket with session_status from recently-active sessions', async () => {
     mockedGetRequestSession.mockResolvedValue({
       userId: 'u1',
       role: 'user',
@@ -398,7 +409,7 @@ describe('UserSettingsDO WebSocket upgrade', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(2)
   })
 
-  it('does not send a prime frame when the user has no running sessions', async () => {
+  it('does not send a prime frame when the user has no recently-active sessions', async () => {
     mockedGetRequestSession.mockResolvedValue({
       userId: 'u1',
       role: 'user',
@@ -427,6 +438,58 @@ describe('UserSettingsDO WebSocket upgrade', () => {
     expect(sentFrames.find((f: { collection?: string }) => f.collection === 'session_status')).toBe(
       undefined,
     )
+  })
+
+  // Regression guard: the prime universe used to be `WHERE status='running'`
+  // (D1's coarse status), which became wrong once D1 stopped tracking
+  // live status. The fix is a recency window over `updated_at`. This test
+  // captures the WHERE clause and asserts the new shape so a future
+  // refactor doesn't silently revert the universe.
+  it('queries by recency window over updated_at, not by D1 status', async () => {
+    mockedGetRequestSession.mockResolvedValue({
+      userId: 'u1',
+      role: 'user',
+      session: {},
+      user: {},
+    })
+    mockSelectRows = []
+    const SESSION_AGENT = {
+      idFromName: (name: string) => name,
+      get: () => ({ fetch: vi.fn() }),
+    }
+    const { instance, ctx } = makeDO({ SESSION_AGENT })
+    const req = new Request('http://do/parties/user-settings/u1', {
+      headers: { Upgrade: 'websocket' },
+    })
+    try {
+      await instance.fetch(req)
+    } catch (err) {
+      if (!/status/.test(String(err))) throw err
+    }
+    await Promise.all(ctx._waitUntilTasks)
+
+    expect(selectCalls).toHaveLength(1)
+    const { whereClause, orderByClause, limit } = selectCalls[0]!
+    // Recursive scan of the AND-tree the production code builds.
+    const flatten = (node: any): any[] => {
+      if (!node || typeof node !== 'object') return []
+      if (Array.isArray(node.and)) return node.and.flatMap(flatten)
+      return [node]
+    }
+    const predicates = flatten(whereClause)
+    // Must contain a `gt` predicate against `agent_sessions.updated_at`
+    // (the recency window).
+    const hasGtUpdatedAt = predicates.some(
+      (p) => p?.op === 'gt' && typeof p?.b === 'string' && !Number.isNaN(new Date(p.b).getTime()),
+    )
+    expect(hasGtUpdatedAt).toBe(true)
+    // Must NOT contain the legacy `eq(status, 'running')` predicate.
+    const hasEqRunning = predicates.some((p) => p?.op === 'eq' && p?.b === 'running')
+    expect(hasEqRunning).toBe(false)
+    // Order DESC for "most recent first" so the LIMIT clips the cold tail.
+    expect((orderByClause as any)?.op).toBe('desc')
+    // Cap matches PRIME_LIMIT.
+    expect(limit).toBe(200)
   })
 })
 
