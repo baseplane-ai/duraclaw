@@ -78,19 +78,26 @@ session is asking me a question right now?"* across a dozen of them.
 Duraclaw is the orchestration fabric that fixes that.
 
 A Cloudflare Workers frontend — a plain Vite 8 SPA built with React 19 and [TanStack Router](https://tanstack.com/router) for client routing, [Hono](https://hono.dev/) on the Worker side for API routes, deployed via the [`@cloudflare/vite-plugin`](https://developers.cloudflare.com/workers/vite-plugin/) — owns session
-lifecycle through three [Durable
+lifecycle through four [Durable
 Objects](https://developers.cloudflare.com/durable-objects/) — `SessionDO`
 (per-session state + SQLite message history + event log), `UserSettingsDO`
-(per-user prefs and push-subscription registry), and `SessionCollabDO`
-(realtime collab via Y.js for multi-tab session views). Better Auth on
-D1 handles sign-in; R2 stores the mobile OTA bundle.
+(per-user prefs and push-subscription registry), `SessionCollabDO`
+(realtime collab via Y.js for multi-tab session views), and
+`RepoDocumentDO` (Yjs-backed real-time markdown collab on repo files,
+fed by a per-repo `docs-runner`). Better Auth on D1 handles sign-in;
+R2 stores the mobile OTA bundle.
 
-A VPS-side `agent-gateway` spawns one detached `session-runner` per
-session — that runner owns one `@anthropic-ai/claude-agent-sdk` `query()`
-and dials its Durable Object directly over a buffered WebSocket.
-Gateway restarts and Worker redeploys are non-events: the
-`BufferedChannel` (10K events / 50 MB ring) replays on reconnect, and
-SDK transcripts persist on disk for resume.
+A VPS-side `agent-gateway` spawns detached runner processes — one
+`session-runner` per chat session (owns one
+`@anthropic-ai/claude-agent-sdk` `query()`) and one `docs-runner` per
+repo (owns the chokidar watch + Yjs sync) — and each runner dials its
+Durable Object directly over a buffered WebSocket. Gateway and
+runners ship as **self-contained Bun bundles** (atomic `mv` in place
+via `scripts/bundle-bin.sh`), so a `git pull` + rebuild on the VPS
+never racing-corrupts a running runner. Gateway restarts and Worker
+redeploys are non-events: the `BufferedChannel` (10K events / 50 MB
+ring) replays on reconnect, and SDK transcripts persist on disk for
+resume.
 
 Layered on top:
 
@@ -193,6 +200,11 @@ status.
 - Admin user management page
 - Feature-flag system with admin patch endpoints
 - Bootstrap-token + gateway-secret rotation paths
+- **Identity catalog + account failover** — multiple isolated `HOME`
+  directories (each with its own `~/.claude/.credentials.json`) registered
+  as named identities; the DO LRU-selects an identity at spawn, marks
+  rate-limited identities `cooldown`, and resumes the session under the
+  next available one via the SDK's `SessionStore` (no message loss)
 
 **Backend hardening**
 
@@ -206,7 +218,12 @@ status.
 **Integrations**
 
 - GitHub webhooks (chains feature — issue → impl → verification flow)
-- Worktree-aware project discovery (`/api/gateway/projects`)
+- **Worktrees as first-class reservable resources** — pool-backed
+  `/api/worktrees` (reserve / list / release / delete), gateway-side
+  60s sweep that classifies each clone under `/data/projects/<name>`
+  via branch + `.duraclaw/reservation.json`, idempotent re-acquire by
+  reservedBy, and `agent_sessions.worktreeId` FK so each session is
+  bound to a concrete clone
 - "Chains" workflow: claim issue → checkout worktree → run
   implementation session → release
 
@@ -335,10 +352,11 @@ rules under [`.claude/rules/`](.claude/rules/).
 
 | Path | What it does | Read more |
 |---|---|---|
-| [`apps/orchestrator`](apps/orchestrator) | Cloudflare Worker + Vite SPA: React UI (TanStack Router), Hono API routes, three Durable Objects (`SessionDO`, `UserSettingsDO`, `SessionCollabDO`), Better Auth on D1, dual-channel push fan-out | [`.claude/rules/orchestrator.md`](.claude/rules/orchestrator.md) |
+| [`apps/orchestrator`](apps/orchestrator) | Cloudflare Worker + Vite SPA: React UI (TanStack Router + Tamagui), Hono API routes, four Durable Objects (`SessionDO`, `UserSettingsDO`, `SessionCollabDO`, `RepoDocumentDO`), Better Auth on D1, dual-channel push fan-out | [`.claude/rules/orchestrator.md`](.claude/rules/orchestrator.md) |
 | [`apps/mobile`](apps/mobile) | Capacitor 8 Android shell + Capgo web-bundle OTA + native-APK fallback updater | [`apps/mobile/README.md`](apps/mobile/README.md) |
-| [`packages/agent-gateway`](packages/agent-gateway) | VPS spawn / list / reap control plane (Bun HTTP + systemd) | [`packages/agent-gateway/README.md`](packages/agent-gateway/README.md) |
-| [`packages/session-runner`](packages/session-runner) | Per-session Claude Agent SDK owner (one `query()` per process) | [`packages/session-runner/README.md`](packages/session-runner/README.md) |
+| [`packages/agent-gateway`](packages/agent-gateway) | VPS spawn / list / reap control plane (Bun HTTP + systemd); ships as a self-contained Bun bundle | [`packages/agent-gateway/README.md`](packages/agent-gateway/README.md) |
+| [`packages/session-runner`](packages/session-runner) | Per-session Claude Agent SDK owner (one `query()` per process); self-contained Bun bundle | [`packages/session-runner/README.md`](packages/session-runner/README.md) |
+| [`packages/docs-runner`](packages/docs-runner) | Per-repo markdown / Yjs sync runner — chokidar watches the worktree, dials `RepoDocumentDO`, round-trips edits between disk and the in-browser BlockNote editor; self-contained Bun bundle | — |
 | [`packages/shared-transport`](packages/shared-transport) | `BufferedChannel` ring + `DialBackClient` (runner → DO WS, 1/3/9/27/30s backoff) | [`packages/shared-transport/README.md`](packages/shared-transport/README.md) |
 | [`packages/shared-types`](packages/shared-types) | `GatewayCommand` / `GatewayEvent` shapes shared across the wire | — |
 | [`packages/ai-elements`](packages/ai-elements) | Vendored + customized fork of [Vercel AI Elements](https://ai-sdk.dev/elements) — 50+ chat / code / tool React components (`Conversation`, `Reasoning`, `ToolCallList`, `CodeBlock`, `Terminal`, `FileTree`, ...) over a 25-component Radix UI primitive layer, with [Streamdown](https://github.com/vercel/streamdown) for streaming markdown and [Shiki](https://shiki.style/) for syntax highlighting | — |
@@ -381,9 +399,10 @@ Every major library duraclaw is built on, grouped by concern. Versions float on 
 
 **UI primitives**
 
-- [Radix UI](https://www.radix-ui.com/) — accordion, alert-dialog, avatar, checkbox, collapsible, dialog, direction, dropdown-menu, hover-card, label, popover, progress, radio-group, scroll-area, select, separator, slot, switch, tabs, tooltip, use-controllable-state, icons
+- **[Tamagui](https://tamagui.dev/) (`@tamagui/core` + `@tamagui/vite-plugin`)** — owns the orchestrator's theme tokens, dark-mode handling, sidebar, and the migrated primitive layer (`button`, `card`, `input`, `label`, `badge`, `separator`, `avatar`, `tabs`, `textarea`, `table`, `alert`, `skeleton`, `collapsible`); compiler-extracted atomic CSS in the client bundle, **zero `@tamagui/*` bytes in the Worker bundle** (CI guard enforces it)
+- [Radix UI](https://www.radix-ui.com/) — retained for the unmigrated complex primitives (alert-dialog, checkbox, dialog, dropdown-menu, hover-card, popover, radio-group, scroll-area, select, slot, switch, tooltip, ...) that Tamagui's primitive layer doesn't yet cover
 - [Lucide React](https://lucide.dev/) — icon set
-- [`class-variance-authority`](https://cva.style/) + [`clsx`](https://github.com/lukeed/clsx) + [`tailwind-merge`](https://github.com/dcastil/tailwind-merge) — variant authoring + class merging
+- [`class-variance-authority`](https://cva.style/) + [`clsx`](https://github.com/lukeed/clsx) + [`tailwind-merge`](https://github.com/dcastil/tailwind-merge) — variant authoring + class merging (Tailwind retained mainly to process `@duraclaw/ai-elements` styles)
 
 **Backend (Cloudflare Workers)**
 
@@ -413,12 +432,13 @@ Every major library duraclaw is built on, grouped by concern. Versions float on 
 
 - [`vite-plugin-pwa`](https://vite-pwa-org.netlify.app/) + [`workbox-precaching`](https://developer.chrome.com/docs/workbox/) + [`workbox-window`](https://developer.chrome.com/docs/workbox/)
 
-**VPS runner stack (`packages/agent-gateway` + `packages/session-runner`)**
+**VPS runner stack (`packages/agent-gateway` + `packages/session-runner` + `packages/docs-runner`)**
 
-- [Bun](https://bun.sh/) — runtime for the gateway HTTP server and the per-session runner binary
-- [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk) — the agent SDK each runner owns
+- [Bun](https://bun.sh/) — runtime for the gateway HTTP server and both runner binaries; gateway and runners ship as **self-contained Bun bundles** (workspace deps inlined; written via staging dir + atomic `mv` so a runner spawn racing with a pipeline rebuild always reads either the old or new bundle, never a half-written one)
+- [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk) — the agent SDK each session-runner owns
 - [`@anthropic-ai/sdk`](https://www.npmjs.com/package/@anthropic-ai/sdk) — lower-level client
-- systemd — process supervision for the gateway
+- [Yjs](https://yjs.dev/) + [`y-protocols`](https://www.npmjs.com/package/y-protocols) + [`@blocknote/server-util`](https://www.blocknotejs.org/) + [`chokidar`](https://github.com/paulmillr/chokidar) — docs-runner's disk-watch + Yjs sync stack
+- systemd — process supervision for the gateway (runners are detached children with `KillMode=process` so a gateway restart doesn't disturb in-flight runners)
 
 **`packages/kata` (workflow CLI)**
 
