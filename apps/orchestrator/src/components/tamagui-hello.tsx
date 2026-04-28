@@ -5,7 +5,7 @@ export function TamaguiHello() {
     <View
       backgroundColor="$primary"
       padding="$3"
-      borderRadius="$2"
+      borderRadius="$md"
       alignItems="center"
       justifyContent="center"
     >

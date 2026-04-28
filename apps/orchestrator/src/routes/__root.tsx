@@ -1,9 +1,9 @@
-import { TamaguiProvider } from '@tamagui/core'
+import { TamaguiProvider, Theme } from '@tamagui/core'
 import { createRootRoute, Outlet, useLocation, useNavigate } from '@tanstack/react-router'
 import { useEffect } from 'react'
 import { TamaguiHello } from '~/components/tamagui-hello'
 import { Toaster } from '~/components/ui/sonner'
-import { ThemeProvider } from '~/context/theme-provider'
+import { ThemeProvider, useTheme } from '~/context/theme-provider'
 import { setUserStreamIdentity } from '~/hooks/use-user-stream'
 import { useSession } from '~/lib/auth-client'
 import { connectionManager } from '~/lib/connection-manager/manager'
@@ -65,25 +65,37 @@ function RootComponent() {
 
   if (isPending && !isLogin) {
     return (
-      <TamaguiProvider config={tamaguiConfig} defaultTheme="light">
-        <ThemeProvider>
+      <ThemeProvider>
+        <TamaguiThemed>
           <div className="flex min-h-svh items-center justify-center text-sm text-muted-foreground">
             Loading session…
           </div>
-        </ThemeProvider>
-      </TamaguiProvider>
+        </TamaguiThemed>
+      </ThemeProvider>
     )
   }
 
   return (
-    <TamaguiProvider config={tamaguiConfig} defaultTheme="light">
-      <ThemeProvider>
+    <ThemeProvider>
+      <TamaguiThemed>
         <NowProvider>
           <TamaguiHello />
           <Outlet />
           <Toaster duration={5000} />
         </NowProvider>
-      </ThemeProvider>
+      </TamaguiThemed>
+    </ThemeProvider>
+  )
+}
+
+// Inner wrapper so TamaguiProvider sees the resolved theme from
+// ThemeProvider's context. Keeping ThemeProvider outermost preserves
+// the `useTheme()` contract for downstream consumers.
+function TamaguiThemed({ children }: { children: React.ReactNode }) {
+  const { resolvedTheme } = useTheme()
+  return (
+    <TamaguiProvider config={tamaguiConfig} defaultTheme={resolvedTheme}>
+      <Theme name={resolvedTheme}>{children}</Theme>
     </TamaguiProvider>
   )
 }

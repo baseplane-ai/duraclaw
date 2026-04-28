@@ -7,7 +7,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && bash ../../scripts/check-worker-tamagui-leak.sh",
     "ship": "set -a && . ../../.env && set +a && wrangler deploy",
     "cf-typegen": "wrangler types",
     "db:generate": "drizzle-kit generate",
