@@ -14,6 +14,9 @@ dist
 .output
 .turbo
 .wrangler
+# GH#125: Tamagui Vite plugin emits per-build config snapshot here.
+# Regenerated on every `pnpm build`; never checked in.
+apps/orchestrator/.tamagui/
 
 # Tool state
 .claude/settings.local.json

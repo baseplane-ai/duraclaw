@@ -5,9 +5,9 @@
  * sort/filter/search and resume button behavior.
  */
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionRecord } from '~/db/session-record'
+import { cleanup, fireEvent, render, screen, waitFor } from '~/test-utils'
 
 const mockNavigate = vi.fn()
 vi.mock('@tanstack/react-router', () => ({

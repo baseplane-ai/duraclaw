@@ -1,0 +1,36 @@
+/*
+ * GH#125 P1b — escape-hatch CSS.
+ *
+ * Holds CSS classes that were previously defined via Tailwind @apply
+ * directives but are now expressed as raw CSS so the orchestrator can
+ * shed Tailwind's `@apply` directive (per the P1b partial-teardown).
+ */
+
+/*
+ * faded-bottom — used by chat surfaces to fade the last 8rem of content
+ * into the background, hiding the cut from the viewport edge. Moved
+ * from `@utility faded-bottom { @apply ... }` in styles.css.
+ */
+.faded-bottom {
+  position: relative;
+}
+
+.faded-bottom::after {
+  content: '';
+  pointer-events: none;
+  position: absolute;
+  inset-inline-start: 0;
+  bottom: 0;
+  display: none;
+  height: 8rem;
+  width: 100%;
+  border-end-start-radius: 1rem;
+  border-end-end-radius: 1rem;
+  background: linear-gradient(180deg, transparent 10%, var(--background) 70%);
+}
+
+@media (min-width: 768px) {
+  .faded-bottom::after {
+    display: block;
+  }
+}
