@@ -133,7 +133,7 @@ export async function checkPrecondition(
   }
 
   if (mode === 'implementation') {
-    const project = chain.sessions[0]?.project ?? chain.worktreeReservation?.worktree
+    const project = chain.sessions[0]?.project ?? chain.worktreeReservation?.path.split('/').pop()
     if (!project) {
       return { canAdvance: false, reason: 'No project context for chain', nextMode: mode }
     }
@@ -164,7 +164,7 @@ export async function checkPrecondition(
   }
 
   if (mode === 'close') {
-    const project = chain.sessions[0]?.project ?? chain.worktreeReservation?.worktree
+    const project = chain.sessions[0]?.project ?? chain.worktreeReservation?.path.split('/').pop()
     if (!project) {
       return { canAdvance: false, reason: 'No project context for chain', nextMode: mode }
     }

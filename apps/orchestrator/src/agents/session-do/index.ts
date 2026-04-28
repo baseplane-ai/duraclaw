@@ -83,7 +83,6 @@ import {
 import {
   persistMetaPatch as persistMetaPatchImpl,
   syncContextUsageToD1 as syncContextUsageToD1Impl,
-  syncWorktreeInfoToD1 as syncWorktreeInfoToD1Impl,
   updateState as updateStateImpl,
 } from './status'
 import { DEFAULT_META, type SessionDOContext } from './types'
@@ -320,11 +319,6 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   /** Drizzle handle scoped to this DO's request env (lazy, fresh per call). */
   get d1() {
     return drizzle(this.env.AUTH_DB, { schema })
-  }
-  // #37 P1b: stub kept for follow-up worktree-info attach. Do not remove.
-  // biome-ignore lint/correctness/noUnusedPrivateClassMembers: intentional, see above
-  private async syncWorktreeInfoToD1(worktreeInfoJson: string | null, updatedAt: string) {
-    return syncWorktreeInfoToD1Impl(this.moduleCtx, worktreeInfoJson, updatedAt)
   }
   syncContextUsageToD1(json: string) {
     return syncContextUsageToD1Impl(this.moduleCtx, this.contextUsageDebounce, json)

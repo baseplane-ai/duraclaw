@@ -806,7 +806,6 @@ export interface SessionSummary {
   errorCode?: string | null
   kataStateJson?: string | null
   contextUsageJson?: string | null
-  worktreeInfoJson?: string | null
   visibility?: 'public' | 'private'
 }
 

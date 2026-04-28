@@ -14,10 +14,12 @@
  * a `{type:'delete'}` op so empty chains disappear from user clients.
  */
 
-import { asc, eq } from 'drizzle-orm'
+import { and, asc, eq, sql } from 'drizzle-orm'
 import type { drizzle } from 'drizzle-orm/d1'
+import type { WorktreeRow } from '~/api/worktrees-types'
 import type * as schema from '~/db/schema'
-import { agentSessions, worktreeReservations } from '~/db/schema'
+import { agentSessions, worktrees } from '~/db/schema'
+import { rowToDto } from '~/lib/reserve-worktree'
 import type { ChainSummary, Env } from '~/lib/types'
 
 type DrizzleDB = ReturnType<typeof drizzle<typeof schema>>
@@ -231,6 +233,12 @@ export async function loadChainBuildContext(env: Env): Promise<ChainBuildContext
  * pre-fetched sessions, reservation, and GH context. Returns null if the
  * chain is empty (no sessions AND no GH issue metadata).
  */
+/** Number of ms after which a held worktree is considered "stale" for the
+ *  kanban force-release UI gate. Mirrors `FORCE_RELEASE_STALE_MS` in the
+ *  api handler — the constant lives here too so chain projections compute
+ *  the boolean without reaching across modules. */
+const CHAIN_RESERVATION_STALE_MS = 7 * 24 * 60 * 60 * 1000
+
 export function buildChainRowFromContext(
   issueNumber: number,
   sessions: Array<{
@@ -241,13 +249,7 @@ export function buildChainRowFromContext(
     createdAt: string
     project: string
   }>,
-  reservation: {
-    worktree: string
-    heldSince: string
-    lastActivityAt: string
-    ownerId: string
-    stale: boolean | null
-  } | null,
+  reservation: WorktreeRow | null,
   ctx: ChainBuildContext,
 ): ChainSummary | null {
   const ghIssue = ctx.ghIssueByNumber.get(issueNumber)
@@ -278,13 +280,20 @@ export function buildChainRowFromContext(
     issueState,
   )
 
+  // GH#115 P1.4: project the worktrees row onto the wire shape the chain
+  // summary exposes. Derives the legacy `stale` boolean (lastTouchedAt
+  // older than 7d) here since `worktrees` has no `stale` column.
   const worktreeReservation = reservation
     ? {
-        worktree: reservation.worktree,
-        heldSince: reservation.heldSince,
-        lastActivityAt: reservation.lastActivityAt,
+        id: reservation.id,
+        path: reservation.path,
+        branch: reservation.branch,
+        status: reservation.status,
+        reservedBy: reservation.reservedBy,
         ownerId: reservation.ownerId,
-        stale: !!reservation.stale,
+        releasedAt: reservation.releasedAt,
+        lastTouchedAt: reservation.lastTouchedAt,
+        stale: Date.now() - reservation.lastTouchedAt > CHAIN_RESERVATION_STALE_MS,
       }
     : null
 
@@ -342,17 +351,44 @@ export async function buildChainRow(
       lastActivity: agentSessions.lastActivity,
       createdAt: agentSessions.createdAt,
       project: agentSessions.project,
+      worktreeId: agentSessions.worktreeId,
     })
     .from(agentSessions)
     .where(eq(agentSessions.kataIssue, issueNumber))
     .orderBy(asc(agentSessions.createdAt))
 
-  const reservationRows = await db
-    .select()
-    .from(worktreeReservations)
-    .where(eq(worktreeReservations.issueNumber, issueNumber))
-    .limit(1)
-  const reservation = reservationRows[0] ?? null
+  // GH#115 P1.4: reservation is the worktrees row referenced by ANY
+  // session in the chain. Pick the most-recent session with a non-null
+  // worktreeId — all sessions in an arc share the same FK so this is
+  // deterministic in practice. Falls back to a `reservedBy.kind='arc'`
+  // lookup for chains where no session has a worktreeId yet (rare;
+  // pre-115 stragglers backfilled successfully but not all sessions
+  // joined the FK).
+  let reservation: WorktreeRow | null = null
+  // sessionRows is ordered ASC by createdAt; the predecessor->successor
+  // chain shares one FK, so any non-null worktreeId resolves the same
+  // row. Take the first hit for simplicity.
+  const sessionWithWt = sessionRows.find((s) => s.worktreeId)
+  if (sessionWithWt?.worktreeId) {
+    const rows = await db
+      .select()
+      .from(worktrees)
+      .where(eq(worktrees.id, sessionWithWt.worktreeId))
+      .limit(1)
+    reservation = rows[0] ? rowToDto(rows[0]) : null
+  } else {
+    const rows = await db
+      .select()
+      .from(worktrees)
+      .where(
+        and(
+          sql`json_extract(${worktrees.reservedBy}, '$.kind') = 'arc'`,
+          sql`json_extract(${worktrees.reservedBy}, '$.id') = ${issueNumber}`,
+        ),
+      )
+      .limit(1)
+    reservation = rows[0] ? rowToDto(rows[0]) : null
+  }
 
   const ctx = await loadChainBuildContext(env)
 

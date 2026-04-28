@@ -214,19 +214,61 @@ describe('tryAutoAdvance', () => {
     expect(res).toEqual({ action: 'error', error: 'boom' })
   })
 
-  it('returns {action:"stalled"} when worktree is held by another chain (409 conflict)', async () => {
-    fakeDb.data.queue = [[{ chainsJson: null, defaultChainAutoAdvance: 1 }], []]
+  it('returns {action:"stalled"} when worktree is held by another arc (409 conflict)', async () => {
+    // GH#115 P1.4: queue is [prefs, idempotency, predecessor-worktreeId
+    // lookup]. With a non-null worktreeId, the checkout helper is called
+    // and its 409 conflict surfaces as a stalled action.
+    fakeDb.data.queue = [
+      [{ chainsJson: null, defaultChainAutoAdvance: 1 }],
+      [],
+      [{ worktreeId: 'wt-99' }],
+    ]
     mockedCheckoutWorktree.mockResolvedValueOnce({
       ok: false,
       status: 409,
-      conflict: { issueNumber: 99 },
+      conflict: { reservedBy: { kind: 'arc', id: 99 } },
     } as any)
 
     const res = await tryAutoAdvance(env, baseParams({ kataMode: 'implementation' }))
     expect(res).toMatchObject({ action: 'stalled' })
     if (res.action === 'stalled') {
-      expect(res.reason).toMatch(/Worktree held by chain #99/)
+      expect(res.reason).toMatch(/Worktree held by arc:99/)
     }
+  })
+
+  it('skips checkout when predecessor has no worktreeId (pre-115 chain)', async () => {
+    // Predecessor row has worktreeId=null — auto-advance must still
+    // spawn the successor (kata auto-reserve P1.6 will provision one
+    // on first mode entry).
+    fakeDb.data.queue = [
+      [{ chainsJson: null, defaultChainAutoAdvance: 1 }],
+      [],
+      [{ worktreeId: null }],
+    ]
+    mockedCreateSession.mockResolvedValueOnce({ ok: true, sessionId: 'new-verify' })
+
+    const res = await tryAutoAdvance(env, baseParams({ kataMode: 'implementation' }))
+    expect(res).toMatchObject({ action: 'advanced', nextMode: 'verify' })
+    // Worktree checkout was NOT invoked (predecessor had no FK).
+    expect(mockedCheckoutWorktree).not.toHaveBeenCalled()
+    // Successor spawned WITHOUT inherited worktree param.
+    const call = mockedCreateSession.mock.calls[0]
+    expect(call[2].worktree).toBeUndefined()
+  })
+
+  it('threads predecessor worktreeId through to createSession via worktree:{id}', async () => {
+    fakeDb.data.queue = [
+      [{ chainsJson: null, defaultChainAutoAdvance: 1 }],
+      [],
+      [{ worktreeId: 'wt-abc' }],
+    ]
+    mockedCreateSession.mockResolvedValueOnce({ ok: true, sessionId: 'new-verify' })
+    mockedCheckoutWorktree.mockResolvedValueOnce({ ok: true, reservation: {} } as any)
+
+    const res = await tryAutoAdvance(env, baseParams({ kataMode: 'implementation' }))
+    expect(res).toMatchObject({ action: 'advanced', nextMode: 'verify' })
+    const call = mockedCreateSession.mock.calls[0]
+    expect(call[2].worktree).toEqual({ id: 'wt-abc' })
   })
 
   describe('evidence-file gate (GH#73)', () => {

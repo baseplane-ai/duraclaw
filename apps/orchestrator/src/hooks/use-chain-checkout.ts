@@ -11,12 +11,12 @@
  */
 
 import { useMemo } from 'react'
-import type { WorktreeReservation } from '~/lib/types'
+import type { ChainWorktreeReservation } from '~/lib/types'
 
 export interface ChainCheckoutResult {
   ok: boolean
-  reservation?: WorktreeReservation
-  conflict?: WorktreeReservation
+  reservation?: ChainWorktreeReservation
+  conflict?: ChainWorktreeReservation
   error?: string
 }
 
@@ -70,12 +70,12 @@ export function useChainCheckout(): UseChainCheckoutResult {
             modeAtCheckout,
           })
           if (status === 200 && data && 'reservation' in data) {
-            return { ok: true, reservation: data.reservation as WorktreeReservation }
+            return { ok: true, reservation: data.reservation as ChainWorktreeReservation }
           }
           if (status === 409 && data && 'conflict' in data) {
             return {
               ok: false,
-              conflict: data.conflict as WorktreeReservation,
+              conflict: data.conflict as ChainWorktreeReservation,
               error: typeof data.message === 'string' ? data.message : 'Worktree already held',
             }
           }

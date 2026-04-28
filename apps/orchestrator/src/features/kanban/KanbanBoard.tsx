@@ -230,7 +230,11 @@ export function KanbanBoard() {
             issueNumber={pendingAdvance.chain.issueNumber}
             currentMode={pendingAdvance.chain.column}
             nextMode={pendingAdvance.nextMode}
-            worktree={pendingAdvance.chain.worktreeReservation?.worktree ?? null}
+            worktree={
+              // GH#115: derive legacy project-name display from the row
+              // path (basename). null when no reservation is held.
+              pendingAdvance.chain.worktreeReservation?.path.split('/').pop() ?? null
+            }
             worktreeReserved={!!pendingAdvance.chain.worktreeReservation}
             onConfirm={handleConfirm}
             pending={pending}

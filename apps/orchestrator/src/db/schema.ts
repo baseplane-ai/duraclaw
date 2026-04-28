@@ -167,10 +167,6 @@ export const agentSessions = sqliteTable(
     errorCode: text('error_code'),
     kataStateJson: text('kata_state_json'),
     contextUsageJson: text('context_usage_json'),
-    // @deprecated — column dropped by migration 0027 (GH#115). Kept as
-    // a TS field until P1.4 removes references in lib/types.ts,
-    // shared-types, status-bar.tsx, AgentDetailView.tsx, and tests.
-    worktreeInfoJson: text('worktree_info_json'),
     // GH#115: FK into worktrees(id). NULL for sessions in read-only
     // kata modes (research, planning, freeform); populated by kata
     // auto-reserve for code-touching modes. Backfilled from the prior
@@ -222,34 +218,6 @@ export const userTabs = sqliteTable(
     // and intentionally a plain `index` so drizzle-kit doesn't try to
     // re-emit it.
     liveSessionUq: index('idx_user_tabs_live_session_uq').on(t.userId, t.sessionId),
-  }),
-)
-
-/**
- * @deprecated — replaced by `worktrees` (GH#115). The SQL table
- * `worktree_reservations` is renamed to `worktrees` by migration 0027,
- * so this export is mechanically still pointing at columns that won't
- * exist post-deploy. Kept here ONLY so the ~6 callsites in chains.ts /
- * checkout-worktree.ts / auto-advance.ts / status.ts / api/index.ts
- * keep typechecking until P1.4 of GH#115 refactors them to use
- * `worktrees`. Do NOT add new callers. Remove this export when P1.4
- * lands.
- */
-export const worktreeReservations = sqliteTable(
-  'worktree_reservations',
-  {
-    worktree: text('worktree').primaryKey(),
-    issueNumber: integer('issue_number').notNull(),
-    ownerId: text('owner_id')
-      .notNull()
-      .references(() => users.id, { onDelete: 'cascade' }),
-    heldSince: text('held_since').notNull(),
-    lastActivityAt: text('last_activity_at').notNull(),
-    modeAtCheckout: text('mode_at_checkout').notNull(),
-    stale: integer('stale', { mode: 'boolean' }).notNull().default(false),
-  },
-  (t) => ({
-    byIssue: index('idx_wt_res_issue').on(t.issueNumber),
   }),
 )
 

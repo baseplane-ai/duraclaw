@@ -320,7 +320,12 @@ export function ChainStatusItem({ kataState, kataIssue, sessionId }: ChainStatus
 
             {chain.worktreeReservation && (
               <div className="text-muted-foreground">
-                Worktree: {chain.worktreeReservation.worktree}
+                {/* GH#115: legacy `worktree` (project name) is the basename
+                    of the new `path` (e.g. /data/projects/duraclaw-dev3 ->
+                    duraclaw-dev3). Falls back to the full path if the
+                    derivation fails — never empty. */}
+                Worktree:{' '}
+                {chain.worktreeReservation.path.split('/').pop() || chain.worktreeReservation.path}
               </div>
             )}
 

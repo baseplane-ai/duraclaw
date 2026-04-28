@@ -13,7 +13,7 @@
  */
 
 import { apiUrl } from '~/lib/platform'
-import type { ChainSummary, WorktreeReservation } from '~/lib/types'
+import type { ChainSummary, ChainWorktreeReservation } from '~/lib/types'
 
 const ACTIVE_STATUSES = new Set(['running', 'waiting_input', 'waiting_permission', 'idle'])
 
@@ -26,7 +26,7 @@ const CODE_TOUCHING_MODES = new Set(['implementation', 'verify', 'debug', 'task'
 
 export type AdvanceChainResult =
   | { ok: true; sessionId: string }
-  | { ok: false; error?: string; conflict?: WorktreeReservation }
+  | { ok: false; error?: string; conflict?: ChainWorktreeReservation }
 
 function latestActiveSession(chain: ChainSummary): ChainSummary['sessions'][number] | null {
   const active = chain.sessions.filter((s) => ACTIVE_STATUSES.has(String(s.status)))
@@ -129,7 +129,7 @@ export async function advanceChain(
       })
       if (checkoutResp.status === 409) {
         const body = (await checkoutResp.json().catch(() => null)) as {
-          conflict?: WorktreeReservation
+          conflict?: ChainWorktreeReservation
           message?: string
         } | null
         return {

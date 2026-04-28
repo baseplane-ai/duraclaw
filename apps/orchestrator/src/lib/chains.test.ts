@@ -246,7 +246,9 @@ describe('buildChainRowFromContext', () => {
     expect(row!.issueType).toBe('other')
   })
 
-  it('includes worktreeReservation when present', () => {
+  it('includes worktreeReservation when present (GH#115 wire shape)', () => {
+    // Recent lastTouchedAt — well within the 7d stale window.
+    const recent = Date.now()
     const row = buildChainRowFromContext(
       27,
       [
@@ -260,21 +262,59 @@ describe('buildChainRowFromContext', () => {
         },
       ],
       {
-        worktree: 'duraclaw-dev3',
-        heldSince: '2026-04-18T00:00:00Z',
-        lastActivityAt: '2026-04-20T00:00:00Z',
+        id: 'wt-abc',
+        path: '/data/projects/duraclaw-dev3',
+        branch: null,
+        status: 'held',
+        reservedBy: { kind: 'arc', id: 27 },
         ownerId: 'user-1',
-        stale: false,
+        releasedAt: null,
+        createdAt: 1_700_000_000_000,
+        lastTouchedAt: recent,
       },
       emptyCtx,
     )
     expect(row!.worktreeReservation).toEqual({
-      worktree: 'duraclaw-dev3',
-      heldSince: '2026-04-18T00:00:00Z',
-      lastActivityAt: '2026-04-20T00:00:00Z',
+      id: 'wt-abc',
+      path: '/data/projects/duraclaw-dev3',
+      branch: null,
+      status: 'held',
+      reservedBy: { kind: 'arc', id: 27 },
       ownerId: 'user-1',
+      releasedAt: null,
+      lastTouchedAt: recent,
       stale: false,
     })
+  })
+
+  it('derives stale=true when lastTouchedAt is older than 7 days', () => {
+    const eightDaysAgo = Date.now() - 8 * 24 * 60 * 60 * 1000
+    const row = buildChainRowFromContext(
+      27,
+      [
+        {
+          id: 's1',
+          kataMode: 'implementation',
+          status: 'idle',
+          lastActivity: '2026-04-20T00:00:00Z',
+          createdAt: '2026-04-20T00:00:00Z',
+          project: 'p',
+        },
+      ],
+      {
+        id: 'wt-abc',
+        path: '/data/projects/duraclaw-dev3',
+        branch: null,
+        status: 'held',
+        reservedBy: { kind: 'arc', id: 27 },
+        ownerId: 'user-1',
+        releasedAt: null,
+        createdAt: 1_700_000_000_000,
+        lastTouchedAt: eightDaysAgo,
+      },
+      emptyCtx,
+    )
+    expect(row!.worktreeReservation?.stale).toBe(true)
   })
 
   it('attaches prNumber when a matching PR is found', () => {
