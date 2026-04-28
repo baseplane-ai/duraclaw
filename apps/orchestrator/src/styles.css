@@ -24,17 +24,28 @@
 @source inline("has-[>[data-slot=button-group]]:gap-2");
 
 /*
- * GH#125 P1b — `@custom-variant dark` removed. Tamagui's <Theme name='dark'>
- * now owns dark-mode token resolution (via the `.dark` class set on the
- * root element by theme-provider.tsx — Tamagui reads it via theme tokens,
- * Tailwind utilities outside the orchestrator-owned scope still see it
- * for ai-elements).
+ * GH#125 P1b — `@custom-variant dark` is RETAINED. The initial P1b draft
+ * removed it on the theory that Tamagui's <Theme name='dark'> owns dark
+ * mode, but escape-hatch className strings on migrated primitives
+ * (input/textarea/button/badge/tabs/switch) and ai-elements continue to
+ * use Tailwind `dark:` utilities, which need this directive to trigger
+ * off the `.dark` class set by theme-provider.tsx on <html>. Removing it
+ * silently regressed manual theme-toggle dark mode (the toggle still
+ * flipped the class, but every `dark:` utility fell back to
+ * `@media (prefers-color-scheme: dark)` and only responded to OS
+ * appearance). P1b's "Tailwind teardown" thus retains both
+ * `@theme inline` (for utility generation) AND `@custom-variant dark`
+ * (for variant resolution) — the only meaningful teardown items removed
+ * are the 4 `@apply` usages in @layer base and `@utility faded-bottom`
+ * (moved to escape-hatch.css).
  *
  * The 4 @apply directives that previously lived in this @layer base block
  * have been rewritten as raw CSS using the existing CSS variables defined
  * in :root / .dark blocks of styles/theme.css. The `body has-[...]:bg-sidebar`
  * variant uses an attribute selector instead of Tailwind's has-[] utility.
  */
+@custom-variant dark (&:is(.dark *));
+
 @layer base {
   * {
     border-color: var(--border);
