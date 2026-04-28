@@ -626,6 +626,12 @@ export class ClaudeRunner {
       if (cmd.session_store_enabled) {
         if (ctx.transcriptRpc) {
           options.sessionStore = new DuraclavSessionStore(ctx.transcriptRpc)
+          // SDK 0.2.119 rejects enableFileCheckpointing + sessionStore at
+          // query() time ("backup blobs are not mirrored, so rewindFiles()
+          // fails after a store-backed resume"). When sessionStore is in
+          // play, file checkpointing must be off — the DO transcript
+          // mirror is the source of truth for resume.
+          options.enableFileCheckpointing = false
           // Bump the SDK's SessionStore.load() timeout on resume only —
           // the default 60s assumes a local-disk JSONL read, but with
           // sessionStore we pay a dial-back round-trip + DO cold-start +
