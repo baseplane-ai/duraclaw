@@ -9,22 +9,70 @@ import {
 } from './titler.js'
 import type { RunnerSessionContext } from './types.js'
 
-// ── Mock Anthropic SDK ───────────────────────────────────────────────
+// ── Mock Claude Agent SDK ────────────────────────────────────────────
+//
+// Titler swapped from the plain `@anthropic-ai/sdk` to the Agent SDK's
+// `query()` so it auths via Claude Code's OAuth subscription (no
+// ANTHROPIC_API_KEY needed). Tests mock `query()` to return an async
+// iterable yielding one assistant message + one result, matching the
+// shape the titler's `oneShotQuery` consumer expects.
 
-let mockCreateCalls: Array<{ model: string; system: string; messages: unknown[] }> = []
-let mockCreateResponse: { content: Array<{ type: string; text: string }> } = {
-  content: [{ type: 'text', text: '{"title":"Fix Auth Bug","confidence":0.92}' }],
+interface MockQueryCall {
+  systemPrompt: string | string[] | { type: string }
+  model?: string
+  userText: string
+  allowedTools: string[] | undefined
+  maxTurns: number | undefined
 }
 
-vi.mock('@anthropic-ai/sdk', () => {
+let mockQueryCalls: MockQueryCall[] = []
+let mockAssistantText = '{"title":"Fix Auth Bug","confidence":0.92}'
+/** When set, the next query() rejects with this error instead of yielding. */
+let mockQueryError: Error | null = null
+
+vi.mock('@anthropic-ai/claude-agent-sdk', () => {
   return {
-    default: class {
-      messages = {
-        create: async (opts: { model: string; system: string; messages: unknown[] }) => {
-          mockCreateCalls.push(opts)
-          return mockCreateResponse
-        },
+    query: ({
+      prompt,
+      options,
+    }: {
+      prompt: AsyncIterable<{ message: { content: string } }>
+      options: {
+        model?: string
+        systemPrompt?: string | string[] | { type: string }
+        allowedTools?: string[]
+        maxTurns?: number
       }
+    }) => {
+      // Drain the prompt iterable so we see what the titler sent. Caller
+      // closure into both prompt + options means we capture the user
+      // text alongside the model/system options for assertions.
+      const errorOnIter = mockQueryError
+      mockQueryError = null
+      const userTextPromise: Promise<string> = (async () => {
+        for await (const m of prompt) {
+          return typeof m.message.content === 'string' ? m.message.content : ''
+        }
+        return ''
+      })()
+
+      const text = mockAssistantText
+      return (async function* () {
+        const userText = await userTextPromise
+        mockQueryCalls.push({
+          systemPrompt: options.systemPrompt ?? '',
+          model: options.model,
+          userText,
+          allowedTools: options.allowedTools,
+          maxTurns: options.maxTurns,
+        })
+        if (errorOnIter) throw errorOnIter
+        yield {
+          type: 'assistant',
+          message: { role: 'assistant', content: [{ type: 'text', text }] },
+        }
+        yield { type: 'result', subtype: 'success' }
+      })()
     },
   }
 })
@@ -90,10 +138,9 @@ function makeMessages(count: number, charsEach = 600): TranscriptMessage[] {
 // ── Tests ────────────────────────────────────────────────────────────
 
 beforeEach(() => {
-  mockCreateCalls = []
-  mockCreateResponse = {
-    content: [{ type: 'text', text: '{"title":"Fix Auth Bug","confidence":0.92}' }],
-  }
+  mockQueryCalls = []
+  mockAssistantText = '{"title":"Fix Auth Bug","confidence":0.92}'
+  mockQueryError = null
 })
 
 afterEach(() => {
@@ -159,14 +206,14 @@ describe('SessionTitler', () => {
       const { titler, sendCalls } = makeTitler()
       await titler.maybeInitialTitle(makeMessages(2, 100))
       expect(sendCalls).toHaveLength(0)
-      expect(mockCreateCalls).toHaveLength(0)
+      expect(mockQueryCalls).toHaveLength(0)
     })
 
     it('fires and emits title_update when transcript >= 1500 tokens', async () => {
       const { titler, sendCalls } = makeTitler()
       // 4 messages * 2000 chars each ≈ 2000+ tokens
       await titler.maybeInitialTitle(makeMessages(4, 2000))
-      expect(mockCreateCalls).toHaveLength(1)
+      expect(mockQueryCalls).toHaveLength(1)
       expect(sendCalls).toHaveLength(1)
       expect(sendCalls[0]).toMatchObject({
         type: 'title_update',
@@ -182,7 +229,7 @@ describe('SessionTitler', () => {
       const msgs = makeMessages(4, 2000)
       await titler.maybeInitialTitle(msgs)
       await titler.maybeInitialTitle(msgs)
-      expect(mockCreateCalls).toHaveLength(1)
+      expect(mockQueryCalls).toHaveLength(1)
     })
   })
 
@@ -200,14 +247,7 @@ describe('SessionTitler', () => {
       expect(sendCalls).toHaveLength(1)
 
       // Set pivot response
-      mockCreateResponse = {
-        content: [
-          {
-            type: 'text',
-            text: '{"did_pivot":true,"confidence":0.85,"proposed_new_title":"Debug Push"}',
-          },
-        ],
-      }
+      mockAssistantText = '{"did_pivot":true,"confidence":0.85,"proposed_new_title":"Debug Push"}'
 
       await titler.maybePivotRetitle(makeMessages(5, 2000), "Let's debug push notifications")
       expect(sendCalls).toHaveLength(2)
@@ -223,14 +263,7 @@ describe('SessionTitler', () => {
       const { titler, sendCalls } = makeTitler()
       await titler.maybeInitialTitle(makeMessages(4, 2000))
 
-      mockCreateResponse = {
-        content: [
-          {
-            type: 'text',
-            text: '{"did_pivot":false,"confidence":0.3,"proposed_new_title":null}',
-          },
-        ],
-      }
+      mockAssistantText = '{"did_pivot":false,"confidence":0.3,"proposed_new_title":null}'
 
       await titler.maybePivotRetitle(makeMessages(5, 2000), 'follow up')
       expect(sendCalls).toHaveLength(1) // only initial
@@ -240,14 +273,7 @@ describe('SessionTitler', () => {
       const { titler, sendCalls } = makeTitler()
       await titler.maybeInitialTitle(makeMessages(4, 2000))
 
-      mockCreateResponse = {
-        content: [
-          {
-            type: 'text',
-            text: '{"did_pivot":true,"confidence":0.5,"proposed_new_title":"Maybe New"}',
-          },
-        ],
-      }
+      mockAssistantText = '{"did_pivot":true,"confidence":0.5,"proposed_new_title":"Maybe New"}'
 
       await titler.maybePivotRetitle(makeMessages(5, 2000), 'sort of new topic')
       expect(sendCalls).toHaveLength(1) // only initial
@@ -257,14 +283,7 @@ describe('SessionTitler', () => {
       const { titler, sendCalls } = makeTitler()
       await titler.maybeInitialTitle(makeMessages(4, 2000))
 
-      mockCreateResponse = {
-        content: [
-          {
-            type: 'text',
-            text: '{"did_pivot":true,"confidence":0.9,"proposed_new_title":"Topic B"}',
-          },
-        ],
-      }
+      mockAssistantText = '{"did_pivot":true,"confidence":0.9,"proposed_new_title":"Topic B"}'
 
       await titler.maybePivotRetitle(makeMessages(5, 2000), 'pivot 1')
       expect(sendCalls).toHaveLength(2) // initial + first pivot
@@ -272,7 +291,7 @@ describe('SessionTitler', () => {
       // Second pivot within cooldown — should be a no-op
       await titler.maybePivotRetitle(makeMessages(6, 2000), 'pivot 2')
       expect(sendCalls).toHaveLength(2) // unchanged
-      expect(mockCreateCalls).toHaveLength(2) // initial + first pivot, no third call
+      expect(mockQueryCalls).toHaveLength(2) // initial + first pivot, no third call
     })
   })
 
@@ -285,7 +304,7 @@ describe('SessionTitler', () => {
       const p2 = titler.maybeInitialTitle(msgs)
       await Promise.all([p1, p2])
       // Only one Haiku call should have been made
-      expect(mockCreateCalls).toHaveLength(1)
+      expect(mockQueryCalls).toHaveLength(1)
     })
   })
 
@@ -295,14 +314,14 @@ describe('SessionTitler', () => {
       await titler.maybeInitialTitle(makeMessages(4, 2000))
       await titler.maybePivotRetitle(makeMessages(5, 2000), 'new topic')
       expect(sendCalls).toHaveLength(0)
-      expect(mockCreateCalls).toHaveLength(0)
+      expect(mockQueryCalls).toHaveLength(0)
     })
   })
 
   describe('graceful degradation', () => {
     it('logs warning and does not emit on Haiku failure', async () => {
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
-      mockCreateResponse = { content: [{ type: 'text', text: 'not valid json!!!' }] }
+      mockAssistantText = 'not valid json!!!'
 
       const { titler, sendCalls } = makeTitler()
       await titler.maybeInitialTitle(makeMessages(4, 2000))
@@ -313,31 +332,70 @@ describe('SessionTitler', () => {
     it('clears titleInFlight on failure so future calls work', async () => {
       vi.spyOn(console, 'warn').mockImplementation(() => {})
       // First call: fail
-      mockCreateResponse = { content: [{ type: 'text', text: 'bad json' }] }
+      mockAssistantText = 'bad json'
       const { titler, sendCalls } = makeTitler()
       await titler.maybeInitialTitle(makeMessages(4, 2000))
       expect(sendCalls).toHaveLength(0)
 
       // Second call: succeed
-      mockCreateResponse = {
-        content: [{ type: 'text', text: '{"title":"Recovered","confidence":0.8}' }],
-      }
+      mockAssistantText = '{"title":"Recovered","confidence":0.8}'
       await titler.maybeInitialTitle(makeMessages(5, 2000))
       expect(sendCalls).toHaveLength(1)
       expect(sendCalls[0]).toMatchObject({ title: 'Recovered' })
     })
   })
 
+  describe('Agent SDK one-shot shape', () => {
+    // Pins the contract that earned us OAuth-based auth: titler routes
+    // through `query()` with the title model, the title system prompt,
+    // no tools, and a single-turn cap. Regression guard for anyone
+    // tempted to "simplify" back to a plain SDK call (which would
+    // re-introduce the ANTHROPIC_API_KEY dependency).
+    it('calls query() with TITLER_MODEL, system prompt, no tools, maxTurns=1', async () => {
+      const { titler } = makeTitler()
+      await titler.maybeInitialTitle(makeMessages(4, 2000))
+
+      expect(mockQueryCalls).toHaveLength(1)
+      const call = mockQueryCalls[0]
+      expect(call.model).toBe('claude-haiku-4-5-20251014')
+      expect(call.allowedTools).toEqual([])
+      expect(call.maxTurns).toBe(1)
+      expect(typeof call.systemPrompt).toBe('string')
+      expect(call.systemPrompt as string).toContain('You name work sessions')
+      // The transcript landed as the user message — confirms we sent
+      // it as a synthetic prompt rather than the SDK's default
+      // working-context boot prompt.
+      expect(call.userText).toContain('Message ')
+    })
+
+    it('uses the pivot system prompt for retitle calls', async () => {
+      const { titler } = makeTitler()
+      // Get past the initial-title gate first.
+      await titler.maybeInitialTitle(makeMessages(4, 2000))
+      mockQueryCalls = []
+
+      mockAssistantText = '{"did_pivot":true,"confidence":0.85,"proposed_new_title":"New Topic"}'
+      await titler.maybePivotRetitle(makeMessages(5, 2000), 'completely new topic')
+
+      expect(mockQueryCalls).toHaveLength(1)
+      expect(mockQueryCalls[0].systemPrompt as string).toContain('Detect whether the user pivoted')
+    })
+
+    it('logs warning and does not emit on query() throw (e.g. missing OAuth)', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      mockQueryError = new Error('not authenticated')
+
+      const { titler, sendCalls } = makeTitler()
+      await titler.maybeInitialTitle(makeMessages(4, 2000))
+
+      expect(sendCalls).toHaveLength(0)
+      expect(warnSpy).toHaveBeenCalled()
+    })
+  })
+
   describe('code fence stripping', () => {
     it('handles response wrapped in code fences', async () => {
-      mockCreateResponse = {
-        content: [
-          {
-            type: 'text',
-            text: '```json\n{"title":"Fenced Title","confidence":0.88}\n```',
-          },
-        ],
-      }
+      mockAssistantText = '```json\n{"title":"Fenced Title","confidence":0.88}\n```'
       const { titler, sendCalls } = makeTitler()
       await titler.maybeInitialTitle(makeMessages(4, 2000))
       expect(sendCalls).toHaveLength(1)

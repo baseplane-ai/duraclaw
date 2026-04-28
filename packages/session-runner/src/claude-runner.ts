@@ -657,6 +657,10 @@ export class ClaudeRunner {
         sendFn: (channel, event, context) =>
           send(channel, event as unknown as GatewayEvent, context),
         enabled: !!cmd.titler_enabled,
+        // Same musl-vs-glibc fix as the main query() above: pass the
+        // resolved glibc bin so the titler's one-shot query() doesn't
+        // trip the SDK's musl-first lookup on a glibc-only host.
+        pathToClaudeCodeExecutable: resolveGlibcClaudeBinary(),
       })
       ctx.titler = titler
 

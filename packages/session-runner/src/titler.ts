@@ -1,8 +1,7 @@
 /**
  * GH#86: Haiku-based session titler.
  *
- * Lives in the session-runner, not the DO — the runner owns the transcript
- * and inherits ANTHROPIC_API_KEY from the gateway's buildCleanEnv().
+ * Lives in the session-runner, not the DO — the runner owns the transcript.
  *
  * Two call sites:
  *  1. `maybeInitialTitle(messages)` — fire-and-forget after `type=result`
@@ -10,7 +9,14 @@
  *  2. `maybePivotRetitle(messages, newUserMessage)` — fire-and-forget on
  *     each incoming `stream-input`, in parallel with the main `query()`.
  *
- * All Haiku calls are single-flighted and non-blocking. Failures are
+ * Auth: rides the same `@anthropic-ai/claude-agent-sdk` that the main
+ * session uses, so it picks up the user's Claude Code OAuth subscription
+ * automatically — no `ANTHROPIC_API_KEY` env var needed. Each title call
+ * spins up its own one-shot `query()` with `model = TITLER_MODEL`,
+ * `allowedTools: []`, and `maxTurns: 1` so the model emits a single
+ * JSON-only assistant turn and then halts.
+ *
+ * All title calls are single-flighted and non-blocking. Failures are
  * logged and swallowed — the session continues untitled.
  */
 import type { BufferedChannel } from '@duraclaw/shared-transport'
@@ -162,6 +168,14 @@ export interface SessionTitlerOptions {
   ctx: RunnerSessionContext
   sendFn: SendFn
   enabled: boolean
+  /**
+   * Optional explicit path to the Claude Code executable. Plumbed
+   * through from the main runner's `resolveGlibcClaudeBinary()` so the
+   * titler's one-shot `query()` doesn't trip the SDK's musl-first
+   * lookup on glibc-only hosts (same fix as `claude-runner.ts`'s main
+   * `query()` call). Undefined → SDK falls back to its default lookup.
+   */
+  pathToClaudeCodeExecutable?: string
 }
 
 export class SessionTitler {
@@ -169,6 +183,7 @@ export class SessionTitler {
   private ctx: RunnerSessionContext
   private sendFn: SendFn
   private enabled: boolean
+  private pathToClaudeCodeExecutable: string | undefined
 
   /** True after the initial title has been generated. */
   private hasInitialTitle = false
@@ -184,6 +199,80 @@ export class SessionTitler {
     this.ctx = opts.ctx
     this.sendFn = opts.sendFn
     this.enabled = opts.enabled
+    this.pathToClaudeCodeExecutable = opts.pathToClaudeCodeExecutable
+  }
+
+  /**
+   * One-shot Agent SDK call. Spins up `query()` with a single
+   * synthetic user message, JSON-only system prompt, no tools, and
+   * `maxTurns: 1` so the model emits one assistant turn and stops.
+   *
+   * Returns the concatenated text of the assistant's content blocks.
+   * Throws on SDK error (`error_*` result subtype, missing assistant
+   * message, or import failure) — callers catch and log.
+   */
+  private async oneShotQuery(systemPrompt: string, userPrompt: string): Promise<string> {
+    const { query } = await import('@anthropic-ai/claude-agent-sdk')
+
+    // Single-message async iterable — yields once, then completes so
+    // the SDK's prompt-stream sees end-of-input after the first turn.
+    async function* oneshotPrompt() {
+      yield {
+        type: 'user' as const,
+        message: { role: 'user' as const, content: userPrompt },
+        parent_tool_use_id: null,
+        session_id: '',
+      }
+    }
+
+    const q = query({
+      prompt: oneshotPrompt(),
+      options: {
+        model: TITLER_MODEL,
+        systemPrompt,
+        allowedTools: [],
+        maxTurns: 1,
+        // No tools means nothing dangerous can run; pick the strict
+        // default so an unexpected tool attempt is denied rather than
+        // prompted (titler is fire-and-forget, no UI to prompt).
+        permissionMode: 'default',
+        ...(this.pathToClaudeCodeExecutable
+          ? { pathToClaudeCodeExecutable: this.pathToClaudeCodeExecutable }
+          : {}),
+      },
+    })
+
+    let assistantText = ''
+    for await (const msg of q) {
+      // Only the assistant text blocks matter for title parsing.
+      if (msg.type === 'assistant') {
+        const content = (msg as unknown as { message: { content: unknown } }).message.content
+        if (Array.isArray(content)) {
+          for (const block of content) {
+            if (
+              block &&
+              typeof block === 'object' &&
+              (block as { type?: string }).type === 'text' &&
+              typeof (block as { text?: unknown }).text === 'string'
+            ) {
+              assistantText += (block as { text: string }).text
+            }
+          }
+        }
+      } else if (msg.type === 'result') {
+        // SDKResultMessage — done. `subtype` indicates success vs error.
+        const subtype = (msg as unknown as { subtype?: string }).subtype
+        if (subtype && subtype !== 'success') {
+          throw new Error(`titler one-shot query result subtype=${subtype}`)
+        }
+        break
+      }
+    }
+
+    if (!assistantText) {
+      throw new Error('titler one-shot query produced no assistant text')
+    }
+    return assistantText
   }
 
   /**
@@ -232,16 +321,7 @@ export class SessionTitler {
 
   private async doInitialTitle(transcript: string): Promise<void> {
     try {
-      const Anthropic = (await import('@anthropic-ai/sdk')).default
-      const client = new Anthropic()
-      const response = await client.messages.create({
-        model: TITLER_MODEL,
-        max_tokens: 100,
-        system: INITIAL_TITLE_SYSTEM,
-        messages: [{ role: 'user', content: transcript }],
-      })
-
-      const text = response.content[0]?.type === 'text' ? response.content[0].text : ''
+      const text = await this.oneShotQuery(INITIAL_TITLE_SYSTEM, transcript)
       const parsed = JSON.parse(stripCodeFences(text)) as InitialTitleResult
 
       if (!parsed.title || typeof parsed.title !== 'string') {
@@ -281,16 +361,7 @@ export class SessionTitler {
       // title is tracked via currentTitleValue (set on each successful emit).
       const pivotPrompt = `Current session title: "${this.getCurrentTitle()}"\n\nNew user message:\n${newUserMessage}`
 
-      const Anthropic = (await import('@anthropic-ai/sdk')).default
-      const client = new Anthropic()
-      const response = await client.messages.create({
-        model: TITLER_MODEL,
-        max_tokens: 100,
-        system: PIVOT_GATE_SYSTEM,
-        messages: [{ role: 'user', content: pivotPrompt }],
-      })
-
-      const text = response.content[0]?.type === 'text' ? response.content[0].text : ''
+      const text = await this.oneShotQuery(PIVOT_GATE_SYSTEM, pivotPrompt)
       const parsed = JSON.parse(stripCodeFences(text)) as PivotGateResult
 
       if (!parsed.did_pivot || (parsed.confidence ?? 0) < 0.7) {
