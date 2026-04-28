@@ -1,7 +1,6 @@
 import { TamaguiProvider, Theme } from '@tamagui/core'
 import { createRootRoute, Outlet, useLocation, useNavigate } from '@tanstack/react-router'
 import { useEffect } from 'react'
-import { TamaguiHello } from '~/components/tamagui-hello'
 import { Toaster } from '~/components/ui/sonner'
 import { ThemeProvider, useTheme } from '~/context/theme-provider'
 import { setUserStreamIdentity } from '~/hooks/use-user-stream'
@@ -79,7 +78,6 @@ function RootComponent() {
     <ThemeProvider>
       <TamaguiThemed>
         <NowProvider>
-          <TamaguiHello />
           <Outlet />
           <Toaster duration={5000} />
         </NowProvider>
