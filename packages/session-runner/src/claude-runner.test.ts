@@ -279,6 +279,227 @@ describe('ClaudeRunner — interrupt handling', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Empty-prompt guard — runner must NOT push an initial user turn onto the
+// SDK input iterable when the DO dialed in purely to revive the runner.
+// See claude-runner.ts (the empty-prompt guard around the initial userQueue
+// push) for the rationale and the three DO call sites that send `prompt: ''`.
+// ---------------------------------------------------------------------------
+
+describe('ClaudeRunner — empty-prompt guard', () => {
+  /**
+   * Helper: build a mocked SDK that:
+   *   1. capturedPrompt records the AsyncIterable handed to query()
+   *   2. its iterator yields system/init, then races promptIter.next() vs a
+   *      short timeout to observe whether the runner pushed an initial user
+   *      turn, then yields a successful result, then ends.
+   * The race result lands in `pulledFromPrompt` for the test to assert on.
+   */
+  function buildSdkSpy() {
+    const state: {
+      capturedPrompt: AsyncIterable<unknown> | null
+      pulledFromPrompt: { kind: 'message'; value: unknown } | { kind: 'timeout' } | null
+    } = {
+      capturedPrompt: null,
+      pulledFromPrompt: null,
+    }
+
+    const query = (args: { prompt: AsyncIterable<unknown> }) => {
+      state.capturedPrompt = args.prompt
+      const promptIter = args.prompt[Symbol.asyncIterator]()
+      let step = 0
+      return {
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              step++
+              if (step === 1) {
+                return {
+                  value: {
+                    type: 'system',
+                    subtype: 'init',
+                    session_id: 'sdk-session-test',
+                    model: 'claude-test',
+                    tools: [],
+                  },
+                  done: false,
+                }
+              }
+              if (step === 2) {
+                // Race the prompt iterable against a short timeout. If the
+                // runner pushed an initial user turn, promptIter.next()
+                // resolves synchronously (PushPullQueue drains queued items
+                // first); otherwise the timeout wins.
+                const winner = await Promise.race([
+                  promptIter.next().then(
+                    (r) => ({ kind: 'message' as const, value: r.value }),
+                    () => ({ kind: 'timeout' as const }),
+                  ),
+                  new Promise<{ kind: 'timeout' }>((resolve) =>
+                    setTimeout(() => resolve({ kind: 'timeout' }), 50),
+                  ),
+                ])
+                state.pulledFromPrompt = winner
+                return {
+                  value: {
+                    type: 'result',
+                    subtype: 'success',
+                    total_cost_usd: 0,
+                    result: 'ok',
+                    num_turns: 1,
+                  },
+                  done: false,
+                }
+              }
+              // End the SDK stream cleanly so executeSession exits.
+              return { value: undefined, done: true }
+            },
+          }
+        },
+        async interrupt() {
+          /* unused */
+        },
+      }
+    }
+
+    return { query, state }
+  }
+
+  it('does NOT push a user turn when prompt is empty string', async () => {
+    vi.resetModules()
+    const { query, state } = buildSdkSpy()
+    vi.doMock('@anthropic-ai/claude-agent-sdk', () => ({
+      query,
+      getSessionInfo: async () => null,
+    }))
+
+    const { ClaudeRunner: MockedRunner } = await import('./claude-runner.js')
+
+    const { ch, parsedMessages } = createMockChannel()
+    const ctx = createMockCtx()
+
+    const runner = new MockedRunner()
+    const cmd = {
+      type: 'execute' as const,
+      project: 'duraclaw-dev2',
+      prompt: '',
+    }
+
+    await runner.execute(ch as any, cmd, ctx)
+
+    // The runner started the SDK Query (session.init was emitted) but never
+    // pushed a user turn — the prompt-iterable race lost to the timeout.
+    expect(state.capturedPrompt).not.toBeNull()
+    expect(state.pulledFromPrompt).toEqual({ kind: 'timeout' })
+
+    const msgs = parsedMessages()
+    expect(msgs.some((m) => m.type === 'session.init')).toBe(true)
+    // No model output — the SDK was never asked to run a turn.
+    expect(msgs.some((m) => m.type === 'assistant')).toBe(false)
+    expect(msgs.some((m) => m.type === 'partial_assistant')).toBe(false)
+
+    vi.doUnmock('@anthropic-ai/claude-agent-sdk')
+    vi.resetModules()
+  })
+
+  it('does NOT push a user turn when prompt is empty array', async () => {
+    vi.resetModules()
+    const { query, state } = buildSdkSpy()
+    vi.doMock('@anthropic-ai/claude-agent-sdk', () => ({
+      query,
+      getSessionInfo: async () => null,
+    }))
+
+    const { ClaudeRunner: MockedRunner } = await import('./claude-runner.js')
+
+    const { ch } = createMockChannel()
+    const ctx = createMockCtx()
+
+    const runner = new MockedRunner()
+    const cmd = {
+      type: 'execute' as const,
+      project: 'duraclaw-dev2',
+      prompt: [] as unknown as string,
+    }
+
+    await runner.execute(ch as any, cmd, ctx)
+
+    expect(state.pulledFromPrompt).toEqual({ kind: 'timeout' })
+
+    vi.doUnmock('@anthropic-ai/claude-agent-sdk')
+    vi.resetModules()
+  })
+
+  it('positive control: pushes the initial user turn when prompt is "hello"', async () => {
+    vi.resetModules()
+    const { query, state } = buildSdkSpy()
+    vi.doMock('@anthropic-ai/claude-agent-sdk', () => ({
+      query,
+      getSessionInfo: async () => null,
+    }))
+
+    const { ClaudeRunner: MockedRunner } = await import('./claude-runner.js')
+
+    const { ch } = createMockChannel()
+    const ctx = createMockCtx()
+
+    const runner = new MockedRunner()
+    const cmd = {
+      type: 'execute' as const,
+      project: 'duraclaw-dev2',
+      prompt: 'hello',
+    }
+
+    await runner.execute(ch as any, cmd, ctx)
+
+    // The runner pushed an SDKUserMessage onto the lifetime queue with
+    // content 'hello' before the SDK started pulling.
+    expect(state.pulledFromPrompt?.kind).toBe('message')
+    const pulled = state.pulledFromPrompt as { kind: 'message'; value: unknown }
+    const userMsg = pulled.value as {
+      type: string
+      message: { role: string; content: string }
+    }
+    expect(userMsg.type).toBe('user')
+    expect(userMsg.message.role).toBe('user')
+    expect(userMsg.message.content).toBe('hello')
+
+    vi.doUnmock('@anthropic-ai/claude-agent-sdk')
+    vi.resetModules()
+  })
+
+  it('whitespace-only prompt is still treated as a real user turn', async () => {
+    vi.resetModules()
+    const { query, state } = buildSdkSpy()
+    vi.doMock('@anthropic-ai/claude-agent-sdk', () => ({
+      query,
+      getSessionInfo: async () => null,
+    }))
+
+    const { ClaudeRunner: MockedRunner } = await import('./claude-runner.js')
+
+    const { ch } = createMockChannel()
+    const ctx = createMockCtx()
+
+    const runner = new MockedRunner()
+    const cmd = {
+      type: 'execute' as const,
+      project: 'duraclaw-dev2',
+      prompt: '   ',
+    }
+
+    await runner.execute(ch as any, cmd, ctx)
+
+    expect(state.pulledFromPrompt?.kind).toBe('message')
+    const pulled = state.pulledFromPrompt as { kind: 'message'; value: unknown }
+    const userMsg = pulled.value as { message: { content: string } }
+    expect(userMsg.message.content).toBe('   ')
+
+    vi.doUnmock('@anthropic-ai/claude-agent-sdk')
+    vi.resetModules()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // handleCanUseTool tests (TDD — function will be extracted in implementation)
 // ---------------------------------------------------------------------------
 

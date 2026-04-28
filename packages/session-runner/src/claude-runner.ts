@@ -724,13 +724,33 @@ export class ClaudeRunner {
 
       // --- Initial user turn: push onto the lifetime queue ---
       // GH#86: capture initial prompt for titler transcript.
-      const promptText = typeof cmd.prompt === 'string' ? cmd.prompt : JSON.stringify(cmd.prompt)
-      titlerHistory.push({ role: 'user', content: promptText })
-      userQueue.push({
-        type: 'user',
-        message: { role: 'user', content: cmd.prompt },
-        parent_tool_use_id: null,
-      })
+      //
+      // Empty-prompt guard: certain DO call sites intentionally dial the
+      // gateway with `prompt: ''` (or `[]`) purely to revive a dead runner
+      // — they are NOT delivering a new user turn. See:
+      //   - apps/orchestrator/src/agents/session-do/rpc-lifecycle.ts
+      //     (`reattachImpl`, `resumeFromTranscriptImpl`)
+      //   - apps/orchestrator/src/agents/session-do/resume-scheduler.ts
+      //     (`dispatchFailoverResume`)
+      // If we pushed the empty prompt, the SDK would run an empty turn,
+      // typically return an idle stop ("No response requested."), and the
+      // auto-nudge below would inject "continue" — producing a model
+      // response the user never asked for. So treat literal-empty as a
+      // signal to start the Query() and idle on the userQueue waiting for
+      // the next stream-input. Whitespace-only strings are still real
+      // user turns; only `''` and `[]` are the no-turn signal.
+      const promptIsEmpty =
+        (typeof cmd.prompt === 'string' && cmd.prompt.length === 0) ||
+        (Array.isArray(cmd.prompt) && cmd.prompt.length === 0)
+      if (!promptIsEmpty) {
+        const promptText = typeof cmd.prompt === 'string' ? cmd.prompt : JSON.stringify(cmd.prompt)
+        titlerHistory.push({ role: 'user', content: promptText })
+        userQueue.push({
+          type: 'user',
+          message: { role: 'user', content: cmd.prompt },
+          parent_tool_use_id: null,
+        })
+      }
 
       // --- One Query for the runner's lifetime ---
       // Both `execute` and `resume` converge here; only options differ.
