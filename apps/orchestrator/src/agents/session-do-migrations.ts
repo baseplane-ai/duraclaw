@@ -366,4 +366,20 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 20,
+    description:
+      'GH#115 P1.2: add session_meta.worktree_id (FK into D1 worktrees(id)). Used to source worktree_path on triggerGatewayDial for execute / resume commands so the runner CDs into the reserved clone. NULL for sessions created before this migration; populated by /create body.',
+    up: (sql) => {
+      try {
+        sql.exec(`ALTER TABLE session_meta ADD COLUMN worktree_id TEXT`)
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (!msg.toLowerCase().includes('duplicate column')) {
+          console.warn('[migration v20] unexpected error adding worktree_id column', e)
+          throw e
+        }
+      }
+    },
+  },
 ]

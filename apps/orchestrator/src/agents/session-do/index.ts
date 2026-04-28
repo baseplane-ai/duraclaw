@@ -120,6 +120,9 @@ export interface SessionMeta {
    */
   capabilities: AdapterCapabilities | null
   active_callback_token?: string
+  /** GH#115: FK into D1 worktrees(id). Used to source `worktree_path`
+   *  for ExecuteCommand / ResumeCommand. NULL until first reserve. */
+  worktreeId?: string | null
   lastKataMode?: string
   /** GH#73: true once runner observed `run-end.json`. Gate for chain auto-advance. */
   lastRunEnded?: boolean

@@ -13,12 +13,14 @@
 
 import { eq } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
+import type { ReservedBy, SessionWorktreeParam } from '~/api/worktrees-types'
 import * as schema from '~/db/schema'
 import { agentSessions } from '~/db/schema'
 import { broadcastChainRow } from '~/lib/broadcast-chain'
 import { broadcastSessionRow } from '~/lib/broadcast-session'
 import { resolveProjectPath } from '~/lib/gateway-files'
 import { promptToPreviewText } from '~/lib/prompt-preview'
+import { bindWorktreeById, reserveFreshWorktree } from '~/lib/reserve-worktree'
 import type { ContentBlock, Env } from '~/lib/types'
 
 // Match the REST handler's regex for client-supplied session IDs.
@@ -39,6 +41,13 @@ export interface CreateSessionParams {
   agent?: string
   kataIssue?: number | null
   client_session_id?: string
+  /**
+   * GH#115: optional worktree reservation. `{kind:'fresh'}` allocates a
+   * fresh clone from the registry pool; `{id}` binds to an explicit id
+   * (e.g. inherited from chain predecessor). Absent => no reservation;
+   * `worktreeId` stays NULL on the session row (today's behavior).
+   */
+  worktree?: SessionWorktreeParam | null
 }
 
 export type CreateSessionResult =
@@ -64,8 +73,6 @@ export async function createSession(
     }
   }
 
-  const projectPath = await resolveProjectPath(env, params.project)
-
   // Spec #68 B6 — inherit the project's visibility at creation time. Projects
   // default to 'public'; restricting to 'private' happens via the admin
   // PATCH endpoint. New sessions adopt whatever the project is set to today,
@@ -81,6 +88,10 @@ export async function createSession(
   const visibility: 'public' | 'private' =
     projectRows[0]?.visibility === 'private' ? 'private' : 'public'
 
+  // GH#115 P1.2: allocate the session id BEFORE worktree reservation so
+  // we can derive `reservedBy: {kind:'session', id: <sessionId>}` for
+  // sessions that have no kataIssue. Previously this block lived after
+  // the projectPath resolution; the reordering is benign.
   let sessionId: string
   let doId: DurableObjectId
   if (params.client_session_id !== undefined) {
@@ -97,6 +108,50 @@ export async function createSession(
     sessionId = doId.toString()
   }
   const sessionDO = env.SESSION_AGENT.get(doId)
+
+  // GH#115 P1.2: optional worktree reservation. `{kind:'fresh'}` allocates
+  // from the pool, `{id}` binds explicitly; absent => no reservation
+  // (today's back-compat path). The derived `reservedBy` follows the
+  // explicit rule from spec §B-API-5: arc when kataIssue is a positive
+  // integer, session otherwise. `kind:'manual'` is reserved for setup
+  // ceremony / discovery sweep — never assigned by this endpoint.
+  let reservedWorktreeId: string | null = null
+  let reservedWorktreePath: string | null = null
+  if (params.worktree) {
+    const reservedBy: ReservedBy =
+      typeof params.kataIssue === 'number' &&
+      Number.isInteger(params.kataIssue) &&
+      params.kataIssue > 0
+        ? { kind: 'arc', id: params.kataIssue }
+        : { kind: 'session', id: sessionId }
+
+    if ('id' in params.worktree) {
+      const bind = await bindWorktreeById(db, params.worktree.id, reservedBy, userId)
+      if (!bind.ok && bind.kind === 'not_found') {
+        return { ok: false, status: 404, error: 'worktree_not_found' }
+      }
+      if (!bind.ok && bind.kind === 'conflict') {
+        return { ok: false, status: 409, error: 'worktree_conflict' }
+      }
+      if (bind.ok) {
+        reservedWorktreeId = bind.row.id
+        reservedWorktreePath = bind.row.path
+      }
+    } else if (params.worktree.kind === 'fresh') {
+      const reserve = await reserveFreshWorktree(db, reservedBy, userId)
+      if (!reserve.ok && reserve.kind === 'pool_exhausted') {
+        return { ok: false, status: 503, error: 'pool_exhausted' }
+      }
+      if (reserve.ok) {
+        reservedWorktreeId = reserve.row.id
+        reservedWorktreePath = reserve.row.path
+      }
+    }
+  }
+
+  // Without a worktree reservation, fall back to today's behavior:
+  // gateway-side resolution of `/projects/<name>` -> absolute path.
+  const projectPath = reservedWorktreePath ?? (await resolveProjectPath(env, params.project))
 
   const now = new Date().toISOString()
   const promptText = promptToPreviewText(params.prompt)
@@ -125,6 +180,9 @@ export async function createSession(
     kataIssue: typeof params.kataIssue === 'number' ? params.kataIssue : (null as number | null),
     kataPhase: null as string | null,
     visibility,
+    // GH#115: persist FK so chain auto-advance + status updates can
+    // resolve the worktree without joining through (kataIssue, project).
+    worktreeId: reservedWorktreeId,
   }
 
   // ── D1 INSERT FIRST ──────────────────────────────────────────────────
@@ -175,6 +233,9 @@ export async function createSession(
         runner_session_id: params.runner_session_id,
         agent: params.agent,
         userId,
+        // GH#115: persist FK on SessionMeta so triggerGatewayDial can
+        // stamp `worktree_path` on execute/resume commands.
+        worktreeId: reservedWorktreeId,
       }),
     }),
   )

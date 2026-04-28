@@ -14,6 +14,7 @@ import {
   userPresence,
   userTabs,
   worktreeReservations,
+  worktrees,
 } from '~/db/schema'
 import { validateActionToken } from '~/lib/action-token'
 import { createAuth } from '~/lib/auth'
@@ -37,6 +38,7 @@ import {
 } from '~/lib/gateway-files'
 import { type PushPayload, sendPushNotification } from '~/lib/push'
 import { sendFcmNotification } from '~/lib/push-fcm'
+import { reserveFreshWorktree, rowToDto } from '~/lib/reserve-worktree'
 import type {
   AgentSessionRow,
   ChainSummary,
@@ -55,6 +57,7 @@ import { authMiddleware } from './auth-middleware'
 import { authRoutes } from './auth-routes'
 import { getRequestSession } from './auth-session'
 import type { ApiAppEnv } from './context'
+import type { ReservedBy, SessionWorktreeParam } from './worktrees-types'
 
 interface CreateSessionBody {
   project?: string
@@ -75,6 +78,14 @@ interface CreateSessionBody {
    *  background. Must not match the 64-char hex shape used by DO
    *  `idFromString` (see `getSessionDoId`). */
   client_session_id?: string
+  /**
+   * GH#115: optional worktree reservation. `{kind:'fresh'}` allocates a
+   * fresh clone from the registry pool; `{id}` binds to an explicit id
+   * (e.g. inherited from chain predecessor). Absent => no reservation;
+   * the runner falls back to today's gateway-side project-path lookup.
+   * See planning/specs/115-worktrees-first-class-resource.md §B-API-5.
+   */
+  worktree?: SessionWorktreeParam
 }
 
 const ACTIVE_STATUSES = ['running', 'waiting_input', 'waiting_permission'] as const
@@ -124,6 +135,20 @@ const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
 
 function getDb(env: ApiAppEnv['Bindings']) {
   return drizzle(env.AUTH_DB, { schema })
+}
+
+/**
+ * GH#115: validate a `ReservedBy` payload from a `POST /api/worktrees`
+ * body. Accepts the three known kinds; `id` must be either a non-empty
+ * string or a positive integer (kataIssue uses numeric id).
+ */
+function isValidReservedBy(value: unknown): value is ReservedBy {
+  if (!value || typeof value !== 'object') return false
+  const v = value as { kind?: unknown; id?: unknown }
+  if (v.kind !== 'arc' && v.kind !== 'session' && v.kind !== 'manual') return false
+  if (typeof v.id === 'string') return v.id.length > 0
+  if (typeof v.id === 'number') return Number.isInteger(v.id) && v.id > 0
+  return false
 }
 
 /**
@@ -2292,6 +2317,80 @@ export function createApiApp() {
     return c.json({ updated, skipped, total: snapshots.length })
   })
 
+  // ── Worktrees registry (GH#115) ──────────────────────────────────────
+  // Reservable-resource API over /data/projects/* clones. See spec
+  // planning/specs/115-worktrees-first-class-resource.md §B-API-1..5.
+  // Phase P1.2: additive-only — does not touch the legacy
+  // worktreeReservations callsites (those land in P1.4).
+
+  app.post('/api/worktrees', async (c) => {
+    const userId = c.get('userId')
+    const body = (await c.req.json().catch(() => null)) as {
+      kind?: string
+      reservedBy?: unknown
+    } | null
+    if (!body || body.kind !== 'fresh' || !isValidReservedBy(body.reservedBy)) {
+      return c.json({ error: 'invalid_request' }, 400)
+    }
+    const db = getDb(c.env)
+    const result = await reserveFreshWorktree(db, body.reservedBy, userId)
+    if (!result.ok) {
+      return c.json(
+        {
+          error: 'pool_exhausted',
+          freeCount: result.freeCount,
+          totalCount: result.totalCount,
+          hint: 'Run scripts/setup-clone.sh on the VPS to add a clone to the pool.',
+        },
+        503,
+      )
+    }
+    return c.json(result.row, 200)
+  })
+
+  app.get('/api/worktrees', async (c) => {
+    const status = c.req.query('status')
+    const kind = c.req.query('kind')
+    const id = c.req.query('id')
+    const db = getDb(c.env)
+    const conditions: SQL[] = []
+    if (status) conditions.push(eq(worktrees.status, status))
+    if (kind) conditions.push(sql`json_extract(${worktrees.reservedBy}, '$.kind') = ${kind}`)
+    if (id) conditions.push(sql`json_extract(${worktrees.reservedBy}, '$.id') = ${id}`)
+    const rows = conditions.length
+      ? await db
+          .select()
+          .from(worktrees)
+          .where(and(...conditions))
+      : await db.select().from(worktrees)
+    return c.json({ worktrees: rows.map(rowToDto) })
+  })
+
+  app.post('/api/worktrees/:id/release', async (c) => {
+    const id = c.req.param('id')
+    const db = getDb(c.env)
+    const now = Date.now()
+    const updated = await db
+      .update(worktrees)
+      .set({ releasedAt: now, status: 'cleanup', lastTouchedAt: now })
+      .where(eq(worktrees.id, id))
+      .returning()
+    if (updated.length === 0) return c.json({ error: 'not_found' }, 404)
+    return c.json(rowToDto(updated[0]), 200)
+  })
+
+  app.delete('/api/worktrees/:id', async (c) => {
+    if (c.get('role') !== 'admin') return c.json({ error: 'Forbidden' }, 403)
+    const id = c.req.param('id')
+    const db = getDb(c.env)
+    const deleted = await db
+      .delete(worktrees)
+      .where(eq(worktrees.id, id))
+      .returning({ id: worktrees.id })
+    if (deleted.length === 0) return c.json({ error: 'not_found' }, 404)
+    return c.json({ ok: true, id: deleted[0].id }, 200)
+  })
+
   app.post('/api/sessions', async (c) => {
     const userId = c.get('userId')
     const body = (await c.req.json()) as CreateSessionBody
@@ -2308,12 +2407,13 @@ export function createApiApp() {
         agent: body.agent,
         kataIssue: body.kataIssue,
         client_session_id: body.client_session_id,
+        worktree: body.worktree,
       },
       c.executionCtx,
     )
 
     if (!result.ok) {
-      return c.json({ error: result.error }, result.status as 400 | 500)
+      return c.json({ error: result.error }, result.status as 400 | 404 | 409 | 500 | 503)
     }
     return c.json({ session_id: result.sessionId }, 201)
   })

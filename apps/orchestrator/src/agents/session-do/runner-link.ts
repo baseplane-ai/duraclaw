@@ -214,6 +214,16 @@ export async function triggerGatewayDial(
     cmd = { ...cmd, titler_enabled: titlerEnabled }
   }
 
+  // GH#115: stamp the resolved clone path onto execute/resume commands.
+  // The runner uses `worktree_path` verbatim as cwd; absent => runner
+  // falls back to its default project-path resolution (back-compat for
+  // pre-115 callers).
+  if (cmd.type === 'execute' || cmd.type === 'resume') {
+    if (ctx.state.project_path) {
+      cmd = { ...cmd, worktree_path: ctx.state.project_path }
+    }
+  }
+
   // Inject user_preferences onto spawn / resume payloads. Reads from
   // D1 `user_preferences` for `ctx.state.userId` in a single query.
   // Fail-open per field: on D1 miss / unknown value the runner falls

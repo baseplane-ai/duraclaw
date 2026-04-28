@@ -70,6 +70,14 @@ export interface ExecuteCommand {
   codex_models?: ReadonlyArray<{ name: string; context_window: number }>
   /** GH#86: enable Haiku-based session titler in the runner. Default false. */
   titler_enabled?: boolean
+  /**
+   * GH#115: absolute path on the VPS to the reserved clone (e.g.
+   * `/data/projects/duraclaw-dev2`). When present, the runner uses
+   * this verbatim as the working directory; when absent (callers that
+   * predate worktree reservation), the runner falls back to its
+   * default project-path resolution (gateway-side `/projects/<name>`).
+   */
+  worktree_path?: string
 }
 
 // Content block types matching Anthropic API format
@@ -146,6 +154,14 @@ export interface ResumeCommand {
   codex_models?: ReadonlyArray<{ name: string; context_window: number }>
   /** GH#86: enable Haiku-based session titler in the runner. Default false. */
   titler_enabled?: boolean
+  /**
+   * GH#115: absolute path on the VPS to the reserved clone (e.g.
+   * `/data/projects/duraclaw-dev2`). When present, the runner uses
+   * this verbatim as the working directory; when absent (callers that
+   * predate worktree reservation), the runner falls back to its
+   * default project-path resolution (gateway-side `/projects/<name>`).
+   */
+  worktree_path?: string
 }
 
 // ── Gateway Events (Gateway → Orchestrator) ────────────────────────────
