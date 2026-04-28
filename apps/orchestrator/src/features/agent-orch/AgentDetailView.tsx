@@ -114,6 +114,14 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
     [sendMessage],
   )
 
+  // On mobile (Capacitor SQLite) the messages collection hydrates async,
+  // so `messages.length === 0` briefly holds even for sessions with prior
+  // turns — without this hint, ChatThread would flash the
+  // "Start a conversation" suggestion chips before the cached transcript
+  // paints. `numTurns` comes from the D1-mirrored sessions row, which
+  // hydrates synchronously from the synced collection.
+  const expectsMessages = (session?.numTurns ?? 0) > 0
+
   const status =
     useSessionStatus(sessionId) ?? (session?.status as SessionStatus | undefined) ?? 'idle'
 
@@ -174,6 +182,7 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
         branchInfo={branchInfo}
         onBranchNavigate={navigateBranch}
         onSendSuggestion={handleSendSuggestion}
+        expectsMessages={expectsMessages}
       />
 
       <ApiRetryBanner />

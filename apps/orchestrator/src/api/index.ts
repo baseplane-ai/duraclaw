@@ -8,6 +8,7 @@ import {
   agentSessions,
   auditLog,
   featureFlags,
+  projectMetadata,
   projects as projectsTable,
   userPreferences,
   userPresence,
@@ -104,9 +105,13 @@ const PREF_PATCH_KEYS = new Set([
   'defaultChainAutoAdvance',
 ])
 
+// Mirrors the Claude Agent SDK's `PermissionMode` union. Keep in sync
+// with `PermissionMode` in `@duraclaw/shared-types` and the SDK's
+// `sdk.d.ts`. `acceptAll` was historically accepted here but the SDK
+// has no such mode — it would be silently demoted to `'default'` by
+// the runner, so reject it at the API boundary.
 const PERMISSION_MODES = new Set([
   'default',
-  'acceptAll',
   'acceptEdits',
   'bypassPermissions',
   'plan',
@@ -114,6 +119,8 @@ const PERMISSION_MODES = new Set([
   'auto',
 ])
 const THINKING_MODES = new Set(['adaptive', 'enabled', 'disabled'])
+// Mirrors the Claude Agent SDK's `EffortLevel` union (sdk.d.ts).
+// `'xhigh'` was added in SDK v0.2.119 (Claude 4.7).
 const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
 
 function getDb(env: ApiAppEnv['Bindings']) {
@@ -729,6 +736,67 @@ export function createApiApp() {
     return c.body(null, 204)
   })
 
+  // ── Gateway reap-decision bridge ──────────────────────────────────────────
+  // Posted by the gateway reaper on every kill/skip decision.
+  // Bypasses authMiddleware — auth is Bearer CC_GATEWAY_SECRET, timing-safe.
+  app.post('/api/gateway/sessions/:id/reap-decision', async (c) => {
+    const expected = c.env.CC_GATEWAY_SECRET
+    if (!expected) {
+      return c.json({ error: 'CC_GATEWAY_SECRET not configured' }, 401)
+    }
+    const authHeader = c.req.header('authorization') ?? ''
+    const provided = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
+    if (!constantTimeEquals(provided, expected)) {
+      return c.json({ error: 'unauthorized' }, 401)
+    }
+
+    const body = (await c.req.json().catch(() => null)) as {
+      decision?: unknown
+      attrs?: unknown
+    } | null
+
+    const VALID_DECISIONS = ['skip-pending-gate', 'kill-stale', 'kill-dead-runner'] as const
+    type ReapDecision = (typeof VALID_DECISIONS)[number]
+
+    if (
+      !body ||
+      typeof body.decision !== 'string' ||
+      !(VALID_DECISIONS as readonly string[]).includes(body.decision)
+    ) {
+      return c.json({ error: 'invalid request' }, 400)
+    }
+
+    const decision = body.decision as ReapDecision
+    const attrs =
+      body.attrs && typeof body.attrs === 'object' && !Array.isArray(body.attrs)
+        ? (body.attrs as Record<string, unknown>)
+        : {}
+
+    const sessionId = c.req.param('id')
+    const doId = getSessionDoId(c.env, sessionId)
+    const stub = c.env.SESSION_AGENT.get(doId)
+
+    try {
+      // Cast: DO RPC types aren't auto-exposed on the stub; @callable routes correctly at runtime.
+      await (
+        stub as unknown as {
+          recordReapDecision: (args: {
+            decision: ReapDecision
+            attrs: Record<string, unknown>
+          }) => Promise<{ ok: true }>
+        }
+      ).recordReapDecision({ decision, attrs })
+    } catch (err) {
+      // SessionDO not found or RPC error — log and return 404
+      console.warn(
+        `[reap-decision] RPC failed sessionId=${sessionId} err=${(err as Error).message}`,
+      )
+      return c.json({ error: 'session not found' }, 404)
+    }
+
+    return c.json({ ok: true })
+  })
+
   // Mobile OTA updater manifest — public endpoint (no auth). Capacitor
   // shell POSTs {platform, version_name}; we return {version, url} when the
   // deployed web bundle is newer, or {message} when it's current. The
@@ -835,6 +903,171 @@ export function createApiApp() {
     // Immutable — each image has a unique key (session + message + part index).
     headers.set('Cache-Control', 'public, max-age=31536000, immutable')
     return new Response(obj.body, { headers })
+  })
+
+  // GH#27 P1.1 (B2): projectMetadata UPSERT + read.
+  //
+  // Dual-auth (mirrors the B3 WS pattern, inline-style — same shape as
+  // `/api/sessions/:id/tool-approval` above): accept EITHER a valid
+  // Better Auth session cookie (browser path, e.g. the docs-worktree
+  // modal) OR `Authorization: Bearer <DOCS_RUNNER_SECRET>` (gateway
+  // path, called at project-discovery time). Bearer is checked
+  // timing-safe via `constantTimeEquals`. When DOCS_RUNNER_SECRET is
+  // unset, the bearer path is closed entirely (still 401).
+  //
+  // Mounted BEFORE `app.use('/api/*', authMiddleware)` so the bearer
+  // path bypasses the cookie-only middleware.
+  //
+  // `projectId` URL param is constrained to exactly 16 lowercase hex
+  // chars — matches the spec's `sha256(originUrl).slice(0,16)` shape
+  // and the UUID-fallback (also 16 hex after stripping dashes). Any
+  // other shape returns 400 to keep the surface area tight.
+  const PROJECT_ID_RE = /^[0-9a-f]{16}$/
+
+  function projectMetadataAuth(
+    c: import('hono').Context<ApiAppEnv>,
+  ): Promise<{ ok: true } | { ok: false; res: Response }> {
+    const authHeader = c.req.header('authorization') ?? ''
+    if (authHeader.startsWith('Bearer ')) {
+      const expected = c.env.DOCS_RUNNER_SECRET
+      const provided = authHeader.slice(7)
+      if (expected && constantTimeEquals(provided, expected)) {
+        return Promise.resolve({ ok: true } as const)
+      }
+      return Promise.resolve({
+        ok: false as const,
+        res: c.json({ error: 'Unauthorized' }, 401),
+      })
+    }
+    // Fall back to session cookie auth.
+    return getRequestSession(c.env, c.req.raw).then((session) => {
+      if (!session) {
+        return { ok: false as const, res: c.json({ error: 'Unauthorized' }, 401) }
+      }
+      return { ok: true as const }
+    })
+  }
+
+  app.patch('/api/projects/:projectId', async (c) => {
+    const projectId = c.req.param('projectId')
+    if (!PROJECT_ID_RE.test(projectId)) {
+      return c.json({ error: 'Invalid projectId' }, 400)
+    }
+
+    const auth = await projectMetadataAuth(c)
+    if (!auth.ok) return auth.res
+
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return c.json({ error: 'Invalid body' }, 400)
+    }
+
+    // Validate field types. We accept missing keys (partial patch) and
+    // accept `null` for nullable columns (originUrl, docsWorktreePath)
+    // as an explicit "clear this column" signal. `projectName` is
+    // NOT NULL in schema → reject explicit null.
+    const patch: Partial<typeof projectMetadata.$inferInsert> = {}
+
+    if ('projectName' in body) {
+      const v = body.projectName
+      if (typeof v !== 'string' || v.length === 0) {
+        return c.json({ error: 'projectName must be a non-empty string' }, 400)
+      }
+      patch.projectName = v
+    }
+    if ('originUrl' in body) {
+      const v = body.originUrl
+      if (v !== null && typeof v !== 'string') {
+        return c.json({ error: 'originUrl must be a string or null' }, 400)
+      }
+      patch.originUrl = v
+    }
+    if ('docsWorktreePath' in body) {
+      const v = body.docsWorktreePath
+      if (v !== null && typeof v !== 'string') {
+        return c.json({ error: 'docsWorktreePath must be a string or null' }, 400)
+      }
+      patch.docsWorktreePath = v
+    }
+    if ('tombstoneGraceDays' in body) {
+      const v = body.tombstoneGraceDays
+      if (typeof v !== 'number' || !Number.isInteger(v) || v < 1) {
+        return c.json({ error: 'tombstoneGraceDays must be a positive integer' }, 400)
+      }
+      patch.tombstoneGraceDays = v
+    }
+
+    const knownKeys = new Set([
+      'projectName',
+      'originUrl',
+      'docsWorktreePath',
+      'tombstoneGraceDays',
+    ])
+    for (const key of Object.keys(body)) {
+      if (!knownKeys.has(key)) {
+        return c.json({ error: `Unknown field: ${key}` }, 400)
+      }
+    }
+
+    const db = getDb(c.env)
+    const now = new Date().toISOString()
+
+    const existing = await db
+      .select()
+      .from(projectMetadata)
+      .where(eq(projectMetadata.projectId, projectId))
+      .limit(1)
+
+    if (existing.length === 0) {
+      // Insert path. `projectName` is NOT NULL — must be supplied on
+      // first-touch unless we synthesise. Keep it strict: require
+      // projectName on create. If not supplied, fall back to projectId
+      // (so the gateway can call PATCH with `{}` and still create the
+      // row — projectName is later overwritten on the next discovery).
+      const inserted = await db
+        .insert(projectMetadata)
+        .values({
+          projectId,
+          projectName: patch.projectName ?? projectId,
+          originUrl: patch.originUrl ?? null,
+          docsWorktreePath: patch.docsWorktreePath ?? null,
+          tombstoneGraceDays: patch.tombstoneGraceDays ?? 7,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning()
+      return c.json(inserted[0])
+    }
+
+    // Update path — merge supplied fields, advance updatedAt, leave
+    // createdAt untouched.
+    const updated = await db
+      .update(projectMetadata)
+      .set({ ...patch, updatedAt: now })
+      .where(eq(projectMetadata.projectId, projectId))
+      .returning()
+    return c.json(updated[0])
+  })
+
+  app.get('/api/projects/:projectId', async (c) => {
+    const projectId = c.req.param('projectId')
+    if (!PROJECT_ID_RE.test(projectId)) {
+      return c.json({ error: 'Invalid projectId' }, 400)
+    }
+
+    const auth = await projectMetadataAuth(c)
+    if (!auth.ok) return auth.res
+
+    const db = getDb(c.env)
+    const rows = await db
+      .select()
+      .from(projectMetadata)
+      .where(eq(projectMetadata.projectId, projectId))
+      .limit(1)
+    if (rows.length === 0) {
+      return c.json({ error: 'Project not found' }, 404)
+    }
+    return c.json(rows[0])
   })
 
   app.use('/api/*', authMiddleware)
@@ -1785,6 +2018,174 @@ export function createApiApp() {
     return c.json({ ok: true, visibility: body.visibility })
   })
 
+  // GH#27 P1.6 WU-B: GET /api/projects/:projectId/docs-files
+  //
+  // Proxy endpoint that lets the UI list markdown files in the project's
+  // configured docs worktree. Reads `docsWorktreePath` from D1
+  // `projectMetadata`, then proxies to the gateway's
+  // `GET /docs-runners/:projectId/files?docsWorktreePath=...` directory
+  // walker. The gateway is the only side with FS access; the worker just
+  // forwards the call with the bearer-token gateway auth.
+  //
+  // Auth: cookie session (provided by `app.use('/api/*', authMiddleware)`
+  // mounted above). Project-visibility is intentionally permissive for
+  // v1 — see TODO below.
+  //
+  // Status semantics (per spec phase p5a):
+  //   - 200      → forwarded gateway 200 body
+  //   - 4xx      → forwarded gateway status + body
+  //   - 502      → gateway responded but with 5xx
+  //   - 503      → gateway unreachable / network failure / timeout. UI
+  //                renders a retry chip on this code, NOT an empty state.
+  //   - 404      → no projectMetadata row OR docsWorktreePath is null
+  //                (project not configured for docs).
+  app.get('/api/projects/:projectId/docs-files', async (c) => {
+    const projectId = c.req.param('projectId')
+    if (!PROJECT_ID_RE.test(projectId)) {
+      return c.json({ error: 'Invalid projectId' }, 400)
+    }
+
+    // TODO(GH#27): once per-project visibility/ownership lands for
+    // projectMetadata, gate this on the caller being a member of the
+    // project. For v1 any authenticated user can read the file list —
+    // the gateway validates `docsWorktreePath` server-side, so this
+    // is not a path-traversal boundary.
+
+    const db = getDb(c.env)
+    const rows = await db
+      .select()
+      .from(projectMetadata)
+      .where(eq(projectMetadata.projectId, projectId))
+      .limit(1)
+    if (rows.length === 0 || !rows[0].docsWorktreePath) {
+      return c.json(
+        {
+          error: 'project_not_configured',
+          message: 'No docs worktree configured for this project',
+        },
+        404,
+      )
+    }
+    const docsWorktreePath = rows[0].docsWorktreePath
+
+    if (!c.env.CC_GATEWAY_URL) {
+      return c.json({ error: 'CC_GATEWAY_URL not configured' }, 500)
+    }
+    const httpBase = c.env.CC_GATEWAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+    const url = new URL(`/docs-runners/${projectId}/files`, httpBase)
+    url.searchParams.set('docsWorktreePath', docsWorktreePath)
+
+    const headers: Record<string, string> = {}
+    if (c.env.CC_GATEWAY_SECRET) {
+      headers.Authorization = `Bearer ${c.env.CC_GATEWAY_SECRET}`
+    }
+
+    let resp: Response
+    try {
+      resp = await fetch(url.toString(), {
+        headers,
+        signal: AbortSignal.timeout(5000),
+      })
+    } catch {
+      return c.json({ error: 'gateway_unavailable' }, 503)
+    }
+
+    if (resp.status >= 500) {
+      return c.json({ error: 'gateway_error', upstreamStatus: resp.status }, 502)
+    }
+
+    // 2xx and 4xx: forward body + status verbatim. Body is JSON for
+    // the contract we care about; on the off-chance the gateway emits
+    // a non-JSON response we still forward the bytes.
+    const text = await resp.text()
+    return new Response(text, {
+      status: resp.status,
+      headers: { 'Content-Type': resp.headers.get('Content-Type') ?? 'application/json' },
+    })
+  })
+
+  // GH#27 P1.7 WU-B: GET /api/docs-runners/:projectId/health
+  //
+  // Proxy to the gateway's `GET /docs-runners/:projectId/health`, which
+  // in turn forwards the docs-runner's loopback `/health`. Used by the
+  // docs route to drive per-file state indicators and the
+  // ConfigMissingBanner (`config_present === false`).
+  //
+  // Status semantics:
+  //   - upstream 200          → forward 200 + body
+  //   - upstream 502          → pass through as-is (the gateway's
+  //                             `docs_runner_unreachable` is not a gateway
+  //                             error — the runner is down or not started)
+  //   - upstream 5xx (other)  → 502 `gateway_error` with upstreamStatus
+  //   - fetch throw / timeout → 503 `gateway_unavailable`
+  //   - 404 if no projectMetadata row.
+  app.get('/api/docs-runners/:projectId/health', async (c) => {
+    const projectId = c.req.param('projectId')
+    if (!PROJECT_ID_RE.test(projectId)) {
+      return c.json({ error: 'Invalid projectId' }, 400)
+    }
+
+    const db = getDb(c.env)
+    const rows = await db
+      .select()
+      .from(projectMetadata)
+      .where(eq(projectMetadata.projectId, projectId))
+      .limit(1)
+    if (rows.length === 0) {
+      return c.json(
+        {
+          error: 'project_not_configured',
+          message: 'No metadata for this project',
+        },
+        404,
+      )
+    }
+
+    if (!c.env.CC_GATEWAY_URL) {
+      return c.json({ error: 'CC_GATEWAY_URL not configured' }, 500)
+    }
+    const httpBase = c.env.CC_GATEWAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+    const url = new URL(`/docs-runners/${projectId}/health`, httpBase)
+
+    const headers: Record<string, string> = {}
+    if (c.env.CC_GATEWAY_SECRET) {
+      headers.Authorization = `Bearer ${c.env.CC_GATEWAY_SECRET}`
+    }
+
+    let resp: Response
+    try {
+      resp = await fetch(url.toString(), {
+        headers,
+        signal: AbortSignal.timeout(5000),
+      })
+    } catch {
+      return c.json({ error: 'gateway_unavailable' }, 503)
+    }
+
+    // 502 from the gateway is the docs-runner-unreachable signal —
+    // pass through as-is so the UI can distinguish "runner down" from
+    // "gateway down".
+    if (resp.status === 502) {
+      const text = await resp.text()
+      return new Response(text, {
+        status: 502,
+        headers: { 'Content-Type': resp.headers.get('Content-Type') ?? 'application/json' },
+      })
+    }
+
+    if (resp.status >= 500) {
+      return c.json({ error: 'gateway_error', upstreamStatus: resp.status }, 502)
+    }
+
+    const text = await resp.text()
+    const outHeaders: Record<string, string> = {
+      'Content-Type': resp.headers.get('Content-Type') ?? 'application/json',
+    }
+    const ver = resp.headers.get('x-docs-runner-version')
+    if (ver) outHeaders['X-Docs-Runner-Version'] = ver
+    return new Response(text, { status: resp.status, headers: outHeaders })
+  })
+
   // ── Feature Flags (GH#86) ─────────────────────────────────────────
 
   app.get('/api/admin/feature-flags', async (c) => {
@@ -1905,7 +2306,7 @@ export function createApiApp() {
       userId,
       {
         project: body.project ?? '',
-        prompt: body.prompt as string | ContentBlock[],
+        prompt: body.prompt,
         model: body.model,
         system_prompt: body.system_prompt,
         runner_session_id: body.runner_session_id,

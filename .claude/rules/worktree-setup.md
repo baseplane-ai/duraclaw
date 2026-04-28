@@ -20,12 +20,12 @@ scripts/verify/dev-up.sh    # generates .dev.vars, starts gateway + orchestrator
 its absolute path via `cksum % 800`. No manual allocation needed — any new
 clone Just Works.
 
-| Worktree | Orch | Gateway | CDP-A | CDP-B | Bridge-A | Bridge-B | Axi |
-|----------|------|---------|-------|-------|----------|----------|-----|
-| duraclaw | 43307 | 10107 | 11307 | 12307 | 13307 | 14307 | 15307 |
-| duraclaw-dev1 | 43054 | 9854 | 11054 | 12054 | 13054 | 14054 | 15054 |
-| duraclaw-dev2 | 43613 | 10413 | 11613 | 12613 | 13613 | 14613 | 15613 |
-| duraclaw-dev3 | 43537 | 10337 | 11537 | 12537 | 13537 | 14537 | 15537 |
+| Worktree | Orch | Gateway | CDP-A | CDP-B | Bridge-A | Bridge-B | Axi | CC_DOCS_RUNNER |
+|----------|------|---------|-------|-------|----------|----------|-----|----------------|
+| duraclaw | 43307 | 10107 | 11307 | 12307 | 13307 | 14307 | 15307 | 16107 |
+| duraclaw-dev1 | 43054 | 9854 | 11054 | 12054 | 13054 | 14054 | 15054 | 15854 |
+| duraclaw-dev2 | 43613 | 10413 | 11613 | 12613 | 13613 | 14613 | 15613 | 16413 |
+| duraclaw-dev3 | 43537 | 10337 | 11537 | 12537 | 13537 | 14537 | 15537 | 16337 |
 
 Port ranges (all non-overlapping):
 
@@ -37,6 +37,7 @@ Port ranges (all non-overlapping):
 | 13000-13799 | AXI-A bridge (dual-browser) |
 | 14000-14799 | AXI-B bridge (dual-browser) |
 | 15000-15799 | AXI bridge (single-browser via `scripts/axi`) |
+| 15800-16599 | Docs runner (`CC_DOCS_RUNNER_PORT`) |
 | 43000-43799 | Orchestrator |
 
 **Rules:**

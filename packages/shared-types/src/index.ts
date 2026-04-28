@@ -14,6 +14,19 @@ import type { SDKAssistantMessageError } from '@anthropic-ai/claude-agent-sdk'
  */
 export type AgentName = 'claude' | 'codex' | 'gemini'
 
+/**
+ * Claude Agent SDK permission mode. Must stay in sync with the SDK's
+ * `PermissionMode` union (sdk.d.ts) — extending here without SDK
+ * support means the runner's fallback path swallows the value silently.
+ */
+export type PermissionMode =
+  | 'default'
+  | 'acceptEdits'
+  | 'bypassPermissions'
+  | 'plan'
+  | 'dontAsk'
+  | 'auto'
+
 export type GatewayCommand =
   | ExecuteCommand
   | ResumeCommand
@@ -37,7 +50,12 @@ export interface ExecuteCommand {
     | { type: 'adaptive'; display?: 'summarized' | 'omitted' }
     | { type: 'enabled'; budgetTokens?: number; display?: 'summarized' | 'omitted' }
     | { type: 'disabled' }
-  effort?: 'low' | 'medium' | 'high' | 'max'
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+  /**
+   * SDK permission mode. Injected by the DO from `user_preferences.permission_mode`
+   * at spawn time. Runner falls back to `'default'` when omitted.
+   */
+  permission_mode?: PermissionMode
   /** Baseplane organization ID (gateway-level metadata, not passed to Claude SDK) */
   org_id?: string
   /** Baseplane user ID (gateway-level metadata, not passed to Claude SDK) */
@@ -115,6 +133,11 @@ export interface ResumeCommand {
   project: string
   prompt: string | ContentBlock[]
   runner_session_id: string
+  /**
+   * SDK permission mode. Injected by the DO from `user_preferences.permission_mode`
+   * at resume time so user-preference changes apply on the next spawn/resume.
+   */
+  permission_mode?: PermissionMode
   /** Which agent to use for resume. Defaults to 'claude' if omitted. */
   agent?: AgentName
   /**
@@ -685,8 +708,13 @@ export type SessionStatus =
 
 export interface SpawnConfig {
   project: string
-  /** Initial message — plain text or structured content blocks (text + images). */
-  prompt: string | ContentBlock[]
+  /**
+   * Initial message — plain text or structured content blocks (text + images).
+   * Optional: when omitted at session-creation time, the DO is initialised in
+   * `idle` with no runner spawned; the runner is dialled lazily on the first
+   * `sendMessage` (fresh-execute fallback). See SessionDO.initialize.
+   */
+  prompt?: string | ContentBlock[]
   model?: string
   /** Which agent adapter to use (e.g. 'claude', 'codex'). Defaults to 'claude'. */
   agent?: string
@@ -948,3 +976,9 @@ export interface SyncedCollectionFrame<TRow = unknown> {
    */
   sessionStatus?: SessionStatus
 }
+
+// ── Shared workspace helpers ──────────────────────────────────────────
+
+// GH#27 B2: SHA-256-based projectId / entityId derivation usable from
+// the browser, the Worker, and the Bun runner.
+export * from './entity-id.js'

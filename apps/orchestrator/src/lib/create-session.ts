@@ -26,7 +26,13 @@ const CLIENT_SESSION_ID_RE = /^[A-Za-z0-9_-]{8,128}$/
 
 export interface CreateSessionParams {
   project: string
-  prompt: string | ContentBlock[]
+  /**
+   * Optional initial prompt. When omitted, the DO is initialised in `idle`
+   * with no runner — the gateway dial is deferred to the first sendMessage
+   * (the deferred-runner flow used by "new session" tab clicks). When
+   * present, the runner spawns immediately as before.
+   */
+  prompt?: string | ContentBlock[]
   model?: string
   system_prompt?: string
   runner_session_id?: string
@@ -45,9 +51,12 @@ export async function createSession(
   params: CreateSessionParams,
   executionCtx: { waitUntil: (p: Promise<unknown>) => void },
 ): Promise<CreateSessionResult> {
-  if (!params.project || !params.prompt) {
-    return { ok: false, status: 400, error: 'Missing required fields: project, prompt' }
+  if (!params.project) {
+    return { ok: false, status: 400, error: 'Missing required field: project' }
   }
+  // Prompt is now optional — empty/missing prompt routes to the DO's
+  // prompt-less `initialize()` path so the runner is deferred until the
+  // first sendMessage. See SessionDO.initialize / sendMessage fresh-execute.
 
   if (params.kataIssue !== undefined && params.kataIssue !== null) {
     if (!Number.isInteger(params.kataIssue) || params.kataIssue <= 0) {

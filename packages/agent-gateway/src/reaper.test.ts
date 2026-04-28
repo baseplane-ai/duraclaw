@@ -58,6 +58,11 @@ interface FixtureOpts {
     cost?: { input_tokens: number; output_tokens: number; usd: number }
     model?: string | null
     turn_count?: number
+    pending_gate?: {
+      type: 'ask_user' | 'permission_request'
+      tool_call_id: string
+      parked_at_ts: number
+    } | null
   }
   exit?: {
     state: 'completed' | 'failed' | 'aborted' | 'crashed'
@@ -82,18 +87,19 @@ async function writeSession(dir: string, f: FixtureOpts): Promise<void> {
   }
   if (f.meta) {
     const metaPath = nodePath.join(dir, `${f.id}.meta.json`)
-    await fs.writeFile(
-      metaPath,
-      JSON.stringify({
-        runner_session_id: f.meta.runner_session_id ?? null,
-        last_activity_ts: f.meta.last_activity_ts ?? null,
-        last_event_seq: f.meta.last_event_seq ?? 0,
-        cost: f.meta.cost ?? { input_tokens: 0, output_tokens: 0, usd: 0 },
-        model: f.meta.model ?? null,
-        turn_count: f.meta.turn_count ?? 0,
-        state: f.meta.state ?? 'running',
-      }),
-    )
+    const metaObj: Record<string, unknown> = {
+      runner_session_id: f.meta.runner_session_id ?? null,
+      last_activity_ts: f.meta.last_activity_ts ?? null,
+      last_event_seq: f.meta.last_event_seq ?? 0,
+      cost: f.meta.cost ?? { input_tokens: 0, output_tokens: 0, usd: 0 },
+      model: f.meta.model ?? null,
+      turn_count: f.meta.turn_count ?? 0,
+      state: f.meta.state ?? 'running',
+    }
+    if (f.meta.pending_gate !== undefined) {
+      metaObj.pending_gate = f.meta.pending_gate
+    }
+    await fs.writeFile(metaPath, JSON.stringify(metaObj))
   }
   if (f.exit) {
     const exitPath = nodePath.join(dir, `${f.id}.exit`)
@@ -360,6 +366,103 @@ describe('createReaper.reapOnce', () => {
     await expect(fs.stat(nodePath.join(tmpDir, 'RECENT-DONE.exit'))).resolves.toBeDefined()
   })
 
+  it('skips SIGTERM when pending_gate is fresh (parked <24h) and session is stale', async () => {
+    // Session has stale last_activity_ts (>30min) but fresh pending_gate (5min)
+    await writeSession(tmpDir, {
+      id: 'GATED',
+      pid: 8000,
+      meta: {
+        last_activity_ts: FIXED_NOW - 31 * 60_000,
+        pending_gate: {
+          type: 'ask_user',
+          tool_call_id: 'tu_test',
+          parked_at_ts: FIXED_NOW - 5 * 60_000,
+        },
+      },
+    })
+    const killCalls: Array<[number, string]> = []
+    const logger = mkLogger()
+    const reaper = createReaper(
+      baseOpts({
+        livenessCheck: (pid) => pid === 8000,
+        kill: (pid, sig) => killCalls.push([pid, sig]),
+        logger,
+      }),
+    )
+
+    const report = await reaper.reapOnce()
+    reaper.stop()
+
+    expect(report.sigtermed).toEqual([])
+    expect(killCalls).toEqual([])
+    expect(
+      logger.infoCalls.some((l) => l.includes('skip-pending-gate') && l.includes('GATED')),
+    ).toBe(true)
+  })
+
+  it('SIGTERMs when pending_gate.parked_at_ts exceeds 24h sanity threshold', async () => {
+    await writeSession(tmpDir, {
+      id: 'STALE-GATE',
+      pid: 9000,
+      meta: {
+        last_activity_ts: FIXED_NOW - 31 * 60_000,
+        pending_gate: {
+          type: 'ask_user',
+          tool_call_id: 'tu_test',
+          parked_at_ts: FIXED_NOW - 25 * 60 * 60_000,
+        },
+      },
+    })
+    const killCalls: Array<[number, string]> = []
+    const logger = mkLogger()
+    const reaper = createReaper(
+      baseOpts({
+        livenessCheck: (pid) => pid === 9000,
+        kill: (pid, sig) => killCalls.push([pid, sig]),
+        logger,
+      }),
+    )
+
+    const report = await reaper.reapOnce()
+    reaper.stop()
+
+    expect(report.sigtermed).toEqual(['STALE-GATE'])
+    expect(killCalls).toEqual([[9000, 'SIGTERM']])
+  })
+
+  it('writes crash marker for dead pid even when pending_gate is set', async () => {
+    // Write meta with pending_gate set but the pid doesn't exist (dead runner)
+    await writeSession(tmpDir, {
+      id: 'DEAD-GATED',
+      pid: 99999, // very high PID unlikely to be alive
+      meta: {
+        last_activity_ts: FIXED_NOW - 31 * 60_000,
+        pending_gate: {
+          type: 'permission_request',
+          tool_call_id: 'tu_dead',
+          parked_at_ts: FIXED_NOW - 5 * 60_000,
+        },
+      },
+    })
+    const killCalls: Array<[number, string]> = []
+    const reaper = createReaper(
+      baseOpts({
+        livenessCheck: () => false, // pid is dead
+        kill: (pid, sig) => killCalls.push([pid, sig]),
+      }),
+    )
+
+    const report = await reaper.reapOnce()
+    reaper.stop()
+
+    // Dead pids get crash marker, NOT SIGTERM (pending_gate doesn't affect this path)
+    expect(report.markedCrashed).toEqual(['DEAD-GATED'])
+    expect(report.sigtermed).toEqual([])
+    expect(killCalls).toEqual([])
+    const exitContent = await fs.readFile(nodePath.join(tmpDir, 'DEAD-GATED.exit'), 'utf8')
+    expect(JSON.parse(exitContent).state).toBe('crashed')
+  })
+
   it('start() fires one immediate pass and schedules an interval; stop() cancels future passes', async () => {
     await writeSession(tmpDir, {
       id: 'TICK',
@@ -397,5 +500,125 @@ describe('createReaper.reapOnce', () => {
     // A subsequent reapOnce (invoked manually) still works.
     const report = await reaper.reapOnce()
     expect(report.scanned).toBe(1)
+  })
+})
+
+// ── GH#113 P1.2: reportReapDecision fire-and-forget RPC ──────────────
+//
+// Stubs globalThis.fetch and verifies that `reportReapDecision` fires
+// the correct POST shape when the reaper skips a session due to a
+// fresh pending_gate, and that fetch failures are swallowed gracefully.
+
+describe('reportReapDecision — fire-and-forget RPC', () => {
+  // Save/restore fetch and env vars
+  let originalFetch: unknown
+  let originalWorkerUrl: string | undefined
+  let originalSecret: string | undefined
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch
+    originalWorkerUrl = process.env.WORKER_PUBLIC_URL
+    originalSecret = process.env.CC_GATEWAY_SECRET
+    process.env.WORKER_PUBLIC_URL = 'https://worker.example.com'
+    process.env.CC_GATEWAY_SECRET = 'test-secret'
+  })
+
+  afterEach(async () => {
+    ;(globalThis as { fetch: unknown }).fetch = originalFetch
+    if (originalWorkerUrl === undefined) {
+      delete process.env.WORKER_PUBLIC_URL
+    } else {
+      process.env.WORKER_PUBLIC_URL = originalWorkerUrl
+    }
+    if (originalSecret === undefined) {
+      delete process.env.CC_GATEWAY_SECRET
+    } else {
+      process.env.CC_GATEWAY_SECRET = originalSecret
+    }
+  })
+
+  it('POSTs reap-decision with decision=skip-pending-gate when pending_gate is fresh', async () => {
+    const fetchCalls: Array<{ url: string; init: RequestInit }> = []
+    ;(globalThis as { fetch: unknown }).fetch = async (
+      url: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      fetchCalls.push({ url: String(url), init: init ?? {} })
+      return new Response(JSON.stringify({ ok: true }), { status: 200 })
+    }
+
+    // Fresh pending_gate + stale last_activity_ts
+    await writeSession(tmpDir, {
+      id: 'REPORT-SKIP',
+      pid: 11000,
+      meta: {
+        last_activity_ts: FIXED_NOW - 31 * 60_000,
+        pending_gate: {
+          type: 'ask_user',
+          tool_call_id: 'tu_report',
+          parked_at_ts: FIXED_NOW - 5 * 60_000,
+        },
+      },
+    })
+
+    const reaper = createReaper(
+      baseOpts({
+        livenessCheck: (pid) => pid === 11000,
+        kill: () => {},
+      }),
+    )
+    await reaper.reapOnce()
+    reaper.stop()
+
+    // Allow fetch promise to settle (fire-and-forget is .then/.catch, not awaited)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    expect(fetchCalls).toHaveLength(1)
+    const call = fetchCalls[0]
+    expect(call.url).toBe(
+      'https://worker.example.com/api/gateway/sessions/REPORT-SKIP/reap-decision',
+    )
+    const body = JSON.parse(call.init.body as string)
+    expect(body.decision).toBe('skip-pending-gate')
+    expect(body.attrs.type).toBe('ask_user')
+    expect(body.attrs.tool_call_id).toBe('tu_report')
+  })
+
+  it('logs rpc-failed and does not throw when fetch rejects', async () => {
+    ;(globalThis as { fetch: unknown }).fetch = async () => {
+      throw new Error('network unreachable')
+    }
+
+    await writeSession(tmpDir, {
+      id: 'REPORT-FAIL',
+      pid: 12000,
+      meta: {
+        last_activity_ts: FIXED_NOW - 31 * 60_000,
+        pending_gate: {
+          type: 'ask_user',
+          tool_call_id: 'tu_fail',
+          parked_at_ts: FIXED_NOW - 5 * 60_000,
+        },
+      },
+    })
+
+    const logger = mkLogger()
+    const reaper = createReaper(
+      baseOpts({
+        livenessCheck: (pid) => pid === 12000,
+        kill: () => {},
+        logger,
+      }),
+    )
+    // Should not throw even though fetch rejects
+    await expect(reaper.reapOnce()).resolves.toBeDefined()
+    reaper.stop()
+
+    // Give the fire-and-forget promise time to settle
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    expect(
+      logger.warnCalls.some((l) => l.includes('rpc-failed') && l.includes('REPORT-FAIL')),
+    ).toBe(true)
   })
 })

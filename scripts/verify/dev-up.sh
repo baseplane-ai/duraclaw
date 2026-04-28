@@ -154,7 +154,17 @@ fi
 
 print_section "wait"
 wait_for_service "gateway" "$VERIFY_GATEWAY_READY_URL" "$GATEWAY_PID_FILE" "$GATEWAY_LOG_FILE" 60
-VERIFY_ORCH_URL="$(detect_orchestrator_url 90)"
+
+# If the orchestrator was already responding before we entered this script,
+# skip the tmux URL-scrape — the URL line may have scrolled off the pane
+# buffer long ago, which would cause `detect_orchestrator_url` to time out
+# even though the server is healthy. We already know the URL: it's the
+# derived $VERIFY_ORCH_URL.
+if curl --silent --show-error --fail "$VERIFY_ORCH_READY_URL" >/dev/null 2>&1; then
+  echo "Orchestrator already healthy at $VERIFY_ORCH_URL; skipping tmux URL scrape"
+else
+  VERIFY_ORCH_URL="$(detect_orchestrator_url 90)"
+fi
 VERIFY_ORCH_READY_URL="$VERIFY_ORCH_URL/api/auth/get-session"
 wait_for_tmux_service "orchestrator" "$VERIFY_ORCH_READY_URL" "$ORCH_TMUX_SESSION" "$ORCH_LOG_FILE" 90
 

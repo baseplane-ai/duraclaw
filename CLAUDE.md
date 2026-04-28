@@ -32,6 +32,7 @@ Key invariants:
 - `session-runner` never embeds the DO. It dials `CC_GATEWAY_URL`'s partner `WORKER_PUBLIC_URL` (`wss://dura.../agents/session-agent/<do-id>?role=gateway&token=...`).
 - Gateway restart / CF Worker redeploy are non-events for an in-flight runner; the BufferedChannel buffers while the WS is down, replays on reconnect, emits a single gap sentinel only on overflow.
 - Session status derives from `messagesCollection` via `useDerivedStatus`; D1 `agent_sessions` is the idle/background fallback, not a truth-gate.
+- Per-project state (e.g. docs-runner DO id, settings) lives in the D1 `projectMetadata` table — see `apps/orchestrator/src/db/schema.ts` and `planning/specs/27-docs-as-yjs-dialback-runners.md`.
 
 ## Monorepo Structure
 
@@ -76,6 +77,7 @@ pnpm ship               # Build + wrangler deploy (do NOT run manually -- see De
 # Gateway (local)
 cd packages/agent-gateway
 bun run src/server.ts   # Starts on 127.0.0.1:$CC_GATEWAY_PORT (default 9877)
+                        # Docs-runner uses $CC_DOCS_RUNNER_PORT (also derived per-worktree, see .claude/rules/worktree-setup.md)
 
 # Session-runner binary build
 pnpm --filter @duraclaw/session-runner build   # Emits dist/main.js with #!/usr/bin/env bun shebang
@@ -90,7 +92,7 @@ pnpm --filter @duraclaw/session-runner build   # Emits dist/main.js with #!/usr/
   retention, GC'd on `onStart`) AND mirrors to `console.log` for live
   `wrangler tail`. Use tag prefixes consistently: `gate` for
   AskUserQuestion / permission lifecycle, `conn` for WS connection
-  events, `rpc` for callable entry/exit. Query via the `getEventLog()`
+  events, `rpc` for callable entry/exit, `reap` for reaper kill/skip decisions originating on the gateway and forwarded via recordReapDecision RPC. Query via the `getEventLog()`
   RPC (`{tag?, sinceTs?, limit?}`) — no external log infra needed for
   per-session replay. Runner-side logs still go to `console.log` (they
   land in `/run/duraclaw/sessions/{id}.log` on the VPS).

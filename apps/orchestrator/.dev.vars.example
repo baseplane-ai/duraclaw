@@ -13,6 +13,12 @@ CC_GATEWAY_URL=ws://127.0.0.1:9877
 CC_GATEWAY_SECRET=<paste gateway .env secret here>
 WORKER_PUBLIC_URL=http://127.0.0.1:43173
 
+# GH#27 P1.1/P1.2 — bearer token shared between agent-gateway / docs-runner
+# and the orchestrator. Must match the gateway-side value. Used for the
+# bearer auth path on /api/projects/:id and the docs-runner WS dial-back
+# to RepoDocumentDO. Cookie-authed browser callers don't need this.
+DOCS_RUNNER_SECRET=dev-docs-runner-secret-change-me
+
 # Push-notification keys — copy from any working worktree or generate new
 # ones (they're shared across dev).
 VAPID_PUBLIC_KEY=

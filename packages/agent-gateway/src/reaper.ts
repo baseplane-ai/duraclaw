@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { getDocsRunnersDir } from './docs-runner-handlers.js'
 import { defaultLivenessCheck, getSessionsDir, type LivenessCheck } from './session-state.js'
 import type { ExitFile, MetaFile } from './types.js'
 
@@ -9,6 +10,7 @@ const DEFAULT_STALE_THRESHOLD_MS = 30 * 60_000
 const DEFAULT_SIGTERM_GRACE_MS = 10_000
 const DEFAULT_CMD_ORPHAN_MAX_AGE_MS = 5 * 60_000
 const DEFAULT_TERMINAL_FILE_MAX_AGE_MS = 60 * 60_000
+const PENDING_GATE_MAX_AGE_MS = 24 * 60 * 60_000
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -22,6 +24,12 @@ export interface ReaperLogger {
 
 export interface ReaperOptions {
   sessionsDir: string
+  /**
+   * Additional directories to sweep on each pass alongside `sessionsDir`.
+   * Used so the docs-runner control-file dir gets the same staleness /
+   * SIGTERM / orphan-GC / terminal-GC treatment as `/run/duraclaw/sessions`.
+   */
+  extraDirs?: string[]
   livenessCheck?: LivenessCheck
   kill?: KillFn
   now?: () => number
@@ -141,6 +149,7 @@ function parseSessionIdFromExitEntry(name: string): string | null {
 
 export function createReaper(opts: ReaperOptions): Reaper {
   const sessionsDir = opts.sessionsDir
+  const extraDirs = opts.extraDirs ?? []
   const livenessCheck = opts.livenessCheck ?? defaultLivenessCheck
   const kill = opts.kill ?? defaultKill
   const now = opts.now ?? Date.now
@@ -196,39 +205,55 @@ export function createReaper(opts: ReaperOptions): Reaper {
     killTimers.set(sessionId, timer)
   }
 
-  async function reapOnce(): Promise<ReapReport> {
-    const report: ReapReport = {
-      scanned: 0,
-      sigtermed: [],
-      sigkilled: [],
-      markedCrashed: [],
-      cmdOrphansDeleted: [],
-      terminalFilesDeleted: [],
-    }
+  function reportReapDecision(
+    sessionId: string,
+    decision: 'skip-pending-gate' | 'kill-stale' | 'kill-dead-runner',
+    attrs: Record<string, unknown>,
+  ): void {
+    const workerPublicUrl = process.env.WORKER_PUBLIC_URL ?? ''
+    const gatewaySecret = process.env.CC_GATEWAY_SECRET ?? ''
+    if (!workerPublicUrl) return
+    const url = `${workerPublicUrl}/api/gateway/sessions/${sessionId}/reap-decision`
+    fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${gatewaySecret}`,
+      },
+      body: JSON.stringify({ decision, attrs }),
+      signal: AbortSignal.timeout(2000),
+    })
+      .then((res) => {
+        if (!res.ok) {
+          logger.warn(
+            `[reaper] rpc-failed sessionId=${sessionId} decision=${decision} status=${res.status}`,
+          )
+        }
+      })
+      .catch((err) => {
+        logger.warn(
+          `[reaper] rpc-failed sessionId=${sessionId} decision=${decision} err=${(err as Error).message}`,
+        )
+      })
+  }
 
-    // Per-session snapshot collected during the scan, emitted as a single
-    // structured log at the end. Helps reason about what's running between
-    // reaps without having to hit /sessions or tail individual session logs.
-    const inflight: Array<{
-      id: string
-      pid: number
-      ageSec: number
-      idleSec: number
-      seq: number
-    }> = []
-
-    logger.info(`[reaper] scan start dir=${sessionsDir} ts=${now()}`)
+  // Per-directory reap helper. Extracted so `reapOnce` can sweep both the
+  // session-runner sessions dir AND any docs-runner extras configured by
+  // the gateway (e.g. docs-runner scratch dir under /run/duraclaw/docs).
+  async function reapDir(
+    dir: string,
+    report: ReapReport,
+    inflight: Array<{ id: string; pid: number; ageSec: number; idleSec: number; seq: number }>,
+  ): Promise<void> {
+    logger.info(`[reaper] scan start dir=${dir} ts=${now()}`)
 
     let entries: string[]
     try {
-      entries = await fs.readdir(sessionsDir)
+      entries = await fs.readdir(dir)
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code
       if (code === 'ENOENT') {
-        logger.info(
-          `[reaper] scan complete scanned=0 sigtermed=[] sigkilled=[] crashed=[] cmdOrphans=[] terminalDeleted=[]`,
-        )
-        return report
+        return
       }
       throw err
     }
@@ -236,16 +261,16 @@ export function createReaper(opts: ReaperOptions): Reaper {
     const pidNames = entries.filter((n) => n.endsWith(PID_SUFFIX))
     const cmdNames = entries.filter((n) => n.endsWith(CMD_SUFFIX))
     const exitNames = entries.filter((n) => n.endsWith(EXIT_SUFFIX))
-    report.scanned = pidNames.length
+    report.scanned += pidNames.length
 
     // ── 1. Scan pid files ────────────────────────────────────────
     for (const pidName of pidNames) {
       const sessionId = parseSessionIdFromPidEntry(pidName)
       if (!sessionId) continue
 
-      const pidPath = path.join(sessionsDir, pidName)
-      const metaPath = path.join(sessionsDir, `${sessionId}.meta.json`)
-      const exitPath = path.join(sessionsDir, `${sessionId}.exit`)
+      const pidPath = path.join(dir, pidName)
+      const metaPath = path.join(dir, `${sessionId}.meta.json`)
+      const exitPath = path.join(dir, `${sessionId}.exit`)
 
       const pidFile = await readJsonIfExists<{ pid: number }>(pidPath)
       const pidFileStat = await statOrNull(pidPath)
@@ -287,11 +312,34 @@ export function createReaper(opts: ReaperOptions): Reaper {
         // Previously SIGTERMed and still alive? The watchdog handles escalation
         // via setTimeout; here we only need to detect NEW stale sessions.
         if (stale && !awaitingKill.has(sessionId)) {
+          // Re-read meta to check for fresh pending_gate (runner may have just parked)
+          const freshMeta = await readJsonIfExists<MetaFile>(metaPath)
+          const pg = freshMeta?.pending_gate
+          if (pg && typeof pg.parked_at_ts === 'number') {
+            const parkedAgeMs = currentNow - pg.parked_at_ts
+            if (parkedAgeMs <= PENDING_GATE_MAX_AGE_MS) {
+              logger.info(
+                `[reaper] skip-pending-gate sessionId=${sessionId} type=${pg.type} tool_call_id=${pg.tool_call_id} parked_age_ms=${parkedAgeMs}`,
+              )
+              reportReapDecision(sessionId, 'skip-pending-gate', {
+                type: pg.type,
+                tool_call_id: pg.tool_call_id,
+                parked_age_ms: parkedAgeMs,
+                last_activity_age_ms: lastActivityTs !== null ? currentNow - lastActivityTs : null,
+              })
+              continue
+            }
+            // pending_gate exists but exceeded sanity threshold — fall through to SIGTERM
+          }
           try {
             logger.info(
               `[reaper] stale session sessionId=${sessionId} alive=true last_activity_ts=${lastActivityTs} — SIGTERM`,
             )
             kill(pid, 'SIGTERM')
+            reportReapDecision(sessionId, 'kill-stale', {
+              pid,
+              last_activity_age_ms: lastActivityTs !== null ? currentNow - lastActivityTs : null,
+            })
             awaitingKill.set(sessionId, { pid, termedAt: currentNow })
             report.sigtermed.push(sessionId)
             scheduleSigkillWatchdog(sessionId, pid)
@@ -330,6 +378,10 @@ export function createReaper(opts: ReaperOptions): Reaper {
           if (result === 'written') {
             report.markedCrashed.push(sessionId)
             logger.info(`[reaper] crash marked sessionId=${sessionId} duration_ms=${durationMs}`)
+            reportReapDecision(sessionId, 'kill-dead-runner', {
+              pid: pid ?? null,
+              duration_ms: durationMs,
+            })
           } else {
             logger.info(`[reaper] exit file already present, skipping sessionId=${sessionId}`)
           }
@@ -345,7 +397,7 @@ export function createReaper(opts: ReaperOptions): Reaper {
     for (const cmdName of cmdNames) {
       const sessionId = parseSessionIdFromCmdEntry(cmdName)
       if (!sessionId) continue
-      const cmdPath = path.join(sessionsDir, cmdName)
+      const cmdPath = path.join(dir, cmdName)
       const cmdStat = await statOrNull(cmdPath)
       if (!cmdStat) continue
 
@@ -353,7 +405,7 @@ export function createReaper(opts: ReaperOptions): Reaper {
       if (age <= cmdOrphanMaxAgeMs) continue
 
       // Matching live pid? Skip GC.
-      const pidPath = path.join(sessionsDir, `${sessionId}.pid`)
+      const pidPath = path.join(dir, `${sessionId}.pid`)
       const pidFile = await readJsonIfExists<{ pid: number }>(pidPath)
       const pid =
         pidFile &&
@@ -373,21 +425,21 @@ export function createReaper(opts: ReaperOptions): Reaper {
     for (const exitName of exitNames) {
       const sessionId = parseSessionIdFromExitEntry(exitName)
       if (!sessionId) continue
-      const exitPath = path.join(sessionsDir, exitName)
+      const exitPath = path.join(dir, exitName)
       const exitStat = await statOrNull(exitPath)
       if (!exitStat) continue
       const age = now() - exitStat.mtimeMs
       if (age <= terminalFileMaxAgeMs) continue
 
-      const pidPath = path.join(sessionsDir, `${sessionId}.pid`)
-      const metaPath = path.join(sessionsDir, `${sessionId}.meta.json`)
+      const pidPath = path.join(dir, `${sessionId}.pid`)
+      const metaPath = path.join(dir, `${sessionId}.meta.json`)
       // Spec GH#75 B8 — the BufferedChannel gap-sentinel sidecar lives next
       // to the meta file; clean it up in the same terminal-GC sweep so we
       // don't leave orphaned `.gap` files for sessions that have long since
       // finished.
-      const gapPath = path.join(sessionsDir, `${sessionId}.meta.json.gap`)
-      const logPath = path.join(sessionsDir, `${sessionId}.log`)
-      const cmdPath = path.join(sessionsDir, `${sessionId}.cmd`)
+      const gapPath = path.join(dir, `${sessionId}.meta.json.gap`)
+      const logPath = path.join(dir, `${sessionId}.log`)
+      const cmdPath = path.join(dir, `${sessionId}.cmd`)
 
       // Unlink best-effort — ENOENT is fine.
       await unlinkSafe(pidPath, logger)
@@ -397,6 +449,32 @@ export function createReaper(opts: ReaperOptions): Reaper {
       await unlinkSafe(logPath, logger)
       await unlinkSafe(cmdPath, logger)
       report.terminalFilesDeleted.push(sessionId)
+    }
+  }
+
+  async function reapOnce(): Promise<ReapReport> {
+    const report: ReapReport = {
+      scanned: 0,
+      sigtermed: [],
+      sigkilled: [],
+      markedCrashed: [],
+      cmdOrphansDeleted: [],
+      terminalFilesDeleted: [],
+    }
+
+    // Per-session snapshot collected during the scan, emitted as a single
+    // structured log at the end. Helps reason about what's running between
+    // reaps without having to hit /sessions or tail individual session logs.
+    const inflight: Array<{
+      id: string
+      pid: number
+      ageSec: number
+      idleSec: number
+      seq: number
+    }> = []
+
+    for (const dir of [sessionsDir, ...extraDirs]) {
+      await reapDir(dir, report, inflight)
     }
 
     logger.info(
@@ -463,7 +541,10 @@ let moduleReaper: Reaper | null = null
  */
 export function getOrCreateReaper(): Reaper {
   if (moduleReaper) return moduleReaper
-  moduleReaper = createReaper({ sessionsDir: getSessionsDir() })
+  moduleReaper = createReaper({
+    sessionsDir: getSessionsDir(),
+    extraDirs: [getDocsRunnersDir()],
+  })
   return moduleReaper
 }
 

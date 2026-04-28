@@ -33,7 +33,7 @@
  */
 
 import { useLiveQuery } from '@tanstack/react-db'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { userTabsCollection } from '~/db/user-tabs-collection'
 import { apiUrl } from '~/lib/platform'
 import type { TabMeta, UserTabRow } from '~/lib/types'
@@ -265,6 +265,74 @@ export function collectReplaceTabDedupIds(
     if (r.meta.project !== dedupProject) continue
     out.push(r.id)
   }
+  return out
+}
+
+/**
+ * Build a map of `oldSessionId → newSessionId` describing peer-driven
+ * sessionId changes inside the user's tab list. Two patterns produce
+ * follow entries:
+ *
+ *   1. PATCH swap (`replaceTab` draft→real): the row's `id` is stable,
+ *      only `sessionId` changes. We pair prev → curr by row id.
+ *   2. Delete+insert (`openTab` one-tab-per-project): a row carrying
+ *      project P is removed and a new row with the same project P is
+ *      inserted with a different sessionId. We pair the deleted row's
+ *      sessionId with the newly inserted row's sessionId via project.
+ *
+ * Rows without a `project` are only paired via the row-id rule (case 1)
+ * — the project-pair fallback would otherwise merge unrelated tabs.
+ *
+ * The hook consumes this map to advance `activeSessionId` so the local
+ * view follows the latest session inside whatever tab the user is on,
+ * across devices. Pure / exported for unit testing.
+ */
+export function computeFollowMap(
+  prev: ReadonlyArray<{ id: string; sessionId: string; project?: string }>,
+  curr: ReadonlyArray<{ id: string; sessionId: string; project?: string }>,
+): Map<string, string> {
+  const out = new Map<string, string>()
+
+  const prevById = new Map(prev.map((r) => [r.id, r]))
+  const currById = new Map(curr.map((r) => [r.id, r]))
+
+  // Case 1 — same row id, sessionId changed (PATCH swap path).
+  for (const c of curr) {
+    const p = prevById.get(c.id)
+    if (p && p.sessionId !== c.sessionId) {
+      out.set(p.sessionId, c.sessionId)
+    }
+  }
+
+  // Case 2 — row deleted + new row inserted with same project.
+  // Build project → sessionId for prev-only and curr-only rows, then
+  // pair them up. A project with multiple deleted rows or multiple new
+  // rows is ambiguous — skip it rather than guess.
+  const prevOnlyByProject = new Map<string, string[]>()
+  for (const p of prev) {
+    if (currById.has(p.id)) continue
+    if (!p.project) continue
+    const list = prevOnlyByProject.get(p.project) ?? []
+    list.push(p.sessionId)
+    prevOnlyByProject.set(p.project, list)
+  }
+  const currOnlyByProject = new Map<string, string[]>()
+  for (const c of curr) {
+    if (prevById.has(c.id)) continue
+    if (!c.project) continue
+    const list = currOnlyByProject.get(c.project) ?? []
+    list.push(c.sessionId)
+    currOnlyByProject.set(c.project, list)
+  }
+  for (const [project, prevSessions] of prevOnlyByProject) {
+    const currSessions = currOnlyByProject.get(project)
+    if (!currSessions) continue
+    if (prevSessions.length !== 1 || currSessions.length !== 1) continue
+    const oldId = prevSessions[0]
+    const newId = currSessions[0]
+    if (oldId !== newId && !out.has(oldId)) out.set(oldId, newId)
+  }
+
   return out
 }
 
@@ -554,6 +622,42 @@ export function useTabSync(): UseTabSyncResult {
     window.addEventListener('storage', onStorage)
     return () => window.removeEventListener('storage', onStorage)
   }, [])
+
+  // ── Follow current-session changes from peer devices ────────────────
+  // Tab-list sync already broadcasts the row's `sessionId` cross-device
+  // (PATCH on `replaceTab`, delete+insert on `openTab` one-tab-per-
+  // project). What was missing: when the row I'm currently viewing has
+  // its `sessionId` swapped by a peer, my local activeSessionId still
+  // points at the previous id, so my view stays on the stale session.
+  // This effect diffs `rows` across renders and advances the local
+  // active marker (and localStorage) to the new sessionId. URL sync is
+  // handled by the page-level effect that watches `activeSessionId`.
+  //
+  // Self-writes (replaceTab / openTab on this device) also pass through
+  // here — they'd trigger an idempotent setActiveState since the
+  // imperative paths already point activeSessionId at the new id.
+  const prevRowsRef = useRef<ReadonlyArray<{ id: string; sessionId: string; project?: string }>>([])
+  useEffect(() => {
+    const flat = rows.map((r) => ({
+      id: r.id,
+      sessionId: r.sessionId as string,
+      project: r.meta.project,
+    }))
+    const prev = prevRowsRef.current
+    prevRowsRef.current = flat
+
+    if (prev.length === 0) return // first render — nothing to follow yet
+    if (!activeSessionId) return
+
+    const follow = computeFollowMap(prev, flat)
+    const replacement = follow.get(activeSessionId)
+    if (!replacement) return
+
+    setActiveState(replacement)
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(ACTIVE_TAB_KEY, replacement)
+    }
+  }, [rows, activeSessionId])
 
   // Map the user-stream status to the legacy shape the UI expects.
   const { status: streamStatus } = useUserStream()

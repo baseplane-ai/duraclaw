@@ -394,6 +394,44 @@ describe('ChatThread Suggestions', () => {
 
     expect(screen.queryByTestId('suggestions')).toBeNull()
   })
+
+  // Regression: on Capacitor (mobile) the messages collection hydrates
+  // asynchronously, so a session with prior turns briefly has
+  // `messages.length === 0` on tab-tap / wake. Without `expectsMessages`,
+  // ChatThread would flash the suggestion-chip empty state for a frame
+  // or two — long enough to look like a permanent state on slow devices.
+  // AgentDetailView passes `expectsMessages={(numTurns ?? 0) > 0}` so the
+  // skeleton (not the suggestions) renders during hydrate.
+  it('renders skeleton (not suggestions) when messages is empty but expectsMessages is true', () => {
+    const { container } = render(
+      <ChatThread
+        {...defaultProps}
+        messages={[]}
+        onSendSuggestion={vi.fn()}
+        expectsMessages={true}
+      />,
+    )
+
+    expect(screen.queryByTestId('suggestions')).toBeNull()
+    expect(screen.queryByText('Explain this codebase')).toBeNull()
+    expect(screen.queryByText('Start a conversation')).toBeNull()
+    expect(container.querySelector('[data-slot="skeleton"]')).toBeTruthy()
+  })
+
+  it('still shows suggestions when expectsMessages is false (draft / new-session path)', () => {
+    const { container } = render(
+      <ChatThread
+        {...defaultProps}
+        messages={[]}
+        onSendSuggestion={vi.fn()}
+        expectsMessages={false}
+      />,
+    )
+
+    expect(screen.getByTestId('suggestions')).toBeTruthy()
+    expect(screen.getByText('Explain this codebase')).toBeTruthy()
+    expect(container.querySelector('[data-slot="skeleton"]')).toBeNull()
+  })
 })
 
 /**

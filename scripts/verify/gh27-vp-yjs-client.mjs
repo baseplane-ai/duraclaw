@@ -1,0 +1,1 @@
+../../packages/docs-runner/scripts/vp-yjs-client.mjs
