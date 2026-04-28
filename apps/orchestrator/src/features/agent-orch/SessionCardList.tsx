@@ -245,7 +245,7 @@ export function SessionCardList({
         dateRange={dateRange}
         onDateRangeChange={setDateRange}
       />
-      <ul className="space-y-4 p-4 pb-10 list-none">
+      <ul className="flex flex-col gap-4 p-4 pb-10 list-none">
         {recentSessions.length === 0 && olderSessions.length === 0 && (
           <li className="list-none">
             <p className="p-4 text-center text-sm text-muted-foreground">
@@ -263,7 +263,7 @@ export function SessionCardList({
               >
                 {groupKey}
               </h3>
-              <div className="space-y-2">
+              <div className="flex flex-col gap-2">
                 {groupSessions.map((session) => (
                   <SwipeableCard
                     key={session.id}
@@ -296,7 +296,7 @@ export function SessionCardList({
               Older Sessions ({olderSessions.length})
             </button>
             {showOlder && (
-              <div className="mt-2 space-y-1">
+              <div className="mt-2 flex flex-col gap-1">
                 {olderSessions.map((session) => (
                   <OlderSessionRow
                     key={session.id}

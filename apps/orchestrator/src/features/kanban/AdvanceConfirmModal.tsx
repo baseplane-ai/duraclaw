@@ -73,10 +73,10 @@ export function AdvanceConfirmModal({
           </DialogTitle>
         </DialogHeader>
 
-        <div className="space-y-3 text-sm">
+        <div className="flex flex-col gap-3 text-sm">
           <div>
             <p className="text-muted-foreground mb-1">This will:</p>
-            <ul className="list-disc pl-5 space-y-1">
+            <ul className="flex list-disc flex-col gap-1 pl-5">
               <li>Close the current {currentMode} session</li>
               <li>Start a fresh {nextMode} session</li>
               <li>Reset context (new SDK session)</li>

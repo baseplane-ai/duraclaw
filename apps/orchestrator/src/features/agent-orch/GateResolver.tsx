@@ -95,7 +95,7 @@ export function GateResolver({ gate, onResolve }: GateResolverProps) {
     return (
       <div
         ref={containerRef}
-        className="min-w-0 space-y-3 rounded-lg border border-warning/30 bg-warning/5 p-3"
+        className="flex min-w-0 flex-col gap-3 rounded-lg border border-warning/30 bg-warning/5 p-3"
       >
         <div className="text-sm font-medium text-warning">Permission Request</div>
         <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs">
@@ -144,7 +144,7 @@ export function GateResolver({ gate, onResolve }: GateResolverProps) {
       return (
         <div
           ref={containerRef}
-          className="min-w-0 space-y-3 rounded-lg border border-info/30 bg-info/5 p-3"
+          className="flex min-w-0 flex-col gap-3 rounded-lg border border-info/30 bg-info/5 p-3"
         >
           <div className="text-sm font-medium text-info">Agent Question</div>
           <p className="break-words text-sm">{question}</p>
@@ -230,12 +230,12 @@ export function GateResolver({ gate, onResolve }: GateResolverProps) {
     return (
       <div
         ref={containerRef}
-        className="min-w-0 space-y-3 rounded-lg border border-info/30 bg-info/5 p-3"
+        className="flex min-w-0 flex-col gap-3 rounded-lg border border-info/30 bg-info/5 p-3"
       >
         <div className="text-sm font-medium text-info">Agent Question</div>
 
         {questions.map((q, qIndex) => (
-          <div key={q.header} className="space-y-2">
+          <div key={q.header} className="flex flex-col gap-2">
             <div className="flex flex-wrap items-center gap-2">
               <Badge variant="secondary" className="max-w-full break-words">
                 {q.header}

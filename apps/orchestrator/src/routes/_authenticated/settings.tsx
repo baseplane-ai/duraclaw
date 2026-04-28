@@ -87,7 +87,7 @@ function SettingsPage() {
         <h1 className="text-lg font-semibold">Settings</h1>
       </Header>
       <Main>
-        <div className="mx-auto max-w-3xl space-y-6">
+        <div className="mx-auto max-w-3xl flex flex-col gap-6">
           <AccountSection />
           <DefaultsSection />
           <ProjectsSection />
@@ -157,7 +157,7 @@ function DefaultsSection() {
   }
 
   const maxBudgetField = (
-    <div className="space-y-2">
+    <div className="flex flex-col gap-2">
       <Label htmlFor="max-budget">Max Budget (USD)</Label>
       <Input
         id="max-budget"
@@ -195,9 +195,9 @@ function DefaultsSection() {
             <TabsTrigger value="codex">Codex</TabsTrigger>
           </TabsList>
 
-          <TabsContent value="claude" className="space-y-6 pt-4">
+          <TabsContent value="claude" className="flex flex-col gap-6 pt-4">
             {/* Permission Mode */}
-            <div className="space-y-3">
+            <div className="flex flex-col gap-3">
               <Label className="text-sm font-medium">Permission Mode</Label>
               <RadioGroup
                 value={preferences.permissionMode}
@@ -223,7 +223,7 @@ function DefaultsSection() {
             </div>
 
             {/* Claude Model */}
-            <div className="space-y-2">
+            <div className="flex flex-col gap-2">
               <Label htmlFor="claude-model">Model</Label>
               <Select
                 value={isCodexModel(preferences.model) ? CLAUDE_MODELS[0].value : preferences.model}
@@ -243,7 +243,7 @@ function DefaultsSection() {
             </div>
 
             {/* Thinking Mode */}
-            <div className="space-y-2">
+            <div className="flex flex-col gap-2">
               <Label htmlFor="thinking-mode">Thinking Mode</Label>
               <Select
                 value={preferences.thinkingMode}
@@ -263,7 +263,7 @@ function DefaultsSection() {
             </div>
 
             {/* Effort */}
-            <div className="space-y-2">
+            <div className="flex flex-col gap-2">
               <Label htmlFor="effort">Effort</Label>
               <Select
                 value={preferences.effort}
@@ -285,9 +285,9 @@ function DefaultsSection() {
             {maxBudgetField}
           </TabsContent>
 
-          <TabsContent value="codex" className="space-y-6 pt-4">
+          <TabsContent value="codex" className="flex flex-col gap-6 pt-4">
             {/* Codex Model */}
-            <div className="space-y-2">
+            <div className="flex flex-col gap-2">
               <Label htmlFor="codex-model">Model</Label>
               <Select
                 value={preferences.codexModel ?? CODEX_MODELS[0].value}
@@ -342,9 +342,9 @@ function AppearanceSection() {
         <CardTitle>Appearance</CardTitle>
         <CardDescription>Customize the look and feel of the application.</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-6">
+      <CardContent className="flex flex-col gap-6">
         {/* Theme */}
-        <div className="space-y-2">
+        <div className="flex flex-col gap-2">
           <Label htmlFor="theme-select">Theme</Label>
           <Select value={theme} onValueChange={setTheme}>
             <SelectTrigger id="theme-select" className="w-full max-w-xs">
@@ -359,7 +359,7 @@ function AppearanceSection() {
         </div>
 
         {/* Sidebar Variant */}
-        <div className="space-y-2">
+        <div className="flex flex-col gap-2">
           <Label htmlFor="sidebar-variant">Sidebar Variant</Label>
           <Select value={variant} onValueChange={setVariant}>
             <SelectTrigger id="sidebar-variant" className="w-full max-w-xs">
@@ -720,11 +720,11 @@ function IdentitiesSection() {
           spawn time and falls over to another when one hits a rate limit.
         </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-4">
+      <CardContent className="flex flex-col gap-4">
         {/* Add form */}
-        <form onSubmit={handleCreate} className="space-y-2 rounded-md border p-3">
+        <form onSubmit={handleCreate} className="flex flex-col gap-2 rounded-md border p-3">
           <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-end">
-            <div className="space-y-1">
+            <div className="flex flex-col gap-1">
               <Label htmlFor="identity-name" className="text-xs">
                 Name
               </Label>
@@ -766,7 +766,7 @@ function IdentitiesSection() {
               const err = rowErrors[row.id]
               const lastUsed = formatRelativePast(row.lastUsedAt)
               return (
-                <li key={row.id} className="space-y-1 px-3 py-2 text-sm">
+                <li key={row.id} className="flex flex-col gap-1 px-3 py-2 text-sm">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex min-w-0 flex-1 items-center gap-2">
                       <span className="truncate font-mono">{row.name}</span>
@@ -815,8 +815,8 @@ function SystemSection() {
         <CardTitle>System</CardTitle>
         <CardDescription>Application version and maintenance.</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="space-y-2 rounded-md border p-3 font-mono text-xs">
+      <CardContent className="flex flex-col gap-4">
+        <div className="flex flex-col gap-2 rounded-md border p-3 font-mono text-xs">
           <div className="flex items-center justify-between gap-4">
             <span className="text-muted-foreground">Running</span>
             <span>{localHash ?? '...'}</span>

@@ -25,7 +25,7 @@ function AdminCodexModelsPage() {
         <h1 className="text-lg font-semibold">Codex Models</h1>
       </Header>
       <Main>
-        <div className="mx-auto max-w-3xl space-y-6">
+        <div className="mx-auto max-w-3xl flex flex-col gap-6">
           <Card>
             <CardHeader>
               <CardTitle>Codex Models</CardTitle>

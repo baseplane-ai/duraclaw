@@ -156,7 +156,7 @@ function KataStatusItem({ kataState }: { kataState: KataSessionState }) {
       </button>
       {showPopover && (
         <div className="absolute bottom-full left-0 mb-1 w-64 rounded border bg-popover p-3 text-popover-foreground shadow-md text-xs">
-          <div className="space-y-1.5">
+          <div className="flex flex-col gap-1.5">
             <div>
               <span className="text-muted-foreground">Mode:</span> {kataState.currentMode}
             </div>

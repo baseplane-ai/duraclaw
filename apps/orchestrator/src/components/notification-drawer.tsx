@@ -57,7 +57,7 @@ export function NotificationDrawer({ open, onOpenChange }: NotificationDrawerPro
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent side="right" className="w-[380px] sm:w-[420px]">
-        <SheetHeader className="flex flex-row items-center justify-between space-y-0 pb-4">
+        <SheetHeader className="flex flex-row items-center justify-between gap-0 pb-4">
           <SheetTitle>Notifications</SheetTitle>
           <SheetDescription className="sr-only">
             Recent notifications and alerts from your sessions

@@ -170,7 +170,7 @@ export function GeminiModelsPanel() {
   )
 
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col gap-4">
       <p className="text-sm text-muted-foreground">
         Google Gemini model catalog. Context window must be entered manually. Sessions started with
         `agent: 'gemini'` receive this list at spawn time and use it for capability advertisement
@@ -239,7 +239,7 @@ export function GeminiModelsPanel() {
                 <TableCell>
                   <Switch checked={row.enabled} onCheckedChange={() => handleToggleEnabled(row)} />
                 </TableCell>
-                <TableCell className="text-right space-x-2">
+                <TableCell className="text-right [&>*+*]:ml-2">
                   <Button size="sm" variant="outline" onClick={() => handleEditContext(row)}>
                     Edit
                   </Button>

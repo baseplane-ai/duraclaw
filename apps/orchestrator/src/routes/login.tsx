@@ -64,14 +64,14 @@ function LoginPage() {
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,_rgba(250,250,250,0.12),_transparent_50%),linear-gradient(180deg,_rgba(39,39,42,0.65),_transparent)]" />
       <div className="relative mx-auto flex min-h-[calc(100dvh-5rem)] max-w-md items-center justify-center">
         <Card className="w-full rounded-[28px] border-border/70 bg-card/85 shadow-lg backdrop-blur">
-          <CardHeader className="space-y-2 pb-4">
+          <CardHeader className="flex flex-col gap-2 pb-4">
             <p className="text-xs font-semibold uppercase tracking-[0.24em] text-muted-foreground">
               Access
             </p>
             <CardTitle className="text-2xl">Sign in</CardTitle>
           </CardHeader>
           <CardContent>
-            <form className="space-y-4" onSubmit={handleSubmit}>
+            <form className="flex flex-col gap-4" onSubmit={handleSubmit}>
               <div>
                 <label className="mb-1.5 block text-sm font-medium" htmlFor="login-email">
                   Email

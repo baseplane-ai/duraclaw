@@ -157,7 +157,7 @@ export function SessionSidebar({
       </div>
 
       {collapsed ? (
-        <div className="space-y-1 p-1">
+        <div className="flex flex-col gap-1 p-1">
           {filteredSessions.map((session) => (
             <button
               key={session.id}
@@ -215,7 +215,7 @@ export function SessionSidebar({
             selectedSessionId={selectedSessionId}
           />
 
-          <div className="space-y-2 border-b p-3">
+          <div className="flex flex-col gap-2 border-b p-3">
             <Input
               placeholder="Search sessions..."
               value={searchQuery}
@@ -262,7 +262,7 @@ export function SessionSidebar({
           </div>
 
           <ScrollArea className="flex-1">
-            <div className="space-y-1 p-2">
+            <div className="flex flex-col gap-1 p-2">
               {recentSessions.length === 0 && olderSessions.length === 0 && (
                 <p className="p-4 text-center text-xs text-muted-foreground">
                   {sessions.length === 0
@@ -294,7 +294,7 @@ export function SessionSidebar({
                       <span className="ml-auto">{groupSessions.length}</span>
                     </button>
                     {!collapsedGroups.has(key) && (
-                      <div className="ml-2 space-y-1">
+                      <div className="ml-2 flex flex-col gap-1">
                         {groupSessions.map((session) => (
                           <SessionListItem
                             key={session.id}
@@ -328,7 +328,7 @@ export function SessionSidebar({
                   Older Sessions ({olderSessions.length})
                 </button>
                 {showOlder && (
-                  <div className="ml-2 mt-1 space-y-1">
+                  <div className="ml-2 mt-1 flex flex-col gap-1">
                     {olderSessions.map((session) => (
                       <SessionListItem
                         key={session.id}

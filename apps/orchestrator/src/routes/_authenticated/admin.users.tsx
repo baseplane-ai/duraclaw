@@ -159,7 +159,7 @@ function AdminUsersPage() {
       </Header>
 
       <Main>
-        <div className="space-y-4">
+        <div className="flex flex-col gap-4">
           <div className="flex items-center justify-between">
             <p className="text-sm text-muted-foreground">
               Manage user accounts and roles. Only admins can create new users.
@@ -219,7 +219,7 @@ function AdminUsersPage() {
                             <Badge variant="secondary">Active</Badge>
                           )}
                         </TableCell>
-                        <TableCell className="text-right space-x-2">
+                        <TableCell className="text-right flex flex-row gap-2">
                           <Button
                             onClick={() => setPasswordTarget(user)}
                             size="sm"
@@ -252,7 +252,7 @@ function AdminUsersPage() {
                 Add a new user account with name, email, password, and role
               </DialogDescription>
             </DialogHeader>
-            <form className="space-y-4" onSubmit={handleCreate}>
+            <form className="flex flex-col gap-4" onSubmit={handleCreate}>
               <div>
                 <Label htmlFor="create-name">Name</Label>
                 <Input
@@ -344,7 +344,7 @@ function AdminUsersPage() {
                 Replace the user's password with a new one
               </DialogDescription>
             </DialogHeader>
-            <form className="space-y-4" onSubmit={handleSetPassword}>
+            <form className="flex flex-col gap-4" onSubmit={handleSetPassword}>
               <div>
                 <Label htmlFor="new-password">New Password</Label>
                 <Input

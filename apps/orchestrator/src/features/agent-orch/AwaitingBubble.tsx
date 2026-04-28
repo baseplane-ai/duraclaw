@@ -38,7 +38,7 @@ export function AwaitingBubble({ reason }: AwaitingBubbleProps) {
   const label = COPY[reason]
   return (
     <div className="group relative" data-testid="awaiting-bubble" role="status" aria-live="polite">
-      <div className="space-y-2">
+      <div className="flex flex-col gap-2">
         <Message from="assistant">
           <MessageContent>
             <div className="flex items-center gap-2 text-sm text-muted-foreground">

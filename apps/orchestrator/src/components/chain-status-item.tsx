@@ -285,7 +285,7 @@ export function ChainStatusItem({ kataState, kataIssue, sessionId }: ChainStatus
       </button>
       {showPopover && (
         <div className="absolute bottom-full left-0 mb-1 w-72 rounded border bg-popover p-3 text-popover-foreground shadow-md text-xs">
-          <div className="space-y-2">
+          <div className="flex flex-col gap-2">
             <div className="flex items-start justify-between gap-2">
               <a
                 href={`https://github.com/${GH_REPO}/issues/${kataIssue}`}
@@ -324,7 +324,7 @@ export function ChainStatusItem({ kataState, kataIssue, sessionId }: ChainStatus
               </div>
             )}
 
-            <div className="space-y-1 border-t pt-2">
+            <div className="flex flex-col gap-1 border-t pt-2">
               {rungs.map((r) => {
                 const hasTarget = !!r.targetSessionId
                 const isCurrentlyViewing = r.viewing

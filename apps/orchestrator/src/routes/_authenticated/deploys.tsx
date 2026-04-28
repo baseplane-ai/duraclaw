@@ -228,7 +228,7 @@ function DeploysView() {
       </Header>
 
       <Main>
-        <div className="space-y-2">
+        <div className="flex flex-col gap-2">
           {error && (
             <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
               {error}
@@ -431,7 +431,7 @@ function LogsSection({
 function QueueSection({ state }: { state: DeployState }) {
   return (
     <Section title={`Queue (${state.queue.length})`}>
-      <div className="space-y-1 text-xs">
+      <div className="flex flex-col gap-1 text-xs">
         {state.queue.map((q) => (
           <div
             key={`${q.commit_sha}-${q.queued_at}`}
@@ -460,7 +460,7 @@ function HistorySection({ state }: { state: DeployState }) {
       {recent.length === 0 ? (
         <p className="px-1 py-0.5 text-xs text-muted-foreground">No prior deploys recorded.</p>
       ) : (
-        <div className="space-y-1 text-xs">
+        <div className="flex flex-col gap-1 text-xs">
           {recent.map((h) => (
             <div
               key={`${h.commit_sha}-${h.started_at}`}

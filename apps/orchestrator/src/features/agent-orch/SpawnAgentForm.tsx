@@ -91,9 +91,9 @@ export function SpawnAgentForm({ onSpawn, disabled, inline }: SpawnAgentFormProp
   }
 
   const formContent = (
-    <form onSubmit={handleSubmit} className="space-y-3">
+    <form onSubmit={handleSubmit} className="flex flex-col gap-3">
       <div className="grid grid-cols-2 gap-3">
-        <div className="space-y-1">
+        <div className="flex flex-col gap-1">
           <Label>Project</Label>
           {projects.length > 0 ? (
             <Select value={project} onValueChange={setProject}>
@@ -116,7 +116,7 @@ export function SpawnAgentForm({ onSpawn, disabled, inline }: SpawnAgentFormProp
             />
           )}
         </div>
-        <div className="space-y-1">
+        <div className="flex flex-col gap-1">
           <Label>Model</Label>
           <Select value={model} onValueChange={setModel}>
             <SelectTrigger>
@@ -132,7 +132,7 @@ export function SpawnAgentForm({ onSpawn, disabled, inline }: SpawnAgentFormProp
           </Select>
         </div>
       </div>
-      <div className="space-y-1">
+      <div className="flex flex-col gap-1">
         <Label htmlFor="spawn-prompt">Prompt</Label>
         <Textarea
           id="spawn-prompt"

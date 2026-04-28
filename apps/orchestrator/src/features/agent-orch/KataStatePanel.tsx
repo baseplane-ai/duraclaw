@@ -36,7 +36,7 @@ export function KataStatePanel({ kataState }: KataStatePanelProps) {
       </Button>
 
       {expanded && (
-        <div className="mt-2 space-y-1 text-xs">
+        <div className="mt-2 flex flex-col gap-1 text-xs">
           {kataState.issueNumber && (
             <div className="flex items-center gap-2">
               <span className="text-muted-foreground">Issue:</span>

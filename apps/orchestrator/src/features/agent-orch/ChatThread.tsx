@@ -186,7 +186,7 @@ function ResolvedAskUser({ part }: { part: SessionMessagePart }) {
     const deniedAnswer =
       typeof part.output === 'string' && part.output.length > 0 ? part.output : 'Declined'
     return (
-      <div className="min-w-0 space-y-1 rounded-lg border-l-2 border-info/30 bg-info/5 p-3">
+      <div className="min-w-0 flex flex-col gap-1 rounded-lg border-l-2 border-info/30 bg-info/5 p-3">
         {questions.map((q, i) => (
           // biome-ignore lint/suspicious/noArrayIndexKey: questions share no stable id
           <p key={`q-${i}`} className="break-words text-sm">
@@ -204,7 +204,7 @@ function ResolvedAskUser({ part }: { part: SessionMessagePart }) {
   // note). Two-column layout on sm+ (Q left, A right); stacked on mobile.
   if (structuredAnswers) {
     return (
-      <div className="min-w-0 space-y-2 rounded-lg border-l-2 border-info/30 bg-info/5 p-3">
+      <div className="min-w-0 flex flex-col gap-2 rounded-lg border-l-2 border-info/30 bg-info/5 p-3">
         {questions.map((q, i) => {
           const ans = structuredAnswers[i]
           return (
@@ -239,7 +239,7 @@ function ResolvedAskUser({ part }: { part: SessionMessagePart }) {
         ? JSON.stringify(part.output)
         : ''
   return (
-    <div className="min-w-0 space-y-1 rounded-lg border-l-2 border-info/30 bg-info/5 p-3">
+    <div className="min-w-0 flex flex-col gap-1 rounded-lg border-l-2 border-info/30 bg-info/5 p-3">
       {questions.map((q, i) => (
         // biome-ignore lint/suspicious/noArrayIndexKey: questions share no stable id
         <p key={`q-${i}`} className="break-words text-sm">
@@ -332,7 +332,7 @@ function ToolPillRow({ parts }: { parts: SessionMessagePart[] }) {
               {selectedParts?.length ?? 0} call{(selectedParts?.length ?? 0) === 1 ? '' : 's'}
             </SheetDescription>
           </SheetHeader>
-          <div className="flex-1 space-y-3 overflow-y-auto p-4">
+          <div className="flex-1 flex flex-col gap-3 overflow-y-auto p-4">
             {selectedSplit?.grouped.map(({ filePath, parts: fileParts }) => (
               <details
                 key={filePath}
@@ -348,7 +348,7 @@ function ToolPillRow({ parts }: { parts: SessionMessagePart[] }) {
                     </span>
                   )}
                 </summary>
-                <div className="space-y-3 border-t p-3">
+                <div className="flex flex-col gap-3 border-t p-3">
                   {fileParts.map((p, i) => (
                     <ToolCallDetail key={p.toolCallId ?? i} part={p} />
                   ))}
@@ -390,7 +390,7 @@ function ReasoningPillRow({ parts }: { parts: SessionMessagePart[] }) {
               {parts.length} thought{parts.length === 1 ? '' : 's'}
             </SheetDescription>
           </SheetHeader>
-          <div className="flex-1 space-y-3 overflow-y-auto p-4">
+          <div className="flex-1 flex flex-col gap-3 overflow-y-auto p-4">
             {parts.map((p, i) => (
               <div
                 // biome-ignore lint/suspicious/noArrayIndexKey: reasoning parts share no stable id; order is fixed
@@ -814,7 +814,7 @@ const ChatMessageRow = memo(
     if (msg.role === 'assistant') {
       return (
         <div key={msg.id} className="group relative" data-turn-index={turnIndex}>
-          <div className="space-y-2">{assistantNodes}</div>
+          <div className="flex flex-col gap-2">{assistantNodes}</div>
           {rewindButton}
         </div>
       )
@@ -1177,17 +1177,17 @@ export function ChatThread({
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" role="log">
         <div className="flex-1 overflow-y-auto overflow-x-hidden p-2">
           {isConnecting || expectsMessages ? (
-            <div className="space-y-6">
+            <div className="flex flex-col gap-6">
               <div className="flex items-start gap-3">
                 <Skeleton className="size-8 rounded-full" />
-                <div className="flex-1 space-y-2">
+                <div className="flex-1 flex flex-col gap-2">
                   <Skeleton className="h-4 w-3/4" />
                   <Skeleton className="h-4 w-1/2" />
                 </div>
               </div>
               <div className="flex items-start gap-3">
                 <Skeleton className="size-8 rounded-full" />
-                <div className="flex-1 space-y-2">
+                <div className="flex-1 flex flex-col gap-2">
                   <Skeleton className="h-4 w-5/6" />
                   <Skeleton className="h-4 w-2/3" />
                   <Skeleton className="h-4 w-1/3" />
@@ -1196,7 +1196,7 @@ export function ChatThread({
             </div>
           ) : (
             <ConversationEmptyState>
-              <div className="space-y-1">
+              <div className="flex flex-col gap-1">
                 <h3 className="text-sm font-medium">
                   {onSendSuggestion ? 'Start a conversation' : 'No messages yet'}
                 </h3>

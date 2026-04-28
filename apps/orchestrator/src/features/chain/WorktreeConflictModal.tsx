@@ -56,7 +56,7 @@ export function WorktreeConflictModal({
           {conflictTitle ? <DialogDescription>{conflictTitle}</DialogDescription> : null}
         </DialogHeader>
 
-        <ul className="space-y-1 text-sm text-muted-foreground">
+        <ul className="flex flex-col gap-1 text-sm text-muted-foreground">
           <li>
             <span className="font-medium text-foreground">owner:</span> {conflict.ownerId}
           </li>
