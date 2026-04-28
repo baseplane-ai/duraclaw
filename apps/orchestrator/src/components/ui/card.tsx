@@ -65,6 +65,7 @@ const CardContentShell = styled(View, {
 const CardFooterShell = styled(View, {
   name: 'CardFooter',
   display: 'flex',
+  flexDirection: 'row',
   alignItems: 'center',
   paddingHorizontal: '$5',
 })

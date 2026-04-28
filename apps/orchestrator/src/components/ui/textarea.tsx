@@ -22,6 +22,11 @@ const TextareaShell = styled(View, {
   name: 'Textarea',
   render: 'textarea',
   display: 'flex',
+  // Tamagui View defaults to flexDirection: 'column'. <textarea> has
+  // no rendered DOM children so the value doesn't matter visually,
+  // but declaring it explicitly satisfies the styled-flex-direction
+  // guard alongside InputShell.
+  flexDirection: 'row',
   minHeight: 64,
   width: '100%',
   borderRadius: '$md',

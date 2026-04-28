@@ -480,6 +480,7 @@ function SidebarGroup({ className, ...props }: React.ComponentProps<'div'>) {
 const SidebarGroupLabelShell = styled(View, {
   name: 'SidebarGroupLabel',
   display: 'flex',
+  flexDirection: 'row',
   height: 32,
   flexShrink: 0,
   alignItems: 'center',
@@ -522,6 +523,7 @@ const SidebarGroupActionShell = styled(View, {
   render: 'button',
   position: 'absolute',
   display: 'flex',
+  flexDirection: 'row',
   alignItems: 'center',
   justifyContent: 'center',
   width: 20,
@@ -704,6 +706,7 @@ const SidebarMenuActionShell = styled(View, {
   render: 'button',
   position: 'absolute',
   display: 'flex',
+  flexDirection: 'row',
   alignItems: 'center',
   justifyContent: 'center',
   width: 20,
@@ -758,6 +761,7 @@ const SidebarMenuBadgeShell = styled(View, {
   pointerEvents: 'none',
   position: 'absolute',
   display: 'flex',
+  flexDirection: 'row',
   height: 20,
   minWidth: 20,
   alignItems: 'center',
@@ -789,6 +793,7 @@ function SidebarMenuBadge({ className, ...props }: React.ComponentProps<'div'>) 
 const SidebarMenuSkeletonShell = styled(View, {
   name: 'SidebarMenuSkeleton',
   display: 'flex',
+  flexDirection: 'row',
   height: 32,
   alignItems: 'center',
   gap: '$2',
@@ -879,6 +884,11 @@ const SidebarMenuSubButtonShell = styled(View, {
   name: 'SidebarMenuSubButton',
   render: 'a',
   display: 'flex',
+  // GH#125 follow-up: Tamagui `styled(View)` defaults to flexDirection:
+  // 'column' (RN semantics). Without an explicit row direction the chevron,
+  // label-stack <div>, and trailing count <span> children stack vertically
+  // and get clipped by overflow:hidden, so only the leading icon is visible.
+  flexDirection: 'row',
   height: 24,
   minWidth: 0,
   alignItems: 'center',

@@ -26,6 +26,11 @@ const BadgeShell = styled(View, {
   name: 'Badge',
   render: 'span',
   display: 'inline-flex',
+  // GH#125 follow-up: Tamagui `styled(View)` defaults to flexDirection:
+  // 'column' (RN semantics). Without `row` here, badges with an icon +
+  // text child (e.g. BrainIcon + "Thought for…" in the reasoning pill)
+  // stack vertically — visible regression in chat thinking-bubble.
+  flexDirection: 'row',
   alignItems: 'center',
   justifyContent: 'center',
   gap: '$1',

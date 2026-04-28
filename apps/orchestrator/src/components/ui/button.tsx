@@ -27,6 +27,11 @@ const ButtonShell = styled(View, {
   // base layout (was: 'inline-flex items-center justify-center gap-2
   // whitespace-nowrap rounded-md text-sm font-medium ... shrink-0 outline-none')
   display: 'inline-flex',
+  // GH#125 follow-up: Tamagui `styled(View)` defaults to flexDirection:
+  // 'column' (RN semantics). Without `row` here, an icon child (Loader2,
+  // ArrowRight, etc.) stacks above the label text — visible regression
+  // in GateResolver Approve/Deny buttons and any icon+label button.
+  flexDirection: 'row',
   alignItems: 'center',
   justifyContent: 'center',
   gap: '$2',
@@ -97,24 +102,32 @@ function Button({ className, variant, size, asChild = false, ...props }: ButtonP
   if (asChild) {
     // Slot polymorphism — passes props through to a child element. The
     // styled() shell isn't used here; consumers using <Button asChild>
-    // <Link>...</Link></Button> rely on Tailwind classes for visuals,
-    // which the ARIA/SVG escape-hatch + any consumer className still
-    // provide for adjacent layout. Visual variant fidelity (bg/color)
-    // for asChild is a known P1b cleanup item.
+    // <Link>...</Link></Button> rely on Tailwind classes for visuals.
+    // Layer the cva-equivalent buttonVariants() class string so bg/color
+    // variants render correctly (GH#125 P1b hotfix — was previously
+    // unstyled).
     return (
       <Slot
         data-slot="button"
-        className={cn(BASE_ESCAPE_CLASSES, className)}
+        className={cn(BASE_ESCAPE_CLASSES, buttonVariants({ variant, size }), className)}
         {...(props as React.ComponentProps<typeof Slot>)}
       />
     )
   }
+  // GH#125 P1b hotfix — the Tamagui compiler is dropping token-referenced
+  // color props (`backgroundColor: '$primary'`, `color:
+  // '$primaryForeground'`) inside `variants` blocks of the styled() shell,
+  // so the bundled CSS lacks _color-* / _backgroundColor-primary atoms.
+  // Layer Tailwind utilities via buttonVariants() in className so visuals
+  // resolve through CSS variables (var(--primary), etc.) defined in
+  // theme.css. tailwind-merge in cn() dedups; the styled() shell's
+  // remaining layout atoms still emit and serve as a backup.
   return (
     <ButtonShell
       data-slot="button"
       variant={variant}
       size={size}
-      className={cn(BASE_ESCAPE_CLASSES, className)}
+      className={cn(BASE_ESCAPE_CLASSES, buttonVariants({ variant, size }), className)}
       {...(props as React.ComponentProps<typeof ButtonShell>)}
     />
   )

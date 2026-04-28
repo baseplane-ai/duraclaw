@@ -14,10 +14,26 @@ import { cn } from '~/lib/utils'
 const INPUT_ESCAPE_CLASSES =
   'text-base md:text-sm selection:bg-primary selection:text-primary-foreground file:inline-flex file:h-7 file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground dark:bg-input/30 aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40'
 
+// GH#125 P1b hotfix — the Tamagui compiler is dropping token-referenced
+// border / bg / color props in the styled() shell below (no
+// _borderColor-input, no _backgroundColor-primary in extracted CSS), so
+// the Input renders without visible borders. Layer the original shadcn
+// Tailwind utilities via cn() so border + height + radius + padding +
+// transition + focus-visible resolve through CSS variables defined in
+// theme.css. tailwind-merge in cn() dedups; the styled() shell's
+// remaining layout atoms still emit and serve as a backup.
+const INPUT_BASE_CLASSES =
+  'flex h-9 w-full min-w-0 rounded-md border border-input bg-transparent px-3 py-1 shadow-xs transition-[color,box-shadow] outline-none disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50'
+
 const InputShell = styled(View, {
   name: 'Input',
   render: 'input',
   display: 'flex',
+  // Tamagui View defaults to flexDirection: 'column'. <input> has no
+  // rendered DOM children so the value doesn't matter visually here,
+  // but declaring it explicitly satisfies the styled-flex-direction
+  // guard and protects against future restyles.
+  flexDirection: 'row',
   height: 36,
   width: '100%',
   minWidth: 0,
