@@ -72,7 +72,24 @@ const tokens = createTokens({
   color: lightTheme,
   // Tailwind --radius is 0.625rem = 10px; sm=-4, md=-2, lg=0, xl=+4
   radius: { 0: 0, sm: 6, md: 8, lg: 10, xl: 14, true: 8 },
-  space: { 0: 0, 1: 4, 2: 8, 3: 12, 4: 16, 5: 24, 6: 32, 7: 48, 8: 64, true: 8 },
+  space: {
+    0: 0,
+    1: 4,
+    2: 8,
+    3: 12,
+    4: 16,
+    5: 24,
+    6: 32,
+    7: 48,
+    8: 64,
+    true: 8,
+    // GH#125 P1b — sidebar widths (replaces --sidebar-width / --sidebar-width-icon
+    // CSS-var arbitrary-calc patterns from the pre-Tamagui sidebar). 16rem,
+    // 18rem, 3rem in pixels at the default 16px root font.
+    sidebarWidth: 256,
+    sidebarWidthMobile: 288,
+    sidebarWidthIcon: 48,
+  },
   size: { 0: 0, 1: 20, 2: 28, 3: 36, 4: 44, 5: 52, 6: 64, 7: 80, true: 36 },
   zIndex: { 0: 0, 1: 100, 2: 200, 3: 300, 4: 400, 5: 500 },
 })
