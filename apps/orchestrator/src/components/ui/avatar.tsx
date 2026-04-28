@@ -3,23 +3,22 @@ import { styled } from '@tamagui/core'
 import type * as React from 'react'
 import { cn } from '~/lib/utils'
 
-// GH#125 P1a — Tamagui port of the shadcn Avatar (Radix wrapper, 3
-// subcomponents). Pure structural styling, no variants.
+// GH#125 P1a — shadcn Avatar (Radix wrapper, 3 subcomponents).
 //
-// Tailwind escape hatch (kept in className via `cn()`):
-//  - aspect-square — Tamagui StackStyle has no aspectRatio shorthand
-//    matching Tailwind's 1:1 idiom; lighter to keep it in className.
+// IMPORTANT: `AvatarPrimitive.Root` is a context provider for the
+// image-load state machine that `Image` + `Fallback` consume. Wrapping
+// it in `styled(...)` breaks the provider chain (same pathology as
+// collapsible.tsx — caught during P1a after-screenshots). Root keeps
+// the bare-Radix shape with a className escape-hatch for layout. The
+// leaf shells `AvatarImage` + `AvatarFallback` are pure consumers and
+// can wear `styled()` safely.
+//
+// Tailwind escape hatch on Root: `relative flex size-8 shrink-0
+// overflow-hidden rounded-full` — Tamagui StackStyle has no
+// aspect-ratio shorthand on `View` in v2-rc.41 and the layout is too
+// state-aware for Tamagui's variant API to express cleanly.
 
-const AvatarShell = styled(AvatarPrimitive.Root, {
-  name: 'Avatar',
-  position: 'relative',
-  display: 'flex',
-  width: 32,
-  height: 32,
-  flexShrink: 0,
-  overflow: 'hidden',
-  borderRadius: 9999,
-})
+const AVATAR_ROOT_CLASSES = 'relative flex size-8 shrink-0 overflow-hidden rounded-full'
 
 const AvatarImageShell = styled(AvatarPrimitive.Image, {
   name: 'AvatarImage',
@@ -40,10 +39,10 @@ const AvatarFallbackShell = styled(AvatarPrimitive.Fallback, {
 
 function Avatar({ className, ...props }: React.ComponentProps<typeof AvatarPrimitive.Root>) {
   return (
-    <AvatarShell
+    <AvatarPrimitive.Root
       data-slot="avatar"
-      className={cn(className)}
-      {...(props as React.ComponentProps<typeof AvatarShell>)}
+      className={cn(AVATAR_ROOT_CLASSES, className)}
+      {...props}
     />
   )
 }

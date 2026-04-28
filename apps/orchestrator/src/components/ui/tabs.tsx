@@ -6,6 +6,14 @@ import { cn } from '~/lib/utils'
 // GH#125 P1a — Tamagui port of the shadcn Tabs (Radix wrapper, 4
 // subcomponents). Pure structural styling around Radix Tabs internals.
 //
+// IMPORTANT: `TabsPrimitive.Root` is a context provider for the
+// active-tab state that `List`, `Trigger`, and `Content` consume.
+// Wrapping it in `styled(...)` breaks the provider chain (same
+// pathology as collapsible.tsx and avatar.tsx — caught during P1a
+// after-screenshots). Root keeps the bare-Radix shape with a
+// className escape-hatch for the flex/gap layout. The leaf shells
+// (List, Trigger, Content) are consumers and can wear `styled()`.
+//
 // Tailwind escape hatch (kept in className via `cn()`):
 //  - text typography (text-sm font-medium whitespace-nowrap) — View's
 //    StackStyle rejects TextStyle props in v2-rc.41 runtime.
@@ -16,15 +24,10 @@ import { cn } from '~/lib/utils'
 //  - [&_svg]:* descendant selectors.
 //  - [calc(100%-1px)] arbitrary-value height for the trigger.
 
+const TABS_ROOT_CLASSES = 'flex flex-col gap-2'
+
 const TABS_TRIGGER_ESCAPE_CLASSES =
   "h-[calc(100%-1px)] text-sm font-medium whitespace-nowrap text-foreground transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-background data-[state=active]:shadow-sm dark:text-muted-foreground dark:data-[state=active]:border-input dark:data-[state=active]:bg-input/30 dark:data-[state=active]:text-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4"
-
-const TabsShell = styled(TabsPrimitive.Root, {
-  name: 'Tabs',
-  display: 'flex',
-  flexDirection: 'column',
-  gap: '$2',
-})
 
 const TabsListShell = styled(TabsPrimitive.List, {
   name: 'TabsList',
@@ -61,11 +64,7 @@ const TabsContentShell = styled(TabsPrimitive.Content, {
 
 function Tabs({ className, ...props }: React.ComponentProps<typeof TabsPrimitive.Root>) {
   return (
-    <TabsShell
-      data-slot="tabs"
-      className={cn(className)}
-      {...(props as React.ComponentProps<typeof TabsShell>)}
-    />
+    <TabsPrimitive.Root data-slot="tabs" className={cn(TABS_ROOT_CLASSES, className)} {...props} />
   )
 }
 
