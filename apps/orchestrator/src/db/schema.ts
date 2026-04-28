@@ -167,7 +167,15 @@ export const agentSessions = sqliteTable(
     errorCode: text('error_code'),
     kataStateJson: text('kata_state_json'),
     contextUsageJson: text('context_usage_json'),
+    // @deprecated — column dropped by migration 0027 (GH#115). Kept as
+    // a TS field until P1.4 removes references in lib/types.ts,
+    // shared-types, status-bar.tsx, AgentDetailView.tsx, and tests.
     worktreeInfoJson: text('worktree_info_json'),
+    // GH#115: FK into worktrees(id). NULL for sessions in read-only
+    // kata modes (research, planning, freeform); populated by kata
+    // auto-reserve for code-touching modes. Backfilled from the prior
+    // (kataIssue, project) tuple by migration 0027.
+    worktreeId: text('worktreeId'),
     visibility: text('visibility').notNull().default('public'),
   },
   (t) => ({
@@ -217,6 +225,16 @@ export const userTabs = sqliteTable(
   }),
 )
 
+/**
+ * @deprecated — replaced by `worktrees` (GH#115). The SQL table
+ * `worktree_reservations` is renamed to `worktrees` by migration 0027,
+ * so this export is mechanically still pointing at columns that won't
+ * exist post-deploy. Kept here ONLY so the ~6 callsites in chains.ts /
+ * checkout-worktree.ts / auto-advance.ts / status.ts / api/index.ts
+ * keep typechecking until P1.4 of GH#115 refactors them to use
+ * `worktrees`. Do NOT add new callers. Remove this export when P1.4
+ * lands.
+ */
 export const worktreeReservations = sqliteTable(
   'worktree_reservations',
   {
@@ -232,6 +250,39 @@ export const worktreeReservations = sqliteTable(
   },
   (t) => ({
     byIssue: index('idx_wt_res_issue').on(t.issueNumber),
+  }),
+)
+
+/**
+ * GH#115: registry over /data/projects/* clones. Decouples worktree
+ * reservation from kataIssue so debug, freeform, side-arc, and arc-bound
+ * sessions all share one primitive. See planning/specs/115-worktrees-
+ * first-class-resource.md §B-SCHEMA-1.
+ *
+ * `reservedBy` is a JSON blob `{kind: 'arc'|'session'|'manual', id}`
+ * and is NULL only when status='free'. `released_at` is set when the
+ * row enters the cleanup grace window (B-LIFECYCLE-1).
+ */
+export const worktrees = sqliteTable(
+  'worktrees',
+  {
+    id: text('id').primaryKey(),
+    path: text('path').notNull().unique(),
+    branch: text('branch'),
+    status: text('status').notNull().default('held'),
+    reservedBy: text('reservedBy'),
+    releasedAt: integer('released_at'),
+    createdAt: integer('createdAt').notNull(),
+    lastTouchedAt: integer('lastTouchedAt').notNull(),
+    ownerId: text('ownerId')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+  },
+  (t) => ({
+    byReservedBy: index('idx_worktrees_reservedBy').on(
+      sql`json_extract(${t.reservedBy}, '$.kind')`,
+      sql`json_extract(${t.reservedBy}, '$.id')`,
+    ),
   }),
 )
 
