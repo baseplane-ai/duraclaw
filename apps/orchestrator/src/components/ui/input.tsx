@@ -34,7 +34,13 @@ const InputShell = styled(View, {
   // but declaring it explicitly satisfies the styled-flex-direction
   // guard and protects against future restyles.
   flexDirection: 'row',
-  height: 36,
+  // GH#125 follow-up — minHeight not height; see SidebarMenuSubButton
+  // commit 77364be for the specificity rationale. Some Input consumers
+  // (auth forms with help text, password inputs with show/hide affordance)
+  // want a taller field via `className="h-N"`; Tamagui's atomic 0,2,0
+  // beat Tailwind 0,1,0 and ignored the override. minHeight floors at
+  // 36px (the standard input height) and lets consumers grow.
+  minHeight: 36,
   width: '100%',
   minWidth: 0,
   borderRadius: '$md',

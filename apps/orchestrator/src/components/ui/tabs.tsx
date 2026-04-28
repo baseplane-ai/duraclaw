@@ -32,7 +32,13 @@ const TABS_TRIGGER_ESCAPE_CLASSES =
 const TabsListShell = styled(TabsPrimitive.List, {
   name: 'TabsList',
   display: 'inline-flex',
-  height: 36,
+  // GH#125 follow-up — minHeight not height. Tamagui atomic `_height-36px`
+  // (specificity 0,2,0 via `:root .className`) silently beats Tailwind
+  // `.h-N` (0,1,0); consumers passing `className="h-auto"` to fit a
+  // multi-line tab list got their override ignored and content clipped
+  // by the row's overflow. minHeight preserves the 36px floor while
+  // letting consumers grow.
+  minHeight: 36,
   width: 'fit-content',
   alignItems: 'center',
   justifyContent: 'center',

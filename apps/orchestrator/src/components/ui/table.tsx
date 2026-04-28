@@ -65,7 +65,11 @@ const TableRowShell = styled(View, {
 const TableHeadShell = styled(View, {
   name: 'TableHead',
   render: 'th',
-  height: 40,
+  // GH#125 follow-up — minHeight not height; see SidebarMenuSubButton
+  // commit 77364be for the specificity rationale. Wrapping header text
+  // (long column titles) couldn't grow the row before this; rows clipped
+  // to 40px and visually overlapped neighbours.
+  minHeight: 40,
   paddingHorizontal: 8,
 })
 

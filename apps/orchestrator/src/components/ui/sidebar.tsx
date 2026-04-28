@@ -481,7 +481,10 @@ const SidebarGroupLabelShell = styled(View, {
   name: 'SidebarGroupLabel',
   display: 'flex',
   flexDirection: 'row',
-  height: 32,
+  // GH#125 follow-up — minHeight not height; see SidebarMenuSubButton
+  // commit 77364be. Long group labels (multi-word repo names with org
+  // prefix) need to wrap; the fixed 32px floor was clipping line 2.
+  minHeight: 32,
   flexShrink: 0,
   alignItems: 'center',
   borderRadius: '$md',
@@ -762,7 +765,11 @@ const SidebarMenuBadgeShell = styled(View, {
   position: 'absolute',
   display: 'flex',
   flexDirection: 'row',
-  height: 20,
+  // GH#125 follow-up — minHeight not height; see SidebarMenuSubButton
+  // commit 77364be. Numeric badges with ≥3 digits stayed at 20px and
+  // clipped overflow; this lets the chip grow vertically if the number
+  // ever wraps (rare but no longer broken).
+  minHeight: 20,
   minWidth: 20,
   alignItems: 'center',
   justifyContent: 'center',
