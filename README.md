@@ -40,13 +40,17 @@
 > pipeline (see [Deployment → Android shell + OTA
 > channel](#optional-android-shell--ota-channel)).
 
-> **Agent scope today: Claude only.** Every session runs against
-> [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk).
-> The runner / DO wire and the gateway control plane are intentionally
-> SDK-agnostic, but there is exactly one executor wired in right now.
-> **Multi-agent / multi-provider** (Codex, Gemini, custom executors,
-> per-session model selection) is roadmap phase **10.x Platform
-> Evolution** — see [Roadmap](#roadmap).
+> **Multi-driver runner.** The `session-runner` selects an executor at
+> spawn time via a `RunnerAdapter` interface — three adapters ship
+> today: **Claude** (via
+> [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk)),
+> **OpenAI Codex** (via the [Codex CLI](https://github.com/openai/codex)),
+> and **Google Gemini** (via the [Gemini CLI](https://github.com/google-gemini/gemini-cli)).
+> Each driver has its own admin-managed model registry in D1
+> (`codex_models`, `gemini_models`) and a per-driver settings tab; the
+> spawn / draft-tab form lets you pick agent + model per session.
+> Adding a fourth adapter is mechanical — implement `RunnerAdapter`
+> and register it. See [Roadmap](#roadmap) (Phase 10.3 — landed).
 
 ---
 
@@ -88,15 +92,18 @@ fed by a per-repo `docs-runner`). Better Auth on D1 handles sign-in;
 R2 stores the mobile OTA bundle.
 
 A VPS-side `agent-gateway` spawns detached runner processes — one
-`session-runner` per chat session (owns one
-`@anthropic-ai/claude-agent-sdk` `query()`) and one `docs-runner` per
-repo (owns the chokidar watch + Yjs sync) — and each runner dials its
-Durable Object directly over a buffered WebSocket. Gateway and
-runners ship as **self-contained Bun bundles** (atomic `mv` in place
-via `scripts/bundle-bin.sh`), so a `git pull` + rebuild on the VPS
-never racing-corrupts a running runner. Gateway restarts and Worker
-redeploys are non-events: the `BufferedChannel` (10K events / 50 MB
-ring) replays on reconnect, and SDK transcripts persist on disk for
+`session-runner` per chat session and one `docs-runner` per repo —
+and each runner dials its Durable Object directly over a buffered
+WebSocket. The session-runner picks an adapter at spawn time
+(`RunnerAdapter` interface) — Claude via `@anthropic-ai/claude-agent-sdk`,
+Codex via the Codex CLI, or Gemini via the Gemini CLI — so a single
+runner process can host any of the three drivers. The docs-runner
+owns the chokidar watch + Yjs sync. Gateway and runners ship as
+**self-contained Bun bundles** (atomic `mv` in place via
+`scripts/bundle-bin.sh`), so a `git pull` + rebuild on the VPS never
+race-corrupts a running runner. Gateway restarts and Worker redeploys
+are non-events: the `BufferedChannel` (10K events / 50 MB ring)
+replays on reconnect, and SDK / CLI transcripts persist on disk for
 resume.
 
 Layered on top:
@@ -126,12 +133,38 @@ A non-exhaustive map of what's actually shipped. See
 [`planning/progress.md`](planning/progress.md) for live phase / subphase
 status.
 
+**Multi-driver / multi-provider**
+
+- **Three runner adapters today**: Claude
+  (`@anthropic-ai/claude-agent-sdk`), OpenAI Codex (Codex CLI),
+  Google Gemini (Gemini CLI), all behind a single `RunnerAdapter`
+  interface in `packages/session-runner/src/adapters/`
+- D1-backed admin model registries (`codex_models`, `gemini_models`)
+  with full CRUD pages at `/admin/codex-models` and
+  `/admin/gemini-models`; the spawn payload reads the catalog at
+  dispatch time
+- Per-driver Settings → Defaults tabs (Claude / Codex) for model,
+  permission mode, thinking effort, max budget
+- Agent + model selector on the new-session draft tab; chains
+  workflow auto-routes by configured driver
+- `kata` workflow CLI runs against either Claude Code or Codex CLI as
+  the host driver — same modes, same exit-gate enforcement, dual hook
+  installation (GH#109)
+
 **Sessions**
 
-- Many concurrent Claude Code sessions, each with its own runner
-  process and Durable Object
+- Many concurrent agent sessions, each with its own runner process and
+  Durable Object — Claude / Codex / Gemini sessions coexist on the
+  same gateway and dashboard
 - Session lifecycle: create, list, search, history, fork, rename,
   abort, force-stop, delete, export
+- **Create-then-spawn**: a new session can be created (and given a
+  first prompt) before the runner is dispatched, so the chat surface
+  is interactive immediately and runner spawn is deferred until send
+- **Haiku auto-titler**: sessions are auto-named once the transcript
+  crosses a token threshold, with a confidence score and never
+  clobbering a user-set title; admin-toggled via the
+  `haiku_titler` feature flag
 - Per-session SQLite message history (live in the DO) mirrored to D1
   for cross-device list views
 - Session resume across runner reaper / SSH disconnect / Worker
@@ -284,23 +317,23 @@ duraclaw.
 
 ## What it is not
 
-- **Not full feature-parity with the Claude Code CLI.** Sessions run
-  through `@anthropic-ai/claude-agent-sdk`, which exposes most of what
-  the CLI does — but a handful of CLI features (full local-only
-  operation, MCP-server flag wiring, `/`-command parity, some
-  plugin / extension surfaces) aren't reproduced here. Use the CLI
-  when you want a single local session with the full CLI surface;
-  use duraclaw when you want a fleet of remote, persistent,
-  observable sessions.
-- **Not a Claude wrapper or standalone chatbot.** Sessions run inside
-  `@anthropic-ai/claude-agent-sdk` — duraclaw orchestrates them, it
-  doesn't reimplement them.
-- **Not multi-agent yet.** Today every session is Claude. The runner
-  process and the gateway are deliberately SDK-shaped to make swapping
-  in other executors (Codex, Gemini, custom adapters) tractable, but
-  none of those are wired up. That work is roadmap phase **10.x
-  Platform Evolution** — see [Roadmap](#roadmap). If you need
-  multi-provider routing today, this isn't it.
+- **Not full feature-parity with the Claude Code CLI.** Claude
+  sessions run through `@anthropic-ai/claude-agent-sdk`, which exposes
+  most of what the CLI does — but a handful of CLI features (full
+  local-only operation, MCP-server flag wiring, `/`-command parity,
+  some plugin / extension surfaces) aren't reproduced here. Use the
+  CLI when you want a single local session with the full CLI surface;
+  use duraclaw when you want a fleet of remote, persistent, observable
+  sessions.
+- **Not a Claude / Codex / Gemini wrapper or standalone chatbot.**
+  Sessions delegate to the upstream agent SDK or CLI behind a
+  `RunnerAdapter` — duraclaw orchestrates them, it doesn't reimplement
+  them.
+- **Not unlimited-provider yet.** Three adapters ship: Claude, Codex,
+  Gemini. Custom adapters are tractable (implement `RunnerAdapter`,
+  register in the per-runner registry, add a model table + admin CRUD
+  if you want per-driver model selection) but no fourth provider is
+  wired in today.
 - **Not a one-click self-hosted app yet.** It assumes a Cloudflare
   Workers account, D1, R2, and a Linux VPS you control. The deploy
   pipeline is internal infra (see [Deployment](#deployment)).
@@ -355,7 +388,7 @@ rules under [`.claude/rules/`](.claude/rules/).
 | [`apps/orchestrator`](apps/orchestrator) | Cloudflare Worker + Vite SPA: React UI (TanStack Router + Tamagui), Hono API routes, four Durable Objects (`SessionDO`, `UserSettingsDO`, `SessionCollabDO`, `RepoDocumentDO`), Better Auth on D1, dual-channel push fan-out | [`.claude/rules/orchestrator.md`](.claude/rules/orchestrator.md) |
 | [`apps/mobile`](apps/mobile) | Capacitor 8 Android shell + Capgo web-bundle OTA + native-APK fallback updater | [`apps/mobile/README.md`](apps/mobile/README.md) |
 | [`packages/agent-gateway`](packages/agent-gateway) | VPS spawn / list / reap control plane (Bun HTTP + systemd); ships as a self-contained Bun bundle | [`packages/agent-gateway/README.md`](packages/agent-gateway/README.md) |
-| [`packages/session-runner`](packages/session-runner) | Per-session Claude Agent SDK owner (one `query()` per process); self-contained Bun bundle | [`packages/session-runner/README.md`](packages/session-runner/README.md) |
+| [`packages/session-runner`](packages/session-runner) | Per-session executor host with a `RunnerAdapter` interface — Claude (Agent SDK), Codex (Codex CLI), and Gemini (Gemini CLI) adapters all live here under `src/adapters/`; one process owns one driver per session; self-contained Bun bundle | [`packages/session-runner/README.md`](packages/session-runner/README.md) |
 | [`packages/docs-runner`](packages/docs-runner) | Per-repo markdown / Yjs sync runner — chokidar watches the worktree, dials `RepoDocumentDO`, round-trips edits between disk and the in-browser BlockNote editor; self-contained Bun bundle | — |
 | [`packages/shared-transport`](packages/shared-transport) | `BufferedChannel` ring + `DialBackClient` (runner → DO WS, 1/3/9/27/30s backoff) | [`packages/shared-transport/README.md`](packages/shared-transport/README.md) |
 | [`packages/shared-types`](packages/shared-types) | `GatewayCommand` / `GatewayEvent` shapes shared across the wire | — |
@@ -435,8 +468,10 @@ Every major library duraclaw is built on, grouped by concern. Versions float on 
 **VPS runner stack (`packages/agent-gateway` + `packages/session-runner` + `packages/docs-runner`)**
 
 - [Bun](https://bun.sh/) — runtime for the gateway HTTP server and both runner binaries; gateway and runners ship as **self-contained Bun bundles** (workspace deps inlined; written via staging dir + atomic `mv` so a runner spawn racing with a pipeline rebuild always reads either the old or new bundle, never a half-written one)
-- [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk) — the agent SDK each session-runner owns
-- [`@anthropic-ai/sdk`](https://www.npmjs.com/package/@anthropic-ai/sdk) — lower-level client
+- [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk) — Claude adapter inside session-runner
+- [`@anthropic-ai/sdk`](https://www.npmjs.com/package/@anthropic-ai/sdk) — lower-level Anthropic client (used by the Haiku auto-titler and CAAM identity rotation)
+- [OpenAI Codex CLI](https://github.com/openai/codex) — Codex adapter shells out to the upstream CLI; D1-managed model registry feeds spawn-time selection
+- [Google Gemini CLI](https://github.com/google-gemini/gemini-cli) — Gemini adapter shells out to the upstream CLI; D1-managed model registry feeds spawn-time selection
 - [Yjs](https://yjs.dev/) + [`y-protocols`](https://www.npmjs.com/package/y-protocols) + [`@blocknote/server-util`](https://www.blocknotejs.org/) + [`chokidar`](https://github.com/paulmillr/chokidar) — docs-runner's disk-watch + Yjs sync stack
 - systemd — process supervision for the gateway (runners are detached children with `KillMode=process` so a gateway restart doesn't disturb in-flight runners)
 
@@ -669,19 +704,21 @@ The roadmap is broken into ten phases:
 | 2.x | Multi-session dashboard | landing |
 | 3.x | Session management — rename, delete, export, rewind, compaction | landing |
 | 4.x | Push notifications + PWA | landed |
-| 5.x | File viewer + integrations (GitHub, kata state) | landing |
+| 5.x | File viewer + integrations (GitHub, kata state, executor abstraction) | landing |
 | 6.x | Settings + auth + theming | landing |
 | 7.x | Advanced chat features — slash commands, input history, command palette | upcoming |
 | 8.x | Data layer + offline | upcoming |
 | 9.x | Backend hardening — observability, cleanup, lifecycle, rate limits | upcoming |
-| **10.x** | **Platform evolution — executor registry, multi-provider, multi-model, orchestration** | **upcoming** |
+| 10.x | Platform evolution — executor registry, multi-provider, multi-model, orchestration | **partially landed** (10.3 multi-provider live; AI SDK v7, dynamic Workers research, multi-model breadth, sub-agent RPC pending) |
+| 11.x | UX overhaul — session-centric navigation (mobile cards, fuzzy finder, swipe-between-sessions) | upcoming |
 
-**Phase 10.x is where the Claude-only constraint goes away.** It
-introduces an executor registry so the runner can host
-`@anthropic-ai/claude-agent-sdk` alongside other agent SDKs (OpenAI
-Codex, Google Gemini, custom adapters), per-session model and provider
-selection in the UI, and the orchestration glue to route each session
-to the right executor without changing the gateway / DO wire shape.
+**Phase 10.3 already shipped** — the executor registry hosts
+`@anthropic-ai/claude-agent-sdk` alongside the OpenAI Codex CLI and
+Google Gemini CLI; per-driver model registries (`codex_models`,
+`gemini_models`) drive admin CRUD pages and a per-session
+agent / model selector. The remaining 10.x work focuses on AI SDK v7,
+multi-model breadth (per-driver rate-limit awareness, per-model
+capability flags), and sub-agent / orchestration RPC patterns.
 
 ## Acknowledgments
 
