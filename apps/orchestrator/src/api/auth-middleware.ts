@@ -3,13 +3,19 @@ import { getRequestSession } from './auth-session'
 import type { ApiAppEnv } from './context'
 
 // Paths that use their own auth (Bearer tokens) and bypass session-cookie auth.
-// Note: `/api/gateway/projects/sync` is the only gateway push that uses Bearer
-// auth. The two GET sibling endpoints (`/api/gateway/projects` and
-// `/api/gateway/projects/all`) are browser-client endpoints that need the
-// session cookie to resolve `userId` for hidden-project filtering — keeping
-// them under the session middleware prevents a D1_TYPE_ERROR on an undefined
-// userId reaching drizzle's `eq()`.
-const BYPASS_PATHS = ['/api/gateway/projects/sync', '/api/webhooks/', '/api/bootstrap']
+// Note: `/api/gateway/projects/sync` is the gateway's project-manifest push
+// (Bearer-authed). `/api/gateway/worktrees/upsert` is the GH#115 P1.3 sweep
+// push (also Bearer-authed). The two GET sibling endpoints
+// (`/api/gateway/projects` and `/api/gateway/projects/all`) are
+// browser-client endpoints that need the session cookie to resolve `userId`
+// for hidden-project filtering — keeping them under the session middleware
+// prevents a D1_TYPE_ERROR on an undefined userId reaching drizzle's `eq()`.
+const BYPASS_PATHS = [
+  '/api/gateway/projects/sync',
+  '/api/gateway/worktrees/upsert',
+  '/api/webhooks/',
+  '/api/bootstrap',
+]
 
 export const authMiddleware = createMiddleware<ApiAppEnv>(async (c, next) => {
   const path = c.req.path

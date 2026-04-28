@@ -12,6 +12,7 @@ import {
   projects as projectsTable,
   userPreferences,
   userPresence,
+  users,
   userTabs,
   worktreeReservations,
   worktrees,
@@ -758,6 +759,180 @@ export function createApiApp() {
     }
 
     return c.body(null, 204)
+  })
+
+  // ── Gateway → Worker worktree-discovery sweep (GH#115 P1.3) ───────
+  //
+  // Batch upsert of clones the gateway observed under /data/projects/.
+  // Per B-DISCOVERY-1: idempotent INSERT-OR-UPDATE keyed by `path`.
+  //   - INSERT: status derived from classification (free vs held);
+  //     ownerId resolved from request payload → CC_DEFAULT_DISCOVERY_OWNER_USER_ID
+  //     env fallback. Validates user exists; surfaces a per-clone error
+  //     in errors[] if neither resolves.
+  //   - UPDATE: refresh `branch` (when changed) + `lastTouchedAt`. Does
+  //     NOT re-classify reservedBy / status / ownerId — those are sticky
+  //     after first INSERT until explicit DELETE+re-INSERT.
+  //
+  // Per-clone errors do NOT fail the batch — they're returned in
+  // `errors[]` so the gateway can log + retry on next sweep.
+  //
+  // Bypasses authMiddleware — auth is Bearer CC_GATEWAY_SECRET, timing-safe.
+  app.post('/api/gateway/worktrees/upsert', async (c) => {
+    const expected = c.env.CC_GATEWAY_SECRET
+    if (!expected) {
+      return c.json({ error: 'CC_GATEWAY_SECRET not configured' }, 401)
+    }
+    const authHeader = c.req.header('authorization') ?? ''
+    const provided = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
+    if (!constantTimeEquals(provided, expected)) {
+      return c.json({ error: 'unauthorized' }, 401)
+    }
+
+    const body = (await c.req.json().catch(() => null)) as {
+      clones?: unknown
+    } | null
+    if (!body || !Array.isArray(body.clones)) {
+      return c.json({ error: 'invalid body: expected {clones: SweptClone[]}' }, 400)
+    }
+
+    type IncomingClone = {
+      path?: unknown
+      branch?: unknown
+      reservedBy?: unknown
+      reservationOwnerUserId?: unknown
+    }
+
+    const upserted: Array<{ path: string; action: 'inserted' | 'updated' | 'unchanged' }> = []
+    const errors: Array<{ path: string; error: string }> = []
+    const fallbackOwner = c.env.CC_DEFAULT_DISCOVERY_OWNER_USER_ID ?? ''
+    const db = getDb(c.env)
+
+    // Cache the validated fallback owner per request — skip the users
+    // SELECT on every clone in the batch.
+    let fallbackOwnerValid: boolean | null = null
+    async function fallbackOwnerExists(): Promise<boolean> {
+      if (fallbackOwnerValid !== null) return fallbackOwnerValid
+      if (!fallbackOwner) {
+        fallbackOwnerValid = false
+        return false
+      }
+      const rows = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.id, fallbackOwner))
+        .limit(1)
+      fallbackOwnerValid = rows.length > 0
+      return fallbackOwnerValid
+    }
+
+    const validatedOwners = new Map<string, boolean>()
+    async function ownerExists(id: string): Promise<boolean> {
+      if (validatedOwners.has(id)) return validatedOwners.get(id) as boolean
+      const rows = await db.select({ id: users.id }).from(users).where(eq(users.id, id)).limit(1)
+      const exists = rows.length > 0
+      validatedOwners.set(id, exists)
+      return exists
+    }
+
+    for (const raw of body.clones as IncomingClone[]) {
+      if (
+        !raw ||
+        typeof raw !== 'object' ||
+        typeof raw.path !== 'string' ||
+        raw.path.length === 0
+      ) {
+        errors.push({
+          path: typeof raw?.path === 'string' ? raw.path : '<unknown>',
+          error: 'invalid_path',
+        })
+        continue
+      }
+      const cPath = raw.path
+      const branch = typeof raw.branch === 'string' && raw.branch.length > 0 ? raw.branch : null
+
+      // Validate reservedBy (matches isValidReservedBy contract).
+      let reservedByJson: string | null = null
+      if (raw.reservedBy !== undefined && raw.reservedBy !== null) {
+        if (!isValidReservedBy(raw.reservedBy)) {
+          errors.push({ path: cPath, error: 'invalid_reservedBy' })
+          continue
+        }
+        reservedByJson = JSON.stringify(raw.reservedBy)
+      }
+
+      // Look up by `path` (UNIQUE).
+      const existing = await db.select().from(worktrees).where(eq(worktrees.path, cPath)).limit(1)
+
+      if (existing.length === 0) {
+        // INSERT path. Resolve ownerId.
+        let ownerId: string | null = null
+        const requestedOwner =
+          typeof raw.reservationOwnerUserId === 'string' && raw.reservationOwnerUserId.length > 0
+            ? raw.reservationOwnerUserId
+            : null
+
+        if (requestedOwner) {
+          if (await ownerExists(requestedOwner)) {
+            ownerId = requestedOwner
+          } else {
+            errors.push({ path: cPath, error: 'invalid_owner' })
+            continue
+          }
+        } else if (await fallbackOwnerExists()) {
+          ownerId = fallbackOwner
+        } else {
+          errors.push({ path: cPath, error: 'no_owner_resolvable' })
+          continue
+        }
+
+        const status = reservedByJson ? 'held' : 'free'
+        const now = Date.now()
+        // 16-char id matches the migration 0027 scheme (lower(hex(randomblob(8)))).
+        const id = crypto.randomUUID().replace(/-/g, '').slice(0, 16)
+
+        try {
+          await db.insert(worktrees).values({
+            id,
+            path: cPath,
+            branch,
+            status,
+            reservedBy: reservedByJson,
+            releasedAt: null,
+            createdAt: now,
+            lastTouchedAt: now,
+            ownerId,
+          })
+          upserted.push({ path: cPath, action: 'inserted' })
+        } catch (err) {
+          // UNIQUE conflict on path is the most likely cause (concurrent
+          // sweep insert) — re-read and treat as update on next pass.
+          errors.push({
+            path: cPath,
+            error: `insert_failed: ${(err as Error).message ?? String(err)}`,
+          })
+        }
+        continue
+      }
+
+      // UPDATE path. Refresh branch (if changed) + lastTouchedAt.
+      // Sticky: do NOT update reservedBy / status / ownerId.
+      const row = existing[0]
+      const branchChanged = branch !== null && row.branch !== branch
+      const now = Date.now()
+
+      if (branchChanged) {
+        await db
+          .update(worktrees)
+          .set({ branch, lastTouchedAt: now })
+          .where(eq(worktrees.path, cPath))
+        upserted.push({ path: cPath, action: 'updated' })
+      } else {
+        await db.update(worktrees).set({ lastTouchedAt: now }).where(eq(worktrees.path, cPath))
+        upserted.push({ path: cPath, action: 'unchanged' })
+      }
+    }
+
+    return c.json({ upserted, errors }, 200)
   })
 
   // ── Gateway reap-decision bridge ──────────────────────────────────────────

@@ -100,6 +100,11 @@ export interface Env {
    *  dial-back to RepoDocumentDO (B3). When unset, those bearer-paths
    *  reject with 401; cookie-authed browser callers still work. */
   DOCS_RUNNER_SECRET?: string
+  /** GH#115: fallback ownerId for worktree rows discovered by the
+   *  gateway sweep when the .duraclaw/reservation.json doesn't carry a
+   *  `userId`. Required for the gateway-sweep RPC; must reference an
+   *  existing users(id). */
+  CC_DEFAULT_DISCOVERY_OWNER_USER_ID?: string
 }
 
 // ── D1 row response shapes (issue #7 p2) ───────────────────────────
