@@ -56,7 +56,7 @@ function Input({ className, type, ...props }: React.ComponentProps<'input'>) {
   return (
     <InputShell
       data-slot="input"
-      className={cn(INPUT_ESCAPE_CLASSES, className)}
+      className={cn(INPUT_BASE_CLASSES, INPUT_ESCAPE_CLASSES, className)}
       // type / name / value etc. flow through Tamagui's `render: 'input'`
       // path to the underlying <input>.
       {...({ type, ...props } as React.ComponentProps<typeof InputShell>)}
