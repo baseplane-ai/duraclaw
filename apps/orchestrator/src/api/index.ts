@@ -2615,6 +2615,56 @@ export function createApiApp() {
     return c.json({ ok: true, id: deleted[0].id }, 200)
   })
 
+  // ── Kata-CLI worktree reservation (GH#115 P1.6) ──────────────────────
+  // Mirrors POST /api/worktrees but Bearer-authed via CC_GATEWAY_SECRET so
+  // the kata CLI can reserve from an unauth shell context. The CLI runs
+  // on the same VPS as the gateway and shares CC_GATEWAY_SECRET via
+  // .env / .dev.vars; ownerId resolves to CC_DEFAULT_DISCOVERY_OWNER_USER_ID
+  // (same fallback the gateway sweep uses on /api/gateway/worktrees/upsert).
+  // Bypasses authMiddleware — auth is Bearer CC_GATEWAY_SECRET, timing-safe.
+  app.post('/api/kata/worktrees/reserve', async (c) => {
+    const expected = c.env.CC_GATEWAY_SECRET
+    if (!expected) {
+      return c.json({ error: 'CC_GATEWAY_SECRET not configured' }, 401)
+    }
+    const authHeader = c.req.header('authorization') ?? ''
+    const provided = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
+    if (!constantTimeEquals(provided, expected)) {
+      return c.json({ error: 'unauthorized' }, 401)
+    }
+
+    const body = (await c.req.json().catch(() => null)) as {
+      kind?: string
+      reservedBy?: unknown
+    } | null
+    if (!body || body.kind !== 'fresh' || !isValidReservedBy(body.reservedBy)) {
+      return c.json({ error: 'invalid_request' }, 400)
+    }
+
+    const fallbackOwner = c.env.CC_DEFAULT_DISCOVERY_OWNER_USER_ID ?? ''
+    if (!fallbackOwner) {
+      return c.json(
+        { error: 'no_owner_resolvable', hint: 'Set CC_DEFAULT_DISCOVERY_OWNER_USER_ID' },
+        503,
+      )
+    }
+
+    const db = getDb(c.env)
+    const result = await reserveFreshWorktree(db, body.reservedBy, fallbackOwner)
+    if (!result.ok) {
+      return c.json(
+        {
+          error: 'pool_exhausted',
+          freeCount: result.freeCount,
+          totalCount: result.totalCount,
+          hint: 'Run scripts/setup-clone.sh on the VPS to add a clone to the pool.',
+        },
+        503,
+      )
+    }
+    return c.json(result.row, 200)
+  })
+
   app.post('/api/sessions', async (c) => {
     const userId = c.get('userId')
     const body = (await c.req.json()) as CreateSessionBody

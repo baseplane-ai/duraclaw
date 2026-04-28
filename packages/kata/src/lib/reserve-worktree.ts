@@ -56,13 +56,20 @@ export interface ReserveOptions {
   mode: string
   /** Optional GH issue number; populates `reservedBy.kind='arc'` when present. */
   kataIssue?: number | null
-  /** Bearer token for orchestrator auth, if the API requires one. Optional. */
+  /**
+   * Bearer token for the kata reservation endpoint. Required for a real
+   * reservation — the kata CLI has no session cookie, so it presents the
+   * shared `CC_GATEWAY_SECRET` (already in scope on the VPS) against the
+   * Bearer-authed `/api/kata/worktrees/reserve` endpoint. Falls back to
+   * env `CC_GATEWAY_SECRET` / `CC_GATEWAY_API_TOKEN` when omitted; if
+   * neither is set, the helper returns `{kind:'skipped', reason:'no_auth'}`.
+   */
   authToken?: string
 }
 
 export type ReserveOutcome =
   | { kind: 'reserved'; row: WorktreeRow }
-  | { kind: 'skipped'; reason: 'read_only_mode' | 'unknown_mode' }
+  | { kind: 'skipped'; reason: 'read_only_mode' | 'unknown_mode' | 'no_auth' }
 
 /**
  * Thrown by `reserveWorktreeIfNeeded` when the orchestrator returns
@@ -103,13 +110,23 @@ export function getOrchestratorBaseUrl(
 export async function reserveWorktreeIfNeeded(
   opts: ReserveOptions,
 ): Promise<ReserveOutcome> {
-  const { orchestratorBaseUrl, sessionId, mode, kataIssue, authToken } = opts
+  const { orchestratorBaseUrl, sessionId, mode, kataIssue } = opts
 
   if (READ_ONLY_MODES.has(mode)) {
     return { kind: 'skipped', reason: 'read_only_mode' }
   }
   if (!CODE_TOUCHING_MODES.has(mode)) {
     return { kind: 'skipped', reason: 'unknown_mode' }
+  }
+
+  // Bearer secret resolution: explicit param wins, then env. The CLI
+  // runs on the same VPS as the gateway and shares CC_GATEWAY_SECRET via
+  // ./.env (gitignored) — the same source `scripts/verify/dev-up.sh`
+  // uses to seed the orchestrator's .dev.vars.
+  const authToken =
+    opts.authToken ?? process.env.CC_GATEWAY_SECRET ?? process.env.CC_GATEWAY_API_TOKEN ?? ''
+  if (!authToken) {
+    return { kind: 'skipped', reason: 'no_auth' }
   }
 
   const reservedBy: ReservedBy =
@@ -119,12 +136,15 @@ export async function reserveWorktreeIfNeeded(
 
   const headers: Record<string, string> = {
     'content-type': 'application/json',
-  }
-  if (authToken) {
-    headers.authorization = `Bearer ${authToken}`
+    authorization: `Bearer ${authToken}`,
   }
 
-  const url = `${orchestratorBaseUrl.replace(/\/$/, '')}/api/worktrees`
+  // Bearer-authed kata-reservation endpoint (P1.6). Distinct from the
+  // session-cookie-authed `/api/worktrees` user-facing endpoint — that
+  // path resolves ownerId from the request session, which the CLI has
+  // no way to provide. The Bearer endpoint resolves ownerId from
+  // CC_DEFAULT_DISCOVERY_OWNER_USER_ID, mirroring the gateway sweep.
+  const url = `${orchestratorBaseUrl.replace(/\/$/, '')}/api/kata/worktrees/reserve`
   const resp = await fetch(url, {
     method: 'POST',
     headers,

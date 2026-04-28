@@ -758,6 +758,12 @@ export async function enter(args: string[]): Promise<void> {
           `[kata] Reserved worktree: ${outcome.row.path}` +
             (outcome.row.branch ? ` (branch: ${outcome.row.branch})` : ''),
         )
+      } else if (outcome.kind === 'skipped' && outcome.reason === 'no_auth') {
+        // biome-ignore lint/suspicious/noConsole: intentional CLI debug
+        console.error(
+          '[kata] Skipping worktree reservation (CC_GATEWAY_SECRET not in env). ' +
+            'Source $REPO_ROOT/.env or export CC_GATEWAY_SECRET before running kata.',
+        )
       }
     } catch (err) {
       if (err instanceof PoolExhaustedError) {
