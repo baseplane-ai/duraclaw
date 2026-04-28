@@ -1,4 +1,6 @@
 import type { SpawnConfig } from '~/lib/types'
+import { handleRateLimit } from './resume-scheduler'
+import { transcriptCountImpl } from './transcript'
 import type { SessionDOContext } from './types'
 
 /**
@@ -230,6 +232,86 @@ export async function handleHttpRequest(
       }
       return new Response(JSON.stringify({ id: body.clientId }), {
         status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    } catch (err) {
+      return new Response(
+        JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } },
+      )
+    }
+  }
+
+  // GH#119 P3: dev-only failover trigger for VP-3 verification. Synthesises
+  // a `RateLimitEvent` with the optional `resets_at` from the request body
+  // and routes it through the real failover handler — same identity-cooldown
+  // write, same LRU resume spawn as a runner-emitted rate_limit. The public
+  // Hono route gates on `ENABLE_DEBUG_ENDPOINTS === 'true'`; this handler
+  // trusts pre-validated calls.
+  //
+  // We `await` `handleRateLimit` here (unlike the production rate_limit /
+  // result-error paths in `gateway-event-handler.ts`, which fire-and-forget
+  // because they run inside the WS dispatch loop and blocking would be
+  // wrong) so VP-3 verification is not racy: the response only returns
+  // after the failover side-effects (identity-cooldown write + LRU resume
+  // spawn) have settled.
+  if (request.method === 'POST' && url.pathname === '/debug/simulate-rate-limit') {
+    try {
+      let resetsAt: string | undefined
+      try {
+        const body = (await request.json()) as { resets_at?: unknown } | null
+        if (body && typeof body.resets_at === 'string') resetsAt = body.resets_at
+      } catch {
+        // Tolerate missing / non-JSON body — synth event uses fallback.
+      }
+      const sessionId = ctx.do.name
+      try {
+        await handleRateLimit(ctx, {
+          type: 'rate_limit',
+          session_id: sessionId,
+          rate_limit_info: resetsAt ? { resets_at: resetsAt } : {},
+        })
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      } catch (err) {
+        ctx.logEvent('error', 'failover', 'simulate-rate-limit handleRateLimit threw', {
+          error: err instanceof Error ? err.message : String(err),
+        })
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+    } catch (err) {
+      return new Response(
+        JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } },
+      )
+    }
+  }
+
+  // GH#119 P1.1: dev-only transcript-entry count for VP-1 verification.
+  // The public Hono route gates on `c.env.ENABLE_DEBUG_ENDPOINTS === 'true'`
+  // before forwarding here, so this DO handler does not need its own gate
+  // — only the API layer reaches it.
+  //
+  // `session_transcript.session_id` stores the SDK runner_session_id (the
+  // value the SDK passes to `SessionStore.append()`), NOT the duraclaw
+  // session id (`ctx.do.name`). Default to `ctx.state.runner_session_id`
+  // so the API route can call us without knowing the SDK id. The
+  // `?session_id=` override remains for tests and ad-hoc lookups.
+  if (request.method === 'GET' && url.pathname === '/debug/transcript-count') {
+    try {
+      const sessionId = url.searchParams.get('session_id') ?? ctx.state.runner_session_id ?? ''
+      if (!sessionId) {
+        return new Response(JSON.stringify({ count: 0, reason: 'no runner_session_id yet' }), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      const count = transcriptCountImpl(ctx, sessionId)
+      return new Response(JSON.stringify({ count }), {
         headers: { 'Content-Type': 'application/json' },
       })
     } catch (err) {

@@ -64,7 +64,7 @@ planning/
 ## Key Commands
 
 ```bash
-pnpm build              # Build all packages (tsup for workspace libs)
+pnpm build              # Build all packages (tsup for libs; bun build for VPS binaries)
 pnpm typecheck          # Typecheck all packages
 pnpm test               # Run vitest suites across the workspace
 pnpm dev                # Dev mode (all packages)
@@ -74,13 +74,17 @@ cd apps/orchestrator
 pnpm dev                # Local dev (Vite + miniflare)
 pnpm ship               # Build + wrangler deploy (do NOT run manually -- see Deployment)
 
-# Gateway (local)
+# Gateway (local dev)
 cd packages/agent-gateway
 bun run src/server.ts   # Starts on 127.0.0.1:$CC_GATEWAY_PORT (default 9877)
                         # Docs-runner uses $CC_DOCS_RUNNER_PORT (also derived per-worktree, see .claude/rules/worktree-setup.md)
 
-# Session-runner binary build
-pnpm --filter @duraclaw/session-runner build   # Emits dist/main.js with #!/usr/bin/env bun shebang
+# VPS binary bundles (gateway + both runners) — single self-contained
+# files via `scripts/bundle-bin.sh` (bun build --target=bun + atomic mv).
+# Production systemd runs the bundle, never source. See .claude/rules/deployment.md.
+pnpm --filter @duraclaw/agent-gateway  build   # -> packages/agent-gateway/dist/server.js
+pnpm --filter @duraclaw/session-runner build   # -> packages/session-runner/dist/main.js (shebanged, +x)
+pnpm --filter @duraclaw/docs-runner    build   # -> packages/docs-runner/dist/main.js   (shebanged, +x)
 ```
 
 ## Conventions
@@ -120,6 +124,48 @@ pnpm --filter @duraclaw/session-runner build   # Emits dist/main.js with #!/usr/
   - If you're unsure which bucket a change falls into, ask before
     opening a PR. A PR that duplicates commits already on `main` is
     worse than no PR.
+
+## Identity Management (GH#119)
+
+Account failover for Claude runners. Each "identity" maps a name (e.g.
+`work1`, `personal`) to an isolated `HOME` directory containing its own
+`~/.claude/.credentials.json`. The DO selects an available identity via
+LRU at spawn time and the gateway sets `HOME=<runner_home>` in the
+runner's process env so the SDK picks up the identity-scoped auth.
+
+When a runner emits `rate_limit` (or the SDK reports an auth error),
+the DO marks the current identity as `cooldown` and resumes the session
+under the next available identity using the SDK's `SessionStore` to
+load the transcript from DO SQLite (no message loss).
+
+### Adding an identity
+
+The HOME path is derived as `${IDENTITY_HOME_BASE}/${name}` (default
+base: `/srv/duraclaw/homes`; override per-deploy via `wrangler secret
+put IDENTITY_HOME_BASE` in prod or `apps/orchestrator/.dev.vars` for
+dev). Names must match `[A-Za-z0-9_-]{1,64}`.
+
+1. Run `scripts/setup-identity.sh --name work2`. The script computes
+   the HOME as `${IDENTITY_HOME_BASE}/work2` and creates the skeleton.
+2. Authenticate the new HOME: `HOME=$IDENTITY_HOME_BASE/work2 claude /login`.
+3. Register: re-run the script with `--register`, or POST manually:
+   ```bash
+   curl -X POST ${ORCH_URL}/api/admin/identities \
+     -H "Cookie: <admin session>" \
+     -d '{"name":"work2"}'
+   ```
+4. Verify in Settings > Identities.
+
+### How failover works (high level)
+
+- D1 `runner_identities` is the catalog (admin-managed via UI / CRUD).
+- D1 `agent_sessions.identity_name` records which identity owns each session.
+- DO SQLite `session_transcript` mirrors the SDK's `SessionStore` so
+  resume under a different identity is lossless.
+- LRU selection skips `cooldown` identities until `cooldown_until <
+  datetime('now')`. Lazy expiry — no cleanup job.
+- Zero identities configured → orchestrator behaves as before
+  (single-HOME, no failover). Identities are opt-in.
 
 ## Progress Tracking
 

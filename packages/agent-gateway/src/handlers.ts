@@ -70,6 +70,88 @@ export function buildCleanEnv(): Record<string, string> {
   return clean
 }
 
+// ── Gemini preflight (B8, GH#110) ──────────────────────────────────
+
+/** Injectable for tests — avoids real subprocess spawning. */
+export type GeminiPreflightFn = () => Promise<
+  { ok: true } | { ok: false; error: string; detail: string }
+>
+
+/**
+ * Semver comparison: returns true iff `ver` >= `min`.
+ * Parses "0.39.1", "0.32.0" etc. Returns false on any parse error.
+ */
+export function semverGte(ver: string, min: string): boolean {
+  const parse = (s: string) => s.split('.').map((n) => Number.parseInt(n, 10))
+  const a = parse(ver)
+  const b = parse(min)
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const x = a[i] ?? 0
+    const y = b[i] ?? 0
+    if (x > y) return true
+    if (x < y) return false
+  }
+  return true // equal
+}
+
+/**
+ * Run the real Gemini preflight: check GEMINI_API_KEY and `gemini --version`.
+ * Called from `handleStartSession` when `cmd.agent === 'gemini'`.
+ */
+export async function defaultGeminiPreflight(): Promise<
+  { ok: true } | { ok: false; error: string; detail: string }
+> {
+  // Check env var
+  const apiKey = process.env.GEMINI_API_KEY
+  if (!apiKey || apiKey.trim() === '') {
+    return {
+      ok: false,
+      error: 'missing_credential',
+      detail: 'GEMINI_API_KEY environment variable is not set',
+    }
+  }
+
+  // Check gemini --version >= 0.32.0
+  try {
+    const result = await new Promise<{ stdout: string; exitCode: number }>((resolve) => {
+      const chunks: Buffer[] = []
+      const child = spawn('gemini', ['--version'], { stdio: ['ignore', 'pipe', 'ignore'] })
+      child.stdout?.on('data', (chunk: Buffer) => chunks.push(chunk))
+      child.on('close', (code) => {
+        resolve({ stdout: Buffer.concat(chunks).toString().trim(), exitCode: code ?? 1 })
+      })
+      child.on('error', () => resolve({ stdout: '', exitCode: 1 }))
+    })
+
+    if (result.exitCode !== 0) {
+      return {
+        ok: false,
+        error: 'version_too_old',
+        detail: 'gemini CLI not found or failed to run — >= 0.32.0 required',
+      }
+    }
+
+    // Extract version: "0.39.1" from possible strings like "gemini/0.39.1" or just "0.39.1"
+    const match = result.stdout.match(/(\d+\.\d+\.\d+)/)
+    const ver = match?.[1]
+    if (!ver || !semverGte(ver, '0.32.0')) {
+      return {
+        ok: false,
+        error: 'version_too_old',
+        detail: `gemini CLI v${ver ?? 'unknown'} found, >= 0.32.0 required`,
+      }
+    }
+
+    return { ok: true }
+  } catch {
+    return {
+      ok: false,
+      error: 'version_too_old',
+      detail: 'gemini CLI not found or failed to run — >= 0.32.0 required',
+    }
+  }
+}
+
 // ── Session-runner bin resolution ──────────────────────────────────
 
 let cachedBin: string | null = null
@@ -119,6 +201,8 @@ export interface StartSessionOpts {
   binResolver?: () => Promise<string | null>
   idGenerator?: () => string
   logger?: GatewayLogger
+  /** Injectable for tests. Defaults to `defaultGeminiPreflight`. */
+  geminiPreflightFn?: GeminiPreflightFn
 }
 
 /**
@@ -154,6 +238,16 @@ export async function handleStartSession(
   }
   const cmd = b.cmd
 
+  // GH#110 B8: Gemini preflight — check GEMINI_API_KEY + CLI version before spawning.
+  const cmdAgent = (cmd as { agent?: string }).agent
+  if (cmdAgent === 'gemini') {
+    const preflightFn = opts.geminiPreflightFn ?? defaultGeminiPreflight
+    const preflightResult = await preflightFn()
+    if (!preflightResult.ok) {
+      return json(400, { ok: false, error: preflightResult.error, detail: preflightResult.detail })
+    }
+  }
+
   const sessionId = (opts.idGenerator ?? randomUUID)()
   const dir = opts.sessionsDir ?? getSessionsDir()
   const cmdFile = nodePath.join(dir, `${sessionId}.cmd`)
@@ -184,6 +278,19 @@ export async function handleStartSession(
     ((cmd as { worktree?: string }).worktree ?? '?')
   logger.info(`[gateway] /sessions/start sessionId=${sessionId} ${cmdSummary}`)
 
+  // GH#119 P2: when the DO selected a runner identity, it stamps the
+  // identity's HOME path on `cmd.runner_home`. Inject it into the spawn
+  // env so the runner picks up identity-scoped Claude auth from
+  // `<runner_home>/.claude/.credentials.json`. Tolerate stale/garbled
+  // wire shapes silently — runner_home is opt-in and the gateway falls
+  // back to its own HOME when omitted.
+  const runnerHome = (cmd as { runner_home?: unknown }).runner_home
+  const spawnEnv: Record<string, string | undefined> = {
+    ...buildCleanEnv(),
+    SESSIONS_DIR: dir,
+    ...(typeof runnerHome === 'string' && runnerHome.length > 0 ? { HOME: runnerHome } : {}),
+  }
+
   const logHandle = await fs.open(logFile, 'a', 0o600)
   try {
     const spawnFn = opts.spawnFn ?? defaultSpawn
@@ -193,7 +300,7 @@ export async function handleStartSession(
       {
         stdio: ['ignore', logHandle.fd, logHandle.fd],
         detached: true,
-        env: { ...buildCleanEnv(), SESSIONS_DIR: dir },
+        env: spawnEnv as Record<string, string>,
       },
     )
     child.unref()

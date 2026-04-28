@@ -39,41 +39,41 @@ export function ThemeProvider({
   ...props
 }: ThemeProviderProps) {
   const [theme, _setTheme] = useState<Theme>(() => (getCookie(storageKey) as Theme) || defaultTheme)
+  const [systemPrefersDark, setSystemPrefersDark] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false
+    return window.matchMedia('(prefers-color-scheme: dark)').matches
+  })
 
-  // Optimized: Memoize the resolved theme calculation to prevent unnecessary re-computations
-  const resolvedTheme = useMemo((): ResolvedTheme => {
-    if (theme === 'system') {
-      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
-    }
-    return theme as ResolvedTheme
+  // Subscribe to OS appearance changes only when theme === 'system'.
+  // Cleanup runs when theme switches away from 'system'. Tamagui's
+  // useMedia hook is for token-level breakpoints (e.g. media.mobile),
+  // not OS preference — so we keep matchMedia here.
+  useEffect(() => {
+    if (theme !== 'system') return
+    const mql = window.matchMedia('(prefers-color-scheme: dark)')
+    const onChange = (e: MediaQueryListEvent) => setSystemPrefersDark(e.matches)
+    mql.addEventListener('change', onChange)
+    return () => mql.removeEventListener('change', onChange)
   }, [theme])
 
+  const resolvedTheme = useMemo<ResolvedTheme>(() => {
+    if (theme === 'system') return systemPrefersDark ? 'dark' : 'light'
+    return theme
+  }, [theme, systemPrefersDark])
+
+  // During P1a, the `.dark` class on <html> still drives ai-elements'
+  // Tailwind dark mode (and any non-migrated primitives). P1b's Tailwind
+  // teardown removes this and Tamagui's <Theme name='dark'> becomes the
+  // sole driver.
   useEffect(() => {
     const root = window.document.documentElement
-    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
+    root.classList.remove('light', 'dark')
+    root.classList.add(resolvedTheme)
+  }, [resolvedTheme])
 
-    const applyTheme = (currentResolvedTheme: ResolvedTheme) => {
-      root.classList.remove('light', 'dark') // Remove existing theme classes
-      root.classList.add(currentResolvedTheme) // Add the new theme class
-    }
-
-    const handleChange = () => {
-      if (theme === 'system') {
-        const systemTheme = mediaQuery.matches ? 'dark' : 'light'
-        applyTheme(systemTheme)
-      }
-    }
-
-    applyTheme(resolvedTheme)
-
-    mediaQuery.addEventListener('change', handleChange)
-
-    return () => mediaQuery.removeEventListener('change', handleChange)
-  }, [theme, resolvedTheme])
-
-  const setTheme = (theme: Theme) => {
-    setCookie(storageKey, theme, THEME_COOKIE_MAX_AGE)
-    _setTheme(theme)
+  const setTheme = (next: Theme) => {
+    setCookie(storageKey, next, THEME_COOKIE_MAX_AGE)
+    _setTheme(next)
   }
 
   const resetTheme = () => {

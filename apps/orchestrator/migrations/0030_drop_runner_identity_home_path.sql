@@ -1,0 +1,13 @@
+-- GH#129: drop the raw home_path foot-gun. The runner HOME is now derived
+-- from `${IDENTITY_HOME_BASE}/${name}` at use time, so the column adds
+-- nothing but drift risk (admins can typo a path that contradicts the
+-- identity's name, sessions silently spawn under the wrong HOME). The
+-- gateway-side payload field `runner_home` is unchanged — only the
+-- catalog row drops the column. SQLite 3.35+ supports DROP COLUMN
+-- directly (Cloudflare D1 ships 3.45+).
+--
+-- Production has no identities registered yet (GH#119 just landed with
+-- empty runner_identities), so there's nothing to migrate. Dev rows in
+-- ad-hoc worktrees can be deleted + re-created if their physical HOME
+-- path doesn't already match `${base}/${name}`.
+ALTER TABLE runner_identities DROP COLUMN home_path;

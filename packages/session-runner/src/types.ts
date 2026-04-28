@@ -1,6 +1,7 @@
 import type { ContentBlock } from '@duraclaw/shared-types'
 import type { PushPullQueue } from './push-pull-queue.js'
 import type { SessionTitler } from './titler.js'
+import type { WsTranscriptRpc } from './transcript-rpc.js'
 
 /** SDK user message shape used as the lifetime queue payload. */
 export interface SDKUserMsg {
@@ -62,4 +63,13 @@ export interface RunnerSessionContext {
    * constructing the flushMeta closure; optional so claude-runner.ts can call
    * it without a hard dependency on the closure. */
   flushMeta?: () => Promise<void>
+  /**
+   * GH#119: TranscriptRpc multiplexer over the dial-back WS. Constructed
+   * in main() before the channel is dialed and exposed on ctx so the
+   * incoming-command dispatcher can deliver `transcript-rpc-response`
+   * frames into `handleResponse()` and `claude-runner` can build the
+   * `DuraclavSessionStore` adapter when the feature flag is on. Optional
+   * — pre-119 wiring won't populate it.
+   */
+  transcriptRpc?: WsTranscriptRpc
 }

@@ -135,6 +135,12 @@ export const agentSessions = sqliteTable(
     status: text('status').notNull().default('running'),
     model: text('model'),
     runnerSessionId: text('runner_session_id'),
+    // GH#119 P2: which runner identity owns this session. Populated by
+    // the DO at triggerGatewayDial after LRU selection from
+    // runner_identities; cleared/blanked when no identity is available
+    // (zero-identities fallback). Mirrored to clients via
+    // broadcastSessionRow so the UI can surface the active identity.
+    identityName: text('identity_name'),
     capabilitiesJson: text('capabilities_json'),
     createdAt: text('created_at').notNull(),
     updatedAt: text('updated_at').notNull(),
@@ -316,6 +322,56 @@ export const codexModels = sqliteTable('codex_models', {
   enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
   createdAt: text('created_at').notNull().default(sql`(datetime('now'))`),
   updatedAt: text('updated_at').notNull().default(sql`(datetime('now'))`),
+})
+
+/**
+ * GH#119 P2: admin-managed catalog of Claude runner identities.
+ *
+ * Each row maps a logical identity name (e.g. `work1`) to a HOME
+ * directory whose `.claude/.credentials.json` carries that identity's
+ * auth. The DO picks one via LRU at `triggerGatewayDial` time and
+ * passes the derived HOME to the gateway as `runner_home`; the gateway
+ * sets `HOME` in the spawn env so the runner picks up the identity-
+ * scoped credentials.
+ *
+ * GH#129: the HOME path is derived at use time as
+ * `${env.IDENTITY_HOME_BASE ?? '/srv/duraclaw/homes'}/${name}` rather
+ * than stored as an arbitrary admin-supplied string — eliminates the
+ * name-vs-path drift foot-gun and centralises the convention in env.
+ *
+ * Status: `'available'` (selectable), `'cooldown'` (temporarily
+ * unavailable, expires lazily via `cooldown_until < datetime('now')`),
+ * `'disabled'` (admin-disabled, never selected). CRUD lives at
+ * `/api/admin/identities*` (admin-role gated).
+ */
+export const runnerIdentities = sqliteTable('runner_identities', {
+  id: text('id')
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  name: text('name').notNull().unique(),
+  status: text('status').notNull().default('available'),
+  cooldownUntil: text('cooldown_until'),
+  lastUsedAt: text('last_used_at'),
+  createdAt: text('created_at').notNull().default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').notNull().default(sql`(datetime('now'))`),
+})
+
+/**
+ * GH#110 P2: admin-managed catalog of Google Gemini models.
+ *
+ * Read on `triggerGatewayDial` for gemini sessions and injected onto
+ * the spawn payload as `cmd.gemini_models`. CRUD via
+ * `/api/admin/gemini-models*` (admin role gated). Seeded by migration
+ * 0026 with 5 models.
+ */
+export const geminiModels = sqliteTable('gemini_models', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull().unique(),
+  contextWindow: integer('context_window').notNull(),
+  maxOutputTokens: integer('max_output_tokens'),
+  enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
 })
 
 /**

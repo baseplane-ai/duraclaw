@@ -149,12 +149,28 @@ https://www.better-auth.com/docs/plugins/organization.
 
 ### 3. Real-time delivery infra
 
+**PartySocket lineage — this is what the transport is built for.**
+The Cloudflare Agents SDK is built on PartyKit/PartySocket, and the
+DO's `ctx.getConnections()` IS the PartyKit "room" primitive: one room
+per session DO, fan-out is `for (conn of ctx.getConnections())
+conn.send(...)`. The browser uses `PartySocket` directly in
+`apps/orchestrator/src/lib/connection-manager/manager.ts` and
+`features/agent-orch/use-coding-agent.ts`. **Multi-human collaboration
+on one session is the use case the library was designed for** — we
+don't need a new socket, a new room, or a new transport. PartySocket
+gives us per-room fan-out + reconnect-with-backoff for free; the
+SyncedCollection layer (delta frames, `messageSeq` gap detection,
+TanStack DB reconciliation) is the application protocol *on top of*
+PartySocket. The recommendation in this section (Option B — parallel
+SyncedCollections) is the PartySocket-native answer: new typed
+channels in the existing room, not new connections.
+
 **The existing stack already does multi-client fan-out per session.**
 `broadcastToClients(ctx, data)` at
 `apps/orchestrator/src/agents/session-do/broadcast.ts:32` iterates
-`ctx.getConnections()` (Agent SDK) and unicasts to every WS except the
-one identified by `cachedGatewayConnId` (the runner). Two browsers on
-the same DO each get every frame. The `messageSeq` envelope counter
+`ctx.getConnections()` (Agent SDK / PartyKit room) and unicasts to
+every WS except the one identified by `cachedGatewayConnId` (the
+runner). Two browsers on the same DO each get every frame. The `messageSeq` envelope counter
 (broadcast.ts:97, 160) is stamped on every non-targeted frame; the
 client tracks `lastSeq` per session and triggers `requestSnapshot()`
 on a gap.
@@ -396,7 +412,10 @@ Synthesised from §1–§5. The spec writer needs to land each of these:
 2. **Delivery**: two new parallel `SyncedCollection`s
    (`comments:<sessionId>`, `sessionChat:<sessionId>` — later
    `sessionChat:<arcId>`). Reuse the existing `broadcastToClients`
-   plumbing and `messageSeq` envelope. No new sockets.
+   plumbing and `messageSeq` envelope. **No new sockets — this rides
+   the PartySocket room the Agents SDK already gives us per DO.** New
+   channels are typed `SyncedCollection` scopes inside the same room,
+   not parallel connections.
 3. **Anchoring**: composite `(sessionId, messageId)` for comments.
    Lock during streaming, unlock on finalisation. Don't use text
    offsets.

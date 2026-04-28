@@ -22,3 +22,37 @@ bash scripts/build-mobile-ota-bundle.sh   # emits zip + version.json locally
 # and then deploys the Worker.
 wrangler deploy --cwd apps/orchestrator
 ```
+
+**Infra-pipeline contract for the VPS gateway + runners** — the gateway
+(`packages/agent-gateway`) and its two spawn targets (`session-runner`,
+`docs-runner`) ship as **self-contained Bun bundles**. The pipeline runs:
+
+```bash
+git pull
+pnpm install --frozen-lockfile
+pnpm --filter '@duraclaw/agent-gateway' \
+     --filter '@duraclaw/session-runner' \
+     --filter '@duraclaw/docs-runner' \
+     build                              # produces dist/{server,main}.js bundles
+sudo cp packages/agent-gateway/systemd/duraclaw-agent-gateway.service \
+        /etc/systemd/system/             # only if the unit changed
+sudo systemctl daemon-reload             # only after a unit copy
+sudo systemctl restart duraclaw-agent-gateway
+```
+
+Why bundles (not source / not tsup):
+- Gateway runs from `dist/server.js`, not `src/server.ts` — `git pull`
+  rewriting source files is harmless to the running process.
+- Session-runner and docs-runner bundles inline their workspace deps
+  (`shared-transport`, `shared-types`, the SDK), so a runner spawned at
+  T+0 is unaffected by `pnpm install` rewriting `node_modules` at T+1.
+  Runners load their bundle once at spawn and never re-read disk.
+- `scripts/bundle-bin.sh` writes via a staging dir + atomic `mv`, so a
+  spawn that races with a pipeline-time bundle rewrite always reads
+  either the old or the new bundle, never a half-written one.
+
+Because of those three properties, the pipeline does NOT need a
+stop-before-pull window or an early-start step — the gateway stays up
+through pull/install/build, and only restarts after the new bundle is
+in place. The unit file uses `KillMode=process` so detached runner
+children are unaffected by the gateway restart.

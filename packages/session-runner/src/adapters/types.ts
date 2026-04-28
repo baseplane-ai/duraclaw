@@ -24,6 +24,7 @@ export interface AdapterStartOptions {
   env: Readonly<Record<string, string>>
   signal: AbortSignal
   codexModels?: ReadonlyArray<{ name: string; context_window: number }>
+  geminiModels?: ReadonlyArray<{ name: string; context_window: number }>
   onEvent: (event: GatewayEvent) => void
 }
 

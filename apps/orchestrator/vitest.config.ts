@@ -1,4 +1,6 @@
 import path from 'node:path'
+import { tamaguiPlugin } from '@tamagui/vite-plugin'
+import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vitest/config'
 
 // React 19's production build strips `React.act`, which @testing-library/react
@@ -9,8 +11,18 @@ import { defineConfig } from 'vitest/config'
 process.env.NODE_ENV = 'test'
 
 export default defineConfig({
+  plugins: [
+    tamaguiPlugin({
+      config: './src/tamagui.config.ts',
+      components: ['@tamagui/core'],
+      // Mirrors vite.config.ts: P0 spike runtime only; P1b flips extract: true.
+      extract: false,
+    }),
+    react(),
+  ],
   test: {
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+    setupFiles: ['./src/test-setup.ts'],
     env: {
       NODE_ENV: 'test',
     },

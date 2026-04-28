@@ -94,6 +94,11 @@ export interface Env {
    *  browsers must authenticate with this secret. Required for broadcast
    *  calls; missing secret means the DO rejects every broadcast with 401. */
   SYNC_BROADCAST_SECRET?: string
+  /** GH#119: gate dev-only debug endpoints (transcript-count, simulate-rate-limit, ...).
+   *  Set to the literal string `'true'` to enable. Anything else (incl. unset)
+   *  causes the API layer to 404 the route. P1.4 will reuse this gate for the
+   *  simulate-rate-limit endpoint. */
+  ENABLE_DEBUG_ENDPOINTS?: string
   /** GH#27 P1.1: bearer token shared between the agent-gateway / docs-runner
    *  and the orchestrator. Used to authenticate non-cookie callers on
    *  `PATCH/GET /api/projects/:projectId` (B2) and the docs-runner WS
@@ -105,6 +110,14 @@ export interface Env {
    *  `userId`. Required for the gateway-sweep RPC; must reference an
    *  existing users(id). */
   CC_DEFAULT_DISCOVERY_OWNER_USER_ID?: string
+  /** GH#129: base directory under which every runner identity's HOME
+   *  lives. The DO derives `runner_home` as `${IDENTITY_HOME_BASE}/${name}`
+   *  at spawn time and stamps it onto the gateway command. Defaults to
+   *  `/srv/duraclaw/homes` when unset (matches the GH#119 prod
+   *  convention); override via `wrangler secret put IDENTITY_HOME_BASE`
+   *  in prod or `apps/orchestrator/.dev.vars` for dev. The trailing
+   *  slash is stripped at derivation time. */
+  IDENTITY_HOME_BASE?: string
 }
 
 // ── D1 row response shapes (issue #7 p2) ───────────────────────────

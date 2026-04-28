@@ -24,6 +24,14 @@ DOCS_RUNNER_SECRET=dev-docs-runner-secret-change-me
 VAPID_PUBLIC_KEY=
 VAPID_PRIVATE_KEY=
 
+# GH#129 — base directory under which every runner identity's HOME lives.
+# The DO derives `runner_home` as `${IDENTITY_HOME_BASE}/${name}` from the
+# `runner_identities` row. Optional; defaults to `/srv/duraclaw/homes` to
+# match the prod convention. Override here to point dev at a writable
+# tmp dir if you want to run the failover VPs locally without touching
+# the prod path.
+# IDENTITY_HOME_BASE=/tmp/duraclaw-identities
+
 # ── Mode B: portless (multi-worktree-safe / GH#8 Phase 2) ──────────────
 # Used by `scripts/verify/portless-up.sh`. Subdomains are stable, so the
 # same .dev.vars works in every worktree. Requires portless installed +

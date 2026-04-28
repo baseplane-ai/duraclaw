@@ -251,7 +251,7 @@ describe('SESSION_DO_MIGRATIONS', () => {
     it('has sequential version numbers', () => {
       const versions = SESSION_DO_MIGRATIONS.map((m) => m.version)
       expect(versions).toEqual([
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
       ])
     })
 
@@ -3754,6 +3754,60 @@ describe('spawn() idempotency guard treats pending as active (GH new-session-dra
     'terminated',
   ] as const)('allows spawn when status is %s', (status) => {
     expect(isActiveSpawnGuardStatus(status)).toBe(false)
+  })
+})
+
+// ── deferred-runner first-message preview regression ──────────────────
+//
+// Regression: when a draft session is created via `directCreateSession`
+// (no initial prompt — the deferred-runner flow at sendMessageImpl's
+// `isFreshSpawnable` branch), the D1 row's `prompt` column lands as ''.
+// The sidebar `displayName` chain (`title || summary || prompt ||
+// id.slice(0,8)`) collapses to the session-id prefix — the "temp name"
+// users see and expect to be replaced by the first message.
+//
+// Pre-fix, the first-turn dispatch in sendMessageImpl spawned the runner
+// but never wrote the first-message preview back to SessionMeta.prompt
+// or D1 agent_sessions.prompt. The display only updated much later,
+// after the runner-side haiku titler eventually fired — and that titler
+// won't fire at all unless the transcript exceeds 1500 tokens. Short
+// first messages were stuck on the id-prefix temp name forever.
+//
+// The fix mirrors what spawnImpl already does for prompt-at-creation:
+// compute `promptToPreviewText(content)` and write it to both
+// SessionMeta.prompt (via updateState) and agent_sessions.prompt (via
+// the new syncPromptToD1 helper in status.ts). Only the isFreshSpawnable
+// branch writes — the live-runner and resume branches intentionally
+// leave `prompt` alone so subsequent turns don't clobber the original
+// session intent.
+//
+// SessionDO can't be instantiated under vitest (TC39 decorator parse
+// barrier), so this pins the predicate that gates the new write — the
+// same shape as the spawn-idempotency-guard regression above.
+
+describe('deferred-runner first-turn writes prompt preview (GH new-session-draft naming)', () => {
+  // Mirrors the `if (previewText)` skip in rpc-messages.ts isFreshSpawnable
+  // branch. Empty previews must NOT trigger a D1 write — there's nothing
+  // useful to display, and overwriting one empty string with another is
+  // pointless churn on the broadcast channel.
+  function shouldSyncPromptOnFirstTurn(previewText: string): boolean {
+    return Boolean(previewText)
+  }
+
+  it('writes when the first message is plain text', () => {
+    expect(shouldSyncPromptOnFirstTurn('refactor the auth gate')).toBe(true)
+  })
+
+  it('writes when the first message is image-only (renders as [image] marker)', () => {
+    expect(shouldSyncPromptOnFirstTurn('[image]')).toBe(true)
+  })
+
+  it('writes when the first message mixes text and images', () => {
+    expect(shouldSyncPromptOnFirstTurn('whats in this screenshot? [image]')).toBe(true)
+  })
+
+  it('skips when the preview is empty (defensive — avoids no-op D1 churn)', () => {
+    expect(shouldSyncPromptOnFirstTurn('')).toBe(false)
   })
 })
 

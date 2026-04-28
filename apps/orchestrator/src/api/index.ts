@@ -53,6 +53,8 @@ import type {
   VpStatusResponse,
 } from '~/lib/types'
 import { adminCodexModelsRoutes } from './admin-codex-models'
+import { adminGeminiModelsRoutes } from './admin-gemini-models'
+import { adminIdentitiesRoutes } from './admin-identities'
 import { authMiddleware } from './auth-middleware'
 import { authRoutes } from './auth-routes'
 import { getRequestSession } from './auth-session'
@@ -1291,6 +1293,16 @@ export function createApiApp() {
   // GH#107 P2: admin-only codex_models CRUD. Mounted after authMiddleware
   // so `c.get('role')` is populated; the sub-app asserts admin role.
   app.route('/api/admin/codex-models', adminCodexModelsRoutes())
+
+  // GH#110 P2: admin-only gemini_models CRUD. Mounted after authMiddleware
+  // so `c.get('role')` is populated; the sub-app asserts admin role.
+  app.route('/api/admin/gemini-models', adminGeminiModelsRoutes())
+
+  // GH#119 P2: admin-only runner_identities CRUD. Same auth pattern as
+  // codex-models. The DO reads this catalog on triggerGatewayDial and
+  // selects an identity via LRU; the gateway sets HOME from the
+  // derived path (`${IDENTITY_HOME_BASE}/${name}`, GH#129).
+  app.route('/api/admin/identities', adminIdentitiesRoutes())
 
   // ── User settings (tabs) — direct D1 CRUD (B-API-2) ──────────────
 
@@ -2876,6 +2888,83 @@ export function createApiApp() {
       fetchedAt: string
       isCached: boolean
     }
+    return c.json(body)
+  })
+
+  // GH#119 P1.1: dev-only transcript-entry count (VP-1 verification).
+  // Gated on `ENABLE_DEBUG_ENDPOINTS === 'true'` — anything else 404s so
+  // production deployments don't expose internal diagnostics. P3 reuses
+  // the same gate for the simulate-rate-limit endpoint below.
+  app.get('/api/sessions/:id/debug/transcript-count', async (c) => {
+    if (c.env.ENABLE_DEBUG_ENDPOINTS !== 'true') {
+      return c.json({ error: 'Not found' }, 404)
+    }
+    const userId = c.get('userId')
+    const access = await getAccessibleSession(c.env, c.req.param('id'), userId, c.get('role'))
+    if (!access.ok) {
+      return c.json({ error: 'Session not found' }, 404)
+    }
+    const sessionId = access.session.id
+    const doId = getSessionDoId(c.env, sessionId)
+    const sessionDO = c.env.SESSION_AGENT.get(doId)
+    // Don't pass `session_id` here — the duraclaw session id is not the
+    // SDK runner_session_id stored in `session_transcript.session_id`. The
+    // DO resolves the correct id from its own `state.runner_session_id`.
+    const response = await sessionDO.fetch(
+      new Request('https://session/debug/transcript-count', {
+        headers: {
+          'x-partykit-room': sessionId,
+          'x-user-id': userId,
+        },
+      }),
+    )
+    if (!response.ok) {
+      return c.json({ error: 'Session not found' }, response.status === 403 ? 403 : 404)
+    }
+    const body = (await response.json()) as { count: number }
+    return c.json(body)
+  })
+
+  // GH#119 P3: dev-only failover trigger (VP-3 verification). Forwards an
+  // optional `{ resets_at }` body to the DO's `/debug/simulate-rate-limit`
+  // route which synthesises a real `RateLimitEvent` and routes it through
+  // the failover handler. Gated on `ENABLE_DEBUG_ENDPOINTS === 'true'`.
+  app.post('/api/sessions/:id/debug/simulate-rate-limit', async (c) => {
+    if (c.env.ENABLE_DEBUG_ENDPOINTS !== 'true') {
+      return c.json({ error: 'Not found' }, 404)
+    }
+    const userId = c.get('userId')
+    const access = await getAccessibleSession(c.env, c.req.param('id'), userId, c.get('role'))
+    if (!access.ok) {
+      return c.json({ error: 'Session not found' }, 404)
+    }
+    const sessionId = access.session.id
+    const doId = getSessionDoId(c.env, sessionId)
+    const sessionDO = c.env.SESSION_AGENT.get(doId)
+    let bodyJson: string
+    try {
+      const raw = (await c.req.json().catch(() => null)) as { resets_at?: unknown } | null
+      bodyJson = JSON.stringify(
+        raw && typeof raw.resets_at === 'string' ? { resets_at: raw.resets_at } : {},
+      )
+    } catch {
+      bodyJson = '{}'
+    }
+    const response = await sessionDO.fetch(
+      new Request('https://session/debug/simulate-rate-limit', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-partykit-room': sessionId,
+          'x-user-id': userId,
+        },
+        body: bodyJson,
+      }),
+    )
+    if (!response.ok) {
+      return c.json({ error: 'Session not found' }, response.status === 403 ? 403 : 404)
+    }
+    const body = (await response.json()) as { ok: boolean }
     return c.json(body)
   })
 

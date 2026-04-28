@@ -1,8 +1,9 @@
 import { timingSafeEqual } from 'node:crypto'
 
-import type { ExecuteCommand, GatewayCommand, PermissionMode } from '~/lib/types'
+import type { ExecuteCommand, GatewayCommand, PermissionMode, ResumeCommand } from '~/lib/types'
 import { getSessionStatus } from '~/lib/vps-client'
 import { maybeReleaseWorktreeOnTerminal } from './maybe-release-worktree'
+import { syncIdentityNameToD1 } from './status'
 import { RECOVERY_GRACE_MS, type SessionDOContext } from './types'
 import { clearRecoveryGraceTimer, scheduleWatchdog } from './watchdog'
 
@@ -183,6 +184,111 @@ export function sendToGateway(ctx: SessionDOContext, cmd: GatewayCommand): void 
 }
 
 /**
+ * GH#119 P2/P3: query D1 for the next available runner identity using
+ * the LRU `(status, cooldown_until, last_used_at)` ordering. Returns
+ * `null` when no identity is available (catalog empty / every row
+ * disabled or on cooldown). Throws on D1 error so callers can decide
+ * how to fail (selectAndStampIdentity swallows; failover handler logs
+ * + bails).
+ *
+ * `last_used_at IS NULL DESC` puts never-used identities first (they're
+ * the most natural pick over an LRU sweep); after that ASC orders the
+ * remainder by oldest-use-first.
+ *
+ * GH#129: `home_path` was dropped from the catalog — callers derive
+ * the HOME from `${IDENTITY_HOME_BASE}/${name}` instead.
+ */
+export async function findAvailableIdentity(
+  ctx: SessionDOContext,
+): Promise<{ id: string; name: string } | null> {
+  const row = await ctx.env.AUTH_DB.prepare(
+    `SELECT id, name FROM runner_identities
+       WHERE status = 'available'
+         AND (cooldown_until IS NULL OR cooldown_until < datetime('now'))
+       ORDER BY last_used_at IS NULL DESC, last_used_at ASC
+       LIMIT 1`,
+  ).first<{ id: string; name: string }>()
+  return row ?? null
+}
+
+/**
+ * GH#129: default base directory that every runner identity's HOME
+ * lives under. Matches the convention used by `setup-identity.sh` and
+ * the prod cutover described in the GH#129 issue body. Override per
+ * deploy via the `IDENTITY_HOME_BASE` env binding.
+ */
+const DEFAULT_IDENTITY_HOME_BASE = '/srv/duraclaw/homes'
+
+/**
+ * GH#129: derive a runner HOME path from an identity name + the
+ * `IDENTITY_HOME_BASE` env binding. The trailing slash on the base is
+ * stripped so `${base}/${name}` always produces a single separator.
+ * The admin POST validator enforces a `[A-Za-z0-9_-]{1,64}` shape on
+ * `name`, so this concatenation cannot escape the base.
+ */
+export function deriveRunnerHome(base: string | undefined | null, name: string): string {
+  const trimmed = (base ?? DEFAULT_IDENTITY_HOME_BASE).replace(/\/+$/, '')
+  return `${trimmed}/${name}`
+}
+
+/**
+ * GH#119 P2: pick an available runner identity via LRU, stamp
+ * `runner_home` onto the command, bump `last_used_at`, and mirror the
+ * identity name onto the `agent_sessions` D1 row.
+ *
+ * Fail-open: any D1 error returns the original `cmd` unchanged so the
+ * gateway uses its own HOME (the pre-GH#119 default). The same applies
+ * when the catalog is empty / every row is on cooldown.
+ *
+ * Extracted from `triggerGatewayDial` so the LRU / cooldown / fail-open
+ * branches are unit-testable without a full DO harness.
+ */
+export async function selectAndStampIdentity<C extends ExecuteCommand | ResumeCommand>(
+  ctx: SessionDOContext,
+  cmd: C,
+): Promise<C> {
+  try {
+    const row = await findAvailableIdentity(ctx)
+
+    if (!row) {
+      ctx.logEvent('info', 'identity', 'no identity available — using gateway default')
+      return cmd
+    }
+
+    const runnerHome = deriveRunnerHome(ctx.env.IDENTITY_HOME_BASE, row.name)
+    const next = { ...cmd, runner_home: runnerHome }
+    try {
+      await ctx.env.AUTH_DB.prepare(
+        `UPDATE runner_identities
+             SET last_used_at = datetime('now'), updated_at = datetime('now')
+             WHERE id = ?`,
+      )
+        .bind(row.id)
+        .run()
+    } catch (err) {
+      ctx.logEvent('warn', 'identity', 'failed to update last_used_at', {
+        identityId: row.id,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+    ctx.logEvent('info', 'identity', `selected ${row.name}`, {
+      identityId: row.id,
+      homePath: runnerHome,
+    })
+    // Mirror onto the D1 `agent_sessions` row + broadcast so the UI
+    // sees which identity owns the session. Failure here is swallowed
+    // inside the helper.
+    await syncIdentityNameToD1(ctx, row.name, new Date().toISOString())
+    return next
+  } catch (err) {
+    ctx.logEvent('warn', 'identity', 'identity selection failed — using gateway default', {
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return cmd
+  }
+}
+
+/**
  * Trigger the gateway to dial back into this DO via outbound WS.
  *
  * Lifecycle (per B4b):
@@ -211,10 +317,23 @@ export async function triggerGatewayDial(
 
   // GH#86: inject titler_enabled into execute/resume commands. Read from
   // D1 feature_flags (5-min cached). Fail-open (default true) so new
-  // deploys work before the admin toggles anything.
+  // deploys work before the admin toggles anything. Preserves a caller-
+  // supplied explicit value so failover paths can force-enable.
   if (cmd.type === 'execute' || cmd.type === 'resume') {
     const titlerEnabled = await ctx.do.getFeatureFlagEnabled('haiku_titler', true)
-    cmd = { ...cmd, titler_enabled: titlerEnabled }
+    cmd = { ...cmd, titler_enabled: cmd.titler_enabled ?? titlerEnabled }
+  }
+
+  // GH#119: inject session_store_enabled into execute/resume commands.
+  // Default-OFF — the SessionStore mirror is opt-in until P3 (auto-failover)
+  // ships. P3's failover handler force-enables the flag on the resume
+  // command (so the new identity loads from DO SQLite, not the prior
+  // identity's local disk); the `cmd.session_store_enabled ??` lookup
+  // preserves that explicit `true` instead of overwriting it with the
+  // global feature-flag value.
+  if (cmd.type === 'execute' || cmd.type === 'resume') {
+    const sessionStoreEnabled = await ctx.do.getFeatureFlagEnabled('session_store', false)
+    cmd = { ...cmd, session_store_enabled: cmd.session_store_enabled ?? sessionStoreEnabled }
   }
 
   // GH#115: stamp the resolved clone path onto execute/resume commands.
@@ -288,6 +407,31 @@ export async function triggerGatewayDial(
         // Proceed without — adapter falls back to hardcoded defaults.
       }
     }
+  }
+
+  // GH#110: inject gemini_models catalog onto gemini spawn payloads. Reads
+  // from D1 `gemini_models WHERE enabled = 1`. Fail-open: on D1 read
+  // failure the runner falls back to the adapter's hardcoded defaults.
+  if (cmd.type === 'execute' || cmd.type === 'resume') {
+    if (cmd.agent === 'gemini') {
+      try {
+        const result = await ctx.env.AUTH_DB.prepare(
+          'SELECT name, context_window FROM gemini_models WHERE enabled = 1 ORDER BY name',
+        ).all<{ name: string; context_window: number }>()
+        cmd = { ...cmd, gemini_models: result.results ?? [] }
+      } catch (err) {
+        console.error(`[SessionDO:${ctx.ctx.id}] Failed to read gemini_models from D1:`, err)
+        // Proceed without — adapter falls back to hardcoded defaults.
+      }
+    }
+  }
+
+  // GH#119 P2: select a runner identity via LRU and stamp `runner_home`
+  // onto the spawn command. Extracted to a free helper so unit tests can
+  // exercise the LRU / cooldown / fail-open / zero-identities branches
+  // without spinning up a DO harness — see `identity-selection.test.ts`.
+  if (cmd.type === 'execute' || cmd.type === 'resume') {
+    cmd = await selectAndStampIdentity(ctx, cmd)
   }
 
   const callback_token = crypto.randomUUID()

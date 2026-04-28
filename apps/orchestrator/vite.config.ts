@@ -1,5 +1,6 @@
 import path from 'node:path'
 import { cloudflare } from '@cloudflare/vite-plugin'
+import { tamaguiPlugin } from '@tamagui/vite-plugin'
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 import agents from 'agents/vite'
@@ -96,6 +97,15 @@ export default defineConfig({
     }),
     buildHashPlugin(),
     cloudflare(),
+    tamaguiPlugin({
+      config: './src/tamagui.config.ts',
+      components: ['@tamagui/core'],
+      // P1b: compiler enabled (atomic-CSS extraction, hoisting, flattening).
+      // The compiler emits underscore-prefixed atomic classes (e.g.,
+      // `_dsp-flex`, `_alignItems-center`) into dist/client/assets/*.css —
+      // verify with `grep -E '\\._[a-zA-Z]' dist/client/assets/*.css`.
+      extract: true,
+    }),
     react(),
     tailwindcss(),
   ],

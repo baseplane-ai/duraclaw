@@ -27,12 +27,27 @@ import { META_COLUMN_MAP, type SessionDOContext } from './types'
  */
 export function updateState(ctx: SessionDOContext, partial: Partial<SessionMeta>): void {
   const prevStatus = ctx.state.status
+  // GH#119 P3: canonical reset point for the waiting_identity retry
+  // counter. Any transition into a terminal state (`idle` / `error`) or
+  // a successful failover (`failover`) clears the counter so a future
+  // rate-limit on the same session starts the alarm-loop budget fresh.
+  // The caller may override by passing an explicit
+  // `waiting_identity_retries` in `partial` (handleRateLimit /
+  // checkWaitingIdentity do this when bumping or zeroing intentionally).
+  let normalized: Partial<SessionMeta> = partial
+  if (
+    partial.status !== undefined &&
+    partial.waiting_identity_retries === undefined &&
+    (partial.status === 'idle' || partial.status === 'error' || partial.status === 'failover')
+  ) {
+    normalized = { ...partial, waiting_identity_retries: 0 }
+  }
   ctx.do.setState({
     ...ctx.state,
-    ...partial,
+    ...normalized,
     updated_at: new Date().toISOString(),
   })
-  persistMetaPatch(ctx, partial)
+  persistMetaPatch(ctx, normalized)
 
   // Push a status-only frame to all connected clients whenever the
   // status field actually changes. This ensures the client sees every
@@ -138,6 +153,71 @@ export async function syncRunnerSessionIdToD1(
     await broadcastSessionRow(ctx.env, ctx.ctx, sessionId, 'update')
   } catch (err) {
     console.error(`[SessionDO:${ctx.ctx.id}] Failed to sync runner_session_id to D1:`, err)
+  }
+}
+
+/**
+ * GH#119 P2: persist the runner identity name onto the D1
+ * `agent_sessions` row and broadcast. Called from `triggerGatewayDial`
+ * after the DO selects an identity via LRU. The UI reads this column
+ * via the synced `agent_sessions` collection so the active identity is
+ * visible in the session sidebar (P4 surface).
+ *
+ * Best-effort: a D1 hiccup or broadcast failure must not crash the
+ * spawn path, so the helper logs the error and returns rather than
+ * throwing.
+ */
+export async function syncIdentityNameToD1(
+  ctx: SessionDOContext,
+  identityName: string | null,
+  updatedAt: string,
+): Promise<void> {
+  try {
+    const sessionId = ctx.do.name
+    await ctx.do.d1
+      .update(agentSessions)
+      .set({ identityName, messageSeq: ctx.do.messageSeq, updatedAt })
+      .where(eq(agentSessions.id, sessionId))
+    await broadcastSessionRow(ctx.env, ctx.ctx, sessionId, 'update')
+  } catch (err) {
+    ctx.logEvent('warn', 'identity', 'failed to sync identity_name to D1', {
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+}
+
+/**
+ * Mirror the session's first-message preview onto the D1 row + broadcast.
+ *
+ * Used by the deferred-runner / `isFreshSpawnable` branch in
+ * `sendMessageImpl`: a session created without an initial prompt
+ * (`directCreateSession` → `initializeImpl`) lands in D1 with
+ * `prompt = ''`, so the sidebar's `displayName` fallback chain
+ * (`title || summary || prompt || id.slice(0,8)`) collapses to the
+ * session-id prefix. Once the user submits the first turn, write the
+ * preview text back so the sidebar shows something meaningful before
+ * the runner-side haiku titler eventually fires (which only triggers
+ * at ≥1500 transcript tokens — far too late for short conversations).
+ *
+ * Called only on the first turn of a deferred session. The other
+ * sendMessage branches (live-runner stream-input, post-reaper resume)
+ * intentionally leave `prompt` untouched — overwriting it with the most
+ * recent turn would erase the original session intent.
+ */
+export async function syncPromptToD1(
+  ctx: SessionDOContext,
+  prompt: string,
+  updatedAt: string,
+): Promise<void> {
+  try {
+    const sessionId = ctx.do.name
+    await ctx.do.d1
+      .update(agentSessions)
+      .set({ prompt, updatedAt })
+      .where(eq(agentSessions.id, sessionId))
+    await broadcastSessionRow(ctx.env, ctx.ctx, sessionId, 'update')
+  } catch (err) {
+    console.error(`[SessionDO:${ctx.ctx.id}] Failed to sync prompt to D1:`, err)
   }
 }
 

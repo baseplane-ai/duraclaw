@@ -242,6 +242,109 @@ describe('POST /sessions/start', () => {
     expect(await resp.json()).toEqual({ ok: false, error: 'session-runner bin not found' })
   })
 
+  // GH#119 P2: when the DO has selected a runner identity, it stamps
+  // `runner_home` onto cmd. The gateway must lift that into the spawn
+  // env's HOME so the runner's Claude SDK reads identity-scoped
+  // credentials. Empty string / non-string falls back to the gateway's
+  // own HOME (which buildCleanEnv inherits from process.env).
+  it('GH#119: spawn env contains HOME=runner_home when cmd.runner_home is set', async () => {
+    const spy = mkSpawnSpy()
+    const resp = await handleStartSession(
+      validStartBody({
+        cmd: {
+          type: 'execute',
+          project: 'duraclaw',
+          prompt: 'hi',
+          runner_home: '/home/work1',
+        },
+      }),
+      {
+        sessionsDir: tmpDir,
+        binResolver: async () => '/fake/bin/session-runner',
+        spawnFn: spy.fn,
+        idGenerator: () => 'RH-OK',
+      },
+    )
+
+    expect(resp.status).toBe(200)
+    expect(spy.calls).toHaveLength(1)
+    const env = (spy.calls[0].opts as { env: Record<string, string> }).env
+    expect(env.HOME).toBe('/home/work1')
+    expect(env.SESSIONS_DIR).toBe(tmpDir)
+  })
+
+  it('GH#119: HOME falls back to inherited HOME when cmd.runner_home is missing', async () => {
+    const prev = process.env.HOME
+    process.env.HOME = '/home/inherited'
+    try {
+      const spy = mkSpawnSpy()
+      const resp = await handleStartSession(validStartBody(), {
+        sessionsDir: tmpDir,
+        binResolver: async () => '/fake/bin/session-runner',
+        spawnFn: spy.fn,
+        idGenerator: () => 'RH-NONE',
+      })
+      expect(resp.status).toBe(200)
+      const env = (spy.calls[0].opts as { env: Record<string, string> }).env
+      expect(env.HOME).toBe('/home/inherited')
+    } finally {
+      if (prev === undefined) delete process.env.HOME
+      else process.env.HOME = prev
+    }
+  })
+
+  it('GH#119: empty-string runner_home is treated as absent (no override)', async () => {
+    const prev = process.env.HOME
+    process.env.HOME = '/home/inherited'
+    try {
+      const spy = mkSpawnSpy()
+      const resp = await handleStartSession(
+        validStartBody({
+          cmd: { type: 'execute', project: 'p', prompt: 'q', runner_home: '' },
+        }),
+        {
+          sessionsDir: tmpDir,
+          binResolver: async () => '/fake/bin/session-runner',
+          spawnFn: spy.fn,
+          idGenerator: () => 'RH-EMPTY',
+        },
+      )
+      expect(resp.status).toBe(200)
+      const env = (spy.calls[0].opts as { env: Record<string, string> }).env
+      // Falls back to inherited HOME, not the empty override.
+      expect(env.HOME).toBe('/home/inherited')
+    } finally {
+      if (prev === undefined) delete process.env.HOME
+      else process.env.HOME = prev
+    }
+  })
+
+  it('GH#119: non-string runner_home is ignored', async () => {
+    const prev = process.env.HOME
+    process.env.HOME = '/home/inherited'
+    try {
+      const spy = mkSpawnSpy()
+      const resp = await handleStartSession(
+        validStartBody({
+          // Wire shape: garbled / stale field type from a misbehaving caller.
+          cmd: { type: 'execute', project: 'p', prompt: 'q', runner_home: 12345 },
+        }),
+        {
+          sessionsDir: tmpDir,
+          binResolver: async () => '/fake/bin/session-runner',
+          spawnFn: spy.fn,
+          idGenerator: () => 'RH-NONSTRING',
+        },
+      )
+      expect(resp.status).toBe(200)
+      const env = (spy.calls[0].opts as { env: Record<string, string> }).env
+      expect(env.HOME).toBe('/home/inherited')
+    } finally {
+      if (prev === undefined) delete process.env.HOME
+      else process.env.HOME = prev
+    }
+  })
+
   it('isValidGatewayCommand rejects null / non-object / missing type', () => {
     expect(isValidGatewayCommand(null)).toBe(false)
     expect(isValidGatewayCommand(undefined)).toBe(false)

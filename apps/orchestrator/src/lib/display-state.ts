@@ -50,6 +50,22 @@ export type DisplayState =
       isInteractive: true
     }
   | { status: 'error'; label: 'Error'; color: 'red'; icon: 'alert'; isInteractive: true }
+  // GH#119 P3: transient identity-swap (rate_limit / auth_error → resume).
+  | {
+      status: 'failover'
+      label: 'Switching accounts…'
+      color: 'amber'
+      icon: 'spinner'
+      isInteractive: false
+    }
+  // GH#119 P3: zero identities available; alarm-loop retrying every 60s.
+  | {
+      status: 'waiting_identity'
+      label: 'All accounts on cooldown — retrying…'
+      color: 'red'
+      icon: 'alert'
+      isInteractive: false
+    }
   | { status: 'archived'; label: 'Archived'; color: 'gray'; icon: 'archive'; isInteractive: false }
   | {
       status: 'disconnected'
@@ -106,6 +122,22 @@ const ERROR: DisplayState = {
   color: 'red',
   icon: 'alert',
   isInteractive: true,
+}
+
+const FAILOVER: DisplayState = {
+  status: 'failover',
+  label: 'Switching accounts…',
+  color: 'amber',
+  icon: 'spinner',
+  isInteractive: false,
+}
+
+const WAITING_IDENTITY: DisplayState = {
+  status: 'waiting_identity',
+  label: 'All accounts on cooldown — retrying…',
+  color: 'red',
+  icon: 'alert',
+  isInteractive: false,
 }
 
 const ARCHIVED: DisplayState = {
@@ -200,6 +232,10 @@ export function deriveDisplayStateFromStatus(
       return WAITING_GATE
     case 'error':
       return ERROR
+    case 'failover':
+      return FAILOVER
+    case 'waiting_identity':
+      return WAITING_IDENTITY
     case 'archived':
       return ARCHIVED
     default:
@@ -216,6 +252,8 @@ export const DISPLAY_STATES = {
   completed_unseen: COMPLETED_UNSEEN,
   waiting_gate: WAITING_GATE,
   error: ERROR,
+  failover: FAILOVER,
+  waiting_identity: WAITING_IDENTITY,
   archived: ARCHIVED,
   disconnected: DISCONNECTED,
   unknown: UNKNOWN,

@@ -16,6 +16,7 @@ import { buildCleanEnv } from './env.js'
 
 import { resolveProject } from './project-resolver.js'
 import { PushPullQueue } from './push-pull-queue.js'
+import { DuraclavSessionStore } from './session-store-adapter.js'
 import { SessionTitler, type TranscriptMessage } from './titler.js'
 import type { RunnerSessionContext, SDKUserMsg } from './types.js'
 
@@ -615,6 +616,38 @@ export class ClaudeRunner {
         options.resume = cmd.runner_session_id
       }
 
+      // GH#119: opt-in SessionStore mirror for account failover. The DO
+      // injects `session_store_enabled` from the `session_store` D1
+      // feature flag (default false until P3 ships). When the flag is
+      // off, we skip the adapter entirely so behavior is bit-for-bit
+      // identical to today (filesystem-only). The transcriptRpc instance
+      // is built in main.ts once the dial-back channel is up; if it's
+      // somehow missing here we degrade to filesystem-only and warn.
+      if (cmd.session_store_enabled) {
+        if (ctx.transcriptRpc) {
+          options.sessionStore = new DuraclavSessionStore(ctx.transcriptRpc)
+          // SDK 0.2.119 rejects enableFileCheckpointing + sessionStore at
+          // query() time ("backup blobs are not mirrored, so rewindFiles()
+          // fails after a store-backed resume"). When sessionStore is in
+          // play, file checkpointing must be off — the DO transcript
+          // mirror is the source of truth for resume.
+          options.enableFileCheckpointing = false
+          // Bump the SDK's SessionStore.load() timeout on resume only —
+          // the default 60s assumes a local-disk JSONL read, but with
+          // sessionStore we pay a dial-back round-trip + DO cold-start +
+          // SQLite read for potentially large transcripts. 120s gives
+          // margin. Inert on execute (no load() call) but also gated on
+          // resume to keep the change tightly scoped to GH#119 paths.
+          if (cmd.type === 'resume') {
+            options.loadTimeoutMs = 120_000
+          }
+        } else {
+          console.warn(
+            '[session-runner] session_store_enabled but ctx.transcriptRpc missing — falling back to filesystem-only',
+          )
+        }
+      }
+
       // GH#86: instantiate the Haiku session titler. Runs fire-and-forget
       // calls to Haiku after turn-complete and on pivot detection. Lives
       // on ctx so handleIncomingCommand in main.ts can trigger pivot checks.
@@ -624,6 +657,10 @@ export class ClaudeRunner {
         sendFn: (channel, event, context) =>
           send(channel, event as unknown as GatewayEvent, context),
         enabled: !!cmd.titler_enabled,
+        // Same musl-vs-glibc fix as the main query() above: pass the
+        // resolved glibc bin so the titler's one-shot query() doesn't
+        // trip the SDK's musl-first lookup on a glibc-only host.
+        pathToClaudeCodeExecutable: resolveGlibcClaudeBinary(),
       })
       ctx.titler = titler
 
