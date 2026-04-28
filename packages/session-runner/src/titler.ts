@@ -5,7 +5,8 @@
  *
  * Two call sites:
  *  1. `maybeInitialTitle(messages)` — fire-and-forget after `type=result`
- *     (turn-complete) when the transcript exceeds ~1500 estimated tokens.
+ *     (turn-complete) when the transcript exceeds INITIAL_TITLE_TOKEN_THRESHOLD
+ *     (200 tokens ≈ 800 chars).
  *  2. `maybePivotRetitle(messages, newUserMessage)` — fire-and-forget on
  *     each incoming `stream-input`, in parallel with the main `query()`.
  *
@@ -27,8 +28,17 @@ import type { RunnerSessionContext } from './types.js'
 /** Model used for title generation. Named constant so rotations are a one-line diff. */
 const TITLER_MODEL = 'claude-haiku-4-5-20251014'
 
-/** Minimum estimated tokens before the initial title fires. */
-const INITIAL_TITLE_TOKEN_THRESHOLD = 1500
+/**
+ * Minimum estimated tokens before the initial title fires.
+ *
+ * Originally 1500 (≈6000 chars) so titles only landed on long sessions —
+ * but that meant the typical "hi, can you fix X" first turn never got
+ * a title at all, and the sidebar fallback chain (title || summary ||
+ * prompt || id) collapsed to the session-id prefix indefinitely. 200
+ * tokens (≈800 chars) clears even short conversations after the first
+ * round-trip while still skipping the truly empty "hello" → "hi" pings.
+ */
+const INITIAL_TITLE_TOKEN_THRESHOLD = 200
 
 /** Maximum turns to include in the transcript sent to Haiku. */
 const MAX_TRANSCRIPT_TURNS = 8
@@ -320,11 +330,19 @@ export class SessionTitler {
   // ── Private ──────────────────────────────────────────────────────
 
   private async doInitialTitle(transcript: string): Promise<void> {
+    let text: string
     try {
-      const text = await this.oneShotQuery(INITIAL_TITLE_SYSTEM, transcript)
+      text = await this.oneShotQuery(INITIAL_TITLE_SYSTEM, transcript)
+    } catch (err) {
+      this.emitTitleError('initial', err)
+      console.warn(`[titler:${this.ctx.sessionId}] initial title query failed:`, err)
+      return
+    }
+    try {
       const parsed = JSON.parse(stripCodeFences(text)) as InitialTitleResult
 
       if (!parsed.title || typeof parsed.title !== 'string') {
+        this.emitTitleError('initial', 'missing or invalid title field', text.slice(0, 200))
         console.warn(`[titler:${this.ctx.sessionId}] initial title: missing or invalid title field`)
         return
       }
@@ -350,6 +368,7 @@ export class SessionTitler {
         `[titler:${this.ctx.sessionId}] initial title: "${parsed.title}" (confidence: ${parsed.confidence})`,
       )
     } catch (err) {
+      this.emitTitleError('initial', err)
       console.warn(`[titler:${this.ctx.sessionId}] initial title failed:`, err)
     }
   }
@@ -393,6 +412,7 @@ export class SessionTitler {
         `[titler:${this.ctx.sessionId}] pivot retitle: "${parsed.proposed_new_title}" (confidence: ${parsed.confidence})`,
       )
     } catch (err) {
+      this.emitTitleError('pivot', err)
       console.warn(`[titler:${this.ctx.sessionId}] pivot retitle failed:`, err)
     }
   }
@@ -402,5 +422,31 @@ export class SessionTitler {
 
   private getCurrentTitle(): string {
     return this.currentTitleValue ?? 'Untitled Session'
+  }
+
+  /**
+   * Emit a `title_error` GatewayEvent so titler failures land in the
+   * DO's per-session `event_log` (queryable via `getEventLog()` RPC)
+   * instead of only in the runner's stdout file on the VPS. Best-effort:
+   * if the channel itself is gone, swallow — the runner-side console.warn
+   * still records the failure.
+   */
+  private emitTitleError(phase: 'initial' | 'pivot', err: unknown, detail?: string): void {
+    try {
+      const errMsg = err instanceof Error ? err.message : String(err)
+      this.sendFn(
+        this.channel,
+        {
+          type: 'title_error',
+          session_id: this.ctx.sessionId,
+          phase,
+          error: errMsg,
+          ...(detail ? { detail } : {}),
+        },
+        this.ctx,
+      )
+    } catch {
+      // Channel send failed (e.g. closed). Runner-side log already records it.
+    }
   }
 }

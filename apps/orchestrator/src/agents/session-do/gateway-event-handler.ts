@@ -845,6 +845,19 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
       break
     }
 
+    // Diagnostic: titler call failed on the runner side. We log to
+    // event_log so the failure is queryable from the orchestrator
+    // (no SSH to /run/duraclaw/sessions/*.log needed). Does not flip
+    // session status — title generation is best-effort.
+    case 'title_error': {
+      ctx.logEvent('warn', 'titler', `${event.phase} title failed: ${event.error}`, {
+        phase: event.phase,
+        error: event.error,
+        detail: event.detail ?? null,
+      })
+      break
+    }
+
     // context_usage was folded into the `result` event by #102 — no
     // separate wire event anymore. Context usage is now extracted from
     // the result event's payload in the 'result' case above.

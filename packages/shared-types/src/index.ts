@@ -229,6 +229,7 @@ export type GatewayEvent =
   | ChainStalledEvent
   | GapSentinelEvent
   | TitleUpdateEvent
+  | TitleErrorEvent
   | SessionStateChangedEvent
   | CompactBoundaryEvent
   | ApiRetryEvent
@@ -376,6 +377,27 @@ export interface TitleUpdateEvent {
   did_pivot: boolean
   /** `num_turns` snapshot at the moment the title was generated. */
   turn_stamp: number
+}
+
+/**
+ * Diagnostic event emitted by the runner when a titler call fails
+ * (Agent SDK throw, JSON parse failure, missing OAuth, etc.). The DO
+ * routes it to the per-DO `event_log` SQLite table via `logEvent` so
+ * titler failures are queryable from the orchestrator without needing
+ * to read the runner's stdout file on the VPS.
+ *
+ * Fire-and-forget — the runner does NOT pause on this. Title generation
+ * is best-effort; the session continues untitled if all titler calls fail.
+ */
+export interface TitleErrorEvent {
+  type: 'title_error'
+  session_id: string
+  /** Which titler call failed — initial title or pivot retitle. */
+  phase: 'initial' | 'pivot'
+  /** Short error message (e.g. "JSON parse failed", "no assistant text"). */
+  error: string
+  /** Optional longer detail (e.g. raw exception message). */
+  detail?: string
 }
 
 // ── Chain auto-advance events (DO-synthesised for chain UX P3) ──────

@@ -202,14 +202,16 @@ describe('buildTranscript', () => {
 
 describe('SessionTitler', () => {
   describe('maybeInitialTitle', () => {
-    it('does NOT fire when transcript < 1500 tokens', async () => {
+    it('does NOT fire when transcript is below the token threshold', async () => {
+      // Threshold is 200 tokens (≈800 chars). makeMessages(2,100) produces
+      // ≈230 chars total → ~58 tokens. Well under, should no-op.
       const { titler, sendCalls } = makeTitler()
       await titler.maybeInitialTitle(makeMessages(2, 100))
       expect(sendCalls).toHaveLength(0)
       expect(mockQueryCalls).toHaveLength(0)
     })
 
-    it('fires and emits title_update when transcript >= 1500 tokens', async () => {
+    it('fires and emits title_update when transcript >= token threshold', async () => {
       const { titler, sendCalls } = makeTitler()
       // 4 messages * 2000 chars each ≈ 2000+ tokens
       await titler.maybeInitialTitle(makeMessages(4, 2000))
@@ -319,29 +321,34 @@ describe('SessionTitler', () => {
   })
 
   describe('graceful degradation', () => {
-    it('logs warning and does not emit on Haiku failure', async () => {
+    it('logs warning and emits title_error (not title_update) on Haiku failure', async () => {
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
       mockAssistantText = 'not valid json!!!'
 
       const { titler, sendCalls } = makeTitler()
       await titler.maybeInitialTitle(makeMessages(4, 2000))
-      expect(sendCalls).toHaveLength(0)
+      const updates = sendCalls.filter((c) => c.type === 'title_update')
+      const errors = sendCalls.filter((c) => c.type === 'title_error')
+      expect(updates).toHaveLength(0)
+      expect(errors).toHaveLength(1)
+      expect(errors[0]).toMatchObject({ phase: 'initial', type: 'title_error' })
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[titler:'), expect.anything())
     })
 
     it('clears titleInFlight on failure so future calls work', async () => {
       vi.spyOn(console, 'warn').mockImplementation(() => {})
-      // First call: fail
+      // First call: fail (emits title_error, no title_update)
       mockAssistantText = 'bad json'
       const { titler, sendCalls } = makeTitler()
       await titler.maybeInitialTitle(makeMessages(4, 2000))
-      expect(sendCalls).toHaveLength(0)
+      expect(sendCalls.filter((c) => c.type === 'title_update')).toHaveLength(0)
 
-      // Second call: succeed
+      // Second call: succeed (emits title_update)
       mockAssistantText = '{"title":"Recovered","confidence":0.8}'
       await titler.maybeInitialTitle(makeMessages(5, 2000))
-      expect(sendCalls).toHaveLength(1)
-      expect(sendCalls[0]).toMatchObject({ title: 'Recovered' })
+      const updates = sendCalls.filter((c) => c.type === 'title_update')
+      expect(updates).toHaveLength(1)
+      expect(updates[0]).toMatchObject({ title: 'Recovered' })
     })
   })
 
@@ -381,14 +388,22 @@ describe('SessionTitler', () => {
       expect(mockQueryCalls[0].systemPrompt as string).toContain('Detect whether the user pivoted')
     })
 
-    it('logs warning and does not emit on query() throw (e.g. missing OAuth)', async () => {
+    it('logs warning and emits title_error on query() throw (e.g. missing OAuth)', async () => {
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
       mockQueryError = new Error('not authenticated')
 
       const { titler, sendCalls } = makeTitler()
       await titler.maybeInitialTitle(makeMessages(4, 2000))
 
-      expect(sendCalls).toHaveLength(0)
+      const updates = sendCalls.filter((c) => c.type === 'title_update')
+      const errors = sendCalls.filter((c) => c.type === 'title_error')
+      expect(updates).toHaveLength(0)
+      expect(errors).toHaveLength(1)
+      expect(errors[0]).toMatchObject({
+        type: 'title_error',
+        phase: 'initial',
+        error: expect.stringContaining('not authenticated'),
+      })
       expect(warnSpy).toHaveBeenCalled()
     })
   })

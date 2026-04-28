@@ -58,9 +58,27 @@ export function handleTitleUpdate(ctx: SessionDOContext, event: TitleUpdateEvent
     event.confidence,
   )
   if (decision === 'reject') {
+    ctx.logEvent('info', 'titler', `title_update rejected (frozen by user rename)`, {
+      incoming_title: event.title,
+      incoming_confidence: event.confidence,
+    })
     console.log(`[SessionDO:${ctx.ctx.id}] title_update discarded: title_source='user'`)
     return
   }
+
+  // Success path — log here so the per-DO event_log records every title
+  // landing without us having to SSH to the VPS for runner logs.
+  ctx.logEvent(
+    'info',
+    'titler',
+    `title accepted: "${event.title}" (conf=${event.confidence.toFixed(2)})`,
+    {
+      title: event.title,
+      confidence: event.confidence,
+      turn_stamp: event.turn_stamp,
+      source: 'haiku',
+    },
+  )
 
   ctx.do.updateState({
     title: event.title,
