@@ -1,37 +1,29 @@
-# Research: a baseplane-style docs stack for duraclaw
+# Research: a baseplane-style docs hierarchy for duraclaw (internal, no renderer)
 
 **Date:** 2026-04-28
 **Mode:** research
 **Workflow:** RE-c05d-0428
-**Type:** Library/tech evaluation + feature research (gap analysis)
-**Outcome:** Recommend **MkDocs + Material for MkDocs** (parity with baseplane), hosted on GitHub Pages with a Cloudflare CNAME, organised under the **Theory → Primitives → Modules → Integrations** hierarchy. The bigger lift is the *information architecture*, not the tooling — duraclaw already has Specs and Rules layers; the missing layers are Theory, Primitives, Modules, and Integrations.
+**Type:** Feature research (gap analysis + IA proposal)
+**Outcome:** Adopt baseplane's **Theory → Primitives → Modules → Integrations** layered hierarchy as plain markdown inside this repo. **No docs site, no renderer, no hosting** — these layers exist purely so the kata workflow and human readers have a stable place to find each kind of knowledge. Next step is planning mode to spec the adoption.
+
+> **Scope note (revised after initial pass).** The first version of this research evaluated mkdocs / Astro Starlight / Docusaurus and proposed a publish workflow. **That's out of scope.** We don't want a docs *site* — we want the *organisational structure* baseplane uses internally. This revision strips renderer/hosting content; the remaining sections (hierarchy, gap analysis, IA proposal, migration plan) are what matters.
 
 ---
 
 ## TL;DR
 
-1. **Stack: copy baseplane verbatim.** docs.baseplane.ai runs `mkdocs 1.6.1 + mkdocs-material 9.7.6`, dark "slate" theme, indigo accent, hosted at `baseplane-ai.github.io/baseplane/` with a Cloudflare CNAME at `docs.baseplane.ai`. There is no reason to pick a different generator — Material for MkDocs is the highest-quality docs theme in the ecosystem, the convention is already in our heads, and parity makes future cross-referencing cheap.
-2. **The hierarchy matters more than the renderer.** Baseplane's value isn't mkdocs — it's the five-layer knowledge hierarchy (Theory / Primitives / Modules / Specs / Rules) plus the `_archive/` discipline. Adopt the hierarchy first; the renderer is a 30-minute job.
-3. **Duraclaw already has 2 of 5 layers.** `planning/specs/` (62 specs) ≈ baseplane Specs. `.claude/rules/` (11 rules) ≈ baseplane Rules. Theory, Primitives, Modules, Integrations don't exist as a `docs/` tree — what we have lives scattered across `CLAUDE.md`, `.claude/rules/*.md` (which mixes theory-shaped content with rule-shaped content), `planning/research/` (91 docs, mostly historical), and per-package `README.md`s.
-4. **The kata theory-primitives-review prompt is a smoking gun.** `.kata/prompts/theory-primitives-review.md` references baseplane theory docs (`domains.md`, `data.md`, `dynamics.md`, `experience.md`, `governance.md`, `boundaries.md`) and primitives (DataForge, Workflows, CommandBus, EventBus) that **do not exist in duraclaw**. This review currently can't be run on a duraclaw spec. Setting up a duraclaw-shaped Theory + Primitives layer fixes this side effect.
-5. **Phased plan.** P0 (≈90 min): bootstrap `docs/` + `mkdocs.yml` + GH Pages publish workflow, empty stubs. P1 (≈4-6h): seed Theory from existing CLAUDE.md invariants, seed Modules from package READMEs, seed Integrations from Tech Stack section. P2 (ongoing): Primitives layer + reformulate `theory-primitives-review` prompt against duraclaw's actual theory.
+1. **Adopt the hierarchy, skip the website.** Copy baseplane's 5-layer structure (Theory / Primitives / Modules / Specs / Rules + Integrations + `_archive/`) as plain markdown directories. No `mkdocs.yml`, no GH Pages, no Cloudflare. Files render fine in GitHub, in editors, and to the AI sessions that consume them.
+2. **Duraclaw already has 2 of 5 layers.** `planning/specs/` (62 specs) ≈ baseplane Specs. `.claude/rules/` (11 rules) ≈ baseplane Rules. **Theory, Primitives, Modules, Integrations are missing** as discoverable layers.
+3. **Some "rules" are actually theory.** `.claude/rules/session-lifecycle.md` and `.claude/rules/client-data-flow.md` describe invariants ("DO is authoritative", "every event has a monotonic seq") — they're theory wearing rule clothing. The rule frontmatter (`paths:`) means AI sessions auto-load them when editing matching files; that's a rule-layer feature. We need both: theory docs that describe invariants, and thin rule stubs that point editors at them.
+4. **The kata `theory-primitives-review` prompt is currently un-runnable.** `.kata/prompts/theory-primitives-review.md` references baseplane-specific theory docs (`domains.md`, `data.md`, `dynamics.md`, `experience.md`, `governance.md`, `boundaries.md`) and primitives (DataForge, CommandBus, EventBus, Workflows) that don't exist here. Adopting the hierarchy unblocks this.
+5. **Pick a root: `docs/` or `planning/`.** Open decision. Baseplane uses `docs/`. Duraclaw uses `planning/` for specs/research. Sticking the new layers under `planning/theory/` etc. keeps everything-not-code under one root; using `docs/` matches baseplane verbatim. Recommendation: **`docs/`**, because Theory/Primitives/Modules/Integrations are not "planning" (in-flight work) — they're stable knowledge that outlives any plan.
+6. **Phased plan.** P0 (~30 min): create empty directories + index pages. P1 (~3-4h): seed Theory by splitting it out of CLAUDE.md and the two theory-shaped rule files; seed Modules from package READMEs; seed Integrations from CLAUDE.md "Tech Stack". P2 (ongoing): author Primitives, retarget the kata review prompt against real duraclaw theory.
 
 ---
 
-## Part 1 — What baseplane actually does
+## Part 1 — What baseplane does (hierarchy only)
 
-Probed via `curl https://docs.baseplane.ai` (WebFetch returned 403 — Cloudflare bot block — but raw curl works) and the rendered nav structure.
-
-### Renderer
-
-- **Generator:** `mkdocs 1.6.1` (declared in `<meta name="generator">`)
-- **Theme:** `mkdocs-material 9.7.6` (signature `md-*` CSS classes)
-- **Color scheme:** `slate` (dark), primary `indigo`, accent `indigo`
-- **Fonts:** Roboto + Roboto Mono (mkdocs-material default)
-- **Source repo:** `github.com/baseplane-ai/baseplane` (linked from header — likely private; we did not attempt unauthenticated access)
-- **Hosting:** canonical URL is `baseplane-ai.github.io/baseplane/` → GitHub Pages → CNAME `docs.baseplane.ai` behind Cloudflare. `Server: cloudflare`, `cf-cache-status: DYNAMIC` on responses.
-
-### Knowledge hierarchy (lifted from their index page)
+The hierarchy is documented on baseplane's own index page. We don't need any of their tooling — just the structure.
 
 | Layer          | Location              | Contents                                       | Changes when                |
 |----------------|-----------------------|------------------------------------------------|-----------------------------|
@@ -41,22 +33,12 @@ Probed via `curl https://docs.baseplane.ai` (WebFetch returned 403 — Cloudflar
 | **Specs**      | `planning/specs/`     | Specific feature requirements                  | Per-feature implementation  |
 | **Rules**      | `.claude/rules/`      | File paths, imports, anti-patterns             | Stack or framework changes  |
 
-Plus:
-- `docs/integrations/` — external service reference data (Procore API schemas, sync docs)
+Plus three sibling concepts:
+- `docs/integrations/` — external service reference data
 - `docs/testing/` — manual testing data
-- `docs/_archive/` — legacy docs (their dissolved `patterns/` layer migrated into theory + primitives)
+- `docs/_archive/` — dissolved layers / superseded docs (their old `patterns/` layer migrated into theory + primitives, and `_archive/` keeps the trail)
 
-Their nav (counted from the rendered HTML) has Planning at the top, then Rules (the largest section, ~30 entries), then Theory/Primitives/Modules/Integrations. Rules are exposed *in the docs site* even though they live at `.claude/rules/` in the repo — mkdocs's `nav:` lets you point at any markdown path under the repo root.
-
-### What's worth copying (and what isn't)
-
-| Copy                                                         | Skip / adapt                                                              |
-|--------------------------------------------------------------|----------------------------------------------------------------------------|
-| The 5-layer hierarchy + `_archive/` discipline               | Their specific theory docs (`domains.md`, `data.md`, …) — these are       |
-| The "Changes when" column on the index — sets cadence        | construction-software shaped, not us                                       |
-| mkdocs + mkdocs-material 9.x with slate/indigo               | Their primitives (DataForge, CommandBus) — we don't have this stack        |
-| Surfacing `.claude/rules/` *in* the docs nav                 | Procore integration page                                                   |
-| `_archive/` for dissolved layers                             | "Internal documentation for Baseplane" privacy posture (decision for us)   |
+What makes this work isn't the renderer — it's the **"Changes when" cadence**. Each layer has a different update frequency, so they don't churn together: Theory rarely; Primitives when product design evolves; Modules when scope changes; Specs constantly; Rules when the stack changes.
 
 ---
 
@@ -66,20 +48,27 @@ Their nav (counted from the rendered HTML) has Planning at the top, then Rules (
 
 | Baseplane layer  | Duraclaw equivalent                                                      | State           |
 |------------------|---------------------------------------------------------------------------|-----------------|
-| Theory           | Scattered: `CLAUDE.md` "Architecture / Key invariants", `.claude/rules/session-lifecycle.md` (mostly theory in rule clothing), `.claude/rules/client-data-flow.md` (also theory-shaped) | **No `docs/theory/`** |
-| Primitives       | Effectively nothing — the closest thing is `.interface-design/system.md` (design tokens) and `packages/ai-elements/` (UI library) | **Missing**     |
+| Theory           | Scattered: `CLAUDE.md` "Architecture / Key invariants", `.claude/rules/session-lifecycle.md` (theory in rule clothing), `.claude/rules/client-data-flow.md` (also theory-shaped) | **Missing as a layer** |
+| Primitives       | `.interface-design/system.md` (design tokens) + `packages/ai-elements/` (UI lib) — neither documented as a primitive layer | **Missing as a layer**     |
 | Modules          | Per-package `README.md`s (`packages/shared-transport/README.md`, `apps/orchestrator/scripts/README.md`, `.devcontainer/README.md`) — partial, uneven | **Missing as a layer** |
-| Specs            | `planning/specs/` — 62 files, well-populated                              | **Strong** ✅    |
-| Rules            | `.claude/rules/` — 11 files (`client-data-flow`, `deployment`, `gateway`, `kata`, `mobile`, `orchestrator`, `session-lifecycle`, `session-runner`, `shared-transport`, `testing`, `worktree-setup`) | **Strong** ✅    |
+| Specs            | `planning/specs/` — 62 files                                              | **Strong** ✅    |
+| Rules            | `.claude/rules/` — 11 files (`client-data-flow`, `deployment`, `gateway`, `kata`, `mobile`, `orchestrator`, `session-lifecycle`, `session-runner`, `shared-transport`, `testing`, `worktree-setup`) | **Strong** ✅ (but two files are mis-categorised, see below) |
 | Integrations     | Implicit in `CLAUDE.md` "Tech Stack", scattered through specs            | **Missing**     |
-| Archive          | Nothing structurally — old specs/research just sit alongside current ones | **Missing**     |
-| Research         | `planning/research/` — 91 files (no baseplane analogue surfaced; they may live in `_archive/` or be private) | **Extra layer duraclaw has, baseplane doesn't expose** |
+| Archive          | Nothing structurally — old specs/research sit alongside current ones      | **Missing**     |
+| Research         | `planning/research/` — 91 files (no baseplane analogue surfaced)          | **Extra layer duraclaw has** |
 
-Key observation: **duraclaw rules are doing double duty.** `.claude/rules/session-lifecycle.md` and `.claude/rules/client-data-flow.md` read like theory docs (they describe invariants — "DO is authoritative", "every event has a monotonic seq") that happen to be filed under rules because there was nowhere else to put them. Splitting them is the highest-leverage move in the whole migration.
+### Mis-categorised content in `.claude/rules/`
+
+Two rule files are theory in disguise. Quoting from each:
+
+- **`.claude/rules/session-lifecycle.md`** describes the lifecycle states and transitions of a session — that's `dynamics.md`-shaped content in baseplane terms (lifecycle states, transitions, phase rules). The file currently has a `paths:` frontmatter so AI sessions auto-load it when editing matching files; that's rule-layer behaviour. **Both functions needed.**
+- **`.claude/rules/client-data-flow.md`** opens with: *"DO-authoritative status — the SessionDO stamps `sessionStatus` on every `messages:*` / `branchInfo:*` WS frame…"* — that's an invariant statement ("DO is authoritative"). Should be theory.
+
+The split looks like: **theory file describes the invariant; rule stub points editors at the theory file via `paths:` frontmatter.** Same content surface for AI sessions, cleaner organisation for humans.
 
 ### Smoking gun: `.kata/prompts/theory-primitives-review.md`
 
-Our kata workflow already has a `theory-primitives-review` skill (and a `kata-spec-writing` skill that references "behaviors with B-IDs and layers"). The prompt at `.kata/prompts/theory-primitives-review.md:7-28` references:
+The kata workflow already has a `theory-primitives-review` skill (and `kata-spec-writing` references "behaviors with B-IDs and layers"). The review prompt at `.kata/prompts/theory-primitives-review.md:7-28` references:
 
 ```
 **Theory** (invariants that survive stack rewrites):
@@ -91,97 +80,102 @@ Our kata workflow already has a `theory-primitives-review` skill (and a `kata-sp
 - boundaries.md      - integration patterns, sync models
 
 **Platform Primitives**:
-1. DataForge       - entity definitions, schemas, archetypes, validation pipelines
-2. Relationships   - entity connections, foreign keys, reference integrity
-3. Workflows       - multi-step processes, state machines, approval chains
+1. DataForge       - entity definitions, schemas, archetypes
+2. Relationships   - entity connections, foreign keys
+3. Workflows       - multi-step processes, state machines
 4. Templates       - reusable configurations, defaults, presets
-5. CommandBus      - frontend operation dispatch, optimistic updates
-6. EventBus        - real-time sync, cache invalidation, cross-module notifications
+5. CommandBus      - frontend operation dispatch
+6. EventBus        - real-time sync, cache invalidation
 ```
 
-None of these files exist in duraclaw, and none of those primitives map to our stack (we don't have DataForge — we have Drizzle + D1; we don't have CommandBus — we have TanStack DB collections; we don't have Workflows — we have explicit DO state machines). The prompt was copied from baseplane unchanged. **Either retarget this prompt to duraclaw's actual theory + primitives, or delete it.** That decision is forced once the docs/ tree exists.
+None of these files exist in duraclaw, and none of those primitives map to our stack:
+
+| Baseplane primitive | Duraclaw equivalent (if any)                                |
+|---------------------|--------------------------------------------------------------|
+| DataForge           | Drizzle + D1 schema (`apps/orchestrator/src/db/schema.ts`)   |
+| Relationships       | Drizzle relations + DO-side foreign keys                     |
+| Workflows           | Explicit DO state machines (kata phases, session lifecycle)  |
+| Templates           | Spec templates in `planning/spec-templates/`                 |
+| CommandBus          | TanStack DB collections + WS message dispatch                |
+| EventBus            | DialBackClient + BufferedChannel WS pubsub                   |
+
+This map is itself a small piece of new theory work. Either retarget the prompt against duraclaw's actual theory + primitives, or delete it. The choice is forced once the layers exist.
 
 ---
 
-## Part 3 — Stack evaluation
+## Part 3 — Information architecture proposal
 
-We're picking the renderer for a small, high-traffic-by-developer-eye-only docs site. Ranked on what matters here: low-friction authoring, baseplane parity, ops surface, and how well it tolerates being the destination for both `docs/`-tree content *and* externally-located markdown (`.claude/rules/`, `planning/specs/`).
+Concrete tree, with each entry's source content mapped from existing assets so this is grounded.
 
-| Option                  | Renderer | Toolchain | External-markdown nav | Theme quality | Baseplane parity | Notes                                          |
-|-------------------------|----------|-----------|------------------------|---------------|------------------|------------------------------------------------|
-| **MkDocs + Material**   | Static   | Python    | ✅ via `nav:` paths    | Best in class | **Identical**    | What baseplane uses. Recommended.              |
-| Astro Starlight         | Static   | Node      | ⚠️ MDX + symlinks       | Excellent     | Partial (baseplane.ai marketing is Astro)        | Tempting because the rest of the org is Node, but the nav model is rigid (auto-discovered from `src/content/docs/`) and pulling in `.claude/rules/` requires symlinks or copy-on-build. |
-| Docusaurus              | Static   | Node      | ⚠️ via sidebars.js + symlinks | Good         | None              | React-heavy, slow build, themer needed for parity. Not justified vs. Material. |
-| Nextra                  | Static   | Node      | ⚠️ similar to Starlight | Good          | None              | Bound to Next.js; we don't run Next.js anywhere. |
-| VitePress               | Static   | Node      | ✅ via config           | Good          | None              | Lighter than Docusaurus, but no advantage over Material to offset losing baseplane parity. |
-| Plain markdown (no site)| —        | —         | n/a                    | n/a           | n/a              | Lowest effort; loses search, nav, mobile rendering, and the cultural artefact "the docs site". Acceptable as P0 stopgap if we want to defer the renderer. |
-| Mount on orchestrator SPA | Custom | Node      | ✅                      | Custom build  | None              | Serves the docs from `dura.baseplane.ai/docs`. Cute, but auth gates it (most docs sites are public/skim-friendly), and we'd be writing a docs renderer instead of shipping product. |
+### Recommended root: `docs/`
 
-**Recommendation: MkDocs + Material.** Reasons in priority order:
+Reasoning: Theory/Primitives/Modules/Integrations are stable knowledge that outlives any specific plan. `planning/` is for in-flight work (specs, research, reviews, evidence, verify). Mixing the two muddies "what is settled" vs "what is being worked on". Baseplane uses `docs/` and the convention is well-understood.
 
-1. **Parity with baseplane.** Same syntax, same theme, same admonitions, same tabs. Anyone who has touched baseplane docs can write here. When the two hierarchies diverge, the diff is content, not framework.
-2. **`nav:` is path-agnostic.** mkdocs lets `nav:` reference any markdown path under the configured `docs_dir` *or* parent dirs (with `monorepo` plugin or symlinks). This makes "`.claude/rules/` shows up in the docs nav" trivial — exactly what baseplane does.
-3. **Material for MkDocs is unmatched.** Built-in search, instant nav, code copy buttons, admonitions, content tabs, mermaid, math, dark/light toggle, social cards. Setup is `mkdocs.yml` + `pip install`.
-4. **Python toolchain is fine.** GitHub Actions has python preinstalled. The CI step is `pip install mkdocs-material && mkdocs build --strict && publish`. We don't have to add python anywhere else; the dev workflow stays Node.
-5. **Public-by-default GitHub Pages is what we already do.** No new infra. No CF Worker to write. Just `gh-pages` branch + a CNAME record to a chosen subdomain.
-
----
-
-## Part 4 — Information architecture proposal
-
-Concrete `docs/` tree for duraclaw, with the source content for each entry mapped from existing assets so this isn't speculative.
+Alternative: nest under `planning/` to keep all-non-code under one root. Survives equally well; pick by taste. Decision belongs in the planning-mode spec, not this research doc.
 
 ### `docs/` tree
 
 ```
 docs/
-├── index.md                  # Knowledge hierarchy table + intro (mirror baseplane's index)
+├── index.md                  # Hierarchy table + intro (mirror baseplane's index)
 ├── theory/
 │   ├── index.md              # 1-page summary of all theory docs
 │   ├── session-lifecycle.md  # FROM: .claude/rules/session-lifecycle.md (rules → theory split)
 │   ├── client-data-flow.md   # FROM: .claude/rules/client-data-flow.md (rules → theory split)
 │   ├── do-authority.md       # NEW: SessionDO is the durable truth-gate; D1 is fallback
-│   ├── transport.md          # NEW: BufferedChannel, monotonic seq, gap sentinel; DialBackClient backoff
-│   ├── identity-model.md     # FROM: CLAUDE.md "Identity Management" → theory of failover
-│   └── observability.md      # FROM: CLAUDE.md "DO observability" — logEvent/event_log invariant
+│   ├── transport.md          # NEW: BufferedChannel monotonic seq + gap sentinel; DialBackClient backoff
+│   ├── identity-model.md     # FROM: CLAUDE.md "Identity Management" → theory of failover (LRU, cooldown, lossless resume)
+│   └── observability.md      # FROM: CLAUDE.md "DO observability" — logEvent / event_log invariant
 ├── primitives/
 │   ├── index.md
 │   ├── design-system.md      # FROM: .interface-design/system.md
-│   ├── ai-elements.md        # FROM: packages/ai-elements/ + screenshots
-│   ├── chain-status.md       # NEW: chain status item primitive (referenced in 16-chain-ux spec)
-│   └── tabs-and-drafts.md    # NEW: yjs tab+draft primitive (refs spec 3, 17, 18-yjs-tab)
+│   ├── ai-elements.md        # FROM: packages/ai-elements/ (component inventory)
+│   ├── chain-status.md       # NEW: chain status item primitive (refs spec 16-chain-ux)
+│   └── tabs-and-drafts.md    # NEW: yjs tab+draft primitive (refs specs 3, 17, etc.)
 ├── modules/
 │   ├── index.md
 │   ├── orchestrator.md       # FROM: .claude/rules/orchestrator.md + apps/orchestrator/scripts/README.md
 │   ├── agent-gateway.md      # FROM: .claude/rules/gateway.md + packages/agent-gateway/
 │   ├── session-runner.md     # FROM: .claude/rules/session-runner.md
-│   ├── docs-runner.md        # FROM: planning/specs/27-docs-as-yjs-dialback-runners.md
+│   ├── docs-runner.md        # FROM: planning/specs/27-docs-as-yjs-dialback-runners.md (note: this is the live yjs docs runner, unrelated to this research)
 │   ├── shared-transport.md   # FROM: packages/shared-transport/README.md
 │   ├── kata.md               # FROM: .claude/rules/kata.md + packages/kata/
 │   └── mobile.md             # FROM: .claude/rules/mobile.md
 ├── integrations/
 │   ├── index.md
-│   ├── cloudflare.md         # NEW: Workers, DOs, D1, R2 footprint (see Part 2 of baseplane migration research)
+│   ├── cloudflare.md         # NEW: Workers, DOs, D1, R2 footprint (cite the migration research)
 │   ├── claude-agent-sdk.md   # NEW: SDK version, how runner wraps it
 │   ├── better-auth.md        # NEW: D1 adapter, email-only, no GH OAuth
 │   ├── capacitor.md          # NEW: Android shell, Firebase, OTA bundle pipeline
 │   └── github.md             # NEW: issue/PR linking convention from chain-status-item.tsx
 ├── testing/
 │   ├── index.md
-│   ├── prod-test-users.md    # FROM: ~/.claude/projects/.../MEMORY.md — already documented
+│   ├── prod-test-users.md    # FROM: ~/.claude/projects/.../MEMORY.md "Prod test users" entry
 │   └── dev-up.md             # FROM: scripts/verify/dev-up.sh + .claude/rules/worktree-setup.md
 └── _archive/
-    └── (dropzone for dissolved layers, e.g. when a primitive is retired)
+    └── (dropzone for dissolved layers / superseded docs)
 ```
 
-### Linked-but-outside (mkdocs `nav:` references them by path)
+### What stays where it is
 
-- **Rules:** `.claude/rules/index.md` + the 11 rule files (deployment, gateway, kata, mobile, etc.)
-- **Specs:** `planning/specs/` — 62 specs; mkdocs nav can include the spec index page only and let users navigate from there, or list all 62 (baseplane lists `planning/specs/index.md` in nav, not individual specs)
-- **Research:** `planning/research/` — 91 files; same pattern as specs
-- **Progress:** `planning/progress.md`
+- **`planning/specs/`** — unchanged. Already the Specs layer.
+- **`planning/research/`** — unchanged. Research is duraclaw-specific (no baseplane analogue), and 91 files would swamp any nav anyway. Cross-link from theory/module docs where relevant.
+- **`planning/reviews/`, `planning/verify/`, `planning/evidence/`** — unchanged. These are kata workflow artefacts, not knowledge layers.
+- **`.claude/rules/`** — keeps its 11 files **except** the two theory-shaped ones, which become thin stubs:
+  ```md
+  ---
+  paths: ["apps/orchestrator/src/components/**", "..."]
+  ---
+  # Client data flow (rule stub)
+  See `docs/theory/client-data-flow.md` for the invariants.
+  Implementation pointers:
+  - DO writes `sessionStatus` on every `messages:*` frame (see `apps/orchestrator/.../session-do.ts`)
+  - Client extracts via `useSessionStatus(sessionId)` (see `.../hooks/use-session-status.ts`)
+  ```
+  This preserves the `paths:` auto-load behaviour for AI sessions while moving invariant prose to theory.
+- **`CLAUDE.md`** — anything moved into `docs/theory/` becomes a one-line link in CLAUDE.md (keep the project root signal-dense).
 
-### "Changes when" cadence (adapted to duraclaw)
+### "Changes when" cadence (adapted)
 
 | Layer        | Changes when                                                  |
 |--------------|---------------------------------------------------------------|
@@ -194,125 +188,75 @@ docs/
 
 ---
 
-## Part 5 — Phased rollout
+## Part 4 — Phased rollout (no renderer, no publish)
 
-### P0 — Bootstrap (≈90 minutes)
+### P0 — Create the layer skeleton (~30 min)
 
-**Goal:** A `docs.duraclaw.<domain>` URL serving an index page and empty section stubs, deployed on every push to main.
+```
+mkdir -p docs/{theory,primitives,modules,integrations,testing,_archive}
+```
 
-1. `mkdir -p docs/{theory,primitives,modules,integrations,testing,_archive}` and add a stub `index.md` to each.
-2. Write `docs/index.md` mirroring baseplane's hierarchy table (already drafted in Part 4 above).
-3. Write `mkdocs.yml`:
-   ```yaml
-   site_name: Duraclaw Docs
-   site_url: https://docs.<chosen-domain>
-   repo_url: https://github.com/baseplane-ai/duraclaw
-   theme:
-     name: material
-     palette:
-       scheme: slate
-       primary: indigo
-       accent: indigo
-     features: [navigation.instant, navigation.tracking, content.code.copy, search.suggest]
-   nav:
-     - Home: index.md
-     - Theory: theory/
-     - Primitives: primitives/
-     - Modules: modules/
-     - Integrations: integrations/
-     - Testing: testing/
-     - Specs: '!include planning/specs/'   # via mkdocs-monorepo or use_directory_urls trick
-     - Rules: '!include .claude/rules/'
-     - Research: '!include planning/research/'
-   plugins: [search]
-   markdown_extensions: [admonition, pymdownx.superfences, pymdownx.tabbed, attr_list, tables]
-   ```
-   Note: pulling content from `.claude/rules/` (above docs_dir) requires either the `mkdocs-monorepo-plugin`, the `mkdocs-include-markdown-plugin`, or a build-time symlink. Pick one — symlink is simplest for P0.
-4. Add `.github/workflows/docs.yml`:
-   ```yaml
-   on:
-     push:
-       branches: [main]
-       paths: [docs/**, mkdocs.yml, .claude/rules/**, planning/specs/**, planning/research/**]
-   jobs:
-     deploy:
-       runs-on: ubuntu-latest
-       steps:
-         - uses: actions/checkout@v4
-         - uses: actions/setup-python@v5
-           with: { python-version: '3.12' }
-         - run: pip install mkdocs-material mkdocs-include-markdown-plugin
-         - run: mkdocs build --strict
-         - uses: peaceiris/actions-gh-pages@v4
-           with:
-             github_token: ${{ secrets.GITHUB_TOKEN }}
-             publish_dir: ./site
-   ```
-   Caveat: this repo currently has no `.github/workflows/` (per the migration research, all deploys run from `baseplane-infra`). This would be the first GHA workflow. Check with infra owner whether docs publish should also live in `baseplane-infra` for consistency, or whether a public docs-publish workflow is fine in-repo.
-5. Pick a domain. Options: `docs.duraclaw.dev` (new), `docs.baseplane.ai/duraclaw` (subpath, not natively supported by GH Pages without a redirect Worker), `duraclaw-docs.pages.dev` (CF Pages — could replace GH Pages entirely if we'd rather stay on Cloudflare). **Recommendation: CF Pages** if we already have account access — same vendor as everything else, no GH Pages infra to introduce, CNAME is internal.
-6. Verify locally: `pip install mkdocs-material && mkdocs serve`.
+Write `docs/index.md` mirroring the hierarchy table from Part 1. Add stub `index.md` to each layer with a one-sentence "what lives here" summary. Commit.
 
-**Exit criteria:** `mkdocs build --strict` is green, the published URL renders the index page with empty section stubs, and `--strict` is enforced in CI.
+**Exit criteria:** the directories exist, the index renders correctly in GitHub, and a `find docs -name '*.md'` shows the expected stubs.
 
-### P1 — Seed content (≈4-6 hours)
+### P1 — Seed content (~3-4h)
 
-**Goal:** Each layer has at least one substantial doc; nothing is empty.
+In rough priority order (highest leverage first):
 
-1. **Theory (highest leverage).** Move `.claude/rules/session-lifecycle.md` → `docs/theory/session-lifecycle.md` and `.claude/rules/client-data-flow.md` → `docs/theory/client-data-flow.md`. These are theory wearing rule clothing. Replace the originals with thin stubs that link to the theory docs (so `paths:` frontmatter still works for editors that look up rules by file glob). Author 3-4 new theory docs from CLAUDE.md invariants: DO authority, transport (BufferedChannel + DialBackClient), identity model, observability (logEvent / event_log).
-2. **Modules.** One page per package. Source from existing READMEs and `.claude/rules/<package>.md`. Most are already half-written — this is consolidation, not authoring.
-3. **Integrations.** Five short pages (Cloudflare, Anthropic SDK, Better Auth, Capacitor, GitHub). Mostly content already in `CLAUDE.md` "Tech Stack" + the recent baseplane-migration research doc.
-4. **Testing.** Lift `~/.claude/projects/-data-projects-duraclaw-dev3/memory/MEMORY.md` "Prod test users" entry into `docs/testing/prod-test-users.md`. Lift `dev-up.sh` walkthrough.
+1. **Theory split.** Move `.claude/rules/session-lifecycle.md` → `docs/theory/session-lifecycle.md` and `.claude/rules/client-data-flow.md` → `docs/theory/client-data-flow.md`. Replace each rule file with a thin stub (frontmatter + link). Author 3-4 new theory docs from CLAUDE.md invariants: `do-authority.md`, `transport.md`, `identity-model.md`, `observability.md`.
+2. **Modules.** One page per package, sourced from existing READMEs and `.claude/rules/<package>.md` files. Mostly consolidation, not authoring.
+3. **Integrations.** Five short pages (Cloudflare, claude-agent-sdk, Better Auth, Capacitor, GitHub). Most content is in `CLAUDE.md` "Tech Stack" + the recent baseplane-migration research.
+4. **Testing.** Lift `MEMORY.md` "Prod test users" entry into `docs/testing/prod-test-users.md`; lift `dev-up.sh` walkthrough.
 
-**Exit criteria:** every layer has ≥1 page with real content; `mkdocs build --strict` green; no broken internal links.
+**Exit criteria:** every layer has ≥1 page with real content; cross-links are valid (`grep -r '](docs/' .` resolves); CLAUDE.md is shorter, not longer.
 
-### P2 — Primitives + retarget kata reviews (ongoing)
+### P2 — Primitives + retarget kata reviews (ongoing, opportunistic)
 
-1. **Primitives layer.** This is the hardest because we have to *decide* what counts as a primitive in duraclaw. Candidates: design tokens (`.interface-design/system.md`), `ai-elements/` components, chain-status item, tab+draft yjs primitive, message-list virtualised pattern. Author one primitive doc per stable building block, with screenshot or wireframe.
-2. **Retarget `theory-primitives-review.md`.** Rewrite the prompt against duraclaw's actual theory docs (the 6-7 from P1) and primitives (whatever ships in P2). This unblocks the kata spec-review workflow.
-3. **Retire CLAUDE.md duplication.** Anything moved into `docs/theory/` should be replaced by a one-line link in CLAUDE.md to keep the project root signal-dense.
+1. **Primitives layer.** Hardest because it requires *deciding* what counts as a primitive in duraclaw. Candidates: design tokens, `ai-elements/` components, chain-status item, tab+draft yjs primitive, virtualised message list. One primitive doc per stable building block.
+2. **Retarget `.kata/prompts/theory-primitives-review.md`.** Rewrite against duraclaw's actual theory docs (the 6-7 from P1) and primitives (whatever ships in P2). Use the baseplane→duraclaw primitive map from Part 2 as the starting point.
 
-**Exit criteria:** `theory-primitives-review` runs on a real spec; CLAUDE.md is shorter, not longer.
+**Exit criteria:** `theory-primitives-review` runs against a real spec and produces useful output, not "I can't find domains.md".
 
 ---
 
-## Part 6 — Trade-offs and risks
+## Part 5 — Risks (much narrower without a renderer)
 
 | Risk                                                          | Likelihood | Mitigation                                                                                  |
 |---------------------------------------------------------------|------------|----------------------------------------------------------------------------------------------|
-| Doc rot — content stops matching the code                     | High       | `mkdocs build --strict` in CI; quarterly "doc burn-down" pass; rules layer has `paths:` frontmatter that AI sessions auto-load |
-| Hierarchy drift — people put theory in modules etc.          | Medium     | Lock the "Changes when" table in `docs/index.md`; review in PR template                     |
-| Python toolchain in a Node monorepo                           | Low        | CI-only; devs who want local preview install `pip` in a venv. mkdocs is python-stable.       |
-| Pulling `.claude/rules/` from above `docs_dir`                | Low        | Use `mkdocs-include-markdown-plugin` or `mkdocs-monorepo-plugin`; both well-maintained       |
-| Public docs leaking sensitive content (test creds, prod URLs) | Medium     | Audit the seeded content before first publish; add `lychee` link-check to CI; never source from `.env` files |
-| `theory-primitives-review` continues to misfire if not retargeted | High      | Either delete it now or commit to retargeting in P2; do not leave it in limbo               |
-| GH Pages vs CF Pages decision deferred                        | Low        | Either works; recommendation is CF Pages for vendor consistency                              |
-| First `.github/workflows/` in the repo collides with `baseplane-infra` deploy convention | Low | Check with infra owner; alternative is to add the docs publish step to `baseplane-infra` instead |
+| Doc rot — content stops matching the code                     | High       | Quarterly burn-down pass; rule stubs with `paths:` frontmatter keep theory in AI sessions' face when editing related code |
+| Hierarchy drift — people put theory in modules etc.          | Medium     | Lock the "Changes when" table in `docs/index.md`; reference it in PR template / spec template |
+| Half-migrated state — some theory in `docs/`, some still in `.claude/rules/` | High during P1 | Do the rules → theory split atomically (move + stub in same commit); track outstanding splits in the planning-mode spec |
+| `theory-primitives-review` continues to misfire if not retargeted | High      | Either delete the prompt now (P0) or commit to retargeting in P2; do not leave it pointing at non-existent docs |
+| Choosing `docs/` vs `planning/` and changing later            | Low        | `git mv` is cheap; pick one in the planning-mode spec and move on                            |
+
+Notably absent (because there's no renderer): build-system risks, hosting risks, public-vs-private risks, link-check CI, Python toolchain, GH Actions changes.
 
 ---
 
-## Part 7 — Open decisions for the user
+## Part 6 — Decisions to make in planning mode
 
-These are the choices that gate P0:
+These are the choices the planning-mode spec needs to nail down. Most are small.
 
-1. **Public or private docs?** Baseplane's `docs.baseplane.ai` is internal-by-meta-description but appears unauthenticated. Duraclaw equivalent could be public (cheap, easy, helpful for contributors) or private (CF Access in front, more setup). Default recommendation: **public**, mirror baseplane.
-2. **Domain?** `docs.duraclaw.dev` (new domain, $11/yr), `docs.baseplane.ai/duraclaw` (subpath, needs a Worker), or `<sub>.baseplane.ai` (e.g. `dura-docs.baseplane.ai`)? Default: **dura-docs.baseplane.ai** — reuses existing zone, no new domain to register.
-3. **GitHub Pages vs Cloudflare Pages?** Both work. Default recommendation: **Cloudflare Pages** for vendor consistency with the rest of the stack (Workers, DOs, D1, R2 already on CF) and to avoid introducing the first `.github/workflows/` in this repo if `baseplane-infra` is preferred for ops.
-4. **Move `planning/research/` and `planning/specs/` into the docs nav, or just link the index pages?** Baseplane links the index. Defaulting to that — listing 62 specs in mkdocs nav is noise.
-5. **Retire the baseplane-shaped `theory-primitives-review` prompt now or in P2?** Now would mean replacing it with a placeholder; P2 means living with a broken prompt for a few weeks. Default: **placeholder now, fill in P2.**
-6. **Does this work fall under task or implementation mode when we execute it?** P0 is a small task; P1+P2 together are large enough to warrant an issue + implementation spec. I'd suggest opening a single issue ("Bootstrap docs/ with baseplane-style hierarchy") and letting P0 land via task mode, then writing an implementation spec for P1+P2.
+1. **Root: `docs/` or `planning/<layer>/`?** Recommendation: `docs/`. Different from `planning/` because these layers are stable knowledge, not in-flight work.
+2. **Atomic migration vs gradual?** Recommendation: atomic for the rule→theory split (the two files), gradual for everything else (one PR per module, etc.).
+3. **What about `planning/research/`?** Recommendation: leave alone. 91 historical research docs don't fit any of the new layers cleanly. Cross-link from theory/module docs as needed.
+4. **Retire `theory-primitives-review` immediately or after P2?** Recommendation: edit it now to say "WIP — duraclaw theory docs forthcoming, see `docs/theory/`" so the prompt fails loudly with a useful pointer instead of failing confusingly.
+5. **CLAUDE.md trim — what to keep at the root?** Recommendation: keep the architecture diagram, key invariants list (with each item linking into `docs/theory/`), monorepo structure, key commands, conventions. Move long-form prose into theory docs.
+6. **Scope of the planning-mode spec.** Recommendation: spec covers P0+P1 only. P2 (Primitives) is separate because deciding what counts as a primitive is its own question.
 
 ---
 
 ## References
 
-- baseplane docs index (probed via curl): `https://docs.baseplane.ai`
-- baseplane source repo (linked from header, not accessed): `github.com/baseplane-ai/baseplane`
-- mkdocs-material: `https://squidfunk.github.io/mkdocs-material/`
-- duraclaw existing assets cited by path:
-  - `CLAUDE.md` — Architecture / Identity / DO observability sections
-  - `.claude/rules/` — 11 rule files
+- **baseplane hierarchy** — probed via `curl https://docs.baseplane.ai` (HTML index page); only the structure was lifted, no content
+- **prior research** — `planning/research/2026-04-28-baseplane-to-codevibesmatter-migration.md` (relevant for the integrations layer)
+- **duraclaw existing assets cited:**
+  - `CLAUDE.md` — Architecture / Identity Management / DO observability sections
+  - `.claude/rules/` — 11 rule files (two are theory-shaped: `session-lifecycle.md`, `client-data-flow.md`)
   - `.kata/prompts/theory-primitives-review.md` — the broken prompt
+  - `.kata/prompts/spec-review.md`, `.kata/prompts/code-review.md` — sibling kata prompts
   - `planning/specs/` (62), `planning/research/` (91)
   - `.interface-design/system.md` — design tokens
-  - `packages/*/README.md`
-- prior research: `planning/research/2026-04-28-baseplane-to-codevibesmatter-migration.md` — relevant for the org-rename + domain decisions
+  - `packages/*/README.md` — module-shaped content scattered
+- **what was deliberately dropped from this research** — renderer evaluation (mkdocs / Astro / Docusaurus), hosting (GH Pages / CF Pages), domain choice, publish workflow. Out of scope: this is internal markdown, not a website.
