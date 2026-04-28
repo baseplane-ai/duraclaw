@@ -15,9 +15,10 @@
 <h1 align="center">Duraclaw</h1>
 
 <p align="center">
-  <strong>Multi-session Claude Code orchestration on Cloudflare Workers and a VPS runner fleet.</strong><br>
-  Many concurrent sessions across worktrees, on the web and on Android,<br>
-  with a workflow CLI that holds sessions to phase contracts so they actually finish.
+  <strong>An AI-native code-orchestration platform — the harness for building with AI at scale.</strong><br>
+  Centralized, auditable scaffolding for enterprise agent workflows: many concurrent sessions across worktrees,<br>
+  on the web and on Android, with automated agent progression, customized inference,<br>
+  and multi-tiered deployment so security and vendor-lock-in stop blocking AI adoption.
 </p>
 
 <p align="center">
@@ -27,6 +28,25 @@
   <a href="apps/mobile"><img alt="mobile" src="https://img.shields.io/badge/mobile-Capacitor%208%20Android-orange?style=flat-square"></a>
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-orange?style=flat-square"></a>
 </p>
+
+> **Positioning.** Duraclaw is a foundational **harness** for AI
+> coding at scale, not a vertical SaaS. It targets enterprise
+> technology orgs that need centralized, auditable scaffolding around
+> their agent workflows — every session, every tool call, every gate
+> approval, and every model choice is logged, replayable, and bound to
+> a worktree + identity. The architecture is deliberately flexible
+> along the three axes that drive corporate AI anxiety:
+> **automated agent progression** (kata phase contracts + chains
+> auto-advance run sessions through research → planning →
+> implementation → verify gates without a human in the loop on every
+> hop), **customized inference** (per-session driver + model + identity
+> selection: Claude / Codex / Gemini today, isolated `HOME` per
+> identity, per-tenant model registries), and **multi-tiered
+> deployment** (self-host on your own Workers + VPS today; managed and
+> air-gapped tiers on the roadmap). The goal is to mitigate the
+> security and vendor-lock-in concerns that block AI adoption inside
+> larger orgs — your code, your runner, your audit log, your choice of
+> upstream model.
 
 > **Status — active development.** Built and used in-house at
 > [@baseplane-ai](https://github.com/baseplane-ai), but the repo is
@@ -74,12 +94,27 @@
 
 ## What it is
 
-Running a fleet of Claude Code sessions across worktrees is painful with
-the stock CLI: context lives in tmux panes, there's no shared inbox, no
-mobile, no resume across SSH disconnects, and no way to triage *"which
-session is asking me a question right now?"* across a dozen of them.
+Duraclaw is **the harness layer** between an enterprise codebase and
+the agent SDKs / CLIs that work it. It's the scaffolding most orgs
+discover they need around month two of taking AI coding seriously: a
+centralized, auditable place where many agent sessions run in
+parallel, every tool call lands in a queryable event log, every
+worktree is reservation-tracked, and every model / driver / identity
+choice is policy-controlled instead of per-developer-laptop. The
+shape is deliberate — three flexibility axes (driver, identity,
+deployment tier) so the same platform serves a 10-engineer startup
+running everything on managed CF Workers and a regulated enterprise
+running an air-gapped fork on their own infra with their own model
+gateway.
 
-Duraclaw is the orchestration fabric that fixes that.
+The narrower / day-one pain it also solves: running a fleet of
+Claude Code (or Codex, or Gemini) sessions across worktrees is
+painful with the stock CLIs. Context lives in tmux panes, there's no
+shared inbox, no mobile, no resume across SSH disconnects, and no
+way to triage *"which session is asking me a question right now?"*
+across a dozen of them. Duraclaw is the orchestration fabric that
+fixes that — and the harness underneath happens to be the same thing
+enterprises need for governance.
 
 A Cloudflare Workers frontend — a plain Vite 8 SPA built with React 19 and [TanStack Router](https://tanstack.com/router) for client routing, [Hono](https://hono.dev/) on the Worker side for API routes, deployed via the [`@cloudflare/vite-plugin`](https://developers.cloudflare.com/workers/vite-plugin/) — owns session
 lifecycle through four [Durable
@@ -239,6 +274,28 @@ status.
   rate-limited identities `cooldown`, and resumes the session under the
   next available one via the SDK's `SessionStore` (no message loss)
 
+**Auditability & governance**
+
+- Per-session **`event_log`** in DO SQLite (durable, 7-day retention,
+  GC'd on `onStart`) — every gate, connection event, callable RPC,
+  reaper decision, and rate-limit / identity-rotation event recorded
+  via `logEvent()`; queryable via the `getEventLog()` RPC by tag and
+  time range
+- **Identity catalog** in D1 (`runner_identities`) records which
+  Anthropic OAuth subscription owned each session and when it was
+  rotated to cooldown — pair with `agent_sessions.identity_name` for a
+  full provenance chain from prompt to billed account
+- **Worktree reservations** in D1 (`worktrees` table) with explicit
+  `reservedBy = {kind, id}` shapes, idempotent re-acquire, and
+  release timestamps — every code-touching session is bound to a
+  named clone with a known reserver
+- **Kata phase evidence** (`.kata/verification-evidence/`) — verify
+  mode lands real curl + browser proofs alongside the code, so a
+  session that claims "done" has artifacts a reviewer can replay
+- Tool-call approval gates (`AskUserQuestion`, `permission_request`)
+  surface in a per-session attention queue — humans-in-the-loop are
+  rate-limited, not bypassed, and every approval / denial is logged
+
 **Backend hardening**
 
 - BufferedChannel ring (10K events / 50 MB) absorbs gateway / Worker
@@ -339,6 +396,13 @@ duraclaw.
   pipeline is internal infra (see [Deployment](#deployment)).
 - **Not iOS yet.** The Capacitor shell is Android-only today; iOS is on
   the roadmap but not shipped.
+- **Not a managed or air-gapped tier yet.** The
+  multi-tier deployment story is positional; **today only the
+  self-hosted tier ships**. Managed (we run it for you, you bring
+  your own model accounts) and air-gapped (everything inside your
+  network, your own model gateway) are the eventual offerings, but
+  neither is wired up. If you need either of those today, you're
+  forking the self-hosted path and wiring it yourself.
 - **Not a hosted SaaS.** There's no `duraclaw.app` you can sign up
   for. Read the code, lift ideas, run your own.
 
