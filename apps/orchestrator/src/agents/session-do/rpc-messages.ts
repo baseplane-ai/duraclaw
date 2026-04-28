@@ -161,6 +161,10 @@ export async function sendMessageImpl(
           console.warn(
             `[SessionDO:${ctx.ctx.id}] sendMessage: orphan runner ${orphan.session_id} holds runner_session_id ${sdk} — auto-forking with transcript`,
           )
+          // GH#115 P1.5: ctx.state.worktreeId is preserved across the
+          // fork — same DO/session, same clone reservation.
+          // forkWithHistoryImpl re-stamps worktree_path on the new
+          // triggerGatewayDial via runner-link's project_path read.
           return forkWithHistoryImpl(ctx, content)
         }
       } catch (err) {

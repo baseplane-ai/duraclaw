@@ -427,8 +427,9 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   @callable()
   async forkWithHistory(
     content: string | ContentBlock[],
+    opts?: { worktreeId?: string | null },
   ): Promise<{ ok: boolean; error?: string }> {
-    return forkWithHistoryImpl(this.moduleCtx, content)
+    return forkWithHistoryImpl(this.moduleCtx, content, opts)
   }
   @callable()
   async interrupt(): Promise<{ ok: boolean; error?: string }> {

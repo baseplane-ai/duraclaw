@@ -38,7 +38,7 @@ import {
 } from '~/lib/gateway-files'
 import { type PushPayload, sendPushNotification } from '~/lib/push'
 import { sendFcmNotification } from '~/lib/push-fcm'
-import { reserveFreshWorktree, rowToDto } from '~/lib/reserve-worktree'
+import { bindWorktreeById, reserveFreshWorktree, rowToDto } from '~/lib/reserve-worktree'
 import type {
   AgentSessionRow,
   ChainSummary,
@@ -2947,7 +2947,14 @@ export function createApiApp() {
       return c.json({ error: 'Session not found' }, 404)
     }
 
-    const body = (await c.req.json()) as { up_to_message_id?: string; title?: string }
+    const body = (await c.req.json()) as {
+      up_to_message_id?: string
+      title?: string
+      // GH#115 P1.5 / B-FORK-1: optional override. Default inherits parent's
+      // worktreeId; explicit id binds via bindWorktreeById against the new
+      // session id. Same-`reservedBy` re-acquire and free-eligible rows pass.
+      worktreeId?: string
+    }
     const projectName = access.session.project
     const httpBase = (c.env.CC_GATEWAY_URL ?? '')
       .replace(/^wss:/, 'https:')
@@ -2981,6 +2988,31 @@ export function createApiApp() {
       return c.json({ error: 'Session has no runner session ID — cannot fork' }, 400)
     }
 
+    // GH#115 P1.5 / B-FORK-1: resolve the worktreeId for the forked
+    // session. Default inherits the parent's; the body may override with
+    // any free-eligible or same-`reservedBy` clone. We bind eagerly
+    // BEFORE the gateway POST so a 409/404 short-circuits without
+    // creating a dangling SDK fork.
+    const db = getDb(c.env)
+    let resolvedWorktreeId: string | null = access.session.worktreeId ?? null
+    if (typeof body.worktreeId === 'string' && body.worktreeId.length > 0) {
+      const bind = await bindWorktreeById(
+        db,
+        body.worktreeId,
+        { kind: 'session', id: access.session.id },
+        userId,
+      )
+      if (!bind.ok && bind.kind === 'not_found') {
+        return c.json({ error: 'worktree_not_found' }, 404)
+      }
+      if (!bind.ok && bind.kind === 'conflict') {
+        return c.json({ error: 'worktree_conflict' }, 409)
+      }
+      if (bind.ok) {
+        resolvedWorktreeId = bind.row.id
+      }
+    }
+
     const gatewayUrl = new URL(
       `/projects/${encodeURIComponent(projectName)}/sessions/${encodeURIComponent(runnerSessionId)}/fork`,
       httpBase,
@@ -3001,6 +3033,41 @@ export function createApiApp() {
     }
 
     const result = (await response.json()) as { session_id: string }
+
+    // GH#115 P1.5: persist worktreeId on the new agent_sessions row.
+    // The gateway-driven INSERT may not have happened yet — UPSERT so
+    // our value wins regardless of arrival order. Mirrors the minimal
+    // baseRow shape used by `lib/create-session.ts`.
+    if (resolvedWorktreeId) {
+      try {
+        const now = new Date().toISOString()
+        await db
+          .insert(agentSessions)
+          .values({
+            id: result.session_id,
+            userId,
+            project: projectName,
+            status: 'running',
+            createdAt: now,
+            updatedAt: now,
+            lastActivity: now,
+            agent: 'claude',
+            visibility: 'public',
+            origin: 'duraclaw',
+            archived: false,
+            worktreeId: resolvedWorktreeId,
+          } as typeof agentSessions.$inferInsert)
+          .onConflictDoUpdate({
+            target: agentSessions.id,
+            set: { worktreeId: resolvedWorktreeId, updatedAt: now },
+          })
+      } catch (err) {
+        console.error(
+          `[fork] Failed to persist worktreeId=${resolvedWorktreeId} on session ${result.session_id}:`,
+          err,
+        )
+      }
+    }
 
     await broadcastSessionRow(c.env, c.executionCtx, result.session_id, 'insert')
 
