@@ -81,6 +81,33 @@ describe('deriveDisplayStateFromStatus', () => {
     expect(result.isInteractive).toBe(false)
   })
 
+  // GH#119 P3 — failover / waiting_identity surfaces. The StatusBar /
+  // sidebar / tab strip all read these labels; the spec specifically
+  // calls for "Switching..." during failover and a "cooldown" /
+  // "accounts" hint during waiting_identity.
+  it('maps status="failover" → "Switching accounts…" (amber, non-interactive)', () => {
+    const result = deriveDisplayStateFromStatus('failover', 1)
+    expect(result.status).toBe('failover')
+    expect(result.label.toLowerCase()).toContain('switching')
+    expect(result.color).toBe('amber')
+    expect(result.icon).toBe('spinner')
+    expect(result.isInteractive).toBe(false)
+  })
+
+  it('maps status="waiting_identity" → "All accounts on cooldown" (red, non-interactive)', () => {
+    const result = deriveDisplayStateFromStatus('waiting_identity', 1)
+    expect(result.status).toBe('waiting_identity')
+    const label = result.label.toLowerCase()
+    // Spec says label should mention cooldown + the accounts/identities
+    // concept. Match either word so a future copy tweak doesn't break the
+    // test on a label rewrite that preserves the intent.
+    expect(label).toContain('cooldown')
+    expect(label).toMatch(/account|identit/)
+    expect(result.color).toBe('red')
+    expect(result.icon).toBe('alert')
+    expect(result.isInteractive).toBe(false)
+  })
+
   it('returns unknown for unexpected status values when ws is open', () => {
     const result = deriveDisplayStateFromStatus('nonsense' as SessionStatus, 1)
     expect(result.status).toBe('unknown')

@@ -366,4 +366,42 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 20,
+    description:
+      'GH#119 P1.1: Add session_transcript table for DO-side mirror of the Claude Agent SDK SessionStore (account-failover foundation). Persists JSONL transcript entries keyed by (project_key, session_id, subpath). seq is per (session_id, subpath) and assigned at insert time. 30-day retention enforced on DO start.',
+    up: (sql) => {
+      sql.exec(`CREATE TABLE IF NOT EXISTS session_transcript (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_key TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        subpath TEXT NOT NULL DEFAULT '',
+        seq INTEGER NOT NULL,
+        entry_json TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`)
+      sql.exec(`CREATE INDEX IF NOT EXISTS idx_transcript_lookup
+        ON session_transcript (session_id, subpath, seq)`)
+      sql.exec(`CREATE INDEX IF NOT EXISTS idx_transcript_created_at
+        ON session_transcript (created_at)`)
+    },
+  },
+  {
+    version: 21,
+    description:
+      'GH#119 P3: Add session_meta.waiting_identity_retries to persist the alarm-loop retry counter across DO hibernation. Counter increments on each alarm tick that finds zero available identities; resets to 0 on successful failover or session terminal state. Used to enforce the 30-attempt (≈30min) ceiling before declaring the session failed with "All identities exhausted".',
+    up: (sql) => {
+      try {
+        sql.exec(
+          `ALTER TABLE session_meta ADD COLUMN waiting_identity_retries INTEGER NOT NULL DEFAULT 0`,
+        )
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (!msg.toLowerCase().includes('duplicate column')) {
+          console.warn('[migration v21] unexpected error adding waiting_identity_retries column', e)
+          throw e
+        }
+      }
+    },
+  },
 ]

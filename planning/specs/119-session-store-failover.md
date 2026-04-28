@@ -307,6 +307,28 @@ calling `query({resume, sessionStore})`.
 Document the spike finding in the P1a PR. The implementer should not
 build both branches — the spike resolves this before P1b begins.
 
+**Spike outcome (resolved 2026-04-27 against `@anthropic-ai/claude-agent-sdk@0.2.119`):
+Branch B.** Resolution sourced from the SDK's own `sdk.d.ts`:
+
+- `SessionStore.append()` is documented as mirroring "a batch of transcript
+  entries … one per line in the local JSONL file" (sdk.d.ts L3537-3550).
+  Tool-result files are `*.txt`, not JSONL lines, so they fall outside the
+  documented `append()` contract.
+- `SessionStore.listSubkeys()` is documented as enumerating "all subpath
+  keys under a session (e.g., subagent transcripts). Used during resume to
+  discover and materialize all subagent data" (L3603-3611). The SDK
+  reserves `subpath` for subagent JSONLs, not for tool-result blobs.
+- The store-level docblock states "The subprocess still writes to local
+  disk … the adapter receives a secondary copy" (L3522-3533) — the
+  primary durability target is local disk. `tool-results/*.txt` is a
+  local-disk artifact with no documented mirror channel.
+
+Conclusion: tool-results bypass `SessionStore` and live on the runner's
+local disk only. P1b therefore keeps migration v27 (`session_tool_results`),
+adds `storeToolResult` / `loadToolResult` RPCs, and runs a post-turn mirror
+in the runner. P1a (this PR) does NOT build the v27 table or the mirror
+RPCs — that's P1b scope.
+
 #### Data Layer
 
 DO SQLite migration v27 (`session_tool_results`):

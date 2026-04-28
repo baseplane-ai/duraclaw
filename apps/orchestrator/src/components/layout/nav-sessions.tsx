@@ -509,6 +509,11 @@ export function NavSessions() {
                     <span className="truncate text-[11px] text-muted-foreground leading-tight">
                       {session.project}
                     </span>
+                    {session.identityName && (
+                      <span className="truncate text-[10px] text-muted-foreground leading-tight">
+                        {session.identityName}
+                      </span>
+                    )}
                   </div>
                 </SidebarMenuButton>
               </SessionContextMenu>

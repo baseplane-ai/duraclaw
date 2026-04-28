@@ -36,6 +36,7 @@ export type GatewayCommand =
   | PingCommand
   | PermissionResponseCommand
   | AnswerCommand
+  | TranscriptRpcResponseCommand
 
 export interface ExecuteCommand {
   type: 'execute'
@@ -72,6 +73,16 @@ export interface ExecuteCommand {
   gemini_models?: ReadonlyArray<{ name: string; context_window: number }>
   /** GH#86: enable Haiku-based session titler in the runner. Default false. */
   titler_enabled?: boolean
+  /** GH#119: enable DO-side SessionStore mirror for account failover. Default false. */
+  session_store_enabled?: boolean
+  /**
+   * GH#119: HOME directory for the runner identity. The gateway sets
+   * `HOME=<runner_home>` in the spawn env so the runner picks up the
+   * identity-scoped Claude auth at `~/.claude/.credentials.json`.
+   * Optional — when omitted, the gateway uses its own HOME (current
+   * behavior, preserved when no identities are configured).
+   */
+  runner_home?: string
 }
 
 // Content block types matching Anthropic API format
@@ -127,6 +138,24 @@ export interface AnswerCommand {
   answers: Record<string, string>
 }
 
+/**
+ * GH#119 P1.1: DO -> RUNNER reply for `transcript-rpc` requests.
+ *
+ * The runner-side TranscriptRpc multiplexer correlates this response
+ * with its original request via `rpc_id`. Method-specific result is
+ * carried on `result` (or `null` when `error` is set); `error` is a
+ * human-readable message on failure (`null` on success).
+ */
+export interface TranscriptRpcResponseCommand {
+  type: 'transcript-rpc-response'
+  session_id: string
+  rpc_id: string
+  /** Method-specific result. null when error is set. */
+  result: unknown
+  /** null on success; human-readable error message on failure. */
+  error: string | null
+}
+
 // Resume command (session recovery with follow-up prompt)
 export interface ResumeCommand {
   type: 'resume'
@@ -150,6 +179,16 @@ export interface ResumeCommand {
   gemini_models?: ReadonlyArray<{ name: string; context_window: number }>
   /** GH#86: enable Haiku-based session titler in the runner. Default false. */
   titler_enabled?: boolean
+  /** GH#119: enable DO-side SessionStore mirror for account failover. Default false. */
+  session_store_enabled?: boolean
+  /**
+   * GH#119: HOME directory for the runner identity. The gateway sets
+   * `HOME=<runner_home>` in the spawn env so the runner picks up the
+   * identity-scoped Claude auth at `~/.claude/.credentials.json`.
+   * Optional — when omitted, the gateway uses its own HOME (current
+   * behavior, preserved when no identities are configured).
+   */
+  runner_home?: string
 }
 
 // ── Gateway Events (Gateway → Orchestrator) ────────────────────────────
@@ -177,6 +216,49 @@ export type GatewayEvent =
   | SessionStateChangedEvent
   | CompactBoundaryEvent
   | ApiRetryEvent
+  | TranscriptRpcRequestEvent
+  | FailoverEvent
+
+/**
+ * GH#119 P1.1: RUNNER -> DO request over the dial-back WS.
+ *
+ * Carries an opaque `rpc_id` the DO echoes back on the response so the
+ * runner-side multiplexer can correlate concurrent calls. `method`
+ * selects the SessionStore op; `params` is the method-specific shape
+ * (validated server-side by the dispatcher).
+ */
+export interface TranscriptRpcRequestEvent {
+  type: 'transcript-rpc'
+  session_id: string
+  rpc_id: string
+  method: 'appendTranscript' | 'loadTranscript' | 'listTranscriptSubkeys' | 'deleteTranscript'
+  params: Record<string, unknown>
+}
+
+/**
+ * GH#119 P1.1: mirror of the Claude Agent SDK `SessionStore` key shape.
+ * Replicated here so the wire contract is decoupled from the SDK's
+ * `@alpha` types.
+ */
+export interface TranscriptSessionKey {
+  projectKey: string
+  sessionId: string
+  /** Optional subpath (subagent transcripts). Empty string when omitted. */
+  subpath?: string
+}
+
+/**
+ * GH#119 P1.1: mirror of the SDK's `SessionStoreEntry` — opaque,
+ * type-discriminated JSONL line. We don't constrain the shape beyond
+ * `type` so the SDK can evolve its entry vocabulary without forcing a
+ * shared-types bump.
+ */
+export interface TranscriptEntry {
+  type: string
+  uuid?: string
+  timestamp?: string
+  [k: string]: unknown
+}
 
 /**
  * GH#102 / spec 102-sdk-peelback B1: SDK-native liveness signal.
@@ -310,7 +392,30 @@ export interface StoppedEvent {
 export interface RateLimitEvent {
   type: 'rate_limit'
   session_id: string
-  rate_limit_info: Record<string, unknown>
+  rate_limit_info: {
+    /**
+     * GH#119: ISO timestamp when the rate limit resets. Used by the
+     * failover handler to set `cooldown_until` on the rate-limited
+     * identity. When absent, the handler uses a +30min fallback.
+     */
+    resets_at?: string
+    [k: string]: unknown
+  }
+}
+
+/**
+ * GH#119 P3: emitted when the DO swaps the runner identity due to
+ * rate-limit or auth-error. Broadcast to clients so the StatusBar can
+ * show "Switching accounts...". The actual session resume happens via
+ * the normal `triggerGatewayDial({type:'resume',...})` flow; this
+ * event is observability-only.
+ */
+export interface FailoverEvent {
+  type: 'failover'
+  session_id: string
+  from_identity: string
+  to_identity: string
+  reason: 'rate_limit' | 'auth_error'
 }
 
 export interface TaskStartedEvent {
@@ -474,6 +579,15 @@ export interface ResultEvent {
    * omits this if the SDK call throws or returns malformed data.
    */
   context_usage?: WireContextUsage
+  /**
+   * GH#119 P3: optional SDK error discriminator stamped by the runner
+   * when `is_error === true`. The DO routes `'rate_limit'` and
+   * `'authentication_failed'` through the failover handler; other
+   * values fall through to the normal terminal-error path. Forward-
+   * compatible — runners that don't stamp this still produce a normal
+   * is_error result that the existing pipeline handles.
+   */
+  error?: string | null
 }
 
 export interface ErrorEvent {
@@ -697,6 +811,10 @@ export type SessionStatus =
   | 'waiting_input'
   | 'waiting_permission'
   | 'waiting_gate'
+  // GH#119 P3: no identity available; alarm-loop polling
+  | 'waiting_identity'
+  // GH#119 P3: transient — selecting next identity + resuming
+  | 'failover'
   | 'error'
 
 // SessionState deleted (#31 P5 / B10). Status / gate / result are now derived
@@ -796,6 +914,15 @@ export interface SessionSummary {
   contextUsageJson?: string | null
   worktreeInfoJson?: string | null
   visibility?: 'public' | 'private'
+  /**
+   * GH#119: which runner identity owns this session. Populated by the DO at
+   * spawn time (P2) via syncIdentityNameToD1; surfaces in the session sidebar
+   * so operators can see which identity (e.g. 'work1' vs 'personal') is
+   * active. The wire shape uses camelCase because broadcastSessionRow
+   * `SELECT * FROM agent_sessions` via Drizzle, which returns TS field names
+   * (the column itself is `identity_name`).
+   */
+  identityName?: string | null
 }
 
 // ── Stored Message (for SQLite persistence) ─────────────────────────

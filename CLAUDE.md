@@ -125,6 +125,42 @@ pnpm --filter @duraclaw/docs-runner    build   # -> packages/docs-runner/dist/ma
     opening a PR. A PR that duplicates commits already on `main` is
     worse than no PR.
 
+## Identity Management (GH#119)
+
+Account failover for Claude runners. Each "identity" maps a name (e.g.
+`work1`, `personal`) to an isolated `HOME` directory containing its own
+`~/.claude/.credentials.json`. The DO selects an available identity via
+LRU at spawn time and the gateway sets `HOME=<runner_home>` in the
+runner's process env so the SDK picks up the identity-scoped auth.
+
+When a runner emits `rate_limit` (or the SDK reports an auth error),
+the DO marks the current identity as `cooldown` and resumes the session
+under the next available identity using the SDK's `SessionStore` to
+load the transcript from DO SQLite (no message loss).
+
+### Adding an identity
+
+1. Run `scripts/setup-identity.sh --name work2 --home /srv/duraclaw/homes/work2`.
+2. Authenticate the new HOME: `HOME=/srv/duraclaw/homes/work2 claude /login`.
+3. Register: re-run the script with `--register`, or POST manually:
+   ```bash
+   curl -X POST ${ORCH_URL}/api/admin/identities \
+     -H "Cookie: <admin session>" \
+     -d '{"name":"work2","home_path":"/srv/duraclaw/homes/work2"}'
+   ```
+4. Verify in Settings > Identities.
+
+### How failover works (high level)
+
+- D1 `runner_identities` is the catalog (admin-managed via UI / CRUD).
+- D1 `agent_sessions.identity_name` records which identity owns each session.
+- DO SQLite `session_transcript` mirrors the SDK's `SessionStore` so
+  resume under a different identity is lossless.
+- LRU selection skips `cooldown` identities until `cooldown_until <
+  datetime('now')`. Lazy expiry — no cleanup job.
+- Zero identities configured → orchestrator behaves as before
+  (single-HOME, no failover). Identities are opt-in.
+
 ## Progress Tracking
 
 - **Roadmap:** `planning/specs/roadmap-v2-full-vision.md` — full vision with all detail

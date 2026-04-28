@@ -1,4 +1,10 @@
-import type { WireMessagePart, SessionMessage as WireSessionMessage } from '@duraclaw/shared-types'
+import type {
+  TranscriptEntry,
+  TranscriptRpcResponseCommand,
+  TranscriptSessionKey,
+  WireMessagePart,
+  SessionMessage as WireSessionMessage,
+} from '@duraclaw/shared-types'
 import type { SessionMessage, SessionMessagePart } from 'agents/experimental/memory/session'
 import { eq } from 'drizzle-orm'
 import { agentSessions } from '~/db/schema'
@@ -17,6 +23,7 @@ import {
   partialAssistantToParts,
 } from './message-parts'
 import { handleRateLimit } from './resume-scheduler'
+import { sendToGateway } from './runner-link'
 import {
   syncCapabilitiesToD1 as syncCapabilitiesToD1Impl,
   syncKataAllToD1 as syncKataAllToD1Impl,
@@ -24,6 +31,12 @@ import {
   syncRunnerSessionIdToD1 as syncRunnerSessionIdToD1Impl,
 } from './status'
 import { handleTitleUpdate } from './title'
+import {
+  appendTranscriptImpl,
+  deleteTranscriptImpl,
+  listTranscriptSubkeysImpl,
+  loadTranscriptImpl,
+} from './transcript'
 import {
   REPEATED_TURN_THRESHOLD,
   RUNAWAY_EMPTY_TURN_THRESHOLD,
@@ -628,6 +641,32 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
           ),
         )
       }
+
+      // GH#119 P3: SDK error-discriminator routing. When the runner stamps
+      // `error: 'rate_limit' | 'authentication_failed'` on the result, fan
+      // out to the failover handler so we cool down the current identity
+      // and resume under a fresh one. The result event itself stays on
+      // its existing pipeline (terminal-state side-effects above) — the
+      // failover dial happens additively, not as a substitute.
+      if (event.error === 'rate_limit' || event.error === 'authentication_failed') {
+        const failoverReason: 'rate_limit' | 'auth_error' =
+          event.error === 'rate_limit' ? 'rate_limit' : 'auth_error'
+        handleRateLimit(
+          ctx,
+          {
+            type: 'rate_limit',
+            session_id: event.session_id,
+            // No `resets_at` available on the result-error path; the
+            // failover handler falls back to a +30min cooldown.
+            rate_limit_info: {},
+          },
+          failoverReason,
+        ).catch((err) => {
+          ctx.logEvent('error', 'failover', 'handleRateLimit unhandled rejection', {
+            error: err instanceof Error ? err.message : String(err),
+          })
+        })
+      }
       break
     }
 
@@ -806,7 +845,11 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
       // Spec #101 Stage 3: route rate-limit events through the
       // resume-scheduler module. Currently a stub that falls through
       // to the broadcast path; CAAM logic will land here.
-      void handleRateLimit(ctx, event)
+      handleRateLimit(ctx, event).catch((err) => {
+        ctx.logEvent('error', 'failover', 'handleRateLimit unhandled rejection', {
+          error: err instanceof Error ? err.message : String(err),
+        })
+      })
       self.broadcastGatewayEvent(event)
       break
     }
@@ -845,6 +888,23 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
     // transitions. The frame goes to clients so transient
     // compacting/api_retry/running indicators can render.
     case 'session_state_changed':
+      self.broadcastGatewayEvent(event)
+      break
+
+    // GH#119 P1.1: SessionStore RPC over the dial-back WS. Runner ->
+    // DO request; DO replies with `transcript-rpc-response` carrying
+    // either `result` or `error`. Wrapped in try/catch so a malformed
+    // payload or SQL failure surfaces as a structured error to the
+    // runner instead of crashing the WS handler.
+    case 'transcript-rpc':
+      handleTranscriptRpc(ctx, event)
+      break
+
+    // GH#119 P3: failover events are DO-authored — the runner never
+    // emits one. Listed here to satisfy the exhaustiveness check on
+    // `GatewayEvent`; if a stray frame arrives we relay it to clients
+    // rather than dropping it so any chained DO consumer still sees it.
+    case 'failover':
       self.broadcastGatewayEvent(event)
       break
 
@@ -963,4 +1023,219 @@ export function repeatedTurnGuardStep(input: RepeatedTurnGuardInput): RepeatedTu
   const shouldFire =
     nextRecent.length >= input.threshold && nextRecent.every((fp) => fp === nextRecent[0])
   return { nextRecent, shouldFire }
+}
+
+// ── GH#119 P1.1 — transcript-rpc dispatch ─────────────────────────────
+
+/**
+ * Validate a `TranscriptSessionKey` payload from an untrusted runner-side
+ * params blob. Returns the narrowed key, or null when the shape is wrong.
+ */
+function parseTranscriptKey(raw: unknown): TranscriptSessionKey | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  if (typeof r.projectKey !== 'string' || typeof r.sessionId !== 'string') return null
+  if (r.subpath !== undefined && typeof r.subpath !== 'string') return null
+  return {
+    projectKey: r.projectKey,
+    sessionId: r.sessionId,
+    subpath: typeof r.subpath === 'string' ? r.subpath : undefined,
+  }
+}
+
+/**
+ * Validate a `{projectKey, sessionId}` listSubkeys-style key. Looser
+ * than the full transcript key — `subpath` is not part of the listing
+ * lookup.
+ */
+function parseListKey(raw: unknown): { projectKey: string; sessionId: string } | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  if (typeof r.projectKey !== 'string' || typeof r.sessionId !== 'string') return null
+  return { projectKey: r.projectKey, sessionId: r.sessionId }
+}
+
+/**
+ * Validate a `TranscriptEntry[]` from an untrusted runner-side params
+ * blob. Each entry must be an object with a string `type`; we don't
+ * constrain the rest of the shape (the SDK owns that vocabulary).
+ */
+function parseEntries(raw: unknown): TranscriptEntry[] | null {
+  if (!Array.isArray(raw)) return null
+  const out: TranscriptEntry[] = []
+  for (const e of raw) {
+    if (!e || typeof e !== 'object') return null
+    const er = e as Record<string, unknown>
+    if (typeof er.type !== 'string') return null
+    out.push(er as TranscriptEntry)
+  }
+  return out
+}
+
+/**
+ * Build + send a `transcript-rpc-response` command to the runner over
+ * the live gateway-role WS. `result` is method-specific; `error` is
+ * `null` on success.
+ */
+function sendTranscriptRpcResponse(
+  ctx: SessionDOContext,
+  sessionId: string,
+  rpcId: string,
+  result: unknown,
+  error: string | null,
+): void {
+  const reply: TranscriptRpcResponseCommand = {
+    type: 'transcript-rpc-response',
+    session_id: sessionId,
+    rpc_id: rpcId,
+    result,
+    error,
+  }
+  sendToGateway(ctx, reply)
+}
+
+/**
+ * Dispatch a `transcript-rpc` event to the matching impl, capture the
+ * result or error, and send the response back over the dial-back WS.
+ *
+ * Top-level try/catch so any unexpected throw (malformed payload, SQL
+ * crash) surfaces as a structured `error` reply rather than killing
+ * the WS handler.
+ */
+export function handleTranscriptRpc(
+  ctx: SessionDOContext,
+  event: {
+    type: 'transcript-rpc'
+    session_id: string
+    rpc_id: string
+    method: string
+    params: Record<string, unknown>
+  },
+): void {
+  const { session_id, rpc_id, method, params } = event
+  if (typeof rpc_id !== 'string' || typeof method !== 'string' || !params) {
+    sendTranscriptRpcResponse(
+      ctx,
+      session_id ?? '',
+      typeof rpc_id === 'string' ? rpc_id : '',
+      null,
+      'invalid: rpc_id, method, and params are required',
+    )
+    return
+  }
+
+  try {
+    switch (method) {
+      case 'appendTranscript': {
+        const key = parseTranscriptKey(params.key)
+        const entries = parseEntries(params.entries)
+        if (!key || !entries) {
+          sendTranscriptRpcResponse(
+            ctx,
+            session_id,
+            rpc_id,
+            null,
+            'invalid: appendTranscript requires {key:{projectKey,sessionId,subpath?}, entries:Array<{type:string,...}>}',
+          )
+          return
+        }
+        appendTranscriptImpl(ctx, key, entries)
+        ctx.logEvent(
+          'info',
+          'transcript',
+          `append session=${key.sessionId} count=${entries.length}`,
+          {
+            sessionId: key.sessionId,
+            subpath: key.subpath ?? '',
+            entryCount: entries.length,
+          },
+        )
+        sendTranscriptRpcResponse(ctx, session_id, rpc_id, null, null)
+        return
+      }
+      case 'loadTranscript': {
+        const key = parseTranscriptKey(params.key)
+        if (!key) {
+          sendTranscriptRpcResponse(
+            ctx,
+            session_id,
+            rpc_id,
+            null,
+            'invalid: loadTranscript requires {key:{projectKey,sessionId,subpath?}}',
+          )
+          return
+        }
+        const result = loadTranscriptImpl(ctx, key)
+        ctx.logEvent(
+          'info',
+          'transcript',
+          `load session=${key.sessionId} found=${result !== null}`,
+          {
+            sessionId: key.sessionId,
+            subpath: key.subpath ?? '',
+            rows: result?.length ?? 0,
+          },
+        )
+        sendTranscriptRpcResponse(ctx, session_id, rpc_id, result, null)
+        return
+      }
+      case 'listTranscriptSubkeys': {
+        const key = parseListKey(params.key)
+        if (!key) {
+          sendTranscriptRpcResponse(
+            ctx,
+            session_id,
+            rpc_id,
+            null,
+            'invalid: listTranscriptSubkeys requires {key:{projectKey,sessionId}}',
+          )
+          return
+        }
+        const result = listTranscriptSubkeysImpl(ctx, key)
+        ctx.logEvent(
+          'info',
+          'transcript',
+          `listSubkeys session=${key.sessionId} count=${result.length}`,
+          {
+            sessionId: key.sessionId,
+            subkeyCount: result.length,
+          },
+        )
+        sendTranscriptRpcResponse(ctx, session_id, rpc_id, result, null)
+        return
+      }
+      case 'deleteTranscript': {
+        const key = parseTranscriptKey(params.key)
+        if (!key) {
+          sendTranscriptRpcResponse(
+            ctx,
+            session_id,
+            rpc_id,
+            null,
+            'invalid: deleteTranscript requires {key:{projectKey,sessionId,subpath?}}',
+          )
+          return
+        }
+        deleteTranscriptImpl(ctx, key)
+        ctx.logEvent('info', 'transcript', `delete session=${key.sessionId}`, {
+          sessionId: key.sessionId,
+          subpath: key.subpath ?? '',
+        })
+        sendTranscriptRpcResponse(ctx, session_id, rpc_id, null, null)
+        return
+      }
+      default:
+        sendTranscriptRpcResponse(
+          ctx,
+          session_id,
+          rpc_id,
+          null,
+          `invalid: unknown method "${method}"`,
+        )
+        return
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    sendTranscriptRpcResponse(ctx, session_id, rpc_id, null, `internal: ${msg}`)
+  }
 }

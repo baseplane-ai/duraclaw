@@ -20,7 +20,7 @@
  */
 
 import type { SessionMessage } from 'agents/experimental/memory/session'
-import { checkPendingResume } from './resume-scheduler'
+import { checkPendingResume, checkWaitingIdentity } from './resume-scheduler'
 import { ALARM_INTERVAL_MS, RECOVERY_GRACE_MS, type SessionDOContext } from './types'
 
 /** Default stale threshold for the DO watchdog (ms). */
@@ -158,6 +158,18 @@ export async function runAlarm(ctx: SessionDOContext): Promise<void> {
   // even when the session otherwise looks idle (no runner, no awaiting
   // part). Spec #101 B3a.
   await checkPendingResume(ctx)
+
+  // GH#119 P3: waiting_identity alarm-loop — re-query D1 for an available
+  // identity, fire the failover resume on hit, bump-and-re-arm on miss.
+  // No-op unless the session is in `waiting_identity`; the function
+  // guards on status internally so this stays cheap on the common path.
+  if (ctx.state.status === 'waiting_identity') {
+    await checkWaitingIdentity(ctx)
+    // The waiting_identity loop owns its own alarm; don't fall through
+    // to the stale-watchdog branches because none of them apply when
+    // the runner is intentionally absent.
+    return
+  }
 
   const isActiveStatus =
     ctx.state.status === 'running' ||
