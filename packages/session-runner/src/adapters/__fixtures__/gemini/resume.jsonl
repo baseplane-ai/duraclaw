@@ -1,0 +1,4 @@
+{"type":"init","timestamp":"2026-04-27T03:18:36.350Z","session_id":"33c70270-9d62-4d3a-bb12-fb8ee3a3e872","model":"auto-gemini-3"}
+{"type":"message","timestamp":"2026-04-27T03:18:36.353Z","role":"user","content":"What did echo print? Reply in 3 words."}
+{"type":"message","timestamp":"2026-04-27T03:18:39.211Z","role":"assistant","content":"It printed HELLO.","delta":true}
+{"type":"result","timestamp":"2026-04-27T03:18:39.733Z","status":"success","stats":{"total_tokens":14057,"input_tokens":13788,"output_tokens":33,"cached":8112,"input":5676,"duration_ms":3390,"tool_calls":0,"models":{"gemini-2.5-flash-lite":{"total_tokens":1083,"input_tokens":890,"output_tokens":28,"cached":0,"input":890},"gemini-3-flash-preview":{"total_tokens":12974,"input_tokens":12898,"output_tokens":5,"cached":8112,"input":4786}}}}

@@ -46,6 +46,7 @@ export interface Env {
   SESSION_AGENT: DurableObjectNamespace
   USER_SETTINGS: DurableObjectNamespace
   SESSION_COLLAB: DurableObjectNamespace
+  REPO_DOCUMENT: DurableObjectNamespace
   /** Set to '1' via wrangler secret to short-circuit all non-/login traffic to a 503 maintenance page (#7 cutover). */
   MAINTENANCE_MODE?: string
   ASSETS: Fetcher
@@ -98,6 +99,12 @@ export interface Env {
    *  causes the API layer to 404 the route. P1.4 will reuse this gate for the
    *  simulate-rate-limit endpoint. */
   ENABLE_DEBUG_ENDPOINTS?: string
+  /** GH#27 P1.1: bearer token shared between the agent-gateway / docs-runner
+   *  and the orchestrator. Used to authenticate non-cookie callers on
+   *  `PATCH/GET /api/projects/:projectId` (B2) and the docs-runner WS
+   *  dial-back to RepoDocumentDO (B3). When unset, those bearer-paths
+   *  reject with 401; cookie-authed browser callers still work. */
+  DOCS_RUNNER_SECRET?: string
 }
 
 // ── D1 row response shapes (issue #7 p2) ───────────────────────────

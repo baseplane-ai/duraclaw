@@ -76,6 +76,17 @@ AXI_A_BRIDGE_PORT="${AXI_A_BRIDGE_PORT:-$_DERIVED_AXI_A_BRIDGE_PORT}"
 AXI_B_BRIDGE_PORT="${AXI_B_BRIDGE_PORT:-$_DERIVED_AXI_B_BRIDGE_PORT}"
 export BROWSER_A_PORT BROWSER_B_PORT AXI_A_BRIDGE_PORT AXI_B_BRIDGE_PORT
 
+# Docs-runner port derivation (P1.1 / GH#27). Range 15800–16599 sits in
+# the next clean 800-block after the AXI bridge (15000–15799), avoiding
+# overlap with Gateway (9800–10599), Browser/AXI (11000–14799), single-
+# AXI (15000–15799), and Orchestrator (43000–43799). VERIFY_DOCS_RUNNER_PORT
+# is the explicit-pin override knob (mirrors VERIFY_GATEWAY_PORT idiom);
+# CC_DOCS_RUNNER_PORT is then exported unconditionally so child processes
+# agree on the advertised value.
+_DERIVED_DOCS_RUNNER_PORT=$((15800 + _WORKTREE_PORT_OFFSET))
+VERIFY_DOCS_RUNNER_PORT="${VERIFY_DOCS_RUNNER_PORT:-$_DERIVED_DOCS_RUNNER_PORT}"
+export CC_DOCS_RUNNER_PORT="$VERIFY_DOCS_RUNNER_PORT"
+
 # Per-worktree Chrome profile and axi state dirs — prevents cookie/session
 # cross-contamination when multiple worktrees run dual-browser verify.
 _WORKTREE_SLUG="$(basename "$VERIFY_ROOT")"
@@ -233,9 +244,10 @@ cleanup_stale_pidfile() {
 # overrides live in $VERIFY_ROOT/.env (also gitignored, sourced first).
 sync_dev_vars() {
   local dev_vars="$VERIFY_ROOT/apps/orchestrator/.dev.vars"
-  local managed_keys=(BETTER_AUTH_URL CC_GATEWAY_URL CC_GATEWAY_SECRET WORKER_PUBLIC_URL BOOTSTRAP_TOKEN SYNC_BROADCAST_SECRET)
+  local managed_keys=(BETTER_AUTH_URL CC_GATEWAY_URL CC_GATEWAY_SECRET WORKER_PUBLIC_URL BOOTSTRAP_TOKEN SYNC_BROADCAST_SECRET DOCS_RUNNER_SECRET)
   local secret="${CC_GATEWAY_SECRET:-${CC_GATEWAY_API_TOKEN:-}}"
   local sync_broadcast_secret="${SYNC_BROADCAST_SECRET:-dev-sync-broadcast-secret-change-me}"
+  local docs_runner_secret="${DOCS_RUNNER_SECRET:-dev-docs-runner-secret-change-me}"
 
   if [[ -z "$secret" ]]; then
     echo "sync_dev_vars: CC_GATEWAY_SECRET / CC_GATEWAY_API_TOKEN unset in \$VERIFY_ROOT/.env — gateway auth will fail" >&2
@@ -273,6 +285,7 @@ CC_GATEWAY_URL=$VERIFY_GATEWAY_WS_URL
 CC_GATEWAY_SECRET=$secret
 WORKER_PUBLIC_URL=$VERIFY_ORCH_URL
 SYNC_BROADCAST_SECRET=$sync_broadcast_secret
+DOCS_RUNNER_SECRET=$docs_runner_secret
 EOF
   if [[ -n "${BOOTSTRAP_TOKEN:-}" ]]; then
     printf 'BOOTSTRAP_TOKEN=%s\n' "$BOOTSTRAP_TOKEN" >>"$tmp"

@@ -11,11 +11,13 @@
   },
   "scripts": {
     "build": "tsup",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.91",
-    "tsup": "^8.3.5",
-    "typescript": "~5.8.3"
+    "tsup": "^8.5.1",
+    "typescript": "~5.8.3",
+    "vitest": "^4.1.2"
   }
 }

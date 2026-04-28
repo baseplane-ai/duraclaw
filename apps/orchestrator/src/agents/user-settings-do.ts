@@ -16,7 +16,7 @@
 
 import { DurableObject } from 'cloudflare:workers'
 import type { SyncedCollectionFrame } from '@duraclaw/shared-types'
-import { and, eq } from 'drizzle-orm'
+import { and, desc, eq, gt } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import { getRequestSession } from '~/api/auth-session'
 import * as schema from '~/db/schema'
@@ -24,6 +24,13 @@ import type { Env, SessionStatus } from '~/lib/types'
 
 const MAX_BROADCAST_BODY = 256 * 1024 // 256 KiB
 const USER_ID_ATTACHMENT_KEY = 'userId'
+
+// Prime-recency window: how far back in `agent_sessions.updated_at` we
+// look for sessions to ask SessionDO for current status. Far enough back
+// to cover a returning user's mid-flight sessions; bounded so the DO
+// fan-out cost stays cheap. Combined with PRIME_LIMIT below.
+const PRIME_RECENCY_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
+const PRIME_LIMIT = 200
 
 export class UserSettingsDO extends DurableObject<Env> {
   private sockets = new Set<WebSocket>()
@@ -93,13 +100,16 @@ export class UserSettingsDO extends DurableObject<Env> {
       }
     }
 
-    // Substate prime — see primeSessionStatusForSocket(). D1 `agent_sessions.status`
-    // only carries the coarse `running`/`idle`/`error` axis, so a cold-loaded
-    // browser tab can't tell `running` from `waiting_gate` until the next DO
-    // transition fires `broadcastStatusToOwner`. Push a one-shot `session_status`
-    // delta to the just-accepted socket so the tab strip's amber/violet rings
-    // are correct from the first paint. Fire-and-forget via waitUntil so the
-    // 101 Upgrade response isn't gated on N DO RPCs.
+    // Substate prime — see primeSessionStatusForSocket(). D1
+    // `agent_sessions.status` is no longer authoritative for live status
+    // (post-`ea01ca5`), so the prime queries the user's recently-active
+    // sessions by `updated_at` and asks each SessionDO for its current
+    // `state.status` (hibernation-safe via `session_meta`). This is the
+    // only path that converges a backgrounded tab's status indicator
+    // after a user-stream WS disconnect+reconnect — every transition
+    // arriving while the WS was down would otherwise be lost. Fire-and-
+    // forget via waitUntil so the 101 Upgrade response isn't gated on
+    // N DO RPCs.
     this.ctx.waitUntil(this.primeSessionStatusForSocket(server, session.userId))
 
     return new Response(null, { status: 101, webSocket: client })
@@ -107,25 +117,40 @@ export class UserSettingsDO extends DurableObject<Env> {
 
   /**
    * Push a single `session_status` synced-collection delta to one socket
-   * carrying the DO-authoritative `state.status` for every session whose
-   * D1 row is `'running'` (i.e. potentially in a substate the D1 mirror
-   * doesn't carry). Sessions whose D1 status is `idle`/`error` are skipped
-   * because their D1 mirror is already accurate as a cold-load fallback.
+   * carrying the DO-authoritative `state.status` for every session this
+   * user has touched recently.
    *
-   * Bounded by the user's count of in-flight sessions (cap defensively at
-   * 200). Failures are logged and swallowed — the prime is a best-effort
-   * UX optimisation, not a correctness path.
+   * The universe used to be `WHERE status='running'`, but post-`ea01ca5`
+   * D1 `agent_sessions.status` is no longer written on transitions — it
+   * only flips to `'idle'` at result time, so a session that's currently
+   * `waiting_gate` may still read as `running` (or as `idle` if the prior
+   * run finished cleanly), and the filter missed any session whose D1
+   * row hadn't been overwritten by a fresh spawn. The new universe is
+   * "recently-active" by `updated_at` — every session the user has
+   * touched in the last `PRIME_RECENCY_MS` window. Each candidate's
+   * authoritative status comes from its SessionDO via `GET /status`,
+   * which reads from the hibernation-safe `session_meta` SQLite table.
+   *
+   * Bounded by `PRIME_LIMIT` and by the recency window — N parallel DO
+   * RPCs run under `waitUntil` so the 101 Upgrade response isn't
+   * blocked. Failures are logged and swallowed — the prime is a
+   * best-effort UX optimisation, not a correctness path.
    */
   private async primeSessionStatusForSocket(socket: WebSocket, userId: string): Promise<void> {
     try {
       const db = drizzle(this.env.AUTH_DB, { schema })
+      const sinceIso = new Date(Date.now() - PRIME_RECENCY_MS).toISOString()
       const rows = await db
         .select({ id: schema.agentSessions.id })
         .from(schema.agentSessions)
         .where(
-          and(eq(schema.agentSessions.userId, userId), eq(schema.agentSessions.status, 'running')),
+          and(
+            eq(schema.agentSessions.userId, userId),
+            gt(schema.agentSessions.updatedAt, sinceIso),
+          ),
         )
-        .limit(200)
+        .orderBy(desc(schema.agentSessions.updatedAt))
+        .limit(PRIME_LIMIT)
 
       if (rows.length === 0) return
 

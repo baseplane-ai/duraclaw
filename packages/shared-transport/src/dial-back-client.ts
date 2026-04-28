@@ -6,6 +6,19 @@ export interface DialBackClientLogger {
   error: (msg: string, ...rest: unknown[]) => void
 }
 
+/**
+ * Reasons passed to `onTerminate`. Extended over time as new terminal close
+ * codes are added (e.g. `document_deleted` for `RepoDocumentDO` 4412 hard
+ * delete). Subclasses register new mappings via the
+ * `additionalTerminalCodes` constructor option.
+ */
+export type DialBackTerminateReason =
+  | 'invalid_token'
+  | 'token_rotated'
+  | 'mode_transition'
+  | 'reconnect_exhausted'
+  | 'document_deleted'
+
 export interface DialBackClientOptions {
   callbackUrl: string
   bearer: string
@@ -19,14 +32,18 @@ export interface DialBackClientOptions {
   /**
    * Called when the client gives up permanently — either the DO signalled a
    * terminal close code (4401 invalid token / 4410 token rotated / 4411 mode
-   * transition) or we hit MAX_POST_CONNECT_ATTEMPTS back-to-back reconnect
-   * failures after the initial success. The session-runner uses this to exit
-   * cleanly instead of spinning in a 30s reconnect loop forever (i.e.
-   * becoming an orphan).
+   * transition / additionalTerminalCodes from a subclass) or we hit
+   * MAX_POST_CONNECT_ATTEMPTS back-to-back reconnect failures after the
+   * initial success. The session-runner uses this to exit cleanly instead of
+   * spinning in a 30s reconnect loop forever (i.e. becoming an orphan).
    */
-  onTerminate?: (
-    reason: 'invalid_token' | 'token_rotated' | 'mode_transition' | 'reconnect_exhausted',
-  ) => void
+  onTerminate?: (reason: DialBackTerminateReason) => void
+  /**
+   * Subclass-supplied extra terminal close codes mapped to terminate reasons.
+   * Used by `DialBackDocClient` to wire 4412 → 'document_deleted' without
+   * teaching the parent class about doc-specific semantics.
+   */
+  additionalTerminalCodes?: ReadonlyMap<number, DialBackTerminateReason>
 }
 
 const BACKOFF_BASE = 1000
@@ -45,14 +62,15 @@ const CLOSE_MODE_TRANSITION = 4411
 export class DialBackClient {
   private callbackUrl: string
   private bearer: string
-  private channel: BufferedChannel
+  protected channel: BufferedChannel
   private onCommand: (cmd: unknown) => void
   private onStateChange?: DialBackClientOptions['onStateChange']
   private onTerminate?: DialBackClientOptions['onTerminate']
   private sessionId?: string
-  private logger: DialBackClientLogger
+  protected logger: DialBackClientLogger
+  private additionalTerminalCodes: ReadonlyMap<number, DialBackTerminateReason>
 
-  private ws: WebSocket | null = null
+  protected ws: WebSocket | null = null
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private healthTimer: ReturnType<typeof setTimeout> | null = null
   private attempt = 0
@@ -71,6 +89,26 @@ export class DialBackClient {
     this.onTerminate = options.onTerminate
     this.sessionId = options.sessionId
     this.logger = options.logger ?? console
+    this.additionalTerminalCodes = options.additionalTerminalCodes ?? new Map()
+  }
+
+  /**
+   * Subclass hook called immediately after `new WebSocket(url)` and before
+   * any handlers attach. Default: no-op. `DialBackDocClient` overrides to
+   * set `binaryType = 'arraybuffer'`.
+   */
+  protected configureWebSocket(_ws: WebSocket): void {
+    // no-op by default
+  }
+
+  /**
+   * Subclass hook called from `onmessage` to convert the raw WS frame into
+   * the value passed to `onCommand`. Default: `JSON.parse(data as string)`.
+   * `DialBackDocClient` overrides to return `new Uint8Array(data as
+   * ArrayBuffer)` (no JSON parsing).
+   */
+  protected parseIncoming(data: unknown): unknown {
+    return JSON.parse(data as string)
   }
 
   private sessionSuffix(): string {
@@ -120,6 +158,7 @@ export class DialBackClient {
 
     const ws = new WebSocket(url)
     this.ws = ws
+    this.configureWebSocket(ws)
 
     ws.onopen = () => {
       if (this.stopped || ws !== this.ws) return
@@ -162,7 +201,7 @@ export class DialBackClient {
       ) {
         this.stopped = true
         this.onStateChange?.('closed')
-        const reason: 'invalid_token' | 'token_rotated' | 'mode_transition' =
+        const reason: DialBackTerminateReason =
           code === CLOSE_INVALID_TOKEN
             ? 'invalid_token'
             : code === CLOSE_TOKEN_ROTATED
@@ -172,6 +211,19 @@ export class DialBackClient {
         return
       }
 
+      // Subclass-registered terminal codes (e.g. 4412 document_deleted on
+      // RepoDocumentDO). Same semantics as the built-in terminal codes:
+      // stop, emit 'closed', fire onTerminate, no reconnect.
+      if (code !== undefined) {
+        const extraReason = this.additionalTerminalCodes.get(code)
+        if (extraReason !== undefined) {
+          this.stopped = true
+          this.onStateChange?.('closed')
+          this.onTerminate?.(extraReason)
+          return
+        }
+      }
+
       this.scheduleReconnect()
     }
 
@@ -179,10 +231,10 @@ export class DialBackClient {
       // Error triggers close, so we handle reconnect there
     }
 
-    ws.onmessage = (e: { data: string }) => {
+    ws.onmessage = (e: { data: unknown }) => {
       if (this.stopped || ws !== this.ws) return
       try {
-        const parsed = JSON.parse(e.data as string)
+        const parsed = this.parseIncoming(e.data)
         this.onCommand(parsed)
       } catch {
         console.warn('DialBackClient: failed to parse message', e.data)

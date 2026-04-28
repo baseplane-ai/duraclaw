@@ -3,6 +3,13 @@ import nodePath from 'node:path'
 import type { ServerWebSocket } from 'bun'
 import { verifyToken } from './auth.js'
 import { handleDeployState } from './deploy-state.js'
+import {
+  handleDocsRunnerHealth,
+  handleDocsRunnerStatus,
+  handleListDocsFiles,
+  handleListDocsRunners,
+  handleStartDocsRunner,
+} from './docs-runner-handlers.js'
 import { handleFileContents, handleFileTree, handleGitStatus } from './files.js'
 import {
   handleKillSession,
@@ -134,6 +141,48 @@ const server = Bun.serve<WsData>({
         return json(400, { ok: false, error: 'invalid body' })
       }
       return handleStartSession(body, { logger: console })
+    }
+
+    // GET /docs-runners — list all known docs-runners
+    if (req.method === 'GET' && path === '/docs-runners') {
+      return handleListDocsRunners()
+    }
+
+    // GET /docs-runners/:projectId/status
+    const docsStatusMatch = path.match(/^\/docs-runners\/([^/]+)\/status$/)
+    if (req.method === 'GET' && docsStatusMatch) {
+      const [, projectId] = docsStatusMatch
+      return handleDocsRunnerStatus(projectId)
+    }
+
+    // GET /docs-runners/:projectId/health — proxy to the runner's loopback
+    // /health endpoint. Forwards 200 + body on success, 502
+    // `docs_runner_unreachable` on fetch throw/timeout. The orchestrator
+    // passes `?healthPort=` since the gateway has no config of its own.
+    const docsHealthMatch = path.match(/^\/docs-runners\/([^/]+)\/health$/)
+    if (req.method === 'GET' && docsHealthMatch) {
+      const [, projectId] = docsHealthMatch
+      return await handleDocsRunnerHealth(projectId, url.searchParams)
+    }
+
+    // GET /docs-runners/:projectId/files — directory walk fallback when
+    // the runner is absent or 502s. Caller passes `?docsWorktreePath=`
+    // since the gateway has no D1 access.
+    const docsFilesMatch = path.match(/^\/docs-runners\/([^/]+)\/files$/)
+    if (req.method === 'GET' && docsFilesMatch) {
+      const [, projectId] = docsFilesMatch
+      return await handleListDocsFiles(projectId, url.searchParams)
+    }
+
+    // POST /docs-runners/start — spawn detached docs-runner
+    if (req.method === 'POST' && path === '/docs-runners/start') {
+      let body: unknown
+      try {
+        body = await req.json()
+      } catch {
+        return json(400, { ok: false, error: 'invalid body' })
+      }
+      return handleStartDocsRunner(body, { logger: console })
     }
 
     // POST /debug/reap — dev-only on-demand reaper trigger (B6). Guarded by

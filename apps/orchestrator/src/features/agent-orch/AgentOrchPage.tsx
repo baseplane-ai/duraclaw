@@ -26,6 +26,7 @@ import { consumePendingDeepLink, subscribeDeepLink } from '~/lib/native-push-dee
 import { apiUrl } from '~/lib/platform'
 import { promptToPreviewText } from '~/lib/prompt-preview'
 import { AgentDetailView } from './AgentDetailView'
+import { shouldFollowActiveToUrl } from './peer-follow-decision'
 import type { SpawnFormConfig } from './SpawnAgentForm'
 import { type SpawnConfig, useCodingAgent } from './use-coding-agent'
 
@@ -156,10 +157,30 @@ function AgentOrchContent() {
   // bounce activeSessionId back. Skip until cold-start has run so we don't
   // race the initial restore. `replace: true` so peer-driven follow
   // doesn't pollute browser history.
+  //
+  // Why the prevActive ref guard: a sidebar click changes the URL but not
+  // activeSessionId in the same render — the deep-link effect catches up
+  // a render later. Without the guard, this effect saw the divergence,
+  // navigated URL back to the stale activeSessionId, deep-link bounced it
+  // forward again, and the URL flapped between the two ids forever (page
+  // eventually crashed from re-render storm). Only acting when
+  // activeSessionId itself changed isolates this watcher to the
+  // peer-driven case it was added for.
+  const prevActiveSessionIdRef = useRef<string | null>(activeSessionId)
   useEffect(() => {
-    if (!coldStartedRef.current) return
-    if (!activeSessionId) return
-    if (activeSessionId === searchSessionId) return
+    const prev = prevActiveSessionIdRef.current
+    prevActiveSessionIdRef.current = activeSessionId
+    if (
+      !activeSessionId ||
+      !shouldFollowActiveToUrl({
+        prevActive: prev,
+        active: activeSessionId,
+        searchSessionId,
+        coldStarted: coldStartedRef.current,
+      })
+    ) {
+      return
+    }
     navigate({ to: '/', search: { session: activeSessionId }, replace: true })
   }, [activeSessionId, searchSessionId, navigate])
 

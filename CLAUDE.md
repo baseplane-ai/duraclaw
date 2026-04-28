@@ -32,6 +32,7 @@ Key invariants:
 - `session-runner` never embeds the DO. It dials `CC_GATEWAY_URL`'s partner `WORKER_PUBLIC_URL` (`wss://dura.../agents/session-agent/<do-id>?role=gateway&token=...`).
 - Gateway restart / CF Worker redeploy are non-events for an in-flight runner; the BufferedChannel buffers while the WS is down, replays on reconnect, emits a single gap sentinel only on overflow.
 - Session status derives from `messagesCollection` via `useDerivedStatus`; D1 `agent_sessions` is the idle/background fallback, not a truth-gate.
+- Per-project state (e.g. docs-runner DO id, settings) lives in the D1 `projectMetadata` table — see `apps/orchestrator/src/db/schema.ts` and `planning/specs/27-docs-as-yjs-dialback-runners.md`.
 
 ## Monorepo Structure
 
@@ -63,7 +64,7 @@ planning/
 ## Key Commands
 
 ```bash
-pnpm build              # Build all packages (tsup for workspace libs)
+pnpm build              # Build all packages (tsup for libs; bun build for VPS binaries)
 pnpm typecheck          # Typecheck all packages
 pnpm test               # Run vitest suites across the workspace
 pnpm dev                # Dev mode (all packages)
@@ -73,12 +74,17 @@ cd apps/orchestrator
 pnpm dev                # Local dev (Vite + miniflare)
 pnpm ship               # Build + wrangler deploy (do NOT run manually -- see Deployment)
 
-# Gateway (local)
+# Gateway (local dev)
 cd packages/agent-gateway
 bun run src/server.ts   # Starts on 127.0.0.1:$CC_GATEWAY_PORT (default 9877)
+                        # Docs-runner uses $CC_DOCS_RUNNER_PORT (also derived per-worktree, see .claude/rules/worktree-setup.md)
 
-# Session-runner binary build
-pnpm --filter @duraclaw/session-runner build   # Emits dist/main.js with #!/usr/bin/env bun shebang
+# VPS binary bundles (gateway + both runners) — single self-contained
+# files via `scripts/bundle-bin.sh` (bun build --target=bun + atomic mv).
+# Production systemd runs the bundle, never source. See .claude/rules/deployment.md.
+pnpm --filter @duraclaw/agent-gateway  build   # -> packages/agent-gateway/dist/server.js
+pnpm --filter @duraclaw/session-runner build   # -> packages/session-runner/dist/main.js (shebanged, +x)
+pnpm --filter @duraclaw/docs-runner    build   # -> packages/docs-runner/dist/main.js   (shebanged, +x)
 ```
 
 ## Conventions
