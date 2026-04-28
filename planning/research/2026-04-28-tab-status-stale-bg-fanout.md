@@ -129,41 +129,48 @@ The `completed_unseen` ("blue dot — there's a new message you haven't seen") i
 
 The phrase in the user's report is ambiguous in the right way — the literal mechanism (push events through UserSettingsDO) already exists for status transitions and D1-mirrored fields. So "event by event fan out for freshness" is best read as **make the UserSettingsDO conduit reliable enough that bg tabs converge to truth without per-session WS or D1 fallback**. Four flavors of that, ordered by scope:
 
-### Option 1 — UserSettingsDO becomes a per-user status cache (my recommendation)
+### Option 1 — UserSettingsDO becomes a per-user status cache ❌ rejected (hibernation)
 
-Give UserSettingsDO an in-memory `Map<sessionId, SessionStatus>` (optionally backed by `ctx.storage` for hibernation survival). Mutate it on every `/broadcast` of `session_status`, `messageSeq`, etc. On socket connect, replay the cache to the new socket — **no D1 round-trip, no SessionDO RPC fan-out**.
+The original idea was to give UserSettingsDO an in-memory `Map<sessionId, SessionStatus>` mutated on every `/broadcast` and replayed on socket connect.
+
+**Why this fails**: UserSettingsDO uses the WebSocket Hibernation API. The DO can be evicted from memory at any point — including while sockets are connected — and only `ctx.storage` survives. In-memory `statusCache` resets to empty on every wake. The wake itself is usually triggered by an *incoming* frame (which then populates the cache with one entry), so live fan-out works fine. But the **replay-on-reconnect** path — the whole point of the cache — is broken: any transition that occurred before the eviction is gone forever, replay sends a partial map, the tab indicator is still stale.
+
+`ctx.storage.put` per transition would close the gap, but: (a) it's a real write per status flip, (b) it inverts the "UserSettingsDO holds NO persistent state" invariant the file's docstring opens with, (c) it duplicates state that SessionDO already owns durably. The cache is the wrong place for this storage.
+
+### Option 1' — Stateless UserSettingsDO, fix the prime instead (recommended)
+
+UserSettingsDO stays stateless. The fix is in `primeSessionStatusForSocket`:
+
+1. **Drop the `WHERE status='running'` filter.** D1 status is no longer authoritative (post-`ea01ca5`), so filtering on it is the source of Gap B. Replace with a recency bound (`WHERE updated_at > now() - 7 days ORDER BY updated_at DESC LIMIT 200`) — gets the user's recently-touched sessions regardless of D1's stale `status` column.
+2. **Keep the per-session SessionDO RPC.** This is already there and already correct: `stub.fetch('GET /status')` returns the DO-authoritative `state.status`, and SessionDO's state is hibernation-safe via the `session_meta` SQLite table (migration v6+v7). No new state, no new transport.
+3. **Extend the prime payload to include `messageSeq`** (closes Gap D for the `completed_unseen` indicator). SessionDO already exposes `do.messageSeq` on the same `/status` endpoint, so no new DO surface.
 
 ```ts
-// inside UserSettingsDO
-private statusCache = new Map<string, { status: SessionStatus; messageSeq?: number; ts: number }>()
-
-handleBroadcast() {
-  // …existing code…
-  if (frame.collection === 'session_status') {
-    for (const op of frame.ops) {
-      if (op.type === 'update' || op.type === 'insert') {
-        const v = op.value as { id: string; status: SessionStatus }
-        this.statusCache.set(v.id, { status: v.status, ts: Date.now() })
-      } else if (op.type === 'delete') {
-        this.statusCache.delete(op.key)
-      }
-    }
-  }
-  // …fan to sockets…
-}
-
-handleWebSocketUpgrade() {
-  // …existing code…
-  // Replace primeSessionStatusForSocket with:
-  this.replayCacheToSocket(server)
-}
+// user-settings-do.ts — primeSessionStatusForSocket
+const rows = await db
+  .select({ id: schema.agentSessions.id })
+  .from(schema.agentSessions)
+  .where(
+    and(
+      eq(schema.agentSessions.userId, userId),
+      gt(schema.agentSessions.updatedAt, sevenDaysAgo),  // ← was: eq(status, 'running')
+    ),
+  )
+  .orderBy(desc(schema.agentSessions.updatedAt))
+  .limit(200)
+// …rest unchanged: parallel RPC each SessionDO for authoritative status+messageSeq
 ```
 
-**Closes**: A (cache survives socket-down windows because next socket connect replays it), B (no D1 query — cache is the authoritative live mirror), C (replay arrives instantly on reconnect, no clear-then-empty gap).
-**Doesn't close**: D — but extending the cache to `messageSeq` (and any other per-tab-display field) is straightforward in the same DO.
+**Closes**:
+- **B** — prime universe is now "every recently-active session" not "D1 says running"
+- **C** — replay-after-clear arrives in the same tick as the upgrade response, so the blank-then-stale-D1 window collapses
+- **D (partial)** — extending the `session_status` payload to `{id, status, messageSeq}` makes the bg tab's `completed_unseen` ring correct on cold load and on reconnect
 
-**Pros**: Smallest change. Single DO, no new transport. Eliminates the D1 prime and all its bugs. Native to where the data is fanned today.
-**Cons**: Memory grows with sessions per user. Cap + LRU needed (200 is the existing prime cap; same bound suffices). Cache survives WebSocket Hibernation only if persisted; needs `ctx.storage.put`/`get` on init or the cache resets on DO eviction (acceptable — first reconnect after eviction does a one-time D1+SessionDO prime, then steady-state from cache).
+**Doesn't close**:
+- **A** — broadcasts during socket-down windows are still lost. **But**: every reconnect re-primes from authoritative SessionDO state, so the staleness window is bounded by reconnect cadence, not by transition rate. The connection-manager already triggers reconnects on `foreground`/`online`, so a backgrounded tab returning to foreground gets a fresh prime within ~stale-threshold (5s).
+
+**Pros**: Survives hibernation by construction (zero UserSettingsDO state to lose). Smallest delta to the existing code. Doesn't violate the "stateless fanout pipe" invariant. Reuses authoritative SessionDO state instead of duplicating it.
+**Cons**: 200 parallel sub-ms RPCs per socket upgrade — same as today, just dropping a WHERE clause changes the universe size, not the cost. Some sessions in the 200 will be `idle` (cheap RPC, no work). Worst case for a heavy user: 200 RPCs × ~5ms = 1s under `waitUntil`, not blocking the 101 Upgrade.
 
 ### Option 2 — Fan out richer per-event payloads (literal reading of "event by event")
 
@@ -193,35 +200,35 @@ Replace `stub.fetch('https://user-settings/broadcast', ...)` with a typed RPC me
 
 ## Recommendation
 
-Implement **Option 1 (per-user status cache in UserSettingsDO)**, with a follow-on for Option 2's `gate_open`/`error_set` fan-outs once the cache exists.
+Implement **Option 1' — fix the prime, keep UserSettingsDO stateless**. A possible Option 2 follow-on (`gate_open`/`error_set` fan-outs) is independent and can land later.
 
 Concrete next steps for whoever picks this up:
 
-1. **Replace `primeSessionStatusForSocket` with `replayCacheToSocket`**. The new method just iterates `this.statusCache` and sends a single delta frame.
-2. **Mutate the cache inside `handleBroadcast`** for `session_status` (and later `messageSeq` if Option 2's expansion is taken). Cache is purely a write-through observer — fan-out to live sockets stays unchanged.
-3. **Persist the cache via `ctx.storage` in chunks** so DO eviction doesn't lose it. Restore on init alongside the existing `getWebSockets()` rehydrate. Acceptable to skip persistence in a v0 — first reconnect after eviction primes from D1+SessionDO once.
-4. **Drop the `WHERE status='running'` D1 filter from any remaining cold-prime path**. After the cache is the source of truth, cold prime should fall back to "scan SessionDO list for the user" (via `agent_sessions` regardless of D1 status) or skip entirely and let the per-session WS first-frame correct.
-5. **Keep `7d3d6d5`'s clear-on-reconnect** but the replay arrives in the same tick, so the "blank then stale-D1" window collapses to nothing.
-6. **Bound the cache** to ~200 entries per user (same as today's prime cap) with LRU eviction — well above any realistic concurrent-session count.
-7. **Test plan**: extend `apps/orchestrator/src/agents/user-settings-do.fanout.test.ts` with: (a) status broadcast → cache mutation → replay-on-reconnect, (b) eviction simulation (new DO instance, cache empty, fall back gracefully), (c) bounded cache LRU.
+1. **Drop the D1 status filter in `primeSessionStatusForSocket`**. Replace `WHERE status='running'` with a recency window (`updated_at > now() - 7 days`) ordered by `updated_at DESC`, capped at 200. The cap stays the same as today — only the universe changes.
+2. **Extend the prime payload to include `messageSeq`**. SessionDO's `GET /status` already has it. Update `session_status` collection type to `{id, status, messageSeq?}` and update the client subscriber in `session-local-collection.ts` to thread it into `sessionLocalCollection`. (Or fold into a new `session_live` collection name if mixing the schema feels wrong.)
+3. **Keep the live fanout untouched.** `broadcastStatusToOwner` and `broadcastSyncedDelta` stay as-is. We're not changing the hot path — only making the cold prime correct.
+4. **Keep `7d3d6d5`'s clear-on-reconnect.** The new prime arrives in the same tick as the upgrade response, so the "blank then stale-D1" window collapses to nothing in practice — the prime IS the freshness contract.
+5. **Drop the docstring claim** that UserSettingsDO holds NO persistent state — still true after this change. Worth re-asserting because option 1 was tempting and we should remember why we passed.
+6. **Test plan**: extend `apps/orchestrator/src/agents/user-settings-do.fanout.test.ts` with: (a) prime queries every recently-updated session regardless of D1 status, (b) prime payload includes messageSeq, (c) prime sends nothing for users with zero recent sessions, (d) per-session SessionDO RPC failure is swallowed and prime continues for the rest.
 
-Estimated scope: ~150 LOC in `user-settings-do.ts` + tests, no API changes, no client changes (`session-local-collection.ts` consumes the same `session_status` frames whether they come from cache replay or live fanout).
+Estimated scope: ~30 LOC in `user-settings-do.ts` (changing one WHERE clause and adding messageSeq to the payload) + ~10 LOC in `session-do/http-routes.ts` (adding messageSeq to `/status` if not already there) + ~10 LOC in `session-local-collection.ts` to consume the new field + tests. Smaller than the rejected Option 1 by an order of magnitude because we're not adding state.
 
 ## Files to touch
 
 | File | Change |
 |---|---|
-| `apps/orchestrator/src/agents/user-settings-do.ts` | Add `statusCache` + `replayCacheToSocket`; mutate cache in `handleBroadcast`; replace `primeSessionStatusForSocket` call with replay |
-| `apps/orchestrator/src/agents/user-settings-do.fanout.test.ts` | New tests for cache mutation + replay on reconnect + LRU bound |
+| `apps/orchestrator/src/agents/user-settings-do.ts` | Replace D1 status filter with recency filter; thread `messageSeq` into prime payload |
+| `apps/orchestrator/src/agents/session-do/http-routes.ts` | Ensure `GET /status` returns `{status, messageSeq}` (verify current shape; extend if needed) |
+| `apps/orchestrator/src/db/session-local-collection.ts` | Read `messageSeq` from `session_status` frames into `sessionLocalCollection` |
+| `apps/orchestrator/src/agents/user-settings-do.fanout.test.ts` | Test the broader prime universe + messageSeq inclusion |
 | (optional Option 2 follow-up) `apps/orchestrator/src/agents/session-do/broadcast.ts` | New `broadcastGateToOwner`, `broadcastErrorToOwner` helpers |
-| (optional Option 2 follow-up) `apps/orchestrator/src/db/session-local-collection.ts` | Subscribe to new collections, write to local store |
 
 ## Open questions for the implementer
 
-1. **Cache vs D1 mirror coexistence**: should `sessionsCollection` (D1 mirror) keep updating `status` at result time, or is the cache so authoritative we can drop the D1 column entirely? (My read: keep D1 for cold-paint fallback before WS connects at all.)
-2. **Hibernation persistence — eager or lazy?** `ctx.storage.put` per mutation is one extra write per status transition. Lazy (debounced 5s flush) is fine because eviction during a transition is rare.
-3. **Prime universe after this change**: do we still need any D1 read on socket upgrade, or does the cache plus per-session WS first-frame fully cover cold-load?
-4. **Other collections** (`messageSeq` via `sessions`, gate state if Option 2 happens) — same cache, separate cache, or eagerly fold into `session_status` frames? (My read: extend `session_status` payload to `{id, status, messageSeq?}` and keep one cache.)
+1. **What's the right recency window for the prime?** 7 days is a guess. Too short and a returning user's 8-day-old `waiting_gate` session shows stale; too long and prime over-fans. The right answer might key off `agent_sessions.deletedAt IS NULL` plus a generous window like 30d.
+2. **Cap at 200 enough?** Today's cap, never hit in practice. A heavy user with many parallel sessions could in theory exceed it; consider chunking the prime into multiple frames if we ever see this.
+3. **Should `sessionsCollection` (D1 mirror) keep its `status` column?** Currently used as cold-paint fallback before any WS frame arrives. Probably yes — it's the only thing that paints before the user-stream connects at all.
+4. **messageSeq via prime or via sessions D1 mirror?** Both right now. Folding into the prime payload is cleaner because the user doesn't have to wait for both `sessions` and `session_status` deltas to arrive in the right order. Pick one source of truth for the indicator's input, prefer the prime.
 
 ## References
 
