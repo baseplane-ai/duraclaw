@@ -80,9 +80,20 @@ const ButtonShell = styled(View, {
       },
     },
     size: {
-      default: { height: 36, paddingHorizontal: 16, paddingVertical: 8 },
-      sm: { height: 32, paddingHorizontal: 12 },
-      lg: { height: 40, paddingHorizontal: 24 },
+      // GH#125 follow-up — minHeight not height; same specificity rationale
+      // as InputShell + the e5b4db4 sweep. Tamagui's atomic `_height-Npx`
+      // (specificity 0,2,0) beats Tailwind `h-auto` / `min-h-N` overrides
+      // (0,1,0 inside `:where()`), so consumers passing className overrides
+      // for vertical sizing got silently ignored. The visible regression
+      // was GateResolver's option-card buttons (size="sm" with multi-line
+      // title + description) clipping to 32px and overflowing into the
+      // question text above and the notes input below — the "jumbled" UI.
+      // Floor at the original height; let consumers grow.
+      default: { minHeight: 36, paddingHorizontal: 16, paddingVertical: 8 },
+      sm: { minHeight: 32, paddingHorizontal: 12 },
+      lg: { minHeight: 40, paddingHorizontal: 24 },
+      // `icon` stays fixed h+w — intentionally square hit-target, mirrors
+      // the SidebarMenuActionShell precedent in e5b4db4.
       icon: { height: 36, width: 36, paddingHorizontal: 0 },
     },
   } as const,
