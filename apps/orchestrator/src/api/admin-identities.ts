@@ -5,10 +5,17 @@
  * top-level `app.use('/api/*', authMiddleware)` runs first and populates
  * `c.get('role')`). Every handler asserts admin role; non-admin → 403.
  *
- * Validation rules (per spec B4):
- *   - name: non-empty string, must be unique
- *   - home_path: non-empty string
+ * Validation rules:
+ *   - name: matches `[A-Za-z0-9_-]{1,64}`, must be unique. The name is
+ *     also the leaf of the runner HOME path (`${IDENTITY_HOME_BASE}/${name}`)
+ *     so it cannot contain `/`, `..`, or shell-meaningful characters.
  *   - status: 'available' | 'cooldown' | 'disabled' (PUT only)
+ *
+ * GH#129: `home_path` was dropped — the HOME is derived at use time
+ * from `${IDENTITY_HOME_BASE}/${name}` so admins cannot drift the path
+ * away from the identity name. POST tolerates a stale `home_path` field
+ * for one release (silently ignored); PUT rejects `name` updates because
+ * renaming would orphan the existing HOME directory on the VPS.
  *
  * Unlike `codex_models` (where `id == name`), this table uses a
  * generated UUID for `id` (Drizzle `$defaultFn`). The admin POST does
@@ -28,13 +35,21 @@ function getDb(env: ApiAppEnv['Bindings']) {
 
 const VALID_STATUSES = new Set(['available', 'cooldown', 'disabled'])
 
+/** GH#129: identity names are also HOME-path leaves — restrict to a
+ *  filesystem-safe shape. Length cap mirrors the worst-case Linux
+ *  filename limit minus headroom for the `${base}/` prefix. */
+const NAME_RE = /^[A-Za-z0-9_-]{1,64}$/
+
 interface CreateBody {
   name?: unknown
+  /** @deprecated GH#129 — silently ignored; HOME is derived from name. */
   home_path?: unknown
 }
 
 interface UpdateBody {
+  /** GH#129 — rejected with 400 if present (name changes orphan HOME). */
   name?: unknown
+  /** @deprecated GH#129 — silently ignored. */
   home_path?: unknown
   status?: unknown
 }
@@ -63,12 +78,15 @@ export function adminIdentitiesRoutes() {
     if (!body || typeof body.name !== 'string' || body.name.trim() === '') {
       return c.json({ error: 'missing_required_field', field: 'name' }, 400)
     }
-    if (typeof body.home_path !== 'string' || body.home_path.trim() === '') {
-      return c.json({ error: 'missing_required_field', field: 'home_path' }, 400)
-    }
-
     const name = body.name.trim()
-    const homePath = body.home_path.trim()
+    // GH#129: name is also the HOME path leaf — enforce a filesystem-safe
+    // shape so the derived path can't escape `${IDENTITY_HOME_BASE}/`.
+    if (!NAME_RE.test(name)) {
+      return c.json({ error: 'invalid_name', detail: 'must match [A-Za-z0-9_-]{1,64}' }, 400)
+    }
+    // GH#129: `body.home_path` is silently ignored for one release so
+    // older admin clients don't break. Drop the field entirely after.
+
     const db = getDb(c.env)
 
     // Defensive uniqueness check (the UNIQUE index would also reject this).
@@ -88,7 +106,6 @@ export function adminIdentitiesRoutes() {
         .insert(runnerIdentities)
         .values({
           name,
-          homePath,
           status: 'available',
           createdAt: now,
           updatedAt: now,
@@ -131,19 +148,17 @@ export function adminIdentitiesRoutes() {
       return c.json({ error: 'not_found' }, 404)
     }
 
-    const updates: Partial<typeof runnerIdentities.$inferInsert> = {}
+    // GH#129: `name` is the HOME path leaf — renaming would orphan the
+    // physical HOME directory on the VPS. Reject any update that tries
+    // to change it. To rename an identity, delete + re-create after the
+    // operator has moved the underlying HOME directory.
     if (body.name !== undefined) {
-      if (typeof body.name !== 'string' || body.name.trim() === '') {
-        return c.json({ error: 'missing_required_field', field: 'name' }, 400)
-      }
-      updates.name = body.name.trim()
+      return c.json({ error: 'name_immutable' }, 400)
     }
-    if (body.home_path !== undefined) {
-      if (typeof body.home_path !== 'string' || body.home_path.trim() === '') {
-        return c.json({ error: 'missing_required_field', field: 'home_path' }, 400)
-      }
-      updates.homePath = body.home_path.trim()
-    }
+    // `body.home_path` is silently ignored — the column was dropped in
+    // migration 0030.
+
+    const updates: Partial<typeof runnerIdentities.$inferInsert> = {}
     if (body.status !== undefined) {
       if (typeof body.status !== 'string' || !VALID_STATUSES.has(body.status)) {
         return c.json({ error: 'invalid_status' }, 400)
@@ -158,7 +173,7 @@ export function adminIdentitiesRoutes() {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       if (/UNIQUE|constraint/i.test(msg)) {
-        return c.json({ error: 'duplicate_identity_name', name: updates.name }, 409)
+        return c.json({ error: 'duplicate_identity_name' }, 409)
       }
       throw err
     }

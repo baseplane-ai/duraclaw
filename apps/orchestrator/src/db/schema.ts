@@ -311,9 +311,14 @@ export const codexModels = sqliteTable('codex_models', {
  * Each row maps a logical identity name (e.g. `work1`) to a HOME
  * directory whose `.claude/.credentials.json` carries that identity's
  * auth. The DO picks one via LRU at `triggerGatewayDial` time and
- * passes the selected `home_path` to the gateway as `runner_home`; the
- * gateway sets `HOME` in the spawn env so the runner picks up the
- * identity-scoped credentials.
+ * passes the derived HOME to the gateway as `runner_home`; the gateway
+ * sets `HOME` in the spawn env so the runner picks up the identity-
+ * scoped credentials.
+ *
+ * GH#129: the HOME path is derived at use time as
+ * `${env.IDENTITY_HOME_BASE ?? '/srv/duraclaw/homes'}/${name}` rather
+ * than stored as an arbitrary admin-supplied string — eliminates the
+ * name-vs-path drift foot-gun and centralises the convention in env.
  *
  * Status: `'available'` (selectable), `'cooldown'` (temporarily
  * unavailable, expires lazily via `cooldown_until < datetime('now')`),
@@ -325,7 +330,6 @@ export const runnerIdentities = sqliteTable('runner_identities', {
     .primaryKey()
     .$defaultFn(() => crypto.randomUUID()),
   name: text('name').notNull().unique(),
-  homePath: text('home_path').notNull(),
   status: text('status').notNull().default('available'),
   cooldownUntil: text('cooldown_until'),
   lastUsedAt: text('last_used_at'),

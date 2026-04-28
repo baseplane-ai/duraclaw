@@ -193,18 +193,41 @@ export function sendToGateway(ctx: SessionDOContext, cmd: GatewayCommand): void 
  * `last_used_at IS NULL DESC` puts never-used identities first (they're
  * the most natural pick over an LRU sweep); after that ASC orders the
  * remainder by oldest-use-first.
+ *
+ * GH#129: `home_path` was dropped from the catalog — callers derive
+ * the HOME from `${IDENTITY_HOME_BASE}/${name}` instead.
  */
 export async function findAvailableIdentity(
   ctx: SessionDOContext,
-): Promise<{ id: string; name: string; home_path: string } | null> {
+): Promise<{ id: string; name: string } | null> {
   const row = await ctx.env.AUTH_DB.prepare(
-    `SELECT id, name, home_path FROM runner_identities
+    `SELECT id, name FROM runner_identities
        WHERE status = 'available'
          AND (cooldown_until IS NULL OR cooldown_until < datetime('now'))
        ORDER BY last_used_at IS NULL DESC, last_used_at ASC
        LIMIT 1`,
-  ).first<{ id: string; name: string; home_path: string }>()
+  ).first<{ id: string; name: string }>()
   return row ?? null
+}
+
+/**
+ * GH#129: default base directory that every runner identity's HOME
+ * lives under. Matches the convention used by `setup-identity.sh` and
+ * the prod cutover described in the GH#129 issue body. Override per
+ * deploy via the `IDENTITY_HOME_BASE` env binding.
+ */
+const DEFAULT_IDENTITY_HOME_BASE = '/srv/duraclaw/homes'
+
+/**
+ * GH#129: derive a runner HOME path from an identity name + the
+ * `IDENTITY_HOME_BASE` env binding. The trailing slash on the base is
+ * stripped so `${base}/${name}` always produces a single separator.
+ * The admin POST validator enforces a `[A-Za-z0-9_-]{1,64}` shape on
+ * `name`, so this concatenation cannot escape the base.
+ */
+export function deriveRunnerHome(base: string | undefined | null, name: string): string {
+  const trimmed = (base ?? DEFAULT_IDENTITY_HOME_BASE).replace(/\/+$/, '')
+  return `${trimmed}/${name}`
 }
 
 /**
@@ -231,7 +254,8 @@ export async function selectAndStampIdentity<C extends ExecuteCommand | ResumeCo
       return cmd
     }
 
-    const next = { ...cmd, runner_home: row.home_path }
+    const runnerHome = deriveRunnerHome(ctx.env.IDENTITY_HOME_BASE, row.name)
+    const next = { ...cmd, runner_home: runnerHome }
     try {
       await ctx.env.AUTH_DB.prepare(
         `UPDATE runner_identities
@@ -248,7 +272,7 @@ export async function selectAndStampIdentity<C extends ExecuteCommand | ResumeCo
     }
     ctx.logEvent('info', 'identity', `selected ${row.name}`, {
       identityId: row.id,
-      homePath: row.home_path,
+      homePath: runnerHome,
     })
     // Mirror onto the D1 `agent_sessions` row + broadcast so the UI
     // sees which identity owns the session. Failure here is swallowed

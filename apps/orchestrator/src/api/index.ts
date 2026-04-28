@@ -1084,7 +1084,7 @@ export function createApiApp() {
   // GH#119 P2: admin-only runner_identities CRUD. Same auth pattern as
   // codex-models. The DO reads this catalog on triggerGatewayDial and
   // selects an identity via LRU; the gateway sets HOME from the
-  // selected identity's home_path.
+  // derived path (`${IDENTITY_HOME_BASE}/${name}`, GH#129).
   app.route('/api/admin/identities', adminIdentitiesRoutes())
 
   // ── User settings (tabs) — direct D1 CRUD (B-API-2) ──────────────

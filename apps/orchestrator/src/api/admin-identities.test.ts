@@ -93,7 +93,6 @@ describe('GET /api/admin/identities', () => {
       {
         id: 'id-1',
         name: 'work1',
-        homePath: '/home/work1',
         status: 'available',
         cooldownUntil: null,
         lastUsedAt: null,
@@ -103,7 +102,6 @@ describe('GET /api/admin/identities', () => {
       {
         id: 'id-2',
         name: 'work2',
-        homePath: '/home/work2',
         status: 'cooldown',
         cooldownUntil: '2026-05-01T00:00:00.000Z',
         lastUsedAt: '2026-04-25T00:00:00.000Z',
@@ -148,7 +146,6 @@ describe('POST /api/admin/identities', () => {
     const inserted = {
       id: 'gen-uuid',
       name: 'work1',
-      homePath: '/home/work1',
       status: 'available',
       cooldownUntil: null,
       lastUsedAt: null,
@@ -165,7 +162,7 @@ describe('POST /api/admin/identities', () => {
     const res = await app.request('/api/admin/identities', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: 'work1', home_path: '/home/work1' }),
+      body: JSON.stringify({ name: 'work1' }),
     })
 
     expect(res.status).toBe(201)
@@ -181,7 +178,7 @@ describe('POST /api/admin/identities', () => {
     const res = await app.request('/api/admin/identities', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ home_path: '/home/work1' }),
+      body: JSON.stringify({}),
     })
 
     expect(res.status).toBe(400)
@@ -190,20 +187,55 @@ describe('POST /api/admin/identities', () => {
     expect(body.field).toBe('name')
   })
 
-  it('returns 400 when home_path is missing', async () => {
+  it('GH#129: silently ignores legacy home_path field on create', async () => {
+    asAdmin()
+    const inserted = {
+      id: 'gen-uuid',
+      name: 'work1',
+      status: 'available',
+      cooldownUntil: null,
+      lastUsedAt: null,
+      createdAt: '2026-04-26T00:00:00.000Z',
+      updatedAt: '2026-04-26T00:00:00.000Z',
+    }
+    fakeDb.data.queue = [[], [{ id: 'gen-uuid' }], [inserted]]
+
+    const app = makeApp(env)
+    // Older admin client still sends home_path — server must accept the
+    // create and silently drop the field for one release.
+    const res = await app.request('/api/admin/identities', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'work1', home_path: '/whatever/ignored' }),
+    })
+
+    expect(res.status).toBe(201)
+  })
+
+  it.each([
+    ['contains-slash', 'work/2'],
+    ['contains-dotdot', '..'],
+    ['leading-dot', '.work'],
+    ['empty-after-trim', '   '],
+    ['too-long', 'a'.repeat(65)],
+    ['shell-meta', 'work;rm'],
+    ['space', 'work 2'],
+  ])('GH#129: rejects invalid name %s with 400', async (_label, name) => {
     asAdmin()
 
     const app = makeApp(env)
     const res = await app.request('/api/admin/identities', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: 'work1' }),
+      body: JSON.stringify({ name }),
     })
 
     expect(res.status).toBe(400)
-    const body = (await res.json()) as { error: string; field: string }
-    expect(body.error).toBe('missing_required_field')
-    expect(body.field).toBe('home_path')
+    const body = (await res.json()) as { error: string; field?: string }
+    // Empty-after-trim is caught by the missing-name guard; everything
+    // else by the regex. Both surface a 400 with no DB writes.
+    expect(['invalid_name', 'missing_required_field']).toContain(body.error)
+    expect(fakeDb.db.insert).not.toHaveBeenCalled()
   })
 
   it('returns 409 when name is duplicate', async () => {
@@ -214,7 +246,7 @@ describe('POST /api/admin/identities', () => {
     const res = await app.request('/api/admin/identities', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: 'work1', home_path: '/home/work1' }),
+      body: JSON.stringify({ name: 'work1' }),
     })
 
     expect(res.status).toBe(409)
@@ -230,7 +262,7 @@ describe('POST /api/admin/identities', () => {
     const res = await app.request('/api/admin/identities', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: 'work1', home_path: '/home/work1' }),
+      body: JSON.stringify({ name: 'work1' }),
     })
 
     expect(res.status).toBe(403)
@@ -252,7 +284,6 @@ describe('PUT /api/admin/identities/:id', () => {
     const existing = {
       id: 'id-1',
       name: 'work1',
-      homePath: '/home/work1',
       status: 'available',
       cooldownUntil: null,
       lastUsedAt: null,
@@ -281,7 +312,6 @@ describe('PUT /api/admin/identities/:id', () => {
     const existing = {
       id: 'id-1',
       name: 'work1',
-      homePath: '/home/work1',
       status: 'available',
       cooldownUntil: null,
       lastUsedAt: null,
@@ -300,6 +330,32 @@ describe('PUT /api/admin/identities/:id', () => {
     expect(res.status).toBe(400)
     const body = (await res.json()) as { error: string }
     expect(body.error).toBe('invalid_status')
+    expect(fakeDb.db.update).not.toHaveBeenCalled()
+  })
+
+  it('GH#129: rejects PUT body with `name` field — would orphan the HOME directory', async () => {
+    asAdmin()
+    const existing = {
+      id: 'id-1',
+      name: 'work1',
+      status: 'available',
+      cooldownUntil: null,
+      lastUsedAt: null,
+      createdAt: '2026-04-26T00:00:00.000Z',
+      updatedAt: '2026-04-26T00:00:00.000Z',
+    }
+    fakeDb.data.queue = [[existing]]
+
+    const app = makeApp(env)
+    const res = await app.request('/api/admin/identities/id-1', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'renamed' }),
+    })
+
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toBe('name_immutable')
     expect(fakeDb.db.update).not.toHaveBeenCalled()
   })
 

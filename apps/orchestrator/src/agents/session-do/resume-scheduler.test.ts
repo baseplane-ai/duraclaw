@@ -153,7 +153,6 @@ describe('handleRateLimit', () => {
     vi.mocked(findAvailableIdentity).mockResolvedValue({
       id: 'id-w2',
       name: 'work2',
-      home_path: '/srv/runners/work2',
     })
 
     await handleRateLimit(ctx, makeRateLimitEvent('2099-01-01T00:00:00.000Z'))
@@ -214,7 +213,6 @@ describe('handleRateLimit', () => {
     vi.mocked(findAvailableIdentity).mockResolvedValue({
       id: 'id-w2',
       name: 'work2',
-      home_path: '/srv/runners/work2',
     })
 
     await handleRateLimit(ctx, makeRateLimitEvent())
@@ -235,7 +233,6 @@ describe('handleRateLimit', () => {
     vi.mocked(findAvailableIdentity).mockResolvedValue({
       id: 'id-w2',
       name: 'work2',
-      home_path: '/srv/runners/work2',
     })
 
     await handleRateLimit(ctx, makeRateLimitEvent('2000-01-01T00:00:00.000Z'))
@@ -308,7 +305,6 @@ describe('handleRateLimit', () => {
     vi.mocked(findAvailableIdentity).mockResolvedValue({
       id: 'id-w2',
       name: 'work2',
-      home_path: '/srv/runners/work2',
     })
 
     await handleRateLimit(ctx, makeRateLimitEvent('2099-01-01T00:00:00.000Z'), 'auth_error')
@@ -347,7 +343,6 @@ describe('checkWaitingIdentity', () => {
     vi.mocked(findAvailableIdentity).mockResolvedValue({
       id: 'id-w2',
       name: 'work2',
-      home_path: '/srv/runners/work2',
     })
 
     await checkWaitingIdentity(ctx)

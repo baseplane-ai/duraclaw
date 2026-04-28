@@ -278,7 +278,7 @@ export async function handleRateLimit(
  */
 async function findAvailableIdentityWithCatch(
   ctx: SessionDOContext,
-): Promise<{ id: string; name: string; home_path: string } | null> {
+): Promise<{ id: string; name: string } | null> {
   try {
     return await findAvailableIdentity(ctx)
   } catch (err) {

@@ -105,6 +105,14 @@ export interface Env {
    *  dial-back to RepoDocumentDO (B3). When unset, those bearer-paths
    *  reject with 401; cookie-authed browser callers still work. */
   DOCS_RUNNER_SECRET?: string
+  /** GH#129: base directory under which every runner identity's HOME
+   *  lives. The DO derives `runner_home` as `${IDENTITY_HOME_BASE}/${name}`
+   *  at spawn time and stamps it onto the gateway command. Defaults to
+   *  `/srv/duraclaw/homes` when unset (matches the GH#119 prod
+   *  convention); override via `wrangler secret put IDENTITY_HOME_BASE`
+   *  in prod or `apps/orchestrator/.dev.vars` for dev. The trailing
+   *  slash is stripped at derivation time. */
+  IDENTITY_HOME_BASE?: string
 }
 
 // ── D1 row response shapes (issue #7 p2) ───────────────────────────

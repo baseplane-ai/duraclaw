@@ -478,7 +478,6 @@ function ProjectsSection() {
 interface IdentityRow {
   id: string
   name: string
-  homePath: string
   status: 'available' | 'cooldown' | 'disabled' | string
   cooldownUntil: string | null
   lastUsedAt: string | null
@@ -560,7 +559,6 @@ function IdentitiesSection() {
   const [rows, setRows] = useState<IdentityRow[] | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [createName, setCreateName] = useState('')
-  const [createHome, setCreateHome] = useState('')
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
   const [pending, setPending] = useState<Set<string>>(new Set())
@@ -593,9 +591,8 @@ function IdentitiesSection() {
     async (e: React.FormEvent) => {
       e.preventDefault()
       const name = createName.trim()
-      const homePath = createHome.trim()
-      if (!name || !homePath) {
-        setCreateError('Both name and home path are required')
+      if (!name) {
+        setCreateError('Name is required')
         return
       }
       setCreating(true)
@@ -605,12 +602,13 @@ function IdentitiesSection() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
-          body: JSON.stringify({ name, home_path: homePath }),
+          body: JSON.stringify({ name }),
         })
         if (!resp.ok) {
           const body = (await resp.json().catch(() => null)) as {
             error?: string
             field?: string
+            detail?: string
           } | null
           const errCode = body?.error ?? `http_${resp.status}`
           const msg =
@@ -618,12 +616,13 @@ function IdentitiesSection() {
               ? `Identity "${name}" already exists`
               : errCode === 'missing_required_field'
                 ? `Missing required field: ${body?.field ?? 'unknown'}`
-                : errCode
+                : errCode === 'invalid_name'
+                  ? `Invalid name — ${body?.detail ?? 'must match [A-Za-z0-9_-]{1,64}'}`
+                  : errCode
           setCreateError(msg)
           return
         }
         setCreateName('')
-        setCreateHome('')
         await refresh()
       } catch (err) {
         setCreateError(err instanceof Error ? err.message : String(err))
@@ -631,7 +630,7 @@ function IdentitiesSection() {
         setCreating(false)
       }
     },
-    [createName, createHome, refresh],
+    [createName, refresh],
   )
 
   const markPending = useCallback((id: string, busy: boolean) => {
@@ -724,7 +723,7 @@ function IdentitiesSection() {
       <CardContent className="space-y-4">
         {/* Add form */}
         <form onSubmit={handleCreate} className="space-y-2 rounded-md border p-3">
-          <div className="grid gap-2 sm:grid-cols-[1fr_2fr_auto] sm:items-end">
+          <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-end">
             <div className="space-y-1">
               <Label htmlFor="identity-name" className="text-xs">
                 Name
@@ -736,20 +735,14 @@ function IdentitiesSection() {
                 onChange={(e) => setCreateName(e.target.value)}
                 disabled={creating}
               />
+              <p className="text-xs text-muted-foreground">
+                HOME directory is derived as{' '}
+                <span className="font-mono">{`<IDENTITY_HOME_BASE>/${createName.trim() || 'name'}`}</span>
+                . Allowed characters: <span className="font-mono">[A-Za-z0-9_-]</span>, max 64
+                chars.
+              </p>
             </div>
-            <div className="space-y-1">
-              <Label htmlFor="identity-home" className="text-xs">
-                Home path
-              </Label>
-              <Input
-                id="identity-home"
-                placeholder="/srv/duraclaw/homes/work2"
-                value={createHome}
-                onChange={(e) => setCreateHome(e.target.value)}
-                disabled={creating}
-              />
-            </div>
-            <Button type="submit" disabled={creating || !createName.trim() || !createHome.trim()}>
+            <Button type="submit" disabled={creating || !createName.trim()}>
               {creating ? 'Adding…' : 'Add identity'}
             </Button>
           </div>
@@ -799,7 +792,6 @@ function IdentitiesSection() {
                     </div>
                   </div>
                   <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
-                    <span className="truncate font-mono">{row.homePath}</span>
                     {lastUsed && <span>last used {lastUsed}</span>}
                   </div>
                   {err && <p className="text-xs text-destructive">{err}</p>}

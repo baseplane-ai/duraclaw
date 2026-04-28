@@ -77,10 +77,10 @@ function makeFakeD1(): FakeD1 {
   return fake
 }
 
-function makeCtx(d1: FakeD1) {
+function makeCtx(d1: FakeD1, identityHomeBase?: string) {
   const logEvent = vi.fn()
   const ctx = {
-    env: { AUTH_DB: d1 },
+    env: { AUTH_DB: d1, IDENTITY_HOME_BASE: identityHomeBase },
     logEvent,
     ctx: { id: { toString: () => 'do-id-x' } },
   } as unknown as SessionDOContext
@@ -98,31 +98,41 @@ describe('selectAndStampIdentity', () => {
     vi.mocked(syncIdentityNameToD1).mockClear()
   })
 
-  it('stamps runner_home from the LRU row D1 returns', async () => {
+  it('derives runner_home from IDENTITY_HOME_BASE + the LRU row name', async () => {
     const d1 = makeFakeD1()
-    d1.firstQueue.push({ id: 'id-1', name: 'work1', home_path: '/home/work1' })
-    const { ctx } = makeCtx(d1)
+    d1.firstQueue.push({ id: 'id-1', name: 'work1' })
+    const { ctx } = makeCtx(d1, '/srv/runners')
 
     const next = await selectAndStampIdentity(ctx, { ...baseCmd })
 
-    expect(next.runner_home).toBe('/home/work1')
+    expect(next.runner_home).toBe('/srv/runners/work1')
     // Query asserts cooldown filter syntax — light sanity check that the
     // helper hit the right SQL, but the real coverage lives in the
     // migration / a future D1 integration test.
     expect(d1.calls[0].sql).toContain('cooldown_until < datetime')
     expect(d1.calls[0].sql).toContain("status = 'available'")
+    // GH#129: the SELECT must NOT pull the dropped home_path column.
+    expect(d1.calls[0].sql).not.toContain('home_path')
   })
 
-  it('returns the row D1 hands back regardless of cooldown filtering', async () => {
-    // Cooldown filtering happens in SQL — this test pretends D1 already
-    // skipped the cooldown row and returned the only available identity.
+  it('falls back to /srv/duraclaw/homes when IDENTITY_HOME_BASE is unset', async () => {
     const d1 = makeFakeD1()
-    d1.firstQueue.push({ id: 'id-2', name: 'work2', home_path: '/home/work2' })
-    const { ctx } = makeCtx(d1)
+    d1.firstQueue.push({ id: 'id-2', name: 'work2' })
+    const { ctx } = makeCtx(d1) // no IDENTITY_HOME_BASE
 
     const next = await selectAndStampIdentity(ctx, { ...baseCmd })
 
-    expect(next.runner_home).toBe('/home/work2')
+    expect(next.runner_home).toBe('/srv/duraclaw/homes/work2')
+  })
+
+  it('strips a trailing slash from IDENTITY_HOME_BASE', async () => {
+    const d1 = makeFakeD1()
+    d1.firstQueue.push({ id: 'id-3', name: 'work3' })
+    const { ctx } = makeCtx(d1, '/srv/runners/')
+
+    const next = await selectAndStampIdentity(ctx, { ...baseCmd })
+
+    expect(next.runner_home).toBe('/srv/runners/work3')
   })
 
   it('uses an expired-cooldown row that D1 returns (lazy expiry)', async () => {
@@ -130,12 +140,12 @@ describe('selectAndStampIdentity', () => {
     // The helper just consumes whatever D1 hands it — assert no extra
     // client-side filtering layered on top.
     const d1 = makeFakeD1()
-    d1.firstQueue.push({ id: 'id-expired', name: 'expired', home_path: '/home/expired' })
-    const { ctx } = makeCtx(d1)
+    d1.firstQueue.push({ id: 'id-expired', name: 'expired' })
+    const { ctx } = makeCtx(d1, '/srv/runners')
 
     const next = await selectAndStampIdentity(ctx, { ...baseCmd })
 
-    expect(next.runner_home).toBe('/home/expired')
+    expect(next.runner_home).toBe('/srv/runners/expired')
   })
 
   it('returns cmd unchanged when D1 has zero identities', async () => {
@@ -179,8 +189,8 @@ describe('selectAndStampIdentity', () => {
 
   it('issues UPDATE last_used_at after a successful selection', async () => {
     const d1 = makeFakeD1()
-    d1.firstQueue.push({ id: 'id-1', name: 'work1', home_path: '/home/work1' })
-    const { ctx } = makeCtx(d1)
+    d1.firstQueue.push({ id: 'id-1', name: 'work1' })
+    const { ctx } = makeCtx(d1, '/srv/runners')
 
     await selectAndStampIdentity(ctx, { ...baseCmd })
 
@@ -194,14 +204,14 @@ describe('selectAndStampIdentity', () => {
 
   it('logs a warn but does not fail the spawn when UPDATE last_used_at throws', async () => {
     const d1 = makeFakeD1()
-    d1.firstQueue.push({ id: 'id-1', name: 'work1', home_path: '/home/work1' })
+    d1.firstQueue.push({ id: 'id-1', name: 'work1' })
     d1.runThrows.push(new Error('UPDATE failed'))
-    const { ctx, logEvent } = makeCtx(d1)
+    const { ctx, logEvent } = makeCtx(d1, '/srv/runners')
 
     const next = await selectAndStampIdentity(ctx, { ...baseCmd })
 
     // runner_home still stamped — the inner UPDATE failure is non-fatal.
-    expect(next.runner_home).toBe('/home/work1')
+    expect(next.runner_home).toBe('/srv/runners/work1')
     expect(logEvent).toHaveBeenCalledWith(
       'warn',
       'identity',
@@ -212,8 +222,8 @@ describe('selectAndStampIdentity', () => {
 
   it('mirrors the selected identity name to D1 via syncIdentityNameToD1', async () => {
     const d1 = makeFakeD1()
-    d1.firstQueue.push({ id: 'id-1', name: 'work1', home_path: '/home/work1' })
-    const { ctx } = makeCtx(d1)
+    d1.firstQueue.push({ id: 'id-1', name: 'work1' })
+    const { ctx } = makeCtx(d1, '/srv/runners')
 
     await selectAndStampIdentity(ctx, { ...baseCmd })
 
@@ -221,10 +231,10 @@ describe('selectAndStampIdentity', () => {
     expect(syncIdentityNameToD1).toHaveBeenCalledWith(ctx, 'work1', expect.any(String))
   })
 
-  it('logs the selected identity name at info level', async () => {
+  it('logs the selected identity name at info level with the derived HOME', async () => {
     const d1 = makeFakeD1()
-    d1.firstQueue.push({ id: 'id-1', name: 'work1', home_path: '/home/work1' })
-    const { ctx, logEvent } = makeCtx(d1)
+    d1.firstQueue.push({ id: 'id-1', name: 'work1' })
+    const { ctx, logEvent } = makeCtx(d1, '/srv/runners')
 
     await selectAndStampIdentity(ctx, { ...baseCmd })
 
@@ -232,7 +242,7 @@ describe('selectAndStampIdentity', () => {
       'info',
       'identity',
       'selected work1',
-      expect.objectContaining({ identityId: 'id-1', homePath: '/home/work1' }),
+      expect.objectContaining({ identityId: 'id-1', homePath: '/srv/runners/work1' }),
     )
   })
 })

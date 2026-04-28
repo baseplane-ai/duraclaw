@@ -140,13 +140,19 @@ load the transcript from DO SQLite (no message loss).
 
 ### Adding an identity
 
-1. Run `scripts/setup-identity.sh --name work2 --home /srv/duraclaw/homes/work2`.
-2. Authenticate the new HOME: `HOME=/srv/duraclaw/homes/work2 claude /login`.
+The HOME path is derived as `${IDENTITY_HOME_BASE}/${name}` (default
+base: `/srv/duraclaw/homes`; override per-deploy via `wrangler secret
+put IDENTITY_HOME_BASE` in prod or `apps/orchestrator/.dev.vars` for
+dev). Names must match `[A-Za-z0-9_-]{1,64}`.
+
+1. Run `scripts/setup-identity.sh --name work2`. The script computes
+   the HOME as `${IDENTITY_HOME_BASE}/work2` and creates the skeleton.
+2. Authenticate the new HOME: `HOME=$IDENTITY_HOME_BASE/work2 claude /login`.
 3. Register: re-run the script with `--register`, or POST manually:
    ```bash
    curl -X POST ${ORCH_URL}/api/admin/identities \
      -H "Cookie: <admin session>" \
-     -d '{"name":"work2","home_path":"/srv/duraclaw/homes/work2"}'
+     -d '{"name":"work2"}'
    ```
 4. Verify in Settings > Identities.
 

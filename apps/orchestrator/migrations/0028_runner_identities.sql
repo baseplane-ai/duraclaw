@@ -2,9 +2,15 @@
 -- identities. Each row maps an identity name (e.g. 'work1') to a HOME
 -- directory containing isolated Claude auth (~/.claude/.credentials.json
 -- per identity). The DO selects an available identity via LRU at
--- triggerGatewayDial time and passes the selected home_path to the
--- gateway as `runner_home`; the gateway sets HOME in the spawn env so
--- the runner picks up the identity-scoped credentials.
+-- triggerGatewayDial time and passes a derived HOME path to the gateway
+-- as `runner_home`; the gateway sets HOME in the spawn env so the
+-- runner picks up the identity-scoped credentials.
+--
+-- NOTE: the `home_path` column declared below is dropped by migration
+-- 0030 (GH#129) — the HOME is now derived as `${IDENTITY_HOME_BASE}/${name}`
+-- at use time. The column is retained in this migration for replay
+-- correctness; fresh-bootstrap installs run 0028 → 0030 and end up with
+-- the post-0030 schema.
 --
 -- Status values:
 --   'available'  — selectable by LRU
