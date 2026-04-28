@@ -11,9 +11,59 @@ items_researched: 8
 
 ## Context
 
-Duraclaw orchestrates Claude Code sessions across CF Workers + Durable Objects + a VPS gateway/runner system. Today the product is single-user-shaped: every resource is owned by one `userId`, there's a binary `user`/`admin` role, an `audit_log` table sits empty, the Claude SDK's per-tool permission API is unused, cache tokens are discarded, and there's no metrics/traces/RUM anywhere. To serve "enterprise" — defined by the asker as **anything from a 3-person team to a 200-person engineering department** — we need three new pillars working together: multi-tenant permissions, per-(org, user, key, model) usage tracking with quotas, and ops-grade observability.
+Duraclaw orchestrates Claude Code sessions across CF Workers + Durable Objects + a VPS gateway/runner system. Today the product is single-user-shaped: every resource is owned by one `userId`, there's a binary `user`/`admin` role, an `audit_log` table sits empty, the Claude SDK's per-tool permission API is unused, cache tokens are discarded, and there's no metrics/traces/RUM anywhere. To serve "enterprise" — defined by the asker as **anything from a 3-person team to a 200-person engineering department** — we need three new pillars working together: multi-tenant permissions, per-(org, user, identity, model) usage tracking with quotas, and ops-grade observability.
 
 This research scopes the work, evaluates the library/architecture options for each pillar, and produces a unified phased roadmap.
+
+## Critical assumption — the per-identity HOME model
+
+**Duraclaw already runs per-identity HOME-rooted authentication, not shared API keys.** Each "identity" (`work1`, `work2`, `personal`, etc.) maps to an isolated `HOME=${IDENTITY_HOME_BASE}/${name}` directory containing its own `~/.claude/.credentials.json`. The DO selects an available identity via LRU at spawn time and the gateway sets `HOME=<runner_home>` in the runner's process env so the SDK picks up the identity-scoped auth (CLAUDE.md:130-150, `scripts/setup-identity.sh`, issue #134).
+
+**This collapses several would-be features the research originally treated as separate pillars:**
+
+| Question | What this means with HOME-identity model |
+|---|---|
+| "Where do shared API keys live?" | **There are no shared keys.** Each identity is its own Anthropic account/billing entity. |
+| "How do we rotate keys on rate-limit?" | **Already solved** — DO picks next available identity from LRU pool with cooldown. CAAM (spec #92) IS this mechanism, just at the HOME level. |
+| "BYO-key vs shared-key?" | **BYO-identity is the default.** A customer simply authenticates their own Claude account at their org's HOME. |
+| "Who pays Anthropic?" | **The customer does, directly.** We don't multiplex their tokens across our key. We're the orchestration layer, not the billing intermediary. |
+| "How do we enforce a per-org USD hard cap?" | **We can't, structurally** — their Anthropic bill is on their account. Caps become *visibility + warning* (soft caps), not blocking. Concurrent-session caps remain (VPS resource fairness). |
+| "Do we need a `KeyDispatcherDO` for fairness across runners?" | **No** — identity LRU already does this. |
+| "Do we need Stripe Metering for token-based billing?" | **Optional** — we charge for the Duraclaw layer (orchestration, sessions, dashboards, multiplayer), not for Claude tokens passed through. Per-seat or flat-tier billing is simpler and matches reality. |
+
+**What still matters about usage tracking:**
+- Per-(org, user, identity, model, session) **token visibility** — so org admins can see team usage trends and attribute cost back to people/projects, even though Duraclaw isn't billing them for those tokens.
+- **Concurrent-session caps** — VPS resource fairness (how many parallel SDK processes does this org's identities support?).
+- **Soft-cap email warnings** — "your team is on track to spend $X on Anthropic this month" — derived from aggregated `total_cost_usd` from SDK ResultEvents.
+- **Cache token capture** — still important for accurate visibility, even if we don't bill for it.
+- **Audit attribution** — log which identity was used for each session (already happens, just needs surfacing).
+
+**The findings below are written as the original 8 deep-dives produced them; the schema and phasing sections incorporate the HOME-identity simplification. Where an agent recommended a `claude_key_id` + `keyOwner` shape, the corrected ledger uses `claude_identity_name` (singular, derived from the spawn-time identity pick).**
+
+## Critical assumption — dual deployment model (self-hosted + hosted)
+
+**Most orgs will self-host Duraclaw on their own infrastructure.** A managed/hosted SaaS option exists for orgs that don't want to operate the stack themselves. Both modes use the same HOME-identity authentication model — customers always BYO Claude credentials at the identity HOME.
+
+| Aspect | Self-hosted (default) | Hosted |
+|---|---|---|
+| **CF Workers account** | Customer's | Ours |
+| **VPS** | Customer's | Ours |
+| **Anthropic credentials** | Customer's (mounted at identity HOMEs) | Customer's (mounted at identity HOMEs) |
+| **D1 / DO storage** | Customer's CF account | Our CF account, isolated by `org_id` |
+| **Observability stack** | Customer self-hosts OTEL/Loki/Tempo on their VPS | We run the OTEL stack on our VPS pool |
+| **SSO IdP integration** | Customer plugs in their own IdP via Better Auth | We offer WorkOS-backed SSO as a paid add-on |
+| **Audit log** | Customer's D1 | Ours; export-on-request for compliance handoff |
+| **Billing model** | Per-seat license or open-core | Per-seat hosted subscription (no token markup) |
+| **Token-based billing (Stripe Metering)** | N/A | **Not pursued** — customers retain direct Anthropic relationship; we charge for the orchestration layer only |
+| **Tenant isolation** | Trivial (single tenant) | `org_id` foreign key on every table; DO IDs per-org-namespaced; row-level filters in every query |
+
+**Implications for the rest of the research:**
+
+- **OTEL self-host wins doubly** — it's also what self-hosting customers will run on their own VPS. Same emitter code, swap the export destination. (CF-native and managed APM both fail this portability test.)
+- **The org/team data model and RBAC system must work identically in both modes.** No shortcuts that assume our infrastructure (e.g., we can't put Better Auth's session cache in our Redis — it has to work with just the customer's CF account).
+- **Documentation effort for self-hosted becomes a Phase deliverable** — `setup-identity.sh`, deployment guide, observability bring-up runbook. The spec/research already documents most of it (CLAUDE.md, deployment.md, worktree-setup.md).
+- **Hosted-mode multi-tenant isolation** is the new hardest test — every D1 query, every DO RPC, every Logpush export must be `org_id`-scoped. The default-deny pattern from agent #2's L1-L4 enforcement covers this if we add tenant filters at L1 and never trust client-supplied `org_id`.
+- **Hosted-mode pricing** is a per-seat / flat-tier subscription, not per-token. We don't sit between customer and Anthropic on tokens. (Even if a customer prefers we manage their Claude auth, that's a "managed identity" service add-on, not the default.)
 
 ## Scope
 
@@ -278,8 +328,7 @@ export const usageLedger = sqliteTable('usage_ledger', {
   userId: text('user_id').notNull(),
   sessionId: text('session_id').notNull(),
   runnerSessionId: text('runner_session_id'),
-  claudeKeyId: text('claude_key_id'),              // CAAM key registry
-  keyOwner: text('key_owner'),                     // 'user' | 'org' | 'platform'
+  claudeIdentityName: text('claude_identity_name'),  // HOME-identity name, e.g. 'acme-corp', 'work1'
   model: text('model').notNull(),
   provider: text('provider').notNull(),            // 'anthropic' | 'openai' | 'gemini'
   turnSeq: integer('turn_seq').notNull(),
@@ -297,7 +346,7 @@ export const usageLedger = sqliteTable('usage_ledger', {
   orgStarted: index('idx_usage_ledger_org_started').on(t.orgId, t.startedAt),
   userStarted: index('idx_usage_ledger_user_started').on(t.userId, t.startedAt),
   sessionId: index('idx_usage_ledger_session_id').on(t.sessionId),
-  keyStarted: index('idx_usage_ledger_claude_key_id_started').on(t.claudeKeyId, t.startedAt),
+  identityStarted: index('idx_usage_ledger_identity_started').on(t.claudeIdentityName, t.startedAt),
 }))
 
 export const modelPricing = sqliteTable('model_pricing', { /* model, provider, *_per_mtok, effective_from/to */ })
@@ -338,24 +387,24 @@ Without this, every cost number is wrong by 25–90% (cache reads are 90% cheape
 4. Queue consumer writes to D1 with retry + idempotency on `(sessionId, turnSeq)`.
 5. Same writer upserts daily rollup tables (`usage_daily_org`, `usage_daily_user`) for fast dashboards.
 
-**BYO-key vs shared-key:** `keyOwner='user'` lifts org/shared-key TPM gates but keeps concurrent-session caps. Detected via `user_preferences.anthropic_api_key` presence.
+**Identity attribution:** `claude_identity_name` is the HOME-identity selected at spawn. The DO already knows which identity it picked from the LRU pool — the ledger writer just stamps it. No "key registry" table needed; identities are configured via `setup-identity.sh` and registered in the orchestrator's identity binding (issue #134).
 
-**Stripe Metering bridge (Phase 6):** ledger rows are meter events. After D1 insert, optionally `stripe.billing.meterEvents.create({event_name, customer, value, timestamp, identifier: row.id})`. Add `users.stripe_customer_id`.
+**Billing model implication:** Customers authenticate their own Claude account at their identity's HOME. Anthropic bills them directly. The ledger is **visibility-only** for cost — useful for the org admin's dashboard ("your team used $1,200 of Anthropic spend this month, here's the breakdown") but not a billing input for Duraclaw. Duraclaw can charge per-seat or flat-tier for the orchestration layer; Stripe Metering is **not required** for the v1 enterprise story.
 
 ---
 
 ### 6. Quota & rate-limit enforcement
 
-**Recommendation: layered quotas with pre-spawn DO gate + live overage watchdog. Defer `OrgQuotaDO` and `KeyDispatcherDO` until v2/v3.**
+**Recommendation (revised for HOME-identity model): layered quotas with pre-spawn DO gate + live overage watchdog. Drop `KeyDispatcherDO` and shared-key TPM fairness — identity LRU + cooldown already handles rate-limit spillover. Per-org/user USD caps shift from "hard block at 100%" to "soft warning + UI banner" (we cannot block the customer's own Anthropic bill).**
 
 **Quota types:**
 
 | Type | Scope | Where enforced | Hard/soft | Default |
 |---|---|---|---|---|
-| Per-org monthly USD | org | DO `spawnImpl` pre-flight | hard @ 100%, soft @ 80% email | $500/mo |
-| Per-user daily USD | user | DO `spawnImpl` + per-turn check | hard @ 100%, soft @ 80% | $50/day |
-| Concurrent active sessions | org / user | DO `spawnImpl` (D1 count) | hard | 10/org, 3/user |
-| Tokens-per-minute per key | CAAM key | gateway `/sessions/start` (Phase 2) | hard, queue | 400K TPM |
+| Per-org monthly Anthropic spend (visibility) | org | dashboard + email warnings | **soft only** — surface "you're at 80% of your team target" | $500/mo target |
+| Per-user daily Anthropic spend (visibility) | user | dashboard + email warnings | **soft only** | $50/day target |
+| Concurrent active sessions | org / user | DO `spawnImpl` (D1 count) | **hard** — VPS resource fairness | 10/org, 3/user |
+| Identity rate-limit / cooldown | identity | DO identity-pick LRU (already implemented) | implicit — just pick another identity | per-identity Anthropic limits |
 | Tools per session | session | runner local counter + DO interrupt | hard | 50 |
 
 **Pre-spawn budget gate:**
@@ -503,18 +552,21 @@ export const Route = createFileRoute('/_authenticated/admin')({
 
 | # | Decision | Rationale |
 |---|---|---|
+| 0 | **Per-identity HOME is the auth model** (not shared API keys) | Already in production; eliminates KeyDispatcherDO, Stripe Metering, BYO-vs-shared distinction |
+| 0a | **Dual deployment: self-hosted (default) + hosted (option)** | Most orgs run their own; same code, same OTEL emitters, same auth flow; only the hosting target differs |
 | 1 | **Personal-org pattern** (GitHub/Vercel) | Zero breaking changes for existing users, every row has `org_id` from day 1 |
 | 2 | **Better Auth Organization plugin** (use it) | Schema concerns are overstated; saves invite/role plumbing; ships audit hooks |
 | 3 | **Layered enforcement (L1-L4)** | Defense in depth; SDK `canUseTool` is the missing layer |
 | 4 | **Capture cache tokens NOW** | ~10 LOC fix; without it, all cost data is wrong by 25–90% |
-| 5 | **Build usage ledger** (not Anthropic Admin API) | Need session/user/turn granularity for quotas + dashboards |
-| 6 | **Stay in SessionDO for v1 quotas** | Defer `OrgQuotaDO` / `KeyDispatcherDO` until CAAM ships multi-key |
-| 7 | **OTEL self-host on VPS** | Cross-runtime traces (Worker→DO→VPS→Claude) are the unique pain |
+| 5 | **Build usage ledger** (not Anthropic Admin API) | Need session/user/turn granularity for visibility dashboards; cost is for *visibility*, not billing |
+| 6 | **Stay in SessionDO for v1 quotas** | Concurrent-session caps are the only hard quota; soft caps are dashboards |
+| 7 | **OTEL self-host on VPS** | Same stack runs in self-hosted customer deployments — portability is a feature |
 | 8 | **Keep `event_log`, augment with Logpush** | Local SQLite is fast + durable; don't replace |
 | 9 | **Tag-based audit promotion** | Decouples ephemeral debug logs from compliance trail |
 | 10 | **Defer SSO until first enterprise asks** | WorkOS is 2-3 day integration when needed; not worth speculative build |
 | 11 | **Recharts + TanStack Table** | Smallest bundle, best accessibility, composable with Radix |
 | 12 | **Runtime org_role in session JWT + DO 60s cache** | Sub-2ms permission eval without per-request D1 hop |
+| 13 | **No token-based billing** (in either deployment mode) | Customers pay Anthropic directly via their own identity HOME credentials; Duraclaw charges for the orchestration layer (per-seat or flat tier) |
 
 ## Phased roadmap — ~10–12 weeks total
 
@@ -567,27 +619,31 @@ export const Route = createFileRoute('/_authenticated/admin')({
 - Better Auth 2FA plugin (TOTP + backup codes)
 
 ### Phase 6 — Deferred (customer-demand triggered)
-- WorkOS SAML/SCIM integration (2-3 days when needed)
-- Stripe Metering bridge for usage-based billing
+- **Self-hosted deployment guide + tooling** — one-command deploy script (CF Worker + VPS gateway + identity HOME bootstrap), runbook for observability stack, upgrade procedure
+- **Hosted-mode tenant isolation hardening** — DO ID namespacing per-org, default-deny query helpers, isolation regression tests
+- WorkOS SAML/SCIM integration (2-3 days when needed; offered to both modes — self-hosted plugs in their config, hosted offers it as a paid add-on)
 - R2 cold archive for `audit_log` (Parquet weekly export)
 - Hash-chain audit immutability
-- `OrgQuotaDO` + `KeyDispatcherDO` for token-bucket fairness across CAAM keys
+- `OrgQuotaDO` if per-org-aggregate counters become a hot path under load
 - Per-project quotas
 - Live-tail audit log via synced-collections
-- BYO-key support (per-user Anthropic key)
+- **Managed-identity service** (hosted only, opt-in) — for customers who want us to manage their Claude auth instead of mounting their own. Implies CAAM-style key rotation re-emerging in a narrower form.
+- ~~Stripe Metering bridge~~ — explicitly **not pursued**; we don't bill on tokens in either mode
 
 ## Open questions
 
-1. **CAAM `org_id` plumbing — does spec #92 already populate `ctx.state.org_id` on session spawn?** Ledger writer needs it on day 1 of Phase 3. Verify before starting that phase.
+1. **Identity ↔ org binding** — does each org map to exactly one identity HOME, or a pool of N? (Pool gives failover but multiplies setup-identity.sh runs.) How does the DO's existing LRU pick interact with org-scoped identity selection — only pick from identities owned by the spawning org?
 2. **Codex/Gemini cache-token availability — do those SDKs emit cache token counts?** If not, cost computation needs a graceful "no cache data" path. Affects Phase 3.
-3. **Pricing table seed strategy** — Anthropic published rates as defaults, or admin sets markup from day 1? Affects Phase 3 admin UI.
-4. **Multi-tenant in CF Workers without per-tenant DOs** — does our DO model still work if one org has 50 concurrent sessions? Verify D1 row-count growth doesn't degrade `usage_daily_org` aggregation queries past 1M rows.
+3. **Hosted-mode tenant isolation in DOs** — DO IDs are stable identifiers; is `${orgId}:${sessionId}` safe as the DO ID, or do we need org-namespaced DO classes? Affects Phase 1 schema decision.
+4. **D1 row-count growth in hosted mode** — at, say, 100 orgs × 1000 sessions/month × 10 turns/session = 1M ledger rows/month. Verify `usage_daily_org` aggregation queries stay sub-100ms past 10M rows; if not, periodic compaction.
 5. **Audit log immutability bar** — do we need hash-chain in v1 for paranoia tier or defer to Phase 6? Decision affects Phase 2 schema.
 6. **Better Auth Organization plugin schema — exact column-name overlap with our existing `organizations`/`organization_members` Drizzle definitions?** Need to confirm before Phase 1 to avoid migration churn.
 7. **Tool-level policy granularity** — flat `allowed_tools[]` per role, or per-tool conditions (e.g., "Bash allowed but only without sudo")? Phase 5 design depends on this.
-8. **Grafana RBAC at scale** — single Grafana instance for all orgs, or per-org? Affects Phase 4 ops model. (Recommend single + label-based isolation for v1.)
+8. **Grafana RBAC at scale (hosted mode)** — single Grafana instance for all orgs, or per-org? Affects Phase 4 ops model. (Recommend single + label-based isolation for v1.)
 9. **Orphan personal-orgs on user deletion** — delete cascade, soft-delete-and-archive, or transfer-to-co-owner? Policy decision for Phase 1.
-10. **Reaper / system actions in audit log** — `actor_type='system'` covers it, but who's the `actor_user_id` for a CAAM key rotation triggered by a 429? Probably `null`. Confirm in Phase 2.
+10. **System actions in audit log** — `actor_type='system'` covers it, but who's the `actor_user_id` for an identity-pool rotation triggered by a 429? Probably `null`. Confirm in Phase 2.
+11. **Self-hosted deployment artifact format** — is the goal a one-command deploy script, a Helm chart, a Terraform module, a Docker Compose for the VPS layer, or all of the above? Affects Phase 6 scope.
+12. **Hosted-mode billing model** — flat per-seat/month, tiered (Free/Team/Enterprise), or usage-based on something we control (sessions/day, concurrent runners)? We're explicitly *not* billing on Anthropic tokens.
 
 ## Next steps
 
