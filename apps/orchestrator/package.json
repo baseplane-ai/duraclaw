@@ -60,6 +60,8 @@
     "@radix-ui/react-tooltip": "^1.2.8",
     "@react-spring/web": "^10.0.3",
     "@tailwindcss/vite": "^4.2.2",
+    "@tamagui/core": "2.0.0-rc.41",
+    "@tamagui/font-inter": "2.0.0-rc.41",
     "@tanstack/browser-db-sqlite-persistence": "0.1.8",
     "@tanstack/capacitor-db-sqlite-persistence": "0.1.9",
     "@tanstack/db": "0.6.4",
@@ -106,6 +108,7 @@
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.31.0",
     "@cloudflare/workers-types": "^4.20260403.1",
+    "@tamagui/vite-plugin": "2.0.0-rc.41",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.2",
     "@types/react": "^19.2.14",

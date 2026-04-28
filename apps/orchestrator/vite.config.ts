@@ -1,5 +1,6 @@
 import path from 'node:path'
 import { cloudflare } from '@cloudflare/vite-plugin'
+import { tamaguiPlugin } from '@tamagui/vite-plugin'
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 import agents from 'agents/vite'
@@ -96,6 +97,12 @@ export default defineConfig({
     }),
     buildHashPlugin(),
     cloudflare(),
+    tamaguiPlugin({
+      config: './src/tamagui.config.ts',
+      components: ['@tamagui/core'],
+      // P0 spike: runtime only. P1b will flip to extract: true.
+      extract: false,
+    }),
     react(),
     tailwindcss(),
   ],

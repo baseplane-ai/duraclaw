@@ -1,11 +1,14 @@
+import { TamaguiProvider } from '@tamagui/core'
 import { createRootRoute, Outlet, useLocation, useNavigate } from '@tanstack/react-router'
 import { useEffect } from 'react'
+import { TamaguiHello } from '~/components/tamagui-hello'
 import { Toaster } from '~/components/ui/sonner'
 import { ThemeProvider } from '~/context/theme-provider'
 import { setUserStreamIdentity } from '~/hooks/use-user-stream'
 import { useSession } from '~/lib/auth-client'
 import { connectionManager } from '~/lib/connection-manager/manager'
 import { NowProvider } from '~/lib/use-now'
+import { tamaguiConfig } from '~/tamagui.config'
 import '~/styles.css'
 
 export const Route = createRootRoute({
@@ -62,20 +65,25 @@ function RootComponent() {
 
   if (isPending && !isLogin) {
     return (
-      <ThemeProvider>
-        <div className="flex min-h-svh items-center justify-center text-sm text-muted-foreground">
-          Loading session…
-        </div>
-      </ThemeProvider>
+      <TamaguiProvider config={tamaguiConfig} defaultTheme="light">
+        <ThemeProvider>
+          <div className="flex min-h-svh items-center justify-center text-sm text-muted-foreground">
+            Loading session…
+          </div>
+        </ThemeProvider>
+      </TamaguiProvider>
     )
   }
 
   return (
-    <ThemeProvider>
-      <NowProvider>
-        <Outlet />
-        <Toaster duration={5000} />
-      </NowProvider>
-    </ThemeProvider>
+    <TamaguiProvider config={tamaguiConfig} defaultTheme="light">
+      <ThemeProvider>
+        <NowProvider>
+          <TamaguiHello />
+          <Outlet />
+          <Toaster duration={5000} />
+        </NowProvider>
+      </ThemeProvider>
+    </TamaguiProvider>
   )
 }
