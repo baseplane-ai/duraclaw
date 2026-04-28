@@ -889,7 +889,15 @@ const SidebarMenuSubButtonShell = styled(View, {
   // label-stack <div>, and trailing count <span> children stack vertically
   // and get clipped by overflow:hidden, so only the leading icon is visible.
   flexDirection: 'row',
-  height: 24,
+  // GH#125 follow-up — `minHeight` instead of fixed `height`. Two-line
+  // worktree rows (project name + branch) in nav-sessions.tsx pass
+  // `className="h-auto py-1"` to grow the row, but Tamagui's atomic
+  // `_height-24px` (specificity 0,2,0 via `:root .className`) silently
+  // beat Tailwind's `.h-auto` (0,1,0). Result: rows clipped to 24px,
+  // content from one row bled into the next. minHeight preserves the
+  // 24px floor for single-line callers while letting consumers override
+  // with `h-auto` when they need multi-line content.
+  minHeight: 24,
   minWidth: 0,
   alignItems: 'center',
   gap: 6,
