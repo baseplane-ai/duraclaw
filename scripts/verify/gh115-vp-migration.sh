@@ -57,27 +57,32 @@ CREATE TABLE users (
 );
 INSERT INTO users VALUES ('u1', 'admin', 'admin@example.com', 'admin');
 
-CREATE TABLE worktreeReservations (
+-- Pre-0027 column names match the snake_case shape the actual migration
+-- references (worktree_reservations, agent_sessions.kata_issue,
+-- agent_sessions.worktree_info_json). Drizzle's runtime schema annotates
+-- these as camelCase JS property names but the underlying SQL is
+-- snake_case — same as every other table in apps/orchestrator/src/db/schema.ts.
+CREATE TABLE worktree_reservations (
   worktree TEXT PRIMARY KEY,
-  issueNumber INTEGER NOT NULL,
-  ownerId TEXT NOT NULL,
-  heldSince TEXT NOT NULL,
-  lastActivityAt TEXT NOT NULL,
-  modeAtCheckout TEXT NOT NULL,
+  issue_number INTEGER NOT NULL,
+  owner_id TEXT NOT NULL,
+  held_since TEXT NOT NULL,
+  last_activity_at TEXT NOT NULL,
+  mode_at_checkout TEXT NOT NULL,
   stale INTEGER NOT NULL DEFAULT 0
 );
-INSERT INTO worktreeReservations VALUES
+INSERT INTO worktree_reservations VALUES
   ('duraclaw-dev1', 115, 'u1', '2026-04-27 00:00:00', '2026-04-27 12:00:00', 'implementation', 0),
   ('duraclaw-stale', 99, 'u1', '2026-01-01 00:00:00', '2026-01-15 00:00:00', 'implementation', 1);
 
 CREATE TABLE agent_sessions (
   id TEXT PRIMARY KEY,
-  userId TEXT,
+  user_id TEXT,
   project TEXT,
   status TEXT,
-  kataIssue INTEGER,
-  worktreeInfoJson TEXT,
-  createdAt INTEGER
+  kata_issue INTEGER,
+  worktree_info_json TEXT,
+  created_at INTEGER
 );
 INSERT INTO agent_sessions VALUES
   ('s1', 'u1', 'duraclaw-dev1', 'completed', 115, NULL, 1714000000000);

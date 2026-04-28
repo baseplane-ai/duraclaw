@@ -68,8 +68,19 @@ BEFORE_COUNT="$(printf '%s' "$BEFORE_LIST" | jq '.worktrees | length // (. | len
 vp_log "before: ${BEFORE_COUNT} rows"
 
 vp_log "Laying down synthetic clone fixture at ${FIXTURE}"
-mkdir -p "$FIXTURE/.git"
-printf 'ref: refs/heads/main\n' > "$FIXTURE/.git/HEAD"
+mkdir -p "$FIXTURE"
+# git init creates a real .git/ directory the gateway sweep can
+# rev-parse. A bare .git/HEAD text file is NOT recognised by git as
+# a repo (rev-parse exits "not a git repository"), so the sweep would
+# skip it via the readHead() null-return branch.
+git -c init.defaultBranch=main init -q "$FIXTURE" >/dev/null 2>&1 || true
+# Make a no-content commit so HEAD resolves rather than dangling on
+# an unborn branch (rev-parse --abbrev-ref HEAD returns "HEAD" on
+# unborn refs which trips the equality-vs-default check). An empty
+# tree is fine — the sweep doesn't inspect contents.
+( cd "$FIXTURE" \
+  && git -c user.email=vp@duraclaw -c user.name=vp commit --allow-empty -q -m "vp init" \
+) >/dev/null 2>&1 || true
 # Add a .duraclaw/reservation.json so the sweep classifies it
 # deterministically as reservedBy={kind:'manual', id: SLUG}. This makes
 # the post-sweep assertion stable regardless of which branch heuristic

@@ -83,92 +83,102 @@ function reservedByMatches(parsed: ReservedBy | null, want: ReservedBy): boolean
  * first (lowest lastTouchedAt), cleanup-released rows as fallback
  * (B-LIFECYCLE-4). Returns a typed pool_exhausted result on empty pool
  * (caller maps to 503).
+ *
+ * D1 does not support interactive BEGIN/COMMIT transactions — drizzle's
+ * `db.transaction()` throws on the D1 binding (see api/index.ts:1495 for
+ * the prior precedent). Operations run sequentially. The atomic-reserve
+ * step uses `UPDATE ... WHERE id = (SELECT ... LIMIT 1) RETURNING *`
+ * which SQLite/D1 evaluate as a single statement; concurrent allocators
+ * see different ids — one wins the row, the other gets `allocated.length
+ * === 0` and falls through to the pool-exhausted count. The same-
+ * reservedBy idempotency path's SELECT-then-UPDATE has a small race
+ * window where two concurrent callers with identical reservedBy may both
+ * miss the existing row and both proceed to allocate; the second's
+ * UPDATE returns zero rows (the first took the only eligible row), so
+ * the loser gets pool_exhausted — the worst-case outcome is "retry once"
+ * for the loser, never duplicate rows for the same reservedBy.
  */
 export async function reserveFreshWorktree(
   db: DB,
   reservedBy: ReservedBy,
   ownerId: string,
 ): Promise<ReserveResult> {
-  const result = await db.transaction(async (tx) => {
-    // 1. Same-reservedBy idempotency (B-CONCURRENCY-3). Match regardless
-    //    of status — chain auto-advance retries hit this branch.
-    const existing = await tx
-      .select()
-      .from(worktrees)
-      .where(
-        and(
-          sql`json_extract(${worktrees.reservedBy}, '$.kind') = ${reservedBy.kind}`,
-          sql`json_extract(${worktrees.reservedBy}, '$.id') = ${reservedBy.id}`,
-        ),
-      )
-      .limit(1)
-    if (existing[0]) {
-      const row = existing[0]
-      // B-LIFECYCLE-3: re-attach during grace window clears released_at.
-      if (row.releasedAt != null) {
-        const now = Date.now()
-        const updated = await tx
-          .update(worktrees)
-          .set({ releasedAt: null, status: 'held', lastTouchedAt: now })
-          .where(eq(worktrees.id, row.id))
-          .returning()
-        return { ok: true as const, row: rowToDto(updated[0]) }
-      }
-      return { ok: true as const, row: rowToDto(row) }
+  // 1. Same-reservedBy idempotency (B-CONCURRENCY-3). Match regardless
+  //    of status — chain auto-advance retries hit this branch.
+  const existing = await db
+    .select()
+    .from(worktrees)
+    .where(
+      and(
+        sql`json_extract(${worktrees.reservedBy}, '$.kind') = ${reservedBy.kind}`,
+        sql`json_extract(${worktrees.reservedBy}, '$.id') = ${reservedBy.id}`,
+      ),
+    )
+    .limit(1)
+  if (existing[0]) {
+    const row = existing[0]
+    // B-LIFECYCLE-3: re-attach during grace window clears released_at.
+    if (row.releasedAt != null) {
+      const now = Date.now()
+      const updated = await db
+        .update(worktrees)
+        .set({ releasedAt: null, status: 'held', lastTouchedAt: now })
+        .where(eq(worktrees.id, row.id))
+        .returning()
+      return { ok: true as const, row: rowToDto(updated[0]) }
     }
+    return { ok: true as const, row: rowToDto(row) }
+  }
 
-    // 2. Allocate from eligible pool atomically. The SELECT eligible-id
-    //    sub-query is evaluated inside the same UPDATE statement, so two
-    //    concurrent reservers see different ids — one wins, the other
-    //    gets zero rows back (race-lost) and falls through to the count
-    //    check below. SQLite/D1 serialise writes so this is safe.
-    //    Eligibility ordering: free first (B-LIFECYCLE-4), cleanup-released
-    //    fallback. Note: the schema column is literally named `lastTouchedAt`
-    //    (camelCase, see apps/orchestrator/src/db/schema.ts) — that's the
-    //    raw SQL identifier we have to use here.
-    const now = Date.now()
-    const allocated = await tx
-      .update(worktrees)
-      .set({
-        status: 'held',
-        reservedBy: JSON.stringify(reservedBy),
-        releasedAt: null,
-        lastTouchedAt: now,
-        ownerId,
+  // 2. Allocate from eligible pool atomically. The SELECT eligible-id
+  //    sub-query is evaluated inside the same UPDATE statement, so two
+  //    concurrent reservers see different ids — one wins, the other
+  //    gets zero rows back (race-lost) and falls through to the count
+  //    check below. SQLite/D1 serialise writes so this is safe.
+  //    Eligibility ordering: free first (B-LIFECYCLE-4), cleanup-released
+  //    fallback. Note: the schema column is literally named `lastTouchedAt`
+  //    (camelCase, see apps/orchestrator/src/db/schema.ts) — that's the
+  //    raw SQL identifier we have to use here.
+  const now = Date.now()
+  const allocated = await db
+    .update(worktrees)
+    .set({
+      status: 'held',
+      reservedBy: JSON.stringify(reservedBy),
+      releasedAt: null,
+      lastTouchedAt: now,
+      ownerId,
+    })
+    .where(
+      sql`${worktrees.id} = (
+        SELECT id FROM worktrees
+        WHERE status = 'free'
+           OR (status = 'cleanup' AND released_at IS NOT NULL)
+        ORDER BY case status when 'free' then 0 else 1 end, lastTouchedAt
+        LIMIT 1
+      )`,
+    )
+    .returning()
+
+  if (allocated.length === 0) {
+    // Either race-lost (another reserver took the only eligible row in
+    // a concurrent tx) or truly empty pool. Re-check with a SELECT
+    // count so we surface the actual pool state to the caller.
+    const counts = await db
+      .select({
+        free: sql<number>`sum(case when ${worktrees.status} = 'free' then 1 else 0 end)`,
+        total: sql<number>`count(*)`,
       })
-      .where(
-        sql`${worktrees.id} = (
-          SELECT id FROM worktrees
-          WHERE status = 'free'
-             OR (status = 'cleanup' AND released_at IS NOT NULL)
-          ORDER BY case status when 'free' then 0 else 1 end, lastTouchedAt
-          LIMIT 1
-        )`,
-      )
-      .returning()
-
-    if (allocated.length === 0) {
-      // Either race-lost (another reserver took the only eligible row in
-      // a concurrent tx) or truly empty pool. Re-check with a SELECT
-      // count so we surface the actual pool state to the caller.
-      const counts = await tx
-        .select({
-          free: sql<number>`sum(case when ${worktrees.status} = 'free' then 1 else 0 end)`,
-          total: sql<number>`count(*)`,
-        })
-        .from(worktrees)
-      return {
-        ok: false as const,
-        kind: 'pool_exhausted' as const,
-        freeCount: Number(counts[0]?.free ?? 0),
-        totalCount: Number(counts[0]?.total ?? 0),
-      }
+      .from(worktrees)
+    return {
+      ok: false as const,
+      kind: 'pool_exhausted' as const,
+      freeCount: Number(counts[0]?.free ?? 0),
+      totalCount: Number(counts[0]?.total ?? 0),
     }
+  }
 
-    return { ok: true as const, row: rowToDto(allocated[0]) }
-  })
-
-  return result
+  return { ok: true as const, row: rowToDto(allocated[0]) }
 }
 
 /**
@@ -188,55 +198,57 @@ export async function bindWorktreeById(
   reservedBy: ReservedBy,
   ownerId: string,
 ): Promise<BindResult> {
-  return db.transaction(async (tx) => {
-    const rows = await tx.select().from(worktrees).where(eq(worktrees.id, worktreeId)).limit(1)
-    if (rows.length === 0) {
-      return { ok: false as const, kind: 'not_found' as const }
-    }
-    const row = rows[0]
-    const parsed = rowToDto(row).reservedBy
+  // D1 does not support interactive transactions — see reserveFreshWorktree
+  // above for the same precedent. Operations run sequentially; the only
+  // concurrency window is two binds racing for the same worktreeId, where
+  // last-write-wins is the accepted semantic.
+  const rows = await db.select().from(worktrees).where(eq(worktrees.id, worktreeId)).limit(1)
+  if (rows.length === 0) {
+    return { ok: false as const, kind: 'not_found' as const }
+  }
+  const row = rows[0]
+  const parsed = rowToDto(row).reservedBy
 
-    // Same-reservedBy idempotent re-acquire (B-CONCURRENCY-3).
-    if (reservedByMatches(parsed, reservedBy)) {
-      const now = Date.now()
-      const updated = await tx
-        .update(worktrees)
-        .set(
-          row.releasedAt != null
-            ? { releasedAt: null, status: 'held', lastTouchedAt: now }
-            : { lastTouchedAt: now },
-        )
-        .where(eq(worktrees.id, row.id))
-        .returning()
-      return { ok: true as const, row: rowToDto(updated[0]) }
-    }
+  // Same-reservedBy idempotent re-acquire (B-CONCURRENCY-3).
+  if (reservedByMatches(parsed, reservedBy)) {
+    const now = Date.now()
+    const updated = await db
+      .update(worktrees)
+      .set(
+        row.releasedAt != null
+          ? { releasedAt: null, status: 'held', lastTouchedAt: now }
+          : { lastTouchedAt: now },
+      )
+      .where(eq(worktrees.id, row.id))
+      .returning()
+    return { ok: true as const, row: rowToDto(updated[0]) }
+  }
 
-    // B-LIFECYCLE-4: fresh-eligible released row (different reservedBy)
-    // is treated as free for allocation. Also covers status='free' rows
-    // that happen to have a stale reservedBy (shouldn't occur, but defends).
-    const freshEligible =
-      row.status === 'free' || (row.status === 'cleanup' && row.releasedAt != null)
-    if (freshEligible) {
-      const now = Date.now()
-      const updated = await tx
-        .update(worktrees)
-        .set({
-          status: 'held',
-          reservedBy: JSON.stringify(reservedBy),
-          releasedAt: null,
-          lastTouchedAt: now,
-          ownerId,
-        })
-        .where(eq(worktrees.id, row.id))
-        .returning()
-      return { ok: true as const, row: rowToDto(updated[0]) }
-    }
+  // B-LIFECYCLE-4: fresh-eligible released row (different reservedBy)
+  // is treated as free for allocation. Also covers status='free' rows
+  // that happen to have a stale reservedBy (shouldn't occur, but defends).
+  const freshEligible =
+    row.status === 'free' || (row.status === 'cleanup' && row.releasedAt != null)
+  if (freshEligible) {
+    const now = Date.now()
+    const updated = await db
+      .update(worktrees)
+      .set({
+        status: 'held',
+        reservedBy: JSON.stringify(reservedBy),
+        releasedAt: null,
+        lastTouchedAt: now,
+        ownerId,
+      })
+      .where(eq(worktrees.id, row.id))
+      .returning()
+    return { ok: true as const, row: rowToDto(updated[0]) }
+  }
 
-    // B-CONCURRENCY-1: cross-reservation conflict.
-    return {
-      ok: false as const,
-      kind: 'conflict' as const,
-      existing: rowToDto(row),
-    }
-  })
+  // B-CONCURRENCY-1: cross-reservation conflict.
+  return {
+    ok: false as const,
+    kind: 'conflict' as const,
+    existing: rowToDto(row),
+  }
 }

@@ -60,6 +60,7 @@ gh115_bearer_admin() {
     -c "$cookie_jar" \
     -X POST "${ORCH_BASE}/api/auth/sign-in/email" \
     -H 'Content-Type: application/json' \
+    -H "Origin: ${VERIFY_ORIGIN:-$ORCH_BASE}" \
     -d "{\"email\":\"${VERIFY_AUTH_EMAIL}\",\"password\":\"${VERIFY_AUTH_PASSWORD}\"}")"
   if [[ "$http_code" != "200" ]]; then
     vp_log "sign-in for ${VERIFY_AUTH_EMAIL} returned HTTP ${http_code}"
