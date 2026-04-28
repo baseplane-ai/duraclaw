@@ -57,6 +57,7 @@ import { authMiddleware } from './auth-middleware'
 import { authRoutes } from './auth-routes'
 import { getRequestSession } from './auth-session'
 import type { ApiAppEnv } from './context'
+import { runWorktreesJanitor } from './scheduled'
 import type { ReservedBy, SessionWorktreeParam, WorktreeRow } from './worktrees-types'
 
 interface CreateSessionBody {
@@ -2423,6 +2424,17 @@ export function createApiApp() {
         set: { enabled: body.enabled, updatedAt: now },
       })
     return c.json({ ok: true, id: flagId, enabled: body.enabled })
+  })
+
+  // GH#115 §B-JANITOR-3: manual worktree sweep for operators. Runs the
+  // same DELETE logic as the worker cron synchronously and returns the
+  // deleted ids so an admin can confirm the result without tailing
+  // wrangler logs. Same idle-window resolution as the cron (env
+  // `CC_WORKTREE_IDLE_WINDOW_SECS`, default 24h).
+  app.post('/api/admin/worktrees/sweep', async (c) => {
+    if (c.get('role') !== 'admin') return c.json({ error: 'Forbidden' }, 403)
+    const result = await runWorktreesJanitor(c.env as unknown as Env)
+    return c.json(result, 200)
   })
 
   app.post('/api/sessions/sync', async (c) => {
