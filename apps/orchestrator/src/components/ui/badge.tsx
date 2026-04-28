@@ -80,23 +80,34 @@ type BadgeProps = React.ComponentProps<'span'> & {
 
 function Badge({ className, variant, asChild = false, ...props }: BadgeProps) {
   if (asChild) {
-    // Slot polymorphism — passes props through to a child element. As
-    // with Button asChild, visual variant fidelity for asChild relies
-    // on the escape-hatch classes plus consumer className. P1b cleanup
-    // item.
+    // Slot polymorphism — passes props through to a child element
+    // (typically <button> or <a> from a consumer like ChatThread's
+    // ReasoningPillRow / ToolChipRow). The styled() shell isn't rendered
+    // here, so layer badgeVariants() Tailwind utilities via cn() to give
+    // the slot child its inline-flex layout, padding, border, bg/color
+    // variant, and gap — without these the slot renders as bare <button>
+    // text with no chip styling. Same pattern as Button asChild.
     return (
       <Slot
         data-slot="badge"
-        className={cn(BADGE_ESCAPE_CLASSES, className)}
+        className={cn(BADGE_ESCAPE_CLASSES, badgeVariants({ variant }), className)}
         {...(props as React.ComponentProps<typeof Slot>)}
       />
     )
   }
+  // GH#125 P1b hotfix — the Tamagui compiler drops token-referenced color
+  // props (`backgroundColor: '$secondary'`, `color: '$secondaryForeground'`)
+  // inside `variants` blocks of the styled() shell, so the bundled CSS
+  // lacks _color-* / _backgroundColor-secondary atoms. Layer Tailwind
+  // utilities via badgeVariants() in className so visuals resolve through
+  // CSS variables defined in theme.css. tailwind-merge in cn() dedups;
+  // the styled() shell's layout atoms (borderWidth, paddingHorizontal,
+  // flexDirection) still emit and serve as backup.
   return (
     <BadgeShell
       data-slot="badge"
       variant={variant}
-      className={cn(BADGE_ESCAPE_CLASSES, className)}
+      className={cn(BADGE_ESCAPE_CLASSES, badgeVariants({ variant }), className)}
       {...(props as React.ComponentProps<typeof BadgeShell>)}
     />
   )
