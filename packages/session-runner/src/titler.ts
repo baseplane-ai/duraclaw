@@ -25,8 +25,14 @@ import type { RunnerSessionContext } from './types.js'
 
 // ── Constants ────────────────────────────────────────────────────────
 
-/** Model used for title generation. Named constant so rotations are a one-line diff. */
-const TITLER_MODEL = 'claude-haiku-4-5-20251014'
+/**
+ * Model used for title generation. Named constant so rotations are a
+ * one-line diff. The unsuffixed `claude-haiku-4-5` resolves through the
+ * Agent SDK / OAuth subscription; the dated form
+ * `claude-haiku-4-5-20251014` was rejected by the CLI ("model may not
+ * exist or you may not have access to it") on subscription auth.
+ */
+const TITLER_MODEL = 'claude-haiku-4-5'
 
 /**
  * Minimum estimated tokens before the initial title fires.
@@ -51,24 +57,28 @@ const RETITLE_COOLDOWN_MS = 300_000 // 5 minutes
 
 // ── Prompts ──────────────────────────────────────────────────────────
 
-const INITIAL_TITLE_SYSTEM = `You name work sessions. Emit ONLY a JSON object — no prose, no code fences.
+const INITIAL_TITLE_SYSTEM = `You are a session-naming agent. Your ONLY job is to emit a JSON object naming a work session. You DO NOT execute the work. You DO NOT respond to the user's request. You produce a name.
 
-Style: 2-3 words, sentence case, no articles. Examples:
-- "Verify 2128"
-- "Researching Scroll"
+Output exactly one JSON object on one line. No prose before or after. No code fences.
+
+Schema: {"title":"2-3 word session name","confidence":0.0-1.0}
+
+Style: sentence case, no articles, no quotes inside the title. Examples:
+- "Update Readme"
 - "Fix Auth Bug"
-- "Debug Memory Leak"
+- "Verify 2128"
 - "Refactor Gateway"
+- "Debug Memory Leak"
 
-Prefer the user's most recent intent over older context.
+Always emit a title. Even when the conversation is sparse, derive directly from the user's first message intent. NEVER refuse, NEVER explain, NEVER apologize, NEVER hedge.`
 
-Output: {"title": "...", "confidence": 0.0-1.0}`
+const PIVOT_GATE_SYSTEM = `You are a pivot-detection agent. Detect whether the user pivoted to a new task. A pivot is a change in primary goal, technical domain, or problem statement. Elaboration and follow-ups are NOT pivots.
 
-const PIVOT_GATE_SYSTEM = `Detect whether the user pivoted to a new task. A pivot is a change in primary goal, technical domain, or problem statement. Elaboration and follow-ups are NOT pivots. If a pivot occurred, propose a new 2-3 word title in the same style as above.
+Output exactly one JSON object on one line. No prose before or after. No code fences.
 
-Respond ONLY as JSON — no prose, no code fences.
+Schema: {"did_pivot":true|false,"confidence":0.0-1.0,"proposed_new_title":"2-3 word name"|null}
 
-Output: {"did_pivot": true/false, "confidence": 0.0-1.0, "proposed_new_title": "..." or null}`
+If a pivot occurred, propose a new 2-3 word title in sentence case (e.g. "Debug Push", "Refactor Auth"). If no pivot, set "proposed_new_title" to null. NEVER refuse, NEVER explain, NEVER hedge.`
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -287,6 +297,15 @@ export class SessionTitler {
         // default so an unexpected tool attempt is denied rather than
         // prompted (titler is fire-and-forget, no UI to prompt).
         permissionMode: 'default',
+        // CRITICAL: SDK isolation mode (settingSources: []) prevents the
+        // project's `.claude/settings.json` hooks from firing on this
+        // titler call. Without it, the kata "MODE ENTRY IS MANDATORY"
+        // SessionStart hook injects a giant system reminder telling the
+        // model to enter a mode before doing anything — which Haiku
+        // dutifully obeys, hitting maxTurns:1 with prose like "I need
+        // to enter task mode first to update the README" instead of
+        // emitting JSON. Empty settingSources sandboxes the one-shot.
+        settingSources: [],
         ...(this.pathToClaudeCodeExecutable
           ? { pathToClaudeCodeExecutable: this.pathToClaudeCodeExecutable }
           : {}),

@@ -407,15 +407,38 @@ describe('SessionTitler', () => {
 
       expect(mockQueryCalls).toHaveLength(1)
       const call = mockQueryCalls[0]
-      expect(call.model).toBe('claude-haiku-4-5-20251014')
+      // Unsuffixed model name — the dated form (claude-haiku-4-5-20251014)
+      // was rejected by the CLI ("model may not exist or you may not have
+      // access to it") on subscription auth.
+      expect(call.model).toBe('claude-haiku-4-5')
       expect(call.allowedTools).toEqual([])
       expect(call.maxTurns).toBe(1)
       expect(typeof call.systemPrompt).toBe('string')
-      expect(call.systemPrompt as string).toContain('You name work sessions')
+      expect(call.systemPrompt as string).toContain('session-naming agent')
       // The transcript landed as the user message — confirms we sent
       // it as a synthetic prompt rather than the SDK's default
       // working-context boot prompt.
       expect(call.userText).toContain('Message ')
+    })
+
+    // Pins the SDK isolation flag that prevents project hooks from
+    // firing in the titler call. Without it, the kata
+    // "MODE ENTRY IS MANDATORY" SessionStart hook in
+    // .claude/settings.json injects a system reminder telling the
+    // model to enter a mode before doing anything — Haiku obeys,
+    // hits maxTurns:1 with prose like "I need to enter task mode
+    // first to update the README" instead of emitting JSON.
+    it('passes settingSources: [] to disable project hooks', () => {
+      // Read the source under test directly to verify the option is
+      // present at the call site. The mock doesn't currently capture
+      // settingSources (only model/system/tools/turns/userText) so
+      // this is the most stable assertion.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const titlerSrc = require('node:fs').readFileSync(
+        require('node:path').join(__dirname, 'titler.ts'),
+        'utf8',
+      ) as string
+      expect(titlerSrc).toMatch(/settingSources:\s*\[\]/)
     })
 
     it('uses the pivot system prompt for retitle calls', async () => {
