@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   buildTranscript,
   estimateTokens,
+  extractJsonObject,
   type SendFn,
   SessionTitler,
   type SessionTitlerOptions,
@@ -197,6 +198,48 @@ describe('buildTranscript', () => {
     const transcript = buildTranscript(messages)
     expect(transcript).toContain('Let me check that.')
     expect(transcript).toContain('[tool: read_file]')
+  })
+})
+
+describe('extractJsonObject', () => {
+  // Pins the prose-wrapped fallback that prod evidence demanded.
+  // Observed runner log: `JSON Parse error: Unexpected identifier "There"` —
+  // Haiku emitted "There is no good title because the conversation just
+  // started. {...JSON...}" instead of JSON-only. Plain JSON.parse choked
+  // and emitTitleError fired on every result event for the whole session.
+  it('parses well-formed JSON directly', () => {
+    expect(extractJsonObject<{ title: string }>('{"title":"X"}')).toEqual({ title: 'X' })
+  })
+
+  it('strips code fences before parsing', () => {
+    expect(extractJsonObject<{ title: string }>('```json\n{"title":"Y"}\n```')).toEqual({
+      title: 'Y',
+    })
+  })
+
+  it('extracts the JSON object when prose precedes it (Haiku prose-wrap regression)', () => {
+    const text =
+      'There is no clear title yet, but here it is: {"title":"Fix Auth","confidence":0.7}'
+    expect(extractJsonObject<{ title: string; confidence: number }>(text)).toEqual({
+      title: 'Fix Auth',
+      confidence: 0.7,
+    })
+  })
+
+  it('extracts the JSON object when prose follows it', () => {
+    const text = '{"title":"Z","confidence":0.5} (best I can do given the short transcript)'
+    expect(extractJsonObject<{ title: string; confidence: number }>(text)).toEqual({
+      title: 'Z',
+      confidence: 0.5,
+    })
+  })
+
+  it('throws on text that contains no JSON object at all', () => {
+    expect(() => extractJsonObject('There is nothing parseable here.')).toThrow()
+  })
+
+  it('throws when the slice between first/last brace is itself malformed', () => {
+    expect(() => extractJsonObject('{ this is not json }')).toThrow()
   })
 })
 

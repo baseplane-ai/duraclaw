@@ -148,6 +148,47 @@ function stripCodeFences(text: string): string {
     .trim()
 }
 
+/**
+ * Extract a JSON object from Haiku's response.
+ *
+ * Haiku's instruction-following on "respond ONLY as JSON" is unreliable —
+ * observed in prod returning "There is no good title yet because the
+ * conversation just started. {...}" before the JSON. Prior simple
+ * `JSON.parse(stripCodeFences(text))` choked on the leading prose with
+ * `SyntaxError: Unexpected identifier "There"`.
+ *
+ * Strategy:
+ *   1. Try the strict path first: stripCodeFences then JSON.parse. Success
+ *      on well-formed responses (most of the time).
+ *   2. Fallback: scan the text for the first `{` and last `}` and try
+ *      JSON.parse on that slice. Catches prose-wrapped JSON without
+ *      tolerating malformed JSON itself.
+ *
+ * Throws on both-failed so the caller's catch fires emitTitleError as
+ * before.
+ */
+export function extractJsonObject<T = unknown>(text: string): T {
+  const stripped = stripCodeFences(text)
+  try {
+    return JSON.parse(stripped) as T
+  } catch (strictErr) {
+    const firstBrace = stripped.indexOf('{')
+    const lastBrace = stripped.lastIndexOf('}')
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+      const slice = stripped.slice(firstBrace, lastBrace + 1)
+      try {
+        return JSON.parse(slice) as T
+      } catch {
+        // Both attempts failed — re-throw the strict error for the
+        // clearer message ("Unexpected identifier" beats "Unexpected
+        // end of JSON" in error reports).
+        throw strictErr
+      }
+    }
+    throw strictErr
+  }
+}
+
 // ── Types ────────────────────────────────────────────────────────────
 
 interface InitialTitleResult {
@@ -339,7 +380,7 @@ export class SessionTitler {
       return
     }
     try {
-      const parsed = JSON.parse(stripCodeFences(text)) as InitialTitleResult
+      const parsed = extractJsonObject<InitialTitleResult>(text)
 
       if (!parsed.title || typeof parsed.title !== 'string') {
         this.emitTitleError('initial', 'missing or invalid title field', text.slice(0, 200))
@@ -381,7 +422,7 @@ export class SessionTitler {
       const pivotPrompt = `Current session title: "${this.getCurrentTitle()}"\n\nNew user message:\n${newUserMessage}`
 
       const text = await this.oneShotQuery(PIVOT_GATE_SYSTEM, pivotPrompt)
-      const parsed = JSON.parse(stripCodeFences(text)) as PivotGateResult
+      const parsed = extractJsonObject<PivotGateResult>(text)
 
       if (!parsed.did_pivot || (parsed.confidence ?? 0) < 0.7) {
         return
