@@ -2552,6 +2552,8 @@ export function createApiApp() {
   })
 
   app.get('/api/worktrees', async (c) => {
+    const userId = c.get('userId')
+    const role = c.get('role')
     const status = c.req.query('status')
     const kind = c.req.query('kind')
     const id = c.req.query('id')
@@ -2560,6 +2562,10 @@ export function createApiApp() {
     if (status) conditions.push(eq(worktrees.status, status))
     if (kind) conditions.push(sql`json_extract(${worktrees.reservedBy}, '$.kind') = ${kind}`)
     if (id) conditions.push(sql`json_extract(${worktrees.reservedBy}, '$.id') = ${id}`)
+    // GH#115 review: scope to owner for non-admins.
+    if (role !== 'admin') {
+      conditions.push(eq(worktrees.ownerId, userId))
+    }
     const rows = conditions.length
       ? await db
           .select()
@@ -2570,15 +2576,22 @@ export function createApiApp() {
   })
 
   app.post('/api/worktrees/:id/release', async (c) => {
+    const userId = c.get('userId')
+    const role = c.get('role')
     const id = c.req.param('id')
     const db = getDb(c.env)
+    // Look up the row first to check ownership.
+    const existing = await db.select().from(worktrees).where(eq(worktrees.id, id)).limit(1)
+    if (existing.length === 0) return c.json({ error: 'not_found' }, 404)
+    if (existing[0].ownerId !== userId && role !== 'admin') {
+      return c.json({ error: 'not_owner' }, 403)
+    }
     const now = Date.now()
     const updated = await db
       .update(worktrees)
       .set({ releasedAt: now, status: 'cleanup', lastTouchedAt: now })
       .where(eq(worktrees.id, id))
       .returning()
-    if (updated.length === 0) return c.json({ error: 'not_found' }, 404)
     return c.json(rowToDto(updated[0]), 200)
   })
 
@@ -2586,6 +2599,14 @@ export function createApiApp() {
     if (c.get('role') !== 'admin') return c.json({ error: 'Forbidden' }, 403)
     const id = c.req.param('id')
     const db = getDb(c.env)
+    // Null out FK references first — the schema's
+    // `agent_sessions.worktreeId REFERENCES worktrees(id)` has no
+    // ON DELETE SET NULL clause (SQLite can't ALTER it post-creation),
+    // so a referenced row would otherwise wedge on FK_CONSTRAINT_FAILED.
+    await db
+      .update(agentSessions)
+      .set({ worktreeId: null, updatedAt: new Date().toISOString() })
+      .where(eq(agentSessions.worktreeId, id))
     const deleted = await db
       .delete(worktrees)
       .where(eq(worktrees.id, id))
@@ -3053,6 +3074,9 @@ export function createApiApp() {
     if (resolvedWorktreeId) {
       try {
         const now = new Date().toISOString()
+        // GH#115 review: inherit parent's agent/visibility/model/kataIssue
+        // so Codex / private parents don't get silently rewritten to
+        // claude+public on the fork UPSERT.
         await db
           .insert(agentSessions)
           .values({
@@ -3060,11 +3084,13 @@ export function createApiApp() {
             userId,
             project: projectName,
             status: 'running',
+            model: access.session.model ?? null,
+            agent: access.session.agent ?? 'claude',
+            kataIssue: access.session.kataIssue ?? null,
+            visibility: (access.session.visibility ?? 'public') as 'public' | 'private',
             createdAt: now,
             updatedAt: now,
             lastActivity: now,
-            agent: 'claude',
-            visibility: 'public',
             origin: 'duraclaw',
             archived: false,
             worktreeId: resolvedWorktreeId,

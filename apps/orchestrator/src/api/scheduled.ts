@@ -1,7 +1,7 @@
-import { and, isNotNull, lt } from 'drizzle-orm'
+import { and, inArray, isNotNull, lt } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import * as schema from '~/db/schema'
-import { worktrees } from '~/db/schema'
+import { agentSessions, worktrees } from '~/db/schema'
 import type { Env } from '~/lib/types'
 
 /**
@@ -78,9 +78,23 @@ export async function runWorktreesJanitor(env: Env): Promise<{
 }> {
   const db = drizzle(env.AUTH_DB, { schema })
   const cutoff = Date.now() - getIdleWindowMs(env)
+  // Find candidates first so we can null out any agent_sessions FKs
+  // before the DELETE — schema's `worktreeId REFERENCES worktrees(id)`
+  // has no ON DELETE clause, so a referenced row would otherwise wedge
+  // the janitor on FK_CONSTRAINT_FAILED.
+  const candidates = await db
+    .select({ id: worktrees.id })
+    .from(worktrees)
+    .where(and(isNotNull(worktrees.releasedAt), lt(worktrees.releasedAt, cutoff)))
+  if (candidates.length === 0) return { deletedCount: 0, deletedIds: [] }
+  const ids = candidates.map((c) => c.id)
+  await db
+    .update(agentSessions)
+    .set({ worktreeId: null, updatedAt: new Date().toISOString() })
+    .where(inArray(agentSessions.worktreeId, ids))
   const deleted = await db
     .delete(worktrees)
-    .where(and(isNotNull(worktrees.releasedAt), lt(worktrees.releasedAt, cutoff)))
+    .where(inArray(worktrees.id, ids))
     .returning({ id: worktrees.id })
   return {
     deletedCount: deleted.length,

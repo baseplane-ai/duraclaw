@@ -37,32 +37,39 @@ describe('runWorktreesJanitor', () => {
   })
 
   it('returns 0 when no rows are released', async () => {
-    fakeDb.data.delete = []
+    // Fix 7: helper now SELECTs candidates first; empty list short-circuits.
+    fakeDb.data.select = []
     const result = await runWorktreesJanitor(makeEnv())
     expect(result.deletedCount).toBe(0)
     expect(result.deletedIds).toEqual([])
-    expect(fakeDb.db.delete).toHaveBeenCalledTimes(1)
+    expect(fakeDb.db.select).toHaveBeenCalledTimes(1)
+    expect(fakeDb.db.delete).not.toHaveBeenCalled()
   })
 
   it('returns the deleted ids when the DELETE returns rows', async () => {
+    // Fix 7: SELECT first surfaces candidate ids, then UPDATE on
+    // agent_sessions nulls out FKs, then DELETE on worktrees runs.
+    fakeDb.data.select = [{ id: 'wt-1' }, { id: 'wt-2' }]
+    fakeDb.data.update = [] // agent_sessions FK null-out
     fakeDb.data.delete = [{ id: 'wt-1' }, { id: 'wt-2' }]
     const result = await runWorktreesJanitor(makeEnv())
     expect(result.deletedCount).toBe(2)
     expect(result.deletedIds).toEqual(['wt-1', 'wt-2'])
+    expect(fakeDb.db.update).toHaveBeenCalledTimes(1)
+    expect(fakeDb.db.delete).toHaveBeenCalledTimes(1)
   })
 
   it('passes the cutoff into the WHERE clause based on the idle window', async () => {
-    fakeDb.data.delete = []
+    // Fix 7: cutoff is now applied to the SELECT (not the DELETE) — but
+    // the structural assertion is still that we DON'T do an unconditional
+    // wipe. SELECT().where() must be chained; with empty candidates we
+    // short-circuit before reaching DELETE at all.
+    fakeDb.data.select = []
     const before = Date.now()
     await runWorktreesJanitor(makeEnv())
     const after = Date.now()
-    // The drizzle proxy records every chained method call. The `where`
-    // call carries the cutoff predicate via drizzle's expression tree;
-    // we don't introspect the SQL here (the test-helpers proxy doesn't
-    // model `eq` / `and`), but we do assert that delete().where() was
-    // chained — i.e. the helper isn't doing an unconditional wipe.
-    const deleteCalls = fakeDb.db.delete.mock.calls
-    expect(deleteCalls.length).toBe(1)
+    const selectCalls = fakeDb.db.select.mock.calls
+    expect(selectCalls.length).toBe(1)
     // Sanity: the cutoff is in the past relative to the call window.
     const cutoff = before - 24 * 60 * 60 * 1000
     expect(cutoff).toBeLessThan(after)
@@ -110,22 +117,26 @@ describe('scheduled cron handler', () => {
   })
 
   it('runs the janitor and logs deletions when present', async () => {
+    // Fix 7: SELECT candidates → UPDATE agent_sessions FKs → DELETE worktrees.
+    fakeDb.data.select = [{ id: 'wt-zombie' }]
+    fakeDb.data.update = []
     fakeDb.data.delete = [{ id: 'wt-zombie' }]
     await scheduled(dummyEvent, makeEnv(), dummyCtx)
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('worktrees-janitor deleted 1'))
   })
 
   it('stays silent when there is nothing to delete', async () => {
-    fakeDb.data.delete = []
+    fakeDb.data.select = []
     await scheduled(dummyEvent, makeEnv(), dummyCtx)
     expect(logSpy).not.toHaveBeenCalled()
   })
 
   it('swallows + logs janitor errors instead of rethrowing', async () => {
-    // Force the proxied chain to reject by replacing db.delete.
-    fakeDb.db.delete = vi.fn(() => ({
-      where: () => ({
-        returning: () => Promise.reject(new Error('db unavailable')),
+    // Force the proxied chain to reject by replacing db.select (the
+    // candidate-discovery query that runs before any DELETE).
+    fakeDb.db.select = vi.fn(() => ({
+      from: () => ({
+        where: () => Promise.reject(new Error('db unavailable')),
       }),
     })) as any
     await expect(scheduled(dummyEvent, makeEnv(), dummyCtx)).resolves.toBeUndefined()
@@ -137,7 +148,7 @@ describe('scheduled cron handler', () => {
   it('does NOT fetch the gateway /sessions endpoint', async () => {
     const fetchSpy = vi.fn()
     globalThis.fetch = fetchSpy as any
-    fakeDb.data.delete = []
+    fakeDb.data.select = []
     await scheduled(dummyEvent, makeEnv(), dummyCtx)
     expect(fetchSpy).not.toHaveBeenCalled()
   })

@@ -12,7 +12,7 @@
  * §B-LIFECYCLE-3 / 4, §B-CONCURRENCY-1 / 2 / 3.
  */
 
-import { and, eq, isNotNull, or, sql } from 'drizzle-orm'
+import { and, eq, sql } from 'drizzle-orm'
 import type { DrizzleD1Database } from 'drizzle-orm/d1'
 import type { ReservedBy, WorktreeRow } from '~/api/worktrees-types'
 import type * as schema from '~/db/schema'
@@ -117,23 +117,40 @@ export async function reserveFreshWorktree(
       return { ok: true as const, row: rowToDto(row) }
     }
 
-    // 2. Allocate from eligible pool. Free rows first (no implicit owner),
-    //    cleanup-released rows as fallback (B-LIFECYCLE-4). Order by
-    //    lastTouchedAt asc within each tier.
-    const eligible = await tx
-      .select({ id: worktrees.id })
-      .from(worktrees)
+    // 2. Allocate from eligible pool atomically. The SELECT eligible-id
+    //    sub-query is evaluated inside the same UPDATE statement, so two
+    //    concurrent reservers see different ids — one wins, the other
+    //    gets zero rows back (race-lost) and falls through to the count
+    //    check below. SQLite/D1 serialise writes so this is safe.
+    //    Eligibility ordering: free first (B-LIFECYCLE-4), cleanup-released
+    //    fallback. Note: the schema column is literally named `lastTouchedAt`
+    //    (camelCase, see apps/orchestrator/src/db/schema.ts) — that's the
+    //    raw SQL identifier we have to use here.
+    const now = Date.now()
+    const allocated = await tx
+      .update(worktrees)
+      .set({
+        status: 'held',
+        reservedBy: JSON.stringify(reservedBy),
+        releasedAt: null,
+        lastTouchedAt: now,
+        ownerId,
+      })
       .where(
-        or(
-          eq(worktrees.status, 'free'),
-          and(eq(worktrees.status, 'cleanup'), isNotNull(worktrees.releasedAt)),
-        ),
+        sql`${worktrees.id} = (
+          SELECT id FROM worktrees
+          WHERE status = 'free'
+             OR (status = 'cleanup' AND released_at IS NOT NULL)
+          ORDER BY case status when 'free' then 0 else 1 end, lastTouchedAt
+          LIMIT 1
+        )`,
       )
-      .orderBy(sql`case ${worktrees.status} when 'free' then 0 else 1 end`, worktrees.lastTouchedAt)
-      .limit(1)
+      .returning()
 
-    if (eligible.length === 0) {
-      // Pool exhausted — collect counts for the 503 body.
+    if (allocated.length === 0) {
+      // Either race-lost (another reserver took the only eligible row in
+      // a concurrent tx) or truly empty pool. Re-check with a SELECT
+      // count so we surface the actual pool state to the caller.
       const counts = await tx
         .select({
           free: sql<number>`sum(case when ${worktrees.status} = 'free' then 1 else 0 end)`,
@@ -148,18 +165,6 @@ export async function reserveFreshWorktree(
       }
     }
 
-    const now = Date.now()
-    const allocated = await tx
-      .update(worktrees)
-      .set({
-        status: 'held',
-        reservedBy: JSON.stringify(reservedBy),
-        releasedAt: null,
-        lastTouchedAt: now,
-        ownerId,
-      })
-      .where(eq(worktrees.id, eligible[0].id))
-      .returning()
     return { ok: true as const, row: rowToDto(allocated[0]) }
   })
 

@@ -4,10 +4,10 @@ import { eq } from 'drizzle-orm'
 import { agentSessions } from '~/db/schema'
 import { generateActionToken } from '~/lib/action-token'
 import { broadcastSessionRow } from '~/lib/broadcast-session'
-import { releaseWorktreeOnClose } from '~/lib/release-worktree-on-close'
 import type { GatewayEvent } from '~/lib/types'
 import { broadcastMessages as broadcastMessagesImpl } from './broadcast'
 import { promoteToolPartToGate as promoteToolPartToGateImpl } from './gates'
+import { maybeReleaseWorktreeOnTerminal } from './maybe-release-worktree'
 import {
   applyToolResult,
   assistantContentToParts,
@@ -37,33 +37,6 @@ import {
  */
 function wireToSessionParts(wire: WireMessagePart[]): SessionMessagePart[] {
   return wire as unknown as SessionMessagePart[]
-}
-
-/**
- * GH#115 §B-LIFECYCLE-2 helper: on a true terminal transition
- * (`stopped` / `error`), if this session has a `worktreeId`, run the
- * last-session check and flip the worktree row to `cleanup`. Wrapped
- * in `ctx.ctx.waitUntil` + try/catch so a release failure never
- * crashes the close path — the cron janitor in
- * `apps/orchestrator/src/api/scheduled.ts` is the always-on safety net.
- *
- * Note: `case 'result'` is intentionally NOT a release trigger — that
- * event is a turn-complete signal, the runner stays alive awaiting the
- * next stream-input, and `active_callback_token` is preserved (see
- * comments at the `updateStateIdle` callback in the result handler).
- */
-function maybeReleaseWorktreeOnTerminal(ctx: SessionDOContext): void {
-  const worktreeId = ctx.state.worktreeId
-  if (!worktreeId) return
-  const sessionId = ctx.do.name
-  ctx.ctx.waitUntil(
-    releaseWorktreeOnClose(ctx.do.d1, sessionId, worktreeId).catch((err) => {
-      console.error(
-        `[SessionDO:${ctx.ctx.id}] release-on-close (worktreeId=${worktreeId}) failed:`,
-        err,
-      )
-    }),
-  )
 }
 
 /**

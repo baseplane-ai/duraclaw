@@ -30,7 +30,9 @@ CREATE TABLE worktrees_new (
 
 -- 3. Backfill from worktree_reservations. Random 8-byte hex id;
 --    reservedBy = {kind:'arc', id:issue_number}; held status; timestamps
---    converted from ISO-8601 text to unix-ms.
+--    converted from ISO-8601 text to unix-ms. NULL or malformed
+--    held_since / last_activity_at fall back to now() via COALESCE so
+--    the backfill can't fail on legacy rows missing those fields.
 INSERT INTO worktrees_new (id, path, branch, status, reservedBy, released_at, createdAt, lastTouchedAt, ownerId)
 SELECT
   lower(hex(randomblob(8))),
@@ -39,8 +41,8 @@ SELECT
   'held',
   json_object('kind','arc','id', issue_number),
   NULL,
-  CAST(strftime('%s', held_since) AS INTEGER) * 1000,
-  CAST(strftime('%s', last_activity_at) AS INTEGER) * 1000,
+  COALESCE(CAST(strftime('%s', held_since) AS INTEGER) * 1000, unixepoch() * 1000),
+  COALESCE(CAST(strftime('%s', last_activity_at) AS INTEGER) * 1000, unixepoch() * 1000),
   owner_id
 FROM worktree_reservations;
 --> statement-breakpoint

@@ -65,6 +65,26 @@ export type ReserveOutcome =
   | { kind: 'skipped'; reason: 'read_only_mode' | 'unknown_mode' }
 
 /**
+ * Thrown by `reserveWorktreeIfNeeded` when the orchestrator returns
+ * 503 pool_exhausted. Surfaces the structured fields so the CLI
+ * front-end can format a clean stderr line and exit; library callers
+ * (eval harness, tests) can `instanceof`-check and handle it without
+ * the helper unilaterally calling `process.exit`.
+ */
+export class PoolExhaustedError extends Error {
+  freeCount: number
+  totalCount: number
+  hint: string
+  constructor(freeCount: number, totalCount: number, hint: string) {
+    super(`Worktree pool exhausted (free=${freeCount} total=${totalCount}). ${hint}`)
+    this.name = 'PoolExhaustedError'
+    this.freeCount = freeCount
+    this.totalCount = totalCount
+    this.hint = hint
+  }
+}
+
+/**
  * Resolve the orchestrator base URL from env. Falls back to the
  * worktree-derived dev port via VERIFY_ORCH_PORT (set by
  * scripts/verify/common.sh -> sync_dev_vars). Returns null if
@@ -133,11 +153,7 @@ export async function reserveWorktreeIfNeeded(
       const freeCount = body.freeCount ?? 0
       const totalCount = body.totalCount ?? 0
       const hint = body.hint ?? 'Add a clone to the pool.'
-      // biome-ignore lint/suspicious/noConsole: intentional CLI fatal output
-      console.error(
-        `[kata] Worktree pool exhausted (free=${freeCount} total=${totalCount}). ${hint}`,
-      )
-      process.exit(1)
+      throw new PoolExhaustedError(freeCount, totalCount, hint)
     }
   }
 

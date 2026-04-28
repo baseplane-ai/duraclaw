@@ -2,6 +2,7 @@ import { timingSafeEqual } from 'node:crypto'
 
 import type { ExecuteCommand, GatewayCommand, PermissionMode } from '~/lib/types'
 import { getSessionStatus } from '~/lib/vps-client'
+import { maybeReleaseWorktreeOnTerminal } from './maybe-release-worktree'
 import { RECOVERY_GRACE_MS, type SessionDOContext } from './types'
 import { clearRecoveryGraceTimer, scheduleWatchdog } from './watchdog'
 
@@ -203,6 +204,8 @@ export async function triggerGatewayDial(
   if (!gatewayUrl || !workerPublicUrl) {
     console.error(`[SessionDO:${ctx.ctx.id}] CC_GATEWAY_URL or WORKER_PUBLIC_URL not configured`)
     ctx.do.updateState({ status: 'idle', error: 'Gateway URL or Worker URL not configured' })
+    // GH#115 §B-LIFECYCLE-2: terminal-transition release-on-close.
+    maybeReleaseWorktreeOnTerminal(ctx)
     return
   }
 

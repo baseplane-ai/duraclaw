@@ -8,6 +8,7 @@ import { buildAwaitingPart as buildAwaitingPartImpl } from './branches'
 import { broadcastMessages as broadcastMessagesImpl } from './broadcast'
 import { clearPendingGateParts as clearPendingGatePartsImpl } from './gates'
 import type { SessionMeta } from './index'
+import { maybeReleaseWorktreeOnTerminal } from './maybe-release-worktree'
 import { sendToGateway, triggerGatewayDial as triggerGatewayDialImpl } from './runner-link'
 import { DEFAULT_META, type SessionDOContext } from './types'
 
@@ -379,6 +380,9 @@ export async function stopImpl(
     sendToGateway(ctx, { type: 'stop', session_id: ctx.state.session_id ?? '' })
   }
 
+  // GH#115 §B-LIFECYCLE-2: terminal-transition release-on-close.
+  maybeReleaseWorktreeOnTerminal(ctx)
+
   console.log(`[SessionDO:${ctx.ctx.id}] stop: ${reason ?? 'user request'}`)
   return { ok: true }
 }
@@ -394,6 +398,8 @@ export async function abortImpl(
     active_callback_token: undefined,
   })
   sendToGateway(ctx, { type: 'stop', session_id: ctx.state.session_id ?? '' })
+  // GH#115 §B-LIFECYCLE-2: terminal-transition release-on-close.
+  maybeReleaseWorktreeOnTerminal(ctx)
   console.log(`[SessionDO:${ctx.ctx.id}] abort: ${reason ?? 'user request'}`)
   return { ok: true }
 }
@@ -431,6 +437,9 @@ export async function forceStopImpl(
     error: null,
     active_callback_token: undefined,
   })
+
+  // GH#115 §B-LIFECYCLE-2: terminal-transition release-on-close.
+  maybeReleaseWorktreeOnTerminal(ctx)
 
   // Best-effort in-band abort — harmless if the WS is dead.
   if (sessionId) {

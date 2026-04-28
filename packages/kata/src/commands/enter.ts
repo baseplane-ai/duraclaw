@@ -115,7 +115,11 @@ function outputRules(
   console.error('')
 }
 
-import { getOrchestratorBaseUrl, reserveWorktreeIfNeeded } from '../lib/reserve-worktree.js'
+import {
+  getOrchestratorBaseUrl,
+  PoolExhaustedError,
+  reserveWorktreeIfNeeded,
+} from '../lib/reserve-worktree.js'
 import { parseGitStatusPaths, writeBaseline } from '../tracking/edits-log.js'
 import { createDefaultState, parseArgs } from './enter/cli.js'
 import { createDoctrineNotesFile, createFdNotesFile } from './enter/notes.js'
@@ -756,6 +760,14 @@ export async function enter(args: string[]): Promise<void> {
         )
       }
     } catch (err) {
+      if (err instanceof PoolExhaustedError) {
+        // Pool exhausted is a fatal failure — kata can't enter a
+        // code-touching mode without a clone, and the operator needs
+        // to take action (run scripts/setup-clone.sh on the VPS).
+        // biome-ignore lint/suspicious/noConsole: intentional CLI fatal output
+        console.error(`[kata] ${err.message}`)
+        process.exit(1)
+      }
       // biome-ignore lint/suspicious/noConsole: intentional CLI warning
       console.warn(
         `[kata] Worktree reservation failed: ${(err as Error).message}. Continuing without reservation.`,
