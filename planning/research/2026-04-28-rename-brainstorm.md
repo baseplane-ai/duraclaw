@@ -92,6 +92,17 @@ This doc:
 > **Recommendation: pay $500 for the TESS pull as the gate.** If
 > clean, **Varni is the answer.** If dirty, **stay with duraclaw.**
 >
+> **Round 14 — DECISION: VARNI.** User confirmed *"Nothing in the
+> USPTO and I don't care about Indian market"* — both gates cleared.
+> Rebrand duraclaw → Varni approved. Lockdown sequence (register
+> `varni.ai` + `.io` + `.dev` + `.app` + `.so`, claim
+> `github.com/varni-ai` org, reserve `npm @varni` scope, claim social
+> handles) must execute IMMEDIATELY before any public mention of the
+> name. See [§8.18i](#818i-final-decision--varni-round-14) for the
+> full action list. Implementation spec for the rename migration
+> (~2–4 weeks engineering work) is follow-up work, opened separately
+> via `kata enter planning`.
+>
 > **Final rest state — recommendation: stay with duraclaw.** After
 > twelve rounds the universe of available enterprise-credible AI brand
 > names is effectively exhausted. Spinewright and Bridgehold remain as
@@ -992,6 +1003,63 @@ explicit framing), the residual risk is acceptable.
 **Run the USPTO TESS pull first.** If clean, **Varni is the answer.**
 If dirty, **stay with duraclaw.** The right gate is empirical, not
 speculative.
+
+### 8.18i FINAL DECISION — Varni (round 14)
+
+User confirmed: *"Nothing in the USPTO and I don't care about Indian
+market."*
+
+Both gates cleared:
+- USPTO TESS: no live VARNI registration
+- Indian market access: not a target for duraclaw's positioning (US/EU
+  enterprise focus)
+
+**Decision: rebrand duraclaw → Varni.**
+
+#### Pre-public-mention lockdown — DO IMMEDIATELY (in order)
+
+Critical: any public surfacing of "Varni AI" before lockdown raises
+prices on every remaining asset. The squatter on `varni.com` (1999,
+fully locked) and any domain watchers will detect the name and act.
+
+| Step | Asset | Cost | Timing |
+|---|---|---|---|
+| 1 | `varni.ai` | ~$80/yr | TODAY — most important |
+| 2 | `varni.io` | ~$40/yr | TODAY |
+| 3 | `varni.dev` | ~$15/yr | TODAY |
+| 4 | `varni.app` | ~$15/yr | TODAY |
+| 5 | `varni.so` | ~$50/yr | TODAY |
+| 6 | `github.com/varni-ai` org | free | TODAY |
+| 7 | `npm @varni` scope | free | TODAY |
+| 8 | `@varni_ai` on X / Bluesky / LinkedIn | free | TODAY |
+
+Total: ~$200 + 1–2 hours of registration clicks.
+
+#### Rename migration — separate implementation spec
+
+Out of scope for this research doc. Migration touches:
+
+- Orchestrator: Vite config, Wrangler script names, R2 buckets
+  (`duraclaw-mobile` → `varni-mobile`), D1 database names, Better
+  Auth config, install scripts
+- Mobile: Capacitor app ID `ai.baseplane.duraclaw` → `ai.varni.app`,
+  OTA bundle paths, signing keystore
+- Packages: npm scope rename `@duraclaw/*` → `@varni/*` × 9 packages
+- `kata` CLI: published binary rename, hook installer paths
+- All docs: `CLAUDE.md`, `AGENTS.md`, `README.md`, `.claude/rules/*`,
+  every `planning/specs/*.md`
+- Hero image regeneration (lobster claw → new visual)
+- GitHub org migration `baseplane-ai/duraclaw` → new home
+- DNS migration of production hostnames (`dura.baseplane.ai` → new)
+
+Estimate: 2–4 week implementation. Open as a separate planning
+session: `kata enter planning --issue=<new>`.
+
+#### Final state of this research doc
+
+Decision: **Varni.** Gate-passed via user-confirmed USPTO TESS pull
++ explicit Indian-market deprioritization. Lockdown sequence in §8.18i
+above. Implementation spec is follow-up work.
 
 The methodology lesson recorded earlier (§8.12, §8.18d) stands but
 needs one more line:
