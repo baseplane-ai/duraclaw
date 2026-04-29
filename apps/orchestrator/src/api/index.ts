@@ -6,6 +6,7 @@ import { constantTimeEquals } from '~/agents/session-do/runner-link'
 import * as schema from '~/db/schema'
 import {
   agentSessions,
+  arcs,
   auditLog,
   featureFlags,
   projectMetadata,
@@ -3463,19 +3464,21 @@ export function createApiApp() {
     if (resolvedWorktreeId) {
       try {
         const now = new Date().toISOString()
-        // GH#115 review: inherit parent's agent/visibility/model/kataIssue
+        // GH#115 review: inherit parent's agent/visibility/model/arcId
         // so Codex / private parents don't get silently rewritten to
-        // claude+public on the fork UPSERT.
+        // claude+public on the fork UPSERT. GH#116: inherit parent's
+        // `arcId` (was: kataIssue) so the forked session lands in the
+        // same arc.
         await db
           .insert(agentSessions)
           .values({
             id: result.session_id,
             userId,
+            arcId: access.session.arcId,
             project: projectName,
             status: 'running',
             model: access.session.model ?? null,
             agent: access.session.agent ?? 'claude',
-            kataIssue: access.session.kataIssue ?? null,
             visibility: (access.session.visibility ?? 'public') as 'public' | 'private',
             createdAt: now,
             updatedAt: now,
@@ -3622,10 +3625,18 @@ export function createApiApp() {
     // session that has a worktreeId. Mirrors the resolution in
     // `buildChainRow` (~/lib/chains.ts) so the checkout binds the
     // already-allocated row instead of re-allocating from the pool.
+    // GH#116: kata_issue column dropped — resolve issue→arc via
+    // arcs.external_ref JSON extraction, then session→arc via FK.
     const sessionRows = await db
       .select({ worktreeId: agentSessions.worktreeId })
       .from(agentSessions)
-      .where(eq(agentSessions.kataIssue, issueNumber))
+      .innerJoin(arcs, eq(arcs.id, agentSessions.arcId))
+      .where(
+        and(
+          sql`json_extract(${arcs.externalRef}, '$.provider') = 'github'`,
+          sql`CAST(json_extract(${arcs.externalRef}, '$.id') AS INTEGER) = ${issueNumber}`,
+        ),
+      )
       .orderBy(desc(agentSessions.createdAt))
     const sessionWithWt = sessionRows.find((s) => s.worktreeId)
     const worktreeId = sessionWithWt?.worktreeId ?? null
@@ -3816,10 +3827,16 @@ export function createApiApp() {
     const projectFilter = c.req.query('project')
 
     // 1. Collect issue numbers from D1.
+    // GH#116: kata_issue dropped — issue numbers now live as JSON in
+    // arcs.external_ref (provider:'github'). Pull the distinct GH-keyed
+    // arc external_ref ids; arcs with no externalRef or non-github
+    // providers are skipped (they don't appear on the chains kanban).
     const d1IssueRows = await db
-      .selectDistinct({ kataIssue: agentSessions.kataIssue })
-      .from(agentSessions)
-      .where(sql`${agentSessions.kataIssue} IS NOT NULL`)
+      .selectDistinct({
+        kataIssue: sql<number | null>`CAST(json_extract(${arcs.externalRef}, '$.id') AS INTEGER)`,
+      })
+      .from(arcs)
+      .where(sql`json_extract(${arcs.externalRef}, '$.provider') = 'github'`)
     const d1IssueNumbers = new Set<number>()
     for (const row of d1IssueRows) {
       if (typeof row.kataIssue === 'number' && Number.isFinite(row.kataIssue)) {
@@ -3844,15 +3861,40 @@ export function createApiApp() {
 
     // Pre-fetch all relevant sessions + reservations in two bulk queries to
     // avoid N×M SELECTs.
+    // GH#116: source `kataIssue` via the arcs JOIN (json_extract on
+    // external_ref); the `kataIssue` column itself is gone but the chain
+    // builder + consumer code below still keys on it, so we alias the
+    // extracted value back to `kataIssue` to keep the shape stable.
+    type ChainSessionRow = AgentSessionRow & { kataIssue: number | null; kataMode: string | null }
     const issueNumArray = Array.from(allIssueNumbers)
-    const allSessions = issueNumArray.length
-      ? ((await db
-          .select()
-          .from(agentSessions)
-          .where(inArray(agentSessions.kataIssue, issueNumArray))
-          .orderBy(asc(agentSessions.createdAt))) as AgentSessionRow[])
+    const allSessions: ChainSessionRow[] = issueNumArray.length
+      ? ((
+          await db
+            .select({
+              session: agentSessions,
+              kataIssue: sql<
+                number | null
+              >`CAST(json_extract(${arcs.externalRef}, '$.id') AS INTEGER)`,
+            })
+            .from(agentSessions)
+            .innerJoin(arcs, eq(arcs.id, agentSessions.arcId))
+            .where(
+              and(
+                sql`json_extract(${arcs.externalRef}, '$.provider') = 'github'`,
+                inArray(
+                  sql`CAST(json_extract(${arcs.externalRef}, '$.id') AS INTEGER)`,
+                  issueNumArray,
+                ),
+              ),
+            )
+            .orderBy(asc(agentSessions.createdAt))
+        ).map((r) => ({
+          ...(r.session as unknown as AgentSessionRow),
+          kataIssue: r.kataIssue,
+          kataMode: r.session.mode,
+        })) as ChainSessionRow[])
       : []
-    const sessionsByIssue = new Map<number, AgentSessionRow[]>()
+    const sessionsByIssue = new Map<number, ChainSessionRow[]>()
     for (const s of allSessions) {
       if (typeof s.kataIssue !== 'number') continue
       const list = sessionsByIssue.get(s.kataIssue) ?? []

@@ -18,7 +18,7 @@ import { and, asc, eq, sql } from 'drizzle-orm'
 import type { drizzle } from 'drizzle-orm/d1'
 import type { WorktreeRow } from '~/api/worktrees-types'
 import type * as schema from '~/db/schema'
-import { agentSessions, worktrees } from '~/db/schema'
+import { agentSessions, arcs, worktrees } from '~/db/schema'
 import { rowToDto } from '~/lib/reserve-worktree'
 import type { ChainSummary, Env } from '~/lib/types'
 
@@ -343,10 +343,14 @@ export async function buildChainRow(
   _userId: string,
   issueNumber: number,
 ): Promise<ChainSummary | null> {
+  // GH#116: kata_mode/kata_issue columns dropped. Source `kataMode` from
+  // the renamed `mode` column (aliased to keep the consumer shape stable)
+  // and filter on issue number via `arcs.external_ref` JSON extraction
+  // (joined through the new `arc_id` FK).
   const sessionRows = await db
     .select({
       id: agentSessions.id,
-      kataMode: agentSessions.kataMode,
+      kataMode: agentSessions.mode,
       status: agentSessions.status,
       lastActivity: agentSessions.lastActivity,
       createdAt: agentSessions.createdAt,
@@ -354,7 +358,13 @@ export async function buildChainRow(
       worktreeId: agentSessions.worktreeId,
     })
     .from(agentSessions)
-    .where(eq(agentSessions.kataIssue, issueNumber))
+    .innerJoin(arcs, eq(arcs.id, agentSessions.arcId))
+    .where(
+      and(
+        sql`json_extract(${arcs.externalRef}, '$.provider') = 'github'`,
+        sql`CAST(json_extract(${arcs.externalRef}, '$.id') AS INTEGER) = ${issueNumber}`,
+      ),
+    )
     .orderBy(asc(agentSessions.createdAt))
 
   // GH#115 P1.4: reservation is the worktrees row referenced by ANY

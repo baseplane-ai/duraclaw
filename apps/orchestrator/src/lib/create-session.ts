@@ -11,11 +11,11 @@
  *   - broadcasts the row via `broadcastSessionRow` (wrapped in waitUntil).
  */
 
-import { eq } from 'drizzle-orm'
+import { and, eq, sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import type { ReservedBy, SessionWorktreeParam } from '~/api/worktrees-types'
 import * as schema from '~/db/schema'
-import { agentSessions } from '~/db/schema'
+import { agentSessions, arcs } from '~/db/schema'
 import { broadcastChainRow } from '~/lib/broadcast-chain'
 import { broadcastSessionRow } from '~/lib/broadcast-session'
 import { resolveProjectPath } from '~/lib/gateway-files'
@@ -39,7 +39,37 @@ export interface CreateSessionParams {
   system_prompt?: string
   runner_session_id?: string
   agent?: string
+  /**
+   * GH#116: explicit arc parent. When provided, the new session is
+   * inserted with this `arcId`. When absent, an arc is resolved or
+   * auto-created (see B4 in spec 116) — `kataIssue` (transitional)
+   * looks up / creates an arc with `externalRef={provider:'github',id}`,
+   * otherwise an implicit draft arc is created with the prompt preview
+   * as its title.
+   */
+  arcId?: string
+  /**
+   * Transitional: legacy callers still pass `kataIssue`. Resolved into
+   * an arc lookup-or-create at session-create time. Removed in P5.
+   */
   kataIssue?: number | null
+  /**
+   * GH#116: the kata mode (research/planning/implementation/verify/close)
+   * or any free-form string identifying the session's role inside its
+   * arc. Threaded through to the `agent_sessions.mode` column. When
+   * absent, persists as NULL — preserves today's behavior for callers
+   * that don't yet supply a mode (debug / freeform / task).
+   */
+  mode?: string | null
+  /**
+   * GH#116: the id of the prior frontier session in the same arc.
+   * Threaded through to `agent_sessions.parentSessionId` so the arc's
+   * advance/branch chain is reconstructable from the session rows
+   * alone (no separate transitions table). No FK enforcement — matches
+   * the no-FK pattern used for `userTabs.sessionId`; app-level integrity
+   * only.
+   */
+  parentSessionId?: string
   client_session_id?: string
   /**
    * GH#115: optional worktree reservation. `{kind:'fresh'}` allocates a
@@ -51,7 +81,7 @@ export interface CreateSessionParams {
 }
 
 export type CreateSessionResult =
-  | { ok: true; sessionId: string }
+  | { ok: true; sessionId: string; arcId: string }
   | { ok: false; status: number; error: string }
 
 export async function createSession(
@@ -156,9 +186,18 @@ export async function createSession(
   const now = new Date().toISOString()
   const promptText = promptToPreviewText(params.prompt)
 
+  // ── Arc resolution (GH#116 B4) ───────────────────────────────────────
+  // Every session row requires `arcId`. Resolution order:
+  //   1. explicit `params.arcId`
+  //   2. legacy `params.kataIssue` -> lookup/create arc keyed on
+  //      externalRef={provider:'github', id}
+  //   3. implicit auto-create -> draft arc titled from prompt preview
+  const arcId = await resolveArcId(db, userId, params, promptText, now)
+
   const baseRow = {
     id: sessionId,
     userId,
+    arcId,
     project: params.project,
     status: 'running',
     model: params.model ?? null,
@@ -176,9 +215,15 @@ export async function createSession(
     archived: false,
     durationMs: null as number | null,
     totalCostUsd: null as number | null,
-    kataMode: null as string | null,
-    kataIssue: typeof params.kataIssue === 'number' ? params.kataIssue : (null as number | null),
-    kataPhase: null as string | null,
+    // GH#116: `mode` replaces `kataMode`. Caller-supplied mode threads
+    // through (advanceArcImpl / branchArcImpl pass it explicitly);
+    // default null preserves today's behavior for freeform / debug / task
+    // sessions that have no kata methodology mode.
+    mode: params.mode ?? null,
+    // GH#116: parent frontier session in the same arc (advance) or in
+    // the parent arc (branch). NULL for the first session in any arc.
+    // No FK enforcement — app-level integrity only.
+    parentSessionId: params.parentSessionId ?? null,
     visibility,
     // GH#115: persist FK so chain auto-advance + status updates can
     // resolve the worktree without joining through (kataIssue, project).
@@ -261,5 +306,125 @@ export async function createSession(
     await broadcastChainRow(env, executionCtx, params.kataIssue, { actorUserId: userId })
   }
 
-  return { ok: true, sessionId }
+  return { ok: true, sessionId, arcId }
+}
+
+// ─── Arc resolution helpers (GH#116 B4) ──────────────────────────────────
+// Used only by createSession. Kept colocated rather than exported via
+// `lib/arcs.ts` because (a) `lib/arcs.ts` doesn't exist yet (it lands in
+// the same P1.1 wave but as a separate file with read-side helpers), and
+// (b) the arc-resolution policy (explicit -> kataIssue -> implicit) is
+// session-creation-specific. If a second caller emerges, lift then.
+
+type Db = ReturnType<typeof drizzle<typeof schema>>
+
+const ARC_ID_PREFIX = 'arc_'
+const IMPLICIT_TITLE_MAX = 50
+const IMPLICIT_TITLE_FALLBACK = 'Untitled session'
+
+function newArcId(): string {
+  return `${ARC_ID_PREFIX}${crypto.randomUUID()}`
+}
+
+function buildImplicitTitle(promptText: string): string {
+  const trimmed = promptText.trim()
+  if (!trimmed) return IMPLICIT_TITLE_FALLBACK
+  if (trimmed.length <= IMPLICIT_TITLE_MAX) return trimmed
+  return `${trimmed.slice(0, IMPLICIT_TITLE_MAX)}…`
+}
+
+/**
+ * Resolve the arcId for a new session per spec 116 B4.
+ *
+ * Preference order:
+ *   1. explicit `params.arcId` — caller already minted/owns an arc.
+ *   2. legacy `params.kataIssue` — find-or-create an arc with
+ *      `externalRef={provider:'github', id}` for this user. Wraps the
+ *      create in try/catch so a concurrent caller racing on the same
+ *      issue (caught by the `idx_arcs_external_ref` unique index) falls
+ *      back to the SELECT path instead of erroring out.
+ *   3. implicit — draft arc with `externalRef=null`, title derived from
+ *      the prompt preview (or 'Untitled session' if the prompt is
+ *      empty). Used by debug / freeform sessions and renders flat in
+ *      the sidebar (B4 UI clause).
+ */
+async function resolveArcId(
+  db: Db,
+  userId: string,
+  params: CreateSessionParams,
+  promptText: string,
+  now: string,
+): Promise<string> {
+  // (1) Explicit arcId — trust the caller; the FK constraint will fail
+  // loudly downstream if the id doesn't exist or doesn't belong to this
+  // user, which is the right failure mode for a programmer error.
+  if (typeof params.arcId === 'string' && params.arcId.length > 0) {
+    return params.arcId
+  }
+
+  // (2) Legacy kataIssue — find-or-create an arc keyed on the GH issue.
+  if (typeof params.kataIssue === 'number' && Number.isFinite(params.kataIssue)) {
+    const issueId = params.kataIssue
+    const found = await db
+      .select({ id: arcs.id })
+      .from(arcs)
+      .where(
+        and(
+          eq(arcs.userId, userId),
+          sql`json_extract(${arcs.externalRef}, '$.provider') = 'github'`,
+          sql`json_extract(${arcs.externalRef}, '$.id') = ${issueId}`,
+        ),
+      )
+      .limit(1)
+    if (found[0]?.id) return found[0].id
+
+    const newId = newArcId()
+    const externalRef = JSON.stringify({
+      provider: 'github',
+      id: issueId,
+      url: `https://github.com/baseplane-ai/duraclaw/issues/${issueId}`,
+    })
+    try {
+      await db.insert(arcs).values({
+        id: newId,
+        userId,
+        title: `Issue #${issueId}`,
+        externalRef,
+        status: 'open',
+        createdAt: now,
+        updatedAt: now,
+      })
+      return newId
+    } catch (err) {
+      // Concurrent caller created the arc first — `idx_arcs_external_ref`
+      // unique index trips. Re-select; if the row is now visible, use it.
+      const raced = await db
+        .select({ id: arcs.id })
+        .from(arcs)
+        .where(
+          and(
+            eq(arcs.userId, userId),
+            sql`json_extract(${arcs.externalRef}, '$.provider') = 'github'`,
+            sql`json_extract(${arcs.externalRef}, '$.id') = ${issueId}`,
+          ),
+        )
+        .limit(1)
+      if (raced[0]?.id) return raced[0].id
+      throw err
+    }
+  }
+
+  // (3) Implicit arc — draft status, no externalRef. Renders flat in
+  // sidebar (one-session, no externalRef, no parent).
+  const implicitId = newArcId()
+  await db.insert(arcs).values({
+    id: implicitId,
+    userId,
+    title: buildImplicitTitle(promptText),
+    externalRef: null,
+    status: 'draft',
+    createdAt: now,
+    updatedAt: now,
+  })
+  return implicitId
 }

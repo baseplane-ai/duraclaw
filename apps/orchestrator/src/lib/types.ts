@@ -131,6 +131,9 @@ export interface Env {
 export interface AgentSessionRow {
   id: string
   userId: string
+  /** GH#116: parent arc FK (NOT NULL at the Drizzle/app layer; nullable
+   *  at the DB layer per Gotcha #12). Backfilled by migration 0032. */
+  arcId: string
   project: string
   status: string
   model: string | null
@@ -153,9 +156,12 @@ export interface AgentSessionRow {
   errorCode: string | null
   kataStateJson: string | null
   contextUsageJson: string | null
-  kataMode: string | null
-  kataIssue: number | null
-  kataPhase: string | null
+  /** GH#116: renamed from kataMode. Backfilled from kata_mode by
+   *  migration 0032. */
+  mode: string | null
+  /** GH#116: self-FK to agent_sessions.id; populated for advance/branch
+   *  successor sessions, NULL for root sessions. */
+  parentSessionId: string | null
   /** GH#115: FK into `worktrees(id)`. NULL for read-only modes (research,
    *  planning, freeform) and pre-115 sessions whose backfill couldn't
    *  resolve a row. */
@@ -251,11 +257,61 @@ export interface ChainWorktreeReservation {
 }
 
 /**
+ * GH#116: arcs are the durable parent of every session. Response shape
+ * of `GET /api/arcs` and `GET /api/arcs/:id`. Replaces the kata-linked
+ * `ChainSummary` shape: an arc is keyed by its text `id` (not by GitHub
+ * issue number), `externalRef` carries the optional issue / linear /
+ * plain-text reference, and `status` carries the arc lifecycle.
+ *
+ * `worktreeReservation` mirrors the post-#115 worktree row plus a
+ * derived `stale` flag — present when the arc has reserved a worktree,
+ * absent for read-only / arc-less arcs.
+ */
+export type ArcSummary = {
+  id: string
+  title: string
+  externalRef: { provider: 'github' | 'linear' | 'plain'; id: number | string; url?: string } | null
+  status: 'draft' | 'open' | 'closed' | 'archived'
+  worktreeId?: string
+  parentArcId?: string
+  createdAt: string
+  updatedAt: string
+  closedAt?: string
+  sessions: Array<{
+    id: string
+    mode: string | null
+    status: string
+    lastActivity: string | null
+    createdAt: string
+  }>
+  worktreeReservation?: {
+    worktree: string
+    heldSince: string
+    lastActivityAt: string
+    ownerId: string
+    stale: boolean
+  }
+  prNumber?: number
+  lastActivity: string | null
+}
+
+/**
  * Chain summary — one entry per kata-linked GitHub issue (GH#16 Feature 3D).
  * Response shape of `GET /api/chains`. Merges D1 session/reservation state
  * with GitHub issue metadata (cached 5min module-level). `column` is derived
  * by `deriveColumn()` from the latest qualifying session's kataMode plus the
  * issue's open/closed state.
+ *
+ * GH#116 P1 transition: ChainSummary preserves its original shape
+ * verbatim so every existing call site (kanban card, chain-status-item,
+ * use-chain-preconditions, etc.) compiles unchanged during P1+P2. Spec
+ * P3 deletes /api/chains and rewires the kanban + sidebar to use
+ * /api/arcs (ArcSummary). Spec P5 deletes the ChainSummary type and
+ * its consumers. The two types diverge intentionally during the
+ * migration window — pure `type ChainSummary = ArcSummary` would force
+ * every call site to refactor in P1, defeating the wave-by-wave
+ * rollout. ArcSummary above is the forward-looking shape; ChainSummary
+ * below is the legacy shape that survives until P5.
  */
 export interface ChainSummary {
   issueNumber: number

@@ -246,8 +246,10 @@ export async function syncCapabilitiesToD1(
 }
 
 /**
- * Consolidated kata write: one UPDATE for all kata columns
- * (kataMode, kataIssue, kataPhase, kataStateJson) + one broadcast.
+ * Consolidated kata write: UPDATE for `kataStateJson` only (GH#116:
+ * kataMode/kataIssue/kataPhase columns dropped — `mode` is written by
+ * createSession / advanceArc; the issue number is sourced from the
+ * arc's externalRef; phase has no column replacement) + one broadcast.
  * Also refreshes the worktree reservation activity and broadcasts the
  * chain row, mirroring `syncKataToD1`'s side effects.
  */
@@ -261,9 +263,6 @@ export async function syncKataAllToD1(
     await ctx.do.d1
       .update(agentSessions)
       .set({
-        kataMode: kataState?.currentMode ?? null,
-        kataIssue: kataState?.issueNumber ?? null,
-        kataPhase: kataState?.currentPhase ?? null,
         kataStateJson: kataState ? JSON.stringify(kataState) : null,
         messageSeq: ctx.do.messageSeq,
         updatedAt,

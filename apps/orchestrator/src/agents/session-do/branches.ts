@@ -1,12 +1,10 @@
 import type { BranchInfoRow, SessionMessage as WireSessionMessage } from '@duraclaw/shared-types'
 import type { SessionMessage } from 'agents/experimental/memory/session'
-import { eq } from 'drizzle-orm'
-import { agentSessions } from '~/db/schema'
+import { and, eq } from 'drizzle-orm'
+import { agentSessions, arcs } from '~/db/schema'
 import type { AwaitingReason, AwaitingResponsePart } from '~/lib/awaiting-response'
 import { chunkOps } from '~/lib/chunk-frame'
-import { contentToParts } from '~/lib/message-parts'
-import { bindWorktreeById } from '~/lib/reserve-worktree'
-import type { ContentBlock } from '~/lib/types'
+import { createSession } from '~/lib/create-session'
 import { broadcastBranchInfo, broadcastMessages } from './broadcast'
 import {
   bumpTurnCounter,
@@ -118,11 +116,21 @@ export function computeBranchInfoForUserTurn(
 }
 
 /**
- * Build a compact transcript of the current local history for use as a
- * SDK prompt prefix in `forkWithHistory`. Pure — does not touch state.
+ * Build a compact transcript of the current local history for use as an
+ * SDK prompt prefix. Pure — does not touch state.
+ *
+ * GH#116: `maxSeq` (optional) caps the transcript at the first
+ * `maxSeq` messages of the linear history. Used by `branchArcImpl`
+ * to fork from a partial transcript (B7). When omitted, the full
+ * local history is serialized (used by `rebindRunnerImpl`'s orphan
+ * recovery path).
  */
-export function serializeHistoryForFork(ctx: SessionDOContext): string {
-  const history = ctx.session.getHistory()
+export function serializeHistoryForFork(ctx: SessionDOContext, maxSeq?: number): string {
+  const fullHistory = ctx.session.getHistory()
+  const history =
+    typeof maxSeq === 'number' && maxSeq >= 0 && maxSeq < fullHistory.length
+      ? fullHistory.slice(0, maxSeq)
+      : fullHistory
   return history
     .map((m) => {
       const role = m.role === 'user' ? 'User' : m.role === 'assistant' ? 'Assistant' : m.role
@@ -230,128 +238,143 @@ export async function resubmitMessageImpl(
 }
 
 /**
- * Body of the `@callable forkWithHistory` RPC. Spec #101 P1.2 B10:
- * transcript-agnostic — works for any adapter that accepts a prompt. The
- * spawned runner gets a fresh adapter session (new `runner_session_id`)
- * seeded with a serialized transcript of the prior conversation. Feels
- * like a resume from the user's POV but sidesteps adapter-native resume
- * entirely — useful when the prior `runner_session_id` is orphaned by a
- * stuck runner, unresumable, or we just want a clean context window
- * without losing the thread.
+ * Body of the `@callable branchArc` RPC (GH#116 B7). Creates a child arc
+ * under the current session's parent arc, seeded with a transcript-
+ * wrapped prompt containing the parent session's history (optionally
+ * truncated at `fromMessageSeq`) and a fresh user message. The new arc
+ * inherits `externalRef` from the parent by default and points back via
+ * `parentArcId`. Returns both the new arc id and the new session id; the
+ * UI wires both into a "branch tree" view under the parent arc.
+ *
+ * Replaces the intentional path of the legacy `forkWithHistoryImpl`.
+ * The orphan-recovery path (formerly the same function's other use) is
+ * now `rebindRunnerImpl` — separate concern, separate file.
  */
-export async function forkWithHistoryImpl(
+export async function branchArcImpl(
   ctx: SessionDOContext,
-  content: string | ContentBlock[],
-  opts?: { worktreeId?: string | null },
-): Promise<{ ok: boolean; error?: string }> {
+  args: { fromMessageSeq?: number; prompt: string; mode?: string | null; title?: string },
+): Promise<{ ok: boolean; newArcId?: string; newSessionId?: string; error?: string }> {
+  // ── Validation ──────────────────────────────────────────────────────
+  const trimmedPrompt = typeof args.prompt === 'string' ? args.prompt.trim() : ''
+  if (!trimmedPrompt) {
+    return { ok: false, error: 'prompt required' }
+  }
+
+  if (args.fromMessageSeq !== undefined) {
+    if (!Number.isInteger(args.fromMessageSeq) || args.fromMessageSeq < 0) {
+      return { ok: false, error: 'invalid fromMessageSeq' }
+    }
+    const historyLen = ctx.session.getHistory().length
+    if (args.fromMessageSeq > historyLen) {
+      return { ok: false, error: 'invalid fromMessageSeq' }
+    }
+  }
+
   if (!ctx.state.project) {
-    return { ok: false, error: 'Session has no project — cannot fork.' }
+    return { ok: false, error: 'Session has no project — cannot branch.' }
   }
 
-  // GH#115 P1.5 / B-FORK-1: optional worktreeId override. Default
-  // inherits the parent's `ctx.state.worktreeId` (no-op — same DO,
-  // same session). When the caller passes an explicit id different
-  // from the current one, validate via `bindWorktreeById` against
-  // `{kind:'session', id:<doId>}` (fork-with-history doesn't carry
-  // kataIssue) and re-stamp `project_path` so the next gateway dial
-  // routes the runner into the new clone. On 409 / 404 we return
-  // early — the fork is not attempted.
-  if (opts?.worktreeId && opts.worktreeId !== ctx.state.worktreeId) {
-    const ownerUserId = ctx.state.userId
-    if (!ownerUserId) {
-      return { ok: false, error: 'Cannot rebind worktree without authenticated owner.' }
-    }
-    const sessionIdStr = ctx.ctx.id.toString()
-    const bindResult = await bindWorktreeById(
-      ctx.do.d1,
-      opts.worktreeId,
-      { kind: 'session', id: sessionIdStr },
-      ownerUserId,
-    )
-    if (!bindResult.ok) {
-      if (bindResult.kind === 'not_found') {
-        return { ok: false, error: `Worktree ${opts.worktreeId} not found.` }
-      }
-      const existing = bindResult.existing
-      return {
-        ok: false,
-        error: `Worktree ${opts.worktreeId} held by ${existing.reservedBy?.kind ?? '?'}:${existing.reservedBy?.id ?? '?'}.`,
-      }
-    }
-    updateState(ctx, {
-      worktreeId: bindResult.row.id,
-      project_path: bindResult.row.path,
-    })
-    // Also persist the new worktreeId on the D1 agent_sessions row so
-    // the chain projection + sessions list stays consistent.
-    try {
-      await ctx.do.d1
-        .update(agentSessions)
-        .set({ worktreeId: bindResult.row.id, updatedAt: new Date().toISOString() })
-        .where(eq(agentSessions.id, sessionIdStr))
-    } catch (err) {
-      console.error(`[SessionDO:${ctx.ctx.id}] forkWithHistory: D1 worktreeId update failed:`, err)
-    }
+  const userId = ctx.state.userId
+  if (!userId) {
+    return { ok: false, error: 'Cannot branch without authenticated owner.' }
   }
 
-  // Build a compact transcript from local history (safe to read even when
-  // the DO has lost WS contact with its session-runner).
-  const transcript = serializeHistoryForFork(ctx)
+  const sessionId = ctx.ctx.id.toString()
 
-  const nextText =
-    typeof content === 'string'
-      ? content
-      : content
-          .map((b) => {
-            const bl = b as { type?: string; text?: string }
-            return bl.type === 'text' ? (bl.text ?? '') : ''
-          })
-          .filter(Boolean)
-          .join('\n')
-
-  const forkedPrompt = transcript
-    ? `<prior_conversation>\n${transcript}\n</prior_conversation>\n\nContinuing the conversation above. New user message follows.\n\n${nextText}`
-    : nextText
-
-  // Persist the user's new message in local history exactly as sendMessage
-  // would, so the UI reflects the turn boundary. We do NOT persist the
-  // transcript prefix — that's only for the SDK's fresh context.
-  const turnId = bumpTurnCounter(ctx)
-  const userMsgId = `usr-${turnId}`
-  const userMsg: SessionMessage & { canonical_turn_id?: string } = {
-    id: userMsgId,
-    role: 'user',
-    parts: [...contentToParts(content), buildAwaitingPart('first_token')],
-    createdAt: new Date(),
-    canonical_turn_id: userMsgId,
-  }
+  // ── Resolve parent arc via D1 ───────────────────────────────────────
+  // SessionMeta does not carry `arcId` directly; the arc parent is
+  // recorded on the agent_sessions D1 row. Read it (plus the parent
+  // arc's title + externalRef) so the new arc inherits sensibly.
+  let parentArcId: string
+  let parentArcTitle: string
+  let parentArcExternalRef: string | null
   try {
-    await safeAppendMessage(ctx, userMsg)
-    persistTurnState(ctx)
-    // GH#38 P1.5 / B10: emit messages + branchInfo siblings back-to-back.
-    broadcastMessages(ctx, [userMsg as unknown as WireSessionMessage])
-    const siblingRow = computeBranchInfoForUserTurn(ctx, userMsg)
-    if (siblingRow) {
-      broadcastBranchInfo(ctx, [siblingRow])
+    const rows = await ctx.do.d1
+      .select({
+        arcId: agentSessions.arcId,
+        arcTitle: arcs.title,
+        arcExternalRef: arcs.externalRef,
+      })
+      .from(agentSessions)
+      .innerJoin(arcs, eq(agentSessions.arcId, arcs.id))
+      .where(and(eq(agentSessions.id, sessionId), eq(agentSessions.userId, userId)))
+      .limit(1)
+    const row = rows[0]
+    if (!row?.arcId) {
+      return { ok: false, error: 'Parent arc not found for this session.' }
     }
+    parentArcId = row.arcId
+    parentArcTitle = row.arcTitle
+    parentArcExternalRef = row.arcExternalRef ?? null
   } catch (err) {
-    console.error(`[SessionDO:${ctx.ctx.id}] forkWithHistory: persist user msg failed:`, err)
+    console.error(`[SessionDO:${ctx.ctx.id}] branchArc: parent arc lookup failed:`, err)
+    return { ok: false, error: 'Failed to resolve parent arc.' }
   }
 
-  // Spec #80 B3: drop the old runner_session_id so the new runner gets a
-  // brand-new one (guarantees no hasLiveResume collision with any
-  // orphan) and flip status to 'pending' while we wait for the dial.
-  updateState(ctx, {
-    status: 'pending',
-    error: null,
-    runner_session_id: null,
-  })
+  // ── Build wrapped prompt ────────────────────────────────────────────
+  // Matches `forkWithHistoryImpl`'s template verbatim (per spec B7) so
+  // the model sees an identical prefix shape.
+  const transcript = serializeHistoryForFork(ctx, args.fromMessageSeq)
+  const wrappedPrompt = transcript
+    ? `<prior_conversation>\n${transcript}\n</prior_conversation>\n\nContinuing the conversation above. New user message follows.\n\n${args.prompt}`
+    : args.prompt
 
-  void triggerGatewayDial(ctx, {
-    type: 'execute',
-    project: ctx.state.project,
-    prompt: forkedPrompt,
-  })
+  // ── Insert child arc row ────────────────────────────────────────────
+  const newArcId = `arc_${crypto.randomUUID()}`
+  const now = new Date().toISOString()
+  const newArcTitle = args.title ?? `${parentArcTitle} — side arc`
+  try {
+    await ctx.do.d1.insert(arcs).values({
+      id: newArcId,
+      userId,
+      title: newArcTitle,
+      // Inherit parent externalRef by default (GH issue ref carries
+      // through). Stored as the parent's raw JSON text — round-trips
+      // cleanly via parseExternalRef on read.
+      externalRef: parentArcExternalRef,
+      status: 'open',
+      parentArcId,
+      createdAt: now,
+      updatedAt: now,
+    })
+  } catch (err) {
+    console.error(`[SessionDO:${ctx.ctx.id}] branchArc: child arc insert failed:`, err)
+    return { ok: false, error: 'Failed to create child arc.' }
+  }
 
-  return { ok: true }
+  // ── Spawn the new arc's first session ───────────────────────────────
+  // Inline-await shim for the broadcastSessionRow waitUntil — branchArc
+  // is invoked from inside a DO RPC where ctx.ctx.waitUntil is owned by
+  // the inbound HTTP/WS request; chaining onto it from a deeply-nested
+  // callsite is fragile, and the broadcast is best-effort.
+  const spawnCtx = {
+    waitUntil: (p: Promise<unknown>) => {
+      void p.catch((err) =>
+        console.warn(`[SessionDO:${ctx.ctx.id}] branchArc: broadcast failed`, err),
+      )
+    },
+  }
+  // GH#116 B7: thread `mode` and `parentSessionId` through so the new
+  // arc's first session row carries (a) the optional kata mode the
+  // branch starts in and (b) a back-pointer to the parent session in
+  // the parent arc. The branch lineage walks parentSessionId across the
+  // arc boundary; arc-tree views resolve via `arcs.parentArcId`.
+  const result = await createSession(
+    ctx.env,
+    userId,
+    {
+      arcId: newArcId,
+      project: ctx.state.project,
+      prompt: wrappedPrompt,
+      agent: 'claude',
+      mode: args.mode ?? null,
+      parentSessionId: sessionId,
+    },
+    spawnCtx,
+  )
+  if (!result.ok) {
+    return { ok: false, error: result.error }
+  }
+
+  return { ok: true, newArcId, newSessionId: result.sessionId }
 }
