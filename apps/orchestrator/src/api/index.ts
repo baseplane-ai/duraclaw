@@ -2330,13 +2330,29 @@ export function createApiApp() {
     const db = getDb(c.env)
     const now = new Date().toISOString()
 
-    const result = await db.transaction(async (trx) => {
+    type ClaimOutcome =
+      | { kind: 'ok'; updatedAt: string }
+      | { kind: 'not_found' }
+      | { kind: 'already_owned' }
+
+    const outcome: ClaimOutcome = await db.transaction(async (trx) => {
       const updated = await trx
         .update(projectMetadata)
         .set({ ownerId: userId, updatedAt: now })
         .where(and(eq(projectMetadata.projectId, projectId), isNull(projectMetadata.ownerId)))
         .returning({ ownerId: projectMetadata.ownerId, updatedAt: projectMetadata.updatedAt })
-      if (updated.length === 0) return null
+      if (updated.length === 0) {
+        // Disambiguate "already owned" from "no such project". The UPDATE
+        // matches zero rows in BOTH cases; a follow-up SELECT tells them
+        // apart so the caller doesn't see a misleading 409 for a typo'd
+        // projectId.
+        const existing = await trx
+          .select({ projectId: projectMetadata.projectId })
+          .from(projectMetadata)
+          .where(eq(projectMetadata.projectId, projectId))
+          .limit(1)
+        return { kind: existing.length === 0 ? 'not_found' : 'already_owned' }
+      }
       await trx.insert(projectMembers).values({
         projectId,
         userId,
@@ -2344,10 +2360,13 @@ export function createApiApp() {
         addedAt: now,
         addedBy: userId,
       })
-      return updated[0]
+      return { kind: 'ok', updatedAt: updated[0].updatedAt }
     })
 
-    if (result === null) return c.json({ error: 'already_owned' }, 409)
+    if (outcome.kind === 'not_found') {
+      return c.json({ error: 'not_found', reason: 'unknown-project' }, 404)
+    }
+    if (outcome.kind === 'already_owned') return c.json({ error: 'already_owned' }, 409)
 
     // Fanout (mirrors visibility-PATCH at :2294).
     c.executionCtx.waitUntil(
@@ -2369,7 +2388,7 @@ export function createApiApp() {
       })(),
     )
 
-    return c.json({ ok: true, ownerId: userId, claimedAt: result.updatedAt })
+    return c.json({ ok: true, ownerId: userId, claimedAt: outcome.updatedAt })
   })
 
   // GH#122 B-LIFECYCLE-2: owner-or-admin project ownership transfer.

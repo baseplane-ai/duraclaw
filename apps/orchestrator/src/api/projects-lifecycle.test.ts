@@ -149,9 +149,10 @@ describe('POST /api/projects/:projectId/claim (B-LIFECYCLE-1)', () => {
 
   it('admin on already-owned project → 409 already_owned', async () => {
     mockedGetRequestSession.mockResolvedValue(adminSession as any)
-    // UPDATE … WHERE ownerId IS NULL matches 0 rows.
+    // UPDATE … WHERE ownerId IS NULL matches 0 rows (already owned).
     fakeDb.data.queue.push([])
-    // No further queue entries — handler short-circuits.
+    // Disambiguating SELECT: project exists → already_owned.
+    fakeDb.data.queue.push([{ projectId: VALID_PID }])
 
     const { request } = makeApp(env)
     const res = await request(`/api/projects/${VALID_PID}/claim`, { method: 'POST' })
@@ -160,6 +161,23 @@ describe('POST /api/projects/:projectId/claim (B-LIFECYCLE-1)', () => {
     const body = (await res.json()) as Record<string, unknown>
     expect(body.error).toBe('already_owned')
     // INSERT into project_members must NOT happen on the lost-race path.
+    expect(fakeDb.db.insert).not.toHaveBeenCalled()
+  })
+
+  it('admin on nonexistent project → 404 unknown-project', async () => {
+    mockedGetRequestSession.mockResolvedValue(adminSession as any)
+    // UPDATE matches 0 rows.
+    fakeDb.data.queue.push([])
+    // Disambiguating SELECT: project does not exist → 404.
+    fakeDb.data.queue.push([])
+
+    const { request } = makeApp(env)
+    const res = await request(`/api/projects/${VALID_PID}/claim`, { method: 'POST' })
+
+    expect(res.status).toBe(404)
+    const body = (await res.json()) as Record<string, unknown>
+    expect(body.error).toBe('not_found')
+    expect(body.reason).toBe('unknown-project')
     expect(fakeDb.db.insert).not.toHaveBeenCalled()
   })
 
