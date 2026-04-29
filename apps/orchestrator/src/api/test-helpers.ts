@@ -27,7 +27,7 @@ import { vi } from 'vitest'
 
 type Kind = 'select' | 'insert' | 'update' | 'delete'
 
-interface ChainOp {
+export interface ChainOp {
   kind: Kind
   calls: Array<{ method: string; args: unknown[] }>
 }
@@ -57,7 +57,13 @@ export interface DbStubConfig {
  * supplied resolver returns for this op.
  */
 function makeChain(op: ChainOp, resolve: (op: ChainOp) => unknown): any {
-  const finalize = () => Promise.resolve(resolve(op))
+  const finalize = () => {
+    const v = resolve(op)
+    // Allow tests to inject failures by queuing an Error instance — the
+    // chain rejects when awaited so the calling handler observes a thrown
+    // promise (matching real D1 behavior on constraint / network failure).
+    return v instanceof Error ? Promise.reject(v) : Promise.resolve(v)
+  }
 
   const handler: ProxyHandler<object> = {
     get(_target, prop) {
@@ -99,6 +105,12 @@ export function makeFakeDb(cfg: DbStubConfig = {}) {
     runTransactions: cfg.runTransactions ?? true,
   }
 
+  // Recording layer: tests can inspect `ops` to verify what `.values()` /
+  // `.onConflictDoUpdate()` etc. received. One entry per top-level call to
+  // `db.select|insert|update|delete()`; `calls` accumulates every fluent
+  // method invocation on that chain.
+  const ops: ChainOp[] = []
+
   const resolver = (op: ChainOp) => {
     if (data.queue.length > 0) {
       return data.queue.shift()
@@ -106,26 +118,24 @@ export function makeFakeDb(cfg: DbStubConfig = {}) {
     return data[op.kind]
   }
 
+  const startChain = (kind: Kind, args: unknown[]) => {
+    const op: ChainOp = { kind, calls: [{ method: kind, args }] }
+    ops.push(op)
+    return makeChain(op, resolver)
+  }
+
   const db: any = {
-    select: vi.fn((..._args: unknown[]) =>
-      makeChain({ kind: 'select', calls: [{ method: 'select', args: _args }] }, resolver),
-    ),
-    insert: vi.fn((..._args: unknown[]) =>
-      makeChain({ kind: 'insert', calls: [{ method: 'insert', args: _args }] }, resolver),
-    ),
-    update: vi.fn((..._args: unknown[]) =>
-      makeChain({ kind: 'update', calls: [{ method: 'update', args: _args }] }, resolver),
-    ),
-    delete: vi.fn((..._args: unknown[]) =>
-      makeChain({ kind: 'delete', calls: [{ method: 'delete', args: _args }] }, resolver),
-    ),
+    select: vi.fn((..._args: unknown[]) => startChain('select', _args)),
+    insert: vi.fn((..._args: unknown[]) => startChain('insert', _args)),
+    update: vi.fn((..._args: unknown[]) => startChain('update', _args)),
+    delete: vi.fn((..._args: unknown[]) => startChain('delete', _args)),
     transaction: vi.fn(async (cb: (tx: any) => Promise<unknown>) => {
       if (!data.runTransactions) return undefined
       return cb(db)
     }),
   }
 
-  return { db, data }
+  return { db, data, ops }
 }
 
 /**

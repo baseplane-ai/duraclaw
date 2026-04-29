@@ -7,8 +7,8 @@
  */
 
 import { useLiveQuery } from '@tanstack/react-db'
-import { useLocation, useNavigate } from '@tanstack/react-router'
-import { ArchiveIcon, ChevronRight, EditIcon, Eye, EyeOff, PlusIcon } from 'lucide-react'
+import { Link, useLocation, useNavigate } from '@tanstack/react-router'
+import { ArchiveIcon, ChevronRight, EditIcon, Eye, EyeOff, FileText, PlusIcon } from 'lucide-react'
 import { useCallback, useMemo, useRef, useState } from 'react'
 import { SessionPresenceIcons } from '~/components/session-presence-icons'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '~/components/ui/collapsible'
@@ -301,6 +301,17 @@ export function NavSessions() {
     return list.map((p) => ({ ...p, hidden: hiddenSet.has(p.name) }))
   }, [projectRows, hiddenSet])
 
+  // GH#122 B-UI-6/B-UI-7: project name → projectId resolver for the
+  // session-card "Open Docs" icon-button. Returns null when the project
+  // has no projectId yet (gateway hasn't synced post-migration, or the
+  // clone has no remote origin).
+  const projectIdByName = useMemo(() => {
+    const list = (projectRows ?? []) as ProjectInfo[]
+    const out: Record<string, string | null> = {}
+    for (const p of list) out[p.name] = p.projectId ?? null
+    return out
+  }, [projectRows])
+
   const projectsLoaded = projectRows !== undefined
 
   const handleToggleHidden = useCallback(
@@ -506,8 +517,24 @@ export function NavSessions() {
                         />
                       )}
                     </span>
-                    <span className="truncate text-[11px] text-muted-foreground leading-tight">
-                      {session.project}
+                    <span className="flex items-center gap-1 truncate text-[11px] text-muted-foreground leading-tight">
+                      <span className="truncate">{session.project}</span>
+                      {/* GH#122 B-UI-6: Open Docs icon-button — only renders
+                          when the synced projectsCollection has a projectId
+                          for this session's project (NULL until backfill
+                          runs / next gateway sync). Click does NOT propagate
+                          to the parent SessionMenuButton's onClick. */}
+                      {projectIdByName[session.project] && (
+                        <Link
+                          to="/projects/$projectId/docs"
+                          params={{ projectId: projectIdByName[session.project] as string }}
+                          aria-label={`Open docs for ${session.project}`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="opacity-60 transition-opacity hover:opacity-100 focus:opacity-100"
+                        >
+                          <FileText className="size-3.5" />
+                        </Link>
+                      )}
                     </span>
                     {session.identityName && (
                       <span className="truncate text-[10px] text-muted-foreground leading-tight">

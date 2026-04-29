@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Header } from '~/components/layout/header'
 import { Main } from '~/components/layout/main'
 import { NotificationPreferences } from '~/components/notification-preferences'
+import { TransferOwnershipDialog } from '~/components/projects/TransferOwnershipDialog'
 import { Badge } from '~/components/ui/badge'
 import { Button } from '~/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '~/components/ui/card'
@@ -386,6 +387,8 @@ function ProjectsSection() {
   const { data: projectRows } = useLiveQuery(projectsCollection as any)
   const [pending, setPending] = useState<Set<string>>(new Set())
   const [errors, setErrors] = useState<Record<string, string>>({})
+  // GH#122 P4 / B-UI-5: admin reassign dialog target.
+  const [transferTarget, setTransferTarget] = useState<ProjectInfo | null>(null)
 
   const handleToggle = useCallback(async (name: string, current: 'public' | 'private') => {
     const next = current === 'public' ? 'private' : 'public'
@@ -446,11 +449,13 @@ function ProjectsSection() {
                 p.visibility === 'private' ? 'private' : 'public'
               const busy = pending.has(p.name)
               const err = errors[p.name]
+              const ownerLabel = p.ownerId ? p.ownerId.slice(0, 8) : 'unowned'
               return (
                 <li key={p.name} className="flex items-center justify-between gap-3 py-2 text-sm">
                   <div className="flex min-w-0 flex-1 items-center gap-2">
                     <span className="truncate font-mono">{p.name}</span>
                     <VisibilityBadge visibility={visibility} showLabel />
+                    <span className="text-xs text-muted-foreground">Owner: {ownerLabel}</span>
                   </div>
                   <div className="flex items-center gap-2">
                     {err && <span className="text-xs text-destructive">{err}</span>}
@@ -462,6 +467,15 @@ function ProjectsSection() {
                     >
                       {busy ? 'Saving…' : visibility === 'public' ? 'Make private' : 'Make public'}
                     </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={!p.projectId}
+                      title={p.projectId ? undefined : 'Project not yet synced'}
+                      onClick={() => setTransferTarget(p)}
+                    >
+                      Reassign
+                    </Button>
                   </div>
                 </li>
               )
@@ -469,6 +483,15 @@ function ProjectsSection() {
           </ul>
         )}
       </CardContent>
+      {transferTarget?.projectId && (
+        <TransferOwnershipDialog
+          projectId={transferTarget.projectId}
+          projectName={transferTarget.name}
+          currentOwnerId={transferTarget.ownerId ?? null}
+          currentUserRole="admin"
+          onClose={() => setTransferTarget(null)}
+        />
+      )}
     </Card>
   )
 }

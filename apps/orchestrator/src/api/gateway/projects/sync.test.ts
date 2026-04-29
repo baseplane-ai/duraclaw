@@ -289,6 +289,172 @@ describe('POST /api/gateway/projects/sync', () => {
     expect(ops.filter((o) => o.type === 'update')).toHaveLength(2)
   })
 
+  // ── GH#122 P1.2 (B-SYNC-1 / B-SYNC-2): atomic dual-write of projects + projectMetadata ──
+  //
+  // The handler now derives projectId from p.repo_origin and (when set)
+  // upserts both `projects` AND `projectMetadata` inside a single
+  // db.transaction(). The fake's transaction(cb) just calls cb(db), so
+  // queue consumption stays serial; tests below assert the new wiring.
+
+  it('populates projectId on projects when repo_origin is set', async () => {
+    // Single incoming row with origin → expect TWO inserts per row
+    // (projects + projectMetadata).
+    fakeDb.data.queue.push([]) // SELECT projects
+    fakeDb.data.queue.push([]) // INSERT projects
+    fakeDb.data.queue.push([]) // INSERT projectMetadata
+    fakeDb.data.queue.push([{ userId: 'user-A' }]) // SELECT user_presence
+
+    const proj = {
+      ...buildProject('alpha'),
+      repo_origin: 'git@github.com:foo/bar.git',
+    }
+
+    const { request, collector } = makeApp(env)
+    const res = await request('/api/gateway/projects/sync', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer gw-secret',
+      },
+      body: JSON.stringify({ projects: [proj] }),
+    })
+
+    expect(res.status).toBe(204)
+    await Promise.all(collector.promises)
+
+    // Two INSERTs total: projects + projectMetadata.
+    expect(fakeDb.db.insert).toHaveBeenCalledTimes(2)
+
+    // Inspect the projects-side .values() — it should carry a projectId.
+    const insertOps = fakeDb.ops.filter((o) => o.kind === 'insert')
+    expect(insertOps).toHaveLength(2)
+
+    // The first .values() call carries the projects-table row.
+    const projectsValues = insertOps[0].calls.find((c) => c.method === 'values')
+    expect(projectsValues).toBeDefined()
+    const projectsRow = projectsValues?.args[0] as { projectId?: string | null; name: string }
+    expect(projectsRow.name).toBe('alpha')
+    // 16-char lowercase-hex.
+    expect(projectsRow.projectId).toMatch(/^[0-9a-f]{16}$/)
+
+    // Second .values() call carries the projectMetadata row.
+    const metaValues = insertOps[1].calls.find((c) => c.method === 'values')
+    expect(metaValues).toBeDefined()
+    const metaRow = metaValues?.args[0] as {
+      projectId: string
+      projectName: string
+      originUrl: string
+    }
+    expect(metaRow.projectId).toBe(projectsRow.projectId)
+    expect(metaRow.projectName).toBe('alpha')
+    expect(metaRow.originUrl).toBe('git@github.com:foo/bar.git')
+  })
+
+  it('skips projectMetadata upsert when repo_origin is null', async () => {
+    seedForSync(fakeDb, {
+      existing: [],
+      incoming: 1, // ONE insert, not two — projectMetadata is skipped.
+      presenceUsers: [],
+    })
+
+    const { request, collector } = makeApp(env)
+    const res = await request('/api/gateway/projects/sync', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer gw-secret',
+      },
+      body: JSON.stringify({ projects: [buildProject('alpha')] }), // repo_origin: null
+    })
+
+    expect(res.status).toBe(204)
+    await Promise.all(collector.promises)
+
+    // Only the projects insert fires; projectMetadata is gated on a non-null projectId.
+    expect(fakeDb.db.insert).toHaveBeenCalledTimes(1)
+
+    // And the projects row's projectId is null (not derived).
+    const insertOps = fakeDb.ops.filter((o) => o.kind === 'insert')
+    const projectsValues = insertOps[0].calls.find((c) => c.method === 'values')
+    const projectsRow = projectsValues?.args[0] as { projectId: string | null }
+    expect(projectsRow.projectId).toBeNull()
+  })
+
+  it('projectMetadata upsert preserves ownerId on conflict (no ownerId in set clause)', async () => {
+    // Contract assertion: the .onConflictDoUpdate({ set }) for projectMetadata
+    // must NOT include ownerId, so a previously-claimed project keeps its owner
+    // across syncs. (The fake doesn't apply real ON CONFLICT; we inspect the
+    // chain's recorded `.set` argument.)
+    fakeDb.data.queue.push([]) // SELECT projects
+    fakeDb.data.queue.push([]) // INSERT projects
+    fakeDb.data.queue.push([]) // INSERT projectMetadata
+    fakeDb.data.queue.push([]) // SELECT user_presence
+
+    const proj = { ...buildProject('alpha'), repo_origin: 'git@github.com:foo/bar.git' }
+
+    const { request, collector } = makeApp(env)
+    const res = await request('/api/gateway/projects/sync', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer gw-secret',
+      },
+      body: JSON.stringify({ projects: [proj] }),
+    })
+
+    expect(res.status).toBe(204)
+    await Promise.all(collector.promises)
+
+    const insertOps = fakeDb.ops.filter((o) => o.kind === 'insert')
+    expect(insertOps).toHaveLength(2)
+
+    // The projectMetadata insert is the second one; its onConflictDoUpdate
+    // call carries `{ target, set: {...} }` — set must NOT contain ownerId.
+    const metaConflict = insertOps[1].calls.find((c) => c.method === 'onConflictDoUpdate')
+    expect(metaConflict).toBeDefined()
+    const setArg = (metaConflict?.args[0] as { set: Record<string, unknown> }).set
+    expect(setArg).toBeDefined()
+    expect(Object.keys(setArg)).not.toContain('ownerId')
+    // Sanity: it does write the fields it's supposed to.
+    expect(setArg).toHaveProperty('projectName')
+    expect(setArg).toHaveProperty('originUrl')
+    expect(setArg).toHaveProperty('updatedAt')
+  })
+
+  it('transaction failure rolls back: throw inside the transaction body bubbles up; soft-delete UPDATE not issued', async () => {
+    // Seed an existing live row that would normally get soft-deleted (it's
+    // missing from the incoming payload). Then queue an Error at the
+    // position of the projectMetadata INSERT so the transaction body
+    // throws. Assert: db.update (the soft-delete) is never called.
+    fakeDb.data.queue.push([{ name: 'gamma', deletedAt: null }]) // SELECT
+    fakeDb.data.queue.push([]) // INSERT projects (succeeds)
+    fakeDb.data.queue.push(new Error('simulated D1 constraint failure')) // INSERT projectMetadata (throws)
+    // No further queue items — control flow should not reach the soft-delete
+    // UPDATE or the user_presence SELECT.
+
+    const proj = { ...buildProject('alpha'), repo_origin: 'git@github.com:foo/bar.git' }
+
+    const { request, collector } = makeApp(env)
+    const res = await request('/api/gateway/projects/sync', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer gw-secret',
+      },
+      body: JSON.stringify({ projects: [proj] }),
+    })
+
+    // Hono surfaces an unhandled exception as 500.
+    expect(res.status).toBe(500)
+    await Promise.all(collector.promises)
+
+    // The soft-delete UPDATE never fires — the throw inside the transaction
+    // bubbled up before the post-transaction reconcile could run.
+    expect(fakeDb.db.update).not.toHaveBeenCalled()
+    // No fanout broadcasts either.
+    expect(mockedBroadcast).not.toHaveBeenCalled()
+  })
+
   it('chunks a large payload into multiple broadcasts per user', async () => {
     // 500 rows with sizeable path strings → guaranteed to exceed 2 KiB cap.
     const manyProjects = Array.from({ length: 500 }, (_, i) =>
@@ -319,10 +485,15 @@ describe('POST /api/gateway/projects/sync', () => {
       repo_origin: 'x'.repeat(500),
     }))
 
-    // Reset fake queue for the real test run.
+    // Reset fake queue for the real test run. Each fat project now has
+    // a non-null `repo_origin`, so the handler issues TWO inserts per row
+    // (projects + projectMetadata) inside the dual-write transaction.
     fakeDb.data.queue = []
     fakeDb.data.queue.push([]) // no existing
-    for (let i = 0; i < fatProjects.length; i++) fakeDb.data.queue.push([])
+    for (let i = 0; i < fatProjects.length; i++) {
+      fakeDb.data.queue.push([]) // INSERT projects
+      fakeDb.data.queue.push([]) // INSERT projectMetadata
+    }
     fakeDb.data.queue.push([{ userId: 'user-A' }])
 
     const res = await request('/api/gateway/projects/sync', {

@@ -1,4 +1,4 @@
-import { LayoutGrid, MessagesSquare, Rocket, Settings, Users } from 'lucide-react'
+import { FolderTree, LayoutGrid, MessagesSquare, Rocket, Settings, Users } from 'lucide-react'
 import type { NavGroup, SidebarData } from '../types'
 
 export const sidebarData: SidebarData = {
@@ -10,6 +10,11 @@ export const sidebarData: SidebarData = {
           title: 'Sessions',
           url: '/',
           icon: MessagesSquare,
+        },
+        {
+          title: 'Projects',
+          url: '/projects',
+          icon: FolderTree,
         },
         {
           title: 'Board',
