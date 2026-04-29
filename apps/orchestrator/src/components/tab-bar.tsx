@@ -621,7 +621,15 @@ function ProjectTabInner({
     <button
       type="button"
       className={cn(
-        'relative flex items-center justify-center gap-1.5 min-w-12 px-2 py-1 m-0.5 text-xs font-medium rounded-sm',
+        // items-baseline: the dense label is `font-mono` and the title is
+        // sans-serif. With items-center each text span's content box was
+        // centered independently, but mono and sans have different
+        // intrinsic baselines within their line-box, so the visible
+        // characters floated at slightly different y-positions. Aligning on
+        // the shared text baseline puts both fonts on the same visual line.
+        // Non-text children (icons, presence dot, skeleton) opt back into
+        // center alignment via `self-center` below.
+        'relative flex items-baseline justify-center gap-1.5 min-w-12 px-2 py-1 m-0.5 text-xs font-medium rounded-sm',
         'transition-all',
         colorSlot.bg,
         colorSlot.text,
@@ -639,23 +647,29 @@ function ProjectTabInner({
     >
       {session ? (
         <>
-          <span className={cn('font-mono tracking-tight', isActive && 'font-semibold')}>
+          <span
+            className={cn('font-mono tracking-tight leading-none', isActive && 'font-semibold')}
+          >
             {denseLabel}
           </span>
           {!isMobile && session.title && (
-            <span className="max-w-40 truncate font-normal opacity-90">{session.title}</span>
+            <span className="max-w-40 truncate font-normal leading-none opacity-90">
+              {session.title}
+            </span>
           )}
           <SessionPresenceIcons sessionId={sessionId} />
         </>
       ) : isDraft ? (
         <>
-          <PlusIcon className="size-3 shrink-0" />
-          <span className={cn('font-mono tracking-tight', isActive && 'font-semibold')}>
+          <PlusIcon className="size-3 shrink-0 self-center" />
+          <span
+            className={cn('font-mono tracking-tight leading-none', isActive && 'font-semibold')}
+          >
             {denseLabel || '--'}
           </span>
         </>
       ) : (
-        <div className="flex items-center gap-1 py-0.5">
+        <div className="flex items-center gap-1 py-0.5 self-center">
           <div className="animate-pulse bg-black/10 dark:bg-white/10 h-3 w-8 rounded" />
         </div>
       )}
