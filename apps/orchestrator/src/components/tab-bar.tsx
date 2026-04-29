@@ -35,6 +35,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from '~/components/ui/sheet'
+import { Tooltip, TooltipContent, TooltipTrigger } from '~/components/ui/tooltip'
 import { projectsCollection } from '~/db/projects-collection'
 import { useSessionStatus } from '~/db/session-local-collection'
 import type { SessionRecord } from '~/db/session-record'
@@ -54,6 +55,17 @@ import {
 } from '~/lib/project-display'
 import type { SessionStatus, TabMeta, UserTabRow } from '~/lib/types'
 import { cn } from '~/lib/utils'
+
+/**
+ * Maximum characters of the Haiku-generated session title rendered in a
+ * dense tab. Past this we hard-truncate with an ellipsis and surface the
+ * full title in a hover tooltip — keeps the tab strip uniform when one
+ * session has a longer title than the others. Char-based (not pixel-based)
+ * so the budget is consistent across font weights and zoom levels; the
+ * 24-char cap fits the typical 2-3 word Haiku titles ("Fix Auth Bug",
+ * "Refactor Tab Layout") while still cutting off the rare overflow.
+ */
+const MAX_TAB_TITLE_CHARS = 24
 
 interface TabBarProps {
   /** Ordered list of session IDs from userTabsCollection (ORDER BY position). */
@@ -465,6 +477,49 @@ interface ProjectTabProps {
   onNewTabForProject?: () => void
 }
 
+/**
+ * Tab title with hard char-limit + overflow tooltip.
+ *
+ * Truncates `title` to MAX_TAB_TITLE_CHARS chars (with a trailing ellipsis
+ * replacing the last char so the visible string never exceeds the budget).
+ * When truncated, wraps the span in a hover tooltip showing the full
+ * title — so the user can still read long titles without inflating the
+ * tab strip. When within the budget, renders a bare span with no tooltip
+ * (avoids spurious empty-tooltip pop-ups on every tab hover).
+ *
+ * `cursor-default` on the truncated trigger prevents the I-beam from
+ * appearing — the title isn't selectable from the tab; the tab itself is
+ * the click target.
+ */
+function TabTitle({ title }: { title: string }) {
+  const isTruncated = title.length > MAX_TAB_TITLE_CHARS
+  const display = isTruncated ? `${title.slice(0, MAX_TAB_TITLE_CHARS - 1).trimEnd()}…` : title
+
+  const span = (
+    <span
+      className={cn(
+        'font-normal leading-none opacity-90',
+        // Cap at the char-budget but also let CSS truncate as a safety
+        // net for very-wide-glyph titles (CJK, emoji) that fit the char
+        // budget yet still overflow the tab box.
+        'max-w-40 truncate',
+        isTruncated && 'cursor-default',
+      )}
+    >
+      {display}
+    </span>
+  )
+
+  if (!isTruncated) return span
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{span}</TooltipTrigger>
+      <TooltipContent>{title}</TooltipContent>
+    </Tooltip>
+  )
+}
+
 /** Sortable wrapper */
 function SortableProjectTab(props: ProjectTabProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
@@ -652,11 +707,7 @@ function ProjectTabInner({
           >
             {denseLabel}
           </span>
-          {!isMobile && session.title && (
-            <span className="max-w-40 truncate font-normal leading-none opacity-90">
-              {session.title}
-            </span>
-          )}
+          {!isMobile && session.title && <TabTitle title={session.title} />}
           <SessionPresenceIcons sessionId={sessionId} />
         </>
       ) : isDraft ? (
