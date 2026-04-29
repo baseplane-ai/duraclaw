@@ -29,7 +29,9 @@ import {
   ChevronRightIcon,
   CopyIcon,
   FileIcon,
+  GitBranchIcon,
   HistoryIcon,
+  MoreVerticalIcon,
 } from 'lucide-react'
 import {
   memo,
@@ -42,6 +44,12 @@ import {
   useState,
 } from 'react'
 import { Badge } from '~/components/ui/badge'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '~/components/ui/dropdown-menu'
 import {
   Sheet,
   SheetContent,
@@ -491,6 +499,21 @@ interface ChatThreadProps {
   onBranchNavigate?: (messageId: string, direction: 'prev' | 'next') => void
   onSendSuggestion?: (text: string) => void
   /**
+   * GH#116 B16 — invoked when the user clicks the per-message "Branch
+   * from here" affordance on an assistant turn (3-dot menu or right-
+   * click). The argument is the assistant message's turn index in the
+   * `messages` array; the parent maps that to `fromMessageSeq` (turnIndex
+   * + 1) before POSTing `/api/arcs/:arcId/branch`. When omitted (read-
+   * only views, draft sessions without an arc id yet) the affordance is
+   * suppressed.
+   */
+  onBranchFromMessage?: (turnIndex: number) => void
+  /**
+   * GH#116 B16 — turn index currently being branched. While set, the
+   * matching assistant row renders a "Branching…" pill below it.
+   */
+  branchingFromTurnIndex?: number | null
+  /**
    * Caller-side hint that this session has prior turns. When `true`, an
    * empty `messages` array is treated as hydrate-in-progress (render the
    * skeleton) rather than as a draft / never-spawned session (which would
@@ -647,6 +670,20 @@ interface ChatMessageRowProps {
   onRewind?: (turnIndex: number) => void
   branch?: { current: number; total: number; siblings: string[] }
   onBranchNavigate?: (messageId: string, direction: 'prev' | 'next') => void
+  /**
+   * GH#116 B16 — when set, assistant messages render a hover-visible
+   * "Branch from here" affordance (3-dot menu + onContextMenu) that
+   * invokes this callback with the row's `turnIndex`. The parent owns
+   * the modal that drives `POST /api/arcs/:arcId/branch`.
+   */
+  onBranchFromMessage?: (turnIndex: number) => void
+  /**
+   * GH#116 B16 — when this turnIndex is currently being branched, render
+   * a small "Branching…" pill below the assistant message. Cleared when
+   * the parent's submit settles (success → navigation away; error →
+   * pill clears via parent state reset).
+   */
+  branchingFromTurnIndex?: number | null
 }
 
 /**
@@ -672,6 +709,8 @@ const ChatMessageRow = memo(
     onRewind,
     branch,
     onBranchNavigate,
+    onBranchFromMessage,
+    branchingFromTurnIndex,
   }: ChatMessageRowProps) {
     const handleRewind = useCallback(() => {
       onRewind?.(turnIndex)
@@ -683,6 +722,27 @@ const ChatMessageRow = memo(
       },
       [onBranchNavigate, msg.id],
     )
+
+    const handleBranchFromMessage = useCallback(() => {
+      onBranchFromMessage?.(turnIndex)
+    }, [onBranchFromMessage, turnIndex])
+
+    // Right-click context menu — only enabled for assistant messages and
+    // when the parent has wired the callback (read-only / draft mounts
+    // omit it). Suppresses the browser's native menu via preventDefault.
+    const handleAssistantContextMenu = useCallback(
+      (e: React.MouseEvent) => {
+        if (!onBranchFromMessage) return
+        e.preventDefault()
+        onBranchFromMessage(turnIndex)
+      },
+      [onBranchFromMessage, turnIndex],
+    )
+
+    const showBranchingPill =
+      branchingFromTurnIndex !== undefined &&
+      branchingFromTurnIndex !== null &&
+      branchingFromTurnIndex === turnIndex
 
     const rewindButton = onRewind ? (
       <button
@@ -812,10 +872,61 @@ const ChatMessageRow = memo(
     }
 
     if (msg.role === 'assistant') {
+      // Branch menu sits to the LEFT of the rewind button when both are
+      // present, so they don't overlap. Without rewind (read-only or
+      // pre-spawn drafts) it's the sole top-right affordance and snaps
+      // back to right-2.
+      const branchMenuRight = onRewind ? 'right-20' : 'right-2'
+      const branchMenu = onBranchFromMessage ? (
+        <div
+          className={`absolute ${branchMenuRight} top-2 opacity-0 transition-opacity group-hover:opacity-100`}
+        >
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              type="button"
+              aria-label="Message actions"
+              data-testid={`message-actions-${turnIndex}`}
+              className="flex items-center justify-center rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus:opacity-100"
+            >
+              <MoreVerticalIcon className="size-3.5" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem
+                onSelect={handleBranchFromMessage}
+                data-testid={`branch-from-here-${turnIndex}`}
+              >
+                <GitBranchIcon className="size-3.5" />
+                <span>Branch from here</span>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      ) : null
       return (
-        <div key={msg.id} className="group relative" data-turn-index={turnIndex}>
+        // biome-ignore lint/a11y/noStaticElementInteractions: onContextMenu is a passive enhancement; the 3-dot DropdownMenu is the keyboard/screen-reader path.
+        <div
+          key={msg.id}
+          className="group relative"
+          data-turn-index={turnIndex}
+          // Right-click on the assistant message wrapper opens the same
+          // branch dialog. Coexists with Radix DropdownMenu — its
+          // onContextMenu doesn't bubble out of the trigger button so the
+          // wrapper-level handler only fires when the user right-clicks
+          // outside the 3-dot button.
+          onContextMenu={onBranchFromMessage ? handleAssistantContextMenu : undefined}
+        >
           <div className="flex flex-col gap-2">{assistantNodes}</div>
+          {branchMenu}
           {rewindButton}
+          {showBranchingPill && (
+            <div
+              className="mt-1 inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground"
+              data-testid={`branching-pill-${turnIndex}`}
+            >
+              <GitBranchIcon className="size-3 animate-pulse" />
+              <span>Branching…</span>
+            </div>
+          )}
         </div>
       )
     }
@@ -833,7 +944,9 @@ const ChatMessageRow = memo(
       prev.onResolveGate !== next.onResolveGate ||
       prev.onRewind !== next.onRewind ||
       prev.branch !== next.branch ||
-      prev.onBranchNavigate !== next.onBranchNavigate
+      prev.onBranchNavigate !== next.onBranchNavigate ||
+      prev.onBranchFromMessage !== next.onBranchFromMessage ||
+      prev.branchingFromTurnIndex !== next.branchingFromTurnIndex
     ) {
       return false
     }
@@ -894,6 +1007,10 @@ interface VirtualizedMessageListProps {
   onRewind?: (turnIndex: number) => void
   branchInfo?: Map<string, { current: number; total: number; siblings: string[] }>
   onBranchNavigate?: (messageId: string, direction: 'prev' | 'next') => void
+  /** GH#116 B16 — see ChatMessageRowProps. */
+  onBranchFromMessage?: (turnIndex: number) => void
+  /** GH#116 B16 — see ChatMessageRowProps. */
+  branchingFromTurnIndex?: number | null
   /**
    * Spec #80 B9 — when the tail user message carries an
    * `awaiting_response@pending` part, `ChatThread` surfaces the reason
@@ -924,6 +1041,8 @@ function VirtualizedMessageList({
   onRewind,
   branchInfo,
   onBranchNavigate,
+  onBranchFromMessage,
+  branchingFromTurnIndex,
   awaitingReason,
   onMeasurementsSettled,
 }: VirtualizedMessageListProps) {
@@ -1094,6 +1213,8 @@ function VirtualizedMessageList({
                   onRewind={onRewind}
                   branch={branchInfo?.get(msg.id)}
                   onBranchNavigate={onBranchNavigate}
+                  onBranchFromMessage={onBranchFromMessage}
+                  branchingFromTurnIndex={branchingFromTurnIndex}
                 />
               ) : null}
             </div>
@@ -1149,6 +1270,8 @@ export function ChatThread({
   onRewind,
   branchInfo,
   onBranchNavigate,
+  onBranchFromMessage,
+  branchingFromTurnIndex,
   onSendSuggestion,
   expectsMessages = false,
 }: ChatThreadProps) {
@@ -1234,6 +1357,8 @@ export function ChatThread({
           onRewind={onRewind}
           branchInfo={branchInfo}
           onBranchNavigate={onBranchNavigate}
+          onBranchFromMessage={onBranchFromMessage}
+          branchingFromTurnIndex={branchingFromTurnIndex}
           awaitingReason={awaitingReason}
           onMeasurementsSettled={handleMeasurementsSettled}
         />

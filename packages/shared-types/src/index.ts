@@ -976,6 +976,23 @@ export interface SessionSummary {
    * (the column itself is `identity_name`).
    */
   identityName?: string | null
+  /**
+   * GH#116: parent arc id for this session. Always set on rows produced
+   * after migration 0032 (createSession auto-creates an implicit arc when
+   * no explicit arcId is supplied). Optional in the wire type for
+   * back-compat with cold-start paths and pre-migration test fixtures —
+   * the per-message "Branch from here" UI guards on its presence before
+   * enabling the affordance.
+   */
+  arcId?: string | null
+  /**
+   * GH#116: free-form mode label (kata writes 'research' / 'planning' /
+   * 'implementation' / 'verify' / 'debug' / 'task' / 'freeform'; other
+   * agents may write their own strings). Mirrors `agent_sessions.mode`.
+   * The branch UI passes this through verbatim so the new arc's first
+   * session inherits the parent's mode by default.
+   */
+  mode?: string | null
 }
 
 // ── Stored Message (for SQLite persistence) ─────────────────────────
