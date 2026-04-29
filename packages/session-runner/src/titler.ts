@@ -37,14 +37,30 @@ const TITLER_MODEL = 'claude-haiku-4-5'
 /**
  * Minimum estimated tokens before the initial title fires.
  *
- * Originally 1500 (≈6000 chars) so titles only landed on long sessions —
- * but that meant the typical "hi, can you fix X" first turn never got
- * a title at all, and the sidebar fallback chain (title || summary ||
- * prompt || id) collapsed to the session-id prefix indefinitely. 200
- * tokens (≈800 chars) clears even short conversations after the first
- * round-trip while still skipping the truly empty "hello" → "hi" pings.
+ * History:
+ *   - 1500 (≈6000 chars): titles only landed on long sessions, sidebar
+ *     fallback (title || summary || prompt) collapsed to raw prompt text
+ *     indefinitely.
+ *   - 200 (≈800 chars): "clears even short conversations after the first
+ *     round-trip while still skipping truly empty hello/hi pings." The
+ *     reasoning assumed prose-density assistant turns. In practice
+ *     `buildTranscript()` compacts `tool_use` blocks to `[tool: NAME]`
+ *     (~12 chars each) and `tool_result` blocks to `[tool result: ...]`
+ *     (≤115 chars). Tool-heavy assistant turns — the typical Claude Code
+ *     pattern of "short text → many Edit/Read/Grep calls → short text" —
+ *     produce a low-char transcript. A real session like
+ *     User "Fix the auth bug" + Assistant 80 chars of intro/outro around
+ *     5 tool calls totals ≈30 tokens. Well under 200 → titler skipped →
+ *     fallback collapses to the raw user prompt → user reports "the
+ *     first message is showing as the title."
+ *   - 10 (~40 chars, current): low enough that any real turn-completed
+ *     session clears it (tool-heavy or prose-heavy), high enough to skip
+ *     literally-empty / SDK-injected no-content turns. The Haiku system
+ *     prompt explicitly handles sparse input ("derive directly from the
+ *     user's first message intent"), so a sub-200-token session still
+ *     gets a usable 2-3 word name.
  */
-const INITIAL_TITLE_TOKEN_THRESHOLD = 200
+const INITIAL_TITLE_TOKEN_THRESHOLD = 10
 
 /** Maximum turns to include in the transcript sent to Haiku. */
 const MAX_TRANSCRIPT_TURNS = 8
