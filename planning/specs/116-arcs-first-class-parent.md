@@ -6,20 +6,18 @@ status: approved
 priority: high
 github_issue: 116
 created: 2026-04-27
-updated: 2026-04-27
+updated: 2026-04-29
 phases:
   - id: p1
-    name: "Schema + single-drop migration (arcs table, sessions rename, kata* drop, worktree_reservations absorbed)"
+    name: "Schema + single-drop migration (arcs table, kata* drop, partial unique idx)"
     tasks:
-      - "Add `arcs` table to `apps/orchestrator/src/db/schema.ts`: columns `id text PK`, `userId text NOT NULL FK→users.id (CASCADE)`, `title text NOT NULL`, `externalRef text` (JSON column carrying `{provider:'github'|'linear'|'plain', id, url?}` — store as text, parse on read), `worktreeId text FK→worktrees.id` (nullable until #115's worktrees table exists; tighten to NOT NULL after #115 lands), `status text NOT NULL DEFAULT 'draft'` (allowed values: `'draft'|'open'|'closed'|'archived'`), `parentArcId text FK→arcs.id` nullable, `createdAt text NOT NULL`, `updatedAt text NOT NULL`, `closedAt text` nullable. Add expression unique index `idx_arcs_external_ref` on `(json_extract(external_ref, '$.provider'), json_extract(external_ref, '$.id'))` WHERE `external_ref IS NOT NULL` (deduplicates GH issue → arc 1:1). Add composite index `idx_arcs_user_status_lastactivity` on `(userId, status)` for kanban queries"
-      - "In `apps/orchestrator/src/db/schema.ts`: rename Drizzle table `agentSessions` → `sessions` (table name in DB stays `agent_sessions` for one migration, then renamed in the same migration to `sessions`). Add columns: `arcId text NOT NULL FK→arcs.id` (CASCADE delete), `mode text` (renamed from `kataMode`; same nullable text column), `parentSessionId text FK→sessions.id` nullable. Drop columns: `kataMode`, `kataIssue`, `kataPhase`. Keep `kataStateJson` — still useful for UI panel rendering. Add partial unique index `idx_sessions_arc_mode_active` on `(arcId, mode)` WHERE `status IN ('idle','pending','running')` to fix the auto-advance idempotency race"
-      - "Write migration `apps/orchestrator/migrations/{NNNN}_arcs_first_class.sql` where `{NNNN}` is the next sequential number AFTER #115's migration lands. As of 2026-04-28: `origin/main` has `0026_project_metadata.sql` and `0027_gemini_models.sql`; #115's branch (`feature/115-worktrees-first-class`) carries `0027_worktrees_first_class.sql` which will renumber to `0028+` on rebase. So #116's migration is most likely `0029_arcs_first_class.sql`, but verify via `ls apps/orchestrator/migrations/` AFTER #115 has merged and immediately before writing this file. Do NOT pick the number until #115's number is known — picking too early risks a numbering collision identical to the one #115 hit. **D1 transaction caveat:** D1's SQLite implementation does not allow DDL (CREATE/ALTER/DROP) inside an explicit `BEGIN...COMMIT` transaction; DDL auto-commits. The migration is therefore structured as a sequence of statements that wrangler executes serially — wrangler batches them into the migration file but does not wrap them in BEGIN/COMMIT. Atomicity at the workflow level is provided by wrangler's migration runner: if any statement fails, the migration is marked failed and the dev must wipe local D1 to retry (acceptable per pre-prod rollback policy in P1.rollback). Sequence: (1) `CREATE TABLE arcs ...` with full schema. (2) Backfill: `INSERT INTO arcs(id, userId, title, externalRef, status, createdAt, updatedAt) SELECT 'arc_' || lower(hex(randomblob(8))), userId, COALESCE(...) AS title, json_object('provider','github','id',kataIssue,'url','https://github.com/baseplane-ai/duraclaw/issues/'||kataIssue) AS externalRef, CASE WHEN ... END AS status, MIN(createdAt), MAX(COALESCE(lastActivity,createdAt)) FROM agent_sessions WHERE kataIssue IS NOT NULL GROUP BY userId, kataIssue` (one arc per `(userId, kataIssue)` pair). For orphan sessions (kataIssue IS NULL), one implicit arc per session. (3) Add `arcId` column to `agent_sessions` (nullable initially — see arcId-NOT-NULL task below for tightening) and backfill via `UPDATE agent_sessions SET arcId = (SELECT a.id FROM arcs a WHERE a.userId=agent_sessions.userId AND json_extract(a.externalRef,'$.id')=agent_sessions.kataIssue)` for kata-linked rows; for arc-less rows, the implicit-arc backfill in step (2) keys by sessionId so a `UPDATE agent_sessions SET arcId = 'arc_orphan_' || id WHERE kataIssue IS NULL` finishes coverage. (4) Add `mode` column and `UPDATE agent_sessions SET mode = kataMode`. The `prompt` column already exists on `agent_sessions` (verified at `db/schema.ts:144` — used in step 2's orphan backfill SUBSTR call); no new column needed for prompt. (5) Add `parentSessionId` column (initialized NULL). (6) Backfill arc.worktreeId + carry-over fields from `worktree_reservations` LEFT JOIN (see B3 SQL skeleton in Pattern 4). (7) Drop kata columns: SQLite supports `ALTER TABLE ... DROP COLUMN` natively (v3.35+; D1 uses recent enough SQLite). (8) `ALTER TABLE agent_sessions RENAME TO sessions` — table rename. (9) `DROP TABLE worktree_reservations`. (10) Recreate `sessions` table to enforce `arcId NOT NULL` constraint (see arcId-NOT-NULL task below). (11) Create the new indexes (`idx_arcs_external_ref`, `idx_arcs_user_status_lastactivity`, `idx_sessions_arc_mode_active`). Test on a seeded D1 in vitest BEFORE shipping to dev"
-      - "BEFORE writing the migration's `sessions_new` recreate block: run `wrangler d1 execute duraclaw_local --command \"PRAGMA table_info(agent_sessions)\"` against a current dev D1 (a fresh wrangler dev session, NOT the migration-test fixture) and confirm the column list matches Pattern 4 step 12. If extra columns exist (added by migrations between this spec writing and impl), add them to the `sessions_new` schema and the `INSERT INTO sessions_new SELECT` list. The hand-enumerated column list in Pattern 4 is a snapshot — verify-before-write avoids silent column drops"
-      - "Enforce `arcId NOT NULL` on the renamed `sessions` table via the SQLite recreate-table pattern (D1/SQLite cannot ALTER an existing column to add NOT NULL). Sequence after step 9 of the prior migration task: (a) `CREATE TABLE sessions_new (... arcId text NOT NULL REFERENCES arcs(id) ON DELETE CASCADE, ... all other columns from the renamed `sessions` table, with the same defaults and FKs)`. (b) `INSERT INTO sessions_new SELECT * FROM sessions` (column order must match — write the column list explicitly to be safe). (c) `DROP TABLE sessions`. (d) `ALTER TABLE sessions_new RENAME TO sessions`. (e) Recreate the four pre-existing indexes (`idx_agent_sessions_runner_id`, `idx_agent_sessions_user_last_activity`, `idx_agent_sessions_user_project`, `idx_agent_sessions_visibility_last_activity` — but with table prefix `idx_sessions_*` matching the renamed table). The recreate adds runtime cost on first migration but is one-time and ensures DB-level enforcement. Alternative (simpler but weaker): skip the recreate and rely on Drizzle's `notNull()` schema declaration + app-layer validation only. Pre-prod tolerates the simpler path; recommend the recreate so prod data integrity is enforced from day one. **Decision:** spec mandates the recreate. Document in Gotcha #11 below"
+      - "Add `arcs` table to `apps/orchestrator/src/db/schema.ts`: columns `id text PK`, `userId text NOT NULL FK→users.id (CASCADE)`, `title text NOT NULL`, `externalRef text` (JSON column carrying `{provider:'github'|'linear'|'plain', id, url?}` — store as text, parse on read), `worktreeId text FK→worktrees.id` (nullable; arc-less / read-only arcs may have no worktree. The `worktrees` table was added by #115's migration 0031), `status text NOT NULL DEFAULT 'draft'` (allowed values: `'draft'|'open'|'closed'|'archived'`), `parentArcId text FK→arcs.id` nullable, `createdAt text NOT NULL`, `updatedAt text NOT NULL`, `closedAt text` nullable. Add expression unique index `idx_arcs_external_ref` on `(json_extract(external_ref, '$.provider'), json_extract(external_ref, '$.id'))` WHERE `external_ref IS NOT NULL` (deduplicates GH issue → arc 1:1). Add composite index `idx_arcs_user_status_lastactivity` on `(userId, status)` for kanban queries"
+      - "In `apps/orchestrator/src/db/schema.ts`: keep Drizzle table `agentSessions` (DB name `agent_sessions`) — no rename; the auth `sessions` table already owns that identifier (see Gotcha #13). Add columns: `arcId text NOT NULL FK→arcs.id` (CASCADE delete) — `notNull()` is enforced at the Drizzle schema + app layer only; SQLite cannot ALTER an existing column to add NOT NULL without a table recreate, and we accept that trade-off rather than collide with the auth `sessions` table (see Gotcha #12 + #13). Add `mode text` (renamed from `kataMode`; same nullable text column), `parentSessionId text FK→agent_sessions.id` nullable. Drop columns: `kataMode`, `kataIssue`, `kataPhase`. Keep `kataStateJson` — still useful for UI panel rendering. Add partial unique index `idx_agent_sessions_arc_mode_active` on `(arcId, mode)` WHERE `status IN ('idle','pending','running')` to fix the auto-advance idempotency race"
+      - "Write migration `apps/orchestrator/migrations/0032_arcs_first_class.sql` (the next sequential number after #115's `0031_worktrees_first_class.sql` on main). **D1 transaction caveat:** D1's SQLite implementation does not allow DDL (CREATE/ALTER/DROP) inside an explicit `BEGIN...COMMIT` transaction; DDL auto-commits. The migration is therefore structured as a sequence of statements that wrangler executes serially — wrangler batches them into the migration file but does not wrap them in BEGIN/COMMIT. Atomicity at the workflow level is provided by wrangler's migration runner: if any statement fails, the migration is marked failed and the dev must wipe local D1 to retry (acceptable per pre-prod rollback policy in P1.rollback). Sequence: (1) `CREATE TABLE arcs ...` with full schema. (2) Backfill: `INSERT INTO arcs(id, userId, title, externalRef, status, createdAt, updatedAt) SELECT 'arc_' || lower(hex(randomblob(8))), userId, COALESCE(...) AS title, json_object('provider','github','id',kataIssue,'url','https://github.com/baseplane-ai/duraclaw/issues/'||kataIssue) AS externalRef, CASE WHEN ... END AS status, MIN(createdAt), MAX(COALESCE(lastActivity,createdAt)) FROM agent_sessions WHERE kataIssue IS NOT NULL GROUP BY userId, kataIssue` (one arc per `(userId, kataIssue)` pair). For orphan sessions (kataIssue IS NULL), one implicit arc per session. (3) Add `arcId` column to `agent_sessions` (nullable at the DB layer; `notNull()` enforced at Drizzle + app layer only — see Gotcha #12) and backfill via `UPDATE agent_sessions SET arcId = (SELECT a.id FROM arcs a WHERE a.userId=agent_sessions.userId AND json_extract(a.externalRef,'$.id')=agent_sessions.kataIssue)` for kata-linked rows; for arc-less rows, the implicit-arc backfill in step (2) keys by sessionId so a `UPDATE agent_sessions SET arcId = 'arc_orphan_' || id WHERE kataIssue IS NULL` finishes coverage. (4) Add `mode` column and `UPDATE agent_sessions SET mode = kataMode`. The `prompt` column already exists on `agent_sessions` (verified at `db/schema.ts:144` — used in step 2's orphan backfill SUBSTR call); no new column needed for prompt. (5) Add `parentSessionId` column (initialized NULL). (6) Backfill `arcs.worktreeId` from `agent_sessions.worktreeId` (the existing `agent_sessions.worktreeId text REFERENCES worktrees(id)` column from migration 0031). For each arc, pick the worktreeId from any one of its sessions (NULL if none). No carry-over columns needed; the `worktrees` table already owns reservation lifecycle fields per #115's schema. (7) Drop kata columns: SQLite supports `ALTER TABLE ... DROP COLUMN` natively (v3.35+; D1 uses recent enough SQLite). (8) Create the new indexes (`idx_arcs_external_ref`, `idx_arcs_user_status_lastactivity`, `idx_agent_sessions_arc_mode_active`). The four pre-existing `agent_sessions` indexes are unchanged — column adds/drops in modern SQLite do not invalidate them. Test on a seeded D1 in vitest BEFORE shipping to dev"
       - "In `apps/orchestrator/src/lib/types.ts`: add `ArcSummary` type with shape `{ id, title, externalRef: {provider,id,url?} | null, status: 'draft'|'open'|'closed'|'archived', worktreeId?: string, parentArcId?: string, createdAt, updatedAt, closedAt?, sessions: Array<{id, mode, status, lastActivity, createdAt}>, worktreeReservation?: {worktree, heldSince, lastActivityAt, ownerId, stale}, prNumber?: number, lastActivity }`. Keep `ChainSummary` type alias as `type ChainSummary = ArcSummary` for one release to ease the rename, then drop in P5"
-      - "Add helper `parseExternalRef(json: string | null): {provider,id,url?} | null` to `apps/orchestrator/src/lib/arcs.ts` (NEW file, replaces `lib/chains.ts`). Add `formatExternalRef({provider,id,url?}): string` for round-trip. Add `buildArcRow(env, db, userId, arcId): Promise<ArcSummary | null>` (replaces `buildChainRow`) that: (a) fetches arc row, (b) fetches sessions for that arc via `WHERE arcId = ?` (use the composite index), (c) fetches worktree reservation if `arc.worktreeId` set (joins to #115's worktrees table once it lands; until then reads remaining `worktree_reservations` join in the legacy way during pre-migration testing), (d) calls existing GH issue/PR cache to resolve `prNumber`, (e) returns ArcSummary. Add `buildArcRowFromContext(arcRow, sessionRows, reservation, ctx)` pure function for bulk operations. Add `deriveColumn(sessions: Array<{mode, status, lastActivity, createdAt}>, arcStatus): 'backlog'|'research'|'planning'|'implementation'|'verify'|'done'` — same logic as `lib/chains.ts:166-189` but reads `mode` instead of `kataMode`; returns `'backlog'` for arcs in `'draft'` status. Add `COLUMN_QUALIFYING_MODES` set: `new Set(['research','planning','implementation','verify','close'])`"
+      - "Add helper `parseExternalRef(json: string | null): {provider,id,url?} | null` to `apps/orchestrator/src/lib/arcs.ts` (NEW file, replaces `lib/chains.ts`). Add `formatExternalRef({provider,id,url?}): string` for round-trip. Add `buildArcRow(env, db, userId, arcId): Promise<ArcSummary | null>` (replaces `buildChainRow`) that: (a) fetches arc row, (b) fetches sessions for that arc via `WHERE arcId = ?` (use the composite index), (c) fetches worktree row from `worktrees` table if `arc.worktreeId` set (#115's worktrees table is the source of truth for reservation lifecycle), (d) calls existing GH issue/PR cache to resolve `prNumber`, (e) returns ArcSummary. Add `buildArcRowFromContext(arcRow, sessionRows, worktree, ctx)` pure function for bulk operations. Add `deriveColumn(sessions: Array<{mode, status, lastActivity, createdAt}>, arcStatus): 'backlog'|'research'|'planning'|'implementation'|'verify'|'done'` — same logic as `lib/chains.ts:166-189` but reads `mode` instead of `kataMode`; returns `'backlog'` for arcs in `'draft'` status. Add `COLUMN_QUALIFYING_MODES` set: `new Set(['research','planning','implementation','verify','close'])`"
       - "Update `apps/orchestrator/src/lib/create-session.ts`: change `POST /api/sessions` parameter from optional `kataIssue: number` to required `arcId: string`. If `arcId` missing AND `kataIssue` provided (legacy clients during transition), look up or auto-create an arc with `externalRef={provider:'github',id:kataIssue}` and use its id. Implicit arc auto-creation when neither `arcId` nor `kataIssue` provided: create a draft-status arc with `title = (prompt.slice(0, 50) + '…')` and no externalRef, then use its id. Insert sessions row with `arcId`, `mode` (from request), drop the `kataIssue` write"
-      - "Add `apps/orchestrator/src/db/migration-test.ts`: vitest fixture that seeds 3 user-and-issue patterns into agent_sessions: (1) two sessions with `kataIssue=42, kataMode='research'` and `kataMode='planning'` for the same user (chain shape), (2) one orphan `kataIssue=null` session (debug-style), (3) one session with `kataIssue=99` plus a `worktree_reservations` row keyed on `(worktree='wt-99', issue_number=99)`. Run the migration. Assert: 3 arcs created (one per kataIssue + implicit for orphan), session `arcId` populated, session `mode` populated from `kataMode`, arc 99 has `worktreeId` linking to the (later) #115 worktrees row OR `worktreeHeldSince` populated from reservation, `kataMode/kataIssue/kataPhase` columns gone, `worktree_reservations` table gone, `agent_sessions` table renamed to `sessions`"
+      - "Add `apps/orchestrator/src/db/migration-test.ts`: vitest fixture that seeds 3 user-and-issue patterns into agent_sessions: (1) two sessions with `kataIssue=42, kataMode='research'` and `kataMode='planning'` for the same user (chain shape), (2) one orphan `kataIssue=null` session (debug-style), (3) one session with `kataIssue=99` plus a row in `worktrees` table referenced by `agent_sessions.worktreeId` (e.g. `worktreeId='wt-abc'`). Run the migration. Assert: 3 arcs created (one per kataIssue + implicit for orphan), session `arcId` populated, session `mode` populated from `kataMode`, arc 99 has `worktreeId` populated (the same value as the seed session's worktreeId, e.g. `'wt-abc'`), `kataMode/kataIssue/kataPhase` columns gone from `agent_sessions`"
       - "Verify: `pnpm typecheck`; `pnpm test --filter @duraclaw/orchestrator -- migration-test`; `pnpm test --filter @duraclaw/orchestrator -- arcs` (the new lib tests)"
     test_cases:
       - id: "migration-roundtrip-chain-pattern"
@@ -28,14 +26,8 @@ phases:
       - id: "migration-roundtrip-orphan"
         description: "Session with kataIssue=null backfills into its own implicit arc (one arc per orphan); arc.title fallback uses session prompt summary"
         type: "unit"
-      - id: "migration-absorbs-worktree-reservations"
-        description: "worktree_reservations row keyed on issue_number=99 lands as arcs.worktreeId (or worktreeHeldSince/ownerId carried onto arc); table dropped after migration"
-        type: "unit"
       - id: "migration-drops-kata-cols"
-        description: "After migration, sessions table has no kataMode/kataIssue/kataPhase columns; SELECT against them throws"
-        type: "unit"
-      - id: "migration-renames-agent-sessions"
-        description: "After migration, table is `sessions` not `agent_sessions`; old name throws on SELECT"
+        description: "After migration, agent_sessions table has no kataMode/kataIssue/kataPhase columns; SELECT against them throws"
         type: "unit"
       - id: "arc-unique-on-external-ref"
         description: "Two sessions for same userId+kataIssue produce ONE arc, not two (expression unique index works)"
@@ -55,7 +47,7 @@ phases:
       - "Update `apps/orchestrator/src/agents/session-do/rpc-messages.ts:154-171` (`sendMessageImpl` orphan preflight): replace the `return forkWithHistoryImpl(ctx, content)` at line 164 with `return rebindRunnerImpl(ctx, {nextUserMessage: content})`. The preflight detection logic (gateway `listSessions` query, orphan match) is unchanged"
       - "Delete `apps/orchestrator/src/agents/session-do/mode-transition.ts` entirely. Remove the call from `gateway-event-handler.ts:712`: when a `kata_state` event arrives with `prev !== next` mode, the DO no longer triggers `handleModeTransition`. Mode change in kata is now a kata-internal concern; orchestrator only sees the `mode` write at session creation time (via the prompt-or-arg). For dev observability, log the kata_state delta but take no action: `logEvent(ctx, 'info', 'kata', \\`mode_change observed prev=${prev} next=${next}\\`)`"
       - "Update `apps/orchestrator/src/agents/session-do/index.ts`: remove `handleModeTransition()` and `forkWithHistory()` callable methods. Add new callables: `advanceArc(args)`, `branchArc(args)`, `rebindRunner(args)`. Each delegates to its respective `*Impl` function"
-      - "Update auto-advance gate in `lib/auto-advance.ts` (or move into `advance-arc.ts` and delete the old file): drop the `runEnded` evidence check from the gate. New gate: (1) terminate_reason === 'stopped' (clean exit, NOT crashed/errored), (2) user pref enabled (per-arc override + global default), (3) idempotency: no in-flight successor session for same `(arcId, nextMode)` (the partial unique index now enforces this at the DB layer, but check first to avoid throwing on duplicate insert), (4) worktree available if next mode is code-touching (check via #115's /api/worktrees endpoint; until #115 ships, keep checkoutWorktree call to legacy table during transition). The `runEnded` file existence check is REMOVED — kata's evidence file is no longer the gate"
+      - "Update auto-advance gate in `lib/auto-advance.ts` (or move into `advance-arc.ts` and delete the old file): drop the `runEnded` evidence check from the gate. New gate: (1) terminate_reason === 'stopped' (clean exit, NOT crashed/errored), (2) user pref enabled (per-arc override + global default), (3) idempotency: no in-flight successor session for same `(arcId, nextMode)` (the partial unique index now enforces this at the DB layer, but check first to avoid throwing on duplicate insert), (4) worktree available if next mode is code-touching (check via #115's /api/worktrees endpoint — already shipped). The `runEnded` file existence check is REMOVED — kata's evidence file is no longer the gate"
       - "Update `apps/orchestrator/src/agents/session-do/gateway-event-handler.ts:656-660`: on `stopped` event, call new `advanceArcGate()` (the relaxed gate from prior task). If gate returns `{action:'advanced', mode}`, call `advanceArcImpl(ctx, {mode, prompt: \\`enter ${mode}\\`})` (auto-advance path). Otherwise broadcast `{type:'arc_stalled', reason}` for the UI"
       - "Add unit tests `apps/orchestrator/src/agents/session-do/advance-arc.test.ts`: (1) `advanceArc({mode:'planning', prompt:'...'})` creates new session row in same arc; old session row stays at `status='idle'`; new session has `arcId === old.arcId`. (2) Auto-advance gate skips when terminate_reason !== 'stopped'. (3) Idempotency: two simultaneous advance calls with same `(arcId, nextMode)` → only one succeeds, second sees the partial unique index conflict and returns the existing successor's id"
       - "Add unit tests `apps/orchestrator/src/agents/session-do/branches.test.ts`: (1) `branchArc({fromMessageSeq:5, prompt:'try X'})` creates new arc with parentArcId set and externalRef inherited from parent. (2) The new session's prompt contains `<prior_conversation>` wrapper with serialized history up to seq 5 only. (3) Branch from message seq beyond history length → error 400"
@@ -91,7 +83,7 @@ phases:
     tasks:
       - "Add new Hono routes to `apps/orchestrator/src/api/index.ts` (or split into a new `apps/orchestrator/src/api/arcs.ts` module wired into the main app). Endpoints: (1) `POST /api/arcs` — body `{title, externalRef?:{provider,id,url?}, parentArcId?}` — validates externalRef (if present), checks unique-index conflict, returns 409 if duplicate exists with `{ok:false, existingArcId}`; otherwise inserts and returns 201 with the new arc id. (2) `GET /api/arcs` — same query params as today's /api/chains (mine, lane, column, project, stale), returns `{arcs: ArcSummary[], more_issues_available: boolean}`. Implementation: SELECT arcs JOIN sessions in JS-side group (matches today's pattern in `api/index.ts:2659-2756`). (3) `GET /api/arcs/:id` — returns single ArcSummary. (4) `POST /api/arcs/:id/sessions` — body `{mode?, prompt, agent?}` — calls `advanceArcImpl` on the SessionDO of the latest non-terminal session in this arc, OR for empty arcs (draft status, no sessions) calls `createSession()` directly with the given args. Returns `{sessionId}`. (5) `POST /api/arcs/:id/branch` — body `{fromSessionId, fromMessageSeq?, prompt, mode?}` — invokes `branchArcImpl` on the parent session's DO. Returns `{newArcId, newSessionId}`. (6) `POST /api/arcs/:id/close` — sets arc.status='closed', broadcast arc row update. (7) `POST /api/arcs/:id/archive` — sets arc.status='archived'"
       - "Add `PATCH /api/arcs/:id` route in the same module. Body: `{title?: string, status?: 'open' | 'closed' | 'archived'}` — both fields optional, at least one required (400 if body is empty). Validation: `status` must be one of the three allowed values (NOT 'draft' — drafts transition to open by spawning their first session, not via PATCH); rejecting `status: 'closed'` here is acceptable but the canonical close path is `POST /api/arcs/:id/close` which also stamps `closedAt`. PATCH only writes the fields explicitly present in the body. Response 200 returns the updated `{arc: ArcSummary}`. Broadcasts arc row update via `broadcastArcRow`. Use case: user renames an arc inline in /arc/:arcId; admin re-opens an archived arc via debug action"
-      - "Delete `/api/chains` and all `/api/chains/:issue/...` routes from `api/index.ts`. The kanban + sidebar now exclusively call `/api/arcs`. Worktree checkout/release endpoints (today: `POST /api/chains/:issue/checkout`, `/release`, `/force-release`) are NOT moved here — they are deleted in this spec and replaced by `/api/worktrees/*` endpoints owned by GH#115. During the transition window where #115 has not landed, retain the legacy `/api/chains/:issue/checkout|release` routes as compatibility stubs that look up `arc.externalRef.id`, find the matching arc, and act on it; remove these stubs in P5 once #115 lands. Document the transition explicitly in the spec body"
+      - "Delete `/api/chains` and all `/api/chains/:issue/...` routes from `api/index.ts`, including the worktree ops (`POST /api/chains/:issue/checkout`, `/release`, `/force-release`). #115 has shipped; `/api/worktrees/*` is the replacement and is already live. The kanban + sidebar now exclusively call `/api/arcs`. Update any client callers that still hit `/api/chains/:issue/checkout|release|force-release` to call the corresponding `/api/worktrees/*` endpoint instead — track these client-side rewires as part of P4a's identifier sweep so they land coordinated with the server-side delete"
       - "Update `apps/orchestrator/src/db/chains-collection.ts` → rename file to `apps/orchestrator/src/db/arcs-collection.ts`. Inside: rename `chainsCollection` → `arcsCollection`, `id: 'chains'` → `id: 'arcs'`, `syncFrameType: 'chains'` → `syncFrameType: 'arcs'`, `queryKey: ['chains']` → `queryKey: ['arcs']`, `queryFn` fetches `/api/arcs` instead of `/api/chains`, `getKey: (item) => String(item.issueNumber)` → `getKey: (item) => item.id` (arcs are keyed by their text id, not issue number)"
       - "Update `apps/orchestrator/src/lib/broadcast-chain.ts` → rename to `lib/broadcast-arc.ts`. `broadcastChainRow` → `broadcastArcRow`. Build args change: takes arcId not issueNumber. Calls `buildArcRow(env, db, userId, arcId)`. Emits WS frame `{collection: 'arcs', ops: [{type:'upsert', key:arcId, value:arcRow}]}` (replacing the old `'chains'` collection)"
       - "Update `apps/orchestrator/src/agents/session-do/broadcast.ts:259-280`: `broadcastChainUpdate` → `broadcastArcUpdate`. Passes arcId derived from session's arcId column to the rebuild path. Wire the call site that fires on `kata_state` events to use the new helper"
@@ -178,12 +170,10 @@ phases:
       - "In `packages/kata/src/state/writer.ts`: add pre-write validation that `state.currentMode` (when non-null) is in the registered modes from `.kata/kata.yaml`. Read kata.yaml via the existing `loadKataConfig()` helper; match `state.currentMode` against the modes hash keys (`research`, `planning`, `implementation`, `task`, `verify`, `debug`, `freeform`, `default`). On mismatch throw `Error(`Mode '${state.currentMode}' not registered in kata.yaml`)`. This is the new validation surface that replaces what (didn't exist) at the orchestrator layer"
       - "Add unit test `packages/kata/src/state/writer.test.ts`: writeState({currentMode:'planning'}) succeeds; writeState({currentMode:'foobar'}) throws; writeState({currentMode:undefined}) succeeds (null mode is fine)"
       - "Identifier sweep — second pass to catch stragglers. Run from repo root: `grep -rn --include='*.ts' --include='*.tsx' 'chainsCollection\\|ChainSummary\\|buildChainRow\\|ChainBuildContext\\|broadcastChainRow\\|broadcastChainUpdate\\|chain-status-item\\|use-chain-' apps/ packages/ | grep -v node_modules | grep -v '\\.test\\.'`. For each match not already touched in P1-P4, rename. Common stragglers: comments, jsdoc, documentation strings"
-      - "Delete legacy `/api/chains/:issue/checkout|release|force-release` compatibility stubs from `apps/orchestrator/src/api/index.ts` (added in P3 as transition stubs). Replace any client callers with `/api/worktrees/*` endpoints — these endpoints are owned by GH#115; if #115 has not landed by P5 execution time, document the dependency block in the issue and pause P5"
       - "Drop the `type ChainSummary = ArcSummary` alias in `lib/types.ts` (added in P1). Run a final grep for `ChainSummary` references — should be zero"
       - "Delete `apps/orchestrator/src/lib/chains.ts` if not already deleted in P1 (the new file is `lib/arcs.ts`). Confirm no imports remain"
       - "Update `planning/progress.md` with #116 status; update `.claude/rules/session-lifecycle.md` to reflect the three new primitives (advanceArc/branchArc/rebindRunner) instead of the old paths (handleModeTransition/forkWithHistory/auto-advance). Specifically the 'orphan case' bullet should describe rebindRunner and the 'follow-up after >30min idle' bullet should describe how /api/arcs/:id/sessions advances rather than the in-place mode transition"
       - "Drop the obsolete chain naming-sweep tasks: rename `kata-task` skill if it references chain terminology (likely doesn't, but verify with `grep -rn chain ~/.claude/skills/`)"
-      - "**Follow-up after #115 lands** — drop the four worktree carry-over columns (`worktreeHeldSince`, `worktreeLastActivityAt`, `worktreeOwnerId`, `worktreeStale`) from `arcs`. These were added in P1 step 8 to preserve reservation-lifecycle data across the #115 dependency window. After #115 ships and its `worktrees` table contains those fields (or whatever shape #115 ends up with), write a follow-up migration `0027_arcs_drop_worktree_carryover.sql` that: (a) verifies `worktrees` has equivalent fields populated for every arc with `arcs.worktreeId` set, (b) drops the four columns from arcs. This task is gated on #115 merging; if #115 lands BEFORE P5 runs, fold this into P5 directly. If #115 is still open when P5 runs, this becomes a tracked follow-up issue (not blocked here since the columns are harmless nullable text)"
       - "Final verify: `pnpm build && pnpm typecheck && pnpm test`. All three must pass. Run a full smoke through the dev environment: scripts/verify/dev-up.sh, browse /board, click into an arc, advance a session, branch from a message, verify rebindRunner kicks in if you SIGSTOP a runner and send a message"
       - "Update CLAUDE.md `## Architecture` section: replace 'chain' references with 'arc' where they describe schema; keep references to 'kata' methodology unchanged"
     test_cases:
@@ -193,8 +183,8 @@ phases:
       - id: "no-chain-identifiers-remain"
         description: "grep for chainsCollection / ChainSummary / buildChainRow / chain-status-item / use-chain- across apps + packages returns zero matches (excluding test fixtures)"
         type: "unit"
-      - id: "legacy-stubs-deleted"
-        description: "GET /api/chains and POST /api/chains/:issue/checkout|release|force-release all return 404 after P5 lands"
+      - id: "legacy-chains-routes-gone"
+        description: "GET /api/chains, GET /api/chains/:issue/spec-status, GET /api/chains/:issue/vp-status, and POST /api/chains/:issue/checkout|release|force-release all return 404 after P3 lands (no compat-stub interim)"
         type: "integration"
       - id: "full-build-passes"
         description: "pnpm build && pnpm typecheck && pnpm test all green; smoke flow exercises arc detail, advance, branch, rebind"
@@ -222,20 +212,13 @@ generic column, validating them against its own `kata.yaml`.
 This unifies the data model around arcs-as-durable-containers and
 makes branching (cross-arc and in-arc) explicit instead of overloaded
 through `forkWithHistory`. **#115 (worktrees as first-class resource)
-is a hard dependency** — `arcs.worktreeId` references `worktrees.id`
-from #115's table; this spec lands in parallel but implementation
-phases are blocked on #115 merge.
-
-**#115 status (as of 2026-04-28):** actively in flight on
-`feature/115-worktrees-first-class` (spec already merged to main as
-`docs(planning): GH#115 worktrees-first-class spec + research +
-interview` at 20843af; branch carries at least one impl commit
-`feat(orchestrator): GH#115 P1 migration 0027 + worktrees schema`
-at 7416a13; no PR open yet). The earlier P0 research doc reported
-"no PR/branch" — that view was stale (the agent ran before
-`git fetch` brought the branch into the local view). Read #115's spec
-at `planning/specs/115-worktrees-first-class.md` (on main) for the
-canonical worktrees schema before starting #116 P1.
+has merged** — `arcs.worktreeId` references `worktrees.id` directly,
+and `agent_sessions.worktreeId text REFERENCES worktrees(id)` was
+added by #115's migration 0031. This amended spec reflects the
+post-merge schema state; the original spec's worktree carry-over
+columns and `worktree_reservations` backfill are no longer needed and
+have been removed. Read `planning/specs/115-worktrees-first-class.md`
+on main for the canonical worktrees schema.
 
 ## Feature Behaviors
 
@@ -243,46 +226,46 @@ canonical worktrees schema before starting #116 P1.
 
 **Core:**
 - **ID:** arcs-table-created
-- **Trigger:** Migration `0026_arcs_first_class.sql` runs.
+- **Trigger:** Migration `0032_arcs_first_class.sql` runs.
 - **Expected:** Table `arcs` exists with columns `(id, userId FK→users, title NOT NULL, externalRef text JSON, worktreeId FK→worktrees nullable, status NOT NULL DEFAULT 'draft', parentArcId FK→arcs nullable, createdAt, updatedAt, closedAt nullable)`. Status values restricted to `'draft'|'open'|'closed'|'archived'` via app-layer validation (no DB CHECK constraint — D1 SQLite supports them but Drizzle's text-with-default pattern stays consistent with rest of schema). Expression unique index `idx_arcs_external_ref` on `(json_extract(external_ref, '$.provider'), json_extract(external_ref, '$.id'))` WHERE `external_ref IS NOT NULL`. Composite index `idx_arcs_user_status_lastactivity` on `(userId, status)`.
 - **Verify:** Migration test (P1.test_cases.migration-roundtrip-chain-pattern) seeds two sessions sharing `kataIssue=42`, runs migration, asserts exactly one arc row exists with `externalRef={provider:'github',id:42,url:...}`.
-**Source:** new file `apps/orchestrator/migrations/0026_arcs_first_class.sql`; new table in `apps/orchestrator/src/db/schema.ts`
+**Source:** new file `apps/orchestrator/migrations/0032_arcs_first_class.sql`; new table in `apps/orchestrator/src/db/schema.ts`
 
 #### Data Layer
 - New table `arcs` with columns above
 - Two new indexes: `idx_arcs_external_ref` (expression unique), `idx_arcs_user_status_lastactivity` (composite)
-- `arcs.worktreeId` is nullable until #115 lands; tightening to NOT NULL is a P5 follow-up after #115 merges
+- `arcs.worktreeId` is nullable (FK to `worktrees.id` from #115's migration 0031) — arc-less / read-only arcs may have no worktree
 
 ---
 
-### B2: `agent_sessions` renamed to `sessions`; `arcId`/`mode`/`parentSessionId` added; `kataMode`/`kataIssue`/`kataPhase` dropped
+### B2: `arcId`/`mode`/`parentSessionId` added to `agent_sessions`; `kataMode`/`kataIssue`/`kataPhase` dropped
 
 **Core:**
-- **ID:** sessions-table-restructured
+- **ID:** sessions-columns-restructured
 - **Trigger:** Same migration as B1.
-- **Expected:** Table renamed (`ALTER TABLE agent_sessions RENAME TO sessions`). Columns added: `arcId text NOT NULL FK→arcs.id ON DELETE CASCADE`, `mode text` (renamed from `kataMode`; backfill copies values), `parentSessionId text FK→sessions.id` nullable. Columns dropped: `kataMode`, `kataIssue`, `kataPhase`. Column `kataStateJson` PRESERVED (still used for UI panel rendering). Partial unique index `idx_sessions_arc_mode_active` on `(arcId, mode)` WHERE `status IN ('idle','pending','running')` enforces the auto-advance idempotency invariant.
-- **Verify:** P1.test_cases.migration-drops-kata-cols and migration-renames-agent-sessions assert post-migration `SELECT kataMode FROM sessions` throws and `SELECT * FROM agent_sessions` throws.
-**Source:** `apps/orchestrator/migrations/0026_arcs_first_class.sql`; `apps/orchestrator/src/db/schema.ts:127-184` (rewrite)
+- **Expected:** No table rename — `agent_sessions` keeps its name (the auth `sessions` table already owns that identifier; see Gotcha #13). Columns added: `arcId text FK→arcs.id ON DELETE CASCADE` (`notNull()` enforced at Drizzle + app layer; SQLite cannot ALTER an existing column to add NOT NULL without a table recreate, and we accept that trade-off — see Gotcha #12), `mode text` (renamed from `kataMode`; backfill copies values), `parentSessionId text FK→agent_sessions.id` nullable. Columns dropped: `kataMode`, `kataIssue`, `kataPhase`. Column `kataStateJson` PRESERVED (still used for UI panel rendering). Partial unique index `idx_agent_sessions_arc_mode_active` on `(arcId, mode)` WHERE `status IN ('idle','pending','running')` enforces the auto-advance idempotency invariant.
+- **Verify:** P1.test_cases.migration-drops-kata-cols asserts post-migration `SELECT kataMode FROM agent_sessions` throws.
+**Source:** `apps/orchestrator/migrations/0032_arcs_first_class.sql`; `apps/orchestrator/src/db/schema.ts:127-184` (column-only changes; no table rename)
 
 #### Data Layer
 - Column changes as above
-- Existing indexes (`runnerIdUnique`, `userLastActivity`, `userProject`, `visibilityLastActivity`) preserved with table renamed underneath
-- New partial unique index for advance idempotency
+- Existing indexes (`runnerIdUnique`, `userLastActivity`, `userProject`, `visibilityLastActivity`) untouched — modern SQLite preserves indexes across `ALTER TABLE ADD/DROP COLUMN`
+- New partial unique index `idx_agent_sessions_arc_mode_active` for advance idempotency
 
 ---
 
-### B3: `worktree_reservations` table absorbed into arcs.worktreeId and dropped
+### B3: `arcs.worktreeId` backfilled from existing `agent_sessions.worktreeId` (no carry-over)
 
 **Core:**
-- **ID:** worktree-reservations-absorbed
+- **ID:** arc-worktree-backfilled
 - **Trigger:** Same migration as B1.
-- **Expected:** Migration step (6): `UPDATE arcs SET worktreeId = (SELECT wr.worktree FROM worktree_reservations wr WHERE wr.issue_number = json_extract(arcs.externalRef,'$.id'))` for each arc with a matching reservation row. Reservation lifecycle fields (`heldSince`, `lastActivityAt`, `ownerId`, `stale`) ALWAYS written onto the arc row as `worktreeHeldSince text`, `worktreeLastActivityAt text`, `worktreeOwnerId text`, `worktreeStale integer`. **The migration assumes #115 has NOT landed** (per the hard-dependency-on-implementation rule in the frontmatter: P1 migration writes always go onto arcs; #115's worktrees table is referenced only by `arcs.worktreeId` FK, not for lifecycle fields). After #115 lands and its worktree-lifecycle fields are populated from these arcs columns, P5 will add a follow-up task to drop the four carry-over columns from arcs. Final step: `DROP TABLE worktree_reservations`.
-- **Verify:** P1.test_cases.migration-absorbs-worktree-reservations seeds a worktree_reservations row for issue_number=99 plus a session with kataIssue=99; runs migration; asserts (a) the arc for issue 99 has `worktreeId` set OR `worktreeHeldSince` populated, and (b) `SELECT * FROM worktree_reservations` throws (table dropped).
-**Source:** migration; `apps/orchestrator/src/db/schema.ts` (drop the `worktreeReservations` Drizzle table definition)
+- **Expected:** Migration step (8) does `UPDATE arcs SET worktreeId = (SELECT s.worktreeId FROM agent_sessions s WHERE s.kata_issue = json_extract(arcs.external_ref, '$.id') AND s.worktreeId IS NOT NULL LIMIT 1)`. Reservation lifecycle (`heldSince`, `lastTouchedAt`, `ownerId`) lives on the `worktrees` table per #115's schema; arcs reference via FK only. No carry-over columns added to arcs. The `worktree_reservations` table was already dropped by #115's migration 0031.
+- **Verify:** Migration test seeds an arc-99 + agent_sessions row with `worktreeId='wt-abc'`; runs migration; asserts arc 99 has `worktreeId='wt-abc'`.
+**Source:** migration `0032_arcs_first_class.sql`; `apps/orchestrator/src/db/schema.ts` (arcs.worktreeId FK → worktrees.id)
 
 #### Data Layer
-- `worktree_reservations` table dropped
-- Reservation lifecycle fields move to `arcs` (or to `worktrees` if #115's schema accommodates them)
+- `arcs.worktreeId text REFERENCES worktrees(id)` populated from `agent_sessions.worktreeId`
+- Reservation lifecycle fields owned by `worktrees` table per #115
 
 ---
 
@@ -391,12 +374,12 @@ canonical worktrees schema before starting #116 P1.
 
 ---
 
-### B11: `/api/arcs` CRUD surface; `/api/chains` deleted (with one-spec-cycle compatibility stubs for worktree ops)
+### B11: `/api/arcs` CRUD surface; `/api/chains` deleted outright (no compat stubs — #115 has shipped)
 
 **Core:**
 - **ID:** api-arcs-surface
 - **Trigger:** P3 implementation lands.
-- **Expected:** New endpoints: `POST /api/arcs` (create), `GET /api/arcs` (list with filters: mine/lane/column/project/stale), `GET /api/arcs/:id` (detail), `PATCH /api/arcs/:id` (rename, status change), `POST /api/arcs/:id/sessions` (B6), `POST /api/arcs/:id/branch` (B7), `POST /api/arcs/:id/close` (sets status='closed'), `POST /api/arcs/:id/archive` (sets status='archived'). Old endpoints deleted: `GET /api/chains`, `GET /api/chains/:issue/spec-status`, `GET /api/chains/:issue/vp-status`. Compatibility stubs retained briefly: `POST /api/chains/:issue/checkout|release|force-release` translate `:issue` → `arc.externalRef.id` lookup → call into the same logic; these stubs are deleted in P5 once #115's `/api/worktrees/*` endpoints land and the UI is migrated.
+- **Expected:** New endpoints: `POST /api/arcs` (create), `GET /api/arcs` (list with filters: mine/lane/column/project/stale), `GET /api/arcs/:id` (detail), `PATCH /api/arcs/:id` (rename, status change), `POST /api/arcs/:id/sessions` (B6), `POST /api/arcs/:id/branch` (B7), `POST /api/arcs/:id/close` (sets status='closed'), `POST /api/arcs/:id/archive` (sets status='archived'). Old endpoints deleted in the same phase: `GET /api/chains`, `GET /api/chains/:issue/spec-status`, `GET /api/chains/:issue/vp-status`, `POST /api/chains/:issue/checkout`, `POST /api/chains/:issue/release`, `POST /api/chains/:issue/force-release`. Worktree ops migrate to `/api/worktrees/*` (already live from #115). Client callers that still hit the old worktree-op routes are rewired in P4a's identifier sweep so the server-side delete and the client-side rewire ship coordinated. No transition window, no compat stubs — pre-prod, single coordinated deploy.
 - **Verify:** P3.test_cases.* (post-arcs-creates, post-arcs-duplicate-409, post-arcs-sessions-advance, post-arcs-branch, chains-routes-deleted).
 **Source:** `apps/orchestrator/src/api/index.ts` (or new `api/arcs.ts` module)
 
@@ -490,15 +473,15 @@ canonical worktrees schema before starting #116 P1.
 **Core:**
 - **ID:** idempotency-indexes
 - **Trigger:** Migration lands.
-- **Expected:** Two indexes: (1) `idx_arcs_external_ref` — expression unique on `(json_extract(external_ref,'$.provider'), json_extract(external_ref,'$.id'))` WHERE external_ref IS NOT NULL. Prevents duplicate arcs for the same GH issue. INSERT with conflict throws; handler returns 409 with existing arc id. (2) `idx_sessions_arc_mode_active` — partial unique on `(arcId, mode)` WHERE status IN ('idle','pending','running'). Fixes today's auto-advance race where two simultaneous `stopped` events could spawn duplicate successors. INSERT with conflict throws; handler returns 409 with existing session id.
+- **Expected:** Two indexes: (1) `idx_arcs_external_ref` — expression unique on `(json_extract(external_ref,'$.provider'), json_extract(external_ref,'$.id'))` WHERE external_ref IS NOT NULL. Prevents duplicate arcs for the same GH issue. INSERT with conflict throws; handler returns 409 with existing arc id. (2) `idx_agent_sessions_arc_mode_active` — partial unique on `(arcId, mode)` WHERE status IN ('idle','pending','running'). Fixes today's auto-advance race where two simultaneous `stopped` events could spawn duplicate successors. INSERT with conflict throws; handler returns 409 with existing session id.
 - **Verify:** P2.test_cases.advance-arc-idempotency (concurrent advance → exactly one new session); P3.test_cases.post-arcs-duplicate-409 (concurrent arc creation with same externalRef → second returns 409).
-**Source:** migration `0026_arcs_first_class.sql` step (11); schema definitions in `db/schema.ts`
+**Source:** migration `0032_arcs_first_class.sql` step (8); schema definitions in `db/schema.ts`
 
 ---
 
 ## Non-Goals
 
-- **#115 (worktrees as first-class resource) implementation.** This spec depends on #115's worktrees table and `/api/worktrees/*` endpoints, but those are owned by issue #115. #116's spec writing happens in parallel; #116's implementation phases (P3+) are gated on #115 merge. If #115 reshapes mid-flight, #116 spec needs targeted updates.
+- **#115 (worktrees as first-class resource) implementation.** This spec depends on #115's worktrees table and `/api/worktrees/*` endpoints, but those are owned by issue #115. **#115 has merged.** This amended spec reflects the post-merge schema state.
 - **Kata methodology changes.** Kata still prescribes `research / planning / implementation / verify / debug / task / freeform` modes; phase tracking (p0/p1/p2 within a mode) stays in `.kata/sessions/{id}/state.json`. The orchestrator schema does not gain a `phase` column. UI labels like "Kata: planning/p2" in `KataStatePanel` and `ArcStatusItem` are PRESERVED.
 - **DO topology changes.** DO = Session stays. The decision about whether arc-level state should live in DO (vs D1) was settled in the issue: DOs are disposable; D1 owns arc-level state.
 - **Multi-tenancy / shared arcs.** Single-user invariants unchanged. `arcs.userId NOT NULL FK→users.id`. No cross-user arc visibility.
@@ -519,12 +502,12 @@ See frontmatter for full task + test_case breakdowns.
 ### Phase 1: Schema + single-drop migration
 
 - New `arcs` table with externalRef tuple, draft/open/closed/archived status, parentArcId FK
-- Sessions table renamed; arcId/mode/parentSessionId added; kataMode/kataIssue/kataPhase dropped
-- worktree_reservations absorbed into arcs (worktreeId or worktreeHeldSince fields) and dropped
+- `agent_sessions` gains `arcId`/`mode`/`parentSessionId` columns; `kataMode`/`kataIssue`/`kataPhase` dropped (no rename — see Gotcha #13)
+- `arcs.worktreeId` backfilled from `agent_sessions.worktreeId` (#115's worktrees primitive owns reservation lifecycle)
 - Implicit-arc auto-creation in createSession
-- Tests: migration round-trip across the three patterns (chain shape, orphan, worktree-reserved)
+- Tests: migration round-trip across the three patterns (chain shape, orphan, worktree-linked)
 - **Done when:** `pnpm test --filter @duraclaw/orchestrator -- migration-test arcs` passes; manually verified on a seeded local D1 that round-trip migration produces correct arc + session topology
-- **Rollback:** Migration is destructive (drops columns, drops table, renames table). Roll back by either (a) restoring from a pre-migration D1 backup if available, or (b) writing a reverse migration that reverses the column adds/drops. Pre-prod, so rollback is "wipe local D1, re-run dev-up"
+- **Rollback:** Migration is destructive (drops columns, adds columns). Roll back by either (a) restoring from a pre-migration D1 backup if available, or (b) writing a reverse migration that reverses the column adds/drops. Pre-prod, so rollback is "wipe local D1, re-run dev-up"
 
 ### Phase 2: Three primitives — advanceArc, branchArc, rebindRunner
 
@@ -539,7 +522,7 @@ See frontmatter for full task + test_case breakdowns.
 ### Phase 3: API surface + WS frame rename
 
 - New: `/api/arcs` CRUD endpoints (POST, GET, GET/:id, PATCH/:id, /:id/sessions, /:id/branch, /:id/close, /:id/archive)
-- Deleted: `/api/chains` route; `/api/chains/:issue/spec-status`; `/api/chains/:issue/vp-status`. Compatibility stubs retained briefly: `/api/chains/:issue/checkout|release|force-release` (deleted in P5)
+- Deleted (all in P3, no compat-stub interim — #115 has shipped): `/api/chains`, `/api/chains/:issue/spec-status`, `/api/chains/:issue/vp-status`, `/api/chains/:issue/checkout|release|force-release`. Worktree ops migrate to `/api/worktrees/*` (live since #115)
 - WS frame rename: `syncFrameType: 'chains'` → `'arcs'`; `chainsCollection` → `arcsCollection` (renamed file)
 - Tests: API contract tests for each endpoint + idempotency 409 scenario + WS frame integration
 - **Done when:** `pnpm test --filter @duraclaw/orchestrator -- arcs.test` passes; `pnpm typecheck` clean
@@ -571,13 +554,12 @@ P4b is the additive half: brand-new route component, new sidebar section, new co
 
 - Kata writer pre-write validation: `state.currentMode` ∈ registered modes from `kata.yaml`
 - Identifier sweep — second pass for stragglers (comments, jsdoc)
-- Delete legacy `/api/chains/:issue/checkout|release|force-release` stubs (depends on #115 landing first)
 - Drop `type ChainSummary = ArcSummary` alias from lib/types.ts
 - Update `.claude/rules/session-lifecycle.md` to describe the three new primitives
 - Update CLAUDE.md Architecture section
 - Final smoke + full test suite
 - **Done when:** `pnpm build && pnpm typecheck && pnpm test` all green; `grep -rn 'chainsCollection\|ChainSummary\|buildChainRow\|chain-status-item\|use-chain-' apps/ packages/ | grep -v node_modules | grep -v '.test.'` returns zero matches; smoke flow exercises full lifecycle
-- **Rollback:** P5 is mostly cleanup; revert returns aliases and stubs. Doesn't break P1-P4 functionality
+- **Rollback:** P5 is mostly cleanup; revert returns the `ChainSummary` alias and any sweep-renamed identifiers. Doesn't break P1-P4 functionality
 
 ## Verification Plan
 
@@ -589,10 +571,12 @@ P4b is the additive half: brand-new route component, new sidebar section, new co
 3. # Confirm three round-trip cases pass:
    #   - chain-pattern (two sessions kataIssue=42 → one arc, both arcId=arc-42)
    #   - orphan (session kataIssue=null → implicit arc with title from prompt)
-   #   - worktree-reservations absorbed (arc 99 has worktreeId or worktreeHeldSince populated; worktree_reservations table dropped)
+   #   - arc-worktree-backfilled (arc 99 has worktreeId matching the seed session's worktreeId)
 4. # Manual smoke:
    wrangler d1 execute duraclaw_local --command "SELECT name FROM sqlite_master WHERE type='table'"
-   # expect: 'arcs' present, 'sessions' present, 'agent_sessions' absent, 'worktree_reservations' absent
+   # expect: 'arcs' present, 'agent_sessions' present (still), 'worktrees' present (from #115's migration 0031)
+   wrangler d1 execute duraclaw_local --command "PRAGMA table_info(agent_sessions)"
+   # expect: kata_mode, kata_issue, kata_phase columns absent; arc_id, mode, parent_session_id columns present
 5. wrangler d1 execute duraclaw_local --command "SELECT count(*) FROM arcs"
    # expect: matches the count of distinct (userId, kataIssue) pairs + orphan sessions in pre-migration agent_sessions
 ```
@@ -619,7 +603,7 @@ P4b is the additive half: brand-new route component, new sidebar section, new co
    # expect: 201 with new sessionId; arcId same; the previous session row goes to status='idle'
 6. # Verify in D1:
    wrangler d1 execute duraclaw_local --command \
-     "SELECT id, mode, status, parentSessionId FROM sessions WHERE arcId = '<arcId>' ORDER BY createdAt"
+     "SELECT id, mode, status, parentSessionId FROM agent_sessions WHERE arcId = '<arcId>' ORDER BY createdAt"
    # expect: two rows, first mode=research status=idle, second mode=planning status=running parentSessionId=<first.id>
 ```
 
@@ -635,10 +619,10 @@ P4b is the additive half: brand-new route component, new sidebar section, new co
    wait
 3. # Verify exactly two sessions in arc (one prior + one successor), not three:
    wrangler d1 execute duraclaw_local --command \
-     "SELECT count(*) FROM sessions WHERE arcId = '<arcId>'"
+     "SELECT count(*) FROM agent_sessions WHERE arcId = '<arcId>'"
    # expect: 2
 4. # Confirm one of the two POSTs returned 409 with the existing successor's id
-   # (the partial unique index `idx_sessions_arc_mode_active` enforced at insert)
+   # (the partial unique index `idx_agent_sessions_arc_mode_active` enforced at insert)
 ```
 
 ### VP4: branchArc primitive — POST /api/arcs/:id/branch
@@ -656,7 +640,7 @@ P4b is the additive half: brand-new route component, new sidebar section, new co
    # expect: parentArcId='<parent-arc-id>'; externalRef inherited from parent; title='<parent.title> — side arc'
 4. # Verify new session prompt contains <prior_conversation> wrapping first 3 messages:
    wrangler d1 execute duraclaw_local --command \
-     "SELECT prompt FROM sessions WHERE id = '<newSessionId>'"
+     "SELECT prompt FROM agent_sessions WHERE id = '<newSessionId>'"
    # expect: prompt starts with '<prior_conversation>' and contains 3 'User:' / 'Assistant:' role lines
 5. # Navigate UI to /arc/<parent-arc-id>; assert 'side arcs (1)' link visible; click → /arc/<newArcId>
 ```
@@ -675,7 +659,7 @@ P4b is the additive half: brand-new route component, new sidebar section, new co
    #   - triggerGatewayDial fired with type='execute' and prompt containing <prior_conversation>
 5. # Verify D1 has the same session id (NOT a new session row):
    wrangler d1 execute duraclaw_local --command \
-     "SELECT id, runner_session_id FROM sessions WHERE id = '<sessionId>'"
+     "SELECT id, runner_session_id FROM agent_sessions WHERE id = '<sessionId>'"
    # expect: same id, runner_session_id changed (new value after rebind)
 6. # Cleanup: kill -CONT the original runner so it can exit naturally; reaper handles cleanup
 ```
@@ -689,7 +673,7 @@ P4b is the additive half: brand-new route component, new sidebar section, new co
 4. # Expected: orchestrator auto-advance gate fires anyway
 5. # Verify next session was spawned:
    wrangler d1 execute duraclaw_local --command \
-     "SELECT count(*) FROM sessions WHERE arcId = '<arcId>'"
+     "SELECT count(*) FROM agent_sessions WHERE arcId = '<arcId>'"
    # expect: 2 (research + planning successor)
 6. # Negative test: kill -9 the runner instead of /stop. terminate_reason should be 'crashed' not 'stopped'.
    # Verify auto-advance does NOT fire (only one session row in arc).
@@ -752,7 +736,7 @@ P4b is the additive half: brand-new route component, new sidebar section, new co
 
 ### Key Imports
 
-- `~/db/schema` — `arcs`, `sessions` Drizzle table definitions
+- `~/db/schema` — `arcs`, `agentSessions` Drizzle table definitions
 - `~/lib/arcs` (NEW) — `parseExternalRef`, `formatExternalRef`, `buildArcRow`, `buildArcRowFromContext`, `deriveColumn`, `COLUMN_QUALIFYING_MODES`
 - `~/lib/types` — `ArcSummary`, transitional `type ChainSummary = ArcSummary`
 - `~/agents/session-do/advance-arc` (NEW) — `advanceArcImpl`, `advanceArcGate`
@@ -771,7 +755,7 @@ export const arcs = sqliteTable('arcs', {
   userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   title: text('title').notNull(),
   externalRef: text('external_ref'),  // JSON: {provider,id,url?}
-  worktreeId: text('worktree_id'),    // FK to #115's worktrees.id, nullable until #115 lands
+  worktreeId: text('worktree_id'),    // FK to worktrees.id (added by #115's migration 0031); nullable for arc-less / read-only arcs
   status: text('status').notNull().default('draft'),
   parentArcId: text('parent_arc_id'),  // self-FK for side arcs; runtime check
   createdAt: text('created_at').notNull(),
@@ -851,7 +835,7 @@ export async function rebindRunnerImpl(
 **Pattern 4 — Migration backfill SQL skeleton.** Per Gotcha #11, no top-level `BEGIN/COMMIT` — D1 auto-commits DDL regardless. Statements are sequenced so each step depends only on prior DDL having committed.
 
 ```sql
--- 0026_arcs_first_class.sql
+-- 0032_arcs_first_class.sql
 -- NOTE: No BEGIN/COMMIT — D1 auto-commits DDL.
 -- Workflow-level atomicity: wrangler stops on first failure; dev wipes local D1 to retry.
 
@@ -861,7 +845,7 @@ CREATE TABLE arcs (
   user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   title text NOT NULL,
   external_ref text,
-  worktree_id text,  -- references #115 worktrees(id) when that table exists
+  worktree_id text REFERENCES worktrees(id),  -- worktrees table added by #115's migration 0031
   status text NOT NULL DEFAULT 'draft',
   parent_arc_id text REFERENCES arcs(id),
   created_at text NOT NULL,
@@ -922,15 +906,14 @@ WHERE kata_issue IS NULL;
 -- 7. Backfill mode from kataMode
 UPDATE agent_sessions SET mode = kata_mode;
 
--- 8. Backfill arc.worktree_id from worktree_reservations (if #115 hasn't landed yet, store legacy fields)
-ALTER TABLE arcs ADD COLUMN worktree_held_since text;
-ALTER TABLE arcs ADD COLUMN worktree_last_activity_at text;
-ALTER TABLE arcs ADD COLUMN worktree_owner_id text;
-UPDATE arcs SET
-  worktree_id = (SELECT wr.worktree FROM worktree_reservations wr WHERE wr.issue_number = json_extract(arcs.external_ref, '$.id')),
-  worktree_held_since = (SELECT wr.held_since FROM worktree_reservations wr WHERE wr.issue_number = json_extract(arcs.external_ref, '$.id')),
-  worktree_last_activity_at = (SELECT wr.last_activity_at FROM worktree_reservations wr WHERE wr.issue_number = json_extract(arcs.external_ref, '$.id')),
-  worktree_owner_id = (SELECT wr.owner_id FROM worktree_reservations wr WHERE wr.issue_number = json_extract(arcs.external_ref, '$.id'))
+-- 8. Backfill arcs.worktree_id from agent_sessions.worktree_id
+--    (agent_sessions.worktree_id text REFERENCES worktrees(id) was added by #115's migration 0031)
+UPDATE arcs SET worktree_id = (
+  SELECT s.worktree_id FROM agent_sessions s
+  WHERE s.kata_issue = json_extract(arcs.external_ref, '$.id')
+    AND s.worktree_id IS NOT NULL
+  LIMIT 1
+)
 WHERE external_ref IS NOT NULL;
 
 -- 9. Drop kata columns
@@ -938,63 +921,11 @@ ALTER TABLE agent_sessions DROP COLUMN kata_mode;
 ALTER TABLE agent_sessions DROP COLUMN kata_issue;
 ALTER TABLE agent_sessions DROP COLUMN kata_phase;
 
--- 10. Rename table
-ALTER TABLE agent_sessions RENAME TO sessions;
-
--- 11. Drop legacy table
-DROP TABLE worktree_reservations;
-
--- 12. Recreate sessions to enforce arc_id NOT NULL (SQLite cannot ALTER existing column to add NOT NULL)
-CREATE TABLE sessions_new (
-  id text PRIMARY KEY,
-  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  arc_id text NOT NULL REFERENCES arcs(id) ON DELETE CASCADE,
-  project text NOT NULL,
-  status text NOT NULL DEFAULT 'running',
-  model text,
-  runner_session_id text,
-  capabilities_json text,
-  created_at text NOT NULL,
-  updated_at text NOT NULL,
-  last_activity text,
-  num_turns integer,
-  message_seq integer NOT NULL DEFAULT -1,
-  prompt text,
-  summary text,
-  title text,
-  title_source text,
-  tag text,
-  origin text DEFAULT 'duraclaw',
-  agent text DEFAULT 'claude',
-  archived integer NOT NULL DEFAULT 0,
-  duration_ms integer,
-  total_cost_usd real,
-  mode text,
-  parent_session_id text REFERENCES sessions(id),
-  error text,
-  error_code text,
-  kata_state_json text,
-  context_usage_json text,
-  worktree_info_json text,
-  visibility text NOT NULL DEFAULT 'public'
-);
-INSERT INTO sessions_new SELECT
-  id, user_id, arc_id, project, status, model, runner_session_id, capabilities_json,
-  created_at, updated_at, last_activity, num_turns, message_seq, prompt, summary,
-  title, title_source, tag, origin, agent, archived, duration_ms, total_cost_usd,
-  mode, parent_session_id, error, error_code, kata_state_json, context_usage_json,
-  worktree_info_json, visibility
-FROM sessions;
-DROP TABLE sessions;
-ALTER TABLE sessions_new RENAME TO sessions;
-
--- 13. Recreate sessions indexes (4 pre-existing + 1 new partial unique for advance idempotency)
-CREATE UNIQUE INDEX idx_sessions_runner_id ON sessions(runner_session_id) WHERE runner_session_id IS NOT NULL;
-CREATE INDEX idx_sessions_user_last_activity ON sessions(user_id, last_activity);
-CREATE INDEX idx_sessions_user_project ON sessions(user_id, project);
-CREATE INDEX idx_sessions_visibility_last_activity ON sessions(visibility, last_activity);
-CREATE UNIQUE INDEX idx_sessions_arc_mode_active
-  ON sessions(arc_id, mode)
+-- 10. Create the new partial unique index for advance idempotency
+--     (the four pre-existing agent_sessions indexes are unchanged — modern SQLite
+--      preserves indexes across ADD/DROP COLUMN, so no recreate needed)
+CREATE UNIQUE INDEX idx_agent_sessions_arc_mode_active
+  ON agent_sessions(arc_id, mode)
   WHERE status IN ('idle', 'pending', 'running');
 ```
 
@@ -1039,13 +970,15 @@ export const arcsCollection = createArcsCollection()
 
 8. **Component naming preserved** (KanbanBoard, KanbanLane, KanbanColumn, KanbanCard) — the rename does NOT extend to layout-pattern component names, only to data identifiers. Verify in the final grep that `KanbanCard` still exists; only `chain` / `Chain` / `chainsCollection` / `ChainSummary` / `useChain*` / `chain-status-item` are gone.
 
-9. **GH#115 worktree FK is nullable until #115 lands** — `arcs.worktreeId` is added as nullable in this spec's migration. Once #115's worktrees table exists, write a follow-up migration that tightens to NOT NULL (and backfills for any arcs that lack a reservation). The legacy `worktree_reservations` data is preserved via the carry-over fields (`worktreeHeldSince`, `worktreeOwnerId`, `worktreeLastActivityAt`) so #115's migration can populate `worktrees` from those.
+9. **#115 (worktrees as first-class resource) has landed (closed).** `worktrees` table exists in the schema; `agent_sessions.worktreeId text REFERENCES worktrees(id)` was added by migration 0031. `arcs.worktreeId` references `worktrees.id` directly. There is no `worktree_reservations` table any more (dropped in 0031). The original spec's worktree carry-over columns and `worktree_reservations` backfill are no longer needed and have been removed from this amended spec.
 
 10. **Kata UI labels preserved on purpose** — `KataStatePanel` and `ArcStatusItem` continue to render "Kata: planning/p2" labels. This is INTENTIONAL: the schema/identifier purge does not extend to kata methodology labels because kata IS the user-visible methodology layer. Reviewers may flag this as inconsistent with the "purge kata terminology" wording in the issue body — point them to the interview decision.
 
 11. **D1 transaction semantics for DDL** — D1's SQLite implementation does NOT allow `CREATE/ALTER/DROP TABLE` inside an explicit `BEGIN…COMMIT` transaction; DDL auto-commits regardless. The migration is therefore structured as a sequence of statements that wrangler executes serially. **Atomicity is workflow-level**, not transactional: if any statement fails, wrangler marks the migration failed and the dev wipes local D1 to retry. Pre-prod tolerates this (rollback policy in P1). DML statements (INSERT, UPDATE) inside the migration *can* be wrapped in a transaction if needed; the spec's migration script is sequenced so each DML step depends only on the prior DDL having completed (auto-committed). Pattern 4 SQL skeleton intentionally omits BEGIN/COMMIT at the top.
 
-12. **`arcId NOT NULL` enforcement requires SQLite table recreate** — SQLite does not support `ALTER TABLE ALTER COLUMN SET NOT NULL` after the fact. The migration adds `arc_id text` (nullable) to `agent_sessions`, backfills via UPDATE, then recreates the table with a `NOT NULL` constraint via the canonical SQLite recreate-table dance: `CREATE TABLE sessions_new (...arc_id text NOT NULL...)` → `INSERT INTO sessions_new SELECT ... FROM sessions` → `DROP TABLE sessions` → `ALTER TABLE sessions_new RENAME TO sessions` → recreate indexes. Adds first-migration runtime cost but ensures DB-level enforcement matches Drizzle's `notNull()` schema declaration. Without this dance, the column would be nullable at the DB level even though the spec says NOT NULL — app-layer validation catches new inserts but stale rows could slip through. The recreate task is split out as a separate bullet in P1's task list for clarity.
+12. **`arcId` NOT NULL is enforced at the Drizzle schema + app layer, not at the DB layer.** SQLite cannot ALTER an existing column to add NOT NULL without a table recreate; given the auth `sessions` table collision (see Gotcha #13), we accept Drizzle's `notNull()` declaration + insert validation as sufficient. Pre-prod tolerates this; if prod ever needs DB-level enforcement, a follow-up migration can do the recreate dance with the table named correctly.
+
+13. **Auth-`sessions` collision** — `apps/orchestrator/src/db/schema.ts:48` exports `sessions` for Better Auth's login session table. The original spec proposed renaming `agent_sessions` → `sessions`; this clobbers the auth identifier. The amended spec keeps `agent_sessions` / `agentSessions` names. All references to "the renamed sessions table" or "post-rename" are stale and have been removed.
 
 ### Reference Docs
 
