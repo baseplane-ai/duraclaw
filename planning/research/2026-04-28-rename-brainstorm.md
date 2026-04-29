@@ -536,7 +536,31 @@ across all three rounds:
    nothing** is the comparison case the user should weigh against any
    pick that requires a trademark fight.
 
-### 8.8 Honest top picks after three rounds
+### 8.8a Round-4 — Cascade and motion-coded family
+
+User's gut picks (Strider, Cascade) revealed a pattern: **motion /
+flow / capability-coded names** with verb-energy. Round 4 sweeps
+that family.
+
+| Name | Killed by |
+|---|---|
+| **Cascade** | **Windsurf Cascade** — Windsurf's flagship agentic AI coding agent. Windsurf was acquired by Cognition (Devin team) for ~$250M in Dec 2025; ranks #1 in LogRocket AI Dev Tool Power Rankings as of Feb 2026; $82M ARR, 350+ enterprise customers. Plus gocascade.ai (enterprise workflow), usecascade.ai (sales pipeline), try-cascade.ai ("AI-Native Initiative-to-Execution Platform"). Cascade is the *literal flagship product* of duraclaw's nearest direct competitor. **Worst possible conflict.** |
+| **Stride** | stride.build — *"Agentic AI Solutions / Custom AI Agents for Enterprise"* (exact category). Plus Microsoft STRIDE threat-modeling framework. Plus former Atlassian Stride chat product. |
+| **Surge** | Surge AI — well-known data-labeling company used by OpenAI / Anthropic. Hard kill. |
+| **Rally** | Rally Software → Broadcom-owned project management. |
+| **Vanguard** | Vanguard funds — too dominant to share an audience with. |
+| **Harbinger** | harbinger.ai + Harbinger Group's "Agentic AI Studio" with AI Excellence Awards 2026. |
+| **Slipstream** | No dominant AI conflict, but Slipstream Communications / Slipstream Media in adjacent marketing space. Survivable. |
+| **Throughline** | No notable AI/dev-tools conflict. Three syllables, less brandable, but **clear**. |
+| **Lockstep** | Lockstep accounting is a real B2B brand but in a different category. Survivable. |
+
+**Cascade reflection:** the pattern of the user's two gut picks
+(Strider, Cascade) shows the deeper problem — *every* name with
+"agentic energy" already has an AI company on it. The naming gold rush
+of late 2025 / early 2026 has consumed the verb-coded vocabulary in
+the same way it consumed the structural-noun vocabulary in rounds 1–3.
+
+### 8.8 Honest top picks after four rounds
 
 In rough order, the candidates that have survived every round of
 conflict checking AND read as enterprise-credible:
@@ -559,6 +583,15 @@ much smaller than the v1 / v2 lists implied. **Plinth** is the only
 candidate that scores well on both axes after three rounds of cuts.
 
 ---
+
+## Sources (round 4)
+
+- [Windsurf Cascade — Windsurf's flagship agent](https://windsurf.com/cascade)
+- [Windsurf docs — Cascade](https://docs.windsurf.com/windsurf/cascade/cascade)
+- [Windsurf review 2026 — #1 in LogRocket AI Dev Tool Power Rankings](https://www.taskade.com/blog/windsurf-review)
+- [stride.build — Agentic AI Solutions for Enterprise](https://www.stride.build/agentic-ai)
+- [STRIDE threat-modeling framework](https://aviatrix.ai/threat-research-center/ai-threat-modeling-frameworks-2026/)
+- [Harbinger AI](https://www.harbinger.ai/)
 
 ## Sources (round 3)
 
