@@ -220,6 +220,112 @@ Once we have ~1000 labeled session-turn rows, train a RouteLLM-style preference 
 3. Schedule planning mode for the P0 spec
 4. Telemetry expansion (P1) can run in parallel with P0 — no dependency
 
+## Addendum — Bind routing to kata modes (and the kata arc)
+
+**User pivot:** "build it into the kata arc process so that certain modes are fixed to certain models."
+
+This reframes the recommendation. The original P0 was a generic UI tier preset (`cheap / balanced / premium`). But duraclaw already has a **better task classifier** that the user explicitly opts into every session: the **kata mode**. Modes encode *cognitive load and intent* by design (planning vs. task vs. verify is precisely a complexity gradient). Binding model + budget to mode eliminates the need for inference-time classification — the user's mode choice **is** the routing decision.
+
+### Why the kata-mode locus wins for P0
+
+- **Already a task type signal.** `kata enter <mode>` is the user declaring "this is research" or "this is debug." That's the signal a learned classifier would otherwise have to infer.
+- **Already a session-scoped boundary.** Each kata session maps to one or more spawned sessions; SDK constraint (model locked per `query()`) is satisfied without contortion.
+- **Already plumbed.** Kata reserves worktrees via the orchestrator (`packages/kata/src/commands/enter.ts:748–751`). Adding `{ model, max_budget_usd }` to the mode config YAML and to the reserve payload is mechanical; the receiving end (orchestrator `cmd.model`, `cmd.max_budget_usd`) already exists.
+- **Already declarable in YAML.** Mode config is Zod-schema'd at `packages/kata/src/config/kata-config.ts:13–37`, sourced from `.kata/kata.yaml` (with `packages/kata/batteries/kata.yaml` as fallback). Two new optional fields on `KataModeConfigSchema` and we're done.
+- **Arc-level budgets are natural.** "Arc" in this repo = an issue-anchored multi-session work unit (`packages/kata/src/lib/reserve-worktree.ts:34` — `ReservedBy.kind = 'arc'`). A budget on the arc draws across all its sessions, which is what users actually want ("don't spend more than $X solving this issue").
+
+### Proposed per-mode defaults
+
+Anchored to cognitive load, with budgets matched to typical session length:
+
+| Mode | Default model | Budget cap | Rationale |
+|---|---|---|---|
+| `freeform` | `claude-haiku-4-5` | $0.25 | Quick Q&A; low cognitive load |
+| `verify` | `claude-haiku-4-5` | $0.50 | Mechanical VP execution; high volume of small steps |
+| `task` | `claude-sonnet-4-6` | $1.50 | Small refactor/fix; needs reasoning but tightly scoped |
+| `debug` | `claude-sonnet-4-6` | $3.00 | Hypothesis-driven; may need to escalate to Opus on hard cases |
+| `research` | `claude-sonnet-4-6` | $5.00 | Parallel Explore agents; main loop is synthesis, agents are reads |
+| `implementation` | `claude-sonnet-4-6` | $10.00 | Executing an approved spec; design is already done |
+| `planning` | `claude-opus-4-7` | $5.00 | Architectural reasoning; the one mode where Opus pays back |
+
+Three principles behind the table:
+1. **Opus is reserved for design** (`planning`) — by the time you're in `implementation`, the hard thinking is done
+2. **Haiku for mechanical/conversational** (`freeform`, `verify`) — these are high-volume, low-stakes
+3. **Sonnet is the workhorse middle** — most modes default here
+
+### Schema sketch
+
+```yaml
+# .kata/kata.yaml (and packages/kata/batteries/kata.yaml)
+modes:
+  planning:
+    template: planning.md
+    model: claude-opus-4-7         # NEW
+    max_budget_usd: 5.0            # NEW
+    rules: [...]
+  implementation:
+    template: implementation.md
+    model: claude-sonnet-4-6       # NEW
+    max_budget_usd: 10.0           # NEW
+    rules: [...]
+  task:
+    template: task.md
+    model: claude-sonnet-4-6       # NEW
+    max_budget_usd: 1.5            # NEW
+  # ... etc
+```
+
+```ts
+// packages/kata/src/config/kata-config.ts (Zod schema extension)
+export const KataModeConfigSchema = z.object({
+  // ... existing fields
+  model: z.string().optional(),               // NEW
+  max_budget_usd: z.number().positive().optional(),  // NEW
+})
+```
+
+### Resolution order
+
+When a session spawns inside a kata mode:
+
+```
+session_max_budget_usd  ←  user-provided override on `kata enter` (--budget=X)
+                       ↑
+session_model           ←  user override on `kata enter` (--model=X)
+                       ↑
+                       ←  arc budget remaining / N expected sessions  (predictive pacing layer)
+                       ↑
+                       ←  mode default (kata.yaml)
+                       ↑
+                       ←  user-preference default (D1 user_preferences)
+                       ↑
+                       ←  hard system default
+```
+
+Most users get the right model + budget for free. Power users override per-session via flags. Arcs hard-cap the total spend.
+
+### Revised phasing
+
+P0 reshapes around kata-mode binding. The original P0 (UI tier presets) becomes redundant — modes *are* the tiers.
+
+| Phase | What ships | Why |
+|---|---|---|
+| **P0a — Mode → model binding** | `model` + `max_budget_usd` on `KataModeConfigSchema`; thread through `kata enter` → worktree reserve → DO `cmd.model` / `cmd.max_budget_usd` | Wires the existing dead-coded budget cap and replaces hardcoded `opus-4-6` defaults with mode-aware ones |
+| **P0b — Per-session overrides** | `kata enter <mode> --model=X --budget=Y` flags | Power-user escape hatch |
+| **P0c — Arc budget cap** | Arc-level budget that aggregates across its sessions; track in D1 | "Don't spend more than $X on this issue" |
+| **P1 — Per-turn telemetry** | (unchanged from original plan) Extract cache tokens, per-turn rows, surface in UI | Required for any predictive/learned routing |
+| **P2 — Subagent tier dispatch** | (unchanged) `AgentDefinition.model` for typed subagents within a session | Cheap subagents inside expensive modes |
+| **P3 — Predictive arc pacing** | DO downshifts subsequent spawns when arc burn rate exceeds budget pace | Project-/arc-level safety |
+| **P4 — Reactive escalation** | (unchanged) Failed Haiku spawn → re-spawn with Sonnet via `resume` | Quality floor |
+| **P5 — Learned classifier** | Per-mode classifier that tunes the *intra-mode* routing (e.g. is this `task` actually trivial enough for Haiku?) | Optimization on top of the binding |
+
+### Open questions (additional to the original six)
+
+7. **Per-arc vs. per-mode budget composition** — does a `planning` session inside a $20 arc still get its $5 mode cap, or is the arc cap the only ceiling?
+8. **Override surface** — flags only (`--model`, `--budget`), env vars, or also a per-project `.kata/overrides.yaml`?
+9. **Backfill** — should we use this opportunity to deprecate the global `user_preferences.model` default in favor of mode-specific defaults? (Cleaner mental model, but existing UI breaks)
+10. **Identity coupling** — different identities (e.g. personal vs. team Claude account) may have different budget profiles. Do mode defaults compose with identity defaults, or is identity-level orthogonal?
+
 ## Sources
 
 **Codebase (this repo)**
