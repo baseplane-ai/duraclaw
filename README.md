@@ -5,11 +5,11 @@
     is what makes it skim-friendly. Defer deep mechanics to per-package
     READMEs and .claude/rules/, but link them from here.
   - Architecture ASCII block is mirrored from CLAUDE.md — keep them in sync.
-  - Hero image is generated; see docs/hero/ for variants.
+  - Hero image is generated; see .github/assets/hero/ for variants.
 -->
 
 <p align="center">
-  <img src="docs/hero/duraclaw-hero.png" alt="Duraclaw — a lobster claw cradling a constellation of glowing terminal sessions" width="100%">
+  <img src=".github/assets/hero/duraclaw-hero.png" alt="Duraclaw — a lobster claw cradling a constellation of glowing terminal sessions" width="100%">
 </p>
 
 <h1 align="center">Duraclaw</h1>
@@ -157,7 +157,7 @@ Layered on top:
   explicitly waived.
 
 <p align="center">
-  <img src="docs/screenshots/15-sessions-dashboard.png" alt="Duraclaw dashboard with 15 concurrent Claude sessions open as draggable tabs across baseplane, duraclaw, kata-wm, and other worktrees" width="100%">
+  <img src=".github/assets/screenshots/15-sessions-dashboard.png" alt="Duraclaw dashboard with 15 concurrent Claude sessions open as draggable tabs across baseplane, duraclaw, kata-wm, and other worktrees" width="100%">
   <br>
   <sub><em>Fifteen concurrent Claude sessions, one per worktree, fanned out as draggable tabs above a live chat. Sidebar = recents + worktree groups; status bar = per-session model, mode, and connection state.</em></sub>
 </p>
