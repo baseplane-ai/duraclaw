@@ -70,15 +70,15 @@ function makeApp(env: any) {
 function setupQueueForProjects(fakeDb: ReturnType<typeof makeFakeDb>, hidden: string[] | null) {
   const prefRow = hidden === null ? [] : [{ hiddenProjects: JSON.stringify(hidden) }]
   fakeDb.data.queue.push(prefRow)
-  // D1 `projects` table returns all live rows (the handler filters hidden
-  // via the preferences set after the query, not in SQL).
+  // D1 `projects` LEFT JOIN `projectMetadata` returns all live rows
+  // enriched with projectId / ownerId / visibility (GH#122 B-API-FIX).
   fakeDb.data.queue.push(
     mockProjects.map((p) => ({
       name: p.name,
-      displayName: null,
       rootPath: p.path,
-      updatedAt: '2026-04-20T00:00:00.000Z',
-      deletedAt: null,
+      visibility: 'public',
+      projectId: null,
+      ownerId: null,
     })),
   )
   const visible = hidden ? mockProjects.filter((p) => !hidden.includes(p.name)) : mockProjects
@@ -220,6 +220,10 @@ describe('project hiding', () => {
         hidden: true,
         // Spec #68 P2: projects carry a `visibility` field; unknown-in-D1 → 'private'.
         visibility: 'private',
+        // GH#122 B-API-FIX: projectId / ownerId surface from the LEFT JOIN
+        // on projectMetadata; null when the project lacks a D1 row.
+        projectId: null,
+        ownerId: null,
       })
     })
 

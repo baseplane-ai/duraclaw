@@ -115,9 +115,11 @@ describe('POST /api/projects/:projectId/claim (B-LIFECYCLE-1)', () => {
 
   it('admin on null-owner project → 200 + ownerId + claimedAt', async () => {
     mockedGetRequestSession.mockResolvedValue(adminSession as any)
-    // 1. UPDATE projectMetadata WHERE ownerId IS NULL .returning() → 1 row
+    // 1. SELECT precheck on projectMetadata.ownerId → null (claimable).
+    fakeDb.data.queue.push([{ ownerId: null }])
+    // 2. db.batch([UPDATE … .returning(), INSERT project_members]).
+    //    UPDATE returns the new ownerId/updatedAt row; INSERT returns [].
     fakeDb.data.queue.push([{ ownerId: 'user-admin', updatedAt: '2026-04-29T00:00:00.000Z' }])
-    // 2. INSERT projectMembers → []
     fakeDb.data.queue.push([])
     // 3. (fanout, runs in waitUntil) — projectInfoFromMeta SELECT JOIN
     fakeDb.data.queue.push([
@@ -149,10 +151,8 @@ describe('POST /api/projects/:projectId/claim (B-LIFECYCLE-1)', () => {
 
   it('admin on already-owned project → 409 already_owned', async () => {
     mockedGetRequestSession.mockResolvedValue(adminSession as any)
-    // UPDATE … WHERE ownerId IS NULL matches 0 rows (already owned).
-    fakeDb.data.queue.push([])
-    // Disambiguating SELECT: project exists → already_owned.
-    fakeDb.data.queue.push([{ projectId: VALID_PID }])
+    // SELECT precheck returns a row with non-null ownerId → 409 immediately.
+    fakeDb.data.queue.push([{ ownerId: 'user-other' }])
 
     const { request } = makeApp(env)
     const res = await request(`/api/projects/${VALID_PID}/claim`, { method: 'POST' })
@@ -162,13 +162,12 @@ describe('POST /api/projects/:projectId/claim (B-LIFECYCLE-1)', () => {
     expect(body.error).toBe('already_owned')
     // INSERT into project_members must NOT happen on the lost-race path.
     expect(fakeDb.db.insert).not.toHaveBeenCalled()
+    expect(fakeDb.db.update).not.toHaveBeenCalled()
   })
 
   it('admin on nonexistent project → 404 unknown-project', async () => {
     mockedGetRequestSession.mockResolvedValue(adminSession as any)
-    // UPDATE matches 0 rows.
-    fakeDb.data.queue.push([])
-    // Disambiguating SELECT: project does not exist → 404.
+    // SELECT precheck returns no rows → 404 immediately.
     fakeDb.data.queue.push([])
 
     const { request } = makeApp(env)
@@ -179,6 +178,7 @@ describe('POST /api/projects/:projectId/claim (B-LIFECYCLE-1)', () => {
     expect(body.error).toBe('not_found')
     expect(body.reason).toBe('unknown-project')
     expect(fakeDb.db.insert).not.toHaveBeenCalled()
+    expect(fakeDb.db.update).not.toHaveBeenCalled()
   })
 
   it('non-admin → 403 admin-required', async () => {
@@ -211,7 +211,8 @@ describe('POST /api/projects/:projectId/claim (B-LIFECYCLE-1)', () => {
 
   it('fanout: broadcasts a `projects` update op once per userPresence user', async () => {
     mockedGetRequestSession.mockResolvedValue(adminSession as any)
-    fakeDb.data.queue.push([{ ownerId: 'user-admin', updatedAt: '2026-04-29T00:00:00.000Z' }])
+    fakeDb.data.queue.push([{ ownerId: null }]) // SELECT precheck → claimable
+    fakeDb.data.queue.push([{ ownerId: 'user-admin', updatedAt: '2026-04-29T00:00:00.000Z' }]) // UPDATE returning
     fakeDb.data.queue.push([]) // INSERT project_members
     fakeDb.data.queue.push([
       {

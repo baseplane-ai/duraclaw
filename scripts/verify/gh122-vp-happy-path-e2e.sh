@@ -67,7 +67,9 @@ bash "$SCRIPT_DIR/dev-up.sh"
 log "waiting for orch /api/health (or any 200) at ${ORCH_URL}"
 ORCH_READY=0
 for i in $(seq 1 30); do
-  http_code="$(curl -s -o /dev/null -w '%{http_code}' "${ORCH_URL}/api/health" || echo 000)"
+  http_code="$(curl -s -o /dev/null -w '%{http_code}' \
+    -H "Origin: $VERIFY_ORIGIN" \
+    "${ORCH_URL}/api/health" || echo 000)"
   if [[ "$http_code" == "200" || "$http_code" == "401" || "$http_code" == "404" ]]; then
     ORCH_READY=1
     break
@@ -83,6 +85,7 @@ if [[ -n "${BOOTSTRAP_TOKEN:-}" ]]; then
   log "POST /api/bootstrap (idempotent seed)"
   bs_code="$(curl -s -o /dev/null -w '%{http_code}' \
     -X POST "${ORCH_URL}/api/bootstrap" \
+    -H "Origin: $VERIFY_ORIGIN" \
     -H "Authorization: Bearer ${BOOTSTRAP_TOKEN}" \
     -H 'Content-Type: application/json' \
     -d "{\"email\":\"${TEST_EMAIL}\",\"password\":\"${TEST_PASSWORD}\",\"name\":\"${TEST_NAME}\"}" \
@@ -98,6 +101,7 @@ fi
 # ── 3. Sign in ────────────────────────────────────────────────────────
 log "signing in as ${TEST_EMAIL}"
 signin_resp="$(curl -s -X POST "${ORCH_URL}/api/auth/sign-in/email" \
+  -H "Origin: $VERIFY_ORIGIN" \
   -H 'Content-Type: application/json' \
   -c "$COOKIE_JAR" \
   -d "{\"email\":\"${TEST_EMAIL}\",\"password\":\"${TEST_PASSWORD}\"}" \
@@ -115,7 +119,7 @@ log "waiting for gateway projects sync (poll GET /api/projects)"
 PROJECT_ID=""
 PROJECT_NAME=""
 for i in $(seq 1 60); do
-  body="$(curl -fsS -b "$COOKIE_JAR" "${ORCH_URL}/api/projects" || echo '{}')"
+  body="$(curl -fsS -H "Origin: $VERIFY_ORIGIN" -b "$COOKIE_JAR" "${ORCH_URL}/api/projects" || echo '{}')"
   # /api/projects returns {projects: ProjectInfo[]} OR ProjectInfo[] direct
   count="$(printf '%s' "$body" | jq -r 'if type=="object" then (.projects // []) | length else length end' 2>/dev/null || echo 0)"
   if [[ "$count" -gt 0 ]]; then
@@ -137,6 +141,7 @@ done
 # ── 5. GET /projects HTML (B-UI-1) ────────────────────────────────────
 log "GET ${ORCH_URL}/projects (HTML shell)"
 projects_html_code="$(curl -s -o /dev/null -w '%{http_code}' \
+  -H "Origin: $VERIFY_ORIGIN" \
   -b "$COOKIE_JAR" "${ORCH_URL}/projects")"
 [[ "$projects_html_code" == "200" ]] \
   || fail "GET /projects returned ${projects_html_code} (expected 200)"
@@ -144,6 +149,7 @@ projects_html_code="$(curl -s -o /dev/null -w '%{http_code}' \
 # ── 6. POST /api/projects/:projectId/claim (B-LIFECYCLE-1) ────────────
 log "POST /api/projects/${PROJECT_ID}/claim"
 claim_resp="$(curl -s -X POST "${ORCH_URL}/api/projects/${PROJECT_ID}/claim" \
+  -H "Origin: $VERIFY_ORIGIN" \
   -b "$COOKIE_JAR" -w '\n%{http_code}')"
 claim_code="$(printf '%s' "$claim_resp" | tail -n1)"
 case "$claim_code" in
@@ -165,6 +171,7 @@ esac
 # ── 7. GET /api/projects/:projectId/docs-files (B-AUTH-4) ─────────────
 log "GET /api/projects/${PROJECT_ID}/docs-files"
 files_code="$(curl -s -o /dev/null -w '%{http_code}' \
+  -H "Origin: $VERIFY_ORIGIN" \
   -b "$COOKIE_JAR" "${ORCH_URL}/api/projects/${PROJECT_ID}/docs-files")"
 case "$files_code" in
   200) log "docs-files 200 (project has docsWorktreePath configured)" ;;
@@ -176,6 +183,7 @@ esac
 # ── 8. GET /projects/:projectId/docs HTML (B-UI-1's downstream route) ─
 log "GET ${ORCH_URL}/projects/${PROJECT_ID}/docs (HTML shell)"
 docs_html_code="$(curl -s -o /dev/null -w '%{http_code}' \
+  -H "Origin: $VERIFY_ORIGIN" \
   -b "$COOKIE_JAR" "${ORCH_URL}/projects/${PROJECT_ID}/docs")"
 [[ "$docs_html_code" == "200" ]] \
   || fail "GET /projects/${PROJECT_ID}/docs returned ${docs_html_code} (expected 200)"

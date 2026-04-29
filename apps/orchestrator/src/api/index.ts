@@ -1,6 +1,7 @@
 import { deriveProjectId } from '@duraclaw/shared-types'
 import type { SQL } from 'drizzle-orm'
 import { and, asc, desc, eq, inArray, isNull, like, ne, or, sql } from 'drizzle-orm'
+import type { BatchItem } from 'drizzle-orm/batch'
 import { drizzle } from 'drizzle-orm/d1'
 import { Hono } from 'hono'
 import { createMiddleware } from 'hono/factory'
@@ -715,8 +716,14 @@ export function createApiApp() {
     const ops: Array<import('@duraclaw/shared-types').SyncedCollectionOp<ProjectInfo>> = []
 
     // GH#122 B-SYNC-2: atomic dual-write. Upsert each `projects` row AND
-    // (when repo_origin is set) the corresponding `projectMetadata` row in
-    // a single transaction. Failure mid-batch rolls back both tables.
+    // (when repo_origin is set) the corresponding `projectMetadata` row
+    // via a single `db.batch([...])`. Failure mid-batch rolls back both
+    // tables atomically.
+    //
+    // D1 does not support interactive BEGIN/COMMIT — drizzle's
+    // `db.transaction()` throws on the D1 binding (see
+    // api/index.ts:1570-1575). We build the full statement list first
+    // (deriving projectId is async), then submit them in one batch call.
     //
     // projectId derivation: sha256(repo_origin).slice(0, 16) when origin
     // is non-empty; null otherwise. On the projects-side update clause we
@@ -727,21 +734,23 @@ export function createApiApp() {
     //
     // The projectMetadata upsert intentionally OMITS ownerId from the
     // `set` clause: ownership (B-SCHEMA-2) is preserved across syncs.
-    await db.transaction(async (trx) => {
-      for (const p of incoming) {
-        const projectId = p.repo_origin ? await deriveProjectId(p.repo_origin) : null
+    type DualWriteStmt = BatchItem<'sqlite'>
+    const writeStmts: DualWriteStmt[] = []
+    for (const p of incoming) {
+      const projectId = p.repo_origin ? await deriveProjectId(p.repo_origin) : null
 
-        const projectsSet: Record<string, unknown> = {
-          displayName: p.displayName ?? null,
-          rootPath: p.path,
-          updatedAt: now,
-          deletedAt: null,
-        }
-        if (projectId !== null) {
-          projectsSet.projectId = projectId
-        }
+      const projectsSet: Record<string, unknown> = {
+        displayName: p.displayName ?? null,
+        rootPath: p.path,
+        updatedAt: now,
+        deletedAt: null,
+      }
+      if (projectId !== null) {
+        projectsSet.projectId = projectId
+      }
 
-        await trx
+      writeStmts.push(
+        db
           .insert(projectsTable)
           .values({
             name: p.name,
@@ -759,10 +768,12 @@ export function createApiApp() {
           .onConflictDoUpdate({
             target: projectsTable.name,
             set: projectsSet,
-          })
+          }),
+      )
 
-        if (projectId !== null) {
-          await trx
+      if (projectId !== null) {
+        writeStmts.push(
+          db
             .insert(projectMetadata)
             .values({
               projectId,
@@ -779,15 +790,29 @@ export function createApiApp() {
                 updatedAt: now,
                 // ownerId intentionally OMITTED — preserve existing ownership.
               },
-            })
-        }
-
-        ops.push({
-          type: existingLive.has(p.name) ? 'update' : 'insert',
-          value: p,
-        })
+            }),
+        )
       }
-    })
+
+      // GH#122 B-API-FIX: surface projectId on the broadcast so live
+      // synced-collection deltas reach clients with a non-null projectId
+      // (the cold-start GET /api/projects also LEFT JOINs to populate
+      // it — see api/index.ts:2068+). Visibility defaults to 'public'
+      // for new rows to match the upsert above; existing rows preserve
+      // whatever's in D1 (gateway sync never changes visibility — admins
+      // do via PATCH /api/projects/:name/visibility). ownerId is left
+      // out of the broadcast — sync doesn't change ownership; clients
+      // pick it up from the cold-start GET when needed.
+      ops.push({
+        type: existingLive.has(p.name) ? 'update' : 'insert',
+        value: { ...p, projectId, visibility: 'public' as const },
+      })
+    }
+
+    if (writeStmts.length > 0) {
+      const [first, ...rest] = writeStmts as [DualWriteStmt, ...DualWriteStmt[]]
+      await db.batch([first, ...rest])
+    }
 
     // Soft-delete rows present in D1 but absent from the payload.
     const toDelete = [...existingLive].filter((name) => !incomingNames.has(name))
@@ -2059,9 +2084,24 @@ export function createApiApp() {
     const db = getDb(c.env)
     const hiddenSet = await getHiddenProjects(c.env, userId)
 
+    // GH#122 B-API-FIX: LEFT JOIN projectMetadata so each row carries
+    //   projectId / ownerId / visibility — the synced-collection consumer
+    //   (and the VP harness) reads these from the cold-start payload.
+    //   `projects.projectId` is the link key; rows whose projectId is
+    //   still null (pre-backfill, or no remote origin) get a null
+    //   ownerId from the LEFT JOIN — both fields stay nullable on the
+    //   wire-shape, matching the optional-field convention in
+    //   `packages/shared-types/src/index.ts:678` (ProjectInfo).
     const liveRows = await db
-      .select()
+      .select({
+        name: projectsTable.name,
+        rootPath: projectsTable.rootPath,
+        visibility: projectsTable.visibility,
+        projectId: projectsTable.projectId,
+        ownerId: projectMetadata.ownerId,
+      })
       .from(projectsTable)
+      .leftJoin(projectMetadata, eq(projectsTable.projectId, projectMetadata.projectId))
       .where(isNull(projectsTable.deletedAt))
       .orderBy(asc(projectsTable.name))
 
@@ -2093,6 +2133,9 @@ export function createApiApp() {
           ahead: 0,
           behind: 0,
           pr: null,
+          visibility: (row.visibility === 'private' ? 'private' : 'public') as 'public' | 'private',
+          ownerId: row.ownerId ?? null,
+          projectId: row.projectId ?? null,
         }
         return { ...base, sessions: sessions as AgentSessionRow[] }
       }),
@@ -2330,43 +2373,57 @@ export function createApiApp() {
     const db = getDb(c.env)
     const now = new Date().toISOString()
 
-    type ClaimOutcome =
-      | { kind: 'ok'; updatedAt: string }
-      | { kind: 'not_found' }
-      | { kind: 'already_owned' }
-
-    const outcome: ClaimOutcome = await db.transaction(async (trx) => {
-      const updated = await trx
-        .update(projectMetadata)
-        .set({ ownerId: userId, updatedAt: now })
-        .where(and(eq(projectMetadata.projectId, projectId), isNull(projectMetadata.ownerId)))
-        .returning({ ownerId: projectMetadata.ownerId, updatedAt: projectMetadata.updatedAt })
-      if (updated.length === 0) {
-        // Disambiguate "already owned" from "no such project". The UPDATE
-        // matches zero rows in BOTH cases; a follow-up SELECT tells them
-        // apart so the caller doesn't see a misleading 409 for a typo'd
-        // projectId.
-        const existing = await trx
-          .select({ projectId: projectMetadata.projectId })
-          .from(projectMetadata)
-          .where(eq(projectMetadata.projectId, projectId))
-          .limit(1)
-        return { kind: existing.length === 0 ? 'not_found' : 'already_owned' }
-      }
-      await trx.insert(projectMembers).values({
-        projectId,
-        userId,
-        role: 'owner',
-        addedAt: now,
-        addedBy: userId,
-      })
-      return { kind: 'ok', updatedAt: updated[0].updatedAt }
-    })
-
-    if (outcome.kind === 'not_found') {
+    // D1 does not support interactive BEGIN/COMMIT — see api/index.ts:1570-1575.
+    // Pattern: SELECT precheck for row existence + current ownerId, then
+    // `db.batch([UPDATE … WHERE ownerId IS NULL .returning(), INSERT
+    // project_members])`. The UPDATE's WHERE-IS-NULL guard handles the
+    // TOCTOU race: if a concurrent claim wins, the UPDATE matches 0
+    // rows but the INSERT then trips the partial unique index
+    // (project_members_one_owner — see migrations/0032) and the batch
+    // rolls back atomically. We re-check via the UPDATE's `.returning()`
+    // result count; 0 rows means a concurrent claim landed first.
+    const existing = await db
+      .select({ ownerId: projectMetadata.ownerId })
+      .from(projectMetadata)
+      .where(eq(projectMetadata.projectId, projectId))
+      .limit(1)
+    if (existing.length === 0) {
       return c.json({ error: 'not_found', reason: 'unknown-project' }, 404)
     }
-    if (outcome.kind === 'already_owned') return c.json({ error: 'already_owned' }, 409)
+    if (existing[0].ownerId !== null) {
+      return c.json({ error: 'already_owned' }, 409)
+    }
+
+    const updateStmt = db
+      .update(projectMetadata)
+      .set({ ownerId: userId, updatedAt: now })
+      .where(and(eq(projectMetadata.projectId, projectId), isNull(projectMetadata.ownerId)))
+      .returning({ ownerId: projectMetadata.ownerId, updatedAt: projectMetadata.updatedAt })
+    const insertStmt = db.insert(projectMembers).values({
+      projectId,
+      userId,
+      role: 'owner',
+      addedAt: now,
+      addedBy: userId,
+    })
+
+    let updatedAt: string
+    try {
+      const [updated] = await db.batch([updateStmt, insertStmt])
+      if (updated.length === 0) {
+        // Concurrent claim won the race between our SELECT and the UPDATE.
+        // The INSERT into project_members would have tripped the partial
+        // unique index, but the WHERE-IS-NULL guard caught it first; either
+        // way the outcome is the same: report 409.
+        return c.json({ error: 'already_owned' }, 409)
+      }
+      updatedAt = updated[0].updatedAt
+    } catch (_err) {
+      // Concurrent claim won the race AND its membership row already
+      // existed — the INSERT trips the partial unique index and the
+      // batch rolls back. Report 409 (already-owned) to the caller.
+      return c.json({ error: 'already_owned' }, 409)
+    }
 
     // Fanout (mirrors visibility-PATCH at :2294).
     c.executionCtx.waitUntil(
@@ -2388,7 +2445,7 @@ export function createApiApp() {
       })(),
     )
 
-    return c.json({ ok: true, ownerId: userId, claimedAt: outcome.updatedAt })
+    return c.json({ ok: true, ownerId: userId, claimedAt: updatedAt })
   })
 
   // GH#122 B-LIFECYCLE-2: owner-or-admin project ownership transfer.
@@ -2421,67 +2478,63 @@ export function createApiApp() {
       const db = getDb(c.env)
       const now = new Date().toISOString()
 
-      type TxnOutcome =
-        | { ok: true; ownerId: string }
-        | { ok: false; status: 400 | 409; body: Record<string, string> }
+      // D1 does not support interactive BEGIN/COMMIT — see api/index.ts:1570-1575.
+      // Pattern: SELECT prechecks for newOwnerUserId existence and the
+      // current owner (no-op detection), then `db.batch([UPDATE
+      // projectMetadata.ownerId, DELETE old owner row, INSERT new owner
+      // row])` for atomic membership migration.
 
-      const outcome: TxnOutcome = await db.transaction(async (trx) => {
-        // 1. Validate newOwnerUserId exists.
-        const userRows = await trx
-          .select({ id: users.id })
-          .from(users)
-          .where(eq(users.id, newOwnerUserId))
-          .limit(1)
-        if (userRows.length === 0) {
-          return { ok: false, status: 400, body: { error: 'bad_request', reason: 'unknown-user' } }
-        }
-        // 2. Read current owner; reject no-op.
-        const current = await trx
-          .select({ ownerId: projectMetadata.ownerId })
-          .from(projectMetadata)
-          .where(eq(projectMetadata.projectId, projectId))
-          .limit(1)
-        if (current.length === 0) {
-          return {
-            ok: false,
-            status: 400,
-            body: { error: 'bad_request', reason: 'unknown-project' },
-          }
-        }
-        if (current[0].ownerId === newOwnerUserId) {
-          return { ok: false, status: 409, body: { error: 'no_op', reason: 'already-owner' } }
-        }
-        // 3. UPDATE projectMetadata.ownerId.
-        await trx
-          .update(projectMetadata)
-          .set({ ownerId: newOwnerUserId, updatedAt: now })
-          .where(eq(projectMetadata.projectId, projectId))
-        // 4. DELETE old owner row + INSERT new owner row.
-        //    PK column mutation — see B-LIFECYCLE-2 rationale (composite
-        //    PK on (project_id, user_id) means UPDATE of user_id is
-        //    awkward across SQLite drivers; DELETE+INSERT is unambiguous).
-        await trx
-          .delete(projectMembers)
-          .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.role, 'owner')))
-        await trx.insert(projectMembers).values({
-          projectId,
-          userId: newOwnerUserId,
-          role: 'owner',
-          addedAt: now,
-          addedBy: callerUserId,
-        })
-        return { ok: true, ownerId: newOwnerUserId }
+      // 1. Validate newOwnerUserId exists.
+      const userRows = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.id, newOwnerUserId))
+        .limit(1)
+      if (userRows.length === 0) {
+        return c.json({ error: 'bad_request', reason: 'unknown-user' }, 400)
+      }
+
+      // 2. Read current owner; reject no-op.
+      const current = await db
+        .select({ ownerId: projectMetadata.ownerId })
+        .from(projectMetadata)
+        .where(eq(projectMetadata.projectId, projectId))
+        .limit(1)
+      if (current.length === 0) {
+        return c.json({ error: 'bad_request', reason: 'unknown-project' }, 400)
+      }
+      if (current[0].ownerId === newOwnerUserId) {
+        return c.json({ error: 'no_op', reason: 'already-owner' }, 409)
+      }
+
+      // 3. Atomic batch: UPDATE projectMetadata + DELETE old owner +
+      //    INSERT new owner. PK-column mutation on project_members — see
+      //    B-LIFECYCLE-2 rationale (composite PK on (project_id, user_id)
+      //    means UPDATE of user_id is awkward across SQLite drivers;
+      //    DELETE+INSERT is unambiguous).
+      const updateMetaStmt = db
+        .update(projectMetadata)
+        .set({ ownerId: newOwnerUserId, updatedAt: now })
+        .where(eq(projectMetadata.projectId, projectId))
+      const deleteOldOwnerStmt = db
+        .delete(projectMembers)
+        .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.role, 'owner')))
+      const insertNewOwnerStmt = db.insert(projectMembers).values({
+        projectId,
+        userId: newOwnerUserId,
+        role: 'owner',
+        addedAt: now,
+        addedBy: callerUserId,
       })
-
-      if (outcome.ok === false) return c.json(outcome.body, outcome.status)
+      await db.batch([updateMetaStmt, deleteOldOwnerStmt, insertNewOwnerStmt])
 
       // Fanout (same pattern as claim).
       c.executionCtx.waitUntil(
         (async () => {
           try {
             const projectInfo = await projectInfoFromMeta(db, projectId)
-            const userRows = await db.select({ userId: userPresence.userId }).from(userPresence)
-            const userIds = userRows.map((r) => r.userId)
+            const presenceRows = await db.select({ userId: userPresence.userId }).from(userPresence)
+            const userIds = presenceRows.map((r) => r.userId)
             await Promise.allSettled(
               userIds.map((uid) =>
                 broadcastSyncedDelta(c.env, uid, 'projects', [
@@ -2495,7 +2548,7 @@ export function createApiApp() {
         })(),
       )
 
-      return c.json({ ok: true, ownerId: outcome.ownerId, transferredAt: now })
+      return c.json({ ok: true, ownerId: newOwnerUserId, transferredAt: now })
     },
   )
 
@@ -3352,13 +3405,33 @@ export function createApiApp() {
       const userId = c.get('userId')
       const hiddenSet = await getHiddenProjects(c.env, userId)
       const db = getDb(c.env)
+      // GH#122 B-API-FIX: LEFT JOIN projectMetadata so we can enrich the
+      // gateway's live-git rows with projectId / ownerId / visibility
+      // from D1. Match by name (the gateway and the projects table both
+      // key on the project's directory name).
       const d1Rows = await db
-        .select({ name: projectsTable.name, visibility: projectsTable.visibility })
+        .select({
+          name: projectsTable.name,
+          visibility: projectsTable.visibility,
+          projectId: projectsTable.projectId,
+          ownerId: projectMetadata.ownerId,
+        })
         .from(projectsTable)
-      const visMap = new Map(d1Rows.map((r) => [r.name, r.visibility]))
+        .leftJoin(projectMetadata, eq(projectsTable.projectId, projectMetadata.projectId))
+      const d1Map = new Map(d1Rows.map((r) => [r.name, r]))
       const filtered =
         hiddenSet.size > 0 ? projects.filter((p) => !hiddenSet.has(p.name)) : projects
-      return c.json(filtered.map((p) => ({ ...p, visibility: visMap.get(p.name) ?? 'private' })))
+      return c.json(
+        filtered.map((p) => {
+          const d1 = d1Map.get(p.name)
+          return {
+            ...p,
+            visibility: d1?.visibility ?? 'private',
+            projectId: d1?.projectId ?? null,
+            ownerId: d1?.ownerId ?? null,
+          }
+        }),
+      )
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Gateway unreachable'
       return c.json({ error: message }, 502)
@@ -3371,16 +3444,28 @@ export function createApiApp() {
       const userId = c.get('userId')
       const hiddenSet = await getHiddenProjects(c.env, userId)
       const db = getDb(c.env)
+      // GH#122 B-API-FIX: same enrichment as /api/gateway/projects.
       const d1Rows = await db
-        .select({ name: projectsTable.name, visibility: projectsTable.visibility })
+        .select({
+          name: projectsTable.name,
+          visibility: projectsTable.visibility,
+          projectId: projectsTable.projectId,
+          ownerId: projectMetadata.ownerId,
+        })
         .from(projectsTable)
-      const visMap = new Map(d1Rows.map((r) => [r.name, r.visibility]))
+        .leftJoin(projectMetadata, eq(projectsTable.projectId, projectMetadata.projectId))
+      const d1Map = new Map(d1Rows.map((r) => [r.name, r]))
       return c.json(
-        projects.map((p) => ({
-          ...p,
-          hidden: hiddenSet.has(p.name),
-          visibility: visMap.get(p.name) ?? 'private',
-        })),
+        projects.map((p) => {
+          const d1 = d1Map.get(p.name)
+          return {
+            ...p,
+            hidden: hiddenSet.has(p.name),
+            visibility: d1?.visibility ?? 'private',
+            projectId: d1?.projectId ?? null,
+            ownerId: d1?.ownerId ?? null,
+          }
+        }),
       )
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Gateway unreachable'
