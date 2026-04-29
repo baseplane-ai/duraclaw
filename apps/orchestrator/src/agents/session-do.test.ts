@@ -23,7 +23,7 @@ import {
   getGatewayConnectionIdFromSql as getGatewayConnectionId,
   validateGatewayToken,
 } from './session-do/runner-link'
-import { RECOVERY_GRACE_MS, type SessionDOContext } from './session-do/types'
+import { parseTurnOrdinal, RECOVERY_GRACE_MS, type SessionDOContext } from './session-do/types'
 import {
   DEFAULT_STALE_THRESHOLD_MS,
   planAwaitingTimeout,
@@ -349,6 +349,70 @@ describe('loadTurnState', () => {
 
     const result = loadTurnState(sql, 3)
     expect(result.turnCounter).toBe(0)
+  })
+
+  it('returns assistantTurnCounter from assistant_config when present', () => {
+    const sql = createFakeSql({
+      turnCounter: [{ value: '7' }],
+      assistantTurnCounter: [{ value: '11' }],
+    })
+
+    const result = loadTurnState(sql, 0)
+    expect(result.assistantTurnCounter).toBe(11)
+    expect(result.turnCounter).toBe(7)
+  })
+
+  it('seeds assistantTurnCounter from turnCounter when its row is absent (legacy DO)', () => {
+    // Legacy DOs predate the split — they wrote a single `turnCounter` row
+    // that doubled as the assistant ordinal. On first wake post-migration
+    // the assistantTurnCounter row is missing, so we reuse turnCounter to
+    // keep cold-start ids monotonic with the pre-split history.
+    const sql = createFakeSql({
+      turnCounter: [{ value: '9' }],
+    })
+
+    const result = loadTurnState(sql, 0)
+    expect(result.assistantTurnCounter).toBe(9)
+  })
+
+  it('handles non-numeric assistantTurnCounter gracefully (falls back to 0)', () => {
+    const sql = createFakeSql({
+      turnCounter: [{ value: '4' }],
+      assistantTurnCounter: [{ value: 'garbage' }],
+    })
+
+    const result = loadTurnState(sql, 0)
+    expect(result.assistantTurnCounter).toBe(0)
+  })
+})
+
+// ── parseTurnOrdinal tests ─────────────────────────────────────
+
+describe('parseTurnOrdinal', () => {
+  it('parses usr-N to N', () => {
+    expect(parseTurnOrdinal('usr-7')).toBe(7)
+  })
+
+  it('parses msg-N to N (widened to match client sortKey)', () => {
+    expect(parseTurnOrdinal('msg-12')).toBe(12)
+  })
+
+  it('parses err-N to N (widened to match client sortKey)', () => {
+    expect(parseTurnOrdinal('err-3')).toBe(3)
+  })
+
+  it('returns undefined for unparseable ids (e.g. usr-client-<uuid>)', () => {
+    expect(parseTurnOrdinal('usr-client-abc-123')).toBeUndefined()
+  })
+
+  it('returns undefined for empty / missing ids', () => {
+    expect(parseTurnOrdinal(undefined)).toBeUndefined()
+    expect(parseTurnOrdinal('')).toBeUndefined()
+  })
+
+  it('returns undefined for unrelated id shapes', () => {
+    expect(parseTurnOrdinal('msg-abc')).toBeUndefined()
+    expect(parseTurnOrdinal('foo-1')).toBeUndefined()
   })
 })
 

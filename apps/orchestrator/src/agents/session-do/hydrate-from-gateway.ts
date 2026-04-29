@@ -135,8 +135,12 @@ export async function hydrateFromGatewayImpl(ctx: SessionDOContext): Promise<voi
             continue
           }
         }
-        ctx.do.turnCounter++
-        const msgId = `msg-${ctx.do.turnCounter}`
+        // Assistant-side row from a hydrated transcript — bump the assistant
+        // ordinal, NOT the user-side turnCounter (which would pre-bump the
+        // next user row's id and break the `[turnOrdinal, createdAt]` sort
+        // key). See SessionDO.assistantTurnCounter for the full rationale.
+        ctx.do.assistantTurnCounter++
+        const msgId = `msg-${ctx.do.assistantTurnCounter}`
         const sessionMsg: SessionMessage = {
           id: msgId,
           role: 'assistant',

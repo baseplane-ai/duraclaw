@@ -34,14 +34,27 @@ type SqlFn = <T>(
 ) => T[]
 
 /**
- * Load turnCounter and currentTurnMessageId from assistant_config.
- * Must be called AFTER Session table initialization (e.g. getPathLength())
- * to ensure the assistant_config table exists.
+ * Load turnCounter, assistantTurnCounter, and currentTurnMessageId from
+ * assistant_config. Must be called AFTER Session table initialization
+ * (e.g. getPathLength()) to ensure the assistant_config table exists.
+ *
+ * `assistantTurnCounter` is split from `turnCounter` so assistant-side
+ * mid-stream rows (`msg-N` / `err-N`) advance independently from user-side
+ * rows (`usr-N`); see SessionDO.assistantTurnCounter for the full
+ * rationale. On legacy DOs that pre-date the split, the persisted
+ * `turnCounter` doubled as the assistant ordinal — so we seed
+ * `assistantTurnCounter` from the persisted `turnCounter` when its own
+ * row is absent. That keeps cold-start IDs monotonic with the pre-split
+ * history.
  */
 export function loadTurnState(
   sql: SqlFn,
   pathLength: number,
-): { turnCounter: number; currentTurnMessageId: string | null } {
+): {
+  turnCounter: number
+  assistantTurnCounter: number
+  currentTurnMessageId: string | null
+} {
   let turnCounter = 0
   let currentTurnMessageId: string | null = null
 
@@ -55,6 +68,19 @@ export function loadTurnState(
     turnCounter = pathLength + 1
   }
 
+  // Read the split assistant counter; fall back to the persisted user-side
+  // counter so legacy DOs continue minting monotonically increasing
+  // assistant ids on the first wake post-migration.
+  let assistantTurnCounter = 0
+  const assistantRows = sql<{ value: string }>`
+    SELECT value FROM assistant_config WHERE session_id = '' AND key = 'assistantTurnCounter'
+  `
+  if (assistantRows.length > 0) {
+    assistantTurnCounter = Number.parseInt(assistantRows[0].value, 10) || 0
+  } else {
+    assistantTurnCounter = turnCounter
+  }
+
   const turnIdRows = sql<{ value: string }>`
     SELECT value FROM assistant_config WHERE session_id = '' AND key = 'currentTurnMessageId'
   `
@@ -62,7 +88,7 @@ export function loadTurnState(
     currentTurnMessageId = turnIdRows[0].value
   }
 
-  return { turnCounter, currentTurnMessageId }
+  return { turnCounter, assistantTurnCounter, currentTurnMessageId }
 }
 
 /**
@@ -314,6 +340,7 @@ export async function runHydration(ctx: SessionDOContext): Promise<void> {
   // Load persisted turn state from assistant_config
   const turnState = loadTurnState(ctx.do.sql.bind(ctx.do), pathLength)
   ctx.do.turnCounter = turnState.turnCounter
+  ctx.do.assistantTurnCounter = turnState.assistantTurnCounter
   ctx.do.currentTurnMessageId = turnState.currentTurnMessageId
 
   // Guard against DO eviction: if SQLite history survived but the
@@ -322,7 +349,9 @@ export async function runHydration(ctx: SessionDOContext): Promise<void> {
   //
   // GH#57: lightweight ID-only query — replaces an old getHistory() call
   // that read every row's content BLOB and tripped DO storage timeouts on
-  // large sessions.
+  // large sessions. The query filters `role = 'user'` so it sees only
+  // `usr-N` rows; widening parseTurnOrdinal to also match `msg-N` / `err-N`
+  // is safe here — those id kinds are excluded by the WHERE clause.
   try {
     const userRows = ctx.do.sql<{ id: string }>`
       SELECT id FROM assistant_messages

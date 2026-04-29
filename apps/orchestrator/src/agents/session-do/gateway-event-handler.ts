@@ -119,7 +119,10 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
       const parts = event.parts
         ? wireToSessionParts(event.parts)
         : partialAssistantToParts(event.content)
-      const msgId = `msg-${self.turnCounter}`
+      // Mid-stream rows key off `assistantTurnCounter` so a server-emitted
+      // assistant row doesn't pre-bump the user-side ordinal. See
+      // SessionDO.assistantTurnCounter for full rationale.
+      const msgId = `msg-${self.assistantTurnCounter}`
 
       if (!self.currentTurnMessageId) {
         self.currentTurnMessageId = msgId
@@ -266,7 +269,7 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
       const newParts = event.parts
         ? wireToSessionParts(event.parts)
         : assistantContentToParts(event.content as unknown[])
-      const msgId = self.currentTurnMessageId ?? `msg-${self.turnCounter}`
+      const msgId = self.currentTurnMessageId ?? `msg-${self.assistantTurnCounter}`
 
       // Merge finalizes any streaming text/reasoning parts (preserving the
       // text accumulated from partial_assistant deltas) and appends newParts
@@ -305,7 +308,7 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
     case 'tool_result': {
       self.clearAwaitingResponse()
       // Update the current assistant message's tool parts with results
-      const currentMsgId = self.currentTurnMessageId ?? `msg-${self.turnCounter}`
+      const currentMsgId = self.currentTurnMessageId ?? `msg-${self.assistantTurnCounter}`
       const existing = ctx.session.getMessage(currentMsgId)
       if (existing) {
         const updatedParts = applyToolResult(existing.parts, event)
@@ -469,7 +472,7 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
 
     case 'file_changed': {
       // Add file_changed data part to current assistant message
-      const currentMsgId = self.currentTurnMessageId ?? `msg-${self.turnCounter}`
+      const currentMsgId = self.currentTurnMessageId ?? `msg-${self.assistantTurnCounter}`
       const existing = ctx.session.getMessage(currentMsgId)
       if (existing) {
         const updatedParts: SessionMessagePart[] = [
@@ -518,8 +521,8 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
 
           // If SDK reported an error result, show it inline as a system message
           if (event.is_error && event.result) {
-            self.turnCounter++
-            const errorMsgId = `err-${self.turnCounter}`
+            self.assistantTurnCounter++
+            const errorMsgId = `err-${self.assistantTurnCounter}`
             const errorMsg: SessionMessage = {
               id: errorMsgId,
               role: 'system',
@@ -533,7 +536,7 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
           // If the SDK result contains text that isn't already in the last message,
           // append it as a visible assistant message so the final response is shown.
           if (!event.is_error && event.result && typeof event.result === 'string') {
-            const lastMsgId = `msg-${self.turnCounter}`
+            const lastMsgId = `msg-${self.assistantTurnCounter}`
             const lastMsg = ctx.session.getMessage(lastMsgId)
             const lastHasText = lastMsg?.parts?.some(
               (p) => p.type === 'text' && p.state === 'done' && p.text,
@@ -549,8 +552,8 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
                 self.safeUpdateMessage(updatedMsg)
                 broadcastMessagesImpl(ctx, [updatedMsg as unknown as WireSessionMessage])
               } else {
-                self.turnCounter++
-                const resultMsgId = `msg-${self.turnCounter}`
+                self.assistantTurnCounter++
+                const resultMsgId = `msg-${self.assistantTurnCounter}`
                 const resultMsg: SessionMessage = {
                   id: resultMsgId,
                   role: 'assistant',
@@ -777,8 +780,8 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
       }
 
       // Persist error as a visible system message so user sees what happened
-      self.turnCounter++
-      const errorMsgId = `err-${self.turnCounter}`
+      self.assistantTurnCounter++
+      const errorMsgId = `err-${self.assistantTurnCounter}`
       const errorMsg: SessionMessage = {
         id: errorMsgId,
         role: 'system',

@@ -51,9 +51,10 @@ export async function failAwaitingTurnImpl(
 
   // Persist the error as a visible system message row — mirrors the
   // `case 'error':` path in handleGatewayEvent so the UI has a concrete
-  // row to render alongside the status flip.
-  ctx.do.turnCounter++
-  const errorMsgId = `err-${ctx.do.turnCounter}`
+  // row to render alongside the status flip. Assistant-side ordinal —
+  // mints `err-N` against assistantTurnCounter, not turnCounter.
+  ctx.do.assistantTurnCounter++
+  const errorMsgId = `err-${ctx.do.assistantTurnCounter}`
   const errorMsg: SessionMessage = {
     id: errorMsgId,
     role: 'system',
@@ -62,6 +63,9 @@ export async function failAwaitingTurnImpl(
   }
   await ctx.do.safeAppendMessage(errorMsg)
   broadcastMessagesImpl(ctx, [errorMsg as unknown as WireSessionMessage])
+  // Persist the bumped assistantTurnCounter so a DO eviction immediately
+  // after this fail doesn't re-mint the same `err-N` id on cold start.
+  ctx.do.persistTurnState()
 
   // Transition to `'error'` with the error text populated — spec #80
   // B7 widens `SessionStatus` to include `'error'` so the watchdog's
@@ -113,8 +117,9 @@ export async function recoverFromDroppedConnectionImpl(ctx: SessionDOContext): P
     safeUpdateMessageImpl(ctx, awaitingPlan.updated)
     broadcastMessagesImpl(ctx, [awaitingPlan.updated as unknown as WireSessionMessage])
 
-    ctx.do.turnCounter++
-    const noticeMsgId = `err-${ctx.do.turnCounter}`
+    // Assistant-side ordinal — see SessionDO.assistantTurnCounter.
+    ctx.do.assistantTurnCounter++
+    const noticeMsgId = `err-${ctx.do.assistantTurnCounter}`
     const noticeMsg: SessionMessage = {
       id: noticeMsgId,
       role: 'system',
@@ -129,6 +134,9 @@ export async function recoverFromDroppedConnectionImpl(ctx: SessionDOContext): P
     try {
       await ctx.do.safeAppendMessage(noticeMsg)
       broadcastMessagesImpl(ctx, [noticeMsg as unknown as WireSessionMessage])
+      // Persist the bumped assistantTurnCounter so a subsequent DO
+      // eviction doesn't re-mint the same `err-N` id on cold start.
+      ctx.do.persistTurnState()
     } catch (err) {
       console.error(`[SessionDO:${ctx.ctx.id}] Recovery: failed to append notice row:`, err)
     }
@@ -178,8 +186,9 @@ export function fireRunawayInterruptImpl(
     type: 'interrupt',
     session_id: ctx.state.session_id ?? '',
   })
-  ctx.do.turnCounter++
-  const errorMsgId = `err-${ctx.do.turnCounter}`
+  // Assistant-side ordinal — see SessionDO.assistantTurnCounter.
+  ctx.do.assistantTurnCounter++
+  const errorMsgId = `err-${ctx.do.assistantTurnCounter}`
   const errorMsg: SessionMessage = {
     id: errorMsgId,
     role: 'system',
