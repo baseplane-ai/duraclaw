@@ -259,11 +259,10 @@ export function broadcastStatusToOwner(ctx: SessionDOContext): void {
  * via `waitUntil` so the D1 read → rebuild → broadcast latency does
  * not stack on the caller.
  *
- * GH#116 P1.3: replaces `broadcastChainUpdate(ctx, issueNumber)`. The
- * arcId lives on the D1 `agent_sessions.arc_id` column (SessionMeta
- * does not carry arcId — see `advance-arc.ts` for the same lookup
- * pattern). When the lookup misses (orphan session, mid-migration row,
- * arcId=null) the broadcast no-ops.
+ * The arcId lives on the D1 `agent_sessions.arc_id` column
+ * (SessionMeta does not carry arcId — see `advance-arc.ts` for the
+ * same lookup pattern). When the lookup misses (orphan session,
+ * mid-migration row, arcId=null) the broadcast no-ops.
  */
 export function broadcastArcUpdate(ctx: SessionDOContext): void {
   const userId = ctx.state.userId
@@ -292,19 +291,4 @@ export function broadcastArcUpdate(ctx: SessionDOContext): void {
       }
     })(),
   )
-}
-
-/**
- * @deprecated GH#116 P1.3 transitional alias for the rename
- * `broadcastChainUpdate` → `broadcastArcUpdate`. Call sites in this
- * package have been swept; this re-export keeps any in-flight branch
- * code or out-of-tree imports compiling. Remove in P5.
- */
-export const broadcastChainUpdate = (ctx: SessionDOContext, _issueNumber: number | null): void => {
-  // The legacy signature took an issueNumber; the new helper derives
-  // the arcId from the session row directly. We intentionally ignore
-  // the legacy argument so call sites can pass it through unchanged
-  // until they are updated.
-  void _issueNumber
-  broadcastArcUpdate(ctx)
 }

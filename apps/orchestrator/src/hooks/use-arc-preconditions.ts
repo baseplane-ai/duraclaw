@@ -2,15 +2,12 @@
  * useNextModePrecondition — compute the next-mode advance button state for
  * one arc on the kanban (originally GH#82 B9 precondition table).
  *
- * Renamed from `use-chain-preconditions.ts` in GH#116 P1.4. The
- * semantics are unchanged; field accesses ported to the post-#116
- * `ArcSummary` shape:
+ * Field accesses target the post-#116 `ArcSummary` shape:
  *
- *   - `arc.externalRef?.id` (was: `chain.issueNumber`)
- *   - `arc.externalRef.provider === 'github'` "open vs closed" gate has
- *     no direct port — the new arc.status carries `draft|open|closed|archived`.
- *   - `arc.sessions[].mode` (was: `chain.sessions[].kataMode`)
- *   - `deriveColumn(arc.sessions, arc.status)` instead of `chain.column`
+ *   - `arc.externalRef?.id` for GH issue id
+ *   - `arc.status` carries `draft|open|closed|archived`
+ *   - `arc.sessions[].mode` for the per-session frontier mode
+ *   - `deriveColumn(arc.sessions, arc.status)` for kanban placement
  *
  * The table:
  *
@@ -28,15 +25,14 @@
  * entry exists or the cached entry is stale. Both `checkPrecondition()`
  * (used by drag-to-advance) and the hook share this cache.
  *
- * Endpoint paths point at `/api/arcs/:id/spec-status` / `vp-status`
- * (P3 ships these — until then the call falls back to `{exists:false}`
- * via `cachedFetch`'s graceful-degrade, keeping the precondition
- * red-but-not-poisoned).
+ * Endpoint paths point at `/api/arcs/:id/spec-status` / `vp-status`.
+ * On 4xx/5xx the call falls back to `{exists:false}` via
+ * `cachedFetch`'s graceful-degrade, keeping the precondition
+ * red-but-not-poisoned.
  */
 
 import { useEffect, useMemo, useState } from 'react'
-import { deriveColumn, type KanbanColumn } from '~/lib/arcs'
-import { isChainSessionCompleted } from '~/lib/chains'
+import { deriveColumn, isArcSessionCompleted, type KanbanColumn } from '~/lib/arcs'
 import type { ArcSummary, SpecStatusResponse, VpStatusResponse } from '~/lib/types'
 
 export type NextMode = 'research' | 'planning' | 'implementation' | 'verify' | 'close' | null
@@ -152,7 +148,7 @@ export async function checkPrecondition(
     const ok = arc.sessions.some(
       (s) =>
         s.mode === 'research' &&
-        isChainSessionCompleted({ status: s.status, lastActivity: s.lastActivity ?? null }),
+        isArcSessionCompleted({ status: s.status, lastActivity: s.lastActivity ?? null }),
     )
     return {
       canAdvance: ok,
@@ -184,7 +180,7 @@ export async function checkPrecondition(
     const ok = arc.sessions.some(
       (s) =>
         s.mode === 'implementation' &&
-        isChainSessionCompleted({ status: s.status, lastActivity: s.lastActivity ?? null }),
+        isArcSessionCompleted({ status: s.status, lastActivity: s.lastActivity ?? null }),
     )
     return {
       canAdvance: ok,

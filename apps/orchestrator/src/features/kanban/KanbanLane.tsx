@@ -1,10 +1,8 @@
 /**
  * KanbanLane — horizontal swim lane grouping by external-ref provider.
  *
- * GH#116 P4a: each lane now holds an `ArcSummary[]` instead of a
- * `ChainSummary[]`. Columns are derived per-card via
- * `deriveColumn(arc.sessions, arc.status)` rather than reading a
- * pre-baked `chain.column` field.
+ * Each lane holds an `ArcSummary[]`. Columns are derived per-card via
+ * `deriveColumn(arc.sessions, arc.status)`.
  *
  * Renders a header (name + count + collapse toggle) plus a horizontally
  * scrollable row of KanbanColumns when expanded. Each column becomes a

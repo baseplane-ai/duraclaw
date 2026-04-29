@@ -276,7 +276,7 @@ export async function syncKataAllToD1(
   // GH#115 P1.4: refresh `worktrees.lastTouchedAt` keyed by the session's
   // worktreeId (FK on agent_sessions). Drops the legacy
   // `(issueNumber, project)` join + `stale=false` write — staleness is
-  // derived in the chain projection (see `buildChainRowFromContext`).
+  // derived in the arc projection (see `buildArcRowFromContext`).
   if (kataState?.issueNumber != null && ctx.state.worktreeId) {
     try {
       await ctx.do.d1

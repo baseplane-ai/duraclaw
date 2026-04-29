@@ -397,9 +397,9 @@ async function _fetchGithubPulls(env: ApiAppEnv['Bindings']): Promise<GhPull[]> 
   return all
 }
 
-// Chain-aggregation helpers (deriveIssueType / deriveColumn / findPrForIssue)
-// now live in ~/lib/chains. The /api/chains handler consumes them indirectly
-// via `buildChainRowFromContext` so the broadcast path shares the exact mapping.
+// Arc-aggregation helpers (deriveColumn / parseExternalRef / buildArcRow)
+// live in ~/lib/arcs. The /api/arcs handler consumes them indirectly via
+// `buildArcRowFromContext` so the broadcast path shares the exact mapping.
 
 // Gateway-file helpers (parseFrontmatter, fetchGatewayFile, listGatewayFiles,
 // resolveProjectPath) live in ~/lib/gateway-files. Only fetchGatewayFile is
@@ -3586,12 +3586,12 @@ export function createApiApp() {
     return c.json({ status: 'idle', ...result })
   })
 
-  // GH#116 P1.3: `/api/chains/*` deleted. Worktree-keyed checkout /
+  // GH#116: `/api/chains/*` was deleted in P3. Worktree-keyed checkout /
   // release / force-release moved to `/api/worktrees/*` (live since
-  // #115). Chain list + spec-status + vp-status moved to `/api/arcs`
-  // (mounted above near the other sub-routers). Client-side hooks
-  // (use-chain-checkout / use-chain-preconditions / chain-status-item)
-  // are rewired in P1.4's identifier sweep.
+  // #115). Arc list + spec-status + vp-status are served by `/api/arcs`
+  // (mounted above near the other sub-routers). Client-side hooks were
+  // renamed in P4a (`use-arc-checkout`, `use-arc-preconditions`,
+  // `arc-status-item`).
 
   app.post('/api/sessions/:id/answers', async (c) => {
     const userId = c.get('userId')

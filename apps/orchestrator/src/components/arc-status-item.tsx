@@ -29,10 +29,9 @@ import { arcsCollection } from '~/db/arcs-collection'
 import { useArcAutoAdvance } from '~/hooks/use-arc-auto-advance'
 import { checkPrecondition } from '~/hooks/use-arc-preconditions'
 import { useTabSync } from '~/hooks/use-tab-sync'
-import { deriveColumn, type KanbanColumn } from '~/lib/arcs'
+import { deriveColumn, isArcSessionCompleted, type KanbanColumn } from '~/lib/arcs'
 import { CORE_RUNG_ORDER, type CoreRung } from '~/lib/auto-advance'
 import { useStallReason } from '~/lib/chain-stall-store'
-import { isChainSessionCompleted } from '~/lib/chains'
 import type { ArcSummary } from '~/lib/types'
 
 interface ArcStatusItemProps {
@@ -131,9 +130,9 @@ function computeRungs(arc: ArcSummary, sessionId: string, column: KanbanColumn):
   return CORE_RUNG_ORDER.map((rung) => {
     const list = byRung[rung]
     const mostRecent = list[0] ?? null
-    // 'idle' is the D1 terminal marker; see isChainSessionCompleted above.
+    // 'idle' is the D1 terminal marker; see isArcSessionCompleted above.
     const completed = list.some((s) =>
-      isChainSessionCompleted({ status: s.status, lastActivity: s.lastActivity }),
+      isArcSessionCompleted({ status: s.status, lastActivity: s.lastActivity }),
     )
     const isActiveFrontier = activeRung === rung
     let state: RungState
@@ -199,11 +198,11 @@ export function ArcStatusItem({ kataState, kataIssue, sessionId }: ArcStatusItem
     if (column !== 'done') return false
     return rungs.every((r) => {
       // arc-complete means all 5 rungs have a completed session.
-      // 'idle' is the D1 terminal marker (see isChainSessionCompleted).
+      // 'idle' is the D1 terminal marker (see isArcSessionCompleted).
       return arc.sessions.some(
         (s) =>
           s.mode === r.rung &&
-          isChainSessionCompleted({ status: s.status, lastActivity: s.lastActivity }),
+          isArcSessionCompleted({ status: s.status, lastActivity: s.lastActivity }),
       )
     })
   }, [arc, column, rungs])

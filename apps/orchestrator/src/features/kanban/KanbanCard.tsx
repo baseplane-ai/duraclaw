@@ -1,8 +1,7 @@
 /**
  * KanbanCard — single arc summary card on the /board surface.
  *
- * GH#116 P4a: card data shape is `ArcSummary` (was `ChainSummary`).
- * Display fields:
+ * Card data shape is `ArcSummary`. Display fields:
  *   - issue badge `#N` is shown only for GH-linked arcs (`externalRef.provider === 'github'`)
  *   - title comes from `arc.title` (user-editable, auto-filled from external ref)
  *   - column is derived via `deriveColumn(arc.sessions, arc.status)`
@@ -30,8 +29,7 @@ import { useArcAutoAdvance } from '~/hooks/use-arc-auto-advance'
 import { useArcCheckout } from '~/hooks/use-arc-checkout'
 import { useNextModePrecondition } from '~/hooks/use-arc-preconditions'
 import { useTabSync } from '~/hooks/use-tab-sync'
-import { deriveColumn } from '~/lib/arcs'
-import { isChainSessionCompleted } from '~/lib/chains'
+import { deriveColumn, isArcSessionCompleted } from '~/lib/arcs'
 import type { ArcSummary, ChainWorktreeReservation } from '~/lib/types'
 import { AdvanceConfirmModal } from './AdvanceConfirmModal'
 import { advanceArc, hasActiveSession } from './advance-arc'
@@ -56,10 +54,10 @@ function shortStatusLabel(session: ArcSummary['sessions'][number]): string {
   if (status === 'running') return 'live'
   if (status === 'crashed') return 'crashed'
   if (status.startsWith('waiting')) return 'waiting'
-  // `isChainSessionCompleted` recognises the D1 terminal "rung finished"
+  // `isArcSessionCompleted` recognises the D1 terminal "rung finished"
   // shape (status === 'idle' && lastActivity != null). An `'idle'` session
   // with no lastActivity is freshly spawned — render plain idle.
-  if (isChainSessionCompleted(session)) return 'done'
+  if (isArcSessionCompleted(session)) return 'done'
   return 'idle'
 }
 

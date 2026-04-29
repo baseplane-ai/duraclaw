@@ -400,13 +400,15 @@ export interface TitleErrorEvent {
   detail?: string
 }
 
-// ── Chain auto-advance events (DO-synthesised for chain UX P3) ──────
+// ── Arc auto-advance events (DO-synthesised) ───────────────────────
 //
-// Emitted by SessionDO when a chain-linked session terminates and the
-// DO's `maybeAutoAdvanceChain()` pathway runs `tryAutoAdvance()`.
+// Emitted by SessionDO when an arc-linked session terminates and the
+// DO's auto-advance gate decides to mint a successor (or to stall).
 // Travel over the browser WS alongside real runner events; the client
-// handler in `use-coding-agent.ts` invalidates `chainsCollection` and
-// surfaces a toast / stall reason for `ChainStatusItem`.
+// handler in `use-coding-agent.ts` invalidates `arcsCollection` and
+// surfaces a toast / stall reason for `ArcStatusItem`. Wire type names
+// preserve the legacy `chain_*` discriminants so existing handlers
+// keep matching.
 
 export interface ChainAdvanceEvent {
   type: 'chain_advance'

@@ -30,7 +30,7 @@ export interface WorktreeConflictModalProps {
   onPickDifferent: () => void
   /** Called when user confirms force-release. Parent calls API. */
   onForceRelease: () => void
-  /** Optional — if known (e.g. from ChainSummary), shown under the title. */
+  /** Optional — if known (e.g. from ArcSummary), shown under the title. */
   conflictTitle?: string
 }
 

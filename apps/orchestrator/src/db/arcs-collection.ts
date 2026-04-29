@@ -47,8 +47,8 @@ function createArcsCollection() {
     },
     getKey: (item) => item.id,
     persistence,
-    // GH#116 P1.3: bump from chains-collection's schemaVersion=1 because
-    // the OPFS persistence is per-collection-id and the id changed
+    // GH#116: bump from chains-collection's schemaVersion=1 because the
+    // OPFS persistence is per-collection-id and the id changed
     // (`chains` → `arcs`); a fresh start is correct here. Belt-and-
     // suspenders against any client whose OPFS retained an old `arcs`
     // shard from an aborted earlier rollout.
@@ -57,13 +57,3 @@ function createArcsCollection() {
 }
 
 export const arcsCollection = createArcsCollection()
-
-/**
- * @deprecated GH#116 P1.3 transitional alias — client code still
- * importing `chainsCollection` from `~/db/chains-collection` is
- * temporarily redirected to `arcsCollection`. The path also moved
- * (`chains-collection.ts` → `arcs-collection.ts`) so importers must
- * update their import path before this alias is dropped in P5. Do NOT
- * add new importers of this name; client sweep lands in P1.4.
- */
-export const chainsCollection = arcsCollection

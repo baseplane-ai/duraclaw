@@ -9,7 +9,7 @@
  * Both live in `~/agents/session-do/advance-arc.ts`. This module is
  * kept only to satisfy a handful of legacy imports until the P5
  * sweep:
- *   - `chain-status-item.tsx` imports `CORE_RUNG_ORDER` + `CoreRung`
+ *   - `arc-status-item.tsx` imports `CORE_RUNG_ORDER` + `CoreRung`
  *     (UI rendering — preserved here verbatim).
  *   - The auto-advance unit tests still import `tryAutoAdvance` /
  *     `nextRung` / `CORE_RUNGS` (will be rewritten when mode-
@@ -22,7 +22,7 @@ export { advanceArcGate, advanceArcImpl, nextMode } from '~/agents/session-do/ad
 
 /**
  * The 5 "core" kata modes that form the linear advancement chain, in
- * ladder order. UI consumers (chain-status-item) render the ladder
+ * ladder order. UI consumers (arc-status-item) render the ladder
  * from this. Pure-data export — no behavior here.
  */
 export const CORE_RUNG_ORDER = [

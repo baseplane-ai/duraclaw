@@ -1,23 +1,24 @@
 /**
- * Arc aggregation helpers (GH#116 P1).
+ * Arc aggregation helpers (GH#116).
  *
- * The forward-looking replacement for `lib/chains.ts`: arcs are the
- * durable parent of every session (orchestrator-side analog of a kata
- * "chain", expanded to cover orphan / debug / freeform / branch trees).
+ * Arcs are the durable parent of every session (orchestrator-side
+ * analog of a kata "chain", expanded to cover orphan / debug /
+ * freeform / branch trees).
  *
  * `buildArcRow(env, db, userId, arcId)` returns the current ArcSummary
  * for a single arc or `null` if the arc isn't found. The pure
- * `buildArcRowFromContext` variant exists so the future /api/arcs
- * batch handler can pre-fetch sessions + reservations and project rows
+ * `buildArcRowFromContext` variant exists so the /api/arcs batch
+ * handler can pre-fetch sessions + reservations and project rows
  * field-by-field without re-querying.
  *
- * For P1, GitHub PR resolution is intentionally deferred to the caller
- * via `ArcBuildContext.prNumberByExternalRef` (P3 wires the API
- * route's GH cache through this); `buildArcRow` itself stubs `prNumber`
- * as `undefined`.
+ * GitHub PR resolution is deferred to the caller via
+ * `ArcBuildContext.prNumberByExternalRef` (the API route's GH cache
+ * threads through this); `buildArcRow` itself stubs `prNumber` as
+ * `undefined`.
  *
- * `lib/chains.ts` continues to live alongside this file until P5
- * deletes it (per spec §P1).
+ * P5 (this commit) deleted `lib/chains.ts`; the small predicate
+ * `isArcSessionCompleted` (formerly `isChainSessionCompleted`) lives
+ * here now.
  */
 
 import { and, asc, eq } from 'drizzle-orm'
@@ -73,13 +74,43 @@ export function formatExternalRef(ref: ExternalRef): string {
   return JSON.stringify(ref)
 }
 
-// ─── Kanban column derivation (replaces lib/chains.ts deriveColumn) ──────────
+// ─── Session completion predicate (formerly isChainSessionCompleted) ────────
+
+/**
+ * Predicate: has this arc's session finished at least one turn and
+ * parked as the terminal state for its rung?
+ *
+ * `agent_sessions.status` never holds `'completed'` in this codebase —
+ * the `SessionStatus` union (packages/shared-types) is
+ * `'idle' | 'pending' | 'running' | 'waiting_*' | 'error'`. Finished
+ * sessions park as `'idle'`. `lastActivity != null` means at least one
+ * turn ran (we don't treat a freshly-spawned `'pending'` row as
+ * completed).
+ *
+ * Shared between:
+ *   - use-arc-preconditions (client manual-advance gate)
+ *   - KanbanCard status label rendering
+ *   - ArcStatusItem rung-completed bit
+ *
+ * Renamed from `isChainSessionCompleted` in GH#116 P5.
+ */
+export function isArcSessionCompleted(session: {
+  status: string
+  lastActivity: string | null
+}): boolean {
+  return session.status === 'idle' && session.lastActivity != null
+}
+
+// ─── Kanban column derivation ────────────────────────────────────────────────
 
 /**
  * Modes that qualify a session as a "frontier" for kanban column
  * placement. Non-qualifying modes (e.g. `debug`, `freeform`) are
  * skipped — an arc whose only sessions are debug sessions still
  * surfaces as `'backlog'` until a real workflow session arrives.
+ *
+ * Replaces the equivalent `COLUMN_QUALIFYING_MODES` set that lived
+ * in `lib/chains.ts` (deleted in P5).
  *
  * Note: `'task'` (legacy implementation alias) is intentionally NOT
  * here — post-#116, sessions write the canonical `'implementation'`
@@ -113,11 +144,11 @@ export type KanbanColumn =
  *   return that mode, special-casing `'close'` → `'done'`. If no
  *   session qualifies, fall through to `'backlog'`.
  *
- * Mirrors the algorithm in `lib/chains.ts:168-191` but reads `mode`
- * (not the dropped `kataMode`) and is keyed on arc status (not GH
- * issue state). Closed/archived arcs still go through the qualifying
- * scan — the spec leaves "what column does a closed arc sit in?" to
- * the API layer (which can opt to filter them off the board entirely).
+ * Reads `mode` (not the dropped `kataMode`) and is keyed on arc
+ * status (not GH issue state). Closed/archived arcs still go through
+ * the qualifying scan — the spec leaves "what column does a closed
+ * arc sit in?" to the API layer (which can opt to filter them off
+ * the board entirely).
  */
 export function deriveColumn(
   sessions: Array<{
@@ -153,10 +184,10 @@ export function deriveColumn(
 // ─── Arc row builders ────────────────────────────────────────────────────────
 
 /**
- * Pre-fetched context for batch callers (the future /api/arcs handler).
- * P1 leaves `prNumberByExternalRef` empty — P3 wires the GH PR cache
- * through this map so single-row builds get a `prNumber` without
- * re-fetching the GH list endpoints.
+ * Pre-fetched context for batch callers (the /api/arcs handler).
+ * The single-arc broadcaster uses an empty map; the API handler wires
+ * the GH PR cache through this map so list builds get a `prNumber`
+ * without re-fetching the GH list endpoints per-row.
  */
 export interface ArcBuildContext {
   /** Map keyed by `${provider}:${id}` for cheap lookup. */
@@ -164,9 +195,8 @@ export interface ArcBuildContext {
 }
 
 /** Number of ms after which a held worktree is considered "stale" for
- *  the kanban force-release UI gate. Mirrors `CHAIN_RESERVATION_STALE_MS`
- *  in `lib/chains.ts` — the constant lives here too so arc projections
- *  compute the boolean without reaching across modules. */
+ *  the kanban force-release UI gate. The constant lives here so arc
+ *  projections compute the boolean without reaching across modules. */
 const ARC_RESERVATION_STALE_MS = 7 * 24 * 60 * 60 * 1000
 
 /** Drizzle-inferred row shapes for the inputs of `buildArcRowFromContext`. */
@@ -177,8 +207,7 @@ type WorktreeRow = typeof worktrees.$inferSelect
 /**
  * Pure mapping — builds the ArcSummary row given a pre-fetched arc
  * row, its session list, an optional worktree reservation row, and the
- * shared context. Mirrors `buildChainRowFromContext` from
- * `lib/chains.ts` but mapped onto the post-#116 ArcSummary shape.
+ * shared context.
  *
  * Field-by-field carryover:
  *   - id          ← arc.id              (was: issueNumber)
@@ -188,7 +217,7 @@ type WorktreeRow = typeof worktrees.$inferSelect
  *   - worktreeId  ← arc.worktreeId      (NEW; explicit FK)
  *   - parentArcId ← arc.parentArcId     (NEW; for branch trees)
  *   - sessions    ← session rows projected onto {id,mode,status,lastActivity,createdAt}
- *   - column      ← deriveColumn(sessions, arc.status)  — NOTE: ArcSummary
+ *   - column      ← deriveColumn(sessions, arc.status) — NOTE: ArcSummary
  *                   does not carry `column` directly (kanban column is
  *                   derived client-side from sessions+status); shape mirrors
  *                   what the spec defines verbatim, no `column` field.
@@ -229,13 +258,11 @@ export function buildArcRowFromContext(
     }
   }
 
-  // Project the worktrees row onto the wire shape ArcSummary exposes.
-  // Differs from ChainWorktreeReservation: ArcSummary's reservation
-  // surface is `{worktree, heldSince, lastActivityAt, ownerId, stale}`
-  // — `worktree` is the path (UI label), `heldSince` is the
+  // Project the worktrees row onto the wire shape ArcSummary exposes:
+  // `{worktree, heldSince, lastActivityAt, ownerId, stale}` —
+  // `worktree` is the path (UI label), `heldSince` is the
   // ISO-formatted createdAt (integer epoch → ISO), `lastActivityAt`
-  // is the ISO-formatted lastTouchedAt, and `stale` is the legacy 7d
-  // boolean.
+  // is the ISO-formatted lastTouchedAt, and `stale` is the 7d boolean.
   let worktreeReservation: ArcSummary['worktreeReservation']
   if (reservation) {
     worktreeReservation = {
@@ -247,9 +274,9 @@ export function buildArcRowFromContext(
     }
   }
 
-  // PR resolution: ctx-supplied. P1 callers pass an empty map and
-  // `prNumber` stays undefined; P3's API handler hydrates the map from
-  // the GH PR cache (mirroring `findPrForIssue` in lib/chains.ts).
+  // PR resolution: ctx-supplied. Single-arc callers pass an empty map
+  // and `prNumber` stays undefined; the /api/arcs API handler hydrates
+  // the map from the GH PR cache.
   let prNumber: number | undefined
   if (externalRef) {
     const key = `${externalRef.provider}:${externalRef.id}`
@@ -278,8 +305,8 @@ export function buildArcRowFromContext(
  * Single-row builder for broadcast / single-arc callers. Fetches the
  * arc row, its sessions, and (when present) the FK'd worktrees row,
  * then delegates to `buildArcRowFromContext` with an empty context
- * map. P3 will replace this with a context-aware variant once the GH
- * PR cache is plumbed through the API route handler.
+ * map. The /api/arcs route handler uses a context-aware variant once
+ * the GH PR cache is plumbed through.
  *
  * Returns `null` when the arc isn't found OR doesn't belong to the
  * given user. (Other-user arcs are not surfaced — arcs are
@@ -324,10 +351,9 @@ export async function buildArcRow(
     reservation = wtRows[0] ?? null
   }
 
-  // Empty context — P3's API handler will pass a populated map. Until
-  // then, single-arc broadcasts ship without a PR badge, which is
-  // acceptable for the wave-2 milestone (the chain path still resolves
-  // PR numbers via the legacy /api/chains route).
+  // Empty context — the /api/arcs API handler passes a populated map.
+  // Single-arc broadcasts ship without a PR badge; the kanban list view
+  // populates it from its batched GH cache.
   const ctx: ArcBuildContext = { prNumberByExternalRef: new Map() }
 
   return buildArcRowFromContext(arcRow, sessionRows, reservation, ctx)
