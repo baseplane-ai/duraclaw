@@ -1,14 +1,20 @@
 /**
- * ChainStatusItem — StatusBar widget for kata-linked (chain) sessions.
+ * ArcStatusItem — StatusBar widget for kata-linked (arc) sessions.
  *
- * Spec: planning/specs/16-chain-ux-p1-5.md (B3, B4, B5, B8, B9).
+ * Spec: planning/specs/116-arcs-first-class-parent.md (B14). Renamed
+ * from `ChainStatusItem` in P1.4. The "kata: <currentMode>/<currentPhase>"
+ * label is INTENTIONALLY PRESERVED — kata UI labels stay per the
+ * interview decision; the rename is an identifier sweep, not a
+ * methodology purge.
  *
  * Renders a rung ladder (research → planning → impl → verify → close)
- * reflecting chain progress (NOT the viewed session's position). Clicking
+ * reflecting arc progress (NOT the viewed session's position). Clicking
  * a rung with a backing session rebinds the current tab to that session.
  * The popover exposes the auto-advance toggle that writes through
- * `userPreferencesCollection` (per-chain override, falling back to the
- * global `defaultChainAutoAdvance`).
+ * `userPreferencesCollection` (per-arc override, falling back to the
+ * global `defaultChainAutoAdvance`). The toggle's preference shape is
+ * still keyed by the arc's GH issue number for now (P1.4 sweep is
+ * identifier-only; preference-shape migration is out of scope).
  *
  * Stall indicator (B9): P2 has no server-pushed `chain_stalled` event yet
  * (P3). Until then, on mount we recompute the client-side precondition
@@ -19,16 +25,17 @@
 import type { KataSessionState } from '@duraclaw/shared-types'
 import { useLiveQuery } from '@tanstack/react-db'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { chainsCollection } from '~/db/chains-collection'
-import { useChainAutoAdvance } from '~/hooks/use-chain-auto-advance'
-import { checkPrecondition } from '~/hooks/use-chain-preconditions'
+import { arcsCollection } from '~/db/arcs-collection'
+import { useArcAutoAdvance } from '~/hooks/use-arc-auto-advance'
+import { checkPrecondition } from '~/hooks/use-arc-preconditions'
 import { useTabSync } from '~/hooks/use-tab-sync'
+import { deriveColumn, type KanbanColumn } from '~/lib/arcs'
 import { CORE_RUNG_ORDER, type CoreRung } from '~/lib/auto-advance'
 import { useStallReason } from '~/lib/chain-stall-store'
 import { isChainSessionCompleted } from '~/lib/chains'
-import type { ChainSummary } from '~/lib/types'
+import type { ArcSummary } from '~/lib/types'
 
-interface ChainStatusItemProps {
+interface ArcStatusItemProps {
   kataState: KataSessionState
   kataIssue: number
   sessionId: string
@@ -49,7 +56,7 @@ interface RungInfo {
   state: RungState
   /** Most-recent session for this rung, if any. */
   targetSessionId: string | null
-  /** True when the viewed session's kataMode matches this rung. */
+  /** True when the viewed session's mode matches this rung. */
   viewing: boolean
   /** Session status (running/idle/completed/failed/etc) for targetSessionId. */
   targetStatus: string | null
@@ -65,8 +72,8 @@ const GH_REPO = 'baseplane-ai/duraclaw'
  */
 const ACTIVE_STATUSES = new Set(['running', 'waiting_input', 'waiting_permission', 'waiting_gate'])
 
-/** Map a chain's derived `column` to the rung that represents the active frontier. */
-function columnToRung(column: ChainSummary['column']): CoreRung | null {
+/** Map an arc's derived `column` to the rung that represents the active frontier. */
+function columnToRung(column: KanbanColumn): CoreRung | null {
   switch (column) {
     case 'research':
       return 'research'
@@ -89,18 +96,18 @@ function parseLastActivity(iso: string | null): number {
   return Number.isFinite(t) ? t : 0
 }
 
-function computeRungs(chain: ChainSummary, sessionId: string): RungInfo[] {
+function computeRungs(arc: ArcSummary, sessionId: string, column: KanbanColumn): RungInfo[] {
   // Sessions for each rung, newest-first by lastActivity.
-  const byRung: Record<CoreRung, ChainSummary['sessions']> = {
+  const byRung: Record<CoreRung, ArcSummary['sessions']> = {
     research: [],
     planning: [],
     implementation: [],
     verify: [],
     close: [],
   }
-  for (const s of chain.sessions) {
-    if (s.kataMode && (CORE_RUNG_ORDER as readonly string[]).includes(s.kataMode)) {
-      byRung[s.kataMode as CoreRung].push(s)
+  for (const s of arc.sessions) {
+    if (s.mode && (CORE_RUNG_ORDER as readonly string[]).includes(s.mode)) {
+      byRung[s.mode as CoreRung].push(s)
     }
   }
   for (const rung of CORE_RUNG_ORDER) {
@@ -110,22 +117,24 @@ function computeRungs(chain: ChainSummary, sessionId: string): RungInfo[] {
   }
 
   // Prefer the rung corresponding to the most-recent non-terminal session;
-  // fall back to the chain.column-derived rung.
-  const allSessions = [...chain.sessions]
-    .filter((s) => s.kataMode && (CORE_RUNG_ORDER as readonly string[]).includes(s.kataMode))
+  // fall back to the column-derived rung.
+  const allSessions = [...arc.sessions]
+    .filter((s) => s.mode && (CORE_RUNG_ORDER as readonly string[]).includes(s.mode))
     .sort((a, b) => parseLastActivity(b.lastActivity) - parseLastActivity(a.lastActivity))
   // Frontier = most-recent session whose runner is still attached / awaiting
   // input. `'idle'` is the D1 terminal marker for "turn finished, parked",
   // so idle sessions are NOT the frontier — only `ACTIVE_STATUSES` qualify.
   const activeSession = allSessions.find((s) => ACTIVE_STATUSES.has(s.status))
   const activeRung: CoreRung | null =
-    (activeSession?.kataMode as CoreRung | undefined) ?? columnToRung(chain.column)
+    (activeSession?.mode as CoreRung | undefined) ?? columnToRung(column)
 
   return CORE_RUNG_ORDER.map((rung) => {
     const list = byRung[rung]
     const mostRecent = list[0] ?? null
     // 'idle' is the D1 terminal marker; see isChainSessionCompleted above.
-    const completed = list.some(isChainSessionCompleted)
+    const completed = list.some((s) =>
+      isChainSessionCompleted({ status: s.status, lastActivity: s.lastActivity }),
+    )
     const isActiveFrontier = activeRung === rung
     let state: RungState
     if (completed && !isActiveFrontier) state = 'completed'
@@ -143,7 +152,7 @@ function computeRungs(chain: ChainSummary, sessionId: string): RungInfo[] {
   })
 }
 
-export function ChainStatusItem({ kataState, kataIssue, sessionId }: ChainStatusItemProps) {
+export function ArcStatusItem({ kataState, kataIssue, sessionId }: ArcStatusItemProps) {
   const [showPopover, setShowPopover] = useState(false)
   // Mount-time re-evaluation of the precondition — a conservative fallback
   // when the client hasn't yet received a server-pushed `chain_stalled`.
@@ -155,32 +164,49 @@ export function ChainStatusItem({ kataState, kataIssue, sessionId }: ChainStatus
   const stallReason = wsStallReason ?? mountReevalStallReason
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data: chainsData } = useLiveQuery(chainsCollection as any)
+  const { data: arcsData } = useLiveQuery(arcsCollection as any)
 
   const { replaceTab } = useTabSync()
 
-  const chain = useMemo<ChainSummary | null>(() => {
-    if (!chainsData) return null
-    const arr = chainsData as ChainSummary[]
-    return arr.find((c) => c.issueNumber === kataIssue) ?? null
-  }, [chainsData, kataIssue])
+  const arc = useMemo<ArcSummary | null>(() => {
+    if (!arcsData) return null
+    const arr = arcsData as ArcSummary[]
+    // Lookup is still keyed by GH issue number — preserves StatusBar's
+    // existing kataIssue-based wiring. The arc's externalRef carries
+    // the GH issue id; non-GitHub arcs (linear/plain) won't match a
+    // numeric kataIssue, which is the correct behavior.
+    return (
+      arr.find(
+        (a) => a.externalRef?.provider === 'github' && Number(a.externalRef.id) === kataIssue,
+      ) ?? null
+    )
+  }, [arcsData, kataIssue])
 
-  const { enabled: autoAdvanceOn, toggle: onToggleAutoAdvance } = useChainAutoAdvance(kataIssue)
+  const { enabled: autoAdvanceOn, toggle: onToggleAutoAdvance } = useArcAutoAdvance(kataIssue)
+
+  const column = useMemo<KanbanColumn>(() => {
+    if (!arc) return 'backlog'
+    return deriveColumn(arc.sessions, arc.status)
+  }, [arc])
 
   const rungs = useMemo<RungInfo[]>(() => {
-    if (!chain) return []
-    return computeRungs(chain, sessionId)
-  }, [chain, sessionId])
+    if (!arc) return []
+    return computeRungs(arc, sessionId, column)
+  }, [arc, sessionId, column])
 
-  const isChainComplete = useMemo(() => {
-    if (!chain) return false
-    if (chain.column !== 'done') return false
+  const isArcComplete = useMemo(() => {
+    if (!arc) return false
+    if (column !== 'done') return false
     return rungs.every((r) => {
-      // chain-complete means all 5 rungs have a completed session.
+      // arc-complete means all 5 rungs have a completed session.
       // 'idle' is the D1 terminal marker (see isChainSessionCompleted).
-      return chain.sessions.some((s) => s.kataMode === r.rung && isChainSessionCompleted(s))
+      return arc.sessions.some(
+        (s) =>
+          s.mode === r.rung &&
+          isChainSessionCompleted({ status: s.status, lastActivity: s.lastActivity }),
+      )
     })
-  }, [chain, rungs])
+  }, [arc, column, rungs])
 
   // Stall re-evaluation on mount / when inputs change (B9 fallback).
   // Authoritative signal is the WS-pushed `chain_stalled` event (see
@@ -189,15 +215,15 @@ export function ChainStatusItem({ kataState, kataIssue, sessionId }: ChainStatus
   useEffect(() => {
     let cancelled = false
     setMountReevalStallReason(null)
-    if (!chain) return
-    if (chain.column === 'done') return
+    if (!arc) return
+    if (column === 'done') return
     if (!autoAdvanceOn) return
-    const currentSession = chain.sessions.find((s) => s.id === sessionId)
+    const currentSession = arc.sessions.find((s) => s.id === sessionId)
     // 'idle' is the D1 terminal marker; see nav-sessions.tsx:isCompletedSession.
     // Only re-run the precondition once the viewed session has entered the
     // parked/terminal state.
     if (!currentSession || currentSession.status !== 'idle') return
-    void checkPrecondition(chain, chain.sessions).then((res) => {
+    void checkPrecondition(arc).then((res) => {
       if (cancelled) return
       if (!res.canAdvance && res.reason) {
         setMountReevalStallReason(res.reason)
@@ -206,7 +232,7 @@ export function ChainStatusItem({ kataState, kataIssue, sessionId }: ChainStatus
     return () => {
       cancelled = true
     }
-  }, [chain, sessionId, autoAdvanceOn])
+  }, [arc, column, sessionId, autoAdvanceOn])
 
   const onJumpRung = useCallback(
     (target: string | null) => {
@@ -218,9 +244,10 @@ export function ChainStatusItem({ kataState, kataIssue, sessionId }: ChainStatus
     [replaceTab, sessionId],
   )
 
-  if (!chain) {
-    // No chain data loaded yet — fall through to a compact pill with just
-    // the issue number; avoids flicker on first render.
+  if (!arc) {
+    // No arc data loaded yet — fall through to a compact pill with just
+    // the issue number; avoids flicker on first render. Kata UI label
+    // PRESERVED per spec interview decision.
     return (
       <div className="relative">
         <button
@@ -228,7 +255,7 @@ export function ChainStatusItem({ kataState, kataIssue, sessionId }: ChainStatus
           className="text-muted-foreground hover:text-foreground"
           onClick={() => setShowPopover(!showPopover)}
         >
-          #{kataIssue} · kata: {kataState.currentMode}/{kataState.currentPhase || '\u2014'}
+          #{kataIssue} · kata: {kataState.currentMode}/{kataState.currentPhase || '—'}
         </button>
       </div>
     )
@@ -236,12 +263,12 @@ export function ChainStatusItem({ kataState, kataIssue, sessionId }: ChainStatus
 
   // Rung glyphs
   const glyphFor = (r: RungInfo, hasStall: boolean): string => {
-    if (r.state === 'completed') return '\u25CF' // ●
+    if (r.state === 'completed') return '●' // ●
     if (r.state === 'current') {
-      if (hasStall) return '\u26A0' // ⚠ overlays current rung
-      return '\u25D0' // ◐
+      if (hasStall) return '⚠' // ⚠ overlays current rung
+      return '◐' // ◐
     }
-    return '\u25CB' // ○ hollow
+    return '○' // ○ hollow
   }
 
   return (
@@ -250,7 +277,7 @@ export function ChainStatusItem({ kataState, kataIssue, sessionId }: ChainStatus
         type="button"
         className="flex items-center gap-1 text-muted-foreground hover:text-foreground"
         onClick={() => setShowPopover(!showPopover)}
-        data-testid="chain-status-item"
+        data-testid="arc-status-item"
       >
         <span className="rounded bg-muted px-1.5 py-0.5 text-foreground">#{kataIssue}</span>
         <span className="flex items-center gap-0.5">
@@ -281,7 +308,7 @@ export function ChainStatusItem({ kataState, kataIssue, sessionId }: ChainStatus
             )
           })}
         </span>
-        {isChainComplete && <span className="ml-1 text-green-500">Complete</span>}
+        {isArcComplete && <span className="ml-1 text-green-500">Complete</span>}
       </button>
       {showPopover && (
         <div className="absolute bottom-full left-0 mb-1 w-72 rounded border bg-popover p-3 text-popover-foreground shadow-md text-xs">
@@ -293,7 +320,7 @@ export function ChainStatusItem({ kataState, kataIssue, sessionId }: ChainStatus
                 rel="noreferrer noopener"
                 className="font-medium underline-offset-2 hover:underline"
               >
-                #{kataIssue} {chain.issueTitle}
+                #{kataIssue} {arc.title}
               </a>
               <button
                 type="button"
@@ -305,27 +332,28 @@ export function ChainStatusItem({ kataState, kataIssue, sessionId }: ChainStatus
               </button>
             </div>
 
-            {chain.prNumber && (
+            {arc.prNumber && (
               <div>
                 <a
-                  href={`https://github.com/${GH_REPO}/pull/${chain.prNumber}`}
+                  href={`https://github.com/${GH_REPO}/pull/${arc.prNumber}`}
                   target="_blank"
                   rel="noreferrer noopener"
                   className="text-muted-foreground underline-offset-2 hover:underline"
                 >
-                  PR #{chain.prNumber}
+                  PR #{arc.prNumber}
                 </a>
               </div>
             )}
 
-            {chain.worktreeReservation && (
+            {arc.worktreeReservation && (
               <div className="text-muted-foreground">
                 {/* GH#115: legacy `worktree` (project name) is the basename
-                    of the new `path` (e.g. /data/projects/duraclaw-dev3 ->
+                    of the new `worktree` field (e.g. /data/projects/duraclaw-dev3 ->
                     duraclaw-dev3). Falls back to the full path if the
                     derivation fails — never empty. */}
                 Worktree:{' '}
-                {chain.worktreeReservation.path.split('/').pop() || chain.worktreeReservation.path}
+                {arc.worktreeReservation.worktree.split('/').pop() ||
+                  arc.worktreeReservation.worktree}
               </div>
             )}
 
@@ -334,8 +362,7 @@ export function ChainStatusItem({ kataState, kataIssue, sessionId }: ChainStatus
                 const hasTarget = !!r.targetSessionId
                 const isCurrentlyViewing = r.viewing
                 const clickable = hasTarget && !isCurrentlyViewing
-                const glyph =
-                  r.state === 'completed' ? '\u25CF' : r.state === 'current' ? '\u25D0' : '\u25CB'
+                const glyph = r.state === 'completed' ? '●' : r.state === 'current' ? '◐' : '○'
                 const rowBase = 'flex w-full items-center justify-between gap-2 rounded px-1 py-0.5'
                 if (clickable) {
                   return (
@@ -384,7 +411,7 @@ export function ChainStatusItem({ kataState, kataIssue, sessionId }: ChainStatus
               </div>
             )}
 
-            {!isChainComplete && (
+            {!isArcComplete && (
               <label className="flex cursor-pointer items-center gap-2 border-t pt-2">
                 <input
                   type="checkbox"
@@ -392,7 +419,7 @@ export function ChainStatusItem({ kataState, kataIssue, sessionId }: ChainStatus
                   onChange={onToggleAutoAdvance}
                   className="h-3 w-3"
                 />
-                <span>Auto-advance this chain</span>
+                <span>Auto-advance this arc</span>
               </label>
             )}
           </div>
