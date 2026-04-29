@@ -414,13 +414,25 @@ export interface ChainAdvanceEvent {
   type: 'chain_advance'
   newSessionId: string
   nextMode: string
-  issueNumber: number
+  /**
+   * Optional GH issue number — present only when the arc is linked to a
+   * `github` externalRef. Arcs without an externalRef (implicit / debug /
+   * freeform / non-kata) emit the event without this field; the client
+   * (`use-coding-agent.ts`) reads `issueNumber` defensively.
+   */
+  issueNumber?: number
 }
 
 export interface ChainStalledEvent {
   type: 'chain_stalled'
   reason: string
-  issueNumber: number
+  /**
+   * Optional GH issue number — see `ChainAdvanceEvent.issueNumber`. The
+   * gate-skip path in the SessionDO emits the event whenever the
+   * auto-advance decision returns `skipped`; for non-issue-linked arcs
+   * the field is omitted and the client falls back to a generic toast.
+   */
+  issueNumber?: number
 }
 
 export interface StoppedEvent {

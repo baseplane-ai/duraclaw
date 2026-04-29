@@ -223,12 +223,18 @@ export const agentSessions = sqliteTable(
       t.lastActivity,
     ),
     // GH#116: partial unique on (arcId, mode) WHERE status IN
-    // ('idle','pending','running'). Closes the auto-advance idempotency
-    // race — two concurrent `stopped` events can no longer spawn
-    // duplicate successors for the same (arc, mode) tuple.
+    // ('idle','pending','running') AND mode IS NOT NULL. Closes the
+    // auto-advance idempotency race — two concurrent `stopped` events
+    // can no longer spawn duplicate successors for the same (arc, mode)
+    // tuple. `mode IS NOT NULL` is required because SQLite treats NULLs
+    // as distinct in UNIQUE indexes; without it two `(arcId, NULL,
+    // status='running')` rows would not collide and the index would
+    // silently fail to enforce idempotency for null-mode sessions.
+    // Null-mode sessions (implicit-arc / debug / freeform / pre-mode-set)
+    // intentionally do not participate in advance idempotency.
     arcModeActive: uniqueIndex('idx_agent_sessions_arc_mode_active')
       .on(t.arcId, t.mode)
-      .where(sql`${t.status} IN ('idle','pending','running')`),
+      .where(sql`status IN ('idle','pending','running') AND mode IS NOT NULL`),
   }),
 )
 

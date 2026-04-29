@@ -529,14 +529,23 @@ export function arcsRoutes() {
       const msg = err instanceof Error ? err.message : String(err)
       // Partial-unique idempotency race: surface the in-flight successor
       // so the client can re-route to the existing session.
-      if (/UNIQUE|constraint/i.test(msg)) {
+      //
+      // The recovery is only meaningful when `mode != null`. The partial
+      // unique index `idx_agent_sessions_arc_mode_active` carries
+      // `AND mode IS NOT NULL` (see schema.ts / migration 0032 step 16),
+      // so a null-mode insert can never trigger that index. Any
+      // UNIQUE-shaped error encountered here with `mode == null` must
+      // be from some other constraint (e.g. PK collision) and should
+      // surface as-is rather than being misclassified as an advance
+      // idempotency conflict.
+      if (/UNIQUE|constraint/i.test(msg) && mode != null) {
         const existing = await db
           .select({ id: agentSessions.id })
           .from(agentSessions)
           .where(
             and(
               eq(agentSessions.arcId, arcId),
-              ...(mode != null ? [eq(agentSessions.mode, mode)] : []),
+              eq(agentSessions.mode, mode),
               inArray(agentSessions.status, ['idle', 'pending', 'running']),
             ),
           )

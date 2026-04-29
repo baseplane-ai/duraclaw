@@ -707,6 +707,42 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
                 mode: gate.mode,
                 prompt: `enter ${gate.mode}`,
               })
+            } else {
+              // Spec P2: broadcast `chain_stalled` so the client can
+              // surface the reason in `ArcStatusItem` (chain-stall-store
+              // keyed on issueNumber when present) and invalidate the
+              // arcs collection. Wire-type discriminant is `chain_stalled`
+              // — see packages/shared-types/src/index.ts. issueNumber is
+              // best-effort: pulled from the persisted kata_state kv blob
+              // when the arc is GH-linked, omitted otherwise.
+              let issueNumber: number | undefined
+              try {
+                const rows = [
+                  ...ctx.sql.exec<{ value: string }>(
+                    "SELECT value FROM kv WHERE key = 'kata_state'",
+                  ),
+                ]
+                if (rows.length > 0) {
+                  const ks = JSON.parse(rows[0].value) as { issueNumber?: unknown }
+                  if (typeof ks.issueNumber === 'number') {
+                    issueNumber = ks.issueNumber
+                  }
+                }
+              } catch {
+                // best-effort — falling back to issueNumber undefined.
+              }
+              const stallEvent = {
+                type: 'chain_stalled' as const,
+                reason: gate.reason,
+                ...(issueNumber !== undefined ? { issueNumber } : {}),
+              }
+              ctx.broadcast(JSON.stringify({ type: 'gateway_event', event: stallEvent }))
+              ctx.logEvent(
+                'info',
+                'arc',
+                `arc auto-advance skipped reason=${gate.reason}`,
+                issueNumber !== undefined ? { issueNumber } : undefined,
+              )
             }
           } catch (err) {
             console.error('[session-do] post-stop arc advance:', err)

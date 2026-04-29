@@ -155,12 +155,19 @@ ALTER TABLE agent_sessions DROP COLUMN kata_phase;
 --> statement-breakpoint
 
 -- 16. Partial unique index on (arc_id, mode) WHERE status IN
---     ('idle','pending','running'). Closes the auto-advance
---     idempotency race (B17) — two concurrent `stopped` events can no
---     longer spawn duplicate successors for the same (arc, mode) tuple.
+--     ('idle','pending','running') AND mode IS NOT NULL. Closes the
+--     auto-advance idempotency race (B17) — two concurrent `stopped`
+--     events can no longer spawn duplicate successors for the same
+--     (arc, mode) tuple. The `mode IS NOT NULL` clause is required
+--     because SQLite treats NULLs as distinct in UNIQUE indexes; without
+--     it two `(arcId, NULL, status='running')` rows would not collide,
+--     so the index would silently fail to enforce idempotency for
+--     null-mode sessions. Null-mode sessions (implicit-arc / debug /
+--     freeform / pre-mode-set) intentionally do not collide — only
+--     non-null modes participate in advance idempotency.
 --     The pre-existing four agent_sessions indexes (runner_id_unique,
 --     user_last_activity, user_project, visibility_last_activity) are
 --     unchanged: SQLite ≥3.35 preserves indexes across ADD/DROP COLUMN.
 CREATE UNIQUE INDEX idx_agent_sessions_arc_mode_active
   ON agent_sessions(arc_id, mode)
-  WHERE status IN ('idle', 'pending', 'running');
+  WHERE status IN ('idle', 'pending', 'running') AND mode IS NOT NULL;

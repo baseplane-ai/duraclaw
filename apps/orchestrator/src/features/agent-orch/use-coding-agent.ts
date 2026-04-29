@@ -610,12 +610,12 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
             const nextMode = (event as { nextMode?: string }).nextMode ?? 'next rung'
             if (typeof issue === 'number') setStallReason(issue, null)
             toast.success(`Auto-advanced to ${nextMode}`, { duration: 3000 })
-            void queryClient.invalidateQueries({ queryKey: ['chains'] })
+            void queryClient.invalidateQueries({ queryKey: ['arcs'] })
           } else if (event.type === 'chain_stalled') {
             const issue = (event as { issueNumber?: number }).issueNumber
             const reason = (event as { reason?: string }).reason ?? 'Stalled'
             if (typeof issue === 'number') setStallReason(issue, reason)
-            void queryClient.invalidateQueries({ queryKey: ['chains'] })
+            void queryClient.invalidateQueries({ queryKey: ['arcs'] })
           } else if (event.type === 'api_retry') {
             // GH#102 / spec 102-sdk-peelback B12: push the retry frame
             // into the transient banner store.
