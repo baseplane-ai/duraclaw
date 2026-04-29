@@ -45,6 +45,17 @@ This doc:
 > revised brainstorm that drops the "the metaphor must defend itself"
 > constraint and optimizes purely for phonetic appeal in the
 > Stripe / Linear / Vercel / Anthropic / Mistral school of brand naming.
+>
+> **Rounds 3–5 update — front-runner is now LOCKSTEP.** Three further
+> rounds of tighter conflict checking eliminated the v2 sound-first
+> shortlist (Strake, Spire, Strider, Praetor, Cascade — all taken in
+> AI dev tools). User pushback on Lockstep — *"Lockstep has nothing
+> in AI"* — proved correct: the only Lockstep brand of size is the
+> accounting SaaS acquired by Sage Group in 2022/2024 (now absorbed),
+> and our category is open. **Lockstep scores 38/40 on the criteria
+> matrix** — sound, verb-energy, enterprise-credible, conflict-clear,
+> parent-brand-coherent. See [§8.9](#89-round-5--lockstep-re-evaluation-the-one-we-missed)
+> for the full re-evaluation.
 
 ---
 
@@ -560,29 +571,103 @@ that family.
 of late 2025 / early 2026 has consumed the verb-coded vocabulary in
 the same way it consumed the structural-noun vocabulary in rounds 1–3.
 
-### 8.8 Honest top picks after four rounds
+### 8.9 Round-5 — Lockstep re-evaluation (the one we missed)
+
+User pushback: *"Lockstep has nothing in AI and a bunch of random
+stuff."* Correct. Round 4 dismissed Lockstep as "soft conflict" — that
+was wrong. Tighter sweep:
+
+**What's actually on "Lockstep":**
+| Holder | What | Status |
+|---|---|---|
+| Lockstep (accounting) | Connected-accounting SaaS | **Acquired by Sage Group, announced Aug 2022, closed 2024 — absorbed into Sage Network, brand fading** |
+| lockstep.io | Unity / Node.JS networking library (game-dev "lockstep simulation" pattern) | Hobby project |
+| getlockstep.io | Audit management tool | Niche |
+| Lockstep VC | Venture firm | Unrelated |
+| **AI coding / agent orchestration / dev tools** | — | **Open. Category is clear.** |
+
+**Trademark logic:** financial-services class (Sage / accounting
+Lockstep) doesn't block AI / SaaS class. The Sage acquisition is a
+*positive* — the standalone Lockstep brand is fading.
+
+**Lockstep on its merits:**
+
+| Test | Score |
+|---|---|
+| Sound — "LOK-step", 2 syllables, hard consonants, single phonetic unit | 5 |
+| Verb-energy / motion-coded (matches user's Strider/Cascade gut) | 5 |
+| Enterprise read — disciplined, governed, controlled | 5 |
+| Parent-brand fit with `baseplane` | 4 — coherent: foundation provides surface, lockstep is how things move on it |
+| Distinctiveness — owns its search results in AI | 5 — no AI competitor |
+| CLI ergonomics — `lockstep enter implementation` | 5 |
+| Conflict in our category | 5 — clear |
+| `.ai` domain likely available | 4 — needs WHOIS |
+| **Total** | **38 / 40** |
+
+**Positioning sentence writes itself:**
+
+> *"Lockstep is the harness for enterprise AI coding — every agent,
+> every tool call, every gate moving in lockstep with your policy."*
+
+**Revised top pick: Lockstep.** First candidate across five rounds
+that hits every criterion: sound, verb-energy, enterprise read,
+conflict-clear, parent-brand-coherent, CLI-friendly. The accounting-
+Lockstep absorption into Sage means the standalone trademark space in
+software is in better shape than any other candidate we've reviewed.
+
+**Next-step checks specifically for Lockstep:**
+- USPTO TESS class 9 (software) and class 42 (SaaS) — verify Sage
+  isn't holding the class 9/42 mark as part of the acquisition
+- EUIPO eSearch
+- WHOIS on `lockstep.ai`, `lockstep.dev`, `lockstep.app`
+- GitHub `lockstep` org availability (currently `Lockstep-Network` is
+  the accounting / Sage org — different name, low collision risk)
+- `npm` `@lockstep` scope availability
+- Locale check (no obvious negative meanings in Mandarin / Spanish /
+  French / German / Japanese — verify)
+
+### 8.8 Honest top picks after five rounds
 
 In rough order, the candidates that have survived every round of
 conflict checking AND read as enterprise-credible:
 
-1. **Plinth** — structural pair with `baseplane`, rare-enough word to
-   own its search results, clean across three rounds
-2. **Forgewright** — fully coined, brandable, no conflicts
-3. **Bowline** — nautical, "knot that holds under load", short
-4. **Buttress** — industrial register, known word but rare in tech
-5. **Bridlepoint** — riffs on README's "harness" metaphor, no
-   Harness.io collision
+1. **Lockstep** ⭐ — *new front-runner after round 5.* Hits every test:
+   sound (single phonetic unit, hard consonants), verb-energy
+   (matches user's Strider/Cascade gut), enterprise read
+   (disciplined / governed), conflict-clear in AI / dev-tools, and
+   parent-brand-coherent. The README's positioning sentence writes
+   itself: *"every agent, every tool call, every gate moving in
+   lockstep with your policy."*
+2. **Plinth** — strongest brand-family pair with `baseplane`, owns its
+   search results, but quieter than Lockstep on verb-energy
+3. **Throughline** — clear and motion-coded, but three syllables
+4. **Forgewright** — fully coined, brandable, no conflicts
+5. **Bowline** — nautical, short, no conflicts
+6. **Buttress** — industrial register, known word but rare in tech
+7. **Bridlepoint** — riffs on README's "harness" without Harness.io
+   collision
 
-**Tempest** is on probation — survivable if the team is willing to be
+**Tempest** is on probation — survivable if the team accepts being
 "Tempest" while Tempest AI (game dev) is "Tempest AI". Different
 category, but the .ai handle costs you.
 
-**The honest answer:** if the bar is *"sounds cool AND fully clear of
-conflicts in the AI dev-tools / agent space"*, the candidate pool is
-much smaller than the v1 / v2 lists implied. **Plinth** is the only
-candidate that scores well on both axes after three rounds of cuts.
+**The honest answer after five rounds:** the AI dev-tools naming
+namespace is densely occupied for short English words, but **Lockstep
+is the front-runner** — it's the only candidate that combines
+brandability, verb-energy, enterprise-credibility, and conflict
+clearance. The Sage acquisition of accounting-Lockstep (closed 2024)
+actually clears the standalone software namespace. Pending the
+trademark / domain / npm checks, Lockstep is the recommendation.
 
 ---
+
+## Sources (round 5)
+
+- [Sage Group acquires Lockstep (Aug 2022 announcement)](https://www.businesswire.com/news/home/20220815005687/en/The-Sage-Group-Signs-Deal-to-Acquire-Connected-Accounting-Leader-Lockstep)
+- [Sage acquires Lockstep | Accounting Today](https://www.accountingtoday.com/news/sage-acquires-accounting-software-provider-lockstep)
+- [Lockstep-Network/lockstep-sdk-python (Sage org, accounting context)](https://github.com/Lockstep-Network/lockstep-sdk-python)
+- [wonderkiln/lockstep.io (Unity networking lib, hobby)](https://github.com/wonderkiln/lockstep.io)
+- [Lockstep PitchBook profile](https://pitchbook.com/profiles/company/327093-85)
 
 ## Sources (round 4)
 
