@@ -465,7 +465,7 @@ distinctiveness, conflict-clearance, parent-brand fit, length):
 | **Praetor** | 4 | 5 | 5 | 3 | 4 (2 syl) | **21** |
 | **Strider** | 4 | 4 | 5 | 3 | 4 (2 syl) | **20** |
 
-### 8.5 Recommendation (revised)
+### 8.5 Recommendation (revised — but see §8.6 round-3 kills)
 
 > **Top pick: Strake.** Single syllable, sharp consonants, no
 > conflicts, novel enough to dominate its own search results, looks
@@ -477,22 +477,101 @@ distinctiveness, conflict-clearance, parent-brand fit, length):
 > short, conventionally pretty. Slightly less distinctive than Strake
 > because "spire" is a known English noun.
 
-Both are short enough to be the CLI command (replacing `kata` /
-`duraclaw` invocations: `spire enter implementation`, `strake enter
-implementation` both read fine), short enough for a logo, and clear in
-the web-conflict sweep. Either survives the "sounds cool first, defends
-itself later" criterion the v1 list mostly failed.
+> **⚠️ Both top picks were killed in round 3.** See §8.6.
 
-**Tertiary picks if Strake / Spire are blocked at trademark search:**
-**Praetor** (governance-coded), **Tempest** (dramatic, recognizable),
-**Strider** (action-coded). Skip **Stark** unless you're willing to
-fight the Iron Man / GoT cultural baggage.
+### 8.6 Round-3 conflict sweep — sound-first list collapses
 
-The §6 next-step checks (USPTO TESS classes 9 + 42, EUIPO, .com / .ai,
-GitHub org, npm scope, locale check) apply to **Strake** and **Spire**
-as the new front-runners.
+Tighter searches (without phrase quoting that hid close matches in
+rounds 1–2) wiped out almost every v2 candidate. The lesson: the AI
+dev-tooling naming space in April 2026 is essentially exhausted for
+short English words with hard consonants. Sloppy round-1/2 searches
+hid these conflicts because they were filtered to exact phrase matches.
+
+| Name | Killed by | Source |
+|---|---|---|
+| **Strider** | **Strider Technologies / Strider OS** — *"agentic operating system, a centralized intelligence orchestration layer"* (literal positioning collision). Available on AWS Marketplace, offices in 5 countries, AI-powered strategic intelligence platform. | [striderintel.com](https://www.striderintel.com/), [Strider OS launch](https://www.prnewswire.com/news-releases/strider-launches-agentic-operating-system-to-power-next-generation-of-strategic-intelligence-302750846.html) |
+| **Strake** | **strake.dev** — active *"SRE Intelligence Platform for engineering teams without dedicated SRE coverage"* (directly adjacent dev-tools category). Plus Strake Inc. (OTC: SRKE) pivoted to AI. Plus Straiker AI ($21M, agentic-first AI security) contaminates the phonetic namespace. Plus Strac (DLP platform). | [strake.dev](https://strake.dev/), [Strake Inc. ticker](https://www.tennesseedaily.com/news/274015566/strake-inc-otc-srke-marks-new-beginnings-with-ticker-symbol-transition-and-bold-leap-into-ai), [Straiker.ai](https://www.straiker.ai/blog/straiker-launches-with-21-million-to-safeguard-ai) |
+| **Spire** | **Spire.AI** — $68.8M raised (14 rounds, 56 investors), Knowra "Context Intelligence platform", launched **Agent Sigma** (autonomous AI agent for talent supply chain) in April 2025. Plus Spire Global (satellite weather data), Spire Technologies (Bahrain fintech), Spire Inc (utility). The `.ai` domain is gone with serious capital behind it. | [spire.ai](https://spire.ai/), [G2 reviews](https://www.g2.com/products/spire-ai/reviews) |
+| **Praetor** | **Wolters Kluwer Praetor AI** for legal (Word add-in); **Praetorian.com** offensive-security firm with a GitHub org. Both adjacent. | [Wolters Kluwer Praetor](https://www.wolterskluwer.com/en/solutions/praetor/praetor-ai), [praetorian.com](https://www.praetorian.com/) |
+| **Tempest** (downgraded) | **Tempest AI** (Sydney, AI game creation platform, seed-funded by Galileo Ventures); **tempest.energy** project management. Different categories from coding tools, but the `.ai` is taken. **Survivable but contaminated.** | [Tempest AI on PitchBook](https://pitchbook.com/profiles/company/756073-81), [Tempest AI LinkedIn](https://www.linkedin.com/company/tempest-ai) |
+
+**Survivors from v2 after round 3:** essentially none. Tempest is the
+only one still standing, and it's compromised on the .ai domain.
+
+### 8.7 Recalibrated recommendation
+
+The pure "short, sharp, single English word" naming strategy has run
+out of runway in this category. What's left as actually-clear candidates
+across all three rounds:
+
+**From v1 (metaphor-driven, but cleared):**
+- **Plinth**, **Bowline**, **Buttress**, **Bridlepoint** — all cleared
+  in round 1 and not surfaced as conflicts since. Tighter brand-family
+  fit with `baseplane` than the v2 sound-first picks.
+- **Forgewright** — coined / Vercel-school, fully cleared.
+
+**Strategic options going forward:**
+
+1. **Pivot to coined / made-up words.** Vercel, Stripe, Pulumi, Plaid
+   each own ~100% of their search results because the word didn't
+   exist before they did. Candidates worth a USPTO check:
+   - **Stratos** (Greek "layer", scale-coded) — already used by some
+     small entities, needs verification
+   - **Veridian** / **Veridia** (Latinate, green-tech feel)
+   - **Korridor** (corridor-with-K, Slavic edge)
+   - **Solex**, **Velnir**, **Sintra** — fully invented
+   - **Forgewright** — still standing from v1
+
+2. **Lean into the obscure-English-word strategy.** Words where
+   duraclaw can own the search results because nobody uses them:
+   - **Plinth**, **Bowline**, **Buttress** — known but rare in tech
+   - **Architrave**, **Lintel**, **Foliant**, **Strake** (killed),
+     **Davit**
+
+3. **Stop trying to be enterprise-default.** Datadog, Snowflake, and
+   GitHub all have non-enterprise names that won. The original
+   `duraclaw` problem is not unsolvable by name alone — a strong
+   product + strong narrative can carry a playful name. If a rename
+   isn't going to clear conflicts comfortably, **the option of doing
+   nothing** is the comparison case the user should weigh against any
+   pick that requires a trademark fight.
+
+### 8.8 Honest top picks after three rounds
+
+In rough order, the candidates that have survived every round of
+conflict checking AND read as enterprise-credible:
+
+1. **Plinth** — structural pair with `baseplane`, rare-enough word to
+   own its search results, clean across three rounds
+2. **Forgewright** — fully coined, brandable, no conflicts
+3. **Bowline** — nautical, "knot that holds under load", short
+4. **Buttress** — industrial register, known word but rare in tech
+5. **Bridlepoint** — riffs on README's "harness" metaphor, no
+   Harness.io collision
+
+**Tempest** is on probation — survivable if the team is willing to be
+"Tempest" while Tempest AI (game dev) is "Tempest AI". Different
+category, but the .ai handle costs you.
+
+**The honest answer:** if the bar is *"sounds cool AND fully clear of
+conflicts in the AI dev-tools / agent space"*, the candidate pool is
+much smaller than the v1 / v2 lists implied. **Plinth** is the only
+candidate that scores well on both axes after three rounds of cuts.
 
 ---
+
+## Sources (round 3)
+
+- [Strider Technologies — Strider OS launch](https://www.prnewswire.com/news-releases/strider-launches-agentic-operating-system-to-power-next-generation-of-strategic-intelligence-302750846.html)
+- [striderintel.com](https://www.striderintel.com/)
+- [strake.dev — SRE Intelligence Platform](https://strake.dev/)
+- [Strake Inc. (OTC: SRKE) AI pivot](https://www.tennesseedaily.com/news/274015566/strake-inc-otc-srke-marks-new-beginnings-with-ticker-symbol-transition-and-bold-leap-into-ai)
+- [Straiker.ai — agentic-first AI security ($21M)](https://www.straiker.ai/blog/straiker-launches-with-21-million-to-safeguard-ai)
+- [Spire.AI Knowra — talent platform](https://spire.ai/)
+- [Spire.AI on G2 ($68.8M raised)](https://www.g2.com/products/spire-ai/reviews)
+- [Wolters Kluwer Praetor AI](https://www.wolterskluwer.com/en/solutions/praetor/praetor-ai)
+- [Praetorian — offensive security](https://www.praetorian.com/)
+- [Tempest AI — game creation (Sydney)](https://pitchbook.com/profiles/company/756073-81)
 
 ## Sources (round 2)
 
