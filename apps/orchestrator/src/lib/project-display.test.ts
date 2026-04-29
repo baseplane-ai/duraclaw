@@ -5,6 +5,8 @@ import {
   deriveRepoBase,
   deriveSessionSuffix,
   formatTabLabel,
+  isValidAbbrevOverride,
+  isValidColorSlotOverride,
   PROJECT_COLOR_SLOTS,
   parseWorktreeSuffix,
   statusRingClass,
@@ -159,6 +161,97 @@ describe('formatTabLabel', () => {
   it('numeric worktree, multi-session → abbrev + N + letter', () => {
     expect(formatTabLabel('duraclaw-dev3', 's1', ['s1', 's2'])).toBe('DC3a')
     expect(formatTabLabel('duraclaw-dev3', 's2', ['s1', 's2'])).toBe('DC3b')
+  })
+
+  // GH#84: per-project abbrev override.
+  it('GH#84: valid abbrev override replaces the derived abbrev', () => {
+    // Auto-derive would be "DC"; the override wins.
+    expect(formatTabLabel('duraclaw', 's1', ['s1'], 'DZ')).toBe('DZ')
+    // Worktree-N segment still appended after the override.
+    expect(formatTabLabel('duraclaw-dev3', 's1', ['s1'], 'DZ')).toBe('DZ3')
+    // Session suffix still appended on multi-session worktree.
+    expect(formatTabLabel('duraclaw-dev3', 's2', ['s1', 's2'], 'DZ')).toBe('DZ3b')
+  })
+  it('GH#84: 1-char abbrev override is allowed', () => {
+    expect(formatTabLabel('duraclaw', 's1', ['s1'], 'X')).toBe('X')
+  })
+  it('GH#84: invalid abbrev override silently falls back to derivation', () => {
+    expect(formatTabLabel('duraclaw', 's1', ['s1'], 'lower')).toBe('DC')
+    expect(formatTabLabel('duraclaw', 's1', ['s1'], '')).toBe('DC')
+    expect(formatTabLabel('duraclaw', 's1', ['s1'], 'TOO_LONG')).toBe('DC')
+    expect(formatTabLabel('duraclaw', 's1', ['s1'], 'ab')).toBe('DC') // lowercase rejected
+    expect(formatTabLabel('duraclaw', 's1', ['s1'], 'a!')).toBe('DC')
+    // Null / undefined treated as no override.
+    expect(formatTabLabel('duraclaw', 's1', ['s1'], null)).toBe('DC')
+    expect(formatTabLabel('duraclaw', 's1', ['s1'], undefined)).toBe('DC')
+  })
+})
+
+describe('GH#84: deriveProjectColorSlot override', () => {
+  it('valid in-range override returns that exact slot', () => {
+    expect(deriveProjectColorSlot('duraclaw', 0)).toEqual(PROJECT_COLOR_SLOTS[0])
+    expect(deriveProjectColorSlot('duraclaw', 5)).toEqual(PROJECT_COLOR_SLOTS[5])
+    expect(deriveProjectColorSlot('duraclaw', PROJECT_COLOR_SLOTS.length - 1)).toEqual(
+      PROJECT_COLOR_SLOTS[PROJECT_COLOR_SLOTS.length - 1],
+    )
+  })
+  it('override beats hash derivation even when keys would otherwise differ', () => {
+    expect(deriveProjectColorSlot('duraclaw', 3)).toEqual(deriveProjectColorSlot('kata', 3))
+  })
+  it('override applies even when key is null/empty (overrides the unassigned fallback)', () => {
+    expect(deriveProjectColorSlot('', 2)).toEqual(PROJECT_COLOR_SLOTS[2])
+    expect(deriveProjectColorSlot(null, 4)).toEqual(PROJECT_COLOR_SLOTS[4])
+  })
+  it('out-of-range override silently falls through to hash derivation', () => {
+    const fallback = deriveProjectColorSlot('duraclaw')
+    expect(deriveProjectColorSlot('duraclaw', -1)).toEqual(fallback)
+    expect(deriveProjectColorSlot('duraclaw', PROJECT_COLOR_SLOTS.length)).toEqual(fallback)
+    expect(deriveProjectColorSlot('duraclaw', 999)).toEqual(fallback)
+    expect(deriveProjectColorSlot('duraclaw', 1.5)).toEqual(fallback)
+    expect(deriveProjectColorSlot('duraclaw', Number.NaN)).toEqual(fallback)
+  })
+  it('null/undefined override is treated as no override', () => {
+    expect(deriveProjectColorSlot('duraclaw', null)).toEqual(deriveProjectColorSlot('duraclaw'))
+    expect(deriveProjectColorSlot('duraclaw', undefined)).toEqual(
+      deriveProjectColorSlot('duraclaw'),
+    )
+  })
+})
+
+describe('GH#84: validators', () => {
+  describe('isValidAbbrevOverride', () => {
+    it('accepts 1–2 uppercase alphanumerics', () => {
+      expect(isValidAbbrevOverride('A')).toBe(true)
+      expect(isValidAbbrevOverride('AB')).toBe(true)
+      expect(isValidAbbrevOverride('A1')).toBe(true)
+      expect(isValidAbbrevOverride('99')).toBe(true)
+      expect(isValidAbbrevOverride('XY')).toBe(true)
+    })
+    it('rejects lowercase, empty, oversize, punctuation', () => {
+      expect(isValidAbbrevOverride('')).toBe(false)
+      expect(isValidAbbrevOverride('a')).toBe(false)
+      expect(isValidAbbrevOverride('Ab')).toBe(false)
+      expect(isValidAbbrevOverride('ABC')).toBe(false)
+      expect(isValidAbbrevOverride('A!')).toBe(false)
+      expect(isValidAbbrevOverride(' A')).toBe(false)
+      expect(isValidAbbrevOverride('A ')).toBe(false)
+    })
+  })
+  describe('isValidColorSlotOverride', () => {
+    it('accepts integers in [0, slot count)', () => {
+      for (let i = 0; i < PROJECT_COLOR_SLOTS.length; i++) {
+        expect(isValidColorSlotOverride(i)).toBe(true)
+      }
+    })
+    it('rejects out-of-range, non-integer, non-number', () => {
+      expect(isValidColorSlotOverride(-1)).toBe(false)
+      expect(isValidColorSlotOverride(PROJECT_COLOR_SLOTS.length)).toBe(false)
+      expect(isValidColorSlotOverride(1.5)).toBe(false)
+      expect(isValidColorSlotOverride(Number.NaN)).toBe(false)
+      expect(isValidColorSlotOverride('0')).toBe(false)
+      expect(isValidColorSlotOverride(null)).toBe(false)
+      expect(isValidColorSlotOverride(undefined)).toBe(false)
+    })
   })
 })
 

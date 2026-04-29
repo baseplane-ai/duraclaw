@@ -2030,6 +2030,12 @@ export function createApiApp() {
           ahead: 0,
           behind: 0,
           pr: null,
+          // GH#84: surface admin-set tab overrides at cold-start so the
+          // tab strip renders the chosen abbrev/color before the gateway
+          // delta arrives. Both fields are NULL by default and fall back
+          // to the auto-derivation in `lib/project-display.ts` when absent.
+          abbrev: row.abbrev ?? null,
+          color_slot: row.colorSlot ?? null,
         }
         return { ...base, sessions: sessions as AgentSessionRow[] }
       }),
@@ -2227,6 +2233,11 @@ export function createApiApp() {
         behind: 0,
         pr: null,
         visibility: (row.visibility === 'private' ? 'private' : 'public') as 'public' | 'private',
+        // GH#84: include abbrev/colorSlot in every visibility broadcast so
+        // a TanStack DB replace-upsert can't accidentally null them out
+        // between syncs.
+        abbrev: row.abbrev ?? null,
+        color_slot: row.colorSlot ?? null,
       }
       const userRows = await db.select({ userId: userPresence.userId }).from(userPresence)
       const userIds = userRows.map((r) => r.userId)
@@ -2240,6 +2251,108 @@ export function createApiApp() {
     }
 
     return c.json({ ok: true, visibility: body.visibility })
+  })
+
+  // GH#84: per-project tab abbrev + color override. Admin-only, mirrors
+  // the visibility PATCH pattern (D1 write + synced-collection broadcast
+  // to every active-presence user). Both fields are independently
+  // nullable — pass `null` to clear back to the auto-derivation. Omitted
+  // fields are not touched.
+  app.patch('/api/projects/:name/customization', async (c) => {
+    const role = c.get('role')
+    if (role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
+
+    const name = c.req.param('name')
+    const body = (await c.req.json().catch(() => ({}))) as {
+      abbrev?: string | null
+      color_slot?: number | null
+    }
+
+    // Server-side validators mirror the client-side helpers in
+    // `lib/project-display.ts` (`ABBREV_OVERRIDE_RE`,
+    // `isValidColorSlotOverride`). Keep these in lockstep — if the
+    // palette grows, both sides must update.
+    const ABBREV_RE = /^[A-Z0-9]{1,2}$/
+    const COLOR_SLOT_COUNT = 10
+
+    const updates: { abbrev?: string | null; colorSlot?: number | null } = {}
+
+    if (body.abbrev !== undefined) {
+      if (body.abbrev === null) {
+        updates.abbrev = null
+      } else if (typeof body.abbrev === 'string' && ABBREV_RE.test(body.abbrev)) {
+        updates.abbrev = body.abbrev
+      } else {
+        return c.json({ error: 'invalid_abbrev', detail: 'must match [A-Z0-9]{1,2}' }, 400)
+      }
+    }
+
+    if (body.color_slot !== undefined) {
+      if (body.color_slot === null) {
+        updates.colorSlot = null
+      } else if (
+        typeof body.color_slot === 'number' &&
+        Number.isInteger(body.color_slot) &&
+        body.color_slot >= 0 &&
+        body.color_slot < COLOR_SLOT_COUNT
+      ) {
+        updates.colorSlot = body.color_slot
+      } else {
+        return c.json(
+          { error: 'invalid_color_slot', detail: `must be an integer in [0, ${COLOR_SLOT_COUNT})` },
+          400,
+        )
+      }
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return c.json({ error: 'no_fields_to_update' }, 400)
+    }
+
+    const db = getDb(c.env)
+    const now = new Date().toISOString()
+    const result = await db
+      .update(projectsTable)
+      .set({ ...updates, updatedAt: now })
+      .where(eq(projectsTable.name, name))
+      .returning({ name: projectsTable.name })
+    if (!result[0]) return c.json({ error: 'Project not found' }, 404)
+
+    // Re-read the full row + broadcast — same shape contract as the
+    // visibility PATCH so the client sees one canonical ProjectInfo per
+    // delta, not partial patches.
+    const [row] = await db.select().from(projectsTable).where(eq(projectsTable.name, name)).limit(1)
+    if (row) {
+      const projectInfo: ProjectInfo = {
+        name: row.name,
+        path: row.rootPath,
+        branch: 'unknown',
+        dirty: false,
+        active_session: null,
+        repo_origin: null,
+        ahead: 0,
+        behind: 0,
+        pr: null,
+        visibility: (row.visibility === 'private' ? 'private' : 'public') as 'public' | 'private',
+        abbrev: row.abbrev ?? null,
+        color_slot: row.colorSlot ?? null,
+      }
+      const userRows = await db.select({ userId: userPresence.userId }).from(userPresence)
+      const userIds = userRows.map((r) => r.userId)
+      c.executionCtx.waitUntil(
+        Promise.allSettled(
+          userIds.map((uid) =>
+            broadcastSyncedDelta(c.env, uid, 'projects', [{ type: 'update', value: projectInfo }]),
+          ),
+        ).then(() => undefined),
+      )
+    }
+
+    return c.json({
+      ok: true,
+      abbrev: row?.abbrev ?? null,
+      color_slot: row?.colorSlot ?? null,
+    })
   })
 
   // GH#27 P1.6 WU-B: GET /api/projects/:projectId/docs-files
@@ -3073,13 +3186,31 @@ export function createApiApp() {
       const userId = c.get('userId')
       const hiddenSet = await getHiddenProjects(c.env, userId)
       const db = getDb(c.env)
+      // GH#84: pull abbrev/colorSlot alongside visibility so the tab strip
+      // can read all admin-set overrides off projectsCollection without
+      // waiting for a separate D1 round-trip.
       const d1Rows = await db
-        .select({ name: projectsTable.name, visibility: projectsTable.visibility })
+        .select({
+          name: projectsTable.name,
+          visibility: projectsTable.visibility,
+          abbrev: projectsTable.abbrev,
+          colorSlot: projectsTable.colorSlot,
+        })
         .from(projectsTable)
-      const visMap = new Map(d1Rows.map((r) => [r.name, r.visibility]))
+      const d1Map = new Map(d1Rows.map((r) => [r.name, r]))
       const filtered =
         hiddenSet.size > 0 ? projects.filter((p) => !hiddenSet.has(p.name)) : projects
-      return c.json(filtered.map((p) => ({ ...p, visibility: visMap.get(p.name) ?? 'private' })))
+      return c.json(
+        filtered.map((p) => {
+          const meta = d1Map.get(p.name)
+          return {
+            ...p,
+            visibility: meta?.visibility ?? 'private',
+            abbrev: meta?.abbrev ?? null,
+            color_slot: meta?.colorSlot ?? null,
+          }
+        }),
+      )
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Gateway unreachable'
       return c.json({ error: message }, 502)
@@ -3092,16 +3223,27 @@ export function createApiApp() {
       const userId = c.get('userId')
       const hiddenSet = await getHiddenProjects(c.env, userId)
       const db = getDb(c.env)
+      // GH#84: same abbrev/colorSlot enrichment as `/api/gateway/projects`.
       const d1Rows = await db
-        .select({ name: projectsTable.name, visibility: projectsTable.visibility })
+        .select({
+          name: projectsTable.name,
+          visibility: projectsTable.visibility,
+          abbrev: projectsTable.abbrev,
+          colorSlot: projectsTable.colorSlot,
+        })
         .from(projectsTable)
-      const visMap = new Map(d1Rows.map((r) => [r.name, r.visibility]))
+      const d1Map = new Map(d1Rows.map((r) => [r.name, r]))
       return c.json(
-        projects.map((p) => ({
-          ...p,
-          hidden: hiddenSet.has(p.name),
-          visibility: visMap.get(p.name) ?? 'private',
-        })),
+        projects.map((p) => {
+          const meta = d1Map.get(p.name)
+          return {
+            ...p,
+            hidden: hiddenSet.has(p.name),
+            visibility: meta?.visibility ?? 'private',
+            abbrev: meta?.abbrev ?? null,
+            color_slot: meta?.colorSlot ?? null,
+          }
+        }),
       )
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Gateway unreachable'

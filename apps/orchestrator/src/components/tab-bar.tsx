@@ -200,14 +200,23 @@ export function TabBar({
     [openTabs, sessionsMap, tabMetaByRef],
   )
 
-  // Projects map: project name → repo_origin. Used to key the color slot
-  // so the 4 worktrees of one repo all share the same fill color.
+  // Projects map: project name → display metadata. `repoOrigin` keys the
+  // color slot so the 4 worktrees of one repo all share the same fill
+  // color (default behavior). GH#84: `abbrev` + `colorSlot` are admin-set
+  // overrides that win over the auto-derivation when present.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data: projectRows } = useLiveQuery((q) => q.from({ p: projectsCollection as any }))
-  const repoOriginByProject = useMemo(() => {
-    const m = new Map<string, string | null>()
+  const projectMetaByName = useMemo(() => {
+    const m = new Map<
+      string,
+      { repoOrigin: string | null; abbrev: string | null; colorSlot: number | null }
+    >()
     for (const p of (projectRows ?? []) as unknown as ProjectInfo[]) {
-      m.set(p.name, p.repo_origin)
+      m.set(p.name, {
+        repoOrigin: p.repo_origin ?? null,
+        abbrev: p.abbrev ?? null,
+        colorSlot: p.color_slot ?? null,
+      })
     }
     return m
   }, [projectRows])
@@ -380,7 +389,19 @@ export function TabBar({
                   draftProject={draftProject}
                   siblingIds={siblingsBySession.get(row.sessionId) ?? [row.sessionId]}
                   repoOrigin={
-                    row.session ? (repoOriginByProject.get(row.session.project) ?? null) : null
+                    row.session
+                      ? (projectMetaByName.get(row.session.project)?.repoOrigin ?? null)
+                      : null
+                  }
+                  abbrevOverride={
+                    row.session
+                      ? (projectMetaByName.get(row.session.project)?.abbrev ?? null)
+                      : null
+                  }
+                  colorSlotOverride={
+                    row.session
+                      ? (projectMetaByName.get(row.session.project)?.colorSlot ?? null)
+                      : null
                   }
                   isActive={row.sessionId === activeSessionId}
                   lastSeenSeq={row.lastSeenSeq}
@@ -437,7 +458,17 @@ export function TabBar({
               }
               repoOrigin={
                 activeDragRow.session
-                  ? (repoOriginByProject.get(activeDragRow.session.project) ?? null)
+                  ? (projectMetaByName.get(activeDragRow.session.project)?.repoOrigin ?? null)
+                  : null
+              }
+              abbrevOverride={
+                activeDragRow.session
+                  ? (projectMetaByName.get(activeDragRow.session.project)?.abbrev ?? null)
+                  : null
+              }
+              colorSlotOverride={
+                activeDragRow.session
+                  ? (projectMetaByName.get(activeDragRow.session.project)?.colorSlot ?? null)
                   : null
               }
               isActive={activeDragRow.sessionId === activeSessionId}
@@ -464,6 +495,14 @@ interface ProjectTabProps {
    *  so sibling worktrees of the same repo share a fill color. Null when
    *  the project isn't in the synced projects collection yet. */
   repoOrigin?: string | null
+  /** GH#84: admin-set override for the 2-char tab abbreviation. Wins over
+   *  the regex derivation when valid (`[A-Z0-9]{1,2}`); null/invalid →
+   *  fall back to derivation. */
+  abbrevOverride?: string | null
+  /** GH#84: admin-set override for the project fill color, as an index
+   *  into `PROJECT_COLOR_SLOTS`. Wins over the FNV-1a hash when in range;
+   *  null/out-of-range → fall back to the hash. */
+  colorSlotOverride?: number | null
   isActive: boolean
   isDragging?: boolean
   /** Highest `messageSeq` the user has acknowledged for this tab (from
@@ -545,6 +584,8 @@ function ProjectTabInner({
   draftProject,
   siblingIds,
   repoOrigin,
+  abbrevOverride,
+  colorSlotOverride,
   isActive,
   isDragging,
   lastSeenSeq,
@@ -594,13 +635,22 @@ function ProjectTabInner({
   // Project color keyed by `repo_origin` so sibling worktrees of the same
   // repo share a fill; falls back to the repo base name when the project
   // isn't in the synced collection yet (cold start / draft tab).
+  // GH#84: admin-set `abbrevOverride` / `colorSlotOverride` win over the
+  // auto-derivation when valid; `formatTabLabel` and `deriveProjectColorSlot`
+  // both fall back silently on null / invalid values.
   const tabProjectName = session?.project ?? draftProject ?? ''
   const repoBase = deriveRepoBase(tabProjectName)
-  const abbrev = deriveProjectAbbrev(repoBase)
+  const abbrev =
+    typeof abbrevOverride === 'string' && abbrevOverride.length > 0
+      ? abbrevOverride
+      : deriveProjectAbbrev(repoBase)
   const worktreeN = parseWorktreeSuffix(tabProjectName, repoBase)
   const sessionLetter = deriveSessionSuffix(sessionId, siblingIds ?? [sessionId])
   const denseLabel = `${abbrev}${worktreeN}${sessionLetter}`
-  const colorSlot: ProjectColorSlot = deriveProjectColorSlot(repoOrigin || repoBase || null)
+  const colorSlot: ProjectColorSlot = deriveProjectColorSlot(
+    repoOrigin || repoBase || null,
+    colorSlotOverride,
+  )
   const ringClass = statusRingClass(tabStatus)
 
   useEffect(() => {

@@ -290,6 +290,17 @@ export const projects = sqliteTable('projects', {
   updatedAt: text('updated_at').notNull(),
   deletedAt: text('deleted_at'),
   visibility: text('visibility').notNull().default('public'),
+  // GH#84: optional per-project display overrides for the tab strip.
+  // Both default-NULL → fall back to the auto-derivation in
+  // `lib/project-display.ts` (FNV-1a slot hash + regex abbrev). Admins
+  // patch via `PATCH /api/projects/:name/customization`. Gateway sync
+  // upserts MUST omit these columns from the update set so admin
+  // overrides survive a re-sync (same pattern as `visibility`).
+  // `abbrev` is constrained client+server-side to `[A-Z0-9]{1,2}`;
+  // `colorSlot` is an integer index into `PROJECT_COLOR_SLOTS`
+  // (10 slots today). See migration 0032.
+  abbrev: text('abbrev'),
+  colorSlot: integer('color_slot'),
 })
 
 /**

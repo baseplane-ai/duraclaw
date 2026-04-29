@@ -687,6 +687,22 @@ export interface ProjectInfo {
   pr: PrInfo | null
   /** Spec #68 — public projects (and their sessions) are visible to all authed users. */
   visibility?: 'public' | 'private'
+  /**
+   * GH#84: optional admin-set override for the 2-char tab abbreviation.
+   * Constrained server-side to `[A-Z0-9]{1,2}`; null/undefined falls back
+   * to the regex derivation in `lib/project-display.ts` (`deriveProjectAbbrev`).
+   * D1-stored on the `projects` row; the gateway side does not write this
+   * field — admins patch via `PATCH /api/projects/:name/customization`.
+   */
+  abbrev?: string | null
+  /**
+   * GH#84: optional admin-set override for the tab fill color, as an index
+   * into `PROJECT_COLOR_SLOTS` (10 slots today). Out-of-range / null falls
+   * back to the FNV-1a hash derivation in `lib/project-display.ts`
+   * (`deriveProjectColorSlot`). D1-stored on the `projects` row; the
+   * gateway side does not write this field.
+   */
+  color_slot?: number | null
 }
 
 // ── SDK Session Info (on-disk session metadata) ─────────────────────

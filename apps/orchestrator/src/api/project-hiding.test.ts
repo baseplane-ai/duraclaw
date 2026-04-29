@@ -220,6 +220,10 @@ describe('project hiding', () => {
         hidden: true,
         // Spec #68 P2: projects carry a `visibility` field; unknown-in-D1 → 'private'.
         visibility: 'private',
+        // GH#84: every gateway/projects row carries the abbrev + color_slot
+        // overrides from D1; null when no admin override is set.
+        abbrev: null,
+        color_slot: null,
       })
     })
 
