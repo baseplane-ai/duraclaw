@@ -71,18 +71,26 @@ This doc:
 > Vercel-style words exhausted, phonotactic compounds mid-tier.
 > User-flagged `varni.ai` was open with no AI/dev-tools conflict.
 >
-> **Round 12 — VARNI IS DEAD.** User caught what my searches missed:
-> VARNI is a real Indian premium consumer electronics brand (Bluetooth
-> speakers, mobile accessories, home automation), active since 2009,
-> 20,000 dealers, retail presence on Amazon.in / Flipkart / Snapdeal,
-> tagline *"A Proudly Indian Brand."* **Class 9 trademark collision** —
-> consumer electronics and computer software share Class 9, so VARNI's
-> mark blocks software/SaaS use. See
-> [§8.18d](#818d-round-12--varni-walkback-consumer-electronics-conflict)
-> for the kill and a methodology update (must search candidate name
-> against *adjacent Class-9 product categories*, not just AI / dev
-> tools — a Class-9 trademark holder in *any* product category can
-> block software use).
+> **Round 12 — VARNI flagged as conflicted (consumer electronics
+> brand).** VARNI is a real Indian premium consumer electronics brand
+> (Bluetooth speakers, mobile accessories, home automation), active
+> since 2009, 20,000 dealers, retail on Amazon.in / Flipkart / Snapdeal.
+>
+> **Round 13 — partial walkback. Round 12's "same Class blocks" was
+> wrong.** Per user pushback (*"there's nothing in the US trademark"*),
+> the actual USPTO test is *likelihood of confusion* — distinct goods
+> + channels + customers in the same Class routinely coexist (Dove
+> soap vs. chocolates, Delta airlines vs. faucets). VARNI's likely
+> US trademark exposure to a US enterprise SaaS use is **LOW**,
+> contingent on USPTO TESS showing no live US filing. Indian-market
+> access remains contested. **Definitive answer needs a $200–500
+> trademark-paralegal USPTO TESS pull** which I can't run from this
+> shell. See [§8.18f](#818f-round-13--partial-walkback-of-round-12-class-9--block)
+> for the corrected legal logic and [§8.18g](#818g-decision-tree-calibrated)
+> for the decision tree.
+>
+> **Recommendation: pay $500 for the TESS pull as the gate.** If
+> clean, **Varni is the answer.** If dirty, **stay with duraclaw.**
 >
 > **Final rest state — recommendation: stay with duraclaw.** After
 > twelve rounds the universe of available enterprise-credible AI brand
@@ -919,6 +927,80 @@ pronounceable on first read, (c) no AI/dev-tools competitor, (d)
 brand-feel matching the Vercel/Cohere/Plaid/Mistral school. The
 trade-off — never owning `varni.com` — is a real cost but a
 well-trodden one for AI-era brands.
+
+### 8.18f Round-13 — partial walkback of round 12 (Class-9 ≠ block)
+
+**User pushback:** *"Wait hold on there's nothing in the US trademark."*
+**Correct.**
+
+Round 12 conflated **same Class** with **likelihood of confusion**.
+That's wrong. The actual USPTO test is the *likelihood-of-confusion*
+multi-factor test, not Class identity.
+
+| Factor | VARNI India electronics | "Varni AI" software |
+|---|---|---|
+| Goods | Bluetooth speakers, USB cables, mobile cases | Enterprise AI agent orchestration SaaS |
+| Channels | Amazon.in / Flipkart / Snapdeal consumer retail | Direct B2B enterprise sales |
+| Customers | Indian consumers buying $20 audio gear | US/EU CISOs buying governance infra |
+| Mark identity | VARNI | VARNI |
+| Strength of senior mark | Small/regional, no apparent US filing | — |
+
+**USPTO precedent:** distinct goods + distinct channels + distinct
+customers in the same Class routinely co-exist (Dove soap vs. Dove
+chocolates; Delta airlines vs. Delta faucets). VARNI's actual
+likelihood-of-confusion exposure to a US enterprise SaaS use is
+**LOW**, contingent on USPTO TESS showing no live US registration.
+
+**What I could not verify from this shell:** the new USPTO TESS
+(`tmsearch.uspto.gov`) is a JS-rendered SPA — WebFetch can't process
+it; the trademark aggregators (uspto.report, justia) returned 403.
+**The definitive answer requires a $200–500 trademark-paralegal pull**
+across classes 9, 35, 38, 41, 42.
+
+**Revised risk profile for Varni:**
+
+| Risk | Severity | Why |
+|---|---|---|
+| US trademark conflict | **LOW** (probably) | Different goods/channels/customers; if no US filing, your launch establishes first-use rights |
+| Indian market access | HIGH | Their home market; Indian enterprises will see "Varni" as the speaker brand first |
+| C&D nuisance | MEDIUM | Could be sent regardless of legal merit; defending costs |
+| Future Madrid filing | MEDIUM | They could file US designation later; first-use defense helps |
+| Search-pollution (global) | LOW–MEDIUM | A well-funded US AI brand dominates `varni.ai` search within 12 months |
+| Search-pollution (India) | HIGH | 20,000 distributors + Amazon.in / Flipkart listings; persistent |
+
+**Round-12's "Varni is dead" was overreach.** Accurate framing:
+**Varni is verification-pending — needs a USPTO TESS pull as the gate**,
+not an automatic kill.
+
+### 8.18g Decision tree (calibrated)
+
+1. **Pay for USPTO TESS pull on VARNI across classes 9/35/38/41/42**
+   ($200–500, 1–3 days, trademark paralegal). Look for live
+   registrations or pending applications by VARNI India, Krishan
+   Mali, Varni Digital Pvt Ltd, or any other VARNI-mark holder.
+2. **If clean:** Varni is the recommendation, with the residual
+   caveat that the Indian enterprise market is contested.
+3. **If dirty (active US filing):** Varni is dead, fall back to
+   duraclaw or Spinewright / Bridgehold.
+
+The Indian-market residual risk matters most if India is a Tier-1
+enterprise target. For a US/EU enterprise positioning (the README's
+explicit framing), the residual risk is acceptable.
+
+### 8.18h Updated final recommendation
+
+**Run the USPTO TESS pull first.** If clean, **Varni is the answer.**
+If dirty, **stay with duraclaw.** The right gate is empirical, not
+speculative.
+
+The methodology lesson recorded earlier (§8.12, §8.18d) stands but
+needs one more line:
+
+> **The "same Class blocks software" rule from §8.18d was wrong.**
+> Same Class is *not* sufficient for trademark blocking — likelihood
+> of confusion across goods, channels, and customers is the actual
+> test. When in doubt, run a real USPTO TESS query (paid paralegal
+> task), not Class-identity arithmetic.
 
 ### 8.18d Round-12 — VARNI WALKBACK (consumer electronics conflict)
 
