@@ -1,0 +1,8 @@
+{
+  "expo": {
+    "name": "duraclaw-orchestrator",
+    "slug": "duraclaw-orchestrator",
+    "main": "./src/entry-rn.tsx",
+    "platforms": ["web"]
+  }
+}

@@ -647,9 +647,17 @@ Steps:
 
 Steps:
 1. After VP-2 completes, run:
-   `grep -hE '_(alignItems|dsp|fd|jc)-' apps/orchestrator/dist/client/assets/*.css | sort -u | head -20`
-   Expected: at least 1 line per category (alignItems, dsp, fd, jc) —
-   i.e., at least 4 distinct hashed-class output lines.
+   `grep -hoE "_[a-zA-Z]+-[a-zA-Z0-9_-]+" apps/orchestrator/dist/client/assets/*.css | sort -u | grep -E '^_(alignItems|dsp|fd|justifyContent)-' | head -20`
+   Expected: at least 1 line per category (alignItems, dsp, fd,
+   justifyContent) — i.e., at least 4 distinct hashed-class output
+   lines. **Note (P2 impl):** the grep uses `justifyContent` instead
+   of the v1 short form `jc` because Tamagui v2-rc.41 names extracted
+   atomic classes with the long-form CSS property name (verified at
+   impl time on the post-pA build: `_alignItems-center`, `_dsp-flex`,
+   `_dsp-inline`, `_fd-column`, `_fd-row`, `_justifyContent-center`).
+   The non-anchored capture (`-hoE`) is also load-bearing — without
+   it, the single-line minified CSS bundle returns one match-per-file
+   regardless of how many classes are inside.
 2. Paste the output as a comment on the P2 PR (per D4 evidence
    format). Reviewer confirms ≥1 hashed class per category before
    approving the PR.
