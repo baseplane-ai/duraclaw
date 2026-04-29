@@ -1353,7 +1353,78 @@ export function createApiApp() {
     const sessionId = body.sessionId ?? null
     const id = typeof body.id === 'string' && body.id.length > 0 ? body.id : crypto.randomUUID()
     const createdAt = new Date().toISOString()
-    const meta = typeof body.meta === 'string' ? body.meta : null
+    const rawMeta = typeof body.meta === 'string' ? body.meta : null
+
+    // One-tab-per-project server-side dedup. The client's optimistic
+    // delete-then-insert loop fires N independent DELETE + 1 POST as
+    // separate fetches; they race with peer devices and page refreshes,
+    // leaving orphan project tabs on the server. When the POST body's
+    // meta carries `dedupProject`, atomically soft-delete every live tab
+    // whose `meta.project` matches and then insert the new row, all in
+    // one drizzle batch. The transient `dedupProject` field is stripped
+    // from `meta` before persisting.
+    let dedupProject: string | null = null
+    let meta = rawMeta
+    let metaParsed: Record<string, unknown> | null = null
+    if (rawMeta !== null) {
+      try {
+        const parsed = JSON.parse(rawMeta)
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          metaParsed = parsed as Record<string, unknown>
+          const dp = metaParsed.dedupProject
+          if (typeof dp === 'string' && dp.length > 0) {
+            dedupProject = dp
+            const { dedupProject: _strip, ...cleanMeta } = metaParsed
+            meta = JSON.stringify(cleanMeta)
+          }
+        }
+      } catch {
+        // Malformed JSON — leave meta opaque; legacy behavior preserved.
+      }
+    }
+
+    // If a live tab already exists for (userId, sessionId), this is the
+    // refresh / cold-start race — the insert below will hit the unique
+    // index and we return the canonical existing row. Detect it BEFORE
+    // soft-deleting project siblings so we don't nuke other live project
+    // tabs on a benign re-POST. Skip-dedup is only relevant when the body
+    // has a sessionId AND we'd otherwise dedup.
+    let skipDedup = false
+    if (dedupProject !== null && sessionId !== null) {
+      const existingForSession = await db
+        .select({ id: userTabs.id })
+        .from(userTabs)
+        .where(
+          and(
+            eq(userTabs.userId, userId),
+            eq(userTabs.sessionId, sessionId),
+            isNull(userTabs.deletedAt),
+          ),
+        )
+        .limit(1)
+      if (existingForSession.length > 0) {
+        skipDedup = true
+      }
+    }
+
+    let softDeletedSessionIds: string[] = []
+    if (dedupProject !== null && !skipDedup) {
+      // Capture sessionIds we're about to soft-delete so the caller can
+      // fan out viewer changes for them after the batch lands.
+      const toDelete = await db
+        .select({ id: userTabs.id, sessionId: userTabs.sessionId })
+        .from(userTabs)
+        .where(
+          and(
+            eq(userTabs.userId, userId),
+            isNull(userTabs.deletedAt),
+            sql`json_extract(${userTabs.meta}, '$.project') = ${dedupProject}`,
+          ),
+        )
+      softDeletedSessionIds = toDelete
+        .map((r) => r.sessionId)
+        .filter((s): s is string => typeof s === 'string' && s.length > 0)
+    }
 
     // Insert-then-catch is the atomic dedup path: a partial unique index on
     // (user_id, session_id) WHERE deleted_at IS NULL AND session_id IS NOT NULL
@@ -1362,14 +1433,51 @@ export function createApiApp() {
     // return the existing row with status 200 — same shape as a successful
     // dedup.
     try {
-      const inserted = await db
-        .insert(userTabs)
-        .values({ id, userId, sessionId, position, createdAt, meta })
-        .returning()
-      const newRow = inserted[0] as UserTabRow
+      let newRow: UserTabRow
+      if (dedupProject !== null && !skipDedup) {
+        // Atomic soft-delete + insert via db.batch (D1 doesn't support
+        // interactive transactions — see comment in the reorder handler).
+        const deletedAt = new Date().toISOString()
+        const updateOp = db
+          .update(userTabs)
+          .set({ deletedAt })
+          .where(
+            and(
+              eq(userTabs.userId, userId),
+              isNull(userTabs.deletedAt),
+              sql`json_extract(${userTabs.meta}, '$.project') = ${dedupProject}`,
+            ),
+          )
+        const insertOp = db
+          .insert(userTabs)
+          .values({ id, userId, sessionId, position, createdAt, meta })
+          .returning()
+        const results = await db.batch([updateOp, insertOp])
+        // batch returns results in the same order as the ops; the insert
+        // is the second op.
+        const insertResult = results[1] as UserTabRow[] | undefined
+        if (!insertResult || insertResult.length === 0) {
+          // Should never happen — the insert either succeeded or threw
+          // a unique-violation handled below. Defensive.
+          throw new Error('Tab insert returned no row')
+        }
+        newRow = insertResult[0] as UserTabRow
+      } else {
+        const inserted = await db
+          .insert(userTabs)
+          .values({ id, userId, sessionId, position, createdAt, meta })
+          .returning()
+        newRow = inserted[0] as UserTabRow
+      }
+
       c.executionCtx.waitUntil(broadcastTabsSnapshot(c.env, userId, db))
-      if (sessionId) {
-        c.executionCtx.waitUntil(fanoutSessionViewerChange(c.env, db, [sessionId]))
+      // Fan out viewer changes for both the new sessionId and any session
+      // whose tab we just soft-deleted.
+      const affected = new Set<string>()
+      if (sessionId) affected.add(sessionId)
+      for (const s of softDeletedSessionIds) affected.add(s)
+      if (affected.size > 0) {
+        c.executionCtx.waitUntil(fanoutSessionViewerChange(c.env, db, Array.from(affected), userId))
       }
       return c.json({ tab: newRow }, 201)
     } catch (err) {

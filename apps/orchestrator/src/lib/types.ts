@@ -188,6 +188,16 @@ export interface TabMeta {
    * before the user sees a spurious "Done" marker.
    */
   lastSeenSeq?: number
+  /**
+   * Transient one-tab-per-project dedup hint, set ONLY on the way to the
+   * server in `openTab`'s POST body. The server soft-deletes any other live
+   * tab whose `meta.project` matches `dedupProject` for the same user,
+   * atomically with the new row's insert, then strips this field before
+   * persisting `meta`. Never present on rows the client receives back —
+   * server-side insurance against the client's N-DELETE + 1-POST race
+   * which can leave duplicate project tabs across devices / mid-session.
+   */
+  dedupProject?: string
 }
 
 export interface UserTabRow {

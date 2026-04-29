@@ -123,6 +123,10 @@ export function makeFakeDb(cfg: DbStubConfig = {}) {
       if (!data.runTransactions) return undefined
       return cb(db)
     }),
+    // D1's `db.batch(ops)` resolves each fluent chain in order — each op
+    // is already a thenable Proxy from `makeChain`, so awaiting them
+    // delegates to the configured resolver / queue.
+    batch: vi.fn(async (ops: unknown[]) => Promise.all(ops as Promise<unknown>[])),
   }
 
   return { db, data }
