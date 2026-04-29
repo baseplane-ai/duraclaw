@@ -39,6 +39,13 @@ This doc:
 5. **Forgewright** — coined, brandable, no conflicts found
 6. **Bowline** — knot that holds without slipping, lightweight nautical
 
+> **2026-04-29 update — pivot on user feedback.** *"Capstan sounds like
+> a cap stand — no need to be literal, just needs to sound cool."* See
+> [§8 — Sound-first round (v2)](#8-sound-first-round-v2) for the
+> revised brainstorm that drops the "the metaphor must defend itself"
+> constraint and optimizes purely for phonetic appeal in the
+> Stripe / Linear / Vercel / Anthropic / Mistral school of brand naming.
+
 ---
 
 ## 1. Why duraclaw doesn't fit the current positioning
@@ -349,3 +356,154 @@ informal poll inside @baseplane-ai before kicking off the rename spec.
 - [anvil.works — Python web app builder](https://anvil.works/)
 - [Crucible AI · GitHub](https://github.com/crucible-ai)
 - [Baseplane.ai — construction software (parent-brand collision note)](https://baseplane.ai/)
+
+---
+
+## 8. Sound-first round (v2)
+
+> **Feedback that triggered this round:** *"Capstan sounds like a cap
+> stand — no need to be literal, just needs to sound cool."*
+
+The v1 brainstorm above is metaphor-driven — every candidate has to
+"defend itself" against the positioning (harness, scaffolding, control
+plane, governance). That filter rules out most cool-sounding brands by
+construction: Vercel, Stripe, Linear, Anthropic, Mistral, Plaid,
+Pulumi, Cohere don't *mean* anything literal in their categories
+either. They just sound like brands.
+
+This section drops the must-defend-itself filter and optimizes purely
+for phonetic appeal, brandability, and conflict-clearance.
+
+### 8.1 What "sounds cool" actually means in dev-tool branding
+
+Looking at brands that landed in the AI / dev-tool category recently
+without justifying themselves through metaphor:
+
+- **Stripe, Plaid, Linear, Cursor** — short, sharp, single-flow
+- **Vercel, Pulumi, Anthropic, Cohere** — Latin / Greek root that
+  *sounds* modern; doesn't translate literally into the product
+- **Mistral, Polaris, Atlas, Polaris** — celestial / weather names with
+  scale connotation (most are taken)
+- **Bolt, Cursor, Linear, Sentry** — single-word verb / noun
+
+Sound qualities that consistently work:
+- **Hard consonants** to start: k-, t-, p-, st-, str-, kr-, pr-
+- **Open vowels** in the body: a, o
+- **One or two syllables**, ideally read as a single phonetic unit
+  (this is the rule "Capstan" violated — it parses as "cap" + "stan")
+- **No internal morpheme boundary** that the ear can split on first
+  hearing
+- **Latin / Greek / Slavic root** is fine — modern brand-feel without
+  being made-up gibberish
+
+### 8.2 v2 candidate pool — sound-first
+
+Cleared of conflicts at the dev-tools / AI level (see §8.3 for the
+sweep):
+
+| Candidate | Syllables | Read | Brand vibe |
+|---|---|---|---|
+| **Strake** | 1 | strayk | Sharpest single-syllable in this list. Looks like Stripe meets Drake. Aerospace / shipbuilding term but not common-knowledge — reads as a brand, not a word. |
+| **Spire** | 1 | spy-r | Vertical, structural, rises *above* something — natural pairing with `baseplane` (foundation → spire). Short, clean. |
+| **Tempest** | 2 | TEM-pest | Classical, dramatic, recognizable. Reads as scale and intensity without being aggressive. |
+| **Strider** | 2 | STRY-der | Action-coded, hard consonants. Slight LOTR shadow but generic enough that it doesn't dominate. |
+| **Praetor** | 2 | PRAY-tor | Roman magistrate / authority — governance-coded without being heavy-handed. Distinctive. |
+| **Cinder** | 2 | SIN-der | Forge-adjacent imagery without colliding with Ember.js. Soft enough to balance the rest of a hard brand. |
+| **Verge** | 1 | vurj | Edgy, "the verge of"-coded. *The Verge* is a media brand but in a different category. |
+| **Stark** | 1 | stark | Severe, clean, stripped-down. **Heavy cultural baggage** (Iron Man / GoT) — caveat. |
+| **Slate** | 1 | slayt | Material-coded, blank-canvas reading. Slate Magazine + Slate Auto exist but neither in dev tools. |
+| **Quartz** | 1 | kwartz | Crystalline / structural, mineral-coded. *Quartz* business-news brand exists. |
+
+Coined / Vercel-school options worth a USPTO check:
+
+| Coined word | Construction | Read |
+|---|---|---|
+| **Stratos** | Greek-feeling, "stratosphere" root | STRA-toss — clean, scale-coded |
+| **Veridian** | Latinate "green / verdant" feel | ver-RID-ee-an — three syllables, tech-modern |
+| **Solex** | "Sol" + "ex" suffix | SO-lex — short, slick |
+| **Korridor** | "Corridor" with K | KOR-ee-dor — Slavic edge |
+| **Sintra** | Place name (Portugal) | SIN-tra — clean, Iberian |
+| **Velnir** | Coined | VEL-neer — Norse-feel |
+
+### 8.3 Conflict sweep — round 2
+
+**Hard conflicts surfaced this round:**
+
+| Name | Conflict | Source |
+|---|---|---|
+| **Halcyon** | Halcyon.ai — *unicorn* anti-ransomware platform ($209M raised, $1B valuation, 524 employees). Owns the "Halcyon AI" brand in security. | [halcyon.ai](https://www.halcyon.ai/) |
+| **Kairos** | **Worst-case conflict.** Anthropic's *unreleased* internal Claude Code daemon mode is literally codenamed **KAIROS** (autonomous "autoDream" feature, leaked via npm unminified bundle March 31, 2026). Plus kairos.computer (AI agent platform), kairos.com (identity verification), kairos-project.org (AI safety). | [Street Insider](https://www.streetinsider.com/Press+Releases/Claude+Code+Leak+Reveals+KAIROS:+Anthropic%E2%80%99s+Unreleased+Persistent+AI+Agent+Raises+Questions+About+the+Future+of+AI+Memory/26281658.html), [Agent-Kairos Medium](https://medium.com/data-and-beyond/agent-kairos-8c42538c240a) |
+| **Telos** | Telos 2.0 — AI Agent for Unreal Blueprints (Aura AI / Ramen). Plus Telos blockchain. | [Games Press](https://www.gamespress.com/en-US/Next-Evolution-of-Best-In-Class-Multi-agent-AI-Assistant-for-Unreal-En) |
+| **Onyx** | onyx.app — open-source AI platform for enterprise search ($10M raised, First Round + Khosla). Adjacent category. | [onyx.app](https://onyx.app/) |
+| **Cobalt** | Cobalt AI — data infrastructure for AI labs (Feb 2026 launch). Plus Cobalt.io (pen-testing). | [Business Wire](https://www.businesswire.com/news/home/20260217348798/en/Cobalt-AI-Launches-Advanced-Data-Infrastructure-for-AI-Labs) |
+| **Polaris** | Atos Polaris AI Platform — *"enterprise-grade autonomous AI agents"* on AWS Marketplace. Direct collision. | [AWS Marketplace](https://aws.amazon.com/marketplace/pp/prodview-5hs53x6h5xtyq) |
+| **Crux** | Crux (YC W24) — *"Decision-Making AI Copilot for Enterprises"* ($2.6M seed). Direct collision. | [TechCrunch](https://techcrunch.com/2024/02/08/crux-is-building-genai-powered-business-intelligence-tools/), [Crunchbase](https://www.crunchbase.com/organization/crux-ai) |
+| **Granite** | IBM Granite — IBM's coding LLM family with Granite.Code VS Code extension. | [IBM Granite](https://www.ibm.com/granite) |
+| **Vega** | Vega Minds — AI agents for firm-knowledge retrieval. Vega IT consultancy. | [Vega Minds Help](https://help.vegaminds.com/en/articles/10050475-vega-s-ai-agents) |
+| **Vesper** | vesper-ai.vercel.app + Vesper crisis-response mobile platform. Soft conflicts but real. | (search) |
+| **Lodestar** | Lodestar (computer-vision dataset platform) — permanently closed but trademark may linger. | [Lodestar docs](https://docs.lodestar.ai/), [Crunchbase](https://www.crunchbase.com/organization/lodestar-ae84) |
+
+**Cleared in dev-tools / AI category (no notable conflict found):**
+
+- **Strake**, **Spire**, **Tempest**, **Strider**, **Praetor**,
+  **Cinder**, **Verge AI**, **Stark AI**, **Slate**, **Quartz**, **Lyra**,
+  **Stratos**, **Veridian**, **Sintra**
+
+(Reminder: clear in web search ≠ trademark-clear. USPTO TESS, EUIPO,
+domain, and npm scope checks are still §6 next-step work.)
+
+### 8.4 v2 Tier-1 — sound-first picks
+
+Top five from this round, scored on the v2 criteria (sound, brand
+distinctiveness, conflict-clearance, parent-brand fit, length):
+
+| Candidate | Sound | Brand distinct. | Conflict (5 = clear) | `baseplane` fit | Length | Total |
+|---|---:|---:|---:|---:|---:|---:|
+| **Strake** | 5 | 5 | 5 | 4 (structural) | 5 (1 syl) | **24** |
+| **Spire** | 5 | 4 | 5 | 5 (foundation→spire) | 5 (1 syl) | **24** |
+| **Tempest** | 5 | 4 | 5 | 3 | 4 (2 syl) | **21** |
+| **Praetor** | 4 | 5 | 5 | 3 | 4 (2 syl) | **21** |
+| **Strider** | 4 | 4 | 5 | 3 | 4 (2 syl) | **20** |
+
+### 8.5 Recommendation (revised)
+
+> **Top pick: Strake.** Single syllable, sharp consonants, no
+> conflicts, novel enough to dominate its own search results, looks
+> good in lowercase as a CLI command (`strake login`). Sounds like a
+> peer of Stripe / Drake / Slate without colliding with any of them.
+
+> **Close second: Spire.** Pairs with `baseplane` on the structural
+> axis (foundation → spire) without being literal about it. Clean,
+> short, conventionally pretty. Slightly less distinctive than Strake
+> because "spire" is a known English noun.
+
+Both are short enough to be the CLI command (replacing `kata` /
+`duraclaw` invocations: `spire enter implementation`, `strake enter
+implementation` both read fine), short enough for a logo, and clear in
+the web-conflict sweep. Either survives the "sounds cool first, defends
+itself later" criterion the v1 list mostly failed.
+
+**Tertiary picks if Strake / Spire are blocked at trademark search:**
+**Praetor** (governance-coded), **Tempest** (dramatic, recognizable),
+**Strider** (action-coded). Skip **Stark** unless you're willing to
+fight the Iron Man / GoT cultural baggage.
+
+The §6 next-step checks (USPTO TESS classes 9 + 42, EUIPO, .com / .ai,
+GitHub org, npm scope, locale check) apply to **Strake** and **Spire**
+as the new front-runners.
+
+---
+
+## Sources (round 2)
+
+- [Halcyon.ai — anti-ransomware platform](https://www.halcyon.ai/)
+- [Anthropic Claude Code KAIROS leak (Mar 31 2026)](https://www.streetinsider.com/Press+Releases/Claude+Code+Leak+Reveals+KAIROS:+Anthropic%E2%80%99s+Unreleased+Persistent+AI+Agent+Raises+Questions+About+the+Future+of+AI+Memory/26281658.html)
+- [Agent-Kairos | Medium (Apr 2026)](https://medium.com/data-and-beyond/agent-kairos-8c42538c240a)
+- [Onyx — open-source AI platform](https://onyx.app/)
+- [Cobalt AI launches data infrastructure](https://www.businesswire.com/news/home/20260217348798/en/Cobalt-AI-Launches-Advanced-Data-Infrastructure-for-AI-Labs)
+- [Atos Polaris AI Platform on AWS Marketplace](https://aws.amazon.com/marketplace/pp/prodview-5hs53x6h5xtyq)
+- [Crux (YC W24) | TechCrunch](https://techcrunch.com/2024/02/08/crux-is-building-genai-powered-business-intelligence-tools/)
+- [IBM Granite — open AI models for code](https://www.ibm.com/granite)
+- [Telos 2.0 — AI Agent for Unreal Blueprints | Games Press](https://www.gamespress.com/en-US/Next-Evolution-of-Best-In-Class-Multi-agent-AI-Assistant-for-Unreal-En)
+- [Vega Minds — AI agents](https://help.vegaminds.com/en/articles/10050475-vega-s-ai-agents)
+- [Lodestar (closed) | Crunchbase](https://www.crunchbase.com/organization/lodestar-ae84)
