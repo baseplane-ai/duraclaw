@@ -12,6 +12,7 @@
  * deleted rows out, so clients see only live tabs.
  */
 
+import type { Transaction } from '@tanstack/db'
 import { apiUrl } from '~/lib/platform'
 import type { UserTabRow } from '~/lib/types'
 import { dbReady } from './db-instance'
@@ -20,6 +21,77 @@ import { createSyncedCollection } from './synced-collection'
 export type TabRow = UserTabRow
 
 const persistence = await dbReady
+
+export async function userTabsOnInsert({ transaction }: { transaction: Transaction<UserTabRow> }) {
+  for (const m of transaction.mutations) {
+    const resp = await fetch(apiUrl('/api/user-settings/tabs'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(m.modified),
+    })
+    if (!resp.ok) {
+      // Observability guardrail: stuck-tab debug (2026-04-22). A silent
+      // rollback of an optimistic insert is invisible from the UI — log
+      // the response body so the next recurrence leaves breadcrumbs.
+      const body = await resp.text().catch(() => '<unreadable>')
+      console.warn(
+        '[user-tabs] POST failed',
+        JSON.stringify({ status: resp.status, body: body.slice(0, 200), sent: m.modified }),
+      )
+      throw new Error(`Tab insert failed: ${resp.status}`)
+    }
+  }
+}
+
+export async function userTabsOnUpdate({ transaction }: { transaction: Transaction<UserTabRow> }) {
+  for (const m of transaction.mutations) {
+    const resp = await fetch(apiUrl(`/api/user-settings/tabs/${m.key}`), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(m.changes),
+    })
+    if (!resp.ok) {
+      // Stuck-tab debug: the draft→real swap is a PATCH to `sessionId`.
+      // A 400/500 here rolls the optimistic change back and the tab
+      // reverts to the draft id. Log before throwing so the root cause
+      // is visible in console / adb logcat.
+      const body = await resp.text().catch(() => '<unreadable>')
+      console.warn(
+        '[user-tabs] PATCH failed',
+        JSON.stringify({
+          status: resp.status,
+          body: body.slice(0, 200),
+          tabId: m.key,
+          changes: m.changes,
+        }),
+      )
+      throw new Error(`Tab update failed: ${resp.status}`)
+    }
+  }
+}
+
+export async function userTabsOnDelete({ transaction }: { transaction: Transaction<UserTabRow> }) {
+  for (const m of transaction.mutations) {
+    const resp = await fetch(apiUrl(`/api/user-settings/tabs/${m.key}`), { method: 'DELETE' })
+    // HTTP DELETE is idempotent — a 404 means the row is already gone, which
+    // is exactly the post-state we want. Throwing here would cause TanStack
+    // DB to roll back the optimistic delete and resurrect the row, leaving
+    // the user with a "zombie" tab they can't close. This matters now that
+    // the server-side atomic dedup in POST /api/user-settings/tabs
+    // soft-deletes the previous project tab as part of its db.batch — the
+    // client's own optimistic dedup loop in `openTab` then fires a DELETE
+    // against the same row and races the server's soft-delete. 404 is the
+    // expected outcome of that race; treat it as success.
+    if (!resp.ok && resp.status !== 404) {
+      const body = await resp.text().catch(() => '<unreadable>')
+      console.warn(
+        '[user-tabs] DELETE failed',
+        JSON.stringify({ status: resp.status, body: body.slice(0, 200), tabId: m.key }),
+      )
+      throw new Error(`Tab delete failed: ${resp.status}`)
+    }
+  }
+}
 
 function createUserTabsCollection() {
   return createSyncedCollection<UserTabRow, string>({
@@ -36,67 +108,9 @@ function createUserTabsCollection() {
     persistence,
     schemaVersion: 1,
 
-    onInsert: async ({ transaction }) => {
-      for (const m of transaction.mutations) {
-        const resp = await fetch(apiUrl('/api/user-settings/tabs'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(m.modified),
-        })
-        if (!resp.ok) {
-          // Observability guardrail: stuck-tab debug (2026-04-22). A silent
-          // rollback of an optimistic insert is invisible from the UI — log
-          // the response body so the next recurrence leaves breadcrumbs.
-          const body = await resp.text().catch(() => '<unreadable>')
-          console.warn(
-            '[user-tabs] POST failed',
-            JSON.stringify({ status: resp.status, body: body.slice(0, 200), sent: m.modified }),
-          )
-          throw new Error(`Tab insert failed: ${resp.status}`)
-        }
-      }
-    },
-
-    onUpdate: async ({ transaction }) => {
-      for (const m of transaction.mutations) {
-        const resp = await fetch(apiUrl(`/api/user-settings/tabs/${m.key}`), {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(m.changes),
-        })
-        if (!resp.ok) {
-          // Stuck-tab debug: the draft→real swap is a PATCH to `sessionId`.
-          // A 400/500 here rolls the optimistic change back and the tab
-          // reverts to the draft id. Log before throwing so the root cause
-          // is visible in console / adb logcat.
-          const body = await resp.text().catch(() => '<unreadable>')
-          console.warn(
-            '[user-tabs] PATCH failed',
-            JSON.stringify({
-              status: resp.status,
-              body: body.slice(0, 200),
-              tabId: m.key,
-              changes: m.changes,
-            }),
-          )
-          throw new Error(`Tab update failed: ${resp.status}`)
-        }
-      }
-    },
-
-    onDelete: async ({ transaction }) => {
-      for (const m of transaction.mutations) {
-        const resp = await fetch(apiUrl(`/api/user-settings/tabs/${m.key}`), { method: 'DELETE' })
-        if (!resp.ok) {
-          const body = await resp.text().catch(() => '<unreadable>')
-          console.warn(
-            '[user-tabs] DELETE failed',
-            JSON.stringify({ status: resp.status, body: body.slice(0, 200), tabId: m.key }),
-          )
-          throw new Error(`Tab delete failed: ${resp.status}`)
-        }
-      }
-    },
+    onInsert: userTabsOnInsert,
+    onUpdate: userTabsOnUpdate,
+    onDelete: userTabsOnDelete,
   })
 }
 
