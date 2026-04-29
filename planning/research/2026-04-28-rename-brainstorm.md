@@ -617,14 +617,67 @@ software is in better shape than any other candidate we've reviewed.
 
 **Next-step checks specifically for Lockstep:**
 - USPTO TESS class 9 (software) and class 42 (SaaS) — verify Sage
-  isn't holding the class 9/42 mark as part of the acquisition
+  isn't holding the class 9/42 mark as part of the acquisition.
+  **Critical gate.** Sage's accounting product was class 35/36; if
+  defensive marks were filed across class 9/42 during the deal, the
+  whole strategy collapses regardless of domain availability.
 - EUIPO eSearch
-- WHOIS on `lockstep.ai`, `lockstep.dev`, `lockstep.app`
+- WHOIS on `lockstep.ai`, `lockstep.dev`, `lockstep.app`,
+  `lockstep.so`, `lockstep.to`
 - GitHub `lockstep` org availability (currently `Lockstep-Network` is
   the accounting / Sage org — different name, low collision risk)
 - `npm` `@lockstep` scope availability
 - Locale check (no obvious negative meanings in Mandarin / Spanish /
   French / German / Japanese — verify)
+
+### 8.10 Domain strategy (round 6)
+
+User intel: *"lockstep.ai taken but not used — could probably buy down
+the road. There's .to and .so."*
+
+Strategy recommendation: **launch on `lockstep.so`, acquire
+`lockstep.ai` early (not later), defensively register `.dev` and
+`.app`, skip `.to`.**
+
+**TLD comparison for an enterprise dev-tooling brand in 2026:**
+
+| TLD | Vibe | Enterprise read | Notable lineage |
+|---|---|---|---|
+| **`.so`** | Dev-credible, "the startup TLD before .com" | Survives procurement deck | Notion (notion.so), early Linear, many YC startups |
+| **`.ai`** | Prestige TLD for AI companies | Strongest signal | Anthropic, Perplexity, etc. |
+| **`.to`** | Indie / shortener / pirate-leaning | Eyebrow-raise from CISO | URL shorteners, file-share sites |
+| **`.dev`** | Google-controlled, dev-coded | Neutral / docs-flavored | Defensive register only |
+| **`.app`** | Google-controlled, product-coded | Neutral / app-flavored | Defensive register only |
+| **`.com`** | **Owned by Sage** (accounting Lockstep) | N/A | Trademark blocked |
+| **`.io`** | Hobby Unity networking lib | Negligible, low collision risk | Skip |
+
+**Phonetic accident:** `lockstep.so` reads as *"lockstep, so [therefore]"*
+— the TLD completes a logical conjunction. `lockstep.to` reads as
+*"lockstep to"* — preposition without object, incomplete.
+
+**Acquisition timing logic for `lockstep.ai`:**
+
+> Buy early, not "down the road." Brand equity creates demand;
+> demand creates price escalation.
+
+Pricing dynamics for parked `.ai` domains on real English words in
+April 2026:
+- **Now (pre-launch, no brand equity):** generic inquiry, typical
+  asking $15K–$40K, often negotiable to ~half
+- **Post-launch (you're "Lockstep"):** owner Googles → identifies
+  buyer → asking 3–4× as Lockstep starts appearing in search results
+  and press
+
+Recommended outreach play: anonymous broker (Squadhelp / Sedo /
+GoDaddy Domain Brokers), do not link buyer identity, set $20–50K
+budget envelope. Launch on `.so` regardless of outcome — gives
+optionality and resilience, lets you walk away from a price-gouging
+seller. Migrating from `.so` to `.ai` later is cheap (DNS + 301s);
+losing leverage by signaling "Lockstep AI" is expensive.
+
+**Defensive registrations to do immediately on rename approval:**
+`lockstep.so` (launch), `lockstep.dev`, `lockstep.app`, GitHub
+`@lockstep` org, `npm` `@lockstep` scope, social handles.
 
 ### 8.8 Honest top picks after five rounds
 
