@@ -46,16 +46,25 @@ This doc:
 > constraint and optimizes purely for phonetic appeal in the
 > Stripe / Linear / Vercel / Anthropic / Mistral school of brand naming.
 >
-> **Rounds 3–5 update — front-runner is now LOCKSTEP.** Three further
-> rounds of tighter conflict checking eliminated the v2 sound-first
-> shortlist (Strake, Spire, Strider, Praetor, Cascade — all taken in
-> AI dev tools). User pushback on Lockstep — *"Lockstep has nothing
-> in AI"* — proved correct: the only Lockstep brand of size is the
-> accounting SaaS acquired by Sage Group in 2022/2024 (now absorbed),
-> and our category is open. **Lockstep scores 38/40 on the criteria
-> matrix** — sound, verb-energy, enterprise-credible, conflict-clear,
-> parent-brand-coherent. See [§8.9](#89-round-5--lockstep-re-evaluation-the-one-we-missed)
-> for the full re-evaluation.
+> **Rounds 3–5 update — front-runner WAS Lockstep, now WITHDRAWN.**
+> Three further rounds of tighter conflict checking eliminated the v2
+> sound-first shortlist (Strake, Spire, Strider, Praetor, Cascade —
+> all taken in AI dev tools). Lockstep briefly held the #1 spot on
+> the criteria matrix.
+>
+> **Round 7 — Lockstep is DEAD.** Authoritative `whois` queries (the
+> check that should have run before round 5's recommendation) revealed
+> `lockstep.ai` is owned by Sage Software, Inc. — registered via
+> MarkMonitor (the Fortune-500 brand-protection registrar) post-
+> acquisition, locked across all three transfer/update/delete
+> states. Same Cloudflare nameservers on `.dev` and `.app` indicate
+> Sage holds the entire defensive software-TLD portfolio. GitHub
+> `/lockstep` is taken by the original Lockstep team (now Sage).
+> See [§8.11](#811-round-7-reality-check--lockstep-is-dead) for the
+> walk-back and [§8.12](#812-methodology-lesson--whois-first-recommend-second)
+> for the methodology lesson — web-search conflict checking cannot
+> see corporate defensive holdings; whois must run BEFORE any rename
+> recommendation.
 
 ---
 
@@ -678,6 +687,100 @@ losing leverage by signaling "Lockstep AI" is expensive.
 **Defensive registrations to do immediately on rename approval:**
 `lockstep.so` (launch), `lockstep.dev`, `lockstep.app`, GitHub
 `@lockstep` org, `npm` `@lockstep` scope, social handles.
+
+### 8.11 Round-7 reality check — Lockstep is DEAD
+
+**Walk-back of the round 5/6 recommendation.** Authoritative whois
+queries (run via `whois`/`dig` from the dev shell) reveal the Sage
+Lockstep brand is *actively defended*, not absorbed. The narrative
+that the standalone Lockstep brand was "fading" was wrong.
+
+**Confirmed via WHOIS (2026-04-29):**
+
+```
+lockstep.ai
+  Registrant Organization: Sage Software, Inc.
+  Address: 271 17th Street NW Suite 1100, Atlanta, GA  ← Sage US HQ
+  Email: dnsadmin@sage.com
+  Registrar: MarkMonitor Inc.  ← Fortune-500 brand-protection registrar
+  Created: 2023-05-05 (POST-acquisition)
+  Expires: 2027-05-05
+  Status: clientDeleteProhibited / clientTransferProhibited / clientUpdateProhibited
+```
+
+`lockstep.dev` and `lockstep.app` resolve to the same Cloudflare
+nameservers (`elaine.ns.cloudflare.com` / `terin.ns.cloudflare.com`)
+as `lockstep.ai` — almost certainly the same Sage portfolio.
+`lockstep.com` is locked under `clientRenewProhibited` since 2022 —
+classic corporate-asset lock pattern. **GitHub `/lockstep`** = "Lockstep
+Labs" (original accounting team, now Sage), HTTP 200, taken.
+
+**What this means:**
+
+1. Sage actively defends the Lockstep trademark across software TLDs.
+2. MarkMonitor + post-acquisition .ai registration = the pattern of a
+   company with — or pursuing — class 9/42 software-mark filings.
+3. `.so` and `.to` *being* available is irrelevant when the brand
+   itself is corporate-owned and defended.
+4. A duraclaw → Lockstep rebrand in software/SaaS would draw a Sage IP
+   C&D within months. Not survivable.
+
+**Lockstep is dead. Same kill-mechanism as Cascade — owned and
+defended by a competitor.** Round 5/6 recommendation withdrawn.
+
+### 8.12 Methodology lesson — whois first, recommend second
+
+Three of my round-5/6 confidence statements were **demonstrably wrong**
+the moment authoritative whois was run:
+
+| Claim (round 5/6) | Reality (round 7) |
+|---|---|
+| "Sage absorbed Lockstep, brand fading" | Sage actively defends Lockstep with MarkMonitor + post-acquisition .ai registration |
+| "lockstep.ai is parked, could be bought down the road" | Owned by Sage HQ via brand-protection registrar; not for sale |
+| "Standalone Lockstep namespace is open" | Sage holds .ai / .dev / .app / .com + GitHub org |
+
+Web-search-only conflict checking is **insufficient** for a real
+brand decision. The cheap-and-fast checks that should run BEFORE
+recommending any name as the front-runner:
+
+1. `whois <name>.com / .ai / .dev / .app / .io / .so` — see who owns
+   each TLD and via which registrar (MarkMonitor / CSC / Brand
+   Cybersecurity = corporate brand defense, big red flag)
+2. `dig <name>.<tld> NS` — same nameservers across multiple TLDs ≈
+   same owner, defensive portfolio
+3. `curl -s -o /dev/null -w "%{http_code}\n" https://github.com/<name>`
+4. USPTO TESS query for the bare word in classes 9 / 42
+5. Sedo / Afternic / Squadhelp listing check (price floor signal)
+
+**These five checks take ~5 minutes. They should gate any rename
+recommendation.** The web-search rounds (1–6 of this doc) were
+useful for surfacing competing AI products in the same category, but
+they cannot see corporate defensive holdings — those are invisible to
+search engines because they have no public-facing site.
+
+### 8.13 Recalibrated front-runner list (post-whois)
+
+Survivors of all six search rounds + the round-7 whois lesson, with
+honest caveat that **none of these have been whois-verified yet**:
+
+1. **Plinth** — needs `whois plinth.{com,ai,dev,app,io,so}` before any
+   recommendation. Suspicion: lower brand-protection profile than
+   Lockstep (Plinth isn't an absorbed company-brand), so corporate
+   defensive holdings less likely — but verify before recommending.
+2. **Forgewright** — coined, very low corporate-defensive risk; almost
+   certainly all TLDs are open.
+3. **Throughline** — known multi-use word; some defensive holdings
+   possible. Whois first.
+4. **Bowline** — known nautical term + Bowline (a few small
+   companies); whois first.
+5. **Buttress** — common English word; almost certainly some corporate
+   defensive holdings exist (architectural / construction). Whois first.
+6. **Bridlepoint** — coined-compound, low risk; whois first.
+
+**Next concrete step before another recommendation:** run the same
+five-check whois battery on the top 3 (Plinth, Forgewright, Throughline)
+and see which one has the cleanest corporate footprint, not just the
+cleanest search results.
 
 ### 8.8 Honest top picks after five rounds
 
