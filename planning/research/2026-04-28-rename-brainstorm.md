@@ -65,6 +65,22 @@ This doc:
 > for the methodology lesson — web-search conflict checking cannot
 > see corporate defensive holdings; whois must run BEFORE any rename
 > recommendation.
+>
+> **Rounds 8–11 — front-runner is now VARNI.** After Lockstep died:
+> rare-English-word fallbacks (Plinth, Forgewright, Throughline) all
+> compromised by recent speculator buys (Plinth.ai registered 9 days
+> before this session); coined Vercel-style 5–7 letter words exhausted
+> (Cohera.com since 1998, Solyn.com paid through 2035); phonotactic-
+> compound finalists (Spinewright, Brakwell, Rookstrand) usable but
+> mid-tier sound. **User-flagged `varni.ai` is open** and clears every
+> gate: `.ai` actually available; "VAR-nee" pronounceable on first read;
+> no AI / dev-tools competitor in the category; brand-feel matching the
+> Vercel / Cohere / Plaid / Mistral school; positive Sanskrit
+> meaning ("pure / guardian / colors"). Trade-off: `.com` (1999, fully
+> locked) is unbuyable — accepted cost (mistral.ai precedent). See
+> [§8.17](#817-round-11--varni-user-found-candidate) for the full
+> verification and [§8.19](#819-pre-public-mention-action-list-varni)
+> for the lockdown sequence.
 
 ---
 
@@ -781,6 +797,137 @@ honest caveat that **none of these have been whois-verified yet**:
 five-check whois battery on the top 3 (Plinth, Forgewright, Throughline)
 and see which one has the cleanest corporate footprint, not just the
 cleanest search results.
+
+### 8.14 Round-8 — whois battery on the post-Lockstep shortlist
+
+All three rare-English-word fallbacks are compromised:
+
+| Name | .com | .ai | GitHub |
+|---|---|---|---|
+| **Plinth** | TAKEN since 1999 (NameCheap-locked corporate) | TAKEN April 20, 2026 — **9 days ago** under WhoisGuard privacy | TAKEN ("Plinth" org) |
+| **Forgewright** | TAKEN April 2025 (newly registered, private holder) | TAKEN August 2025 (newly registered, private holder) | TAKEN |
+| **Throughline** | TAKEN since 2005 (Cloudflare-locked) | TAKEN under Domains By Proxy with all four `client*Prohibited` locks — corporate defensive pattern | TAKEN |
+
+**Plinth.ai registered 9 days before this research session** — someone
+is actively bulk-buying these. The English-rare-word strategy is dead.
+
+### 8.15 Round-9 — coined-word stress test
+
+Tested 14 short coined words (vorex, stratix, praxen, veron, solyn,
+vellix, trovix, korix, aerys, tactus, pellis, varnix, cohera, ardex):
+**every single one was TAKEN on .com AND .ai AND GitHub.** Cohera.com
+since 1998. Solyn.com since 2004 (paid through 2035).
+
+Verdict: **Vercel-style 5-7 letter coined words are exhausted.**
+Domain investors bulk-bought every plausible-sounding pronounceable
+invented word a decade ago and held them through the AI boom.
+
+### 8.16 Round-10 — phonotactically familiar invented words
+
+Tested longer / less-Latin / surname-or-placename-feel coined words.
+Of 32 candidates, **3 fully open + phonetically obvious**:
+
+| Name | Read | Status |
+|---|---|---|
+| **Spinewright** | SPINE-rite | ✅ all OPEN; SPINE + WRIGHT (real-word compound) |
+| **Brakwell** | BRAK-well | ✅ all OPEN; surname/placename pattern (cf. Hartwell, Bracknell) |
+| **Rookstrand** | ROOK-strand | ✅ all OPEN; ROOK + STRAND (real-word compound) |
+
+User feedback on the all-coined batch (Yvarn, Pylvan, etc.):
+**"No one will know how to pronounce it."** Correct critique — Y-as-vowel
+ambiguity and unfamiliar consonant clusters create the Pulumi-tax.
+Real-word compounds avoid this entirely.
+
+Strong "almost there" candidates with only `.com` taken:
+- **Bridgehold** — fortress/control, both real words; .ai + GitHub OPEN
+- **Northkeep** — fortress feel; .ai + GitHub OPEN
+- **Forgeward** — "forge forward" reading; .ai + GitHub OPEN
+
+### 8.17 Round-11 — VARNI (user-found candidate)
+
+User reported `varni.ai` as available. **Confirmed and verified the
+full footprint:**
+
+| | Status |
+|---|---|
+| `varni.ai` | ✅ **OPEN** (whois: "Domain not found") |
+| `varni.io`, `.dev`, `.app`, `.so` | ✅ All OPEN |
+| `varni.com` | ❌ TAKEN since 1999 (GoDaddy, all four `client*Prohibited` locks — long-held private holder) |
+| `github.com/varni` | ❌ TAKEN (likely an Indian developer — Varni is a common Indian girl's name) |
+| `github.com/varni-ai`, `/varnihq`, `/varni-labs` | ✅ All OPEN — org-name alternatives work |
+
+**Brand conflicts in our category:** None at scale. Multiple small
+Indian IT-services consultancies (Varni Technology, Varnitech, Varni
+Tech, Varni Labs, Varni IT Solutions, Varni Infotech) — **none in
+AI / dev tools / agent orchestration**. Will pollute Indian-market
+search results; will not block a global AI brand.
+
+**Sound + brandability:**
+
+| Test | Verdict |
+|---|---|
+| Pronounceable on first read | ✅ "VAR-nee" — same vowel pattern as Vermont, Bernie, varnish |
+| Sound profile (Vercel / Cohere / Plaid school) | ✅ Two syllables, soft-modern AI brand feel |
+| Enterprise read | ✅ Serious without stuffy |
+| Distinctiveness in AI | ✅ Owns its category search results from launch |
+| Sanskrit origin meaning | ✅ Positive: "pure / guardian / colors / one who describes or praises" |
+| Notable historical figure | Varni Srinivasa Iyengar (Indian jurist, freedom fighter, 1891–1969) — neutral-positive association |
+
+**Honest caveats:**
+
+1. **`varni.com` is unbuyable.** 1999-registered + all four Prohibited
+   locks = serious holder, not a flipper. **Plan: launch on `varni.ai`,
+   never own `.com`.** Many AI-tier brands operate this way
+   (`mistral.ai` is the canonical Mistral brand).
+2. **GitHub org via `varni-ai` or `varnihq`.** Hyphen tax acceptable
+   (`anthropic-ai`, `openai-archive` set the precedent).
+3. **Slightly feminine sound** because it's an Indian girl's name. In
+   2026 mostly a positive — Anthropic, Cohere, Mistral are all
+   soft-coded successful AI brands.
+
+### 8.18 Honest top picks after eleven rounds
+
+After the full search-and-whois battery, the candidates that
+actually clear every gate:
+
+1. **Varni** ⭐⭐ — `varni.ai` open; pronounceable; no AI conflict;
+   brandable; positive Sanskrit meaning; **first candidate to hit
+   every test simultaneously**. Caveat: never own `.com`. Recommend.
+2. **Spinewright** — fully open across .com/.ai/GitHub; both real
+   English words; pronounceable; structural metaphor.
+3. **Bridgehold** — fortress/control feel; pronounceable; .com taken
+   but .ai + GitHub open; would need .com negotiation.
+4. **Brakwell** — fully open; placename-feel; pronounceable.
+5. **Rookstrand** — fully open; real-word compound.
+
+**Varni is the recommendation.** It's the first name across eleven
+rounds of search + whois that combines (a) `.ai` actually open, (b)
+pronounceable on first read, (c) no AI/dev-tools competitor, (d)
+brand-feel matching the Vercel/Cohere/Plaid/Mistral school. The
+trade-off — never owning `varni.com` — is a real cost but a
+well-trodden one for AI-era brands.
+
+### 8.19 Pre-public-mention action list (Varni)
+
+Lock down before mentioning the name in any public channel — once
+"Varni AI" surfaces in search results, the `.com` holder Googles you
+and pricing on every other asset triples:
+
+1. **Register today (cheap, all open):**
+   - `varni.ai` (the launch home)
+   - `varni.io`, `varni.dev`, `varni.app`, `varni.so` (defensive)
+2. **Claim GitHub org** — `varni-ai` (preferred, matches `anthropic-ai`
+   pattern) or `varnihq`
+3. **Reserve npm scope** — `@varni`
+4. **Reserve social handles** — `@varni_ai` on X / Bluesky / LinkedIn
+5. **THEN start trademark work** — USPTO TESS classes 9 + 42; small
+   Indian IT shops likely don't have US software marks but verify.
+   EUIPO eSearch in parallel.
+6. **Locale check** — Varni is positively-coded in Sanskrit / Hindi
+   contexts; verify no negative meanings in Mandarin / Japanese /
+   Spanish / French / German / Korean / Arabic.
+7. **Only after #1–#6 clear:** announce the rename internally, write
+   the rename spec, and begin the migration plan.
 
 ### 8.8 Honest top picks after five rounds
 
