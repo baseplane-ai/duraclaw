@@ -66,21 +66,34 @@ This doc:
 > see corporate defensive holdings; whois must run BEFORE any rename
 > recommendation.
 >
-> **Rounds 8–11 — front-runner is now VARNI.** After Lockstep died:
-> rare-English-word fallbacks (Plinth, Forgewright, Throughline) all
-> compromised by recent speculator buys (Plinth.ai registered 9 days
-> before this session); coined Vercel-style 5–7 letter words exhausted
-> (Cohera.com since 1998, Solyn.com paid through 2035); phonotactic-
-> compound finalists (Spinewright, Brakwell, Rookstrand) usable but
-> mid-tier sound. **User-flagged `varni.ai` is open** and clears every
-> gate: `.ai` actually available; "VAR-nee" pronounceable on first read;
-> no AI / dev-tools competitor in the category; brand-feel matching the
-> Vercel / Cohere / Plaid / Mistral school; positive Sanskrit
-> meaning ("pure / guardian / colors"). Trade-off: `.com` (1999, fully
-> locked) is unbuyable — accepted cost (mistral.ai precedent). See
-> [§8.17](#817-round-11--varni-user-found-candidate) for the full
-> verification and [§8.19](#819-pre-public-mention-action-list-varni)
-> for the lockdown sequence.
+> **Rounds 8–11 — Varni briefly held the recommendation.** After
+> Lockstep died, rare-English-word fallbacks all compromised, coined
+> Vercel-style words exhausted, phonotactic compounds mid-tier.
+> User-flagged `varni.ai` was open with no AI/dev-tools conflict.
+>
+> **Round 12 — VARNI IS DEAD.** User caught what my searches missed:
+> VARNI is a real Indian premium consumer electronics brand (Bluetooth
+> speakers, mobile accessories, home automation), active since 2009,
+> 20,000 dealers, retail presence on Amazon.in / Flipkart / Snapdeal,
+> tagline *"A Proudly Indian Brand."* **Class 9 trademark collision** —
+> consumer electronics and computer software share Class 9, so VARNI's
+> mark blocks software/SaaS use. See
+> [§8.18d](#818d-round-12--varni-walkback-consumer-electronics-conflict)
+> for the kill and a methodology update (must search candidate name
+> against *adjacent Class-9 product categories*, not just AI / dev
+> tools — a Class-9 trademark holder in *any* product category can
+> block software use).
+>
+> **Final rest state — recommendation: stay with duraclaw.** After
+> twelve rounds the universe of available enterprise-credible AI brand
+> names is effectively exhausted. Spinewright and Bridgehold remain as
+> mid-tier fallbacks. Neither is clearly better than duraclaw in a way
+> that justifies the 2-4 week migration + SEO loss + break-something
+> risk + team context-switch. Datadog precedent: playful brand + great
+> product is fine. Spend rebrand-budget engineering on shipping
+> product instead. Revisit only if duraclaw the name actually loses a
+> deal in the next quarter. See
+> [§8.18e](#818e-final-rest-state--duraclaw-vs-fallbacks).
 
 ---
 
@@ -906,6 +919,142 @@ pronounceable on first read, (c) no AI/dev-tools competitor, (d)
 brand-feel matching the Vercel/Cohere/Plaid/Mistral school. The
 trade-off — never owning `varni.com` — is a real cost but a
 well-trodden one for AI-era brands.
+
+### 8.18d Round-12 — VARNI WALKBACK (consumer electronics conflict)
+
+**User-flagged after round 11:** *"Oh no it's an Indian electronics brand."*
+
+**Confirmed.** VARNI is a real Indian premium consumer electronics
+brand, active since 2009 (Varni Digital since 2014):
+
+- **Mobile accessories:** Bluetooth speakers, headsets, headphones,
+  power banks, USB cables, mobile cases, touch screens, LCDs
+- **Home automation:** touch switch modules, sensors, remote control
+  switches
+- **20,000 dealers and distributors across India**
+- Active retail: **Amazon.in, Flipkart, Snapdeal** with multiple
+  product lines (SP06, S7, S205, B92, SP25, etc.)
+- Active socials: `@varniindia` Instagram, `@varnigujarat` Facebook,
+  LinkedIn corporate presence
+- Tagline: *"A Proudly Indian Brand"*
+
+**Why this is fatal — the Class 9 trademark problem.**
+
+Both consumer electronics AND computer software live in trademark
+**Class 9**. VARNI almost certainly holds Class 9 marks in India for
+their electronics. Class 9 also covers:
+- Bluetooth speakers (their product) ✅
+- Computer software (our product) ✅
+- Mobile applications ✅
+- Cloud services ✅
+
+If VARNI has filed Madrid Protocol international registrations —
+common for brands at this distribution scale — the mark has force in
+US/EU. Even without international filings, the Indian market is
+closed to "Varni" as a software brand, and Indian electronics brand
+could oppose any USPTO filing on prior-use grounds.
+
+**Methodology lesson harder than round 7's:** even a clear `.ai`
+domain can be blocked by an offline trademark holder in the same
+Class. My round-11 searches for "Varni AI / dev tools / software"
+missed "Varni speakers / electronics" entirely because I never
+queried product categories outside our own.
+
+**Verdict: Varni is dead.** Class 9 collision + 17-year-old brand +
+20,000 distributors + retail presence on three major Indian
+e-commerce platforms = unrecoverable.
+
+**Update to §8.12 methodology checklist** — add:
+- 6. Search the candidate name + adjacent trademark-Class product
+     categories (electronics, hardware, devices) — not just AI / dev
+     tools. A Class-9 trademark holder in *any* Class-9 product
+     category can block your software/SaaS use.
+
+### 8.18e Final rest state — duraclaw vs. fallbacks
+
+User narrowed the decision to **Varni vs. duraclaw**. Varni is now
+killed. That collapses the active rebrand option as framed.
+
+Remaining options:
+
+1. **Stay with duraclaw.** The eleven-round search exhausted realistic
+   high-quality candidates. The friction tax of duraclaw's name is
+   real but bounded; the cost-of-rebrand-to-mid-tier-name may exceed
+   it. Datadog precedent: playful brand + great product = fine.
+
+2. **Spinewright** — only fully-open + pronounceable + real-word
+   compound left standing. Lower brand-credibility ceiling than
+   Varni would have had. Zero trademark / domain risk.
+
+3. **Bridgehold** — best sound profile of remaining candidates;
+   `.ai` + GitHub OPEN; only `.com` in the way. Negotiation play if
+   the .com holder is a flipper.
+
+**Final recommendation:** stay with duraclaw. After 12 rounds, the
+universe of available enterprise-credible AI brand names is
+effectively exhausted. The next-best names (Spinewright, Bridgehold)
+are real options but neither is *clearly* better than duraclaw in a
+way that justifies a 2-4 week migration + SEO loss + break-something
+risk + team context-switch. Spend the rebrand-budget engineering
+time shipping product. Revisit only if duraclaw the name actually
+loses a deal in the next quarter.
+
+### 8.18b Brand-prior concern (Indian recognition) — and revision
+
+**Concern raised:** *"Too Indian sounding?"*
+
+**Initial answer:** real concern — "Varni Technology / Varni Tech /
+Varni Labs / Varnitech / Varni IT Solutions / Varni Infotech" pattern-
+match against the IT-services-consultancy prior in US/EU enterprise
+procurement.
+
+**User counter:** *"Most people have never heard of Varni or know it's
+an Indian name."*
+
+**Revised assessment — user is right.** Varni is *not* in the recognized
+tier of Indian names that Western audiences identify (Raj, Priya,
+Ananya, Arjun). To most US/EU engineers and procurement officers,
+"Varni AI" reads as a generic two-syllable AI brand in the shape of
+Mistral / Cohere / Vercel — the ethnic-recognition fires only for
+people who already know Sanskrit roots. Blast radius is much smaller
+than the initial response implied.
+
+The Indian-IT-services-search-pollution concern remains, but a
+well-funded global brand at `varni.ai` would dominate search results
+within 6-12 months given the small companies' low SEO authority.
+
+**Revised verdict on Varni:** technically and brand-credibly viable.
+Decision now reduces to **Varni vs. duraclaw** — i.e., rebrand or not.
+
+### 8.18c Final decision frame — Varni vs. duraclaw
+
+| Axis | Varni | duraclaw |
+|---|---|---|
+| Sounds enterprise-credible | ✅ Mistral/Cohere/Vercel-tier | ❌ Indie hacker tool |
+| README positioning fit | ✅ Matches "harness for enterprise AI" | ❌ Playful brand vs. enterprise pitch |
+| Domain economics | ✅ `varni.ai` open | ✅ `duraclaw.com` already owned |
+| Search-result ownership | Will dominate in 6-12 months | Already dominates |
+| Procurement-deck test | Passes | Friction (original problem) |
+| Migration cost | ❌ ~2-4 weeks: 9 npm packages, wrangler scripts, R2/D1 names, Capacitor app ID `ai.baseplane.duraclaw`, install scripts, all docs, GitHub org, hero image, OTA paths | ✅ Zero |
+| SEO continuity | ❌ Lose equity, 6-12 month recovery | ✅ Preserved |
+| Risk of breaking things | Real | Zero |
+
+**Critical question:** *Has the duraclaw name actually cost a deal, or
+is the friction anticipated?* If actual: rebrand now. If anticipated:
+migration cost may exceed friction cost.
+
+**Recommendation given visible signals (active development, pre-broad-
+launch, README explicitly repositioned for enterprise last week):**
+**Rebrand to Varni.** The README's enterprise framing requires an
+enterprise-credible name to land; keeping duraclaw asks the README to
+do work the name should do. Migration cost is finite; brand friction
+is unbounded and compounds with every enterprise conversation. The
+window to rebrand cheaply closes the moment meaningful enterprise
+customers land.
+
+**Caveat:** if team bandwidth is over-committed to feature roadmap
+or current customer base already accepts the name, "ship features,
+defer rename" is a defensible call.
 
 ### 8.19 Pre-public-mention action list (Varni)
 
