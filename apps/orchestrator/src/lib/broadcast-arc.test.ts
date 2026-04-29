@@ -20,7 +20,11 @@ vi.mock('~/lib/chains', () => ({
   buildChainRow: (...args: unknown[]) => buildChainRowMock(...args),
 }))
 
-import { broadcastChainRow } from './broadcast-chain'
+// GH#116 P1.3: file renamed `broadcast-chain.ts` → `broadcast-arc.ts`.
+// These tests still target the transitional `broadcastChainRow` shim
+// (now exported from the renamed file) until P3 deletes the chain
+// routes / `kataIssue` callers that depend on it.
+import { broadcastChainRow } from './broadcast-arc'
 
 function makeEnv() {
   return { AUTH_DB: {} } as any

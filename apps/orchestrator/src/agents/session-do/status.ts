@@ -3,7 +3,7 @@ import { eq } from 'drizzle-orm'
 import { agentSessions, worktrees } from '~/db/schema'
 import { broadcastSessionRow } from '~/lib/broadcast-session'
 import type { KataSessionState } from '~/lib/types'
-import { broadcastChainUpdate, broadcastStatusFrame, broadcastStatusToOwner } from './broadcast'
+import { broadcastArcUpdate, broadcastStatusFrame, broadcastStatusToOwner } from './broadcast'
 import type { SessionMeta } from './index'
 import { META_COLUMN_MAP, type SessionDOContext } from './types'
 
@@ -288,7 +288,10 @@ export async function syncKataAllToD1(
     }
   }
 
-  broadcastChainUpdate(ctx, kataState?.issueNumber ?? null)
+  // GH#116 P1.3: arc update derives arcId from the session's D1 row;
+  // the legacy `kataState.issueNumber` parameter is no longer used —
+  // the arc ↔ session link is now the canonical pointer.
+  broadcastArcUpdate(ctx)
 }
 
 /**
