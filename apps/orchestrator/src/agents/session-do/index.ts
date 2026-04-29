@@ -165,17 +165,6 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   moduleCtx!: SessionDOContext
   /** Mutable DO-instance state read+written by extracted modules via ctx.do. */
   turnCounter = 0
-  /**
-   * Independent ordinal for assistant-side rows (`msg-N` / `err-N`). The
-   * user-side `turnCounter` advances only when the user actually sends a
-   * turn — bumping it from inside an assistant-side mid-stream event
-   * (partial_assistant, tool_result, error, runaway interrupt) corrupts
-   * the sort key on the *next* user row by incrementing it ahead of time.
-   * The client's sortKey (use-messages-collection.ts) already accepts the
-   * union /^(?:usr|msg|err)-(\d+)$/, so the two counters are free to
-   * advance independently and produce a stable per-turn block ordering.
-   */
-  assistantTurnCounter = 0
   currentTurnMessageId: string | null = null
   /** Runaway-turn guards (#101 Stage 5): empty-turn counter + recent-content fingerprint ring. Memory-only. */
   consecutiveEmptyAssistantTurns = 0

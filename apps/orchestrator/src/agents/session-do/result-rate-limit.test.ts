@@ -67,7 +67,6 @@ function makeCtx() {
   const self = {
     name: 'sess-1',
     turnCounter: 0,
-    assistantTurnCounter: 0,
     currentTurnMessageId: null as string | null,
     clearAwaitingResponse: vi.fn(),
     safeAppendMessage: vi.fn(),
@@ -180,53 +179,5 @@ describe('handleGatewayEvent — result case → handleRateLimit routing', () =>
     const ctx = makeCtx()
     handleGatewayEvent(ctx, makeResultEvent({ is_error: true, error: undefined, result: 'oops' }))
     expect(handleRateLimit).not.toHaveBeenCalled()
-  })
-})
-
-describe('handleGatewayEvent — result case → counter discipline', () => {
-  it('bumps assistantTurnCounter (not turnCounter) when is_error result mints an err-N row', () => {
-    const ctx = makeCtx()
-    // Cast through unknown to the loose mock shape so the test can poke
-    // turnCounter directly and read the mocks back as Vitest mocks.
-    const self = ctx.do as unknown as {
-      turnCounter: number
-      assistantTurnCounter: number
-      safeAppendMessage: ReturnType<typeof vi.fn>
-    }
-    // Seed ordinals to distinct, non-zero values so we can prove which one
-    // moved.  turnCounter must NOT advance — assistant-side rows key off
-    // assistantTurnCounter.
-    self.turnCounter = 5
-    self.assistantTurnCounter = 7
-
-    handleGatewayEvent(ctx, makeResultEvent({ is_error: true, error: undefined, result: 'boom' }))
-
-    expect(self.turnCounter).toBe(5)
-    expect(self.assistantTurnCounter).toBe(8)
-    // The minted row should carry the new assistant ordinal.
-    const appendedRow = self.safeAppendMessage.mock.calls[0]?.[0] as { id: string } | undefined
-    expect(appendedRow?.id).toBe('err-8')
-  })
-
-  it('bumps assistantTurnCounter (not turnCounter) when result text mints a fresh msg-N row', () => {
-    const ctx = makeCtx()
-    const self = ctx.do as unknown as {
-      turnCounter: number
-      assistantTurnCounter: number
-      safeAppendMessage: ReturnType<typeof vi.fn>
-    }
-    self.turnCounter = 5
-    self.assistantTurnCounter = 7
-    // No prior assistant row → the result handler appends a new msg-N
-    // (the `else` branch of the `if (lastMsg)` check).
-    const session = ctx.session as unknown as { getMessage: ReturnType<typeof vi.fn> }
-    session.getMessage.mockReturnValue(undefined)
-
-    handleGatewayEvent(ctx, makeResultEvent({ is_error: false, result: 'final answer' }))
-
-    expect(self.turnCounter).toBe(5)
-    expect(self.assistantTurnCounter).toBe(8)
-    const appendedRow = self.safeAppendMessage.mock.calls[0]?.[0] as { id: string } | undefined
-    expect(appendedRow?.id).toBe('msg-8')
   })
 })

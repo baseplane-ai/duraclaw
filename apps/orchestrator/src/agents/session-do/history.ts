@@ -174,10 +174,6 @@ export function persistTurnState(ctx: SessionDOContext): void {
       String(ctx.do.turnCounter),
     )
     ctx.sql.exec(
-      `INSERT OR REPLACE INTO assistant_config (session_id, key, value) VALUES ('', 'assistantTurnCounter', ?)`,
-      String(ctx.do.assistantTurnCounter),
-    )
-    ctx.sql.exec(
       `INSERT OR REPLACE INTO assistant_config (session_id, key, value) VALUES ('', 'currentTurnMessageId', ?)`,
       ctx.do.currentTurnMessageId ?? '',
     )
@@ -187,9 +183,9 @@ export function persistTurnState(ctx: SessionDOContext): void {
 }
 
 /**
- * Bump `turnCounter` by 1 and return the new value. Used only for
- * user-side `usr-N` ids. Assistant-side rows (`msg-N` / `err-N`) advance
- * `ctx.do.assistantTurnCounter` instead — see SessionDO field doc.
+ * Bump `turnCounter` by 1 and persist the new value. Returns the new
+ * counter value so callers that mint canonical message ids
+ * (`usr-${n}` / `msg-${n}` / `err-${n}`) can chain in one call.
  */
 export function bumpTurnCounter(ctx: SessionDOContext): number {
   ctx.do.turnCounter += 1

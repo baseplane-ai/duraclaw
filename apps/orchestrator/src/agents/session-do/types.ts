@@ -74,18 +74,14 @@ export const RUNAWAY_EMPTY_TURN_THRESHOLD = 10
 export const REPEATED_TURN_THRESHOLD = 5
 
 /**
- * Parse a canonical turn ordinal from a message id or canonical_turn_id.
- * Returns `N` if the id matches `/^(?:usr|msg|err)-(\d+)$/`, otherwise
- * `undefined`. Matches all three id kinds so the union is the same on
- * the DO and on the client (use-messages-collection.ts:49-53). The
- * single existing call-site that depends on the result mapping to a
- * user-turn ordinal — the `runHydration` recovery scan — pre-filters
- * its query with `WHERE role = 'user'`, so widening here is safe:
- * non-`usr-N` ids never reach this helper from that path.
+ * Parse a canonical user-turn ordinal from a message id or canonical_turn_id.
+ * Returns `N` if the id matches `/^usr-(\d+)$/`, otherwise `undefined`.
+ * Used by DO cold-start turnCounter recovery (GH#14 P3) and the client
+ * sort-key derivation.
  */
 export function parseTurnOrdinal(id?: string): number | undefined {
   if (!id) return undefined
-  const m = /^(?:usr|msg|err)-(\d+)$/.exec(id)
+  const m = /^usr-(\d+)$/.exec(id)
   return m ? Number.parseInt(m[1], 10) : undefined
 }
 
