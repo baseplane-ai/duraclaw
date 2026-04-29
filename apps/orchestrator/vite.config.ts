@@ -40,7 +40,29 @@ export default defineConfig({
   resolve: {
     alias: {
       '~': path.resolve(__dirname, './src'),
+      // GH#131 P2: route `react-native` imports through Tamagui's curated
+      // RNW subset so the web build keeps shipping unchanged while the
+      // same source becomes capable of running native (P3). Must be set
+      // BEFORE `tamaguiPlugin()` below so the compiler sees the RNW
+      // target and emits atomic CSS for primitives (View/Text/Pressable).
+      'react-native': '@tamagui/react-native-web-lite',
     },
+  },
+  // GH#131 P2: keep RNW polyfills out of the CF Worker bundle. Without
+  // ssr.noExternal, Vite shares chunks containing RNW runtime bytes with
+  // the Worker, costing ~500 KB and risking eval/global-scope breakage in
+  // the Worker. Belt-and-suspenders with the import-leak guard in
+  // scripts/check-worker-tamagui-leak.sh (extended in this PR to match
+  // these three module families).
+  ssr: {
+    noExternal: ['react-native-web', 'react-native', '@tamagui/react-native-web-lite'],
+  },
+  // GH#131 P2: respect RNW's `package.json#browser` field. Without this,
+  // Vite pre-bundles the three RNW packages into a single CJS chunk,
+  // which collapses the per-platform exports map and defeats the alias
+  // above (Tamagui compiler then sees DOM, not RNW).
+  optimizeDeps: {
+    exclude: ['react-native-web', 'react-native', '@tamagui/react-native-web-lite'],
   },
   define: {
     // Stamped into client bundle. Empty defaults so web build uses
