@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Duraclaw orchestrates Claude Code sessions across multiple VPS worktrees. A Cloudflare Workers frontend (orchestrator) owns session lifecycle via Durable Objects, and a VPS-side `agent-gateway` spawns per-session `session-runner` processes that each own one Claude Agent SDK query and dial the DO directly.
+Duraclaw orchestrates Claude Code sessions across multiple VPS worktrees. A Cloudflare Workers orchestrator owns session lifecycle via Durable Objects; a VPS-side `agent-gateway` spawns per-session `session-runner` processes that dial the DO directly.
 
 ## Architecture
 
@@ -53,13 +53,16 @@ planning/
 
 ## Tech Stack
 
-- **Runtime**: TypeScript 5.8, React 19, Vite 8
-- **Monorepo**: pnpm workspaces + Turbo
-- **Orchestrator**: Cloudflare Workers, Durable Objects (Agents SDK v0.7), plain Vite 8 SPA + Hono API (TanStack Router on the client; no TanStack Start)
-- **Auth**: Better Auth with D1 (Drizzle adapter)
-- **Gateway**: Bun HTTP server — spawn/list/status/reap only
-- **Session-runner**: Bun-executable that wraps `@anthropic-ai/claude-agent-sdk` and dials the DO via `shared-transport`
-- **Linting**: Biome (spaces, no semicolons, single quotes in biome-managed files)
+| Concern | Tool | Reference |
+|---------|------|-----------|
+| Runtime | TypeScript 5.8, React 19, Vite 8 | — |
+| Monorepo | pnpm workspaces + Turbo | — |
+| Orchestrator | Cloudflare Workers + Durable Objects (Agents SDK v0.7), Vite 8 SPA + Hono, TanStack Router | [`docs/integrations/cloudflare.md`] |
+| Auth | Better Auth on D1 (Drizzle adapter) | [`docs/integrations/better-auth.md`] |
+| Gateway | Bun HTTP server — spawn/list/status/reap only | [`docs/modules/agent-gateway.md`] |
+| Session-runner | Bun executable wrapping `@anthropic-ai/claude-agent-sdk`, dials DO via `shared-transport` | [`docs/integrations/claude-agent-sdk.md`] |
+| Mobile shell | Capacitor 8 Android (thin client) | [`docs/integrations/capacitor.md`] |
+| Linting | Biome (spaces, no semicolons, single quotes) | — |
 
 ## Key Commands
 
@@ -89,83 +92,30 @@ pnpm --filter @duraclaw/docs-runner    build   # -> packages/docs-runner/dist/ma
 
 ## Conventions
 
-- **DO observability — use `logEvent()`, not `console.log`**: Inside
-  `SessionDO`, all structured/diagnostic logs MUST go through
-  `this.logEvent(level, tag, message, attrs?)` (migration v17). This
-  writes to the per-DO `event_log` SQLite table (durable, 7-day
-  retention, GC'd on `onStart`) AND mirrors to `console.log` for live
-  `wrangler tail`. Use tag prefixes consistently: `gate` for
-  AskUserQuestion / permission lifecycle, `conn` for WS connection
-  events, `rpc` for callable entry/exit, `reap` for reaper kill/skip decisions originating on the gateway and forwarded via recordReapDecision RPC. Query via the `getEventLog()`
-  RPC (`{tag?, sinceTs?, limit?}`) — no external log infra needed for
-  per-session replay. Runner-side logs still go to `console.log` (they
-  land in `/run/duraclaw/sessions/{id}.log` on the VPS).
-- Commit messages: `type(scope): description` (feat, fix, chore, refactor, docs, test)
-- Biome formatting: 2-space indent, 100 char line width, LF endings
-- Path alias: `~/` maps to `./src/` in orchestrator
-- Git workflow — **scope determines whether a PR is involved**, not habit.
-  Always commit and push to **the currently checked-out branch** on
-  `origin` (github.com/baseplane-ai/duraclaw); never switch branches to
-  push elsewhere. Respect whatever branch the human/session left you on.
-  - **Task-scoped work** (task / debug / freeform mode, small fixes,
-    docs, chores, quick refactors): commit directly to `main` and push.
-    No branch, no PR. CI runs remotely after push. Do NOT open a PR for
-    task-scoped work — stale PRs pile up when commits have already
-    landed on `main` directly, and they have to be closed manually.
-  - **Feature-scoped work** (implementation mode off an approved spec,
-    multi-commit epics, anything that needs review before landing): work
-    on a feature branch (`feature/<issue>-...`, `feat/...`, `fix/...`),
-    push to that branch, open a PR, and land via a proper merge (squash
-    or merge-commit). Never push a feature branch's commits to `main`
-    out-of-band while its PR is open — that strands the PR as
-    superseded-but-not-closed, which is exactly the stale-PR failure
-    mode this rule exists to prevent. If a rebase has rewritten branch
-    history, push with `--force-with-lease` (never plain `--force`).
-  - If you're unsure which bucket a change falls into, ask before
-    opening a PR. A PR that duplicates commits already on `main` is
-    worse than no PR.
+- DO logging discipline (use `logEvent()`, not `console.log`, with stable tag prefixes) lives in [`docs/theory/topology.md`].
+- Commit messages: `type(scope): description` (feat, fix, chore, refactor, docs, test).
+- Biome formatting: 2-space indent, 100 char line width, LF endings.
+- Path alias: `~/` maps to `./src/` in orchestrator.
+- Git workflow — scope determines whether a PR is involved, not habit. Always push to the currently checked-out branch on `origin` (github.com/baseplane-ai/duraclaw); never switch branches to push elsewhere.
+  - Task-scoped work (small fixes, docs, chores, quick refactors): commit directly to `main` and push. No branch, no PR.
+  - Feature-scoped work (implementation off an approved spec, multi-commit epics, anything needing review): work on a feature branch, push, open a PR, land via merge. Never push a feature branch's commits to `main` out-of-band while its PR is open. Rebased branches: `--force-with-lease` only.
+  - When unsure, ask before opening a PR. A PR that duplicates commits already on `main` is worse than no PR.
 
-## Identity Management (GH#119)
+## Where docs live
 
-Account failover for Claude runners. Each "identity" maps a name (e.g.
-`work1`, `personal`) to an isolated `HOME` directory containing its own
-`~/.claude/.credentials.json`. The DO selects an available identity via
-LRU at spawn time and the gateway sets `HOME=<runner_home>` in the
-runner's process env so the SDK picks up the identity-scoped auth.
+These layers form duraclaw's knowledge tree (modeled on baseplane). When in doubt about where to put new content, see [`docs/index.md`] for the layer test.
 
-When a runner emits `rate_limit` (or the SDK reports an auth error),
-the DO marks the current identity as `cooldown` and resumes the session
-under the next available identity using the SDK's `SessionStore` to
-load the transcript from DO SQLite (no message loss).
+- [`docs/theory/`] — invariants (domains, data, dynamics, topology, trust, boundaries)
+- [`docs/primitives/`] — stack-independent building blocks (UI + arch)
+- [`docs/modules/`] — per-package surfaces (one file per package + INVENTORY.md)
+- [`docs/integrations/`] — external dependencies (Cloudflare, claude-agent-sdk, Better Auth, Capacitor, GitHub)
+- [`docs/testing/`] — manual testing recipes
+- `planning/specs/` — in-flight features
+- `.claude/rules/` — code-level patterns auto-attached via `paths:` frontmatter
 
-### Adding an identity
+## Identity Management
 
-The HOME path is derived as `${IDENTITY_HOME_BASE}/${name}` (default
-base: `/srv/duraclaw/homes`; override per-deploy via `wrangler secret
-put IDENTITY_HOME_BASE` in prod or `apps/orchestrator/.dev.vars` for
-dev). Names must match `[A-Za-z0-9_-]{1,64}`.
-
-1. Run `scripts/setup-identity.sh --name work2`. The script computes
-   the HOME as `${IDENTITY_HOME_BASE}/work2` and creates the skeleton.
-2. Authenticate the new HOME: `HOME=$IDENTITY_HOME_BASE/work2 claude /login`.
-3. Register: re-run the script with `--register`, or POST manually:
-   ```bash
-   curl -X POST ${ORCH_URL}/api/admin/identities \
-     -H "Cookie: <admin session>" \
-     -d '{"name":"work2"}'
-   ```
-4. Verify in Settings > Identities.
-
-### How failover works (high level)
-
-- D1 `runner_identities` is the catalog (admin-managed via UI / CRUD).
-- D1 `agent_sessions.identity_name` records which identity owns each session.
-- DO SQLite `session_transcript` mirrors the SDK's `SessionStore` so
-  resume under a different identity is lossless.
-- LRU selection skips `cooldown` identities until `cooldown_until <
-  datetime('now')`. Lazy expiry — no cleanup job.
-- Zero identities configured → orchestrator behaves as before
-  (single-HOME, no failover). Identities are opt-in.
+See [`docs/theory/data.md`] for the lossless-resume + identity-failover invariants and [`docs/theory/trust.md`] for the identity-HOME boundary model. Operational steps (adding an identity) live in [`scripts/setup-identity.sh`].
 
 ## Progress Tracking
 
