@@ -1,6 +1,7 @@
 import useEmblaCarousel, { type UseEmblaCarouselType } from 'embla-carousel-react'
 import { ArrowLeft, ArrowRight } from 'lucide-react'
 import * as React from 'react'
+import { Platform, ScrollView } from 'react-native'
 
 import { cn } from '../lib/utils'
 import { Button } from './button'
@@ -42,6 +43,25 @@ const Carousel = React.forwardRef<
   HTMLDivElement,
   React.HTMLAttributes<HTMLDivElement> & CarouselProps
 >(({ orientation = 'horizontal', opts, setApi, plugins, className, children, ...props }, ref) => {
+  // GH#132 P3.3 (B8): embla-carousel uses DOM scroll APIs and pointer
+  // events that aren't shimmed cleanly by RNW on native. Native fallback
+  // is a horizontal/vertical ScrollView with pagingEnabled — no
+  // prev/next buttons (the Button context throws outside the embla
+  // provider, so any consumer of CarouselPrevious/CarouselNext on
+  // native would crash; we accept that as a "don't use those on native"
+  // contract for P3 per Decision #11).
+  if (Platform.OS !== 'web') {
+    return (
+      <ScrollView
+        horizontal={orientation === 'horizontal'}
+        pagingEnabled
+        showsHorizontalScrollIndicator={false}
+        showsVerticalScrollIndicator={false}
+      >
+        {children as React.ReactNode}
+      </ScrollView>
+    )
+  }
   const [carouselRef, api] = useEmblaCarousel(
     {
       ...opts,

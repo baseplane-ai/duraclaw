@@ -1,4 +1,5 @@
 /// <reference types="vite/client" />
+import { Platform } from 'react-native'
 
 declare global {
   interface ImportMetaEnv {
@@ -32,6 +33,29 @@ declare global {
 
 export function isNative(): boolean {
   return import.meta.env.VITE_PLATFORM === 'capacitor'
+}
+
+/**
+ * True on the Expo SDK 55 native runtime (Metro bundler, real Android/iOS).
+ *
+ * Distinct from `isNative()` (Capacitor) because the two builds use
+ * different bundlers and different platform-detection signals. On the
+ * Vite web build and the Vite Capacitor build, react-native-web shims
+ * `Platform.OS` to `'web'`, so this returns false. On the Metro/Expo
+ * build, `Platform.OS` is `'android'` or `'ios'`.
+ *
+ * Used by `db-instance.ts` to select the op-sqlite persistence and by
+ * `auth-client.ts` to dispatch to `@better-auth/expo` instead of
+ * `better-auth-capacitor`. Native imports are dynamic so they're
+ * tree-shaken from the Vite bundle.
+ */
+export function isExpoNative(): boolean {
+  // P2 already pulls react-native (via react-native-web alias on Vite)
+  // into the bundle — see `entry-rn.tsx`. On the Vite web build and the
+  // Vite Capacitor build, RNW shims Platform.OS to `'web'`, so this
+  // returns false. On the Metro/Expo build, Platform.OS is
+  // `'android'` (or `'ios'`).
+  return Platform.OS !== 'web'
 }
 
 export function apiBaseUrl(): string {
@@ -70,6 +94,35 @@ export function apiUrl(path: string): string {
  * (entry-client.tsx) AFTER authClientReady resolves.
  */
 export async function installNativeFetchInterceptor(): Promise<void> {
+  // Three branches:
+  //  1. Capacitor (VITE_PLATFORM=capacitor): Preferences-backed bearer token
+  //     via better-auth-capacitor/client.
+  //  2. Expo (Platform.OS !== 'web'): expo-secure-store-backed token via
+  //     better-auth-expo. No `window` reference — `globalThis.fetch` is
+  //     polyfilled by RN.
+  //  3. Web: no-op (cookies handle auth).
+  if (isExpoNative()) {
+    const base = apiBaseUrl()
+    if (!base) return
+    const { getExpoAuthToken } = await import(/* @vite-ignore */ './auth-client-expo')
+    const originalFetch = globalThis.fetch.bind(globalThis)
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (url.startsWith(base) && !url.includes('/api/auth/')) {
+        const token = await getExpoAuthToken()
+        if (token) {
+          const headers = new Headers(init?.headers)
+          if (!headers.has('Authorization')) {
+            headers.set('Authorization', `Bearer ${token}`)
+          }
+          init = { ...init, headers, credentials: 'omit' }
+        }
+      }
+      return originalFetch(input, init)
+    }) as typeof fetch
+    return
+  }
+
   if (!isNative()) return
   const base = apiBaseUrl()
   if (!base) return

@@ -14,46 +14,56 @@ import {
   MediaVolumeRange,
 } from 'media-chrome/react'
 import type { ComponentProps, CSSProperties } from 'react'
+import { Platform, Text } from 'react-native'
 import { cn } from '../lib/utils'
 import { Button } from '../ui/button'
 import { ButtonGroup, ButtonGroupText } from '../ui/button-group'
 
 export type AudioPlayerProps = Omit<ComponentProps<typeof MediaController>, 'audio'>
 
-export const AudioPlayer = ({ children, style, ...props }: AudioPlayerProps) => (
-  <MediaController
-    audio
-    data-slot="audio-player"
-    style={
-      {
-        '--media-background-color': 'transparent',
-        '--media-button-icon-height': '1rem',
-        '--media-button-icon-width': '1rem',
-        '--media-control-background': 'transparent',
-        '--media-control-hover-background': 'var(--color-accent)',
-        '--media-control-padding': '0',
-        '--media-font': 'var(--font-sans)',
-        '--media-font-size': '10px',
-        '--media-icon-color': 'currentColor',
-        '--media-preview-time-background': 'var(--color-background)',
-        '--media-preview-time-border-radius': 'var(--radius-md)',
-        '--media-preview-time-text-shadow': 'none',
-        '--media-primary-color': 'var(--color-primary)',
-        '--media-range-bar-color': 'var(--color-primary)',
-        '--media-range-track-background': 'var(--color-secondary)',
-        '--media-secondary-color': 'var(--color-secondary)',
-        '--media-text-color': 'var(--color-foreground)',
-        '--media-tooltip-arrow-display': 'none',
-        '--media-tooltip-background': 'var(--color-background)',
-        '--media-tooltip-border-radius': 'var(--radius-md)',
-        ...style,
-      } as CSSProperties
-    }
-    {...props}
-  >
-    {children}
-  </MediaController>
-)
+// GH#132 P3.3 (B8): media-chrome uses Web Components (CustomElementRegistry)
+// — incompatible with native. Per Decision #10, audio playback is feature-
+// gated to web on native; an expo-audio-backed replacement is a deferred
+// follow-up issue (Non-Goal #5).
+export const AudioPlayer = ({ children, style, ...props }: AudioPlayerProps) => {
+  if (Platform.OS !== 'web') {
+    return <Text>Audio playback available on web only</Text>
+  }
+  return (
+    <MediaController
+      audio
+      data-slot="audio-player"
+      style={
+        {
+          '--media-background-color': 'transparent',
+          '--media-button-icon-height': '1rem',
+          '--media-button-icon-width': '1rem',
+          '--media-control-background': 'transparent',
+          '--media-control-hover-background': 'var(--color-accent)',
+          '--media-control-padding': '0',
+          '--media-font': 'var(--font-sans)',
+          '--media-font-size': '10px',
+          '--media-icon-color': 'currentColor',
+          '--media-preview-time-background': 'var(--color-background)',
+          '--media-preview-time-border-radius': 'var(--radius-md)',
+          '--media-preview-time-text-shadow': 'none',
+          '--media-primary-color': 'var(--color-primary)',
+          '--media-range-bar-color': 'var(--color-primary)',
+          '--media-range-track-background': 'var(--color-secondary)',
+          '--media-secondary-color': 'var(--color-secondary)',
+          '--media-text-color': 'var(--color-foreground)',
+          '--media-tooltip-arrow-display': 'none',
+          '--media-tooltip-background': 'var(--color-background)',
+          '--media-tooltip-border-radius': 'var(--radius-md)',
+          ...style,
+        } as CSSProperties
+      }
+      {...props}
+    >
+      {children}
+    </MediaController>
+  )
+}
 
 export type AudioPlayerElementProps = Omit<ComponentProps<'audio'>, 'src'> &
   (

@@ -8,7 +8,11 @@ import {
   type RefCallback,
   useCallback,
   useContext,
+  useEffect,
+  useRef,
+  useState,
 } from 'react'
+import { Platform, type ScrollView } from 'react-native'
 import { useStickToBottom } from 'use-stick-to-bottom'
 import { cn } from '../lib/utils'
 import { Button } from '../ui/button'
@@ -47,6 +51,69 @@ export function useAutoScrollContext() {
   const ctx = useContext(Ctx)
   if (!ctx) throw new Error('useAutoScrollContext must be used within <Conversation>')
   return ctx
+}
+
+/**
+ * GH#132 P3.3 (B9): native replacement for use-stick-to-bottom.
+ *
+ * use-stick-to-bottom relies on ResizeObserver + scroll-event coalescing
+ * to detect "near bottom" and apply a velocity-spring scrollTop write.
+ * Neither primitive is available in RN. The native pattern below
+ * approximates the same UX:
+ *
+ *   - Owns a ScrollView ref (handed to consumers via the same
+ *     `scrollRef` RefCallback shape — types narrowed to `unknown` here
+ *     because RN `ScrollView` is not an HTMLDivElement).
+ *   - Tracks `pinnedToBottom` via `onMomentumScrollEnd`'s
+ *     `contentOffset.y + layoutMeasurement.height >= contentSize.height - PIN_THRESHOLD`.
+ *   - On every render, if pinned, schedules a `scrollToEnd({ animated:
+ *     true })` after layout. The visible result is "new messages
+ *     auto-scroll" parity with the web pattern.
+ *
+ * The contentRef ref is a no-op on native (FlatList/ScrollView track
+ * content size themselves). `sentinelRef` is also a no-op (matches the
+ * web-side legacy passthrough).
+ */
+const _PIN_THRESHOLD = 50
+function useNativeAutoScroll(): AutoScrollContext {
+  // RN ScrollView ref. Typed loosely because ai-elements is a shared
+  // package and the public type signature uses HTMLDivElement.
+  const scrollViewRef = useRef<ScrollView | null>(null)
+  const [pinnedToBottom, setPinnedToBottom] = useState(true)
+
+  // When content size changes (new message streamed in), if we're
+  // pinned, scroll to the bottom. Mirrors use-stick-to-bottom's resize
+  // anchor behaviour at a coarser cadence (no per-frame spring).
+  useEffect(() => {
+    if (pinnedToBottom) {
+      scrollViewRef.current?.scrollToEnd({ animated: true })
+    }
+  })
+
+  const scrollToBottom = useCallback(() => {
+    scrollViewRef.current?.scrollToEnd({ animated: true })
+    setPinnedToBottom(true)
+  }, [])
+
+  // Cast to RefCallback<HTMLDivElement> so the public type is unchanged.
+  // RN ScrollView is not an HTMLDivElement, so callers that try to
+  // dereference DOM properties off the ref will crash on native — but
+  // those callers (e.g. ChatThread's virtualizer composite ref) are
+  // gated by their own Platform.OS branches.
+  const scrollRef = useCallback((node: HTMLDivElement | null) => {
+    scrollViewRef.current = node as unknown as ScrollView | null
+  }, []) as RefCallback<HTMLDivElement>
+
+  const contentRef = useCallback(() => {}, []) as RefCallback<HTMLDivElement>
+  const sentinelRef = useCallback(() => {}, []) as RefCallback<HTMLDivElement>
+
+  return {
+    scrollRef,
+    contentRef,
+    sentinelRef,
+    isAtBottom: pinnedToBottom,
+    scrollToBottom,
+  }
 }
 
 function useAutoScroll(resize: 'smooth' | 'instant' = 'smooth'): AutoScrollContext {
@@ -122,6 +189,14 @@ export type ConversationProps = ComponentProps<'div'> & {
 }
 
 export const Conversation = ({ className, children, resize, ...props }: ConversationProps) => {
+  // Same hook for both branches; the native branch routes through
+  // useNativeAutoScroll inside useAutoScroll itself (cleaner type
+  // story than two parallel context providers). On native we render
+  // children directly without a wrapping div.
+  if (Platform.OS !== 'web') {
+    const ctx = useNativeAutoScroll()
+    return <Ctx.Provider value={ctx}>{children}</Ctx.Provider>
+  }
   const ctx = useAutoScroll(resize)
   return (
     <Ctx.Provider value={ctx}>

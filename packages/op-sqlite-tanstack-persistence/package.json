@@ -1,0 +1,28 @@
+{
+  "name": "@duraclaw/op-sqlite-tanstack-persistence",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@op-engineering/op-sqlite": ">=15.0.0",
+    "@tanstack/db-sqlite-persistence-core": ">=0.1.9"
+  },
+  "devDependencies": {
+    "@op-engineering/op-sqlite": "15.2.12",
+    "@tanstack/db-sqlite-persistence-core": "0.1.9",
+    "tsup": "^8.5.1",
+    "typescript": "~5.8.3",
+    "vitest": "^4.1.2"
+  }
+}

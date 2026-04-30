@@ -8,8 +8,9 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit && bash ../../scripts/check-worker-tamagui-leak.sh && bash ../../scripts/check-metro-bundle.sh",
-    "verify:metro": "bash ../../scripts/check-metro-bundle.sh",
+    "typecheck": "tsc --noEmit && bash ../../scripts/check-worker-tamagui-leak.sh",
+    "verify:metro": "bash ../../scripts/check-metro-bundle.sh.archive",
+    "verify:expo-prebuild": "bash ../../scripts/check-expo-prebuild.sh",
     "ship": "set -a && . ../../.env && set +a && wrangler deploy",
     "cf-typegen": "wrangler types",
     "db:generate": "drizzle-kit generate",
@@ -41,6 +42,7 @@
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
     "@duraclaw/ai-elements": "workspace:^",
+    "@duraclaw/op-sqlite-tanstack-persistence": "workspace:*",
     "@duraclaw/shared-types": "workspace:*",
     "@pushforge/builder": "^2.0.4",
     "@radix-ui/react-alert-dialog": "^1.1.15",
@@ -127,5 +129,16 @@
     "vite": "^8.0.3",
     "vitest": "^4.1.2",
     "wrangler": "^4.80.0"
+  },
+  "optionalDependencies": {
+    "@better-auth/expo": "1.6.9",
+    "@op-engineering/op-sqlite": "15.2.12",
+    "@react-native-community/netinfo": "12.0.1",
+    "@react-native-firebase/messaging": "24.0.0",
+    "@react-navigation/bottom-tabs": "7.15.11",
+    "@react-navigation/native": "7.2.2",
+    "@react-navigation/native-stack": "7.14.12",
+    "expo-secure-store": "55.0.13",
+    "react-native": "0.85.2"
   }
 }

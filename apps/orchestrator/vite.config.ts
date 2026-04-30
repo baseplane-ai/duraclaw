@@ -1,7 +1,7 @@
 import path from 'node:path'
 import { cloudflare } from '@cloudflare/vite-plugin'
-import { tamaguiPlugin } from '@tamagui/vite-plugin'
 import tailwindcss from '@tailwindcss/vite'
+import { tamaguiPlugin } from '@tamagui/vite-plugin'
 import react from '@vitejs/plugin-react'
 import agents from 'agents/vite'
 import { defineConfig, type PluginOption } from 'vite'
@@ -63,6 +63,32 @@ export default defineConfig({
   // above (Tamagui compiler then sees DOM, not RNW).
   optimizeDeps: {
     exclude: ['react-native-web', 'react-native', '@tamagui/react-native-web-lite'],
+  },
+  build: {
+    rollupOptions: {
+      // GH#132 P3: native-only modules (Expo SDK 55 dep tree) are
+      // dynamic-imported behind `isExpoNative()` guards in the
+      // orchestrator source. On the Vite web build that branch never
+      // runs, but Rolldown still walks the import graph statically and
+      // fails to resolve packages that aren't declared in
+      // apps/orchestrator/package.json. Externalising them tells
+      // Rolldown to leave the import as a runtime lookup; the dynamic
+      // branch never fires on web, so the unresolved external is
+      // unreachable. Capacitor counterparts are NOT externalised — they
+      // ARE declared in orchestrator/package.json and live-ship on the
+      // Capacitor Vite build.
+      external: [
+        '@better-auth/expo',
+        '@better-auth/expo/client',
+        '@op-engineering/op-sqlite',
+        '@duraclaw/op-sqlite-tanstack-persistence',
+        '@react-native-community/netinfo',
+        '@react-native-firebase/messaging',
+        '@react-native-firebase/app',
+        'expo-secure-store',
+        'expo-updates',
+      ],
+    },
   },
   define: {
     // Stamped into client bundle. Empty defaults so web build uses

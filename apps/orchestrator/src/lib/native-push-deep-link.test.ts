@@ -20,6 +20,8 @@ vi.mock('@capacitor/push-notifications', () => ({
 const isNativeMock = vi.fn(() => true)
 vi.mock('~/lib/platform', () => ({
   isNative: () => isNativeMock(),
+  // GH#132 P3: Capacitor-path tests keep Expo branch off.
+  isExpoNative: () => false,
 }))
 
 // Capture lifecycle subscribers so tests can fire foreground/visible events.

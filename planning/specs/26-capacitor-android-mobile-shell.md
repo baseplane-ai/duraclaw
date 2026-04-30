@@ -2,11 +2,13 @@
 initiative: capacitor-android-mobile-shell
 type: project
 issue_type: feature
-status: approved
+status: sunset
+sunset_date: 2026-04-30
+sunset_reason: "GH#132 P3 — replaced by Expo SDK 55 native target (apps/mobile-expo/, package com.baseplane.duraclaw.rn)"
 priority: high
 github_issue: 26
 created: 2026-04-19
-updated: 2026-04-20
+updated: 2026-04-30
 prerequisites:
   - "GH#12 — Unify client data layer on TanStack DB collections (must be landed or in-flight)"
 phases:

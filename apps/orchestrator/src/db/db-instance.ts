@@ -21,17 +21,31 @@ import {
   openBrowserWASQLiteOPFSDatabase,
 } from '@tanstack/browser-db-sqlite-persistence'
 import { QueryClient } from '@tanstack/query-core'
-import { isNative } from '../lib/platform'
+import { isExpoNative, isNative } from '../lib/platform'
 
-// Both adapters expose the same structural persistence shape; pin the alias
-// to the browser adapter's return type to avoid pulling a second copy of
-// `@tanstack/db-sqlite-persistence-core` whose types diverge across versions.
+// All three adapters expose the same structural persistence shape; pin the
+// alias to the browser adapter's return type to avoid pulling a second copy
+// of `@tanstack/db-sqlite-persistence-core` whose types diverge across
+// versions.
 type Persistence = Awaited<ReturnType<typeof createBrowserWASQLitePersistence>>
 
 /** Shared QueryClient instance for TanStackDB collections */
 export const queryClient = new QueryClient()
 
 async function initPersistence(): Promise<Persistence | null> {
+  // Expo native target (op-sqlite via JSI). Checked BEFORE the Capacitor
+  // branch because Platform.OS !== 'web' on Expo, but VITE_PLATFORM is
+  // only 'capacitor' on the Capacitor build — they're disjoint signals.
+  if (isExpoNative()) {
+    try {
+      const { createOpSqliteAdapter } = await import('./persistence-op-sqlite')
+      return (await createOpSqliteAdapter()) as unknown as Persistence
+    } catch (err) {
+      console.warn('[duraclaw-db] op-sqlite init failed', err)
+      return null
+    }
+  }
+
   if (isNative()) {
     try {
       const { createCapacitorPersistence } = await import('./persistence-capacitor')

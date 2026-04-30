@@ -14,6 +14,7 @@ import {
 } from 'react'
 import type { TProps as JsxParserProps } from 'react-jsx-parser'
 import JsxParser from 'react-jsx-parser'
+import { Platform, Text } from 'react-native'
 import { cn } from '../lib/utils'
 
 interface JSXPreviewContextValue {
@@ -142,6 +143,12 @@ export const JSXPreview = memo(
     children,
     ...props
   }: JSXPreviewProps) => {
+    // GH#132 P3.3 (B8): react-jsx-parser uses DOM-based parsing
+    // primitives. Feature-gated to web on native (Decision #10) — the
+    // single user has not asked for live JSX preview on mobile.
+    if (Platform.OS !== 'web') {
+      return <Text>Live JSX preview available on web only</Text>
+    }
     const [prevJsx, setPrevJsx] = useState(jsx)
     const [error, setError] = useState<Error | null>(null)
     const [_lastGoodJsx, setLastGoodJsx] = useState('')

@@ -34,7 +34,7 @@ import { useManagedConnection } from '~/lib/connection-manager/hooks'
 import { logDelta } from '~/lib/delta-log'
 import { parseJsonField } from '~/lib/json'
 import { contentToParts } from '~/lib/message-parts'
-import { isNative, wsBaseUrl } from '~/lib/platform'
+import { isExpoNative, isNative, wsBaseUrl } from '~/lib/platform'
 // `BranchInfoRow` still used by navigateBranch's branchInfoCollection read.
 import type {
   ApiRetryEvent,
@@ -428,16 +428,24 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
   // rotation across a live session is rare; on 4401 the server close
   // propagates normally and the app's login redirect handles re-auth.
   const [nativeAuthToken, setNativeAuthToken] = useState<string | null>(null)
-  const [nativeAuthTokenResolved, setNativeAuthTokenResolved] = useState(!isNative())
+  const [nativeAuthTokenResolved, setNativeAuthTokenResolved] = useState(
+    !(isNative() || isExpoNative()),
+  )
   useEffect(() => {
-    if (!isNative()) return
+    if (!isNative() && !isExpoNative()) return
     let cancelled = false
     ;(async () => {
       try {
-        const { getCapacitorAuthToken } = await import('better-auth-capacitor/client')
-        const token = await getCapacitorAuthToken({ storagePrefix: 'better-auth' })
+        let token: string | null = null
+        if (isExpoNative()) {
+          const { getExpoAuthToken } = await import(/* @vite-ignore */ '~/lib/auth-client-expo')
+          token = await getExpoAuthToken()
+        } else {
+          const { getCapacitorAuthToken } = await import('better-auth-capacitor/client')
+          token = (await getCapacitorAuthToken({ storagePrefix: 'better-auth' })) ?? null
+        }
         if (cancelled) return
-        setNativeAuthToken(token ?? null)
+        setNativeAuthToken(token)
       } catch {
         // Fall through with null — useAgent will connect without the bearer
         // and the server will reject with 401. That surfaces through the

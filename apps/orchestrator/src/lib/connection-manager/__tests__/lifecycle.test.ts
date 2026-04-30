@@ -55,6 +55,10 @@ const mocks = vi.hoisted(() => {
 
 vi.mock('~/lib/platform', () => ({
   isNative: () => mocks.getIsNative(),
+  // GH#132 P3: Expo native branch is gated separately. Tests against
+  // the Capacitor lifecycle path keep this false; Expo lifecycle has
+  // its own coverage in tests covering installExpoNative.
+  isExpoNative: () => false,
 }))
 
 vi.mock('@capacitor/app', () => ({
