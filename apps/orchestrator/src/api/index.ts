@@ -1630,6 +1630,25 @@ export function createApiApp() {
       .returning()
 
     if (updated.length === 0) {
+      // Distinguish "row was soft-deleted out from under us" from "row never
+      // existed for this user." The former is the dedup / cross-device-close
+      // race documented on the DELETE handler (and on the client's
+      // userTabsOnDelete 404-as-success comment): the mark-seen PATCH on the
+      // active tab fires after `POST /api/user-settings/tabs` atomically
+      // soft-deleted the previous project tab, but before the synced-collection
+      // delta has dropped that row from the local cache. PATCH against a
+      // vanished tab is logically a no-op — there is no UI left to update —
+      // so return 204 and let the client's optimistic state reconcile away
+      // when the delete delta arrives. A true unknown id (or a row owned by
+      // another user) still returns 404.
+      const anyRow = await db
+        .select({ id: userTabs.id })
+        .from(userTabs)
+        .where(and(eq(userTabs.id, tabId), eq(userTabs.userId, userId)))
+        .limit(1)
+      if (anyRow.length > 0) {
+        return c.body(null, 204)
+      }
       return c.json({ error: 'Tab not found' }, 404)
     }
 

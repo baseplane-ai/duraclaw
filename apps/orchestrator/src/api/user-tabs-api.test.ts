@@ -374,3 +374,109 @@ describe('POST /api/user-settings/tabs — dedupProject', () => {
     expect(fakeDb.db.update).not.toHaveBeenCalled()
   })
 })
+
+describe('PATCH /api/user-settings/tabs/:id', () => {
+  let env: any
+  let fakeDb: ReturnType<typeof makeFakeDb>
+
+  beforeEach(() => {
+    env = createMockEnv()
+    fakeDb = makeFakeDb()
+    installFakeDb(fakeDb.db)
+    mockedBroadcastSnapshot.mockClear()
+    mockedGetRequestSession.mockResolvedValue({
+      userId: 'user-1',
+      session: { id: 's' },
+      user: { id: 'user-1' },
+    })
+  })
+
+  it('returns 204 when the row exists but was soft-deleted (idempotent no-op for the dedup race)', async () => {
+    // Read order in the handler:
+    //   1. SELECT prevSessionId (live filter) — empty (row is soft-deleted)
+    //   2. UPDATE ... .returning() — empty (live WHERE matches nothing)
+    //   3. SELECT existence (no deletedAt filter) — returns the row
+    fakeDb.data.queue = [
+      // 1. prevSessionId precheck (live)
+      [],
+      // 2. UPDATE returning — no live row
+      [],
+      // 3. Existence check ignoring deletedAt — row IS there, just deleted
+      [{ id: 't-deleted' }],
+    ]
+
+    const app = makeApp(env)
+    const res = await app.request('/api/user-settings/tabs/t-deleted', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ meta: '{"project":"BP","lastSeenSeq":42}' }),
+    })
+
+    expect(res.status).toBe(204)
+    // No broadcast — there's nothing to fan out, the row is gone.
+    expect(mockedBroadcastSnapshot).not.toHaveBeenCalled()
+  })
+
+  it('returns 404 when no row exists for that id (truly unknown / wrong user)', async () => {
+    fakeDb.data.queue = [
+      // 1. prevSessionId precheck (live) — empty
+      [],
+      // 2. UPDATE returning — empty
+      [],
+      // 3. Existence check ignoring deletedAt — still empty (truly unknown)
+      [],
+    ]
+
+    const app = makeApp(env)
+    const res = await app.request('/api/user-settings/tabs/missing', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ meta: '{"project":"BP","lastSeenSeq":42}' }),
+    })
+
+    expect(res.status).toBe(404)
+    await expect(res.json()).resolves.toEqual({ error: 'Tab not found' })
+  })
+
+  it('returns 200 with the updated row on a successful patch (regression — the happy path)', async () => {
+    fakeDb.data.queue = [
+      // 1. prevSessionId precheck (live) — sess-A
+      [{ sessionId: 'sess-A' }],
+      // 2. UPDATE returning — the updated row
+      [
+        {
+          id: 't1',
+          userId: 'user-1',
+          sessionId: 'sess-A',
+          position: 0,
+          createdAt: '2026-04-20T00:00:00.000Z',
+          meta: '{"project":"BP","lastSeenSeq":42}',
+          deletedAt: null,
+        },
+      ],
+    ]
+
+    const app = makeApp(env)
+    const res = await app.request('/api/user-settings/tabs/t1', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ meta: '{"project":"BP","lastSeenSeq":42}' }),
+    })
+
+    expect(res.status).toBe(200)
+    expect(mockedBroadcastSnapshot).toHaveBeenCalled()
+  })
+
+  it('returns 401 when not authenticated', async () => {
+    mockedGetRequestSession.mockResolvedValue(null)
+
+    const app = makeApp(env)
+    const res = await app.request('/api/user-settings/tabs/t1', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ meta: '{}' }),
+    })
+
+    expect(res.status).toBe(401)
+  })
+})
