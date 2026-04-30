@@ -21,7 +21,12 @@
 
 import type { SessionMessage } from 'agents/experimental/memory/session'
 import { checkPendingResume, checkWaitingIdentity } from './resume-scheduler'
-import { ALARM_INTERVAL_MS, RECOVERY_GRACE_MS, type SessionDOContext } from './types'
+import {
+  ALARM_INTERVAL_MS,
+  AWAITING_LIVE_CONN_GRACE_MS,
+  RECOVERY_GRACE_MS,
+  type SessionDOContext,
+} from './types'
 
 /** Default stale threshold for the DO watchdog (ms). */
 export const DEFAULT_STALE_THRESHOLD_MS = 90_000
@@ -69,33 +74,59 @@ export function planClearAwaiting<TMsg extends SessionMessage>(
 /**
  * Pure decision returned by {@link planAwaitingTimeout}.
  *
- * - `{ kind: 'noop' }` — nothing to do (no awaiting tail, runner
- *   attached, or the grace window has not elapsed).
- * - `{ kind: 'expire', startedTs }` — the caller should run the
- *   expire sequence: clear awaiting, append an error system message,
- *   flip DO state to `idle` with the error text populated, and sync
- *   status to D1.
+ * - `{ kind: 'noop' }` — nothing to do (no awaiting tail, the grace
+ *   window has not elapsed yet, or no awaiting part on the tail user).
+ * - `{ kind: 'expire', startedTs, reason: 'connection-lost' }` — the
+ *   gateway WS is gone (`connectionId === null`) AND the awaiting part
+ *   is older than `RECOVERY_GRACE_MS`. The caller should run the
+ *   full-recovery sequence (clear awaiting, append error row, flip to
+ *   error state, drop active_callback_token).
+ * - `{ kind: 'expire', startedTs, reason: 'silent-drop' }` — the
+ *   gateway WS appears alive (`connectionId !== null`) BUT no runner
+ *   activity for this user turn within `AWAITING_LIVE_CONN_GRACE_MS`.
+ *   The stream-input was almost certainly silently dropped (TCP
+ *   half-close / CF proxy buffer drop / packet loss — none of which
+ *   throw on `conn.send()`). The caller should run the soft-recovery
+ *   sequence: clear the awaiting part and append a "message wasn't
+ *   received, please retry" notice while keeping the session running
+ *   and the runner attached.
  */
-export type AwaitingTimeoutDecision = { kind: 'noop' } | { kind: 'expire'; startedTs: number }
+export type AwaitingTimeoutDecision =
+  | { kind: 'noop' }
+  | { kind: 'expire'; startedTs: number; reason: 'connection-lost' | 'silent-drop' }
 
 /**
  * Pure version of `SessionDO.checkAwaitingTimeout` (#80 B7).
  *
  * Decides whether the watchdog should expire an awaiting_response part.
  * The decision is a pure function of the current history tail, the
- * runner connection id, the current clock, and the grace window; the
+ * runner connection id, the current clock, and two grace windows; the
  * caller performs the state mutations so the side-effecting pieces
  * (safeAppendMessage / updateState) stay in the DO.
+ *
+ * Two grace windows model the two distinct failure modes:
+ *
+ *   - Gateway WS gone (`connectionId === null`) → use `graceMs`
+ *     (`RECOVERY_GRACE_MS`, default 15s). The runner is unreachable;
+ *     fail the awaiting turn fast so the user sees an error and can
+ *     retry.
+ *
+ *   - Gateway WS alive (`connectionId !== null`) but the awaiting part
+ *     never resolved → use `extendedGraceMs`
+ *     (`AWAITING_LIVE_CONN_GRACE_MS`, default 90s). The stream-input
+ *     was silently dropped on the wire (`conn.send()` returned
+ *     success but the data never arrived). The longer grace absorbs a
+ *     genuinely slow first-token turn (model thinking, big context),
+ *     then surfaces a soft-recovery notice — the runner is still
+ *     processing other turns normally, so we don't tear down state.
  */
 export function planAwaitingTimeout<TMsg extends SessionMessage>(input: {
   history: readonly TMsg[]
   connectionId: string | null
   now: number
   graceMs?: number
+  extendedGraceMs?: number
 }): AwaitingTimeoutDecision {
-  if (input.connectionId !== null) return { kind: 'noop' }
-  const grace = input.graceMs ?? RECOVERY_GRACE_MS
-
   for (let i = input.history.length - 1; i >= 0; i--) {
     const msg = input.history[i]
     if (msg.role !== 'user') continue
@@ -106,8 +137,18 @@ export function planAwaitingTimeout<TMsg extends SessionMessage>(input: {
       return { kind: 'noop' }
     }
     const startedTs = typeof lastPart.startedTs === 'number' ? lastPart.startedTs : 0
-    if (input.now - startedTs <= grace) return { kind: 'noop' }
-    return { kind: 'expire', startedTs }
+    const age = input.now - startedTs
+
+    if (input.connectionId === null) {
+      const grace = input.graceMs ?? RECOVERY_GRACE_MS
+      if (age <= grace) return { kind: 'noop' }
+      return { kind: 'expire', startedTs, reason: 'connection-lost' }
+    }
+
+    // Gateway WS appears alive — silent-drop guard with extended grace.
+    const extendedGrace = input.extendedGraceMs ?? AWAITING_LIVE_CONN_GRACE_MS
+    if (age <= extendedGrace) return { kind: 'noop' }
+    return { kind: 'expire', startedTs, reason: 'silent-drop' }
   }
   return { kind: 'noop' }
 }

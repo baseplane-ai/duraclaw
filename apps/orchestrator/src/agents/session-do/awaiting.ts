@@ -9,7 +9,7 @@ import { hydrateFromGatewayImpl } from './hydrate-from-gateway'
 import { maybeReleaseWorktreeOnTerminal } from './maybe-release-worktree'
 import { finalizeStreamingParts } from './message-parts'
 import { sendToGateway } from './runner-link'
-import { RECOVERY_GRACE_MS, type SessionDOContext } from './types'
+import { AWAITING_LIVE_CONN_GRACE_MS, RECOVERY_GRACE_MS, type SessionDOContext } from './types'
 import {
   clearRecoveryGraceTimer as clearRecoveryGraceTimerImpl,
   planAwaitingTimeout,
@@ -36,11 +36,58 @@ export async function checkAwaitingTimeoutImpl(ctx: SessionDOContext): Promise<v
     connectionId: ctx.do.getGatewayConnectionId(),
     now: Date.now(),
     graceMs: RECOVERY_GRACE_MS,
+    extendedGraceMs: AWAITING_LIVE_CONN_GRACE_MS,
   })
   if (decision.kind === 'noop') return
 
-  // Expired — strip the awaiting part and surface a terminal error row.
-  await failAwaitingTurnImpl(ctx, 'runner failed to attach within recovery grace')
+  if (decision.reason === 'connection-lost') {
+    // Gateway WS is gone — full recovery (transition to error, drop token).
+    await failAwaitingTurnImpl(ctx, 'runner failed to attach within recovery grace')
+    return
+  }
+
+  // Gateway WS alive but stream-input silently dropped on the wire.
+  // Soft-recover: clear the awaiting part + append a notice prompting the
+  // user to retry, but KEEP the session running and the runner attached.
+  await failAwaitingTurnSilentDropImpl(ctx)
+}
+
+/**
+ * Soft-recovery for the silent-drop case: the runner WS still appears
+ * healthy (it's processing other turns fine) but THIS user message's
+ * stream-input never arrived. Clear the awaiting part, append a system
+ * notice, and leave the session running so the user can simply retry.
+ *
+ * Differs from `failAwaitingTurnImpl` in two important ways:
+ *   1. State stays whatever it currently is (NOT flipped to 'error').
+ *   2. `active_callback_token` is preserved — the runner is fine, the
+ *      drop was a single-message wire-level loss.
+ */
+export async function failAwaitingTurnSilentDropImpl(ctx: SessionDOContext): Promise<void> {
+  ctx.do.clearAwaitingResponse()
+
+  ctx.do.turnCounter++
+  const errorMsgId = `err-${ctx.do.turnCounter}`
+  const errorMsg: SessionMessage = {
+    id: errorMsgId,
+    role: 'system',
+    parts: [
+      {
+        type: 'text',
+        text: '⚠ Your last message did not reach the runner (silent network drop). Please send it again — the session is still running.',
+      },
+    ],
+    createdAt: new Date(),
+  }
+  try {
+    await ctx.do.safeAppendMessage(errorMsg)
+    broadcastMessagesImpl(ctx, [errorMsg as unknown as WireSessionMessage])
+  } catch (err) {
+    console.error(
+      `[SessionDO:${ctx.ctx.id}] silent-drop recovery: failed to append notice row:`,
+      err,
+    )
+  }
 }
 
 export async function failAwaitingTurnImpl(
