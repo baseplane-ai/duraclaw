@@ -247,6 +247,49 @@ describe('useMessagesCollection', () => {
     expect(result.current.messages.map((m) => m.id)).toEqual(['usr-1', 'usr-client-abc'])
   })
 
+  it('user always sorts before same-turn assistant, even when user createdAt > assistant createdAt', () => {
+    // Regression: cross-clock createdAt comparison. The user message's
+    // `createdAt` is stamped by the CLIENT (wall clock at optimistic insert,
+    // preserved verbatim by the server in rpc-messages.ts). The same-turn
+    // assistant's `createdAt` is stamped by the SERVER on the first
+    // partial_assistant event (gateway-event-handler.ts).
+    //
+    // When the client clock is ahead of the server clock by more than the
+    // user-POST → first-token latency (commonly true on phones with skewed
+    // NTP, or on any client when SDK warmup is fast), the user's createdAt
+    // exceeds the assistant's createdAt. Both share `turnOrdinal=N` (usr-N
+    // and msg-N), so the previous `[turnOrdinal, createdAt]` sort would
+    // tie-break by the inverted timestamp and place the user BELOW the
+    // assistant of the same turn — visibly "dropping" the user bubble
+    // midstream as the assistant streams in.
+    //
+    // Causally, a user can never speak after the assistant within a single
+    // turn. The sort must enforce role order within a turn before falling
+    // back to createdAt.
+    mockLiveQueryData = [
+      makeMessage({
+        id: 'msg-5',
+        sessionId: 'session-abc',
+        role: 'assistant',
+        // Server-stamped at first partial_assistant
+        createdAt: '2026-04-29T10:00:01.500Z',
+      }),
+      makeMessage({
+        id: 'usr-5',
+        sessionId: 'session-abc',
+        role: 'user',
+        canonical_turn_id: 'usr-5',
+        // Client-stamped at optimistic insert; client clock is ~2s ahead of server
+        createdAt: '2026-04-29T10:00:03.000Z',
+      }),
+    ]
+
+    const { result } = renderHook(() => useMessagesCollection('session-abc'))
+
+    // User must render BEFORE the same-turn assistant regardless of createdAt skew.
+    expect(result.current.messages.map((m) => m.id)).toEqual(['usr-5', 'msg-5'])
+  })
+
   it('REST-loaded user+assistant turns interleave correctly via msg-N id fallback', () => {
     // Regression: when all rows lack seq (REST-loaded), the secondary sort
     // must parse the message id itself (msg-N → turnOrdinal=N) so assistant

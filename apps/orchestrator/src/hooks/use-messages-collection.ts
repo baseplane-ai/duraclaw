@@ -6,8 +6,9 @@
  * memoised per sessionId — no sessionId filter needed because the collection
  * is already scoped.
  *
- * Sort contract — 2-level tuple `[turnOrdinal, createdAt]`, both ascending,
- * lower values first (GH#38 P1.3 — seq was dropped in B6):
+ * Sort contract — 3-level tuple `[turnOrdinal, roleRank, createdAt]`, all
+ * ascending, lower values first (GH#38 P1.3 — seq was dropped in B6;
+ * roleRank added to guard cross-clock createdAt comparisons within a turn):
  *
  *   1. Primary: `canonical_turn_id` parsed as `usr-N` (the SessionDO's
  *      strictly-monotonic `turnCounter`), falling back to the message `id`
@@ -17,9 +18,20 @@
  *      fall through to `Number.POSITIVE_INFINITY` — they briefly sort last
  *      (below every echoed row) and snap into place once the server echo
  *      arrives with the canonical `usr-N` id.
- *   2. Tertiary: `createdAt` — tie-breaker for rows with the same
- *      turnOrdinal (cold-start REST-loaded rows share ordinal with their
- *      server-side siblings and naturally fall through to createdAt).
+ *   2. Secondary: `roleRank` — within a single turn, user always renders
+ *      before assistant before tool/error. This is the causal/logical
+ *      ordering (a user can never speak after the assistant within one
+ *      turn) and crucially it isolates us from cross-clock createdAt
+ *      comparisons: the user's `createdAt` is client wall-clock (preserved
+ *      by the server), while the same-turn assistant's `createdAt` is
+ *      server wall-clock (stamped on the first partial_assistant). When
+ *      client clock skew exceeds user-POST → first-token latency, those
+ *      timestamps invert; without roleRank the user bubble would visibly
+ *      drop below the streaming assistant midstream.
+ *   3. Tertiary: `createdAt` — tie-breaker for rows with the same
+ *      turnOrdinal AND same role (cold-start REST-loaded rows share
+ *      ordinal with their server-side siblings and naturally fall through
+ *      to createdAt).
  *
  * See GH#14 for the canonical-id history and GH#38 for the seq removal.
  */
@@ -60,15 +72,28 @@ function createdAtMs(row: CachedMessage): number {
 }
 
 /**
- * Returns `[turnOrdinal, createdAt]`. Lower values sort first. Rows without
- * any parseable ordinal (`usr-client-<uuid>` optimistic rows pre-echo) fall
- * back to `Number.POSITIVE_INFINITY` — they briefly sort last, then snap
- * into place when the server echo reconciles with the canonical `usr-N`.
+ * Within a single turn, user always renders before assistant before
+ * tool/error. This guards against cross-clock createdAt inversion (user
+ * createdAt is client wall-clock; same-turn assistant createdAt is server
+ * wall-clock).
  */
-function sortKey(row: CachedMessage): [number, number] {
+function roleRank(role: string | undefined): number {
+  if (role === 'user') return 0
+  if (role === 'assistant') return 1
+  return 2
+}
+
+/**
+ * Returns `[turnOrdinal, roleRank, createdAt]`. Lower values sort first.
+ * Rows without any parseable ordinal (`usr-client-<uuid>` optimistic rows
+ * pre-echo) fall back to `Number.POSITIVE_INFINITY` — they briefly sort
+ * last, then snap into place when the server echo reconciles with the
+ * canonical `usr-N`.
+ */
+function sortKey(row: CachedMessage): [number, number, number] {
   const ord =
     parseTurnOrdinal(row.canonical_turn_id) ?? parseTurnOrdinal(row.id) ?? Number.POSITIVE_INFINITY
-  return [ord, createdAtMs(row)]
+  return [ord, roleRank(row.role), createdAtMs(row)]
 }
 
 export function useMessagesCollection(sessionId: string) {
@@ -97,9 +122,10 @@ export function useMessagesCollection(sessionId: string) {
       return [] as CachedMessage[]
     }
     const sorted = (data as unknown as CachedMessage[]).slice().sort((a, b) => {
-      const [aO, aC] = sortKey(a)
-      const [bO, bC] = sortKey(b)
+      const [aO, aR, aC] = sortKey(a)
+      const [bO, bR, bC] = sortKey(b)
       if (aO !== bO) return aO - bO
+      if (aR !== bR) return aR - bR
       return aC - bC
     })
     // Build a compact signature that catches the mutations we render off of:
