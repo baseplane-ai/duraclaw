@@ -10,8 +10,12 @@
 # Differences from apps/mobile/scripts/build-android.sh (Capacitor):
 #   - No `cap sync` — Expo prebuild handles the same job (regen native projects).
 #   - No separate Vite build — Metro bundles JS into the APK at gradle time.
-#   - Package id is com.baseplane.duraclaw.rn (NEW — coexists with the old
-#     com.baseplane.duraclaw Capacitor APK during the dogfood transition).
+#   - Package id is com.baseplane.duraclaw, same as the Capacitor APK
+#     (Decision 7 reversed during VP-11 verification — see commit 120a691).
+#     Reusing the existing Firebase project + google-services.json verbatim.
+#     Side-by-side install with Capacitor APK is no longer supported; the
+#     Expo APK either updates (same signing key) or replaces (different key
+#     after `adb uninstall com.baseplane.duraclaw`) the Capacitor install.
 
 set -euo pipefail
 

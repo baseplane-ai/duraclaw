@@ -5,11 +5,12 @@
 # Mirrors apps/mobile/scripts/sign-android.sh exactly, except:
 #   - The default input APK comes from the Expo prebuild gradle output, which
 #     lives at apps/mobile-expo/android/app/build/outputs/apk/release/app-release-unsigned.apk
-#   - The signed output package is com.baseplane.duraclaw.rn (a NEW Android
-#     package id; see planning/specs/132-p3-rn-native-target.md Decision #7).
-#     This means it CO-EXISTS on a device with com.baseplane.duraclaw — they
-#     install side-by-side; the signing key may be the same or different at
-#     your discretion, but for parallel install you do NOT need to share keys.
+#   - The signed output package is com.baseplane.duraclaw — same as the
+#     Capacitor APK (Decision 7 reversed during VP-11 verification, commit
+#     120a691). To install over an existing Capacitor APK without
+#     INSTALL_FAILED_UPDATE_INCOMPATIBLE, sign with the SAME keystore that
+#     signed the Capacitor build. Otherwise `adb uninstall com.baseplane.duraclaw`
+#     before installing this APK (acceptable since Capacitor is sunsetting).
 #
 # Usage:
 #   KEYSTORE_PATH=~/.duraclaw-keystore.jks \
@@ -55,9 +56,9 @@ Generate a development keystore (one-time, local dev only):
     -storepass <pass> -keypass <pass> \
     -dname "CN=Duraclaw, OU=Eng, O=Baseplane, L=Internal, S=Internal, C=US"
 
-Or reuse the existing apps/mobile/ keystore if you already have one — the
-new com.baseplane.duraclaw.rn package signs cleanly with any key. Side-by-
-side install is unaffected by signing key.
+Reuse the existing apps/mobile/ Capacitor keystore if you have it — same
+package id (com.baseplane.duraclaw), same key → install path replaces the
+Capacitor APK without uninstall. Different key → adb uninstall first.
 HELP
   exit 1
 fi
