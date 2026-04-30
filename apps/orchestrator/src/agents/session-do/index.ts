@@ -21,6 +21,7 @@ import type {
   SpawnConfig,
 } from '~/lib/types'
 import { SESSION_DO_MIGRATIONS } from '../session-do-migrations'
+import { advanceArcImpl } from './advance-arc'
 import {
   checkAwaitingTimeoutImpl,
   clearAwaitingResponseImpl,
@@ -28,7 +29,7 @@ import {
   fireRunawayInterruptImpl,
   recoverFromDroppedConnectionImpl,
 } from './awaiting'
-import { forkWithHistoryImpl, resubmitMessageImpl } from './branches'
+import { branchArcImpl, resubmitMessageImpl } from './branches'
 import {
   broadcastGatewayEvent as broadcastGatewayEventImpl,
   broadcastMessages as broadcastMessagesImpl,
@@ -52,7 +53,7 @@ import {
 } from './history'
 import { handleHttpRequest } from './http-routes'
 import { runHydration } from './hydration'
-import { handleModeTransitionImpl, maybeAutoAdvanceChainImpl } from './mode-transition'
+import { rebindRunnerImpl } from './rebind-runner'
 import { resolveGateImpl } from './rpc-gates'
 import {
   abortImpl,
@@ -315,10 +316,6 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   broadcastGatewayEvent(event: GatewayEvent) {
     return broadcastGatewayEventImpl(this.moduleCtx, event)
   }
-  /** Chain auto-advance (16-chain-ux-p1-5 B6/B7/B9). */
-  async maybeAutoAdvanceChain(): Promise<void> {
-    return maybeAutoAdvanceChainImpl(this.moduleCtx)
-  }
   broadcastMessages(
     rowsOrOps: WireSessionMessage[] | { ops: SyncedCollectionOp<WireSessionMessage>[] },
     opts: { targetClientId?: string } = {},
@@ -334,10 +331,6 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   }
   syncContextUsageToD1(json: string) {
     return syncContextUsageToD1Impl(this.moduleCtx, this.contextUsageDebounce, json)
-  }
-  /** Chain UX P4 — mode-enter session reset on `kata_state` mode change. */
-  async handleModeTransition(kataState: KataSessionState, fromMode: string | null) {
-    return handleModeTransitionImpl(this.moduleCtx, kataState, fromMode)
   }
   getGatewayConnectionId(): string | null {
     return getGatewayConnectionIdImpl(this.moduleCtx)
@@ -437,11 +430,21 @@ export class SessionDO extends Agent<Env, SessionMeta> {
     return sendMessageImpl(this.moduleCtx, content, opts)
   }
   @callable()
-  async forkWithHistory(
-    content: string | ContentBlock[],
-    opts?: { worktreeId?: string | null },
-  ): Promise<{ ok: boolean; error?: string }> {
-    return forkWithHistoryImpl(this.moduleCtx, content, opts)
+  async advanceArc(args: { mode?: string | null; prompt: string; agent?: string }) {
+    return advanceArcImpl(this.moduleCtx, args)
+  }
+  @callable()
+  async branchArc(args: {
+    fromMessageSeq?: number
+    prompt: string
+    mode?: string | null
+    title?: string
+  }) {
+    return branchArcImpl(this.moduleCtx, args)
+  }
+  @callable()
+  async rebindRunner(args: { nextUserMessage?: string | ContentBlock[] }) {
+    return rebindRunnerImpl(this.moduleCtx, args)
   }
   @callable()
   async interrupt(): Promise<{ ok: boolean; error?: string }> {

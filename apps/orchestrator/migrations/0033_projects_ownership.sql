@@ -9,7 +9,7 @@
 -- the role enum reserve editor/viewer slots while v1 only writes 'owner'.
 --
 -- Pre-flight: take a D1 backup with
---   wrangler d1 export duraclaw-auth --output=apps/orchestrator/migrations/backups/pre-0032.sql
+--   wrangler d1 export duraclaw-auth --output=apps/orchestrator/migrations/backups/pre-0033.sql
 -- BEFORE applying this migration. Rollback fixture; see backups/README.md.
 --
 -- After migration applies, operator runs `pnpm backfill:project-ids` once
@@ -17,8 +17,13 @@
 -- already exists. Subsequent gateway syncs (within 30s) populate any
 -- remaining rows via the atomic dual-write in B-SYNC-2.
 --
+-- Renumbered 0032 → 0033 during merge-to-main: two 0032_* files
+-- (arcs_first_class from GH#116, project_customization from GH#84) had
+-- already landed; this slots after them. None of this migration's DDL
+-- touches columns or tables those two introduced, so ordering is safe.
+--
 -- Journal drift note: meta/_journal.json only has entries through 0017.
--- Migrations 0018-0031 shipped without journal entries; we do not
+-- Migrations 0018-0032 shipped without journal entries; we do not
 -- regenerate the journal here to avoid touching every prior migration.
 
 -- 1. B-SCHEMA-1: projectId on projects (nullable so migration can land

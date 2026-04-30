@@ -35,6 +35,8 @@
 | GH#12 | Client Data Layer Unification (TanStack DB) | done | — | — |
 | GH#16 | Chain UX Epic | done | [16-chain-ux.md](specs/16-chain-ux.md) | — |
 | GH#18 | kata_state Emission Fix | done | — | GH#16 P4 |
+| GH#115 | Worktrees as First-Class Resource | done | [115-worktrees-first-class.md](specs/115-worktrees-first-class.md) | unblocks GH#116 |
+| GH#116 | Arcs as First-Class Parent | done | [116-arcs-first-class-parent.md](specs/116-arcs-first-class-parent.md) | replaces "chain" aggregation with `arcs` table; collapses 3 session-progression paths into `advanceArc` / `branchArc` / `rebindRunner`; drops kata schema columns; kata becomes a pure consumer that validates `mode` against its own `kata.yaml`. |
 
 ### Chain UX (GH#16) — Kanban Board + Chain Tabs + Mode Reset
 

@@ -15,16 +15,29 @@
 //                        SessionHistory.tsx, SessionListItem.tsx, status-bar.tsx.
 //   • message_count    — SUPERSEDED by `num_turns` in spec #37 (P1a-1);
 //                        column dropped from D1 in migration 0016.
-//   • kata_mode        — written by SessionDO.syncKataToRegistry, read by
-//                        features/agent-orch/SessionCardList.tsx (badge).
-//   • kata_issue       — same write path, read by SessionCardList.tsx.
-//   • kata_phase       — same write path, read by SessionCardList.tsx.
 //
-// Dropped (no live consumer found):
-//   • (none — every populated column has at least one client read path).
+// Dropped by GH#116 migration 0032 (arcs-first-class):
+//   • kata_mode   — replaced by `mode` (renamed; same nullable text shape).
+//                   Backfilled from kataMode at migration time.
+//   • kata_issue  — replaced by `arc_id` (FK to arcs); arcs carry
+//                   externalRef={provider:'github',id:kataIssue} JSON.
+//   • kata_phase  — dropped entirely; phase tracking now lives in kata's
+//                   internal state.json, not in the D1 row.
 //
-// Net: 17 baseline + 5 extras = 22 columns, matching the current DO DDL minus
-// dead-on-arrival fields. The spec's "13 extra columns" prose was a worst-case
+// Added by GH#116 migration 0032 (arcs-first-class):
+//   • arc_id            — FK→arcs.id (CASCADE). NOT NULL is enforced at the
+//                         Drizzle/app layer; the DB column is nullable
+//                         post-migration because SQLite can't ALTER an
+//                         existing column to add NOT NULL without a table
+//                         recreate (and the auth `sessions` table owns the
+//                         clean name we'd otherwise rename to).
+//   • mode              — text, nullable. Backfilled from kata_mode.
+//   • parent_session_id — self-FK to agent_sessions.id, nullable. Drizzle
+//                         self-reference is omitted (matches user_tabs
+//                         pattern); app-layer integrity only.
+//
+// Net: baseline + audit-retained extensions, with kata-trio replaced by
+// arc-graph columns. The spec's "13 extra columns" prose was a worst-case
 // estimate; the actual ProjectRegistry DDL only had 6 extras over the baseline.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -139,6 +152,18 @@ export const agentSessions = sqliteTable(
     userId: text('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
+    // GH#116: parent arc FK. notNull() is enforced at the Drizzle + app
+    // layer only — the DB column is nullable (added by migration 0032
+    // as `ALTER TABLE ... ADD COLUMN arc_id text` and backfilled, then
+    // left nullable because SQLite cannot ALTER an existing column to
+    // add NOT NULL without a table recreate, and the auth `sessions`
+    // table collision rules out the rename-to-clean-table path
+    // (Gotcha #12 + #13). Every code path that writes a session row
+    // MUST supply arcId; createSession() auto-creates an implicit arc
+    // when the caller doesn't have one.
+    arcId: text('arc_id')
+      .notNull()
+      .references(() => arcs.id, { onDelete: 'cascade' }),
     project: text('project').notNull(),
     status: text('status').notNull().default('running'),
     model: text('model'),
@@ -171,14 +196,21 @@ export const agentSessions = sqliteTable(
     // Audit-retained extensions (see header comment for justification):
     durationMs: integer('duration_ms'),
     totalCostUsd: real('total_cost_usd'),
-    kataMode: text('kata_mode'),
-    kataIssue: integer('kata_issue'),
-    kataPhase: text('kata_phase'),
+    // GH#116: renamed from kata_mode. Backfilled from kata_mode by
+    // migration 0032; nullable text shape preserved.
+    mode: text('mode'),
+    // GH#116: self-FK for branchArc / parentSessionId tree. Drizzle
+    // self-references are awkward to express in the table builder; we
+    // omit the explicit `.references()` and rely on app-layer integrity
+    // (matches the userTabs.sessionId pattern).
+    parentSessionId: text('parent_session_id'),
     // Spec #37 P1a-1: per-session live state mirrored from DO-owned state
     // onto the D1 row so non-active callers (sidebar, history) render
     // uniformly without a DO roundtrip.
     error: text('error'),
     errorCode: text('error_code'),
+    // GH#116: PRESERVED — still used for KataStatePanel UI rendering.
+    // Only the kataMode/kataIssue/kataPhase trio was dropped.
     kataStateJson: text('kata_state_json'),
     contextUsageJson: text('context_usage_json'),
     // GH#115: FK into worktrees(id). NULL for sessions in read-only
@@ -198,6 +230,77 @@ export const agentSessions = sqliteTable(
       t.visibility,
       t.lastActivity,
     ),
+    // GH#116: partial unique on (arcId, mode) WHERE status IN
+    // ('idle','pending','running') AND mode IS NOT NULL. Closes the
+    // auto-advance idempotency race — two concurrent `stopped` events
+    // can no longer spawn duplicate successors for the same (arc, mode)
+    // tuple. `mode IS NOT NULL` is required because SQLite treats NULLs
+    // as distinct in UNIQUE indexes; without it two `(arcId, NULL,
+    // status='running')` rows would not collide and the index would
+    // silently fail to enforce idempotency for null-mode sessions.
+    // Null-mode sessions (implicit-arc / debug / freeform / pre-mode-set)
+    // intentionally do not participate in advance idempotency.
+    arcModeActive: uniqueIndex('idx_agent_sessions_arc_mode_active')
+      .on(t.arcId, t.mode)
+      .where(sql`status IN ('idle','pending','running') AND mode IS NOT NULL`),
+  }),
+)
+
+/**
+ * GH#116: arcs are the durable parent of every session — the
+ * orchestrator-side analog of a kata "chain", but expanded to cover
+ * orphan/debug/freeform sessions and explicit branch trees. One arc per
+ * (userId, externalRef.id) for kata-linked work; one implicit arc per
+ * arc-less session.
+ *
+ * `externalRef` is JSON `{provider, id, url?}` stored as text (D1 has
+ * no native JSON type); parsed on read. The unique index on the
+ * `(provider, id)` extraction enforces "one arc per GH issue per user"
+ * at the DB layer.
+ *
+ * `worktreeId` is FK into worktrees(id) (table introduced by GH#115's
+ * migration 0031). Nullable because read-only arcs (research-only,
+ * archived) may have no worktree.
+ *
+ * `parentArcId` is a self-FK for side arcs created via branchArc.
+ * Drizzle handles self-reference via the `() => arcs.id` callback.
+ */
+export const arcs = sqliteTable(
+  'arcs',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    title: text('title').notNull(),
+    // JSON: {provider:'github'|'linear'|'plain', id, url?}. Parse on read
+    // via parseExternalRef() in lib/arcs.ts.
+    externalRef: text('external_ref'),
+    // FK→worktrees.id; nullable for arc-less / read-only arcs.
+    worktreeId: text('worktree_id').references(() => worktrees.id),
+    // Allowed: 'draft'|'open'|'closed'|'archived' (app-layer validation).
+    status: text('status').notNull().default('draft'),
+    // Self-FK to arcs.id for branchArc parent/child trees. Drizzle's
+    // self-reference inside the table builder fights TypeScript's
+    // circular-binding inference; we omit the explicit `.references()`
+    // and rely on app-layer integrity (matches the userTabs.sessionId
+    // pattern at line ~204).
+    parentArcId: text('parent_arc_id'),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+    closedAt: text('closed_at'),
+  },
+  (t) => ({
+    // Expression unique on the (provider, id) tuple inside externalRef
+    // — deduplicates GH issue → arc 1:1. Filtered to skip arcs without
+    // an externalRef (orphan / draft arcs are unconstrained).
+    externalRefUnique: uniqueIndex('idx_arcs_external_ref')
+      .on(
+        sql`json_extract(${t.externalRef}, '$.provider')`,
+        sql`json_extract(${t.externalRef}, '$.id')`,
+      )
+      .where(sql`${t.externalRef} IS NOT NULL`),
+    userStatusActivity: index('idx_arcs_user_status_lastactivity').on(t.userId, t.status),
   }),
 )
 
@@ -306,6 +409,17 @@ export const projects = sqliteTable('projects', {
    * (the rest of this table is snake_case for legacy reasons).
    */
   projectId: text('projectId'),
+  // GH#84: optional per-project display overrides for the tab strip.
+  // Both default-NULL → fall back to the auto-derivation in
+  // `lib/project-display.ts` (FNV-1a slot hash + regex abbrev). Admins
+  // patch via `PATCH /api/projects/:name/customization`. Gateway sync
+  // upserts MUST omit these columns from the update set so admin
+  // overrides survive a re-sync (same pattern as `visibility`).
+  // `abbrev` is constrained client+server-side to `[A-Z0-9]{1,2}`;
+  // `colorSlot` is an integer index into `PROJECT_COLOR_SLOTS`
+  // (10 slots today). See migration 0033 (additive after 0032).
+  abbrev: text('abbrev'),
+  colorSlot: integer('color_slot'),
 })
 
 /**

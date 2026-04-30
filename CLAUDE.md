@@ -33,6 +33,7 @@ Key invariants:
 - Gateway restart / CF Worker redeploy are non-events for an in-flight runner; the BufferedChannel buffers while the WS is down, replays on reconnect, emits a single gap sentinel only on overflow.
 - Session status derives from `messagesCollection` via `useDerivedStatus`; D1 `agent_sessions` is the idle/background fallback, not a truth-gate.
 - Per-project state (e.g. docs-runner DO id, settings) lives in the D1 `projectMetadata` table — see `apps/orchestrator/src/db/schema.ts` and `planning/specs/27-docs-as-yjs-dialback-runners.md`.
+- **Arcs as session parents (GH#116)** — every `agent_sessions` row points at an `arcs` row via `arcId` FK. An arc is the durable parent that owns a workflow's external ref (GH issue / Linear / plain), reserves a worktree (FK → `worktrees.id` from #115), and parents a tree of sessions advancing through modes. Three explicit primitives drive session progression on the SessionDO: `advanceArc` (mints a successor session in the same arc — auto-advance + manual mode change), `branchArc` (mints a child arc with a parent FK and a wrapped-history prompt), and `rebindRunner` (clears `runner_session_id` and re-dials a fresh runner against the same session row — orphan recovery). Kata is a consumer of `agent_sessions.mode` (free-form text) and validates mode names against its own `kata.yaml` registry; the orchestrator schema no longer carries kata-specific columns.
 
 ## Monorepo Structure
 

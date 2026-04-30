@@ -1,13 +1,10 @@
 /**
- * AdvanceConfirmModal — "Advance #N from X to Y?" dialog shown when the
- * user clicks Start-next on a kanban card or drops a card on its adjacent-
- * forward column (B9 / B10).
+ * AdvanceConfirmModal — "Advance '<arc title>' from X to Y?" dialog
+ * shown when the user clicks Start-next on a kanban card or drops a
+ * card on its adjacent-forward column (B9 / B10).
  *
- * Layout mirrors the spec (16-chain-ux.md lines 639-653). The "Reset
- * context" bullet is aspirational: the P3 degraded path just aborts +
- * respawns, which still gives the new runner a fresh runner_session_id —
- * functionally equivalent to a context reset for the SDK. P4 will swap
- * in the preamble template.
+ * GH#116 P4a: title now reads from the arc title rather than the
+ * GitHub issue number — for non-GH arcs there's no `#N` to display.
  */
 
 import { Button } from '~/components/ui/button'
@@ -22,22 +19,23 @@ import {
 export interface AdvanceConfirmModalProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  issueNumber: number
+  /** Arc title (user-editable; auto-filled from external ref when present). */
+  arcTitle: string
   currentMode: string
   nextMode: string
   /**
-   * Resolved worktree (either from an existing chain session via
-   * `chainProject(chain)` or the user's pick from `projectOptions`).
-   * When `null`, the modal renders the project picker and disables the
-   * confirm button until the user chooses one.
+   * Resolved worktree (either from an existing arc reservation or the
+   * user's pick from `projectOptions`). When `null`, the modal renders
+   * the project picker and disables the confirm button until the user
+   * chooses one.
    */
   worktree: string | null
   worktreeReserved: boolean
   /**
-   * Backlog-bootstrap branch: when a chain has zero sessions, the caller
+   * Backlog-bootstrap branch: when an arc has zero sessions, the caller
    * resolves the project list itself (typically from
    * `projectsCollection`) and hands it in so the modal can render a
-   * picker. Unused for in-progress chains (where `worktree` is already
+   * picker. Unused for in-progress arcs (where `worktree` is already
    * set).
    */
   projectOptions?: readonly string[]
@@ -50,7 +48,7 @@ export interface AdvanceConfirmModalProps {
 export function AdvanceConfirmModal({
   open,
   onOpenChange,
-  issueNumber,
+  arcTitle,
   currentMode,
   nextMode,
   worktree,
@@ -69,7 +67,7 @@ export function AdvanceConfirmModal({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            Advance #{issueNumber} from {currentMode} to {nextMode}?
+            Advance '{arcTitle}' from {currentMode} to {nextMode}?
           </DialogTitle>
         </DialogHeader>
 

@@ -1,32 +1,43 @@
 /**
  * useNextModePrecondition — compute the next-mode advance button state for
- * one chain on the kanban (B9 precondition table).
+ * one arc on the kanban (originally GH#82 B9 precondition table).
+ *
+ * Field accesses target the post-#116 `ArcSummary` shape:
+ *
+ *   - `arc.externalRef?.id` for GH issue id
+ *   - `arc.status` carries `draft|open|closed|archived`
+ *   - `arc.sessions[].mode` for the per-session frontier mode
+ *   - `deriveColumn(arc.sessions, arc.status)` for kanban placement
  *
  * The table:
  *
  * | column         | next           | gate                                    |
  * |----------------|----------------|-----------------------------------------|
- * | backlog        | research       | `issueState !== 'closed'`               |
+ * | backlog        | research       | `arc.status !== 'closed'`               |
  * | research       | planning       | any completed research session          |
  * | planning       | implementation | spec-status `{exists, status:'approved'}` |
  * | implementation | verify         | any completed implementation session    |
  * | verify         | close          | vp-status `{exists:true}`               |
  * | done           | —              | (no next)                               |
  *
- * The spec-status / vp-status fetches are cached in a module-level map for
- * 30s — the hook invalidates a cache entry only on mount when no entry
- * exists or the cached entry is stale. Both checkPrecondition() (used by
- * drag-to-advance) and the hook share this cache.
+ * The spec-status / vp-status fetches are cached in a module-level map
+ * for 30s — the hook invalidates a cache entry only on mount when no
+ * entry exists or the cached entry is stale. Both `checkPrecondition()`
+ * (used by drag-to-advance) and the hook share this cache.
+ *
+ * Endpoint paths point at `/api/arcs/:id/spec-status` / `vp-status`.
+ * On 4xx/5xx the call falls back to `{exists:false}` via
+ * `cachedFetch`'s graceful-degrade, keeping the precondition
+ * red-but-not-poisoned.
  */
 
 import { useEffect, useMemo, useState } from 'react'
-import { useSessionsCollection } from '~/hooks/use-sessions-collection'
-import { isChainSessionCompleted } from '~/lib/chains'
-import type { ChainSummary, SpecStatusResponse, VpStatusResponse } from '~/lib/types'
+import { deriveColumn, isArcSessionCompleted, type KanbanColumn } from '~/lib/arcs'
+import type { ArcSummary, SpecStatusResponse, VpStatusResponse } from '~/lib/types'
 
 export type NextMode = 'research' | 'planning' | 'implementation' | 'verify' | 'close' | null
 
-export interface ChainPrecondition {
+export interface ArcPrecondition {
   nextMode: NextMode
   nextLabel: string
   canAdvance: boolean
@@ -77,7 +88,7 @@ async function cachedFetch<T extends SpecStatusResponse | VpStatusResponse>(
   }
 }
 
-function nextFor(column: ChainSummary['column']): { mode: NextMode; label: string } {
+function nextFor(column: KanbanColumn): { mode: NextMode; label: string } {
   switch (column) {
     case 'backlog':
       return { mode: 'research', label: 'research' }
@@ -94,36 +105,50 @@ function nextFor(column: ChainSummary['column']): { mode: NextMode; label: strin
   }
 }
 
+/** Derive a project-name string for the spec-status / vp-status query
+ *  param. Mirrors the legacy chain-side derivation (sessions[0].project,
+ *  fallback to worktreeReservation basename) but reads from the arc's
+ *  worktreeReservation `worktree` field (path string). */
+function deriveProject(arc: ArcSummary): string | null {
+  const wt = arc.worktreeReservation?.worktree
+  if (typeof wt === 'string' && wt.length > 0) {
+    return wt.split('/').pop() ?? wt
+  }
+  return null
+}
+
+/** Stable key for spec/vp-status cache entries. Prefers `arc.id`
+ *  (the new canonical handle) and falls back to the externalRef id
+ *  for arcs whose id is not surfaced (shouldn't happen post-#116). */
+function arcCacheKey(arc: ArcSummary): string {
+  return arc.id
+}
+
 /**
  * Pure precondition check — shared by the hook and the drag-to-advance
- * handler. Session filtering happens at the caller; we only need the
- * filtered list for the session-based modes.
+ * handler. Reads everything it needs from the `ArcSummary` directly.
  */
 export async function checkPrecondition(
-  chain: ChainSummary,
-  sessionsForChain: readonly {
-    kataMode?: string | null
-    status: string
-    lastActivity?: string | null
-  }[],
+  arc: ArcSummary,
 ): Promise<{ canAdvance: boolean; reason: string; nextMode: NextMode }> {
-  const { mode } = nextFor(chain.column)
+  const column = deriveColumn(arc.sessions, arc.status)
+  const { mode } = nextFor(column)
   if (mode === null) {
-    return { canAdvance: false, reason: 'Chain already done', nextMode: null }
+    return { canAdvance: false, reason: 'Arc already done', nextMode: null }
   }
 
   if (mode === 'research') {
-    if (chain.issueState === 'closed') {
-      return { canAdvance: false, reason: 'Issue is closed', nextMode: mode }
+    if (arc.status === 'closed' || arc.status === 'archived') {
+      return { canAdvance: false, reason: 'Arc is closed', nextMode: mode }
     }
     return { canAdvance: true, reason: '', nextMode: mode }
   }
 
   if (mode === 'planning') {
-    const ok = sessionsForChain.some(
+    const ok = arc.sessions.some(
       (s) =>
-        s.kataMode === 'research' &&
-        isChainSessionCompleted({ status: s.status, lastActivity: s.lastActivity ?? null }),
+        s.mode === 'research' &&
+        isArcSessionCompleted({ status: s.status, lastActivity: s.lastActivity ?? null }),
     )
     return {
       canAdvance: ok,
@@ -133,13 +158,14 @@ export async function checkPrecondition(
   }
 
   if (mode === 'implementation') {
-    const project = chain.sessions[0]?.project ?? chain.worktreeReservation?.path.split('/').pop()
+    const project = deriveProject(arc)
     if (!project) {
-      return { canAdvance: false, reason: 'No project context for chain', nextMode: mode }
+      return { canAdvance: false, reason: 'No project context for arc', nextMode: mode }
     }
+    const arcKey = arcCacheKey(arc)
     const spec = await cachedFetch<SpecStatusResponse>(
-      `spec:${chain.issueNumber}:${project}`,
-      `/api/chains/${chain.issueNumber}/spec-status?project=${encodeURIComponent(project)}`,
+      `spec:${arcKey}:${project}`,
+      `/api/arcs/${encodeURIComponent(arc.id)}/spec-status?project=${encodeURIComponent(project)}`,
     )
     if (!spec.exists) {
       return { canAdvance: false, reason: 'Spec not found', nextMode: mode }
@@ -151,10 +177,10 @@ export async function checkPrecondition(
   }
 
   if (mode === 'verify') {
-    const ok = sessionsForChain.some(
+    const ok = arc.sessions.some(
       (s) =>
-        s.kataMode === 'implementation' &&
-        isChainSessionCompleted({ status: s.status, lastActivity: s.lastActivity ?? null }),
+        s.mode === 'implementation' &&
+        isArcSessionCompleted({ status: s.status, lastActivity: s.lastActivity ?? null }),
     )
     return {
       canAdvance: ok,
@@ -164,13 +190,14 @@ export async function checkPrecondition(
   }
 
   if (mode === 'close') {
-    const project = chain.sessions[0]?.project ?? chain.worktreeReservation?.path.split('/').pop()
+    const project = deriveProject(arc)
     if (!project) {
-      return { canAdvance: false, reason: 'No project context for chain', nextMode: mode }
+      return { canAdvance: false, reason: 'No project context for arc', nextMode: mode }
     }
+    const arcKey = arcCacheKey(arc)
     const vp = await cachedFetch<VpStatusResponse>(
-      `vp:${chain.issueNumber}:${project}`,
-      `/api/chains/${chain.issueNumber}/vp-status?project=${encodeURIComponent(project)}`,
+      `vp:${arcKey}:${project}`,
+      `/api/arcs/${encodeURIComponent(arc.id)}/vp-status?project=${encodeURIComponent(project)}`,
     )
     if (!vp.exists) {
       return { canAdvance: false, reason: 'VP evidence not found', nextMode: mode }
@@ -181,15 +208,9 @@ export async function checkPrecondition(
   return { canAdvance: false, reason: '', nextMode: mode }
 }
 
-export function useNextModePrecondition(chain: ChainSummary): ChainPrecondition {
-  const { sessions } = useSessionsCollection({ includeArchived: true })
-
-  const sessionsForChain = useMemo(
-    () => sessions.filter((s) => s.kataIssue === chain.issueNumber),
-    [sessions, chain.issueNumber],
-  )
-
-  const { mode: nextMode, label: nextLabel } = nextFor(chain.column)
+export function useNextModePrecondition(arc: ArcSummary): ArcPrecondition {
+  const column = useMemo(() => deriveColumn(arc.sessions, arc.status), [arc])
+  const { mode: nextMode, label: nextLabel } = nextFor(column)
 
   const [state, setState] = useState<{
     canAdvance: boolean
@@ -204,16 +225,16 @@ export function useNextModePrecondition(chain: ChainSummary): ChainPrecondition 
     }
     let cancelled = false
     setState((s) => ({ ...s, loading: true }))
-    checkPrecondition(chain, sessionsForChain).then((res) => {
+    checkPrecondition(arc).then((res) => {
       if (cancelled) return
       setState({ canAdvance: res.canAdvance, reason: res.reason, loading: false })
     })
     return () => {
       cancelled = true
     }
-    // sessionsForChain changes when the sessions list changes; include the
-    // column so column-flip also re-evaluates.
-  }, [chain, sessionsForChain, nextMode])
+    // re-evaluate whenever the arc changes (sessions / status) so column
+    // flips trigger a re-check.
+  }, [arc, nextMode])
 
   return {
     nextMode,

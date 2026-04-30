@@ -23,7 +23,11 @@ import {
   getGatewayConnectionIdFromSql as getGatewayConnectionId,
   validateGatewayToken,
 } from './session-do/runner-link'
-import { RECOVERY_GRACE_MS, type SessionDOContext } from './session-do/types'
+import {
+  AWAITING_LIVE_CONN_GRACE_MS,
+  RECOVERY_GRACE_MS,
+  type SessionDOContext,
+} from './session-do/types'
 import {
   DEFAULT_STALE_THRESHOLD_MS,
   planAwaitingTimeout,
@@ -3173,11 +3177,6 @@ describe('idle→running broadcasts status via updateState', () => {
     h.updateState({ status: 'running', gate: null, error: null })
   }
 
-  // forkWithHistory
-  function simulateForkWithHistory(h: ReturnType<typeof makeHarness>): void {
-    h.updateState({ status: 'running', gate: null, error: null })
-  }
-
   // resubmitMessage
   function simulateResubmitMessage(h: ReturnType<typeof makeHarness>): void {
     h.updateState({ status: 'running', gate: null, error: null })
@@ -3205,12 +3204,6 @@ describe('idle→running broadcasts status via updateState', () => {
   it('sendMessage isResumable: calls updateState (fresh-resume path)', () => {
     const h = makeHarness()
     simulateSendMessageIsResumable(h)
-    expect(h.calls).toEqual(['updateState'])
-  })
-
-  it('forkWithHistory: calls updateState (orphan auto-fork)', () => {
-    const h = makeHarness()
-    simulateForkWithHistory(h)
     expect(h.calls).toEqual(['updateState'])
   })
 
@@ -3608,14 +3601,7 @@ describe('planAwaitingTimeout', () => {
     ]),
   ]
 
-  it('returns noop when a runner is attached, even past the grace window', () => {
-    const decision = planAwaitingTimeout({
-      history: awaitingHistory as never,
-      connectionId: 'conn-xyz',
-      now: 1_000 + RECOVERY_GRACE_MS + 1_000,
-    })
-    expect(decision).toEqual({ kind: 'noop' })
-  })
+  // ── connection-lost path (gateway WS gone) ────────────────────────
 
   it('returns noop when no runner is attached but grace has not elapsed', () => {
     const decision = planAwaitingTimeout({
@@ -3626,13 +3612,74 @@ describe('planAwaitingTimeout', () => {
     expect(decision).toEqual({ kind: 'noop' })
   })
 
-  it('returns expire when no runner is attached and grace has elapsed', () => {
+  it('returns expire(connection-lost) when no runner is attached and grace has elapsed', () => {
     const decision = planAwaitingTimeout({
       history: awaitingHistory as never,
       connectionId: null,
       now: 1_000 + RECOVERY_GRACE_MS + 1,
     })
-    expect(decision).toEqual({ kind: 'expire', startedTs: 1_000 })
+    expect(decision).toEqual({
+      kind: 'expire',
+      startedTs: 1_000,
+      reason: 'connection-lost',
+    })
+  })
+
+  // ── silent-drop path (gateway WS alive, but stream-input never landed) ─
+  //
+  // Regression for prod session sess-230935d5-... where usr-41 (00:37),
+  // usr-52 (01:17), usr-54 (01:25) all sat in `awaiting_response` forever
+  // while the runner was happily processing other turns. `conn.send()` had
+  // returned success but the data never reached the runner (TCP
+  // half-close / CF WS proxy buffer drop / packet loss — none throw). The
+  // pre-fix planAwaitingTimeout short-circuited on `connectionId !== null`
+  // so the orphan never expired.
+
+  it('returns noop within the extended grace when the runner appears attached', () => {
+    const decision = planAwaitingTimeout({
+      history: awaitingHistory as never,
+      connectionId: 'conn-xyz',
+      // Past the standard grace, but well within the extended grace.
+      now: 1_000 + RECOVERY_GRACE_MS + 1_000,
+    })
+    expect(decision).toEqual({ kind: 'noop' })
+  })
+
+  it('returns noop at exactly extended grace (boundary, runner attached)', () => {
+    const decision = planAwaitingTimeout({
+      history: awaitingHistory as never,
+      connectionId: 'conn-xyz',
+      now: 1_000 + AWAITING_LIVE_CONN_GRACE_MS, // exactly at extended grace
+    })
+    expect(decision).toEqual({ kind: 'noop' })
+  })
+
+  it('returns expire(silent-drop) when runner appears attached but extended grace elapsed', () => {
+    const decision = planAwaitingTimeout({
+      history: awaitingHistory as never,
+      connectionId: 'conn-xyz',
+      now: 1_000 + AWAITING_LIVE_CONN_GRACE_MS + 1,
+    })
+    expect(decision).toEqual({
+      kind: 'expire',
+      startedTs: 1_000,
+      reason: 'silent-drop',
+    })
+  })
+
+  it('respects a custom extendedGraceMs override', () => {
+    // Short extended grace: 500ms, aged 600ms — should expire as silent-drop.
+    const decision = planAwaitingTimeout({
+      history: awaitingHistory as never,
+      connectionId: 'conn-xyz',
+      now: 1_600,
+      extendedGraceMs: 500,
+    })
+    expect(decision).toEqual({
+      kind: 'expire',
+      startedTs: 1_000,
+      reason: 'silent-drop',
+    })
   })
 
   it('returns noop when the tail user has no awaiting part', () => {
@@ -3661,7 +3708,11 @@ describe('planAwaitingTimeout', () => {
       now: 1_200,
       graceMs: 100,
     })
-    expect(decision).toEqual({ kind: 'expire', startedTs: 1_000 })
+    expect(decision).toEqual({
+      kind: 'expire',
+      startedTs: 1_000,
+      reason: 'connection-lost',
+    })
   })
 
   it('runs cleanly under vi.useFakeTimers clock control', () => {
@@ -3694,7 +3745,7 @@ describe('planAwaitingTimeout', () => {
       vi.advanceTimersByTime(6_000)
       expect(
         planAwaitingTimeout({ history: history as never, connectionId: null, now: Date.now() }),
-      ).toEqual({ kind: 'expire', startedTs: t0 })
+      ).toEqual({ kind: 'expire', startedTs: t0, reason: 'connection-lost' })
     } finally {
       vi.useRealTimers()
     }

@@ -88,6 +88,26 @@
           }
         }
       }
+    },
+    {
+      "includes": ["apps/orchestrator/src/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "@xyflow/react": "Banned in apps/orchestrator/src/** until P3 lands feature gates / replacements (GH#131 / GH#132). packages/ai-elements/** remains free to export.",
+                  "react-jsx-parser": "Banned in apps/orchestrator/src/** until P3 lands feature gates / replacements (GH#131 / GH#132). packages/ai-elements/** remains free to export.",
+                  "@rive-app/react-webgl2": "Banned in apps/orchestrator/src/** until P3 lands feature gates / replacements (GH#131 / GH#132). packages/ai-elements/** remains free to export.",
+                  "media-chrome": "Banned in apps/orchestrator/src/** until P3 lands feature gates / replacements (GH#131 / GH#132). packages/ai-elements/** remains free to export."
+                }
+              }
+            }
+          }
+        }
+      }
     }
   ]
 }

@@ -6,17 +6,17 @@
  */
 
 import { useDroppable } from '@dnd-kit/core'
-import type { ChainSummary } from '~/lib/types'
+import type { ArcSummary } from '~/lib/types'
 import { KanbanCard } from './KanbanCard'
 
 interface KanbanColumnProps {
   title: string
-  cards: ChainSummary[]
+  cards: ArcSummary[]
   /** Drop-zone id wired up by KanbanBoard (`drop:<lane>:<column>`). */
   dropId: string
-  /** Preserved for API compatibility — the inline Create-chain form was
+  /** Preserved for API compatibility — the inline Create-arc form was
    *  removed alongside the `/chain/:issueNumber` route (spec 16-p1-5 B1).
-   *  Chains now appear via GitHub webhook refresh, not manual add. */
+   *  Arcs now appear via GitHub webhook refresh, not manual add. */
   isBacklog?: boolean
 }
 
@@ -42,8 +42,8 @@ export function KanbanColumn({ title, cards, dropId, isBacklog: _isBacklog }: Ka
 
       {/* Card stack */}
       <div className="flex flex-col gap-2">
-        {cards.map((chain) => (
-          <KanbanCard key={chain.issueNumber} chain={chain} />
+        {cards.map((arc) => (
+          <KanbanCard key={arc.id} arc={arc} />
         ))}
       </div>
     </div>

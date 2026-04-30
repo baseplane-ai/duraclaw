@@ -145,6 +145,9 @@ function stringifyMeta(m: TabMeta): string {
   if (m.kind) out.kind = m.kind
   if (m.project !== undefined) out.project = m.project
   if (typeof m.lastSeenSeq === 'number') out.lastSeenSeq = m.lastSeenSeq
+  // Transient: server consumes `dedupProject`, strips it, and persists the
+  // rest. Never present on rows received back from the server.
+  if (m.dedupProject !== undefined) out.dedupProject = m.dedupProject
   return JSON.stringify(out)
 }
 
@@ -470,6 +473,15 @@ export function useTabSync(): UseTabSyncResult {
       const order = computeInsertOrder(remainingEntries, clusterKey, reusedOrder)
 
       const meta: TabMeta = project !== undefined ? { project } : {}
+      // Server-side one-tab-per-project insurance: the optimistic delete
+      // loop above is fast for the local UI, but N-DELETE + 1-POST as
+      // separate fetches can interleave with a peer device or a refresh
+      // and leave orphan project tabs on the server. `dedupProject` tells
+      // the POST handler to atomically soft-delete sibling project tabs
+      // before the insert, then strip the field before persisting.
+      if (!forceNewTab && project) {
+        meta.dedupProject = project
+      }
 
       // Optimistic insert. `userId` is server-populated.
       tabs.insert({

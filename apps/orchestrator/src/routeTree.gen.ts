@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as AuthenticatedAdminUsersRouteImport } from './routes/_authenticated/admin.users'
+import { Route as AuthenticatedArcArcIdRouteImport } from './routes/_authenticated/arc.$arcId'
 import { Route as AuthenticatedBoardRouteImport } from './routes/_authenticated/board'
 import { Route as AuthenticatedDeploysRouteImport } from './routes/_authenticated/deploys'
 import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/index'
@@ -65,6 +66,11 @@ const AuthenticatedSessionIdRoute = AuthenticatedSessionIdRouteImport.update({
   path: '/session/$id',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
+const AuthenticatedArcArcIdRoute = AuthenticatedArcArcIdRouteImport.update({
+  id: '/arc/$arcId',
+  path: '/arc/$arcId',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
 const AuthenticatedAdminUsersRoute = AuthenticatedAdminUsersRouteImport.update({
   id: '/admin/users',
   path: '/admin/users',
@@ -85,6 +91,7 @@ export interface FileRoutesByFullPath {
   '/projects': typeof AuthenticatedProjectsRoute
   '/settings': typeof AuthenticatedSettingsRoute
   '/admin/users': typeof AuthenticatedAdminUsersRoute
+  '/arc/$arcId': typeof AuthenticatedArcArcIdRoute
   '/session/$id': typeof AuthenticatedSessionIdRoute
   '/projects/$projectId/docs': typeof AuthenticatedProjectsProjectIdDocsRoute
 }
@@ -97,6 +104,7 @@ export interface FileRoutesByTo {
   '/settings': typeof AuthenticatedSettingsRoute
   '/': typeof AuthenticatedIndexRoute
   '/admin/users': typeof AuthenticatedAdminUsersRoute
+  '/arc/$arcId': typeof AuthenticatedArcArcIdRoute
   '/session/$id': typeof AuthenticatedSessionIdRoute
   '/projects/$projectId/docs': typeof AuthenticatedProjectsProjectIdDocsRoute
 }
@@ -111,6 +119,7 @@ export interface FileRoutesById {
   '/_authenticated/settings': typeof AuthenticatedSettingsRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
   '/_authenticated/admin/users': typeof AuthenticatedAdminUsersRoute
+  '/_authenticated/arc/$arcId': typeof AuthenticatedArcArcIdRoute
   '/_authenticated/session/$id': typeof AuthenticatedSessionIdRoute
   '/_authenticated/projects/$projectId/docs': typeof AuthenticatedProjectsProjectIdDocsRoute
 }
@@ -125,6 +134,7 @@ export interface FileRouteTypes {
     | '/projects'
     | '/settings'
     | '/admin/users'
+    | '/arc/$arcId'
     | '/session/$id'
     | '/projects/$projectId/docs'
   fileRoutesByTo: FileRoutesByTo
@@ -137,6 +147,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/'
     | '/admin/users'
+    | '/arc/$arcId'
     | '/session/$id'
     | '/projects/$projectId/docs'
   id:
@@ -150,6 +161,7 @@ export interface FileRouteTypes {
     | '/_authenticated/settings'
     | '/_authenticated/'
     | '/_authenticated/admin/users'
+    | '/_authenticated/arc/$arcId'
     | '/_authenticated/session/$id'
     | '/_authenticated/projects/$projectId/docs'
   fileRoutesById: FileRoutesById
@@ -225,6 +237,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedSessionIdRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/arc/$arcId': {
+      id: '/_authenticated/arc/$arcId'
+      path: '/arc/$arcId'
+      fullPath: '/arc/$arcId'
+      preLoaderRoute: typeof AuthenticatedArcArcIdRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/_authenticated/admin/users': {
       id: '/_authenticated/admin/users'
       path: '/admin/users'
@@ -249,6 +268,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedSettingsRoute: typeof AuthenticatedSettingsRoute
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
   AuthenticatedAdminUsersRoute: typeof AuthenticatedAdminUsersRoute
+  AuthenticatedArcArcIdRoute: typeof AuthenticatedArcArcIdRoute
   AuthenticatedSessionIdRoute: typeof AuthenticatedSessionIdRoute
   AuthenticatedProjectsProjectIdDocsRoute: typeof AuthenticatedProjectsProjectIdDocsRoute
 }
@@ -260,6 +280,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedSettingsRoute: AuthenticatedSettingsRoute,
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
   AuthenticatedAdminUsersRoute: AuthenticatedAdminUsersRoute,
+  AuthenticatedArcArcIdRoute: AuthenticatedArcArcIdRoute,
   AuthenticatedSessionIdRoute: AuthenticatedSessionIdRoute,
   AuthenticatedProjectsProjectIdDocsRoute: AuthenticatedProjectsProjectIdDocsRoute,
 }

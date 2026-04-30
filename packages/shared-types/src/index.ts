@@ -400,25 +400,39 @@ export interface TitleErrorEvent {
   detail?: string
 }
 
-// ── Chain auto-advance events (DO-synthesised for chain UX P3) ──────
+// ── Arc auto-advance events (DO-synthesised) ───────────────────────
 //
-// Emitted by SessionDO when a chain-linked session terminates and the
-// DO's `maybeAutoAdvanceChain()` pathway runs `tryAutoAdvance()`.
+// Emitted by SessionDO when an arc-linked session terminates and the
+// DO's auto-advance gate decides to mint a successor (or to stall).
 // Travel over the browser WS alongside real runner events; the client
-// handler in `use-coding-agent.ts` invalidates `chainsCollection` and
-// surfaces a toast / stall reason for `ChainStatusItem`.
+// handler in `use-coding-agent.ts` invalidates `arcsCollection` and
+// surfaces a toast / stall reason for `ArcStatusItem`. Wire type names
+// preserve the legacy `chain_*` discriminants so existing handlers
+// keep matching.
 
 export interface ChainAdvanceEvent {
   type: 'chain_advance'
   newSessionId: string
   nextMode: string
-  issueNumber: number
+  /**
+   * Optional GH issue number — present only when the arc is linked to a
+   * `github` externalRef. Arcs without an externalRef (implicit / debug /
+   * freeform / non-kata) emit the event without this field; the client
+   * (`use-coding-agent.ts`) reads `issueNumber` defensively.
+   */
+  issueNumber?: number
 }
 
 export interface ChainStalledEvent {
   type: 'chain_stalled'
   reason: string
-  issueNumber: number
+  /**
+   * Optional GH issue number — see `ChainAdvanceEvent.issueNumber`. The
+   * gate-skip path in the SessionDO emits the event whenever the
+   * auto-advance decision returns `skipped`; for non-issue-linked arcs
+   * the field is omitted and the client falls back to a generic toast.
+   */
+  issueNumber?: number
 }
 
 export interface StoppedEvent {
@@ -691,6 +705,22 @@ export interface ProjectInfo {
   ownerId?: string | null
   /** GH#122 — sha256(originUrl).slice(0,16); NULL when repo_origin is null or pre-backfill. */
   projectId?: string | null
+  /**
+   * GH#84: optional admin-set override for the 2-char tab abbreviation.
+   * Constrained server-side to `[A-Z0-9]{1,2}`; null/undefined falls back
+   * to the regex derivation in `lib/project-display.ts` (`deriveProjectAbbrev`).
+   * D1-stored on the `projects` row; the gateway side does not write this
+   * field — admins patch via `PATCH /api/projects/:name/customization`.
+   */
+  abbrev?: string | null
+  /**
+   * GH#84: optional admin-set override for the tab fill color, as an index
+   * into `PROJECT_COLOR_SLOTS` (10 slots today). Out-of-range / null falls
+   * back to the FNV-1a hash derivation in `lib/project-display.ts`
+   * (`deriveProjectColorSlot`). D1-stored on the `projects` row; the
+   * gateway side does not write this field.
+   */
+  color_slot?: number | null
 }
 
 // ── SDK Session Info (on-disk session metadata) ─────────────────────
@@ -964,6 +994,23 @@ export interface SessionSummary {
    * (the column itself is `identity_name`).
    */
   identityName?: string | null
+  /**
+   * GH#116: parent arc id for this session. Always set on rows produced
+   * after migration 0032 (createSession auto-creates an implicit arc when
+   * no explicit arcId is supplied). Optional in the wire type for
+   * back-compat with cold-start paths and pre-migration test fixtures —
+   * the per-message "Branch from here" UI guards on its presence before
+   * enabling the affordance.
+   */
+  arcId?: string | null
+  /**
+   * GH#116: free-form mode label (kata writes 'research' / 'planning' /
+   * 'implementation' / 'verify' / 'debug' / 'task' / 'freeform'; other
+   * agents may write their own strings). Mirrors `agent_sessions.mode`.
+   * The branch UI passes this through verbatim so the new arc's first
+   * session inherits the parent's mode by default.
+   */
+  mode?: string | null
 }
 
 // ── Stored Message (for SQLite persistence) ─────────────────────────

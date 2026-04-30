@@ -136,14 +136,15 @@ export function makeFakeDb(cfg: DbStubConfig = {}) {
     /**
      * Real D1 `db.batch([...statements])` runs an array of prepared
      * statements atomically and returns their results in order. The fake
-     * just awaits each chainable in sequence — each chain has already
-     * been built (the test handler called `db.update(...)/db.insert(...)`
+     * awaits each chainable in sequence — each chain has already been
+     * built (the test handler called `db.update(...)/db.insert(...)`
      * before passing the chain into batch), so `await`-ing it pulls the
      * next item off the FIFO queue exactly like a non-batched call would.
      *
      * If any statement rejects (a queued Error), batch rejects with that
      * same error — mirroring real D1's atomic-rollback semantics from the
-     * caller's point of view.
+     * caller's point of view. Sequential (not Promise.all) so rollback
+     * is observable in tests that queue errors mid-batch.
      */
     batch: vi.fn(async (statements: unknown[]) => {
       const results: unknown[] = []

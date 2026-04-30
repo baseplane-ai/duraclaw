@@ -35,6 +35,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from '~/components/ui/sheet'
+import { Tooltip, TooltipContent, TooltipTrigger } from '~/components/ui/tooltip'
 import { projectsCollection } from '~/db/projects-collection'
 import { useSessionStatus } from '~/db/session-local-collection'
 import type { SessionRecord } from '~/db/session-record'
@@ -54,6 +55,17 @@ import {
 } from '~/lib/project-display'
 import type { SessionStatus, TabMeta, UserTabRow } from '~/lib/types'
 import { cn } from '~/lib/utils'
+
+/**
+ * Maximum characters of the Haiku-generated session title rendered in a
+ * dense tab. Past this we hard-truncate with an ellipsis and surface the
+ * full title in a hover tooltip — keeps the tab strip uniform when one
+ * session has a longer title than the others. Char-based (not pixel-based)
+ * so the budget is consistent across font weights and zoom levels; the
+ * 24-char cap fits the typical 2-3 word Haiku titles ("Fix Auth Bug",
+ * "Refactor Tab Layout") while still cutting off the rare overflow.
+ */
+const MAX_TAB_TITLE_CHARS = 24
 
 interface TabBarProps {
   /** Ordered list of session IDs from userTabsCollection (ORDER BY position). */
@@ -188,14 +200,23 @@ export function TabBar({
     [openTabs, sessionsMap, tabMetaByRef],
   )
 
-  // Projects map: project name → repo_origin. Used to key the color slot
-  // so the 4 worktrees of one repo all share the same fill color.
+  // Projects map: project name → display metadata. `repoOrigin` keys the
+  // color slot so the 4 worktrees of one repo all share the same fill
+  // color (default behavior). GH#84: `abbrev` + `colorSlot` are admin-set
+  // overrides that win over the auto-derivation when present.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data: projectRows } = useLiveQuery((q) => q.from({ p: projectsCollection as any }))
-  const repoOriginByProject = useMemo(() => {
-    const m = new Map<string, string | null>()
+  const projectMetaByName = useMemo(() => {
+    const m = new Map<
+      string,
+      { repoOrigin: string | null; abbrev: string | null; colorSlot: number | null }
+    >()
     for (const p of (projectRows ?? []) as unknown as ProjectInfo[]) {
-      m.set(p.name, p.repo_origin)
+      m.set(p.name, {
+        repoOrigin: p.repo_origin ?? null,
+        abbrev: p.abbrev ?? null,
+        colorSlot: p.color_slot ?? null,
+      })
     }
     return m
   }, [projectRows])
@@ -368,7 +389,19 @@ export function TabBar({
                   draftProject={draftProject}
                   siblingIds={siblingsBySession.get(row.sessionId) ?? [row.sessionId]}
                   repoOrigin={
-                    row.session ? (repoOriginByProject.get(row.session.project) ?? null) : null
+                    row.session
+                      ? (projectMetaByName.get(row.session.project)?.repoOrigin ?? null)
+                      : null
+                  }
+                  abbrevOverride={
+                    row.session
+                      ? (projectMetaByName.get(row.session.project)?.abbrev ?? null)
+                      : null
+                  }
+                  colorSlotOverride={
+                    row.session
+                      ? (projectMetaByName.get(row.session.project)?.colorSlot ?? null)
+                      : null
                   }
                   isActive={row.sessionId === activeSessionId}
                   lastSeenSeq={row.lastSeenSeq}
@@ -425,7 +458,17 @@ export function TabBar({
               }
               repoOrigin={
                 activeDragRow.session
-                  ? (repoOriginByProject.get(activeDragRow.session.project) ?? null)
+                  ? (projectMetaByName.get(activeDragRow.session.project)?.repoOrigin ?? null)
+                  : null
+              }
+              abbrevOverride={
+                activeDragRow.session
+                  ? (projectMetaByName.get(activeDragRow.session.project)?.abbrev ?? null)
+                  : null
+              }
+              colorSlotOverride={
+                activeDragRow.session
+                  ? (projectMetaByName.get(activeDragRow.session.project)?.colorSlot ?? null)
                   : null
               }
               isActive={activeDragRow.sessionId === activeSessionId}
@@ -452,6 +495,14 @@ interface ProjectTabProps {
    *  so sibling worktrees of the same repo share a fill color. Null when
    *  the project isn't in the synced projects collection yet. */
   repoOrigin?: string | null
+  /** GH#84: admin-set override for the 2-char tab abbreviation. Wins over
+   *  the regex derivation when valid (`[A-Z0-9]{1,2}`); null/invalid →
+   *  fall back to derivation. */
+  abbrevOverride?: string | null
+  /** GH#84: admin-set override for the project fill color, as an index
+   *  into `PROJECT_COLOR_SLOTS`. Wins over the FNV-1a hash when in range;
+   *  null/out-of-range → fall back to the hash. */
+  colorSlotOverride?: number | null
   isActive: boolean
   isDragging?: boolean
   /** Highest `messageSeq` the user has acknowledged for this tab (from
@@ -463,6 +514,49 @@ interface ProjectTabProps {
   onClose: () => void
   onNewSessionInTab?: () => void
   onNewTabForProject?: () => void
+}
+
+/**
+ * Tab title with hard char-limit + overflow tooltip.
+ *
+ * Truncates `title` to MAX_TAB_TITLE_CHARS chars (with a trailing ellipsis
+ * replacing the last char so the visible string never exceeds the budget).
+ * When truncated, wraps the span in a hover tooltip showing the full
+ * title — so the user can still read long titles without inflating the
+ * tab strip. When within the budget, renders a bare span with no tooltip
+ * (avoids spurious empty-tooltip pop-ups on every tab hover).
+ *
+ * `cursor-default` on the truncated trigger prevents the I-beam from
+ * appearing — the title isn't selectable from the tab; the tab itself is
+ * the click target.
+ */
+function TabTitle({ title }: { title: string }) {
+  const isTruncated = title.length > MAX_TAB_TITLE_CHARS
+  const display = isTruncated ? `${title.slice(0, MAX_TAB_TITLE_CHARS - 1).trimEnd()}…` : title
+
+  const span = (
+    <span
+      className={cn(
+        'font-normal leading-none opacity-90',
+        // Cap at the char-budget but also let CSS truncate as a safety
+        // net for very-wide-glyph titles (CJK, emoji) that fit the char
+        // budget yet still overflow the tab box.
+        'max-w-40 truncate',
+        isTruncated && 'cursor-default',
+      )}
+    >
+      {display}
+    </span>
+  )
+
+  if (!isTruncated) return span
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{span}</TooltipTrigger>
+      <TooltipContent>{title}</TooltipContent>
+    </Tooltip>
+  )
 }
 
 /** Sortable wrapper */
@@ -490,6 +584,8 @@ function ProjectTabInner({
   draftProject,
   siblingIds,
   repoOrigin,
+  abbrevOverride,
+  colorSlotOverride,
   isActive,
   isDragging,
   lastSeenSeq,
@@ -539,13 +635,22 @@ function ProjectTabInner({
   // Project color keyed by `repo_origin` so sibling worktrees of the same
   // repo share a fill; falls back to the repo base name when the project
   // isn't in the synced collection yet (cold start / draft tab).
+  // GH#84: admin-set `abbrevOverride` / `colorSlotOverride` win over the
+  // auto-derivation when valid; `formatTabLabel` and `deriveProjectColorSlot`
+  // both fall back silently on null / invalid values.
   const tabProjectName = session?.project ?? draftProject ?? ''
   const repoBase = deriveRepoBase(tabProjectName)
-  const abbrev = deriveProjectAbbrev(repoBase)
+  const abbrev =
+    typeof abbrevOverride === 'string' && abbrevOverride.length > 0
+      ? abbrevOverride
+      : deriveProjectAbbrev(repoBase)
   const worktreeN = parseWorktreeSuffix(tabProjectName, repoBase)
   const sessionLetter = deriveSessionSuffix(sessionId, siblingIds ?? [sessionId])
   const denseLabel = `${abbrev}${worktreeN}${sessionLetter}`
-  const colorSlot: ProjectColorSlot = deriveProjectColorSlot(repoOrigin || repoBase || null)
+  const colorSlot: ProjectColorSlot = deriveProjectColorSlot(
+    repoOrigin || repoBase || null,
+    colorSlotOverride,
+  )
   const ringClass = statusRingClass(tabStatus)
 
   useEffect(() => {
@@ -621,7 +726,15 @@ function ProjectTabInner({
     <button
       type="button"
       className={cn(
-        'relative flex items-center justify-center gap-1.5 min-w-12 px-2 py-1 m-0.5 text-xs font-medium rounded-sm',
+        // items-baseline: the dense label is `font-mono` and the title is
+        // sans-serif. With items-center each text span's content box was
+        // centered independently, but mono and sans have different
+        // intrinsic baselines within their line-box, so the visible
+        // characters floated at slightly different y-positions. Aligning on
+        // the shared text baseline puts both fonts on the same visual line.
+        // Non-text children (icons, presence dot, skeleton) opt back into
+        // center alignment via `self-center` below.
+        'relative flex items-baseline justify-center gap-1.5 min-w-12 px-2 py-1 m-0.5 text-xs font-medium rounded-sm',
         'transition-all',
         colorSlot.bg,
         colorSlot.text,
@@ -639,23 +752,25 @@ function ProjectTabInner({
     >
       {session ? (
         <>
-          <span className={cn('font-mono tracking-tight', isActive && 'font-semibold')}>
+          <span
+            className={cn('font-mono tracking-tight leading-none', isActive && 'font-semibold')}
+          >
             {denseLabel}
           </span>
-          {!isMobile && session.title && (
-            <span className="max-w-40 truncate font-normal opacity-90">{session.title}</span>
-          )}
+          {!isMobile && session.title && <TabTitle title={session.title} />}
           <SessionPresenceIcons sessionId={sessionId} />
         </>
       ) : isDraft ? (
         <>
-          <PlusIcon className="size-3 shrink-0" />
-          <span className={cn('font-mono tracking-tight', isActive && 'font-semibold')}>
+          <PlusIcon className="size-3 shrink-0 self-center" />
+          <span
+            className={cn('font-mono tracking-tight leading-none', isActive && 'font-semibold')}
+          >
             {denseLabel || '--'}
           </span>
         </>
       ) : (
-        <div className="flex items-center gap-1 py-0.5">
+        <div className="flex items-center gap-1 py-0.5 self-center">
           <div className="animate-pulse bg-black/10 dark:bg-white/10 h-3 w-8 rounded" />
         </div>
       )}

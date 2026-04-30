@@ -224,6 +224,10 @@ describe('project hiding', () => {
         // on projectMetadata; null when the project lacks a D1 row.
         projectId: null,
         ownerId: null,
+        // GH#84: every gateway/projects row carries the abbrev + color_slot
+        // overrides from D1; null when no admin override is set.
+        abbrev: null,
+        color_slot: null,
       })
     })
 

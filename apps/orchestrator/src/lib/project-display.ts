@@ -57,10 +57,47 @@ function fnv1a(s: string): number {
  * base name). Same key → same slot across renders and sessions. Null /
  * empty keys return the dedicated `UNASSIGNED_COLOR_SLOT` so they don't
  * collide with any hashable project slot.
+ *
+ * GH#84: when `override` is an in-range index into `PROJECT_COLOR_SLOTS`,
+ * it wins over the hash derivation. Out-of-range values (negative,
+ * non-integer, ≥ slot count) silently fall through to the hash branch so
+ * a stale or malformed override can't render as the unassigned slot.
  */
-export function deriveProjectColorSlot(key: string | null | undefined): ProjectColorSlot {
+export function deriveProjectColorSlot(
+  key: string | null | undefined,
+  override?: number | null,
+): ProjectColorSlot {
+  if (
+    typeof override === 'number' &&
+    Number.isInteger(override) &&
+    override >= 0 &&
+    override < PROJECT_COLOR_SLOTS.length
+  ) {
+    return PROJECT_COLOR_SLOTS[override]
+  }
   if (!key) return UNASSIGNED_COLOR_SLOT
   return PROJECT_COLOR_SLOTS[fnv1a(key) % PROJECT_COLOR_SLOTS.length]
+}
+
+/**
+ * GH#84: shape validator for the abbrev override (admin-editable in
+ * settings). Server enforces the same regex at PATCH time; the client
+ * uses this to gate the Save button without round-tripping. Mirrors the
+ * server-side `ABBREV_RE`.
+ */
+export const ABBREV_OVERRIDE_RE = /^[A-Z0-9]{1,2}$/
+
+export function isValidAbbrevOverride(s: string): boolean {
+  return ABBREV_OVERRIDE_RE.test(s)
+}
+
+/**
+ * GH#84: clamp an admin-supplied colorSlot to a valid index, returning
+ * null when out of range. Symmetric with the server-side validation so
+ * UI + API agree on what's a "valid" slot index.
+ */
+export function isValidColorSlotOverride(n: unknown): n is number {
+  return typeof n === 'number' && Number.isInteger(n) && n >= 0 && n < PROJECT_COLOR_SLOTS.length
 }
 
 /**
@@ -160,14 +197,24 @@ export function deriveSessionSuffix(sessionId: string, siblingIds: readonly stri
  *   "DC"                  canonical worktree, single session
  *   "DC3"                 duraclaw-dev3, single session
  *   "DC3a" / "DC3b"       duraclaw-dev3, multi-session
+ *
+ * GH#84: when `abbrevOverride` is a valid 1–2 char abbrev (per
+ * `isValidAbbrevOverride`), it replaces the auto-derived abbrev. The
+ * worktree N + session-suffix segments are not overridable — they remain
+ * deterministic from project name + sibling list. Invalid overrides
+ * (wrong shape, empty string) silently fall through to the derivation.
  */
 export function formatTabLabel(
   projectName: string,
   sessionId: string,
   siblingIds: readonly string[],
+  abbrevOverride?: string | null,
 ): string {
   const base = deriveRepoBase(projectName)
-  const abbrev = deriveProjectAbbrev(base)
+  const abbrev =
+    typeof abbrevOverride === 'string' && isValidAbbrevOverride(abbrevOverride)
+      ? abbrevOverride
+      : deriveProjectAbbrev(base)
   const worktreeN = parseWorktreeSuffix(projectName, base)
   const suffix = deriveSessionSuffix(sessionId, siblingIds)
   return `${abbrev}${worktreeN}${suffix}`

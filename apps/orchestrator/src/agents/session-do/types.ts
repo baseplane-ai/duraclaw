@@ -54,6 +54,25 @@ export const ALARM_INTERVAL_MS = 30_000
 export const RECOVERY_GRACE_MS = 15_000
 
 /**
+ * Extended awaiting-response grace for the "silent network drop" case —
+ * `conn.send()` returned success on the gateway WS but the data never
+ * actually reached the runner (TCP half-close, CF WS proxy buffer drop,
+ * packet loss). The runner connection ID is still recorded as healthy, so
+ * `RECOVERY_GRACE_MS` (which only fires when connectionId is null) won't
+ * catch it. After this window — long enough to absorb a slow first-token
+ * SDK turn — the watchdog expires the awaiting part with a notice prompting
+ * the user to retry, while keeping the session running (the runner is
+ * fine; only this one stream-input was dropped).
+ *
+ * Production evidence: session sess-230935d5-... usr-41 (00:37), usr-52
+ * (01:17), usr-54 (01:25) all stuck in awaiting_response with the runner
+ * still attached and processing other turns normally. No connection-drop
+ * log entry around any of them — confirms the WS layer never reported the
+ * drop.
+ */
+export const AWAITING_LIVE_CONN_GRACE_MS = 90_000
+
+/**
  * Runaway-turn guard threshold. When the SDK emits this many consecutive
  * `assistant` events whose content is "effectively empty" (no tool_use and
  * only whitespace / ZWS text), the DO interrupts the runner and flips the

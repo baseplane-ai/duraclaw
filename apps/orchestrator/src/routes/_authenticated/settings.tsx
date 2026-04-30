@@ -28,6 +28,13 @@ import { useSwUpdate } from '~/hooks/use-sw-update'
 import { useUserDefaults } from '~/hooks/use-user-defaults'
 import { signOut, useSession as useAuthSession } from '~/lib/auth-client'
 import { apiUrl } from '~/lib/platform'
+import {
+  deriveProjectAbbrev,
+  deriveProjectColorSlot,
+  deriveRepoBase,
+  isValidAbbrevOverride,
+  PROJECT_COLOR_SLOTS,
+} from '~/lib/project-display'
 
 const CLAUDE_MODELS = [
   { value: 'claude-opus-4-7', label: 'claude-opus-4-7' },
@@ -434,9 +441,10 @@ function ProjectsSection() {
       <CardHeader>
         <CardTitle>Projects</CardTitle>
         <CardDescription>
-          Toggle project visibility. Public projects — and the sessions inside them — are visible to
-          every authenticated user. Private projects are scoped to their owner. New projects default
-          to public.
+          Toggle project visibility, customize the tab abbreviation and color. Public projects — and
+          the sessions inside them — are visible to every authenticated user. Private projects are
+          scoped to their owner. New projects default to public; the abbreviation and color
+          auto-derive from the project name unless overridden.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -451,32 +459,46 @@ function ProjectsSection() {
               const err = errors[p.name]
               const ownerLabel = p.ownerId ? p.ownerId.slice(0, 8) : 'unowned'
               return (
-                <li key={p.name} className="flex items-center justify-between gap-3 py-2 text-sm">
-                  <div className="flex min-w-0 flex-1 items-center gap-2">
-                    <span className="truncate font-mono">{p.name}</span>
-                    <VisibilityBadge visibility={visibility} showLabel />
-                    <span className="text-xs text-muted-foreground">Owner: {ownerLabel}</span>
+                <li key={p.name} className="flex flex-col gap-2 py-3 text-sm">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex min-w-0 flex-1 items-center gap-2">
+                      <span className="truncate font-mono">{p.name}</span>
+                      <VisibilityBadge visibility={visibility} showLabel />
+                      <span className="text-xs text-muted-foreground">
+                        Owner: {ownerLabel}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {err && <span className="text-xs text-destructive">{err}</span>}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={busy}
+                        onClick={() => handleToggle(p.name, visibility)}
+                      >
+                        {busy
+                          ? 'Saving…'
+                          : visibility === 'public'
+                            ? 'Make private'
+                            : 'Make public'}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={!p.projectId}
+                        title={p.projectId ? undefined : 'Project not yet synced'}
+                        onClick={() => setTransferTarget(p)}
+                      >
+                        Reassign
+                      </Button>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    {err && <span className="text-xs text-destructive">{err}</span>}
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={busy}
-                      onClick={() => handleToggle(p.name, visibility)}
-                    >
-                      {busy ? 'Saving…' : visibility === 'public' ? 'Make private' : 'Make public'}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={!p.projectId}
-                      title={p.projectId ? undefined : 'Project not yet synced'}
-                      onClick={() => setTransferTarget(p)}
-                    >
-                      Reassign
-                    </Button>
-                  </div>
+                  <ProjectCustomizationEditor
+                    projectName={p.name}
+                    repoOrigin={p.repo_origin ?? null}
+                    abbrev={p.abbrev ?? null}
+                    colorSlot={p.color_slot ?? null}
+                  />
                 </li>
               )
             })}
@@ -493,6 +515,177 @@ function ProjectsSection() {
         />
       )}
     </Card>
+  )
+}
+
+/**
+ * GH#84: per-project tab override editor — abbrev (2-char) + color slot.
+ *
+ * Wired to `PATCH /api/projects/:name/customization`. Shows the
+ * auto-derived abbrev/slot as ghosted defaults so admins can see what
+ * "Reset" would revert to. Save sends both fields; Reset sends explicit
+ * `null`s to clear back to the derivation.
+ */
+interface ProjectCustomizationEditorProps {
+  projectName: string
+  repoOrigin: string | null
+  abbrev: string | null
+  colorSlot: number | null
+}
+
+function ProjectCustomizationEditor({
+  projectName,
+  repoOrigin,
+  abbrev,
+  colorSlot,
+}: ProjectCustomizationEditorProps) {
+  const repoBase = deriveRepoBase(projectName)
+  const derivedAbbrev = deriveProjectAbbrev(repoBase)
+  const derivedColorKey = repoOrigin || repoBase || null
+  // Find the derived slot index by matching the result against the palette.
+  const derivedColorSlotIndex = (() => {
+    const target = deriveProjectColorSlot(derivedColorKey)
+    for (let i = 0; i < PROJECT_COLOR_SLOTS.length; i++) {
+      if (PROJECT_COLOR_SLOTS[i] === target) return i
+    }
+    return null
+  })()
+
+  const [abbrevInput, setAbbrevInput] = useState<string>(abbrev ?? '')
+  const [slotInput, setSlotInput] = useState<number | null>(colorSlot)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  // Re-sync local form state whenever a fresh row arrives from the
+  // synced-collection delta — otherwise an admin who saves on one tab
+  // would see the other tab's draft state stick.
+  useEffect(() => {
+    setAbbrevInput(abbrev ?? '')
+    setSlotInput(colorSlot)
+  }, [abbrev, colorSlot])
+
+  const trimmedAbbrev = abbrevInput.trim().toUpperCase()
+  const abbrevValid = trimmedAbbrev === '' || isValidAbbrevOverride(trimmedAbbrev)
+  const dirty = trimmedAbbrev !== (abbrev ?? '') || slotInput !== colorSlot
+
+  const handleSave = useCallback(async () => {
+    setBusy(true)
+    setErr(null)
+    try {
+      const body: { abbrev: string | null; color_slot: number | null } = {
+        abbrev: trimmedAbbrev === '' ? null : trimmedAbbrev,
+        color_slot: slotInput,
+      }
+      const resp = await fetch(
+        apiUrl(`/api/projects/${encodeURIComponent(projectName)}/customization`),
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify(body),
+        },
+      )
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => '')
+        setErr(`Failed (${resp.status}) ${text}`)
+      }
+      // Synced-collection delta from the PATCH handler refreshes the row;
+      // useEffect above re-syncs local form state.
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }, [projectName, trimmedAbbrev, slotInput])
+
+  const handleReset = useCallback(async () => {
+    setBusy(true)
+    setErr(null)
+    try {
+      const resp = await fetch(
+        apiUrl(`/api/projects/${encodeURIComponent(projectName)}/customization`),
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ abbrev: null, color_slot: null }),
+        },
+      )
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => '')
+        setErr(`Failed (${resp.status}) ${text}`)
+      }
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }, [projectName])
+
+  return (
+    <div className="flex flex-wrap items-center gap-3 pl-1 pt-1">
+      <div className="flex items-center gap-2">
+        <Label htmlFor={`abbrev-${projectName}`} className="text-xs text-muted-foreground">
+          Abbrev
+        </Label>
+        <Input
+          id={`abbrev-${projectName}`}
+          value={abbrevInput}
+          onChange={(e) => setAbbrevInput(e.target.value.slice(0, 2))}
+          maxLength={2}
+          placeholder={derivedAbbrev}
+          aria-invalid={!abbrevValid}
+          className="h-7 w-16 text-center font-mono text-xs uppercase"
+          disabled={busy}
+        />
+      </div>
+      <div className="flex items-center gap-1">
+        <span className="text-xs text-muted-foreground">Color</span>
+        {PROJECT_COLOR_SLOTS.map((slot, i) => {
+          const isSelected = slotInput === i
+          const isDerivedDefault = slotInput === null && derivedColorSlotIndex === i
+          return (
+            // The palette is module-level constant ordering — `slot.bg` is
+            // a stable, unique class string per slot, so it doubles as a
+            // key without the array-index-key foot-gun.
+            <button
+              key={slot.bg}
+              type="button"
+              aria-label={`Color slot ${i + 1}${isDerivedDefault ? ' (auto-derived)' : ''}`}
+              aria-pressed={isSelected}
+              disabled={busy}
+              onClick={() => setSlotInput(isSelected ? null : i)}
+              className={`size-5 rounded ${slot.bg} transition-all ${
+                isSelected
+                  ? 'ring-2 ring-primary ring-offset-2 ring-offset-background'
+                  : isDerivedDefault
+                    ? 'ring-1 ring-muted-foreground/40'
+                    : 'hover:ring-1 hover:ring-muted-foreground/40'
+              }`}
+            />
+          )
+        })}
+      </div>
+      <div className="ml-auto flex items-center gap-2">
+        {err && <span className="text-xs text-destructive">{err}</span>}
+        {!abbrevValid && (
+          <span className="text-xs text-destructive">Abbrev must be A–Z / 0–9, max 2 chars.</span>
+        )}
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={busy || !dirty || !abbrevValid}
+          onClick={handleSave}
+        >
+          {busy ? 'Saving…' : 'Save'}
+        </Button>
+        {(abbrev !== null || colorSlot !== null) && (
+          <Button variant="ghost" size="sm" disabled={busy} onClick={handleReset}>
+            Reset
+          </Button>
+        )}
+      </div>
+    </div>
   )
 }
 

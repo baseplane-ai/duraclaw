@@ -1,9 +1,15 @@
 /**
  * NavSessions — Session list in AppSidebar.
  *
- * Two sections:
+ * Three sections (GH#116 P4b):
  * 1. Recent — flat list of last ~5 sessions (any project), quick-access
- * 2. Worktrees — repo → worktree (with branch/dirty/PR) → sessions tree
+ * 2. Arcs — `useLiveQuery(arcsCollection)` filtered to status IN
+ *    ('open','draft'). Implicit single-session arcs (no externalRef +
+ *    one session + no parent) render as flat session rows so today's
+ *    debug/freeform UX is preserved; multi-session and ref-bearing
+ *    arcs render as collapsible groups whose label links to
+ *    `/arc/:arcId`.
+ * 3. Worktrees — repo → worktree (with branch/dirty/PR) → sessions tree
  */
 
 import { useLiveQuery } from '@tanstack/react-db'
@@ -31,6 +37,7 @@ import {
 } from '~/components/ui/sidebar'
 import { Tooltip, TooltipContent, TooltipTrigger } from '~/components/ui/tooltip'
 import { VisibilityBadge } from '~/components/visibility-badge'
+import { arcsCollection } from '~/db/arcs-collection'
 import { projectsCollection } from '~/db/projects-collection'
 import type { SessionRecord } from '~/db/session-record'
 import { userPreferencesCollection } from '~/db/user-preferences-collection'
@@ -39,9 +46,29 @@ import { useSessionsCollection } from '~/hooks/use-sessions-collection'
 import { newDraftTabId, useTabSync } from '~/hooks/use-tab-sync'
 import { useSession as useAuthSession } from '~/lib/auth-client'
 import { apiUrl } from '~/lib/platform'
-import type { PrInfo, ProjectInfo, SessionStatus } from '~/lib/types'
+import type { ArcSummary, PrInfo, ProjectInfo, SessionStatus } from '~/lib/types'
 import { cn } from '~/lib/utils'
 import { filterSessionsByMode, type SessionFilterMode } from './nav-sessions-filter'
+
+/**
+ * GH#116 P4b: an arc qualifies as an "implicit single-session arc"
+ * when it has no externalRef, exactly one session, and no parent arc.
+ * Those arcs were minted automatically by `createSession` (debug /
+ * freeform / orphan spawns) and shouldn't add a collapsible layer to
+ * the sidebar — they render as flat session rows so today's
+ * one-session = one-row UX is preserved.
+ *
+ * Pure / exported for unit testing — no React, no hooks. Uses `==` on
+ * `parentArcId` to treat `null` and `undefined` (the optional field)
+ * as equivalent.
+ */
+export function isImplicitSingleSessionArc(arc: ArcSummary): boolean {
+  return (
+    arc.externalRef === null &&
+    arc.sessions.length === 1 &&
+    (arc.parentArcId === null || arc.parentArcId === undefined)
+  )
+}
 
 const SESSION_FILTER_STORAGE_KEY = 'duraclaw.session-filter'
 
@@ -281,6 +308,13 @@ export function NavSessions() {
   // and D1-authoritative /api/projects cold-start queryFn.
   const { data: projectRows } = useLiveQuery(projectsCollection as any)
   const { data: prefsRows } = useLiveQuery(userPreferencesCollection as any)
+  // GH#116 P4b: arcs section — only `open` / `draft` arcs surface in
+  // the sidebar (closed/archived arcs are reachable via /board only).
+  const { data: arcRows } = useLiveQuery(arcsCollection as any)
+  const openArcs = useMemo<ArcSummary[]>(() => {
+    const list = (arcRows ?? []) as ArcSummary[]
+    return list.filter((a) => a.status === 'open' || a.status === 'draft')
+  }, [arcRows])
 
   const hiddenSet = useMemo(() => {
     const raw = (prefsRows as Array<{ hiddenProjects?: string | null }> | undefined)?.[0]
@@ -380,6 +414,26 @@ export function NavSessions() {
       // which calls openTab() on userTabsCollection. No direct tab manipulation needed.
       setOpenMobile(false)
       navigate({ to: '/', search: { session: session.id } })
+    },
+    [setOpenMobile, navigate],
+  )
+
+  // GH#116 P4b: lightweight "select session by id" for ArcGroup rows
+  // (the Arcs section gets ArcSummary['sessions'][number], not the
+  // richer SessionRecord, so it routes by id directly).
+  const handleSelectSessionById = useCallback(
+    (sessionId: string) => {
+      setOpenMobile(false)
+      navigate({ to: '/', search: { session: sessionId } })
+    },
+    [setOpenMobile, navigate],
+  )
+
+  // GH#116 P4b: navigate to /arc/:arcId for multi-session arcs.
+  const handleOpenArc = useCallback(
+    (arcId: string) => {
+      setOpenMobile(false)
+      navigate({ to: '/arc/$arcId', params: { arcId } })
     },
     [setOpenMobile, navigate],
   )
@@ -561,6 +615,75 @@ export function NavSessions() {
                 </span>
               </SidebarMenuButton>
             </SidebarMenuItem>
+          )}
+        </SidebarMenu>
+      </SidebarGroup>
+
+      {/* Arcs section (GH#116 P4b) — between Recent and Worktrees.
+          Implicit single-session arcs render as flat session rows (no
+          collapsible group); other arcs render as ArcGroup linking to
+          /arc/:arcId with their sessions nested below. */}
+      <SidebarGroup>
+        <SidebarGroupLabel>Arcs</SidebarGroupLabel>
+        <SidebarMenu>
+          {openArcs.length === 0 ? (
+            <SidebarMenuItem>
+              <SidebarMenuButton disabled>
+                <span className="text-muted-foreground">No active arcs</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          ) : (
+            openArcs.map((arc) => {
+              if (isImplicitSingleSessionArc(arc)) {
+                const arcSession = arc.sessions[0]
+                if (!arcSession) return null
+                // The Arc's session shape is a thin projection; reach
+                // for the full SessionRecord (with title, project, etc.)
+                // when available so the row matches the Recent section's
+                // density.
+                const fullSession = sessions.find((s) => s.id === arcSession.id)
+                return (
+                  <SidebarMenuItem key={arc.id}>
+                    {fullSession ? (
+                      <SessionContextMenu
+                        session={fullSession}
+                        onRename={handleRename}
+                        onArchive={handleArchive}
+                      >
+                        <SidebarMenuButton
+                          isActive={activeSessionId === fullSession.id}
+                          tooltip={`${getDisplayName(fullSession)} — ${fullSession.project}`}
+                          onClick={() => handleSelect(fullSession)}
+                        >
+                          <StatusDot
+                            status={fullSession.status as SessionStatus}
+                            numTurns={fullSession.numTurns ?? 0}
+                          />
+                          <TruncatedText>{arc.title || getDisplayName(fullSession)}</TruncatedText>
+                        </SidebarMenuButton>
+                      </SessionContextMenu>
+                    ) : (
+                      <SidebarMenuButton
+                        isActive={activeSessionId === arcSession.id}
+                        onClick={() => handleSelectSessionById(arcSession.id)}
+                      >
+                        <StatusDot status={arcSession.status as SessionStatus} numTurns={0} />
+                        <TruncatedText>{arc.title || arcSession.id.slice(0, 8)}</TruncatedText>
+                      </SidebarMenuButton>
+                    )}
+                  </SidebarMenuItem>
+                )
+              }
+              return (
+                <ArcGroup
+                  key={arc.id}
+                  arc={arc}
+                  activeSessionId={activeSessionId}
+                  onOpenArc={handleOpenArc}
+                  onSelectSession={handleSelectSessionById}
+                />
+              )
+            })
           )}
         </SidebarMenu>
       </SidebarGroup>
@@ -1015,6 +1138,88 @@ function OrphanProjectGroup({
                 </SidebarMenuSubButton>
               </SidebarMenuSubItem>
             )}
+          </SidebarMenuSub>
+        </CollapsibleContent>
+      </SidebarMenuItem>
+    </Collapsible>
+  )
+}
+
+// ── Arc group (GH#116 P4b) ────────────────────────────────────────
+//
+// Multi-session arcs and ref-bearing arcs render here. Header label
+// links to /arc/:arcId via `onOpenArc`; expand chevron toggles the
+// nested session list. Implicit single-session arcs are rendered
+// inline (flat) by NavSessions and never reach this component — see
+// `isImplicitSingleSessionArc`.
+
+function ArcGroup({
+  arc,
+  activeSessionId,
+  onOpenArc,
+  onSelectSession,
+}: {
+  arc: ArcSummary
+  activeSessionId: string | null
+  onOpenArc: (arcId: string) => void
+  onSelectSession: (sessionId: string) => void
+}) {
+  const hasActive = arc.sessions.some((s) => s.id === activeSessionId)
+  const sortedSessions = [...arc.sessions].sort((a, b) => {
+    const aTs = new Date(a.lastActivity ?? a.createdAt).getTime()
+    const bTs = new Date(b.lastActivity ?? b.createdAt).getTime()
+    return bTs - aTs
+  })
+  const externalLabel =
+    arc.externalRef?.provider === 'github'
+      ? `#${String(arc.externalRef.id)}`
+      : arc.externalRef
+        ? `${arc.externalRef.provider}:${String(arc.externalRef.id)}`
+        : null
+
+  return (
+    <Collapsible asChild defaultOpen={hasActive} className="group/arc">
+      <SidebarMenuItem>
+        <CollapsibleTrigger asChild>
+          <SidebarMenuButton
+            tooltip={arc.title}
+            onDoubleClick={(e) => {
+              e.preventDefault()
+              e.stopPropagation()
+              onOpenArc(arc.id)
+            }}
+          >
+            <ChevronRight className="size-3 shrink-0 transition-transform duration-200 group-data-[state=open]/arc:rotate-90" />
+            {externalLabel && (
+              <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
+                {externalLabel}
+              </span>
+            )}
+            <TruncatedText>{arc.title}</TruncatedText>
+            <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
+              {arc.sessions.length}
+            </span>
+          </SidebarMenuButton>
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <SidebarMenuSub>
+            <SidebarMenuSubItem>
+              <SidebarMenuSubButton onClick={() => onOpenArc(arc.id)}>
+                <span className="text-muted-foreground text-xs">Open arc detail →</span>
+              </SidebarMenuSubButton>
+            </SidebarMenuSubItem>
+            {sortedSessions.map((session) => (
+              <SidebarMenuSubItem key={session.id}>
+                <SidebarMenuSubButton
+                  isActive={activeSessionId === session.id}
+                  onClick={() => onSelectSession(session.id)}
+                  title={session.id}
+                >
+                  <StatusDot status={session.status as SessionStatus} numTurns={0} />
+                  <TruncatedText>{session.mode || session.id.slice(0, 8)}</TruncatedText>
+                </SidebarMenuSubButton>
+              </SidebarMenuSubItem>
+            ))}
           </SidebarMenuSub>
         </CollapsibleContent>
       </SidebarMenuItem>

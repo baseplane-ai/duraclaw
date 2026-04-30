@@ -245,16 +245,62 @@ describe('extractJsonObject', () => {
 
 describe('SessionTitler', () => {
   describe('maybeInitialTitle', () => {
-    it('does NOT fire when transcript is below the token threshold', async () => {
-      // Threshold is 200 tokens (≈800 chars). makeMessages(2,100) produces
-      // ≈230 chars total → ~58 tokens. Well under, should no-op.
+    it('does NOT fire when transcript is empty (truly-empty turn guard)', async () => {
+      // Threshold (10 tokens, ~40 chars) skips only literally-empty
+      // turns. An empty messages list produces an empty transcript →
+      // 0 tokens → no-op.
       const { titler, sendCalls } = makeTitler()
-      await titler.maybeInitialTitle(makeMessages(2, 100))
+      await titler.maybeInitialTitle([])
       expect(sendCalls).toHaveLength(0)
       expect(mockQueryCalls).toHaveLength(0)
     })
 
-    it('fires and emits title_update when transcript >= token threshold', async () => {
+    it('fires for short prose-only sessions (≈230 chars)', async () => {
+      // makeMessages(2,100) → ≈230 chars → ~58 tokens. Previously
+      // dropped by the 200-token gate; now clears the lowered floor.
+      // Real-world example: a "fix typo" session with two short messages.
+      const { titler, sendCalls } = makeTitler()
+      await titler.maybeInitialTitle(makeMessages(2, 100))
+      expect(mockQueryCalls).toHaveLength(1)
+      expect(sendCalls).toHaveLength(1)
+      expect(sendCalls[0]).toMatchObject({ type: 'title_update' })
+    })
+
+    it('fires for tool-heavy assistant turns (regression — root cause for inconsistent titler)', async () => {
+      // Reproduces the exact bug pattern reported in production:
+      // session-do/sess-055f9217-... showed the raw first-message text
+      // as the displayed "title." The user's prompt is short, the
+      // assistant's reply is dominated by tool calls (Read/Edit/Grep)
+      // which buildTranscript compacts to `[tool: NAME]` markers
+      // (~12 chars each). buildTranscript output ≈80-100 chars → 25
+      // tokens, which the old 200-token gate dropped → titler never
+      // fired → fallback chain (title || summary || prompt) collapsed
+      // to the raw prompt.
+      const messages: TranscriptMessage[] = [
+        { role: 'user', content: 'Fix the auth bug in middleware.ts' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: "I'll look at this." },
+            { type: 'tool_use', name: 'Read', input: { path: 'middleware.ts' } },
+            { type: 'tool_use', name: 'Grep', input: { pattern: 'auth' } },
+            { type: 'tool_use', name: 'Edit', input: { path: 'middleware.ts' } },
+            { type: 'text', text: 'Done.' },
+          ],
+        },
+      ]
+      const { titler, sendCalls } = makeTitler()
+      await titler.maybeInitialTitle(messages)
+      expect(mockQueryCalls).toHaveLength(1)
+      expect(sendCalls).toHaveLength(1)
+      expect(sendCalls[0]).toMatchObject({
+        type: 'title_update',
+        session_id: 'test-session-123',
+        title: 'Fix Auth Bug',
+      })
+    })
+
+    it('fires and emits title_update when transcript is large', async () => {
       const { titler, sendCalls } = makeTitler()
       // 4 messages * 2000 chars each ≈ 2000+ tokens
       await titler.maybeInitialTitle(makeMessages(4, 2000))

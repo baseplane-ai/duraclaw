@@ -2,8 +2,8 @@ import type {
   SyncedCollectionOp,
   SessionMessage as WireSessionMessage,
 } from '@duraclaw/shared-types'
-import { eq } from 'drizzle-orm'
-import { agentSessions } from '~/db/schema'
+import { eq, sql } from 'drizzle-orm'
+import { agentSessions, arcs } from '~/db/schema'
 import { chunkOps } from '~/lib/chunk-frame'
 import type { ContextUsage, KataSessionState } from '~/lib/types'
 import { computeBranchInfo as computeBranchInfoImpl } from './branches'
@@ -71,17 +71,21 @@ export async function getKataStateImpl(
 ): Promise<{ kataState: KataSessionState | null; fetchedAt: string }> {
   const sessionId = ctx.do.name
   try {
+    // GH#116: kataMode→mode rename; kataIssue derives from arcs.externalRef
+    // (provider:'github') via LEFT JOIN; kataPhase column dropped entirely.
     const rows = await ctx.do.d1
       .select({
-        kataMode: agentSessions.kataMode,
-        kataIssue: agentSessions.kataIssue,
-        kataPhase: agentSessions.kataPhase,
+        mode: agentSessions.mode,
+        kataIssue: sql<
+          number | null
+        >`CASE WHEN json_extract(${arcs.externalRef}, '$.provider') = 'github' THEN CAST(json_extract(${arcs.externalRef}, '$.id') AS INTEGER) ELSE NULL END`,
       })
       .from(agentSessions)
+      .leftJoin(arcs, eq(arcs.id, agentSessions.arcId))
       .where(eq(agentSessions.id, sessionId))
       .limit(1)
     const row = rows[0]
-    if (!row || (row.kataMode == null && row.kataIssue == null && row.kataPhase == null)) {
+    if (!row || (row.mode == null && row.kataIssue == null)) {
       return { kataState: null, fetchedAt: new Date().toISOString() }
     }
     // Read the full kata_state blob from the kv table for richer fields if present.
@@ -93,13 +97,15 @@ export async function getKataStateImpl(
       return { kataState: kvKata, fetchedAt: new Date().toISOString() }
     }
     // Fallback: synthesize a minimal KataSessionState from D1 columns.
+    // currentPhase is null — kataPhase column was dropped (GH#116); phase
+    // info now lives only in `kataStateJson` / kv blob (handled above).
     const minimal: KataSessionState = {
       sessionId,
       workflowId: null,
       issueNumber: row.kataIssue ?? null,
       sessionType: null,
-      currentMode: row.kataMode ?? null,
-      currentPhase: row.kataPhase ?? null,
+      currentMode: row.mode ?? null,
+      currentPhase: null,
       completedPhases: [],
       template: null,
       phases: [],
