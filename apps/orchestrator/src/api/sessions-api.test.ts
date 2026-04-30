@@ -352,6 +352,63 @@ describe('POST /api/sessions', () => {
   })
 })
 
+describe('GET /api/sessions/:id', () => {
+  // Regression: previously this handler fetched `https://session/state`
+  // against the SessionDO to merge live state. The DO removed that route
+  // when it migrated to @callable RPC (commit 6a88565), so every request
+  // 404'd — breaking deep-link reload. The fix returns the D1 row directly;
+  // live fields flow over the WS frame protocol. The test must therefore
+  // pass without a working SessionDO `/state` route.
+  let env: any
+  let fakeDb: ReturnType<typeof makeFakeDb>
+
+  beforeEach(() => {
+    env = createMockEnv()
+    fakeDb = makeFakeDb()
+    installFakeDb(fakeDb.db)
+    mockedGetRequestSession.mockResolvedValue({
+      userId: 'user-A',
+      session: { id: 's' },
+      user: { id: 'user-A' },
+    })
+  })
+
+  it('returns 200 with the D1 row for an owner viewing a public session', async () => {
+    fakeDb.data.select = [
+      {
+        id: 'sess-abc',
+        userId: 'user-A',
+        visibility: 'public',
+        project: 'my-project',
+        status: 'running',
+      },
+    ]
+
+    const app = makeApp(env)
+    const res = await app.request('/api/sessions/sess-abc')
+
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { session: { id: string; project: string } }
+    expect(body.session.id).toBe('sess-abc')
+    expect(body.session.project).toBe('my-project')
+    // Crucially: the handler must NOT depend on the SessionDO. If the fix
+    // regresses, we'd see an attempt to fetch the (now-removed) `/state`
+    // route and a 404 fall-through.
+    expect(env.SESSION_AGENT.get).not.toHaveBeenCalled()
+  })
+
+  it('returns 404 for a non-existent session id', async () => {
+    fakeDb.data.select = []
+
+    const app = makeApp(env)
+    const res = await app.request('/api/sessions/missing')
+
+    expect(res.status).toBe(404)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toBe('Session not found')
+  })
+})
+
 describe('route ordering: /search and /history before /:id', () => {
   let env: any
   let fakeDb: ReturnType<typeof makeFakeDb>

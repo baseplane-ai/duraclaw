@@ -3304,26 +3304,11 @@ export function createApiApp() {
     if (!access.ok) {
       return c.json({ error: 'Session not found' }, 404)
     }
-
-    // Merge: D1 metadata + DO runtime state. The DO owns live fields like
-    // pending gates, current turn message id, etc. that are not in agent_sessions.
-    const doId = getSessionDoId(c.env, access.session.id)
-    const sessionDO = c.env.SESSION_AGENT.get(doId)
-    const response = await sessionDO.fetch(
-      new Request('https://session/state', {
-        headers: {
-          'x-partykit-room': access.session.id,
-          'x-user-id': userId,
-        },
-      }),
-    )
-
-    if (!response.ok) {
-      return c.json({ error: 'Session not found' }, response.status === 403 ? 403 : 404)
-    }
-
-    const doState = (await response.json()) as Record<string, unknown>
-    return c.json({ session: { ...access.session, ...doState } })
+    // D1 row is sufficient: live fields (status, gates, current turn) flow
+    // over the WS frame protocol, not via this REST endpoint. Previously
+    // we merged state from the DO at `https://session/state`, but that
+    // route was removed in commit 6a88565 when the DO went @callable.
+    return c.json({ session: access.session })
   })
 
   app.get('/api/sessions/:id/messages', async (c) => {
