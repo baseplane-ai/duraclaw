@@ -157,10 +157,37 @@ export function getGatewayConnectionId(ctx: SessionDOContext): string | null {
 }
 
 /**
+ * Clear the cached + persisted gateway connection ID so the watchdog can
+ * detect the absence on its next tick and run recovery. Used when
+ * `sendToGateway` finds the cached id refers to a socket that's no longer
+ * usable — without this clear, `planAwaitingTimeout` sees a non-null
+ * connection id and refuses to expire the awaiting_response part on the
+ * orphaned user message (the user perceives this as "the assistant skipped
+ * my message" — see GH-issue & rpc-messages flow).
+ */
+function clearStaleGatewayConnection(ctx: SessionDOContext): void {
+  ctx.do.cachedGatewayConnId = null
+  try {
+    ctx.sql.exec(`DELETE FROM kv WHERE key = 'gateway_conn_id'`)
+  } catch {
+    /* ignore — kv table may not exist on pre-migration DO instances */
+  }
+}
+
+/**
  * Send a GatewayCommand to the live runner over the gateway-role WS.
  * No-ops with a console warning when no gateway connection is attached;
  * callers that require the command to land must check
  * `getGatewayConnectionId(ctx)` first.
+ *
+ * SILENT-DROP RECOVERY (orphan user-message fix): when the cached
+ * `gwConnId` resolves to a socket that has gone stale — either `.send()`
+ * throws (closing/closed socket) or the id isn't in `getConnections()`
+ * anymore (race between disconnect detection and dispatch) — clear the
+ * cached id. This unblocks the watchdog's `planAwaitingTimeout` (which
+ * short-circuits on `connectionId !== null`) so the orphaned
+ * `awaiting_response` part on the user's message can age out and the DO
+ * runs recovery, surfacing a system row that prompts the user to retry.
  */
 export function sendToGateway(ctx: SessionDOContext, cmd: GatewayCommand): void {
   const gwConnId = getGatewayConnectionId(ctx)
@@ -173,14 +200,19 @@ export function sendToGateway(ctx: SessionDOContext, cmd: GatewayCommand): void 
       try {
         conn.send(JSON.stringify(cmd))
       } catch (err) {
-        console.error(`[SessionDO:${ctx.ctx.id}] Failed to send to gateway:`, err)
+        console.error(
+          `[SessionDO:${ctx.ctx.id}] Failed to send to gateway — clearing stale connection so watchdog can recover:`,
+          err,
+        )
+        clearStaleGatewayConnection(ctx)
       }
       return
     }
   }
   console.error(
-    `[SessionDO:${ctx.ctx.id}] Gateway connection ${gwConnId} not found in active connections`,
+    `[SessionDO:${ctx.ctx.id}] Gateway connection ${gwConnId} not found in active connections — clearing stale id so watchdog can recover`,
   )
+  clearStaleGatewayConnection(ctx)
 }
 
 /**
