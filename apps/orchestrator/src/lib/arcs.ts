@@ -74,6 +74,35 @@ export function formatExternalRef(ref: ExternalRef): string {
   return JSON.stringify(ref)
 }
 
+// ─── Session liveness predicates ────────────────────────────────────────────
+
+/**
+ * Status values that mean "this session is actively doing work right
+ * now" — i.e. the runner is engaged or expected to engage imminently.
+ *
+ * Excludes `'idle'` (ambiguous — covers both freshly-spawned and
+ * parked-terminal; use `isArcSessionCompleted` to disambiguate) and
+ * `'error'` (terminal failure). Mirrors the SessionStatus union in
+ * packages/shared-types/src/index.ts.
+ *
+ * Used by `deriveColumn` (live session beats time-keyed) and by the
+ * KanbanCard focus picker (live session beats stale terminals).
+ */
+export const LIVE_STATUSES: ReadonlySet<string> = new Set([
+  'running',
+  'pending',
+  'waiting_input',
+  'waiting_permission',
+  'waiting_gate',
+  'waiting_identity',
+  'failover',
+])
+
+/** True when the session's status is in `LIVE_STATUSES`. */
+export function isLiveSession(session: { status: string }): boolean {
+  return LIVE_STATUSES.has(session.status)
+}
+
 // ─── Session completion predicate (formerly isChainSessionCompleted) ────────
 
 /**
@@ -139,16 +168,24 @@ export type KanbanColumn =
  * - `arcStatus === 'draft'` → `'backlog'` (regardless of session
  *   contents — drafts don't appear on the board)
  * - empty sessions → `'backlog'`
- * - else: pick the latest session whose `mode` is in
- *   `COLUMN_QUALIFYING_MODES` (by `lastActivity ?? createdAt`) and
- *   return that mode, special-casing `'close'` → `'done'`. If no
- *   session qualifies, fall through to `'backlog'`.
+ * - else: pick the frontier session by liveness-then-time:
+ *   1. If any qualifying-mode session is live (status in
+ *      `LIVE_STATUSES`), pick the most-recently-spawned one. This
+ *      avoids the race where `verify` spawns moments after
+ *      `implementation` parks-as-idle, and the impl's `lastActivity`
+ *      being newer than verify's `createdAt` would otherwise pin the
+ *      column on `'implementation'` even though verify is the work
+ *      actually running.
+ *   2. Otherwise pick the latest qualifying session by
+ *      `lastActivity ?? createdAt` (the original heuristic).
+ *   Special-case: `'close'` → `'done'`. No qualifying session →
+ *   `'backlog'`.
  *
  * Reads `mode` (not the dropped `kataMode`) and is keyed on arc
- * status (not GH issue state). Closed/archived arcs still go through
- * the qualifying scan — the spec leaves "what column does a closed
- * arc sit in?" to the API layer (which can opt to filter them off
- * the board entirely).
+ * status (not GH issue state). Closed/archived arcs are filtered at
+ * the API layer (see `GET /api/arcs`); this function still maps them
+ * deterministically when they're surfaced (e.g. by an opt-in
+ * `?status=closed` query).
  */
 export function deriveColumn(
   sessions: Array<{
@@ -162,14 +199,33 @@ export function deriveColumn(
   if (arcStatus === 'draft') return 'backlog'
   if (!sessions.length) return 'backlog'
 
-  let bestMode: string | null = null
-  let bestTs = -Infinity
+  // Pass 1 — live qualifying session wins, picked by createdAt
+  // (most-recently-spawned). lastActivity isn't reliable for live
+  // sessions: a brand-new `running` row may not have one yet.
+  let liveMode: string | null = null
+  let liveTs = -Infinity
   for (const s of sessions) {
     if (!s.mode || !COLUMN_QUALIFYING_MODES.has(s.mode)) continue
-    const ts = new Date(s.lastActivity ?? s.createdAt).getTime()
-    if (Number.isFinite(ts) && ts > bestTs) {
-      bestTs = ts
-      bestMode = s.mode
+    if (!isLiveSession(s)) continue
+    const ts = new Date(s.createdAt).getTime()
+    if (Number.isFinite(ts) && ts > liveTs) {
+      liveTs = ts
+      liveMode = s.mode
+    }
+  }
+
+  // Pass 2 — fall back to the latest qualifying session by activity
+  // (matches the pre-cleanup behaviour for arcs with no live session).
+  let bestMode: string | null = liveMode
+  if (bestMode === null) {
+    let bestTs = -Infinity
+    for (const s of sessions) {
+      if (!s.mode || !COLUMN_QUALIFYING_MODES.has(s.mode)) continue
+      const ts = new Date(s.lastActivity ?? s.createdAt).getTime()
+      if (Number.isFinite(ts) && ts > bestTs) {
+        bestTs = ts
+        bestMode = s.mode
+      }
     }
   }
 

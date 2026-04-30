@@ -21,7 +21,7 @@
  * deliberately excluded.
  */
 import { describe, expect, it } from 'vitest'
-import { COLUMN_QUALIFYING_MODES, deriveColumn } from './arcs'
+import { COLUMN_QUALIFYING_MODES, deriveColumn, isLiveSession, LIVE_STATUSES } from './arcs'
 
 describe('deriveColumn', () => {
   it('returns "backlog" for empty sessions regardless of arcStatus', () => {
@@ -121,6 +121,102 @@ describe('deriveColumn', () => {
     ).toBe('done')
   })
 
+  it('prefers a live qualifying session over a more-recently-touched terminal one', () => {
+    // Cleanup of "deriveColumn ignores liveness": when `verify` spawns
+    // moments after `implementation` parks-as-idle, the impl row's
+    // `lastActivity` is newer than verify's `createdAt`. The pre-cleanup
+    // algorithm picked impl by timestamp; the cleanup picks verify by
+    // liveness, even though it's chronologically older.
+    expect(
+      deriveColumn(
+        [
+          {
+            mode: 'implementation',
+            status: 'idle',
+            lastActivity: '2026-04-29T10:00:05Z', // just parked
+            createdAt: '2026-04-29T09:00:00Z',
+          },
+          {
+            mode: 'verify',
+            status: 'running',
+            lastActivity: null,
+            createdAt: '2026-04-29T10:00:00Z', // spawned BEFORE impl parked
+          },
+        ],
+        'open',
+      ),
+    ).toBe('verify')
+  })
+
+  it('falls back to time-keyed pick when no qualifying session is live', () => {
+    // No live sessions → the original lastActivity-keyed picker drives
+    // the column. Prevents a regression where we accidentally always
+    // require a live session.
+    expect(
+      deriveColumn(
+        [
+          {
+            mode: 'research',
+            status: 'idle',
+            lastActivity: '2026-04-29T10:00:00Z',
+            createdAt: '2026-04-29T09:00:00Z',
+          },
+          {
+            mode: 'planning',
+            status: 'idle',
+            lastActivity: '2026-04-29T11:00:00Z',
+            createdAt: '2026-04-29T10:30:00Z',
+          },
+        ],
+        'open',
+      ),
+    ).toBe('planning')
+  })
+
+  it('among multiple live qualifying sessions, picks the most-recently-spawned', () => {
+    // Multiple live rows is rare (the partial-unique index keeps
+    // arc/mode pairs from racing) but possible across modes. Spec is:
+    // most-recently-spawned wins. createdAt drives the tiebreak (not
+    // lastActivity, which may be null on a brand-new running row).
+    expect(
+      deriveColumn(
+        [
+          {
+            mode: 'planning',
+            status: 'pending',
+            lastActivity: null,
+            createdAt: '2026-04-29T10:00:00Z',
+          },
+          {
+            mode: 'verify',
+            status: 'running',
+            lastActivity: null,
+            createdAt: '2026-04-29T10:30:00Z',
+          },
+        ],
+        'open',
+      ),
+    ).toBe('verify')
+  })
+
+  it('skips non-qualifying live sessions even if they are the most recent (debug)', () => {
+    // A live `debug` session must NOT pull the arc out of `backlog` —
+    // debug isn't a frontier mode regardless of liveness.
+    expect(
+      deriveColumn(
+        [
+          {
+            mode: 'debug',
+            status: 'running',
+            lastActivity: null,
+            createdAt: '2026-04-29T11:00:00Z',
+          },
+        ],
+        'open',
+      ),
+    ).toBe('backlog')
+  })
+
   it('picks the latest qualifying session when canonical and non-canonical modes are mixed', () => {
     // (f) — `freeform` is non-qualifying and is the chronologically
     // latest, so the algorithm falls back to the prior `planning`
@@ -160,5 +256,37 @@ describe('COLUMN_QUALIFYING_MODES', () => {
     expect(COLUMN_QUALIFYING_MODES.has('task')).toBe(false)
     expect(COLUMN_QUALIFYING_MODES.has('debug')).toBe(false)
     expect(COLUMN_QUALIFYING_MODES.has('freeform')).toBe(false)
+  })
+})
+
+describe('LIVE_STATUSES / isLiveSession', () => {
+  it('contains the runtime "doing work" statuses', () => {
+    // Mirrors SessionStatus in packages/shared-types minus terminal
+    // states (`idle`, `error`). `idle` is intentionally excluded —
+    // it's ambiguous (freshly-spawned vs parked-terminal) and is
+    // disambiguated by `isArcSessionCompleted` instead.
+    expect(LIVE_STATUSES).toEqual(
+      new Set([
+        'running',
+        'pending',
+        'waiting_input',
+        'waiting_permission',
+        'waiting_gate',
+        'waiting_identity',
+        'failover',
+      ]),
+    )
+  })
+
+  it('does not include idle or error', () => {
+    expect(LIVE_STATUSES.has('idle')).toBe(false)
+    expect(LIVE_STATUSES.has('error')).toBe(false)
+  })
+
+  it('isLiveSession matches the LIVE_STATUSES set', () => {
+    expect(isLiveSession({ status: 'running' })).toBe(true)
+    expect(isLiveSession({ status: 'waiting_input' })).toBe(true)
+    expect(isLiveSession({ status: 'idle' })).toBe(false)
+    expect(isLiveSession({ status: 'error' })).toBe(false)
   })
 })

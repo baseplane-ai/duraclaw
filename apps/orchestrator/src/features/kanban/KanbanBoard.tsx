@@ -91,7 +91,16 @@ export function KanbanBoard() {
   const { openTab } = useTabSync()
   const [projectFilter, setProjectFilter] = useState(ALL_PROJECTS)
 
-  const arcs = useMemo(() => (data ? ([...data] as ArcSummary[]) : []), [data])
+  // Only the in-flight statuses (`draft`, `open`) belong on the board.
+  // The server's GET /api/arcs default already excludes `closed` /
+  // `archived` at cold-start; the client-side filter mirrors that
+  // contract so a freshly-closed arc disappears immediately on the
+  // broadcasted status='closed' delta, instead of lingering in its
+  // last column until the next collection refresh.
+  const arcs = useMemo(() => {
+    if (!data) return [] as ArcSummary[]
+    return (data as ArcSummary[]).filter((a) => a.status === 'draft' || a.status === 'open')
+  }, [data])
 
   // Project list derived from each arc's worktree reservation label
   // (`worktreeReservation.worktree` is the full path; the UI label is

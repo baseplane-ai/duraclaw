@@ -29,7 +29,7 @@ import { useArcAutoAdvance } from '~/hooks/use-arc-auto-advance'
 import { useArcCheckout } from '~/hooks/use-arc-checkout'
 import { useNextModePrecondition } from '~/hooks/use-arc-preconditions'
 import { useTabSync } from '~/hooks/use-tab-sync'
-import { deriveColumn, isArcSessionCompleted } from '~/lib/arcs'
+import { deriveColumn, isArcSessionCompleted, isLiveSession } from '~/lib/arcs'
 import type { ArcSummary, ChainWorktreeReservation } from '~/lib/types'
 import { AdvanceConfirmModal } from './AdvanceConfirmModal'
 import { advanceArc, hasActiveSession } from './advance-arc'
@@ -38,22 +38,45 @@ interface KanbanCardProps {
   arc: ArcSummary
 }
 
-/** Freshest live / non-terminal session for the status strip. */
+/**
+ * Freshest live session (preferred) — falls back to the most recently
+ * touched session when none are live.
+ *
+ * The pre-cleanup version sorted by activity unconditionally, which
+ * surfaced stale terminal sessions as "focus" even when a fresh live
+ * one was right next to it in the same arc. Liveness now wins; among
+ * live sessions the most-recently-spawned (by createdAt — `running` /
+ * `pending` rows often have no `lastActivity` yet) is picked.
+ */
 function pickFocusSession(sessions: ArcSummary['sessions']): ArcSummary['sessions'][number] | null {
   if (sessions.length === 0) return null
-  const byActivity = [...sessions].sort((a, b) => {
-    const aTime = new Date(a.lastActivity ?? a.createdAt).getTime()
-    const bTime = new Date(b.lastActivity ?? b.createdAt).getTime()
-    return bTime - aTime
-  })
-  return byActivity[0] ?? null
+  const live = sessions.filter(isLiveSession)
+  if (live.length > 0) {
+    return (
+      [...live].sort((a, b) => {
+        const aTime = new Date(a.createdAt).getTime()
+        const bTime = new Date(b.createdAt).getTime()
+        return bTime - aTime
+      })[0] ?? null
+    )
+  }
+  // No live session — show the freshest terminal so the card still
+  // reflects something useful (last completed rung, or last error).
+  return (
+    [...sessions].sort((a, b) => {
+      const aTime = new Date(a.lastActivity ?? a.createdAt).getTime()
+      const bTime = new Date(b.lastActivity ?? b.createdAt).getTime()
+      return bTime - aTime
+    })[0] ?? null
+  )
 }
 
 function shortStatusLabel(session: ArcSummary['sessions'][number]): string {
   const { status } = session
   if (status === 'running') return 'live'
-  if (status === 'crashed') return 'crashed'
+  if (status === 'error') return 'error'
   if (status.startsWith('waiting')) return 'waiting'
+  if (status === 'failover') return 'failover'
   // `isArcSessionCompleted` recognises the D1 terminal "rung finished"
   // shape (status === 'idle' && lastActivity != null). An `'idle'` session
   // with no lastActivity is freshly spawned — render plain idle.
@@ -193,6 +216,7 @@ export function KanbanCard({ arc }: KanbanCardProps) {
   const focus = pickFocusSession(arc.sessions)
   const focusTs = focus?.lastActivity ?? focus?.createdAt ?? arc.lastActivity
   const worktree = arc.worktreeReservation?.worktree.split('/').pop() ?? null
+  const worktreeStale = arc.worktreeReservation?.stale === true
   const currentMode = focus?.mode ?? column
 
   const hasActive = hasActiveSession(arc)
@@ -259,10 +283,22 @@ export function KanbanCard({ arc }: KanbanCardProps) {
           )}
         </div>
         {worktree ? (
-          <div className="min-w-0 text-[11px] text-muted-foreground">
-            <span className="block truncate font-mono" title={worktree}>
+          <div className="flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
+            <span
+              className={`block min-w-0 flex-1 truncate font-mono ${worktreeStale ? 'text-amber-600 dark:text-amber-500' : ''}`}
+              title={worktreeStale ? `${worktree} (stale — held >7d)` : worktree}
+            >
               {worktree}
             </span>
+            {worktreeStale ? (
+              <span
+                className="shrink-0 rounded bg-amber-500/15 px-1 py-0.5 text-[9px] font-medium uppercase tracking-wider text-amber-700 dark:text-amber-400"
+                title="Reservation hasn't been touched in over 7 days"
+                data-testid={`arc-worktree-stale-${arc.id}`}
+              >
+                stale
+              </span>
+            ) : null}
           </div>
         ) : null}
         <div className="mt-0.5 flex flex-wrap gap-1.5">

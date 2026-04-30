@@ -254,10 +254,19 @@ export function arcsRoutes() {
   //   - `project`  filters to arcs that have at least one session in
   //                the named project.
   //   - `stale`    `{N}d` form — arcs whose lastActivity is older than N days.
+  //   - `status`   comma-separated subset of {draft,open,closed,archived}
+  //                or 'all'. Default: `draft,open` (the kanban board's
+  //                in-flight set). The board called this without a
+  //                filter and got closed/archived arcs leaking into
+  //                user lanes; the default now matches what the board
+  //                actually wants.
   //
   // `more_issues_available` is preserved from the chain shape as a
   // pagination-overflow hint; it's always `false` here because we
   // don't truncate the per-user arc list.
+  const ALL_ARC_STATUSES = ['draft', 'open', 'closed', 'archived'] as const
+  const DEFAULT_ARC_STATUSES = new Set<string>(['draft', 'open'])
+
   app.get('/', async (c) => {
     const userId = c.get('userId')
     const db = getDb(c.env)
@@ -277,6 +286,33 @@ export function arcsRoutes() {
     const laneFilter = c.req.query('lane')
     const columnFilter = c.req.query('column')
     const projectFilter = c.req.query('project')
+
+    // Status filter: default `draft,open`; `all` opts in to closed/
+    // archived too. Unknown tokens fail loudly so a typo doesn't
+    // silently give the caller a different result set.
+    const statusParam = c.req.query('status')
+    let statusFilter: ReadonlySet<string> = DEFAULT_ARC_STATUSES
+    if (typeof statusParam === 'string' && statusParam.length > 0) {
+      if (statusParam === 'all') {
+        statusFilter = new Set(ALL_ARC_STATUSES)
+      } else {
+        const parts = statusParam
+          .split(',')
+          .map((p) => p.trim())
+          .filter((p) => p.length > 0)
+        const invalid = parts.find((p) => !(ALL_ARC_STATUSES as readonly string[]).includes(p))
+        if (invalid) {
+          return c.json(
+            {
+              error: `Invalid status — expected subset of {${ALL_ARC_STATUSES.join(',')}} or 'all'`,
+              invalid,
+            },
+            400,
+          )
+        }
+        statusFilter = new Set(parts)
+      }
+    }
 
     // 1. Pull the caller's arcs.
     const arcRows = await db.select().from(arcs).where(eq(arcs.userId, userId))
@@ -330,6 +366,7 @@ export function arcsRoutes() {
 
       // Filter pass — applied to the projected ArcSummary so the column
       // filter sees the same value the client renders.
+      if (!statusFilter.has(arc.status)) continue
       if (laneFilter) {
         const provider = arc.externalRef?.provider ?? null
         if (provider !== laneFilter) continue
