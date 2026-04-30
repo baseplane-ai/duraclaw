@@ -9,7 +9,10 @@
  *
  * Drag-to-advance: cards are draggable, columns are droppable
  * (`drop:<lane>:<column>`), and onDragEnd runs the B9 precondition check
- * + B10 confirmation modal before delegating to advanceArc.
+ * + B10 confirmation modal before delegating to advanceArc. Backlog
+ * arcs (zero sessions) get a project picker in the modal — same
+ * pattern as KanbanCard's Start-next flow — so the server has a
+ * project to bind on the no-frontier branch.
  *
  * Adjacency rule: only strict single-step left-to-right drops are
  * accepted. Any other target is a no-op with a toast.
@@ -37,6 +40,7 @@ import {
   SelectValue,
 } from '~/components/ui/select'
 import { arcsCollection } from '~/db/arcs-collection'
+import { projectsCollection } from '~/db/projects-collection'
 import { checkPrecondition } from '~/hooks/use-arc-preconditions'
 import { useKanbanLanes } from '~/hooks/use-kanban-lanes'
 import { useTabSync } from '~/hooks/use-tab-sync'
@@ -140,6 +144,19 @@ export function KanbanBoard() {
   } | null>(null)
   const [pending, setPending] = useState(false)
 
+  // Backlog-bootstrap on drag: when a zero-session arc is dragged into
+  // its first lane, the modal renders a project picker (same pattern as
+  // KanbanCard's Start-next flow). The pick threads through advanceArc
+  // as `projectOverride`; without it the server 400s `no_project_for_arc`.
+  const [pickedProject, setPickedProject] = useState<string>('')
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: projectsData } = useLiveQuery(projectsCollection as any)
+  const projectOptions = useMemo(() => {
+    if (!projectsData) return [] as string[]
+    return (projectsData as Array<{ name: string }>).map((p) => p.name).sort()
+  }, [projectsData])
+
   const handleDragEnd = useCallback(async (event: DragEndEvent) => {
     const over = event.over
     const arc = event.active.data.current?.arc as ArcSummary | undefined
@@ -169,6 +186,9 @@ export function KanbanBoard() {
       toast.error(res.reason || 'Precondition not met')
       return
     }
+    // Reset the picker each time we open the modal so a stale selection
+    // from a prior drag doesn't survive into a new one.
+    setPickedProject('')
     setPendingAdvance({ arc, nextMode: res.nextMode })
   }, [])
 
@@ -176,7 +196,9 @@ export function KanbanBoard() {
     if (!pendingAdvance) return
     setPending(true)
     const { arc, nextMode } = pendingAdvance
-    const res = await advanceArc(arc, nextMode)
+    const res = await advanceArc(arc, nextMode, {
+      projectOverride: arc.sessions.length === 0 && pickedProject ? pickedProject : null,
+    })
     setPending(false)
     setPendingAdvance(null)
     if (!res.ok) {
@@ -186,7 +208,7 @@ export function KanbanBoard() {
     toast.success(`Started ${nextMode} in arc '${arc.title}'`)
     const projectLabel = arc.worktreeReservation?.worktree.split('/').pop()
     openTab(res.sessionId, { project: projectLabel ?? undefined })
-  }, [pendingAdvance, openTab])
+  }, [pendingAdvance, openTab, pickedProject])
 
   return (
     <>
@@ -246,6 +268,9 @@ export function KanbanBoard() {
             nextMode={pendingAdvance.nextMode}
             worktree={pendingAdvance.arc.worktreeReservation?.worktree.split('/').pop() ?? null}
             worktreeReserved={!!pendingAdvance.arc.worktreeReservation}
+            projectOptions={pendingAdvance.arc.sessions.length === 0 ? projectOptions : undefined}
+            selectedProject={pickedProject || null}
+            onProjectChange={setPickedProject}
             onConfirm={handleConfirm}
             pending={pending}
           />
