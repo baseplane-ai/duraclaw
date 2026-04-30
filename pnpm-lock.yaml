@@ -145,6 +145,9 @@ importers:
       '@babel/core':
         specifier: ^7.24.0
         version: 7.29.0
+      '@babel/runtime':
+        specifier: ^7.24.0
+        version: 7.29.2
       '@expo/metro-config':
         specifier: 55.0.0
         version: 55.0.0(expo@55.0.18)(typescript@5.8.3)
