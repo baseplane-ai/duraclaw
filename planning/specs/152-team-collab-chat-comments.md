@@ -93,8 +93,8 @@ phases:
   - id: p3
     name: "Side-channel team chat — ArcCollabDO scaffolding + chat lane (DO SQLite + D1 mirror)"
     tasks:
-      - "Create `apps/orchestrator/src/agents/arc-collab-do.ts` (NEW). **Hybrid DO design:** extends `YServer` from `y-partyserver` (so the prompt-collab Yjs surface promoted in P6 inherits the existing y-partyserver wire/awareness) AND owns custom SQLite tables for chat, reactions, mentions metadata. The Y.Doc state is persisted in `y_state` (same as `SessionCollabDOv2`); the chat/reactions tables are siblings in the same DO's SQLite. This is supported because YServer extends the Cloudflare Agents Server pattern — it does not constrain additional `ctx.storage.sql.exec(...)` schema. P3 ships the SQLite half; P6 layers the Y.Doc topology on top of the same DO. Static options: `hibernate: true`, `callbackOptions: { debounceWait: 2000, debounceMaxWait: 10000, timeout: 5000 }`. Register the DO class in `apps/orchestrator/wrangler.toml` with binding `ARC_COLLAB_DO`. Add the WS upgrade route at `/agents/arc-collab-do/<arcId>` in `server.ts` (gated by `checkArcAccess`, B1)"
-      - "ArcCollabDO migration v1 (in `apps/orchestrator/src/agents/arc-collab-do-migrations.ts` — NEW file mirroring `session-do-migrations.ts:1-22` shape; uses the `Migration` type from `~/lib/do-migrations`). Migration v1 SQL — three statements: (a) `CREATE TABLE chat_messages (id TEXT PRIMARY KEY, arc_id TEXT NOT NULL, author_user_id TEXT NOT NULL, body TEXT NOT NULL, mentions TEXT, created_at INTEGER NOT NULL, modified_at INTEGER NOT NULL, edited_at INTEGER, deleted_at INTEGER, deleted_by TEXT)`. (b) `CREATE TABLE submit_ids (client_id TEXT PRIMARY KEY, response_json TEXT NOT NULL, created_at INTEGER NOT NULL)` — per-DO idempotency table mirroring SessionDO migration v5; 60s TTL enforced in app code on every insert. (c) `CREATE TABLE y_state (id TEXT PRIMARY KEY, data BLOB NOT NULL, updated_at INTEGER NOT NULL)` — same shape as `session-collab-do.ts:23-31`, holds the Y.Doc snapshot for P6's awareness/draft layer. Indexes: `(arc_id, modified_at, id)` on chat_messages for cursor replay, `(arc_id, created_at)` for time-ordered fetch. The `mentions` column is a JSON array of userIds, populated server-side at write time (P5). Run migrations from `onLoad` (matches the `session-collab-do.ts:33-46` pattern — DDL is idempotent and runs before y-partyserver's first read)"
+      - "Create `apps/orchestrator/src/agents/arc-collab-do.ts` (NEW, **greenfield — no migration from `SessionCollabDOv2`**). **Hybrid DO design:** extends `YServer` from `y-partyserver` (so the arc-level Yjs awareness layer in P6 reuses the existing y-partyserver wire) AND owns custom SQLite tables for chat, reactions, mentions metadata. The Y.Doc state is persisted in `y_state` (same shape as `SessionCollabDOv2` uses); the chat/reactions tables are siblings in the same DO's SQLite. This is supported because YServer extends the Cloudflare Agents Server pattern — it does not constrain additional `ctx.storage.sql.exec(...)` schema. P3 ships the SQLite half; P6 layers the arc-level awareness Y.Doc topology on top of the same DO. **Crucially, `SessionCollabDOv2` stays untouched** — it continues to own per-session prompt drafts and prompt-input awareness on its own per-session lifetime. The two DOs coexist; the client subscribes to both and composes awareness from each. Static options: `hibernate: true`, `callbackOptions: { debounceWait: 2000, debounceMaxWait: 10000, timeout: 5000 }`. Register the DO class in `apps/orchestrator/wrangler.toml` with binding `ARC_COLLAB_DO`. Add the WS upgrade route at `/agents/arc-collab-do/<arcId>` in `server.ts` (gated by `checkArcAccess`, B1)"
+      - "ArcCollabDO migration v1 (in `apps/orchestrator/src/agents/arc-collab-do-migrations.ts` — NEW file mirroring `session-do-migrations.ts:1-22` shape; uses the `Migration` type from `~/lib/do-migrations`). Migration v1 SQL — three statements: (a) `CREATE TABLE chat_messages (id TEXT PRIMARY KEY, arc_id TEXT NOT NULL, author_user_id TEXT NOT NULL, body TEXT NOT NULL, mentions TEXT, created_at INTEGER NOT NULL, modified_at INTEGER NOT NULL, edited_at INTEGER, deleted_at INTEGER, deleted_by TEXT)`. (b) `CREATE TABLE submit_ids (client_id TEXT PRIMARY KEY, response_json TEXT NOT NULL, created_at INTEGER NOT NULL)` — per-DO idempotency table mirroring SessionDO migration v5; 60s TTL enforced in app code on every insert. (c) `CREATE TABLE y_state (id TEXT PRIMARY KEY, data BLOB NOT NULL, updated_at INTEGER NOT NULL)` — same shape as `session-collab-do.ts:23-31`, holds the arc-scoped Y.Doc snapshot for P6's awareness layer (chat composer draft + arc:meta only — NOT prompt drafts; those stay in `SessionCollabDOv2`). Indexes: `(arc_id, modified_at, id)` on chat_messages for cursor replay, `(arc_id, created_at)` for time-ordered fetch. The `mentions` column is a JSON array of userIds, populated server-side at write time (P5). Run migrations from `onLoad` (matches the `session-collab-do.ts:33-46` pattern — DDL is idempotent and runs before y-partyserver's first read)"
       - "D1 mirror table — migration `apps/orchestrator/migrations/0035_chat_mirror.sql`. `CREATE TABLE chat_mirror (id text PRIMARY KEY, arc_id text NOT NULL REFERENCES arcs(id) ON DELETE CASCADE, author_user_id text NOT NULL REFERENCES users(id), body text NOT NULL, created_at text NOT NULL, fts_indexed_at text)`. Index: `(arc_id, created_at)`. NOT a full FTS5 yet — that's deferred. The mirror exists for cross-arc 'find auth discussions' search and unread counts (P5)"
       - "Add SyncedCollection scope `arcChat:<arcId>`. New typed `ChatMessageRow` in `shared-types`. Broadcaster: new `apps/orchestrator/src/lib/broadcast-arc-room.ts` — fans out to all `arcMembers(arc_id)` via per-user UserSettingsDO sockets (mirrors `broadcast-arc.ts` but member-aware). Function: `broadcastArcRoom(env, ctx, arcId, channel, ops)` where channel is one of `arcChat`, `comments`, `reactions`, `arcAwareness`"
       - "RPC + HTTP in `apps/orchestrator/src/agents/arc-collab-do.ts` — `sendChatImpl(ctx, args: {body, clientChatId})`, `editChatImpl`, `deleteChatImpl`, `listChatHistory(args: {beforeSeq?, limit})`. HTTP routes mounted at `/arc-collab/<arcId>/chat`. Idempotency via clientChatId in `submit_ids` table (per-DO)"
@@ -179,33 +179,32 @@ phases:
         description: "GET /api/inbox/mentions returns cursor-paginated list ordered by mention_ts DESC; mark-read sets read_at"
         type: "integration"
   - id: p6
-    name: "Presence + typing — Yjs Y.Doc topology on existing ArcCollabDO, lazy hydration from SessionCollabDOv2"
+    name: "Presence + typing — Yjs awareness on ArcCollabDO; SessionCollabDOv2 unchanged; client composes both"
     tasks:
-      - "Layer Yjs Y.Doc structure on the ArcCollabDO created in P3 (the DO already extends `YServer`). **Topology decision baked in (not deferred):** a single Y.Doc per arc with namespace-prefixed top-level keys — NOT y-partyserver sub-docs. Rationale: y-partyserver's documented surface targets one Y.Doc per server instance; sub-doc support is an underdocumented escape hatch. We use a SINGLE Y.Doc with prefixed `Y.Map`/`Y.Text` keys, which works on every y-partyserver version and avoids the question. Concrete keys: `arc:meta` (`Y.Map` — title/notes/etc. — placeholder for future arc-level live-collab fields), `arc:chat-draft` (`Y.Text` — the shared team-chat composer draft), and one `prompt:<sessionId>` (`Y.Text`) per session in the arc, written into the document's root. Map of session → Y.Text is exposed as `doc.getText('prompt:' + sessionId)`. New session in arc → client lazily creates `doc.getText('prompt:' + sessionId)` on first edit"
-      - "Awareness fields per connection: `{ userId: string, sessionId?: string, viewing: 'prompt' | 'chat' | 'comments:<msgId>', typing: boolean, displayName: string, avatarUrl?: string }`. Set on connect via the awareness API (`provider.awareness.setLocalStateField(...)`); cleared on disconnect (y-partyserver handles this automatically when the connection closes). Awareness updates (typing/viewing) ride the existing y-partyserver fanout — no SyncedCollection involved. ArcCollabDO carries (i) the Yjs draft state and (ii) the awareness layer; chat/comment/reaction DATA still flows through SyncedCollection (P3, P2, P4)"
-      - "Hydration of legacy `SessionCollabDOv2` data into the new arc-scoped Y.Doc. On first ArcCollabDO load per arc (detected by checking if `prompt:*` keys exist in the Y.Doc): for each session in this arc, fetch the session's `SessionCollabDOv2` y_state snapshot via a one-time RPC call to that DO; decode with `Y.applyUpdate` into a temp Y.Doc; copy the prompt text into our `doc.getText('prompt:' + sessionId)`. Mark hydration done by writing a sentinel key (`arc:hydrated-from-legacy = true`). Old `SessionCollabDOv2` instances stay readable for 30 days post-cutover then are reaped by a follow-up migration. Add a feature flag `ARC_COLLAB_DO_ENABLED` (env binding) so we can ship the new DO behind a flag and roll back without data loss"
-      - "Update `apps/orchestrator/src/hooks/use-session-collab.ts` — make it a wrapper that, when ARC_COLLAB_DO_ENABLED, dials the ArcCollabDO and reads/writes `arc.prompts.get(sessionId)`. Otherwise falls back to legacy. After cutover, rename to `use-arc-collab.ts` and inline the legacy fallback"
-      - "Awareness UI. Component `apps/orchestrator/src/features/arc-orch/ArcPresenceBar.tsx`: renders avatars of users with active awareness states for this arc. Hover → tooltip 'Bob is viewing chat'. Typing dots in the chat composer when any awareness has `typing: true AND viewing: 'chat'`. Per-message typing indicator in comment threads when awareness has `viewing: 'comments:<msgId>'` and typing"
-      - "Awareness debounce — typing signal: set `typing: true` on first keystroke; clear on (a) Enter (sent), (b) 5s idle. Use lodash `debounce(set, 100, {leading: true, trailing: true})` for the 'true' signal and `setTimeout(clear, 5000)` for the idle clear. Reset on any subsequent keystroke"
-      - "Server-side: extract `userId` and `sessionId` from the WS upgrade (P1). Pass via `request.cf` into `onConnect` (Y server passes through). Set them as awareness 'local state' fields on connect, clear on disconnect"
-      - "Tests: `apps/orchestrator/src/agents/arc-collab-do.test.ts` — sub-doc topology: prompt for session A is independent of prompt for session B in same arc. Awareness convergence: 3 connections, all see consistent typing state within 2s. Migration test: legacy SessionCollabDOv2 state hydrates into ArcCollabDO sub-doc on first load"
-      - "Verify: `pnpm typecheck`; `pnpm test --filter @duraclaw/orchestrator -- arc-collab-do`"
+      - "Layer Yjs Y.Doc structure on the ArcCollabDO created in P3 (the DO already extends `YServer`). **Scope decision: arc-level state ONLY.** The Y.Doc holds (a) `arc:chat-draft` (`Y.Text`) — the shared team-chat composer draft (so reload-mid-typing doesn't lose work), and (b) `arc:meta` (`Y.Map`) — placeholder for future arc-level live-collab fields. **It does NOT hold per-session prompt drafts** — those continue to live in `SessionCollabDOv2`, untouched. We use a single Y.Doc per arc with these two top-level keys; no sub-docs (avoids the y-partyserver sub-doc-support question entirely)"
+      - "Arc-level awareness fields per ArcCollabDO connection: `{ userId: string, viewing: 'prompt' | 'chat' | 'comments:<msgId>' | 'transcript', typing: boolean, displayName: string, avatarUrl?: string }`. Set on connect via the awareness API (`provider.awareness.setLocalStateField(...)`); cleared on disconnect (y-partyserver handles this automatically when the connection closes). The `viewing: 'prompt'` value indicates the user is in the prompt-input surface; the actual prompt-input typing signal lives on `SessionCollabDOv2` (next task). Awareness updates (chat typing, comment thread typing, viewing target) ride the existing y-partyserver fanout — no SyncedCollection involved. ArcCollabDO carries (i) the chat-draft Yjs state and (ii) the arc-level awareness layer; chat/comment/reaction DATA still flows through SyncedCollection (P3, P2, P4)"
+      - "**Two-DO awareness composition.** The client opens TWO y-partyserver connections per arc surface: one to `SessionCollabDOv2` (per-session, owns prompt-input Yjs draft + prompt-typing awareness), one to the arc's `ArcCollabDO` (owns chat-draft + arc-level awareness). Each provides an awareness map. Build a small composed-awareness reader at `apps/orchestrator/src/lib/composed-awareness.ts` (NEW): merges the two maps into a single `ArcPresence[]` view by `userId` (one row per user, fields union — viewing falls back from arc-level if not in session-level, typing is OR of both). Stale rows GC'd by the underlying y-partyserver disconnect handlers. **No legacy hydration, no feature flag, no migration of `SessionCollabDOv2` data — both DOs are first-class and coexist permanently.**"
+      - "Awareness UI. Component `apps/orchestrator/src/features/arc-orch/ArcPresenceBar.tsx`: reads from the composed-awareness hook (`useArcPresence(arcId)`); renders avatars of users with active awareness states. Hover → tooltip 'Bob is viewing chat' or 'Alice is editing the prompt'. Typing dots in the chat composer when any composed-awareness row has `typing: true AND viewing: 'chat'`. Per-message typing indicator in comment threads when awareness has `viewing: 'comments:<msgId>'` and typing. Prompt-input typing indicator in the prompt composer reads from the SessionCollabDO awareness directly (already exists today; just expose it through the composed-awareness reader for uniformity)"
+      - "Awareness debounce — typing signal: set `typing: true` on first keystroke; clear on (a) Enter (sent), (b) 5s idle. Use lodash `debounce(set, 100, {leading: true, trailing: true})` for the 'true' signal and `setTimeout(clear, 5000)` for the idle clear. Reset on any subsequent keystroke. Same logic on both `SessionCollabDOv2` (prompt-input typing — already in place; no change required) and `ArcCollabDO` (chat + comments typing — new wiring)"
+      - "Server-side: extract `userId` from the WS upgrade (B2). Pass via `request.cf` into `onConnect` for ArcCollabDO. Set as the awareness `userId` field on connect; cleared on disconnect by y-partyserver. SessionCollabDOv2 already has equivalent wiring — verify it picks up `request.cf.userId` from B2 and exposes it on its awareness too (small change to `session-collab-do.ts`)"
+      - "Tests: `apps/orchestrator/src/agents/arc-collab-do.test.ts` — chat-draft Y.Text persists across reconnect, awareness convergence (3 connections, all see consistent typing state within 2s). `apps/orchestrator/src/lib/composed-awareness.test.ts` — given mock SessionCollab and ArcCollab awareness maps, the composed view merges by userId correctly; user typing in prompt shows `viewing: prompt, typing: true`; user switches to chat shows `viewing: chat`; both DOs disconnecting clears the user from the composed view"
+      - "Verify: `pnpm typecheck`; `pnpm test --filter @duraclaw/orchestrator -- arc-collab-do composed-awareness`"
     test_cases:
-      - id: "arc-collab-prompt-namespaced"
-        description: "Two sessions in same arc have independent Y.Text under keys 'prompt:<sidA>' and 'prompt:<sidB>'; editing session A's prompt does not appear in session B"
+      - id: "arc-collab-chat-draft-persists"
+        description: "Type in chat composer, reload page → draft text restored from arc:chat-draft Y.Text"
         type: "integration"
       - id: "arc-collab-awareness-presence"
-        description: "Three connections: each sees the other two in awareness; viewing='chat' updates within 1s"
+        description: "Three connections to ArcCollabDO: each sees the other two in awareness; viewing='chat' updates within 1s"
         type: "integration"
       - id: "arc-collab-typing-debounce"
-        description: "Typing in composer sets awareness typing=true; after 5s of no input, typing=false"
+        description: "Typing in chat composer sets ArcCollab awareness typing=true; after 5s of no input, typing=false"
         type: "unit"
-      - id: "arc-collab-legacy-hydration"
-        description: "Legacy SessionCollabDOv2 with prompt 'foo' hydrates into ArcCollabDO Y.Text at key 'prompt:<sid>' = 'foo' on first arc-collab read; arc:hydrated-from-legacy sentinel set"
+      - id: "session-collab-untouched"
+        description: "SessionCollabDOv2 prompt-draft Y.Text and awareness behavior unchanged from pre-spec baseline; existing session-collab-do.test.ts passes without modification (other than the small B2 userId-handshake addition)"
         type: "integration"
-      - id: "arc-collab-feature-flag-rollback"
-        description: "With ARC_COLLAB_DO_ENABLED=false, legacy SessionCollabDOv2 still serves prompt collab; flipping the flag mid-session does not corrupt either DO's state"
-        type: "integration"
+      - id: "composed-awareness-merge"
+        description: "User connected to both SessionCollab (typing in prompt) and ArcCollab (viewing chat) → composed-awareness output has one row for that user with viewing='prompt' and typing=true; switching to chat input flips viewing to 'chat'"
+        type: "unit"
   - id: p7
     name: "FCM push delivery — wire fcmSubscriptions + pushSubscriptions for chat + comment mentions"
     tasks:
@@ -507,7 +506,7 @@ ArcCollabDO SQLite `chat_messages`. D1 mirror `chat_mirror`. SyncedCollection sc
 - **Source:** new `apps/orchestrator/src/agents/arc-collab-do.ts` (extends `YServer`)
 
 #### Data Layer
-ArcCollabDO replaces per-session `SessionCollabDOv2`. Sub-doc-per-session for prompt drafts (existing `SessionCollabDOv2` data hydrates lazily on first ArcCollabDO load). Feature flag `ARC_COLLAB_DO_ENABLED`.
+**Two DOs coexist** — `SessionCollabDOv2` (untouched, per-session prompt drafts + prompt-input awareness) and the new `ArcCollabDO` (per-arc chat draft + arc-level awareness). Client composes the two awareness maps into a single per-user view via `useArcPresence(arcId)` (see `apps/orchestrator/src/lib/composed-awareness.ts`). No migration, no feature flag, no hydration — greenfield ArcCollabDO sits alongside the existing SessionCollabDOv2.
 
 ---
 
@@ -702,7 +701,7 @@ Phase dependencies:
 - P3 (chat + ArcCollabDO scaffolding) needs P1.
 - P4 (reactions) needs P3's ArcCollabDO.
 - P5 (mentions + unread) needs P2 and P3 to have write paths to hook into.
-- P6 (Yjs presence) needs P3's ArcCollabDO; can ship as a standalone follow-up if the team wants to ship MVP without presence.
+- P6 (Yjs presence) needs P3's ArcCollabDO; can ship as a standalone follow-up if the team wants to ship MVP without presence. Note: P6 does NOT migrate `SessionCollabDOv2` — it adds awareness on the new ArcCollabDO and a small client-side composed-awareness reader that merges both DOs' awareness maps. SessionCollabDOv2 stays in production unchanged.
 - P7 (FCM push) is parallelizable with P5/P6 once P3 is done.
 - P8 (cascade + moderation) needs P2 and P3 done.
 - P9 (mobile polish) integrates everything; ships last.
@@ -902,29 +901,37 @@ export async function parseMentions(db, arcId, body): Promise<{ resolvedUserIds:
 }
 ```
 
-**4. Yjs namespace-prefixed top-level keys (in ArcCollabDO):**
+**4. Yjs topology — ArcCollabDO holds arc-level state only; SessionCollabDOv2 owns prompt drafts:**
 
-The canonical topology is a SINGLE Y.Doc per arc with prefixed
-top-level keys — NOT nested Y.Maps and NOT y-partyserver sub-docs.
-Each session's prompt is `doc.getText('prompt:' + sessionId)`. See
-P6 task 1 for rationale.
+ArcCollabDO Y.Doc has TWO top-level keys: `arc:chat-draft`
+(`Y.Text` for the team-chat composer) and `arc:meta` (`Y.Map`
+for future arc-level fields). **Per-session prompt drafts stay
+in `SessionCollabDOv2`** — that DO is unchanged by this spec.
+The client subscribes to both DOs and composes awareness via
+`lib/composed-awareness.ts`. See P6 task 1 / Gotcha #7.
 
 ```ts
 // In arc-collab-do.ts
 async onLoad() {
-  this.ensureChatTables()  // chat_messages, reactions, submit_ids — see P3
+  this.ensureChatTables()  // chat_messages, reactions, submit_ids, y_state — see P3
   // hydrate existing Y.Doc snapshot from y_state BLOB
   const rows = this.ctx.storage.sql.exec("SELECT data FROM y_state WHERE id='snapshot'").toArray()
   if (rows.length) Y.applyUpdate(this.document, new Uint8Array(rows[0].data as ArrayBuffer))
-  // No nested structure to ensure — keys are created lazily on first edit
-  // (e.g., client calls doc.getText('prompt:<sid>') which auto-creates the entry)
+  // No structure to ensure — `arc:chat-draft` and `arc:meta` are created
+  // lazily on first access from the client.
 }
 
-// Client reads its session's prompt:
-const arcDoc = provider.document
-const promptText = arcDoc.getText('prompt:' + sessionId) // top-level key, auto-created
+// Client (chat composer): reads/writes the arc-level chat draft.
+const arcDoc = arcProvider.document
 const chatDraft = arcDoc.getText('arc:chat-draft')
-const arcMeta   = arcDoc.getMap('arc:meta')
+
+// Client (prompt composer): UNCHANGED — uses SessionCollabDOv2 directly.
+const sessionDoc = sessionProvider.document
+const promptText = sessionDoc.getText('prompt') // existing per-session shape
+
+// Composed awareness — single per-user view across both DOs:
+const presence = useArcPresence(arcId) // merges sessionAwareness + arcAwareness
+// → [{ userId, displayName, viewing: 'prompt'|'chat'|..., typing: bool }, ...]
 ```
 
 **5. Comment lock state (broadcast):**
@@ -946,13 +953,18 @@ broadcastToClients(ctx, { type: 'comment_unlock', messageId })
 4. **`agent_sessions.visibility` drop is destructive — split via expand-then-contract.** Migration 0034 is EXPAND-ONLY: it adds `arcs.visibility`, backfills, and grants ownership. The destructive `DROP COLUMN agent_sessions.visibility` lives in a SEPARATE migration `0036_drop_session_visibility.sql` deployed AFTER 0034 has been live for at least one full deploy cycle and post-deploy spot checks confirm the backfill. D1 has no DDL transaction, so a single 10-statement migration risks partial application; splitting eliminates the data-loss path. The `migration-test.ts` 0036 case asserts `SELECT COUNT(*) FROM arcs WHERE visibility IS NULL = 0` BEFORE the column is dropped, and refuses to run if not.
 5. **DO migration version bump.** P2 adds SessionDO migration v23 (`comments` table). ArcCollabDO migrations start fresh at v1, v2 (chat_messages, reactions) — separate migration ladder.
 6. **Yjs topology resolved — single Y.Doc with namespace-prefixed top-level keys.** Decision baked into P6 task 1. We do NOT use y-partyserver sub-docs (their support is underdocumented). We do NOT nest under a `Y.Map` named 'arc' (that's an extra indirection). Each session's prompt is exactly `doc.getText('prompt:' + sessionId)`. The chat draft is `doc.getText('arc:chat-draft')`. Arc-level metadata (future) lives in `doc.getMap('arc:meta')`. This shape is what the hydration in P6 task 3 writes into; tests assert against these paths.
-7. **`SessionCollabDOv2 → ArcCollabDOv1` migration.** Lazy hydration on first ArcCollabDO load. Keep legacy DOs readable for 30 days post-cutover. Behind feature flag `ARC_COLLAB_DO_ENABLED` so we can disable at runtime.
+7. **Two DOs coexist — no `SessionCollabDOv2` migration.** ArcCollabDO is greenfield and runs alongside `SessionCollabDOv2`. The client opens both connections per arc surface and composes their awareness maps via `lib/composed-awareness.ts`. Awareness fan-out has to traverse two y-partyserver streams instead of one — this is the cost we pay to keep prompt drafts naturally session-scoped (each session has its own composer + draft) and to avoid the migration risk of moving live Yjs state across DOs. Watch for: client connection count doubling per arc surface (one extra WS, low cost), and ensuring `viewing: 'prompt'` on ArcCollabDO awareness is set correctly when the user is in the prompt input (the typing signal still lives on SessionCollabDO; only the viewing target reflects on ArcCollab so other users see "Alice is in the prompt" without subscribing to her SessionCollabDO).
 8. **Push permission UX.** Capacitor's `requestPermissions()` is one-shot — denied stays denied until user changes OS settings. Lazy-prompt only on user intent (toggle click), not at app launch.
 9. **`useArcUnread` cache invalidation.** When server broadcasts `arc_unread_delta`, all client tabs of the same user must update. Use the existing `BroadcastChannel` plumbing in `apps/orchestrator/src/lib/broadcast-session.ts` for cross-tab sync of read state.
 10. **Comment-on-deleted-message.** If the assistant message is somehow removed (e.g., resume edge case), the comment row remains but renders 'Message no longer available'. Don't cascade-delete comments on message removal.
 11. **FCM rate limit collapse.** When 5/min cap hits, do NOT drop pushes — coalesce into a digest sent at end-of-window: 'You have 7 new messages in <arc>'. The collapse logic lives in `push-delivery.ts`.
 12. **Reactions composite PK.** `(target_kind, target_id, user_id, emoji)` — same user can react with multiple distinct emojis on one target, but cannot stack the same emoji.
 13. **Member removal preserves attribution.** Removing user A from `arc_members` leaves their comment/chat rows with `author_user_id = 'A'`. UI still resolves the name from `users.id` (Better Auth row not deleted). This is intentional — see B21.
+
+### Architectural decision log
+
+- **2026-04-30 (initial spec):** P6 promotes `SessionCollabDOv2` → `ArcCollabDO` with sub-doc-per-session prompt drafts and lazy hydration. *Reverted.*
+- **2026-04-30 (amendment):** Two DOs coexist permanently. ArcCollabDO is greenfield (chat draft + arc-level awareness only); `SessionCollabDOv2` continues to own per-session prompt drafts and prompt-input awareness. Client composes the two awareness maps via `lib/composed-awareness.ts`. Rationale: avoids migration risk of moving live Yjs state across DOs; preserves natural per-session scope of prompt drafts; preserves independent hibernation behavior of session-collab DOs; eliminates the `ARC_COLLAB_DO_ENABLED` rollback flag.
 
 ### Reference Docs
 
@@ -968,4 +980,4 @@ broadcastToClients(ctx, { type: 'comment_unlock', messageId })
 
 ---
 
-<!-- Status: approved. Updated 2026-04-30 by /kata-close in PL-98ea-0430. Review score: 91/100 PASS. -->
+<!-- Status: approved (amended 2026-04-30: SessionCollabDOv2 stays unmerged; ArcCollabDO is greenfield. Two DOs coexist; client composes awareness). Updated 2026-04-30 by /kata-close in PL-98ea-0430. Review score: 91/100 PASS at initial approval. -->
