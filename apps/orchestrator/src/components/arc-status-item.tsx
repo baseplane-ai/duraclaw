@@ -25,10 +25,13 @@
 import type { KataSessionState } from '@duraclaw/shared-types'
 import { useLiveQuery } from '@tanstack/react-db'
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Button } from '~/components/ui/button'
 import { arcsCollection } from '~/db/arcs-collection'
+import { hasActiveSession } from '~/features/kanban/advance-arc'
 import { useArcAutoAdvance } from '~/hooks/use-arc-auto-advance'
-import { checkPrecondition } from '~/hooks/use-arc-preconditions'
+import { checkPrecondition, useNextModePrecondition } from '~/hooks/use-arc-preconditions'
 import { useTabSync } from '~/hooks/use-tab-sync'
+import { openAdvance } from '~/lib/advance-modal-store'
 import { deriveColumn, isArcSessionCompleted, type KanbanColumn } from '~/lib/arcs'
 import { CORE_RUNG_ORDER, type CoreRung } from '~/lib/auto-advance'
 import { useStallReason } from '~/lib/chain-stall-store'
@@ -243,6 +246,36 @@ export function ArcStatusItem({ kataState, kataIssue, sessionId }: ArcStatusItem
     [replaceTab, sessionId],
   )
 
+  // Hooks must run unconditionally; fall back to a stable empty-arc shape
+  // until the live data resolves so `useNextModePrecondition` can sit above
+  // the early `!arc` return below.
+  const arcForHook = useMemo<ArcSummary>(
+    () =>
+      arc ?? {
+        id: '',
+        title: '',
+        externalRef: null,
+        status: 'open',
+        createdAt: '',
+        updatedAt: '',
+        sessions: [],
+        lastActivity: null,
+      },
+    [arc],
+  )
+  const { nextMode, nextLabel, canAdvance, reason, loading } = useNextModePrecondition(arcForHook)
+  const hasActive = arc ? hasActiveSession(arc) : false
+  const startLabel = nextMode ? `Start ${nextLabel}` : ''
+  const disabledTitle = loading
+    ? 'Checking preconditions…'
+    : reason || (canAdvance ? '' : 'Precondition not met')
+  const startTooltip =
+    disabledTitle || (hasActive ? `Closes current session, starts fresh ${nextLabel}` : undefined)
+  const handleAdvance = useCallback(() => {
+    if (!arc || !nextMode || !canAdvance) return
+    openAdvance(arc, nextMode)
+  }, [arc, nextMode, canAdvance])
+
   if (!arc) {
     // No arc data loaded yet — fall through to a compact pill with just
     // the issue number; avoids flicker on first render. Kata UI label
@@ -403,6 +436,22 @@ export function ArcStatusItem({ kataState, kataIssue, sessionId }: ArcStatusItem
                 )
               })}
             </div>
+
+            {nextMode ? (
+              <div className="flex border-t pt-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 w-full px-2.5 text-xs"
+                  onClick={handleAdvance}
+                  disabled={!canAdvance || loading}
+                  title={startTooltip}
+                  data-testid={`arc-status-advance-${arc.id}`}
+                >
+                  {startLabel}
+                </Button>
+              </div>
+            ) : null}
 
             {stallReason && (
               <div className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-amber-600">

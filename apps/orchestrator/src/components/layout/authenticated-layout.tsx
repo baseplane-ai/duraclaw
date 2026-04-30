@@ -1,4 +1,5 @@
 import { Outlet } from '@tanstack/react-router'
+import { AdvanceModalHost } from '~/components/AdvanceModalHost'
 import { AppSidebar } from '~/components/layout/app-sidebar'
 import { SkipToMain } from '~/components/skip-to-main'
 import { SwUpdateBanner } from '~/components/sw-update-banner'
@@ -45,6 +46,7 @@ export function AuthenticatedLayout({ children }: AuthenticatedLayoutProps) {
               {children ?? <Outlet />}
             </SidebarInset>
           </SidebarProvider>
+          <AdvanceModalHost />
         </SessionPresenceProvider>
         <SwUpdateBanner />
       </LayoutProvider>

@@ -4,35 +4,31 @@
  * Card data shape is `ArcSummary`. Display fields:
  *   - issue badge `#N` is shown only for GH-linked arcs (`externalRef.provider === 'github'`)
  *   - title comes from `arc.title` (user-editable, auto-filled from external ref)
- *   - column is derived via `deriveColumn(arc.sessions, arc.status)`
  *   - session focus reads `arc.sessions[].mode` (was `kataMode`)
  *
- * The use-arc-* hooks (auto-advance, preconditions, checkout) consume
- * `ArcSummary` / arc.id directly. Auto-advance still keys on
- * issueNumber under the hood (preference shape unchanged); for non-GH
- * arcs we hide the chip rather than wire a synthetic key.
+ * The use-arc-* hooks (auto-advance, preconditions) consume `ArcSummary` /
+ * arc.id directly. Auto-advance still keys on issueNumber under the hood
+ * (preference shape unchanged); for non-GH arcs we hide the chip rather
+ * than wire a synthetic key.
  *
- * P3 U3 adds: Start-next button (with precondition gating + confirmation
- * modal), draggable-by-handle via `@dnd-kit/core`. PR chip, lane collapse,
- * and drag-to-advance live on the parent surfaces.
+ * The Start-next button just calls `openAdvance(arc, nextMode)` on the
+ * singleton advance-modal store; the modal lifecycle (confirm flow,
+ * worktree-conflict resolution, toasts, openTab on success) lives in
+ * `<AdvanceModalHost />`, mounted once at the authenticated layout.
+ * Drag-to-advance and lane collapse live on the parent surfaces.
  */
 
 import { useDraggable } from '@dnd-kit/core'
-import { useLiveQuery } from '@tanstack/react-db'
-import { useCallback, useMemo, useState } from 'react'
-import { toast } from 'sonner'
+import { useCallback } from 'react'
 import { Button } from '~/components/ui/button'
-import { projectsCollection } from '~/db/projects-collection'
 import { formatTimeAgo } from '~/features/agent-orch/session-utils'
-import { WorktreeConflictModal } from '~/features/chain/WorktreeConflictModal'
 import { useArcAutoAdvance } from '~/hooks/use-arc-auto-advance'
-import { useArcCheckout } from '~/hooks/use-arc-checkout'
 import { useNextModePrecondition } from '~/hooks/use-arc-preconditions'
 import { useTabSync } from '~/hooks/use-tab-sync'
-import { deriveColumn, isArcSessionCompleted, isLiveSession } from '~/lib/arcs'
-import type { ArcSummary, ChainWorktreeReservation } from '~/lib/types'
-import { AdvanceConfirmModal } from './AdvanceConfirmModal'
-import { advanceArc, hasActiveSession } from './advance-arc'
+import { openAdvance } from '~/lib/advance-modal-store'
+import { isArcSessionCompleted, isLiveSession } from '~/lib/arcs'
+import type { ArcSummary } from '~/lib/types'
+import { hasActiveSession } from './advance-arc'
 
 interface KanbanCardProps {
   arc: ArcSummary
@@ -93,28 +89,7 @@ function shortMode(mode: string | null | undefined): string {
 export function KanbanCard({ arc }: KanbanCardProps) {
   const { openTab } = useTabSync()
 
-  const column = useMemo(() => deriveColumn(arc.sessions, arc.status), [arc.sessions, arc.status])
-
   const { nextMode, nextLabel, canAdvance, reason, loading } = useNextModePrecondition(arc)
-  const { forceRelease } = useArcCheckout()
-  const [modalOpen, setModalOpen] = useState(false)
-  const [pending, setPending] = useState(false)
-  const [conflict, setConflict] = useState<ChainWorktreeReservation | null>(null)
-  // Backlog-bootstrap: when an arc has zero sessions, the user picks a
-  // worktree via the Advance modal. Empty-string = "no selection yet", which
-  // is what disables the confirm button.
-  const [pickedProject, setPickedProject] = useState<string>('')
-
-  // Project list for the picker — only queried when we actually need it
-  // (the modal hasn't been opened yet on most cards, but useLiveQuery is
-  // cheap here since `projectsCollection` is a single module-level
-  // collection shared across the app).
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data: projectsData } = useLiveQuery(projectsCollection as any)
-  const projectOptions = useMemo(() => {
-    if (!projectsData) return [] as string[]
-    return (projectsData as Array<{ name: string }>).map((p) => p.name).sort()
-  }, [projectsData])
 
   // Per-arc auto-advance toggle — same preference the StatusBar
   // ArcStatusItem popover drives, surfaced on the card itself so users
@@ -153,71 +128,13 @@ export function KanbanCard({ arc }: KanbanCardProps) {
 
   const handleStartNext = useCallback(() => {
     if (!nextMode || !canAdvance) return
-    // Reset the picker state each time the modal opens — avoids a stale
-    // selection from a prior attempt persisting into a new session.
-    setPickedProject('')
-    setModalOpen(true)
-  }, [nextMode, canAdvance])
-
-  const runAdvance = useCallback(async (): Promise<boolean> => {
-    if (!nextMode) return false
-    // Backlog-bootstrap: arcs with zero sessions don't have a prior
-    // session whose project the server can inherit, so the Advance
-    // modal renders a project picker and we forward the pick as
-    // `projectOverride`. For arcs that already have sessions we send
-    // no override — the server prefers `body.project` only when given,
-    // otherwise it inherits from the latest prior session. The server
-    // still returns 400 `no_project_for_arc` if both are missing.
-    setPending(true)
-    const res = await advanceArc(arc, nextMode, {
-      projectOverride: arc.sessions.length === 0 && pickedProject ? pickedProject : null,
-    })
-    setPending(false)
-    if (!res.ok) {
-      toast.error(res.error ?? 'Failed to advance arc')
-      return false
-    }
-    setModalOpen(false)
-    toast.success(`Started ${nextMode} in arc '${arc.title}'`)
-    const projectLabel = arc.worktreeReservation?.worktree.split('/').pop()
-    openTab(res.sessionId, { project: projectLabel ?? undefined })
-    return true
-  }, [arc, nextMode, openTab, pickedProject])
-
-  const handleConfirm = useCallback(async () => {
-    await runAdvance()
-  }, [runAdvance])
-
-  const handlePickDifferent = useCallback(() => {
-    // No in-app worktree picker yet — close modal and let the user pick a
-    // different worktree via the existing spawn form / worktrees panel.
-    setConflict(null)
-  }, [])
-
-  const handleForceRelease = useCallback(async () => {
-    if (!conflict) return
-    setPending(true)
-    // GH#116 P4a: force-release is now keyed on worktree id (admin
-    // DELETE /api/worktrees/:id). Use the conflict row's id directly;
-    // the legacy `(issueNumber, worktree)` signature is gone with the
-    // chain endpoint deletion.
-    const res = await forceRelease(conflict.id)
-    if (!res.ok) {
-      setPending(false)
-      toast.error(res.error ?? 'Force release failed')
-      return
-    }
-    // Clear conflict modal; retry the full advance (checkout re-runs).
-    setConflict(null)
-    setPending(false)
-    await runAdvance()
-  }, [conflict, forceRelease, runAdvance])
+    openAdvance(arc, nextMode)
+  }, [arc, nextMode, canAdvance])
 
   const focus = pickFocusSession(arc.sessions)
   const focusTs = focus?.lastActivity ?? focus?.createdAt ?? arc.lastActivity
   const worktree = arc.worktreeReservation?.worktree.split('/').pop() ?? null
   const worktreeStale = arc.worktreeReservation?.stale === true
-  const currentMode = focus?.mode ?? column
 
   const hasActive = hasActiveSession(arc)
   const startLabel = nextMode ? `Start ${nextLabel}` : ''
@@ -228,135 +145,105 @@ export function KanbanCard({ arc }: KanbanCardProps) {
     disabledTitle || (hasActive ? `Closes current session, starts fresh ${nextLabel}` : undefined)
 
   return (
-    <>
-      <div
-        ref={setNodeRef}
-        className={`flex flex-col gap-1.5 rounded-lg border border-border bg-card p-3 text-sm shadow-sm transition-shadow hover:shadow-md ${
-          isDragging ? 'opacity-50 shadow-lg' : ''
-        }`}
-        {...attributes}
-        {...listeners}
-      >
-        <div className="flex items-start justify-between gap-2">
-          <div className="min-w-0 flex-1">
-            {issueLabel ? (
-              <div className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-                {issueLabel}
-              </div>
-            ) : null}
-            <div className="line-clamp-2 text-sm font-medium leading-snug" title={arc.title}>
-              {arc.title}
+    <div
+      ref={setNodeRef}
+      className={`flex flex-col gap-1.5 rounded-lg border border-border bg-card p-3 text-sm shadow-sm transition-shadow hover:shadow-md ${
+        isDragging ? 'opacity-50 shadow-lg' : ''
+      }`}
+      {...attributes}
+      {...listeners}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          {issueLabel ? (
+            <div className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+              {issueLabel}
             </div>
-          </div>
-          {showAutoChip ? (
-            <button
-              type="button"
-              className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
-                autoAdvanceOn
-                  ? 'bg-primary/15 text-primary hover:bg-primary/25'
-                  : 'bg-muted text-muted-foreground hover:bg-muted/70'
-              }`}
-              title={
-                autoAdvanceOn
-                  ? 'Auto-advance on — click to disable'
-                  : 'Auto-advance off — click to enable'
-              }
-              onClick={(e) => {
-                e.stopPropagation()
-                void toggleAutoAdvance()
-              }}
-              onPointerDown={(e) => e.stopPropagation()}
-              data-testid={`arc-auto-chip-${arc.id}`}
-            >
-              ⟲ {autoAdvanceOn ? 'auto' : 'off'}
-            </button>
           ) : null}
-        </div>
-        <div className="flex min-w-0 items-center gap-2 text-[11px]">
-          {focus ? (
-            <span className="min-w-0 flex-1 truncate text-muted-foreground">
-              {shortMode(focus.mode)} &middot; {shortStatusLabel(focus)}
-              {focusTs ? ` &middot; ${formatTimeAgo(focusTs)}` : ''}
-            </span>
-          ) : (
-            <span className="text-muted-foreground">no sessions</span>
-          )}
-        </div>
-        {worktree ? (
-          <div className="flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
-            <span
-              className={`block min-w-0 flex-1 truncate font-mono ${worktreeStale ? 'text-amber-600 dark:text-amber-500' : ''}`}
-              title={worktreeStale ? `${worktree} (stale — held >7d)` : worktree}
-            >
-              {worktree}
-            </span>
-            {worktreeStale ? (
-              <span
-                className="shrink-0 rounded bg-amber-500/15 px-1 py-0.5 text-[9px] font-medium uppercase tracking-wider text-amber-700 dark:text-amber-400"
-                title="Reservation hasn't been touched in over 7 days"
-                data-testid={`arc-worktree-stale-${arc.id}`}
-              >
-                stale
-              </span>
-            ) : null}
+          <div className="line-clamp-2 text-sm font-medium leading-snug" title={arc.title}>
+            {arc.title}
           </div>
+        </div>
+        {showAutoChip ? (
+          <button
+            type="button"
+            className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
+              autoAdvanceOn
+                ? 'bg-primary/15 text-primary hover:bg-primary/25'
+                : 'bg-muted text-muted-foreground hover:bg-muted/70'
+            }`}
+            title={
+              autoAdvanceOn
+                ? 'Auto-advance on — click to disable'
+                : 'Auto-advance off — click to enable'
+            }
+            onClick={(e) => {
+              e.stopPropagation()
+              void toggleAutoAdvance()
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+            data-testid={`arc-auto-chip-${arc.id}`}
+          >
+            ⟲ {autoAdvanceOn ? 'auto' : 'off'}
+          </button>
         ) : null}
-        <div className="mt-0.5 flex flex-wrap gap-1.5">
-          {/* Prevent dnd-kit from intercepting the click on the buttons. */}
-          {arc.sessions.length > 0 ? (
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-7 px-2.5 text-xs"
-              onClick={handleOpen}
-              onPointerDown={(e) => e.stopPropagation()}
+      </div>
+      <div className="flex min-w-0 items-center gap-2 text-[11px]">
+        {focus ? (
+          <span className="min-w-0 flex-1 truncate text-muted-foreground">
+            {shortMode(focus.mode)} &middot; {shortStatusLabel(focus)}
+            {focusTs ? ` &middot; ${formatTimeAgo(focusTs)}` : ''}
+          </span>
+        ) : (
+          <span className="text-muted-foreground">no sessions</span>
+        )}
+      </div>
+      {worktree ? (
+        <div className="flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
+          <span
+            className={`block min-w-0 flex-1 truncate font-mono ${worktreeStale ? 'text-amber-600 dark:text-amber-500' : ''}`}
+            title={worktreeStale ? `${worktree} (stale — held >7d)` : worktree}
+          >
+            {worktree}
+          </span>
+          {worktreeStale ? (
+            <span
+              className="shrink-0 rounded bg-amber-500/15 px-1 py-0.5 text-[9px] font-medium uppercase tracking-wider text-amber-700 dark:text-amber-400"
+              title="Reservation hasn't been touched in over 7 days"
+              data-testid={`arc-worktree-stale-${arc.id}`}
             >
-              Open
-            </Button>
-          ) : null}
-          {nextMode ? (
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-7 px-2.5 text-xs"
-              onClick={handleStartNext}
-              onPointerDown={(e) => e.stopPropagation()}
-              disabled={!canAdvance || loading}
-              title={startTooltip}
-            >
-              {startLabel}
-            </Button>
+              stale
+            </span>
           ) : null}
         </div>
+      ) : null}
+      <div className="mt-0.5 flex flex-wrap gap-1.5">
+        {/* Prevent dnd-kit from intercepting the click on the buttons. */}
+        {arc.sessions.length > 0 ? (
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 px-2.5 text-xs"
+            onClick={handleOpen}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            Open
+          </Button>
+        ) : null}
+        {nextMode ? (
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 px-2.5 text-xs"
+            onClick={handleStartNext}
+            onPointerDown={(e) => e.stopPropagation()}
+            disabled={!canAdvance || loading}
+            title={startTooltip}
+          >
+            {startLabel}
+          </Button>
+        ) : null}
       </div>
-      {nextMode ? (
-        <AdvanceConfirmModal
-          open={modalOpen}
-          onOpenChange={setModalOpen}
-          arcTitle={arc.title}
-          currentMode={currentMode}
-          nextMode={nextMode}
-          worktree={worktree}
-          worktreeReserved={!!arc.worktreeReservation}
-          projectOptions={arc.sessions.length === 0 ? projectOptions : undefined}
-          selectedProject={pickedProject || null}
-          onProjectChange={setPickedProject}
-          onConfirm={handleConfirm}
-          pending={pending}
-        />
-      ) : null}
-      {conflict ? (
-        <WorktreeConflictModal
-          open={true}
-          onOpenChange={(open) => {
-            if (!open) setConflict(null)
-          }}
-          conflict={conflict}
-          onPickDifferent={handlePickDifferent}
-          onForceRelease={handleForceRelease}
-          conflictTitle={`Blocking advance of '${arc.title}'`}
-        />
-      ) : null}
-    </>
+    </div>
   )
 }
