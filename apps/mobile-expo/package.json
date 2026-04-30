@@ -44,6 +44,7 @@
     "@babel/core": "^7.24.0",
     "@babel/runtime": "^7.24.0",
     "@expo/metro-config": "55.0.0",
+    "@expo/metro-runtime": "6.1.2",
     "@types/react": "19.0.0",
     "babel-preset-expo": "55.0.18",
     "typescript": "~5.8.3"
