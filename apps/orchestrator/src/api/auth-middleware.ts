@@ -13,6 +13,14 @@ import type { ApiAppEnv } from './context'
 // browser-client endpoints that need the session cookie to resolve `userId`
 // for hidden-project filtering — keeping them under the session middleware
 // prevents a D1_TYPE_ERROR on an undefined userId reaching drizzle's `eq()`.
+//
+// GH#122 P1.3: `/api/projects/:id/docs-files` and
+// `/api/docs-runners/:id/health` use the per-route `projectMetadataAuth`
+// middleware which natively handles BOTH the cookie path (populating
+// userId+role) and the DOCS_RUNNER_SECRET bearer path (bypassing
+// project_members per B-AUTH-6). They sit AFTER this middleware in
+// route-registration order, so the bypass entries below let the bearer
+// path reach them.
 const BYPASS_PATHS = [
   '/api/gateway/projects/sync',
   '/api/gateway/worktrees/upsert',
@@ -21,9 +29,21 @@ const BYPASS_PATHS = [
   '/api/bootstrap',
 ]
 
+// GH#122 P1.3: regex bypass for the two routes whose `projectMetadataAuth`
+// route-level middleware re-implements both auth modes. The path shape is
+// `/api/projects/<16-hex>/docs-files` and `/api/docs-runners/<16-hex>/health`.
+const BYPASS_REGEXES = [
+  /^\/api\/projects\/[0-9a-f]{16}\/docs-files$/,
+  /^\/api\/docs-runners\/[0-9a-f]{16}\/health$/,
+]
+
 export const authMiddleware = createMiddleware<ApiAppEnv>(async (c, next) => {
   const path = c.req.path
   if (BYPASS_PATHS.some((p) => path.startsWith(p))) {
+    await next()
+    return
+  }
+  if (BYPASS_REGEXES.some((re) => re.test(path))) {
     await next()
     return
   }

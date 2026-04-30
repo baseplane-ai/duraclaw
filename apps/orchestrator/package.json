@@ -21,6 +21,7 @@
     "db:export:remote": "wrangler d1 export duraclaw-auth --remote --output=prod-snapshot.sql",
     "db:clone:remote": "pnpm db:export:remote && pnpm db:reset:local && wrangler d1 execute duraclaw-auth --local --file=prod-snapshot.sql",
     "db:studio": "drizzle-kit studio",
+    "backfill:project-ids": "bun ../../scripts/backfill-project-ids.ts",
     "cutover:rehearse": "bash scripts/cutover-rehearsal.sh",
     "cutover:dump-my-state": "bash scripts/dump-my-state.sh"
   },

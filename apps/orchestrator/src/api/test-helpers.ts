@@ -27,7 +27,7 @@ import { vi } from 'vitest'
 
 type Kind = 'select' | 'insert' | 'update' | 'delete'
 
-interface ChainOp {
+export interface ChainOp {
   kind: Kind
   calls: Array<{ method: string; args: unknown[] }>
 }
@@ -57,7 +57,13 @@ export interface DbStubConfig {
  * supplied resolver returns for this op.
  */
 function makeChain(op: ChainOp, resolve: (op: ChainOp) => unknown): any {
-  const finalize = () => Promise.resolve(resolve(op))
+  const finalize = () => {
+    const v = resolve(op)
+    // Allow tests to inject failures by queuing an Error instance — the
+    // chain rejects when awaited so the calling handler observes a thrown
+    // promise (matching real D1 behavior on constraint / network failure).
+    return v instanceof Error ? Promise.reject(v) : Promise.resolve(v)
+  }
 
   const handler: ProxyHandler<object> = {
     get(_target, prop) {
@@ -99,6 +105,12 @@ export function makeFakeDb(cfg: DbStubConfig = {}) {
     runTransactions: cfg.runTransactions ?? true,
   }
 
+  // Recording layer: tests can inspect `ops` to verify what `.values()` /
+  // `.onConflictDoUpdate()` etc. received. One entry per top-level call to
+  // `db.select|insert|update|delete()`; `calls` accumulates every fluent
+  // method invocation on that chain.
+  const ops: ChainOp[] = []
+
   const resolver = (op: ChainOp) => {
     if (data.queue.length > 0) {
       return data.queue.shift()
@@ -106,30 +118,44 @@ export function makeFakeDb(cfg: DbStubConfig = {}) {
     return data[op.kind]
   }
 
+  const startChain = (kind: Kind, args: unknown[]) => {
+    const op: ChainOp = { kind, calls: [{ method: kind, args }] }
+    ops.push(op)
+    return makeChain(op, resolver)
+  }
+
   const db: any = {
-    select: vi.fn((..._args: unknown[]) =>
-      makeChain({ kind: 'select', calls: [{ method: 'select', args: _args }] }, resolver),
-    ),
-    insert: vi.fn((..._args: unknown[]) =>
-      makeChain({ kind: 'insert', calls: [{ method: 'insert', args: _args }] }, resolver),
-    ),
-    update: vi.fn((..._args: unknown[]) =>
-      makeChain({ kind: 'update', calls: [{ method: 'update', args: _args }] }, resolver),
-    ),
-    delete: vi.fn((..._args: unknown[]) =>
-      makeChain({ kind: 'delete', calls: [{ method: 'delete', args: _args }] }, resolver),
-    ),
+    select: vi.fn((..._args: unknown[]) => startChain('select', _args)),
+    insert: vi.fn((..._args: unknown[]) => startChain('insert', _args)),
+    update: vi.fn((..._args: unknown[]) => startChain('update', _args)),
+    delete: vi.fn((..._args: unknown[]) => startChain('delete', _args)),
     transaction: vi.fn(async (cb: (tx: any) => Promise<unknown>) => {
       if (!data.runTransactions) return undefined
       return cb(db)
     }),
-    // D1's `db.batch(ops)` resolves each fluent chain in order — each op
-    // is already a thenable Proxy from `makeChain`, so awaiting them
-    // delegates to the configured resolver / queue.
-    batch: vi.fn(async (ops: unknown[]) => Promise.all(ops as Promise<unknown>[])),
+    /**
+     * Real D1 `db.batch([...statements])` runs an array of prepared
+     * statements atomically and returns their results in order. The fake
+     * awaits each chainable in sequence — each chain has already been
+     * built (the test handler called `db.update(...)/db.insert(...)`
+     * before passing the chain into batch), so `await`-ing it pulls the
+     * next item off the FIFO queue exactly like a non-batched call would.
+     *
+     * If any statement rejects (a queued Error), batch rejects with that
+     * same error — mirroring real D1's atomic-rollback semantics from the
+     * caller's point of view. Sequential (not Promise.all) so rollback
+     * is observable in tests that queue errors mid-batch.
+     */
+    batch: vi.fn(async (statements: unknown[]) => {
+      const results: unknown[] = []
+      for (const stmt of statements) {
+        results.push(await stmt)
+      }
+      return results
+    }),
   }
 
-  return { db, data }
+  return { db, data, ops }
 }
 
 /**

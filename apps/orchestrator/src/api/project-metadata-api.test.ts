@@ -81,10 +81,16 @@ function makeApp(env: any) {
   }
 }
 
+// GH#122 P1.3: PATCH/GET /api/projects/:projectId now go through
+// `requireProjectMember`. Use an admin session so these focused tests
+// (which target validation + insert/update behavior, not the membership
+// gate itself) bypass the project_members lookup. The membership gate's
+// own behavior is covered by `middleware/require-project-member.test.ts`.
 const authedSession = {
   userId: 'user-1',
+  role: 'admin',
   session: { id: 's' },
-  user: { id: 'user-1' },
+  user: { id: 'user-1', role: 'admin' },
 }
 
 describe('PATCH /api/projects/:projectId', () => {

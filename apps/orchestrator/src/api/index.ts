@@ -1,12 +1,16 @@
+import { deriveProjectId } from '@duraclaw/shared-types'
 import type { SQL } from 'drizzle-orm'
 import { and, asc, desc, eq, inArray, isNull, like, ne, or, sql } from 'drizzle-orm'
+import type { BatchItem } from 'drizzle-orm/batch'
 import { drizzle } from 'drizzle-orm/d1'
 import { Hono } from 'hono'
+import { createMiddleware } from 'hono/factory'
 import { constantTimeEquals } from '~/agents/session-do/runner-link'
 import * as schema from '~/db/schema'
 import {
   agentSessions,
   featureFlags,
+  projectMembers,
   projectMetadata,
   projects as projectsTable,
   userPreferences,
@@ -31,6 +35,7 @@ import {
   fetchGatewayProjects as sharedFetchGatewayProjects,
   resolveProjectPath as sharedResolveProjectPath,
 } from '~/lib/gateway-files'
+import { projectInfoFromMeta } from '~/lib/projects'
 import { type PushPayload, sendPushNotification } from '~/lib/push'
 import { sendFcmNotification } from '~/lib/push-fcm'
 import { bindWorktreeById, reserveFreshWorktree, rowToDto } from '~/lib/reserve-worktree'
@@ -52,6 +57,7 @@ import { authMiddleware } from './auth-middleware'
 import { authRoutes } from './auth-routes'
 import { getRequestSession } from './auth-session'
 import type { ApiAppEnv } from './context'
+import { requireProjectMember } from './middleware/require-project-member'
 import { runWorktreesJanitor } from './scheduled'
 import type { ReservedBy, SessionWorktreeParam } from './worktrees-types'
 
@@ -702,36 +708,103 @@ export function createApiApp() {
 
     const ops: Array<import('@duraclaw/shared-types').SyncedCollectionOp<ProjectInfo>> = []
 
-    // Upsert every row from the payload.
+    // GH#122 B-SYNC-2: atomic dual-write. Upsert each `projects` row AND
+    // (when repo_origin is set) the corresponding `projectMetadata` row
+    // via a single `db.batch([...])`. Failure mid-batch rolls back both
+    // tables atomically.
+    //
+    // D1 does not support interactive BEGIN/COMMIT — drizzle's
+    // `db.transaction()` throws on the D1 binding (see
+    // api/index.ts:1570-1575). We build the full statement list first
+    // (deriving projectId is async), then submit them in one batch call.
+    //
+    // projectId derivation: sha256(repo_origin).slice(0, 16) when origin
+    // is non-empty; null otherwise. On the projects-side update clause we
+    // ONLY write projectId when the freshly-computed value is non-null —
+    // a backfilled projectId must NOT be unset by a subsequent sync that
+    // happened to lack repo_origin (e.g. a discovery cycle that ran
+    // before `git config remote.origin.url` returned).
+    //
+    // The projectMetadata upsert intentionally OMITS ownerId from the
+    // `set` clause: ownership (B-SCHEMA-2) is preserved across syncs.
+    type DualWriteStmt = BatchItem<'sqlite'>
+    const writeStmts: DualWriteStmt[] = []
     for (const p of incoming) {
-      await db
-        .insert(projectsTable)
-        .values({
-          name: p.name,
-          displayName: p.displayName ?? null,
-          rootPath: p.path,
-          updatedAt: now,
-          deletedAt: null,
-          // New projects default to 'public'. Admins can restrict via
-          // PATCH /api/projects/:name/visibility; that value is preserved
-          // across subsequent syncs (visibility omitted from the update
-          // clause below).
-          visibility: 'public',
-        })
-        .onConflictDoUpdate({
-          target: projectsTable.name,
-          set: {
+      const projectId = p.repo_origin ? await deriveProjectId(p.repo_origin) : null
+
+      const projectsSet: Record<string, unknown> = {
+        displayName: p.displayName ?? null,
+        rootPath: p.path,
+        updatedAt: now,
+        deletedAt: null,
+      }
+      if (projectId !== null) {
+        projectsSet.projectId = projectId
+      }
+
+      writeStmts.push(
+        db
+          .insert(projectsTable)
+          .values({
+            name: p.name,
             displayName: p.displayName ?? null,
             rootPath: p.path,
+            projectId,
             updatedAt: now,
             deletedAt: null,
-          },
-        })
+            // New projects default to 'public'. Admins can restrict via
+            // PATCH /api/projects/:name/visibility; that value is preserved
+            // across subsequent syncs (visibility omitted from the update
+            // clause below).
+            visibility: 'public',
+          })
+          .onConflictDoUpdate({
+            target: projectsTable.name,
+            set: projectsSet,
+          }),
+      )
 
+      if (projectId !== null) {
+        writeStmts.push(
+          db
+            .insert(projectMetadata)
+            .values({
+              projectId,
+              projectName: p.name,
+              originUrl: p.repo_origin,
+              createdAt: now,
+              updatedAt: now,
+            })
+            .onConflictDoUpdate({
+              target: projectMetadata.projectId,
+              set: {
+                projectName: p.name,
+                originUrl: p.repo_origin,
+                updatedAt: now,
+                // ownerId intentionally OMITTED — preserve existing ownership.
+              },
+            }),
+        )
+      }
+
+      // GH#122 B-API-FIX: surface projectId on the broadcast so live
+      // synced-collection deltas reach clients with a non-null projectId
+      // (the cold-start GET /api/projects also LEFT JOINs to populate
+      // it — see api/index.ts:2068+). Visibility defaults to 'public'
+      // for new rows to match the upsert above; existing rows preserve
+      // whatever's in D1 (gateway sync never changes visibility — admins
+      // do via PATCH /api/projects/:name/visibility). ownerId is left
+      // out of the broadcast — sync doesn't change ownership; clients
+      // pick it up from the cold-start GET when needed.
       ops.push({
         type: existingLive.has(p.name) ? 'update' : 'insert',
-        value: p,
+        value: { ...p, projectId, visibility: 'public' as const },
       })
+    }
+
+    if (writeStmts.length > 0) {
+      const [first, ...rest] = writeStmts as [DualWriteStmt, ...DualWriteStmt[]]
+      await db.batch([first, ...rest])
     }
 
     // Soft-delete rows present in D1 but absent from the payload.
@@ -1135,151 +1208,166 @@ export function createApiApp() {
   // other shape returns 400 to keep the surface area tight.
   const PROJECT_ID_RE = /^[0-9a-f]{16}$/
 
-  function projectMetadataAuth(
-    c: import('hono').Context<ApiAppEnv>,
-  ): Promise<{ ok: true } | { ok: false; res: Response }> {
+  // GH#122 B-AUTH-1: Hono middleware. Sets `c.set('bearerAuth', ...)`
+  // so downstream `requireProjectMember` can short-circuit on the
+  // bearer path. On the cookie path, populates `userId` + `role` on
+  // the context (these routes are mounted BEFORE the global
+  // `authMiddleware`, so we can't rely on it to seed those vars).
+  const projectMetadataAuth = createMiddleware<ApiAppEnv>(async (c, next) => {
     const authHeader = c.req.header('authorization') ?? ''
     if (authHeader.startsWith('Bearer ')) {
       const expected = c.env.DOCS_RUNNER_SECRET
       const provided = authHeader.slice(7)
       if (expected && constantTimeEquals(provided, expected)) {
-        return Promise.resolve({ ok: true } as const)
+        c.set('bearerAuth', true)
+        await next()
+        return
       }
-      return Promise.resolve({
-        ok: false as const,
-        res: c.json({ error: 'Unauthorized' }, 401),
-      })
+      return c.json({ error: 'Unauthorized' }, 401)
     }
-    // Fall back to session cookie auth.
-    return getRequestSession(c.env, c.req.raw).then((session) => {
-      if (!session) {
-        return { ok: false as const, res: c.json({ error: 'Unauthorized' }, 401) }
+    // Fall back to session cookie auth. Better Auth's `getRequestSession`
+    // can throw on malformed-cookie inputs (mirrors `authMiddleware`'s
+    // try/catch); treat throws the same as a missing session.
+    let session: Awaited<ReturnType<typeof getRequestSession>> | null = null
+    try {
+      session = await getRequestSession(c.env, c.req.raw)
+    } catch {
+      session = null
+    }
+    if (!session) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+    c.set('userId', session.userId)
+    c.set('role', session.role)
+    c.set('bearerAuth', false)
+    await next()
+  })
+
+  app.patch(
+    '/api/projects/:projectId',
+    projectMetadataAuth,
+    requireProjectMember('owner'),
+    async (c) => {
+      const projectId = c.req.param('projectId')
+      if (!PROJECT_ID_RE.test(projectId)) {
+        return c.json({ error: 'Invalid projectId' }, 400)
       }
-      return { ok: true as const }
-    })
-  }
 
-  app.patch('/api/projects/:projectId', async (c) => {
-    const projectId = c.req.param('projectId')
-    if (!PROJECT_ID_RE.test(projectId)) {
-      return c.json({ error: 'Invalid projectId' }, 400)
-    }
-
-    const auth = await projectMetadataAuth(c)
-    if (!auth.ok) return auth.res
-
-    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null
-    if (!body || typeof body !== 'object' || Array.isArray(body)) {
-      return c.json({ error: 'Invalid body' }, 400)
-    }
-
-    // Validate field types. We accept missing keys (partial patch) and
-    // accept `null` for nullable columns (originUrl, docsWorktreePath)
-    // as an explicit "clear this column" signal. `projectName` is
-    // NOT NULL in schema → reject explicit null.
-    const patch: Partial<typeof projectMetadata.$inferInsert> = {}
-
-    if ('projectName' in body) {
-      const v = body.projectName
-      if (typeof v !== 'string' || v.length === 0) {
-        return c.json({ error: 'projectName must be a non-empty string' }, 400)
+      const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        return c.json({ error: 'Invalid body' }, 400)
       }
-      patch.projectName = v
-    }
-    if ('originUrl' in body) {
-      const v = body.originUrl
-      if (v !== null && typeof v !== 'string') {
-        return c.json({ error: 'originUrl must be a string or null' }, 400)
-      }
-      patch.originUrl = v
-    }
-    if ('docsWorktreePath' in body) {
-      const v = body.docsWorktreePath
-      if (v !== null && typeof v !== 'string') {
-        return c.json({ error: 'docsWorktreePath must be a string or null' }, 400)
-      }
-      patch.docsWorktreePath = v
-    }
-    if ('tombstoneGraceDays' in body) {
-      const v = body.tombstoneGraceDays
-      if (typeof v !== 'number' || !Number.isInteger(v) || v < 1) {
-        return c.json({ error: 'tombstoneGraceDays must be a positive integer' }, 400)
-      }
-      patch.tombstoneGraceDays = v
-    }
 
-    const knownKeys = new Set([
-      'projectName',
-      'originUrl',
-      'docsWorktreePath',
-      'tombstoneGraceDays',
-    ])
-    for (const key of Object.keys(body)) {
-      if (!knownKeys.has(key)) {
-        return c.json({ error: `Unknown field: ${key}` }, 400)
+      // Validate field types. We accept missing keys (partial patch) and
+      // accept `null` for nullable columns (originUrl, docsWorktreePath)
+      // as an explicit "clear this column" signal. `projectName` is
+      // NOT NULL in schema → reject explicit null.
+      const patch: Partial<typeof projectMetadata.$inferInsert> = {}
+
+      if ('projectName' in body) {
+        const v = body.projectName
+        if (typeof v !== 'string' || v.length === 0) {
+          return c.json({ error: 'projectName must be a non-empty string' }, 400)
+        }
+        patch.projectName = v
       }
-    }
+      if ('originUrl' in body) {
+        const v = body.originUrl
+        if (v !== null && typeof v !== 'string') {
+          return c.json({ error: 'originUrl must be a string or null' }, 400)
+        }
+        patch.originUrl = v
+      }
+      if ('docsWorktreePath' in body) {
+        const v = body.docsWorktreePath
+        if (v !== null && typeof v !== 'string') {
+          return c.json({ error: 'docsWorktreePath must be a string or null' }, 400)
+        }
+        patch.docsWorktreePath = v
+      }
+      if ('tombstoneGraceDays' in body) {
+        const v = body.tombstoneGraceDays
+        if (typeof v !== 'number' || !Number.isInteger(v) || v < 1) {
+          return c.json({ error: 'tombstoneGraceDays must be a positive integer' }, 400)
+        }
+        patch.tombstoneGraceDays = v
+      }
 
-    const db = getDb(c.env)
-    const now = new Date().toISOString()
+      const knownKeys = new Set([
+        'projectName',
+        'originUrl',
+        'docsWorktreePath',
+        'tombstoneGraceDays',
+      ])
+      for (const key of Object.keys(body)) {
+        if (!knownKeys.has(key)) {
+          return c.json({ error: `Unknown field: ${key}` }, 400)
+        }
+      }
 
-    const existing = await db
-      .select()
-      .from(projectMetadata)
-      .where(eq(projectMetadata.projectId, projectId))
-      .limit(1)
+      const db = getDb(c.env)
+      const now = new Date().toISOString()
 
-    if (existing.length === 0) {
-      // Insert path. `projectName` is NOT NULL — must be supplied on
-      // first-touch unless we synthesise. Keep it strict: require
-      // projectName on create. If not supplied, fall back to projectId
-      // (so the gateway can call PATCH with `{}` and still create the
-      // row — projectName is later overwritten on the next discovery).
-      const inserted = await db
-        .insert(projectMetadata)
-        .values({
-          projectId,
-          projectName: patch.projectName ?? projectId,
-          originUrl: patch.originUrl ?? null,
-          docsWorktreePath: patch.docsWorktreePath ?? null,
-          tombstoneGraceDays: patch.tombstoneGraceDays ?? 7,
-          createdAt: now,
-          updatedAt: now,
-        })
+      const existing = await db
+        .select()
+        .from(projectMetadata)
+        .where(eq(projectMetadata.projectId, projectId))
+        .limit(1)
+
+      if (existing.length === 0) {
+        // Insert path. `projectName` is NOT NULL — must be supplied on
+        // first-touch unless we synthesise. Keep it strict: require
+        // projectName on create. If not supplied, fall back to projectId
+        // (so the gateway can call PATCH with `{}` and still create the
+        // row — projectName is later overwritten on the next discovery).
+        const inserted = await db
+          .insert(projectMetadata)
+          .values({
+            projectId,
+            projectName: patch.projectName ?? projectId,
+            originUrl: patch.originUrl ?? null,
+            docsWorktreePath: patch.docsWorktreePath ?? null,
+            tombstoneGraceDays: patch.tombstoneGraceDays ?? 7,
+            createdAt: now,
+            updatedAt: now,
+          })
+          .returning()
+        return c.json(inserted[0])
+      }
+
+      // Update path — merge supplied fields, advance updatedAt, leave
+      // createdAt untouched.
+      const updated = await db
+        .update(projectMetadata)
+        .set({ ...patch, updatedAt: now })
+        .where(eq(projectMetadata.projectId, projectId))
         .returning()
-      return c.json(inserted[0])
-    }
+      return c.json(updated[0])
+    },
+  )
 
-    // Update path — merge supplied fields, advance updatedAt, leave
-    // createdAt untouched.
-    const updated = await db
-      .update(projectMetadata)
-      .set({ ...patch, updatedAt: now })
-      .where(eq(projectMetadata.projectId, projectId))
-      .returning()
-    return c.json(updated[0])
-  })
+  app.get(
+    '/api/projects/:projectId',
+    projectMetadataAuth,
+    requireProjectMember('viewer'),
+    async (c) => {
+      const projectId = c.req.param('projectId')
+      if (!PROJECT_ID_RE.test(projectId)) {
+        return c.json({ error: 'Invalid projectId' }, 400)
+      }
 
-  app.get('/api/projects/:projectId', async (c) => {
-    const projectId = c.req.param('projectId')
-    if (!PROJECT_ID_RE.test(projectId)) {
-      return c.json({ error: 'Invalid projectId' }, 400)
-    }
-
-    const auth = await projectMetadataAuth(c)
-    if (!auth.ok) return auth.res
-
-    const db = getDb(c.env)
-    const rows = await db
-      .select()
-      .from(projectMetadata)
-      .where(eq(projectMetadata.projectId, projectId))
-      .limit(1)
-    if (rows.length === 0) {
-      return c.json({ error: 'Project not found' }, 404)
-    }
-    return c.json(rows[0])
-  })
+      const db = getDb(c.env)
+      const rows = await db
+        .select()
+        .from(projectMetadata)
+        .where(eq(projectMetadata.projectId, projectId))
+        .limit(1)
+      if (rows.length === 0) {
+        return c.json({ error: 'Project not found' }, 404)
+      }
+      return c.json(rows[0])
+    },
+  )
 
   app.use('/api/*', authMiddleware)
 
@@ -2103,9 +2191,27 @@ export function createApiApp() {
     const db = getDb(c.env)
     const hiddenSet = await getHiddenProjects(c.env, userId)
 
+    // GH#122 B-API-FIX: LEFT JOIN projectMetadata so each row carries
+    //   projectId / ownerId / visibility — the synced-collection consumer
+    //   (and the VP harness) reads these from the cold-start payload.
+    //   `projects.projectId` is the link key; rows whose projectId is
+    //   still null (pre-backfill, or no remote origin) get a null
+    //   ownerId from the LEFT JOIN — both fields stay nullable on the
+    //   wire-shape, matching the optional-field convention in
+    //   `packages/shared-types/src/index.ts:678` (ProjectInfo).
     const liveRows = await db
-      .select()
+      .select({
+        name: projectsTable.name,
+        rootPath: projectsTable.rootPath,
+        visibility: projectsTable.visibility,
+        projectId: projectsTable.projectId,
+        ownerId: projectMetadata.ownerId,
+        // GH#84: tab-strip overrides surfaced at cold-start.
+        abbrev: projectsTable.abbrev,
+        colorSlot: projectsTable.colorSlot,
+      })
       .from(projectsTable)
+      .leftJoin(projectMetadata, eq(projectsTable.projectId, projectMetadata.projectId))
       .where(isNull(projectsTable.deletedAt))
       .orderBy(asc(projectsTable.name))
 
@@ -2137,6 +2243,9 @@ export function createApiApp() {
           ahead: 0,
           behind: 0,
           pr: null,
+          visibility: (row.visibility === 'private' ? 'private' : 'public') as 'public' | 'private',
+          ownerId: row.ownerId ?? null,
+          projectId: row.projectId ?? null,
           // GH#84: surface admin-set tab overrides at cold-start so the
           // tab strip renders the chosen abbrev/color before the gateway
           // delta arrives. Both fields are NULL by default and fall back
@@ -2360,6 +2469,228 @@ export function createApiApp() {
     return c.json({ ok: true, visibility: body.visibility })
   })
 
+  // GH#122 B-LIFECYCLE-1: admin-only project ownership claim. Atomic
+  // UPDATE with WHERE ownerId IS NULL guards the double-claim race;
+  // INSERT into project_members records the membership row. Broadcast
+  // the updated ProjectInfo to every userPresence-active user (mirrors
+  // the visibility-PATCH fanout pattern at api/index.ts:2294).
+  //
+  // Auth: this route is mounted AFTER the global `app.use('/api/*',
+  // authMiddleware)` (line 1352), so `c.get('role')` and
+  // `c.get('userId')` are populated from the cookie session. We do NOT
+  // chain `projectMetadataAuth` + `requireProjectMember` here because
+  // claim is fundamentally an admin-on-null-owner action, not a
+  // per-member-role gate (see B-LIFECYCLE-1 expected-shape note).
+  app.post('/api/projects/:projectId/claim', async (c) => {
+    if (c.get('role') !== 'admin') {
+      return c.json({ error: 'forbidden', reason: 'admin-required' }, 403)
+    }
+    const userId = c.get('userId')
+    if (!userId) return c.json({ error: 'unauthorized' }, 401)
+
+    const projectId = c.req.param('projectId')
+    if (!PROJECT_ID_RE.test(projectId)) return c.json({ error: 'bad_request' }, 400)
+
+    const db = getDb(c.env)
+    const now = new Date().toISOString()
+
+    // D1 does not support interactive BEGIN/COMMIT — see api/index.ts:1570-1575.
+    // Pattern: SELECT precheck for row existence + current ownerId, then
+    // `db.batch([UPDATE … WHERE ownerId IS NULL .returning(), INSERT
+    // project_members])`. The UPDATE's WHERE-IS-NULL guard handles the
+    // TOCTOU race: if a concurrent claim wins, the UPDATE matches 0
+    // rows but the INSERT then trips the partial unique index
+    // (project_members_one_owner — see migrations/0032) and the batch
+    // rolls back atomically. We re-check via the UPDATE's `.returning()`
+    // result count; 0 rows means a concurrent claim landed first.
+    const existing = await db
+      .select({ ownerId: projectMetadata.ownerId })
+      .from(projectMetadata)
+      .where(eq(projectMetadata.projectId, projectId))
+      .limit(1)
+    if (existing.length === 0) {
+      return c.json({ error: 'not_found', reason: 'unknown-project' }, 404)
+    }
+    if (existing[0].ownerId !== null) {
+      return c.json({ error: 'already_owned' }, 409)
+    }
+
+    const updateStmt = db
+      .update(projectMetadata)
+      .set({ ownerId: userId, updatedAt: now })
+      .where(and(eq(projectMetadata.projectId, projectId), isNull(projectMetadata.ownerId)))
+      .returning({ ownerId: projectMetadata.ownerId, updatedAt: projectMetadata.updatedAt })
+    const insertStmt = db.insert(projectMembers).values({
+      projectId,
+      userId,
+      role: 'owner',
+      addedAt: now,
+      addedBy: userId,
+    })
+
+    let updatedAt: string
+    try {
+      const [updated] = await db.batch([updateStmt, insertStmt])
+      if (updated.length === 0) {
+        // Concurrent claim won the race between our SELECT and the UPDATE.
+        // The INSERT into project_members would have tripped the partial
+        // unique index, but the WHERE-IS-NULL guard caught it first; either
+        // way the outcome is the same: report 409.
+        return c.json({ error: 'already_owned' }, 409)
+      }
+      updatedAt = updated[0].updatedAt
+    } catch (_err) {
+      // Concurrent claim won the race AND its membership row already
+      // existed — the INSERT trips the partial unique index and the
+      // batch rolls back. Report 409 (already-owned) to the caller.
+      return c.json({ error: 'already_owned' }, 409)
+    }
+
+    // Fanout (mirrors visibility-PATCH at :2294).
+    c.executionCtx.waitUntil(
+      (async () => {
+        try {
+          const projectInfo = await projectInfoFromMeta(db, projectId)
+          const userRows = await db.select({ userId: userPresence.userId }).from(userPresence)
+          const userIds = userRows.map((r) => r.userId)
+          await Promise.allSettled(
+            userIds.map((uid) =>
+              broadcastSyncedDelta(c.env, uid, 'projects', [
+                { type: 'update', value: projectInfo },
+              ]),
+            ),
+          )
+        } catch (err) {
+          console.warn('[claim] fanout error', (err as Error).message ?? err)
+        }
+      })(),
+    )
+
+    return c.json({ ok: true, ownerId: userId, claimedAt: updatedAt })
+  })
+
+  // GH#122 B-LIFECYCLE-2: owner-or-admin project ownership transfer.
+  // `requireProjectMember('owner')` provides the admin-override path
+  // (B-AUTH-2) and the bearer-bypass path (B-AUTH-6) for free. We
+  // re-check `userId` from the context after the gate because the
+  // transfer body needs a caller userId for the `addedBy` audit
+  // column — bearer-only callers (no cookie) would have userId=null
+  // and hit 401 here, which is correct: transfer is a user-action, not
+  // a runner-internal op.
+  app.post(
+    '/api/projects/:projectId/transfer',
+    projectMetadataAuth,
+    requireProjectMember('owner'),
+    async (c) => {
+      const callerUserId = c.get('userId')
+      if (!callerUserId) return c.json({ error: 'unauthorized' }, 401)
+
+      const projectId = c.req.param('projectId')
+      if (!PROJECT_ID_RE.test(projectId)) {
+        return c.json({ error: 'bad_request', reason: 'invalid-projectid' }, 400)
+      }
+
+      const body = (await c.req.json().catch(() => null)) as { newOwnerUserId?: string } | null
+      if (!body || typeof body.newOwnerUserId !== 'string' || body.newOwnerUserId.length === 0) {
+        return c.json({ error: 'bad_request' }, 400)
+      }
+      const newOwnerUserId = body.newOwnerUserId
+
+      const db = getDb(c.env)
+      const now = new Date().toISOString()
+
+      // D1 does not support interactive BEGIN/COMMIT — see api/index.ts:1570-1575.
+      // Pattern: SELECT prechecks for newOwnerUserId existence and the
+      // current owner (no-op detection), then `db.batch([UPDATE
+      // projectMetadata.ownerId, DELETE old owner row, INSERT new owner
+      // row])` for atomic membership migration.
+
+      // 1. Validate newOwnerUserId exists.
+      const userRows = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.id, newOwnerUserId))
+        .limit(1)
+      if (userRows.length === 0) {
+        return c.json({ error: 'bad_request', reason: 'unknown-user' }, 400)
+      }
+
+      // 2. Read current owner; reject no-op.
+      const current = await db
+        .select({ ownerId: projectMetadata.ownerId })
+        .from(projectMetadata)
+        .where(eq(projectMetadata.projectId, projectId))
+        .limit(1)
+      if (current.length === 0) {
+        return c.json({ error: 'bad_request', reason: 'unknown-project' }, 400)
+      }
+      if (current[0].ownerId === newOwnerUserId) {
+        return c.json({ error: 'no_op', reason: 'already-owner' }, 409)
+      }
+
+      // 3. Atomic batch: UPDATE projectMetadata + DELETE old owner +
+      //    INSERT new owner. PK-column mutation on project_members — see
+      //    B-LIFECYCLE-2 rationale (composite PK on (project_id, user_id)
+      //    means UPDATE of user_id is awkward across SQLite drivers;
+      //    DELETE+INSERT is unambiguous).
+      const updateMetaStmt = db
+        .update(projectMetadata)
+        .set({ ownerId: newOwnerUserId, updatedAt: now })
+        .where(eq(projectMetadata.projectId, projectId))
+      const deleteOldOwnerStmt = db
+        .delete(projectMembers)
+        .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.role, 'owner')))
+      const insertNewOwnerStmt = db.insert(projectMembers).values({
+        projectId,
+        userId: newOwnerUserId,
+        role: 'owner',
+        addedAt: now,
+        addedBy: callerUserId,
+      })
+      await db.batch([updateMetaStmt, deleteOldOwnerStmt, insertNewOwnerStmt])
+
+      // Fanout (same pattern as claim).
+      c.executionCtx.waitUntil(
+        (async () => {
+          try {
+            const projectInfo = await projectInfoFromMeta(db, projectId)
+            const presenceRows = await db.select({ userId: userPresence.userId }).from(userPresence)
+            const userIds = presenceRows.map((r) => r.userId)
+            await Promise.allSettled(
+              userIds.map((uid) =>
+                broadcastSyncedDelta(c.env, uid, 'projects', [
+                  { type: 'update', value: projectInfo },
+                ]),
+              ),
+            )
+          } catch (err) {
+            console.warn('[transfer] fanout error', (err as Error).message ?? err)
+          }
+        })(),
+      )
+
+      return c.json({ ok: true, ownerId: newOwnerUserId, transferredAt: now })
+    },
+  )
+
+  // GH#122 B-API-1: lightweight user list for the transfer-ownership
+  // picker. Non-admin owners can't call admin.listUsers, so this is the
+  // minimal-disclosure surface for the picker dialog. Cap at 200 sorted
+  // by displayName ASC; a follow-up issue can add search if a deploy
+  // ever exceeds that. The exposed fields (displayName, email) are
+  // already broadcast across userPresence-driven channels, so this
+  // endpoint introduces no new disclosure.
+  app.get('/api/users/picker', async (c) => {
+    if (!c.get('userId')) return c.json({ error: 'unauthorized' }, 401)
+    const db = getDb(c.env)
+    const rows = await db
+      .select({ id: users.id, displayName: users.name, email: users.email })
+      .from(users)
+      .orderBy(asc(users.name))
+      .limit(200)
+    return c.json(rows)
+  })
+
   // GH#84: per-project tab abbrev + color override. Admin-only, mirrors
   // the visibility PATCH pattern (D1 write + synced-collection broadcast
   // to every active-presence user). Both fields are independently
@@ -2427,8 +2758,25 @@ export function createApiApp() {
 
     // Re-read the full row + broadcast — same shape contract as the
     // visibility PATCH so the client sees one canonical ProjectInfo per
-    // delta, not partial patches.
-    const [row] = await db.select().from(projectsTable).where(eq(projectsTable.name, name)).limit(1)
+    // delta, not partial patches. LEFT JOIN projectMetadata to preserve
+    // GH#122 ownerId/projectId fields that the client collection would
+    // otherwise drop on this update (synced-collection 'update' replaces
+    // the whole row, not a merge — see verify-session defect #2).
+    const rows = await db
+      .select({
+        name: projectsTable.name,
+        rootPath: projectsTable.rootPath,
+        visibility: projectsTable.visibility,
+        abbrev: projectsTable.abbrev,
+        colorSlot: projectsTable.colorSlot,
+        projectId: projectsTable.projectId,
+        ownerId: projectMetadata.ownerId,
+      })
+      .from(projectsTable)
+      .leftJoin(projectMetadata, eq(projectsTable.projectId, projectMetadata.projectId))
+      .where(eq(projectsTable.name, name))
+      .limit(1)
+    const row = rows[0]
     if (row) {
       const projectInfo: ProjectInfo = {
         name: row.name,
@@ -2441,6 +2789,8 @@ export function createApiApp() {
         behind: 0,
         pr: null,
         visibility: (row.visibility === 'private' ? 'private' : 'public') as 'public' | 'private',
+        ownerId: row.ownerId ?? null,
+        projectId: row.projectId ?? null,
         abbrev: row.abbrev ?? null,
         color_slot: row.colorSlot ?? null,
       }
@@ -2483,70 +2833,69 @@ export function createApiApp() {
   //                renders a retry chip on this code, NOT an empty state.
   //   - 404      → no projectMetadata row OR docsWorktreePath is null
   //                (project not configured for docs).
-  app.get('/api/projects/:projectId/docs-files', async (c) => {
-    const projectId = c.req.param('projectId')
-    if (!PROJECT_ID_RE.test(projectId)) {
-      return c.json({ error: 'Invalid projectId' }, 400)
-    }
+  app.get(
+    '/api/projects/:projectId/docs-files',
+    projectMetadataAuth,
+    requireProjectMember('viewer'),
+    async (c) => {
+      const projectId = c.req.param('projectId')
+      if (!PROJECT_ID_RE.test(projectId)) {
+        return c.json({ error: 'Invalid projectId' }, 400)
+      }
 
-    // TODO(GH#27): once per-project visibility/ownership lands for
-    // projectMetadata, gate this on the caller being a member of the
-    // project. For v1 any authenticated user can read the file list —
-    // the gateway validates `docsWorktreePath` server-side, so this
-    // is not a path-traversal boundary.
+      const db = getDb(c.env)
+      const rows = await db
+        .select()
+        .from(projectMetadata)
+        .where(eq(projectMetadata.projectId, projectId))
+        .limit(1)
+      if (rows.length === 0 || !rows[0].docsWorktreePath) {
+        return c.json(
+          {
+            error: 'project_not_configured',
+            message: 'No docs worktree configured for this project',
+          },
+          404,
+        )
+      }
+      const docsWorktreePath = rows[0].docsWorktreePath
 
-    const db = getDb(c.env)
-    const rows = await db
-      .select()
-      .from(projectMetadata)
-      .where(eq(projectMetadata.projectId, projectId))
-      .limit(1)
-    if (rows.length === 0 || !rows[0].docsWorktreePath) {
-      return c.json(
-        {
-          error: 'project_not_configured',
-          message: 'No docs worktree configured for this project',
-        },
-        404,
-      )
-    }
-    const docsWorktreePath = rows[0].docsWorktreePath
+      if (!c.env.CC_GATEWAY_URL) {
+        return c.json({ error: 'CC_GATEWAY_URL not configured' }, 500)
+      }
+      const httpBase = c.env.CC_GATEWAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+      const url = new URL(`/docs-runners/${projectId}/files`, httpBase)
+      url.searchParams.set('docsWorktreePath', docsWorktreePath)
 
-    if (!c.env.CC_GATEWAY_URL) {
-      return c.json({ error: 'CC_GATEWAY_URL not configured' }, 500)
-    }
-    const httpBase = c.env.CC_GATEWAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
-    const url = new URL(`/docs-runners/${projectId}/files`, httpBase)
-    url.searchParams.set('docsWorktreePath', docsWorktreePath)
+      const headers: Record<string, string> = {}
+      if (c.env.CC_GATEWAY_SECRET) {
+        headers.Authorization = `Bearer ${c.env.CC_GATEWAY_SECRET}`
+      }
 
-    const headers: Record<string, string> = {}
-    if (c.env.CC_GATEWAY_SECRET) {
-      headers.Authorization = `Bearer ${c.env.CC_GATEWAY_SECRET}`
-    }
+      let resp: Response
+      try {
+        resp = await fetch(url.toString(), {
+          headers,
+          signal: AbortSignal.timeout(5000),
+        })
+      } catch {
+        return c.json({ error: 'gateway_unavailable' }, 503)
+      }
 
-    let resp: Response
-    try {
-      resp = await fetch(url.toString(), {
-        headers,
-        signal: AbortSignal.timeout(5000),
+      if (resp.status >= 500) {
+        return c.json({ error: 'gateway_error', upstreamStatus: resp.status }, 502)
+      }
+
+      // 2xx and 4xx: forward body + status verbatim. Body is JSON for
+      // the contract we care about; on the off-chance the gateway emits
+      // a non-JSON response we still forward the bytes.
+      const text = await resp.text()
+      return new Response(text, {
+        status: resp.status,
+        headers: { 'Content-Type': resp.headers.get('Content-Type') ?? 'application/json' },
       })
-    } catch {
-      return c.json({ error: 'gateway_unavailable' }, 503)
-    }
-
-    if (resp.status >= 500) {
-      return c.json({ error: 'gateway_error', upstreamStatus: resp.status }, 502)
-    }
-
-    // 2xx and 4xx: forward body + status verbatim. Body is JSON for
-    // the contract we care about; on the off-chance the gateway emits
-    // a non-JSON response we still forward the bytes.
-    const text = await resp.text()
-    return new Response(text, {
-      status: resp.status,
-      headers: { 'Content-Type': resp.headers.get('Content-Type') ?? 'application/json' },
-    })
-  })
+    },
+  )
 
   // GH#27 P1.7 WU-B: GET /api/docs-runners/:projectId/health
   //
@@ -2563,72 +2912,77 @@ export function createApiApp() {
   //   - upstream 5xx (other)  → 502 `gateway_error` with upstreamStatus
   //   - fetch throw / timeout → 503 `gateway_unavailable`
   //   - 404 if no projectMetadata row.
-  app.get('/api/docs-runners/:projectId/health', async (c) => {
-    const projectId = c.req.param('projectId')
-    if (!PROJECT_ID_RE.test(projectId)) {
-      return c.json({ error: 'Invalid projectId' }, 400)
-    }
+  app.get(
+    '/api/docs-runners/:projectId/health',
+    projectMetadataAuth,
+    requireProjectMember('viewer'),
+    async (c) => {
+      const projectId = c.req.param('projectId')
+      if (!PROJECT_ID_RE.test(projectId)) {
+        return c.json({ error: 'Invalid projectId' }, 400)
+      }
 
-    const db = getDb(c.env)
-    const rows = await db
-      .select()
-      .from(projectMetadata)
-      .where(eq(projectMetadata.projectId, projectId))
-      .limit(1)
-    if (rows.length === 0) {
-      return c.json(
-        {
-          error: 'project_not_configured',
-          message: 'No metadata for this project',
-        },
-        404,
-      )
-    }
+      const db = getDb(c.env)
+      const rows = await db
+        .select()
+        .from(projectMetadata)
+        .where(eq(projectMetadata.projectId, projectId))
+        .limit(1)
+      if (rows.length === 0) {
+        return c.json(
+          {
+            error: 'project_not_configured',
+            message: 'No metadata for this project',
+          },
+          404,
+        )
+      }
 
-    if (!c.env.CC_GATEWAY_URL) {
-      return c.json({ error: 'CC_GATEWAY_URL not configured' }, 500)
-    }
-    const httpBase = c.env.CC_GATEWAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
-    const url = new URL(`/docs-runners/${projectId}/health`, httpBase)
+      if (!c.env.CC_GATEWAY_URL) {
+        return c.json({ error: 'CC_GATEWAY_URL not configured' }, 500)
+      }
+      const httpBase = c.env.CC_GATEWAY_URL.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+      const url = new URL(`/docs-runners/${projectId}/health`, httpBase)
 
-    const headers: Record<string, string> = {}
-    if (c.env.CC_GATEWAY_SECRET) {
-      headers.Authorization = `Bearer ${c.env.CC_GATEWAY_SECRET}`
-    }
+      const headers: Record<string, string> = {}
+      if (c.env.CC_GATEWAY_SECRET) {
+        headers.Authorization = `Bearer ${c.env.CC_GATEWAY_SECRET}`
+      }
 
-    let resp: Response
-    try {
-      resp = await fetch(url.toString(), {
-        headers,
-        signal: AbortSignal.timeout(5000),
-      })
-    } catch {
-      return c.json({ error: 'gateway_unavailable' }, 503)
-    }
+      let resp: Response
+      try {
+        resp = await fetch(url.toString(), {
+          headers,
+          signal: AbortSignal.timeout(5000),
+        })
+      } catch {
+        return c.json({ error: 'gateway_unavailable' }, 503)
+      }
 
-    // 502 from the gateway is the docs-runner-unreachable signal —
-    // pass through as-is so the UI can distinguish "runner down" from
-    // "gateway down".
-    if (resp.status === 502) {
+      // 502 from the gateway is the docs-runner-unreachable signal —
+      // pass through as-is so the UI can distinguish "runner down" from
+      // "gateway down".
+      if (resp.status === 502) {
+        const text = await resp.text()
+        return new Response(text, {
+          status: 502,
+          headers: { 'Content-Type': resp.headers.get('Content-Type') ?? 'application/json' },
+        })
+      }
+
+      if (resp.status >= 500) {
+        return c.json({ error: 'gateway_error', upstreamStatus: resp.status }, 502)
+      }
+
       const text = await resp.text()
-      return new Response(text, {
-        status: 502,
-        headers: { 'Content-Type': resp.headers.get('Content-Type') ?? 'application/json' },
-      })
-    }
-
-    if (resp.status >= 500) {
-      return c.json({ error: 'gateway_error', upstreamStatus: resp.status }, 502)
-    }
-
-    const text = await resp.text()
-    const outHeaders: Record<string, string> = {
-      'Content-Type': resp.headers.get('Content-Type') ?? 'application/json',
-    }
-    const ver = resp.headers.get('x-docs-runner-version')
-    if (ver) outHeaders['X-Docs-Runner-Version'] = ver
-    return new Response(text, { status: resp.status, headers: outHeaders })
-  })
+      const outHeaders: Record<string, string> = {
+        'Content-Type': resp.headers.get('Content-Type') ?? 'application/json',
+      }
+      const ver = resp.headers.get('x-docs-runner-version')
+      if (ver) outHeaders['X-Docs-Runner-Version'] = ver
+      return new Response(text, { status: resp.status, headers: outHeaders })
+    },
+  )
 
   // ── Feature Flags (GH#86) ─────────────────────────────────────────
 
@@ -3293,28 +3647,37 @@ export function createApiApp() {
       const userId = c.get('userId')
       const hiddenSet = await getHiddenProjects(c.env, userId)
       const db = getDb(c.env)
-      // GH#84: pull abbrev/colorSlot alongside visibility so the tab strip
-      // can read all admin-set overrides off projectsCollection without
-      // waiting for a separate D1 round-trip.
+      // GH#122 B-API-FIX: LEFT JOIN projectMetadata so we can enrich the
+      // gateway's live-git rows with projectId / ownerId / visibility
+      // from D1. Match by name (the gateway and the projects table both
+      // key on the project's directory name).
+      // GH#84: also pull abbrev/colorSlot so the tab strip can read all
+      // admin-set overrides off projectsCollection without a separate D1
+      // round-trip.
       const d1Rows = await db
         .select({
           name: projectsTable.name,
           visibility: projectsTable.visibility,
+          projectId: projectsTable.projectId,
+          ownerId: projectMetadata.ownerId,
           abbrev: projectsTable.abbrev,
           colorSlot: projectsTable.colorSlot,
         })
         .from(projectsTable)
+        .leftJoin(projectMetadata, eq(projectsTable.projectId, projectMetadata.projectId))
       const d1Map = new Map(d1Rows.map((r) => [r.name, r]))
       const filtered =
         hiddenSet.size > 0 ? projects.filter((p) => !hiddenSet.has(p.name)) : projects
       return c.json(
         filtered.map((p) => {
-          const meta = d1Map.get(p.name)
+          const d1 = d1Map.get(p.name)
           return {
             ...p,
-            visibility: meta?.visibility ?? 'private',
-            abbrev: meta?.abbrev ?? null,
-            color_slot: meta?.colorSlot ?? null,
+            visibility: d1?.visibility ?? 'private',
+            projectId: d1?.projectId ?? null,
+            ownerId: d1?.ownerId ?? null,
+            abbrev: d1?.abbrev ?? null,
+            color_slot: d1?.colorSlot ?? null,
           }
         }),
       )
@@ -3330,25 +3693,30 @@ export function createApiApp() {
       const userId = c.get('userId')
       const hiddenSet = await getHiddenProjects(c.env, userId)
       const db = getDb(c.env)
-      // GH#84: same abbrev/colorSlot enrichment as `/api/gateway/projects`.
+      // GH#122 B-API-FIX + GH#84: same enrichment as /api/gateway/projects.
       const d1Rows = await db
         .select({
           name: projectsTable.name,
           visibility: projectsTable.visibility,
+          projectId: projectsTable.projectId,
+          ownerId: projectMetadata.ownerId,
           abbrev: projectsTable.abbrev,
           colorSlot: projectsTable.colorSlot,
         })
         .from(projectsTable)
+        .leftJoin(projectMetadata, eq(projectsTable.projectId, projectMetadata.projectId))
       const d1Map = new Map(d1Rows.map((r) => [r.name, r]))
       return c.json(
         projects.map((p) => {
-          const meta = d1Map.get(p.name)
+          const d1 = d1Map.get(p.name)
           return {
             ...p,
             hidden: hiddenSet.has(p.name),
-            visibility: meta?.visibility ?? 'private',
-            abbrev: meta?.abbrev ?? null,
-            color_slot: meta?.colorSlot ?? null,
+            visibility: d1?.visibility ?? 'private',
+            projectId: d1?.projectId ?? null,
+            ownerId: d1?.ownerId ?? null,
+            abbrev: d1?.abbrev ?? null,
+            color_slot: d1?.colorSlot ?? null,
           }
         }),
       )

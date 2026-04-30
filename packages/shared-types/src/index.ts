@@ -701,6 +701,10 @@ export interface ProjectInfo {
   pr: PrInfo | null
   /** Spec #68 — public projects (and their sessions) are visible to all authed users. */
   visibility?: 'public' | 'private'
+  /** GH#122 — per-project ACL owner from project_metadata.ownerId; NULL until claimed. */
+  ownerId?: string | null
+  /** GH#122 — sha256(originUrl).slice(0,16); NULL when repo_origin is null or pre-backfill. */
+  projectId?: string | null
   /**
    * GH#84: optional admin-set override for the 2-char tab abbreviation.
    * Constrained server-side to `[A-Z0-9]{1,2}`; null/undefined falls back

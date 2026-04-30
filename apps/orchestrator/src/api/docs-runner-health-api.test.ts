@@ -73,10 +73,15 @@ function makeApp(env: any) {
   }
 }
 
+// GH#122 P1.3: this route now goes through `requireProjectMember('viewer')`.
+// Use an admin session so the membership lookup is short-circuited and
+// these tests stay focused on the proxy/error-handling behavior. The
+// gate's own behavior is covered by `middleware/require-project-member.test.ts`.
 const authedSession = {
   userId: 'user-1',
+  role: 'admin',
   session: { id: 's' },
-  user: { id: 'user-1' },
+  user: { id: 'user-1', role: 'admin' },
 }
 
 const metadataRow = {

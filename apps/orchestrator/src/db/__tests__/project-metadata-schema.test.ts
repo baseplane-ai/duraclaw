@@ -23,6 +23,8 @@ describe('projectMetadata schema', () => {
         'tombstoneGraceDays',
         'createdAt',
         'updatedAt',
+        // GH#122 B-SCHEMA-2: single-owner ACL handle (ON DELETE SET NULL).
+        'ownerId',
       ].sort(),
     )
   })

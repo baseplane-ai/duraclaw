@@ -42,7 +42,15 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { sql } from 'drizzle-orm'
-import { index, integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
+import {
+  index,
+  integer,
+  primaryKey,
+  real,
+  sqliteTable,
+  text,
+  uniqueIndex,
+} from 'drizzle-orm/sqlite-core'
 
 export const users = sqliteTable('users', {
   id: text('id').primaryKey(),
@@ -393,6 +401,14 @@ export const projects = sqliteTable('projects', {
   updatedAt: text('updated_at').notNull(),
   deletedAt: text('deleted_at'),
   visibility: text('visibility').notNull().default('public'),
+  /**
+   * GH#122 B-SCHEMA-1: sha256(originUrl).slice(0,16) projectId handle.
+   * Nullable — migration 0032 lands the column empty; the gateway-sync
+   * dual-write (B-SYNC-2) and `pnpm backfill:project-ids` populate it.
+   * SQL column kept camelCase to match the projectMetadata convention
+   * (the rest of this table is snake_case for legacy reasons).
+   */
+  projectId: text('projectId'),
   // GH#84: optional per-project display overrides for the tab strip.
   // Both default-NULL → fall back to the auto-derivation in
   // `lib/project-display.ts` (FNV-1a slot hash + regex abbrev). Admins
@@ -401,7 +417,7 @@ export const projects = sqliteTable('projects', {
   // overrides survive a re-sync (same pattern as `visibility`).
   // `abbrev` is constrained client+server-side to `[A-Z0-9]{1,2}`;
   // `colorSlot` is an integer index into `PROJECT_COLOR_SLOTS`
-  // (10 slots today). See migration 0032.
+  // (10 slots today). See migration 0033 (additive after 0032).
   abbrev: text('abbrev'),
   colorSlot: integer('color_slot'),
 })
@@ -508,7 +524,44 @@ export const projectMetadata = sqliteTable('projectMetadata', {
   tombstoneGraceDays: integer('tombstoneGraceDays').notNull().default(7),
   createdAt: text('createdAt').notNull(),
   updatedAt: text('updatedAt').notNull(),
+  /**
+   * GH#122 B-SCHEMA-2: single-owner ACL handle. ON DELETE SET NULL so
+   * deleting a user reverts their projects to unowned (never cascades
+   * and orphans the docs config).
+   */
+  ownerId: text('ownerId').references(() => users.id, { onDelete: 'set null' }),
 })
+
+/**
+ * GH#122 B-SCHEMA-3: project membership junction table.
+ *
+ * Composite PK (projectId, userId); `role` CHECK enforces the
+ * 'owner' | 'editor' | 'viewer' enum at the SQL layer. v1 only writes
+ * 'owner' rows — editor/viewer slots are reserved for future phases.
+ *
+ * Note: the partial unique index `project_members_one_owner` (one
+ * 'owner' row per project) lives only in migration 0032's hand-written
+ * SQL — Drizzle's table-builder doesn't emit WHERE clauses on indexes,
+ * so we can't declare it here.
+ */
+export const projectMembers = sqliteTable(
+  'project_members',
+  {
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projectMetadata.projectId, { onDelete: 'cascade' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    role: text('role', { enum: ['owner', 'editor', 'viewer'] }).notNull(),
+    addedAt: text('added_at').notNull(),
+    addedBy: text('added_by'),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.projectId, t.userId] }),
+    byUser: index('idx_project_members_user').on(t.userId),
+  }),
+)
 
 export const userPreferences = sqliteTable('user_preferences', {
   userId: text('user_id')
