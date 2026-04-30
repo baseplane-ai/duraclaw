@@ -8,7 +8,7 @@ import type { ProjectInfo } from '@duraclaw/shared-types'
 import { useLiveQuery } from '@tanstack/react-db'
 import { GitBranchIcon } from 'lucide-react'
 import { useMemo, useState } from 'react'
-import { ChainStatusItem } from '~/components/chain-status-item'
+import { ArcStatusItem } from '~/components/arc-status-item'
 import { projectsCollection } from '~/db/projects-collection'
 import { useSessionLocalState, useSessionStatus } from '~/db/session-local-collection'
 import { useSession } from '~/hooks/use-sessions-collection'
@@ -284,11 +284,7 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
       {/* Row 2 (wraps on mobile): ctx + kata */}
       {contextUsage && <ContextBar contextUsage={contextUsage} />}
       {kataState && session?.kataIssue != null ? (
-        <ChainStatusItem
-          kataState={kataState}
-          kataIssue={session.kataIssue}
-          sessionId={sessionId}
-        />
+        <ArcStatusItem kataState={kataState} kataIssue={session.kataIssue} sessionId={sessionId} />
       ) : (
         kataState && <KataStatusItem kataState={kataState} />
       )}

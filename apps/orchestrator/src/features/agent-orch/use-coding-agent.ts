@@ -79,8 +79,30 @@ export interface UseCodingAgentResult {
   sendMessage: (content: string | ContentBlock[]) => Promise<unknown>
   /** Submit a collaborative draft (Y.Text): optimistically clear, RPC send, restore on failure. */
   submitDraft: (yText: Y.Text) => Promise<{ ok: boolean; error?: string; sent?: boolean }>
-  /** Spawn a fresh adapter session with the current transcript prepended; recovers from orphaned runner_session_id. */
-  forkWithHistory: (content: string | ContentBlock[]) => Promise<unknown>
+  /**
+   * Intentional branch: create a child arc seeded with this session's
+   * transcript (optionally truncated at `fromMessageSeq`) plus a fresh
+   * user prompt. Replaces the legacy `forkWithHistory` "intentional
+   * fork" path (GH#116 B7). The DO-side method `branchArc` returns the
+   * new arc id and new session id; UI consumers (per-message "branch
+   * from here", landing in P1.5) navigate to the new session.
+   */
+  branchArc: (args: {
+    fromMessageSeq?: number
+    prompt: string
+    mode?: string | null
+    title?: string
+  }) => Promise<{ ok: boolean; newArcId?: string; newSessionId?: string; error?: string }>
+  /**
+   * Orphan-recovery: clears `runner_session_id`, wraps local history in
+   * `<prior_conversation>`, dials a fresh `execute`. Same DO, same
+   * sessions row id (GH#116 B8). Normally invoked server-side by
+   * `sendMessageImpl`'s orphan preflight; exposed here as an escape
+   * hatch for diagnostic flows that want to force the rebind.
+   */
+  rebindRunner: (args: {
+    nextUserMessage?: string | ContentBlock[]
+  }) => Promise<{ ok: boolean; error?: string }>
   /** Retry the gateway dial — used by DisconnectedBanner for reattach. */
   reattach: () => Promise<unknown>
   /** Force-resume from the on-disk JSONL transcript — escape hatch for stuck sessions. */
@@ -588,12 +610,12 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
             const nextMode = (event as { nextMode?: string }).nextMode ?? 'next rung'
             if (typeof issue === 'number') setStallReason(issue, null)
             toast.success(`Auto-advanced to ${nextMode}`, { duration: 3000 })
-            void queryClient.invalidateQueries({ queryKey: ['chains'] })
+            void queryClient.invalidateQueries({ queryKey: ['arcs'] })
           } else if (event.type === 'chain_stalled') {
             const issue = (event as { issueNumber?: number }).issueNumber
             const reason = (event as { reason?: string }).reason ?? 'Stalled'
             if (typeof issue === 'number') setStallReason(issue, reason)
-            void queryClient.invalidateQueries({ queryKey: ['chains'] })
+            void queryClient.invalidateQueries({ queryKey: ['arcs'] })
           } else if (event.type === 'api_retry') {
             // GH#102 / spec 102-sdk-peelback B12: push the retry frame
             // into the transient banner store.
@@ -1224,47 +1246,60 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     [agentName, messagesCollection, findPendingAskUserGateId, resolveGate],
   )
 
-  const forkWithHistory = useCallback(
-    async (content: string | ContentBlock[]) => {
-      const clientMessageId = newClientMessageId()
-      const optimisticRow: CachedMessage & Record<string, unknown> = {
-        id: clientMessageId,
-        sessionId: agentName,
-        role: 'user',
-        parts: contentToParts(content),
-        createdAt: new Date(),
-      }
-      const tx = createTransaction<CachedMessage & Record<string, unknown>>({
-        mutationFn: async () => {
-          // NB: DO-side forkWithHistory does not currently accept
-          // client_message_id (the DO-authored user row carries its own
-          // `usr-N` id). The optimistic row stays keyed on
-          // `usr-client-<uuid>`; the server echo arrives with a different id
-          // but the snapshot emitted by forkWithHistory reconciles via
-          // the messagesCollection synced-delta path and still converges.
-          // Documented as a deviation in GH#14 P3.
-          const result = (await connection.call('forkWithHistory', [content])) as {
-            ok: boolean
-            error?: string
-          }
-          if (!result.ok) {
-            throw new Error(result.error ?? 'forkWithHistory failed')
-          }
-          return result
-        },
-      })
-      tx.mutate(() => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(messagesCollection as any).insert(optimisticRow)
-      })
+  /**
+   * Intentional-branch primitive (GH#116 B7). Calls the DO's `branchArc`
+   * RPC; returns the new arc id + session id. No optimistic message
+   * insert here — the new conversation lives in a different session, so
+   * the parent's `messagesCollection` doesn't need to mutate. The UI
+   * consumer (per-message "branch from here", landing in P1.5)
+   * navigates to the new session id, where the wrapped `<prior_conversation>`
+   * prompt arrives via the normal session bootstrap path.
+   */
+  const branchArc = useCallback(
+    async (args: {
+      fromMessageSeq?: number
+      prompt: string
+      mode?: string | null
+      title?: string
+    }) => {
       try {
-        await tx.isPersisted.promise
-        return { ok: true }
+        const result = (await connection.call('branchArc', [args])) as {
+          ok: boolean
+          newArcId?: string
+          newSessionId?: string
+          error?: string
+        }
+        return result
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : String(err) }
       }
     },
-    [agentName, connection, messagesCollection],
+    [connection],
+  )
+
+  /**
+   * Orphan-recovery primitive (GH#116 B8). The normal path is server-
+   * side: `sendMessageImpl`'s orphan preflight calls `rebindRunnerImpl`
+   * directly when it detects the gateway holds a stale runner. This
+   * client-exposed shape is an escape hatch for diagnostic UIs that
+   * want to force the rebind without piggybacking on a `sendMessage`
+   * call. No optimistic insert — `rebindRunnerImpl` appends the new
+   * user turn to local history server-side and broadcasts the messages
+   * delta on its own.
+   */
+  const rebindRunner = useCallback(
+    async (args: { nextUserMessage?: string | ContentBlock[] }) => {
+      try {
+        const result = (await connection.call('rebindRunner', [args])) as {
+          ok: boolean
+          error?: string
+        }
+        return result
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) }
+      }
+    },
+    [connection],
   )
 
   return {
@@ -1282,7 +1317,8 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
     resolveGate,
     sendMessage,
     submitDraft,
-    forkWithHistory,
+    branchArc,
+    rebindRunner,
     reattach,
     resumeFromTranscript,
     rewind,

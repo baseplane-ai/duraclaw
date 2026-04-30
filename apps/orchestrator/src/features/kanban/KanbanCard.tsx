@@ -1,5 +1,16 @@
 /**
- * KanbanCard — single chain summary card on the /board surface.
+ * KanbanCard — single arc summary card on the /board surface.
+ *
+ * Card data shape is `ArcSummary`. Display fields:
+ *   - issue badge `#N` is shown only for GH-linked arcs (`externalRef.provider === 'github'`)
+ *   - title comes from `arc.title` (user-editable, auto-filled from external ref)
+ *   - column is derived via `deriveColumn(arc.sessions, arc.status)`
+ *   - session focus reads `arc.sessions[].mode` (was `kataMode`)
+ *
+ * The use-arc-* hooks (auto-advance, preconditions, checkout) consume
+ * `ArcSummary` / arc.id directly. Auto-advance still keys on
+ * issueNumber under the hood (preference shape unchanged); for non-GH
+ * arcs we hide the chip rather than wire a synthetic key.
  *
  * P3 U3 adds: Start-next button (with precondition gating + confirmation
  * modal), draggable-by-handle via `@dnd-kit/core`. PR chip, lane collapse,
@@ -14,23 +25,21 @@ import { Button } from '~/components/ui/button'
 import { projectsCollection } from '~/db/projects-collection'
 import { formatTimeAgo } from '~/features/agent-orch/session-utils'
 import { WorktreeConflictModal } from '~/features/chain/WorktreeConflictModal'
-import { useChainAutoAdvance } from '~/hooks/use-chain-auto-advance'
-import { useChainCheckout } from '~/hooks/use-chain-checkout'
-import { useNextModePrecondition } from '~/hooks/use-chain-preconditions'
+import { useArcAutoAdvance } from '~/hooks/use-arc-auto-advance'
+import { useArcCheckout } from '~/hooks/use-arc-checkout'
+import { useNextModePrecondition } from '~/hooks/use-arc-preconditions'
 import { useTabSync } from '~/hooks/use-tab-sync'
-import { isChainSessionCompleted } from '~/lib/chains'
-import type { ChainSummary, ChainWorktreeReservation } from '~/lib/types'
+import { deriveColumn, isArcSessionCompleted } from '~/lib/arcs'
+import type { ArcSummary, ChainWorktreeReservation } from '~/lib/types'
 import { AdvanceConfirmModal } from './AdvanceConfirmModal'
-import { advanceChain, chainProject, hasActiveSession } from './advance-chain'
+import { advanceArc, hasActiveSession } from './advance-arc'
 
 interface KanbanCardProps {
-  chain: ChainSummary
+  arc: ArcSummary
 }
 
 /** Freshest live / non-terminal session for the status strip. */
-function pickFocusSession(
-  sessions: ChainSummary['sessions'],
-): ChainSummary['sessions'][number] | null {
+function pickFocusSession(sessions: ArcSummary['sessions']): ArcSummary['sessions'][number] | null {
   if (sessions.length === 0) return null
   const byActivity = [...sessions].sort((a, b) => {
     const aTime = new Date(a.lastActivity ?? a.createdAt).getTime()
@@ -40,15 +49,15 @@ function pickFocusSession(
   return byActivity[0] ?? null
 }
 
-function shortStatusLabel(session: ChainSummary['sessions'][number]): string {
+function shortStatusLabel(session: ArcSummary['sessions'][number]): string {
   const { status } = session
   if (status === 'running') return 'live'
   if (status === 'crashed') return 'crashed'
   if (status.startsWith('waiting')) return 'waiting'
-  // `isChainSessionCompleted` recognises the D1 terminal "rung finished"
+  // `isArcSessionCompleted` recognises the D1 terminal "rung finished"
   // shape (status === 'idle' && lastActivity != null). An `'idle'` session
   // with no lastActivity is freshly spawned — render plain idle.
-  if (isChainSessionCompleted(session)) return 'done'
+  if (isArcSessionCompleted(session)) return 'done'
   return 'idle'
 }
 
@@ -58,14 +67,17 @@ function shortMode(mode: string | null | undefined): string {
   return mode
 }
 
-export function KanbanCard({ chain }: KanbanCardProps) {
+export function KanbanCard({ arc }: KanbanCardProps) {
   const { openTab } = useTabSync()
-  const { nextMode, nextLabel, canAdvance, reason, loading } = useNextModePrecondition(chain)
-  const { forceRelease } = useChainCheckout()
+
+  const column = useMemo(() => deriveColumn(arc.sessions, arc.status), [arc.sessions, arc.status])
+
+  const { nextMode, nextLabel, canAdvance, reason, loading } = useNextModePrecondition(arc)
+  const { forceRelease } = useArcCheckout()
   const [modalOpen, setModalOpen] = useState(false)
   const [pending, setPending] = useState(false)
   const [conflict, setConflict] = useState<ChainWorktreeReservation | null>(null)
-  // Backlog-bootstrap: when a chain has zero sessions, the user picks a
+  // Backlog-bootstrap: when an arc has zero sessions, the user picks a
   // worktree via the Advance modal. Empty-string = "no selection yet", which
   // is what disables the confirm button.
   const [pickedProject, setPickedProject] = useState<string>('')
@@ -81,29 +93,40 @@ export function KanbanCard({ chain }: KanbanCardProps) {
     return (projectsData as Array<{ name: string }>).map((p) => p.name).sort()
   }, [projectsData])
 
-  // Per-chain auto-advance toggle — same preference the StatusBar
-  // ChainStatusItem popover drives, surfaced on the card itself so users
-  // can flip it before any session exists (GH#82 "auto-advance hidden").
-  const { enabled: autoAdvanceOn, toggle: toggleAutoAdvance } = useChainAutoAdvance(
-    chain.issueNumber,
-  )
+  // Per-arc auto-advance toggle — same preference the StatusBar
+  // ArcStatusItem popover drives, surfaced on the card itself so users
+  // can flip it before any session exists. The legacy preference is
+  // keyed on issueNumber — hide the chip for non-GH arcs to avoid
+  // surfacing a no-op button against a synthetic key.
+  const ghIssueNumber =
+    arc.externalRef?.provider === 'github' && typeof arc.externalRef.id === 'number'
+      ? arc.externalRef.id
+      : 0
+  const { enabled: autoAdvanceOn, toggle: toggleAutoAdvance } = useArcAutoAdvance(ghIssueNumber)
+  const showAutoChip = arc.externalRef?.provider === 'github' && ghIssueNumber > 0
+
+  const issueLabel =
+    arc.externalRef?.provider === 'github' && typeof arc.externalRef.id === 'number'
+      ? `#${arc.externalRef.id}`
+      : null
 
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
-    id: `card:${chain.issueNumber}`,
-    data: { chain },
+    id: `card:${arc.id}`,
+    data: { arc },
   })
 
   const handleOpen = useCallback(() => {
-    if (chain.sessions.length === 0) return
-    const sorted = [...chain.sessions].sort((a, b) => {
+    if (arc.sessions.length === 0) return
+    const sorted = [...arc.sessions].sort((a, b) => {
       const aTime = new Date(a.lastActivity ?? a.createdAt).getTime()
       const bTime = new Date(b.lastActivity ?? b.createdAt).getTime()
       return bTime - aTime
     })
     const latestSessionId = sorted[0]?.id
     if (!latestSessionId) return
-    openTab(latestSessionId, { project: chainProject(chain) ?? undefined })
-  }, [chain, openTab])
+    const projectLabel = arc.worktreeReservation?.worktree.split('/').pop()
+    openTab(latestSessionId, { project: projectLabel ?? undefined })
+  }, [arc, openTab])
 
   const handleStartNext = useCallback(() => {
     if (!nextMode || !canAdvance) return
@@ -115,32 +138,24 @@ export function KanbanCard({ chain }: KanbanCardProps) {
 
   const runAdvance = useCallback(async (): Promise<boolean> => {
     if (!nextMode) return false
-    // Backlog-bootstrap: empty chains have no prior project, so surface the
-    // user's pick from the modal's worktree picker. Existing chains ignore
-    // the override.
-    const existingProject = chainProject(chain)
-    const projectOverride = existingProject ? null : pickedProject || null
-    if (!existingProject && !projectOverride) {
-      toast.error('Pick a worktree before advancing')
-      return false
-    }
+    // Backlog-bootstrap: arcs without a worktree reservation can't
+    // advance into a code-touching mode. The picker exists to nudge the
+    // user toward a separate `POST /api/worktrees` reserve step (P4b
+    // wiring). The server returns 400 `no_project_for_arc` here if the
+    // arc has no prior session and no worktree.
     setPending(true)
-    const res = await advanceChain(chain, nextMode, { projectOverride })
+    const res = await advanceArc(arc, nextMode)
     setPending(false)
     if (!res.ok) {
-      if (res.conflict) {
-        setModalOpen(false)
-        setConflict(res.conflict)
-        return false
-      }
-      toast.error(res.error ?? 'Failed to advance chain')
+      toast.error(res.error ?? 'Failed to advance arc')
       return false
     }
     setModalOpen(false)
-    toast.success(`Started ${nextMode} for #${chain.issueNumber}`)
-    openTab(res.sessionId, { project: existingProject ?? projectOverride ?? undefined })
+    toast.success(`Started ${nextMode} in arc '${arc.title}'`)
+    const projectLabel = arc.worktreeReservation?.worktree.split('/').pop()
+    openTab(res.sessionId, { project: projectLabel ?? undefined })
     return true
-  }, [chain, nextMode, openTab, pickedProject])
+  }, [arc, nextMode, openTab])
 
   const handleConfirm = useCallback(async () => {
     await runAdvance()
@@ -155,18 +170,11 @@ export function KanbanCard({ chain }: KanbanCardProps) {
   const handleForceRelease = useCallback(async () => {
     if (!conflict) return
     setPending(true)
-    // GH#115: under the new wire shape, the chain's owning issue rides on
-    // `reservedBy.id` for `kind:'arc'` reservations (always the case for
-    // chain-driven holds). The legacy `worktree` (project name) is the
-    // path's basename. Falls back to the card's chain.issueNumber when the
-    // conflicting reservation is non-arc (defensive — shouldn't reach the
-    // chain UI today).
-    const conflictIssue =
-      conflict.reservedBy?.kind === 'arc' && typeof conflict.reservedBy.id === 'number'
-        ? conflict.reservedBy.id
-        : chain.issueNumber
-    const conflictWorktree = conflict.path.split('/').pop()
-    const res = await forceRelease(conflictIssue, conflictWorktree)
+    // GH#116 P4a: force-release is now keyed on worktree id (admin
+    // DELETE /api/worktrees/:id). Use the conflict row's id directly;
+    // the legacy `(issueNumber, worktree)` signature is gone with the
+    // chain endpoint deletion.
+    const res = await forceRelease(conflict.id)
     if (!res.ok) {
       setPending(false)
       toast.error(res.error ?? 'Force release failed')
@@ -176,17 +184,14 @@ export function KanbanCard({ chain }: KanbanCardProps) {
     setConflict(null)
     setPending(false)
     await runAdvance()
-  }, [conflict, forceRelease, runAdvance, chain.issueNumber])
+  }, [conflict, forceRelease, runAdvance])
 
-  const focus = pickFocusSession(chain.sessions)
-  const focusTs = focus?.lastActivity ?? focus?.createdAt ?? chain.lastActivity
-  // GH#115: legacy `worktree` (project name) is the basename of the new
-  // `path` field. Used for the chain card's worktree label and conflict-
-  // modal display.
-  const worktree = chain.worktreeReservation?.path.split('/').pop() ?? null
-  const currentMode = focus?.kataMode ?? chain.column
+  const focus = pickFocusSession(arc.sessions)
+  const focusTs = focus?.lastActivity ?? focus?.createdAt ?? arc.lastActivity
+  const worktree = arc.worktreeReservation?.worktree.split('/').pop() ?? null
+  const currentMode = focus?.mode ?? column
 
-  const hasActive = hasActiveSession(chain)
+  const hasActive = hasActiveSession(arc)
   const startLabel = nextMode ? `Start ${nextLabel}` : ''
   const disabledTitle = loading
     ? 'Checking preconditions…'
@@ -206,39 +211,43 @@ export function KanbanCard({ chain }: KanbanCardProps) {
       >
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0 flex-1">
-            <div className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-              #{chain.issueNumber}
-            </div>
-            <div className="line-clamp-2 text-sm font-medium leading-snug" title={chain.issueTitle}>
-              {chain.issueTitle}
+            {issueLabel ? (
+              <div className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+                {issueLabel}
+              </div>
+            ) : null}
+            <div className="line-clamp-2 text-sm font-medium leading-snug" title={arc.title}>
+              {arc.title}
             </div>
           </div>
-          <button
-            type="button"
-            className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
-              autoAdvanceOn
-                ? 'bg-primary/15 text-primary hover:bg-primary/25'
-                : 'bg-muted text-muted-foreground hover:bg-muted/70'
-            }`}
-            title={
-              autoAdvanceOn
-                ? 'Auto-advance on — click to disable'
-                : 'Auto-advance off — click to enable'
-            }
-            onClick={(e) => {
-              e.stopPropagation()
-              void toggleAutoAdvance()
-            }}
-            onPointerDown={(e) => e.stopPropagation()}
-            data-testid={`chain-auto-chip-${chain.issueNumber}`}
-          >
-            ⟲ {autoAdvanceOn ? 'auto' : 'off'}
-          </button>
+          {showAutoChip ? (
+            <button
+              type="button"
+              className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
+                autoAdvanceOn
+                  ? 'bg-primary/15 text-primary hover:bg-primary/25'
+                  : 'bg-muted text-muted-foreground hover:bg-muted/70'
+              }`}
+              title={
+                autoAdvanceOn
+                  ? 'Auto-advance on — click to disable'
+                  : 'Auto-advance off — click to enable'
+              }
+              onClick={(e) => {
+                e.stopPropagation()
+                void toggleAutoAdvance()
+              }}
+              onPointerDown={(e) => e.stopPropagation()}
+              data-testid={`arc-auto-chip-${arc.id}`}
+            >
+              ⟲ {autoAdvanceOn ? 'auto' : 'off'}
+            </button>
+          ) : null}
         </div>
         <div className="flex min-w-0 items-center gap-2 text-[11px]">
           {focus ? (
             <span className="min-w-0 flex-1 truncate text-muted-foreground">
-              {shortMode(focus.kataMode)} &middot; {shortStatusLabel(focus)}
+              {shortMode(focus.mode)} &middot; {shortStatusLabel(focus)}
               {focusTs ? ` &middot; ${formatTimeAgo(focusTs)}` : ''}
             </span>
           ) : (
@@ -254,7 +263,7 @@ export function KanbanCard({ chain }: KanbanCardProps) {
         ) : null}
         <div className="mt-0.5 flex flex-wrap gap-1.5">
           {/* Prevent dnd-kit from intercepting the click on the buttons. */}
-          {chain.sessions.length > 0 ? (
+          {arc.sessions.length > 0 ? (
             <Button
               size="sm"
               variant="outline"
@@ -284,12 +293,12 @@ export function KanbanCard({ chain }: KanbanCardProps) {
         <AdvanceConfirmModal
           open={modalOpen}
           onOpenChange={setModalOpen}
-          issueNumber={chain.issueNumber}
+          arcTitle={arc.title}
           currentMode={currentMode}
           nextMode={nextMode}
           worktree={worktree}
-          worktreeReserved={!!chain.worktreeReservation}
-          projectOptions={chain.sessions.length === 0 ? projectOptions : undefined}
+          worktreeReserved={!!arc.worktreeReservation}
+          projectOptions={arc.sessions.length === 0 ? projectOptions : undefined}
           selectedProject={pickedProject || null}
           onProjectChange={setPickedProject}
           onConfirm={handleConfirm}
@@ -305,7 +314,7 @@ export function KanbanCard({ chain }: KanbanCardProps) {
           conflict={conflict}
           onPickDifferent={handlePickDifferent}
           onForceRelease={handleForceRelease}
-          conflictTitle={`Blocking advance of #${chain.issueNumber}`}
+          conflictTitle={`Blocking advance of '${arc.title}'`}
         />
       ) : null}
     </>

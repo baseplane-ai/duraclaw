@@ -11,6 +11,7 @@ import { agentSessions } from '~/db/schema'
 import { generateActionToken } from '~/lib/action-token'
 import { broadcastSessionRow } from '~/lib/broadcast-session'
 import type { GatewayEvent } from '~/lib/types'
+import { advanceArcGate, advanceArcImpl } from './advance-arc'
 import { broadcastMessages as broadcastMessagesImpl } from './broadcast'
 import { promoteToolPartToGate as promoteToolPartToGateImpl } from './gates'
 import { maybeReleaseWorktreeOnTerminal } from './maybe-release-worktree'
@@ -690,13 +691,63 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
         completed_at: new Date().toISOString(),
         active_callback_token: undefined,
       })
-      // Chain auto-advance fires after updateState has broadcast the
-      // idle status. tryAutoAdvance's preconditions query agent_sessions
-      // expecting status='idle' + numTurns>0.
+      // GH#116 B10: arc auto-advance. Gate runs after the idle-status
+      // broadcast (the gate checks `(arcId, mode)` idempotency, not
+      // session status, so order isn't load-bearing). On `advanced`,
+      // mint the successor in the same arc with `enter <mode>` as the
+      // prompt — no transcript carryover (B6). The kata `runEnded`
+      // evidence file gate is dropped (B10) — clean stop is the only
+      // gate now beyond user pref + worktree availability.
       ctx.ctx.waitUntil(
-        self
-          .maybeAutoAdvanceChain()
-          .catch((err) => console.error('[session-do] post-stop chain:', err)),
+        (async () => {
+          try {
+            const gate = await advanceArcGate(ctx, { terminateReason: 'stopped' })
+            if (gate.action === 'advanced') {
+              await advanceArcImpl(ctx, {
+                mode: gate.mode,
+                prompt: `enter ${gate.mode}`,
+              })
+            } else {
+              // Spec P2: broadcast `chain_stalled` so the client can
+              // surface the reason in `ArcStatusItem` (chain-stall-store
+              // keyed on issueNumber when present) and invalidate the
+              // arcs collection. Wire-type discriminant is `chain_stalled`
+              // — see packages/shared-types/src/index.ts. issueNumber is
+              // best-effort: pulled from the persisted kata_state kv blob
+              // when the arc is GH-linked, omitted otherwise.
+              let issueNumber: number | undefined
+              try {
+                const rows = [
+                  ...ctx.sql.exec<{ value: string }>(
+                    "SELECT value FROM kv WHERE key = 'kata_state'",
+                  ),
+                ]
+                if (rows.length > 0) {
+                  const ks = JSON.parse(rows[0].value) as { issueNumber?: unknown }
+                  if (typeof ks.issueNumber === 'number') {
+                    issueNumber = ks.issueNumber
+                  }
+                }
+              } catch {
+                // best-effort — falling back to issueNumber undefined.
+              }
+              const stallEvent = {
+                type: 'chain_stalled' as const,
+                reason: gate.reason,
+                ...(issueNumber !== undefined ? { issueNumber } : {}),
+              }
+              ctx.broadcast(JSON.stringify({ type: 'gateway_event', event: stallEvent }))
+              ctx.logEvent(
+                'info',
+                'arc',
+                `arc auto-advance skipped reason=${gate.reason}`,
+                issueNumber !== undefined ? { issueNumber } : undefined,
+              )
+            }
+          } catch (err) {
+            console.error('[session-do] post-stop arc advance:', err)
+          }
+        })(),
       )
       // GH#115 §B-LIFECYCLE-2: release-on-close. Last-session check
       // inside the helper handles arc-shared chains where a successor
@@ -730,34 +781,21 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
         }
       }
 
-      // Chain UX P4: detect mode transitions on chain-linked sessions and
-      // reset the runner so each mode gets a fresh SDK session context.
+      // GH#116 P2: mode-change observation is now a kata-internal
+      // concern. The DO no longer rotates the runner on `kata_state`
+      // mode delta — `advanceArcImpl` is the only legitimate path that
+      // creates a new session for a new mode (and it's invoked from the
+      // arc auto-advance gate on terminal `stopped`, or explicitly by
+      // POST /api/arcs/:id/sessions). We still latch `lastKataMode`
+      // because the auto-advance gate reads it to determine the next
+      // mode in the progression.
       const ks = event.kata_state
       if (ks?.currentMode && ks.issueNumber != null) {
         const prev = ctx.state.lastKataMode
         const next = ks.currentMode
         if (prev !== next) {
           self.updateState({ lastKataMode: next })
-          // Initial mode observation on a fresh session is NOT a transition —
-          // only rotate the runner when we've seen a prior mode. Firing
-          // handleModeTransition on the first kata_state would kill the
-          // runner that just spawned with the user's typed prompt and
-          // replace it with the mode-preamble text.
-          if (prev == null) {
-            console.log(
-              `[SessionDO:${ctx.ctx.id}] initial mode observed: ${next} — no runner reset`,
-            )
-          } else if (ks.continueSdk === true) {
-            console.log(
-              `[SessionDO:${ctx.ctx.id}] mode change ${prev}→${next} with continueSdk=true, skipping reset`,
-            )
-          } else {
-            // Fire-and-forget — the runner close + respawn involves multi-
-            // second awaits that shouldn't block gateway event processing.
-            self.handleModeTransition(ks, prev).catch((err) => {
-              console.error(`[SessionDO:${ctx.ctx.id}] handleModeTransition failed:`, err)
-            })
-          }
+          ctx.logEvent('info', 'kata', `mode_change observed prev=${prev ?? '(none)'} next=${next}`)
         }
       }
       break

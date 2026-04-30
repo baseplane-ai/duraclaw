@@ -42,13 +42,25 @@ Because resume reads from the transcript bytes mirrored into Durable Object SQLi
 
 If no available identity exists at swap time (every identity is in cooldown, or the catalog is empty), the session enters `errored` and waits for either a cooldown to expire lazily or admin action.
 
-## Orphan recovery
+## Orphan recovery (rebindRunner)
 
 The orphan case is a runner that is alive on the VPS but unreachable from its session's Durable Object. This can arise after split-brain DNS, after a Durable Object loses track of a connection without a clean close, or other transient transport failures.
 
-When the user sends a message and the Durable Object has no live WebSocket but persists a runner session id, it preflights the gateway over HTTPS to check whether a runner with that session id is still listed alive. If one is — and it is unreachable — the Durable Object treats it as an orphan: it serializes its local message history into a transcript-prefixed prompt (a single user turn that contains the prior conversation as context), drops the runner session id (forcing a fresh one rather than colliding with the orphan), and spawns a brand-new runner with that prompt. User-visible UX is a normal send.
+When the user sends a message and the Durable Object has no live WebSocket but persists a runner session id, it preflights the gateway over HTTPS to check whether a runner with that session id is still listed alive. If one is — and it is unreachable — the Durable Object treats it as an orphan and invokes the `rebindRunner` primitive: it serializes its local message history into a transcript-prefixed prompt (a single user turn that contains the prior conversation as context), drops the runner session id (forcing a fresh one rather than colliding with the orphan), and spawns a brand-new runner with that prompt. The session row id is preserved — only the bound runner changes. User-visible UX is a normal send.
 
 Orphan recovery is self-healing on the runner side too. When a runner receives an authorization-class close from the Durable Object — invalid token, rotated token — it aborts its SDK query and exits. This guarantees that an abandoned runner cannot squat indefinitely on a session id and interfere with future spawns.
+
+## Arc progression (advanceArc)
+
+A session does not stand alone — it lives inside an arc, the durable parent that holds an external reference (GitHub issue, Linear, plain), reserves a worktree, and parents a tree of sessions advancing through modes. Progression within an arc is mediated by the `advanceArc` primitive: it closes the current frontier session, mints a successor in the same arc with `parentSessionId` pointing at the closing session, and threads the new mode through. There is no transcript carryover between successor and predecessor — the new session sees only the prompt for its mode.
+
+Auto-advance and manual mode change are the same primitive. When a session terminates with a clean stop and the per-arc auto-advance preference is on, the gate fires and the arc walks to its next mode automatically. When the user picks a mode explicitly, the same primitive runs from a manual entry point. A partial unique index on `(arcId, mode)` for non-terminal statuses enforces idempotency at the database layer — concurrent advance attempts to the same target collapse to one successor row, the loser receiving the existing successor's id rather than minting a duplicate.
+
+## Cross-arc branching (branchArc)
+
+Branching from a specific message creates a new arc, not a new session in the existing arc. The `branchArc` primitive mints a child arc with `parentArcId` pointing at the current arc, inherits the external ref from the parent, and spawns a first session whose prompt is a `<prior_conversation>` block wrapping the conversation up to the chosen message sequence. The current arc is unmodified. The result is a tree of arcs, each with its own session lineage, navigable up to the parent and down into siblings.
+
+The distinction from advance is intentional: advance is "continue forward in the same arc"; branch is "start a new arc with shared history up to a point". Both produce new session rows; only branch produces a new arc row.
 
 ## Gate lifecycle
 

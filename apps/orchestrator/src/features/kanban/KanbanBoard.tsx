@@ -1,13 +1,15 @@
 /**
  * KanbanBoard — top-level surface for `/board`.
  *
- * Swim lanes group by issue type (enhancement / bug / other). A project
- * filter dropdown in the header lets users scope the board to chains that
- * have sessions in a specific project (worktree).
+ * GH#116 P4a: subscribes to `arcsCollection` and renders `ArcSummary`
+ * rows. Lanes group by external-ref provider — GH-linked arcs land in
+ * the `'github'` lane, everything else (implicit single-session arcs,
+ * branch-only arcs, etc.) lands in `'standalone'`. Columns are derived
+ * client-side via `deriveColumn(arc.sessions, arc.status)`.
  *
  * Drag-to-advance: cards are draggable, columns are droppable
  * (`drop:<lane>:<column>`), and onDragEnd runs the B9 precondition check
- * + B10 confirmation modal before delegating to advanceChain.
+ * + B10 confirmation modal before delegating to advanceArc.
  *
  * Adjacency rule: only strict single-step left-to-right drops are
  * accepted. Any other target is a no-op with a toast.
@@ -34,19 +36,26 @@ import {
   SelectTrigger,
   SelectValue,
 } from '~/components/ui/select'
-import { chainsCollection } from '~/db/chains-collection'
-import { checkPrecondition } from '~/hooks/use-chain-preconditions'
+import { arcsCollection } from '~/db/arcs-collection'
+import { checkPrecondition } from '~/hooks/use-arc-preconditions'
 import { useKanbanLanes } from '~/hooks/use-kanban-lanes'
 import { useTabSync } from '~/hooks/use-tab-sync'
-import type { ChainSummary } from '~/lib/types'
+import { deriveColumn, type KanbanColumn } from '~/lib/arcs'
+import type { ArcSummary } from '~/lib/types'
 import { AdvanceConfirmModal } from './AdvanceConfirmModal'
-import { advanceChain, chainProject } from './advance-chain'
+import { advanceArc } from './advance-arc'
 import { KanbanLane } from './KanbanLane'
 
-/** Fixed lane order. Anything not matching falls into 'other'. */
-const LANES: ReadonlyArray<'enhancement' | 'bug' | 'other'> = ['enhancement', 'bug', 'other']
+/**
+ * Lane derivation: arcs with a GitHub external-ref land in the
+ * `'github'` lane; everything else (linear / plain / arc-less) lands
+ * in `'standalone'`. Future providers can be split out of `'github'`
+ * without changing the data shape.
+ */
+type Lane = 'github' | 'standalone'
+const LANES: ReadonlyArray<Lane> = ['github', 'standalone']
 
-const COLUMN_ORDER: ChainSummary['column'][] = [
+const COLUMN_ORDER: KanbanColumn[] = [
   'backlog',
   'research',
   'planning',
@@ -55,17 +64,15 @@ const COLUMN_ORDER: ChainSummary['column'][] = [
   'done',
 ]
 
-function laneFor(chain: ChainSummary): 'enhancement' | 'bug' | 'other' {
-  if (chain.issueType === 'enhancement') return 'enhancement'
-  if (chain.issueType === 'bug') return 'bug'
-  return 'other'
+function laneFor(arc: ArcSummary): Lane {
+  return arc.externalRef?.provider === 'github' ? 'github' : 'standalone'
 }
 
-function parseDropId(id: string): { lane: string; column: ChainSummary['column'] } | null {
+function parseDropId(id: string): { lane: string; column: KanbanColumn } | null {
   // `drop:<lane>:<column>`
   const parts = id.split(':')
   if (parts.length !== 3 || parts[0] !== 'drop') return null
-  const col = parts[2] as ChainSummary['column']
+  const col = parts[2] as KanbanColumn
   if (!COLUMN_ORDER.includes(col)) return null
   return { lane: parts[1], column: col }
 }
@@ -75,41 +82,44 @@ const ALL_PROJECTS = '__all__'
 
 export function KanbanBoard() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, isLoading } = useLiveQuery(chainsCollection as any)
+  const { data, isLoading } = useLiveQuery(arcsCollection as any)
   const { isCollapsed, toggle } = useKanbanLanes()
   const { openTab } = useTabSync()
   const [projectFilter, setProjectFilter] = useState(ALL_PROJECTS)
 
-  const chains = useMemo(() => (data ? ([...data] as ChainSummary[]) : []), [data])
+  const arcs = useMemo(() => (data ? ([...data] as ArcSummary[]) : []), [data])
 
-  // Derive unique project names across all chains for the filter dropdown.
+  // Project list derived from each arc's worktree reservation label
+  // (`worktreeReservation.worktree` is the full path; the UI label is
+  // the basename). ArcSummary no longer carries per-session `project`,
+  // so the filter dropdown only reflects arcs that have actually
+  // reserved a worktree.
   const projects = useMemo(() => {
     const set = new Set<string>()
-    for (const chain of chains) {
-      for (const s of chain.sessions) {
-        if (s.project) set.add(s.project)
-      }
+    for (const arc of arcs) {
+      const label = arc.worktreeReservation?.worktree.split('/').pop()
+      if (label) set.add(label)
     }
     return [...set].sort()
-  }, [chains])
+  }, [arcs])
 
-  // Apply project filter: keep chains that have at least one session in the
-  // selected project. Chains with no sessions (backlog-only) always show.
+  // Apply project filter: keep arcs whose worktree label matches.
+  // Arcs with no worktree always show (read-only / freshly-spawned).
   const filtered = useMemo(() => {
-    if (projectFilter === ALL_PROJECTS) return chains
-    return chains.filter(
-      (c) => c.sessions.length === 0 || c.sessions.some((s) => s.project === projectFilter),
-    )
-  }, [chains, projectFilter])
+    if (projectFilter === ALL_PROJECTS) return arcs
+    return arcs.filter((a) => {
+      const label = a.worktreeReservation?.worktree.split('/').pop()
+      return !label || label === projectFilter
+    })
+  }, [arcs, projectFilter])
 
   const byLane = useMemo(() => {
-    const out: Record<'enhancement' | 'bug' | 'other', ChainSummary[]> = {
-      enhancement: [],
-      bug: [],
-      other: [],
+    const out: Record<Lane, ArcSummary[]> = {
+      github: [],
+      standalone: [],
     }
-    for (const chain of filtered) {
-      out[laneFor(chain)].push(chain)
+    for (const arc of filtered) {
+      out[laneFor(arc)].push(arc)
     }
     return out
   }, [filtered])
@@ -125,19 +135,20 @@ export function KanbanBoard() {
 
   // Drag-driven confirmation modal state.
   const [pendingAdvance, setPendingAdvance] = useState<{
-    chain: ChainSummary
+    arc: ArcSummary
     nextMode: string
   } | null>(null)
   const [pending, setPending] = useState(false)
 
   const handleDragEnd = useCallback(async (event: DragEndEvent) => {
     const over = event.over
-    const chain = event.active.data.current?.chain as ChainSummary | undefined
-    if (!over || !chain) return
+    const arc = event.active.data.current?.arc as ArcSummary | undefined
+    if (!over || !arc) return
     const dest = parseDropId(String(over.id))
     if (!dest) return
 
-    const fromIdx = COLUMN_ORDER.indexOf(chain.column)
+    const fromCol = deriveColumn(arc.sessions, arc.status)
+    const fromIdx = COLUMN_ORDER.indexOf(fromCol)
     const toIdx = COLUMN_ORDER.indexOf(dest.column)
     if (fromIdx < 0 || toIdx < 0) return
     if (toIdx === fromIdx) return
@@ -150,28 +161,31 @@ export function KanbanBoard() {
       return
     }
 
-    const sessionsForChain = chain.sessions
-    const res = await checkPrecondition(chain, sessionsForChain)
+    // Drag-to-advance still goes through the precondition gate
+    // (spec/vp checks). The precondition hook now reads ArcSummary
+    // directly.
+    const res = await checkPrecondition(arc)
     if (!res.canAdvance || !res.nextMode) {
       toast.error(res.reason || 'Precondition not met')
       return
     }
-    setPendingAdvance({ chain, nextMode: res.nextMode })
+    setPendingAdvance({ arc, nextMode: res.nextMode })
   }, [])
 
   const handleConfirm = useCallback(async () => {
     if (!pendingAdvance) return
     setPending(true)
-    const { chain, nextMode } = pendingAdvance
-    const res = await advanceChain(chain, nextMode)
+    const { arc, nextMode } = pendingAdvance
+    const res = await advanceArc(arc, nextMode)
     setPending(false)
     setPendingAdvance(null)
     if (!res.ok) {
-      toast.error(res.error ?? 'Failed to advance chain')
+      toast.error(res.error ?? 'Failed to advance arc')
       return
     }
-    toast.success(`Started ${nextMode} for #${chain.issueNumber}`)
-    openTab(res.sessionId, { project: chainProject(chain) ?? undefined })
+    toast.success(`Started ${nextMode} in arc '${arc.title}'`)
+    const projectLabel = arc.worktreeReservation?.worktree.split('/').pop()
+    openTab(res.sessionId, { project: projectLabel ?? undefined })
   }, [pendingAdvance, openTab])
 
   return (
@@ -199,8 +213,8 @@ export function KanbanBoard() {
       <Main fluid fixed>
         <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
           <div className="flex flex-1 flex-col gap-3 overflow-y-auto">
-            {isLoading && chains.length === 0 ? (
-              <p className="text-sm text-muted-foreground">Loading chains…</p>
+            {isLoading && arcs.length === 0 ? (
+              <p className="text-sm text-muted-foreground">Loading arcs…</p>
             ) : null}
             {LANES.filter((lane) => byLane[lane].length > 0).map((lane) => (
               <KanbanLane
@@ -211,12 +225,12 @@ export function KanbanBoard() {
                 onToggle={() => toggle(lane)}
               />
             ))}
-            {!isLoading && chains.length > 0 && LANES.every((lane) => byLane[lane].length === 0) ? (
-              <p className="text-sm text-muted-foreground">No chains match the current filter.</p>
+            {!isLoading && arcs.length > 0 && LANES.every((lane) => byLane[lane].length === 0) ? (
+              <p className="text-sm text-muted-foreground">No arcs match the current filter.</p>
             ) : null}
-            {!isLoading && chains.length === 0 ? (
+            {!isLoading && arcs.length === 0 ? (
               <p className="text-sm text-muted-foreground">
-                No chains yet. Spawn a session with a `kataIssue` tag to create one.
+                No arcs yet. Spawn a session with a GitHub issue ref to create one.
               </p>
             ) : null}
           </div>
@@ -227,15 +241,11 @@ export function KanbanBoard() {
             onOpenChange={(open) => {
               if (!open) setPendingAdvance(null)
             }}
-            issueNumber={pendingAdvance.chain.issueNumber}
-            currentMode={pendingAdvance.chain.column}
+            arcTitle={pendingAdvance.arc.title}
+            currentMode={deriveColumn(pendingAdvance.arc.sessions, pendingAdvance.arc.status)}
             nextMode={pendingAdvance.nextMode}
-            worktree={
-              // GH#115: derive legacy project-name display from the row
-              // path (basename). null when no reservation is held.
-              pendingAdvance.chain.worktreeReservation?.path.split('/').pop() ?? null
-            }
-            worktreeReserved={!!pendingAdvance.chain.worktreeReservation}
+            worktree={pendingAdvance.arc.worktreeReservation?.worktree.split('/').pop() ?? null}
+            worktreeReserved={!!pendingAdvance.arc.worktreeReservation}
             onConfirm={handleConfirm}
             pending={pending}
           />

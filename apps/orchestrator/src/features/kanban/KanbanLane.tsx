@@ -1,5 +1,8 @@
 /**
- * KanbanLane — horizontal swim lane grouping by issue type.
+ * KanbanLane — horizontal swim lane grouping by external-ref provider.
+ *
+ * Each lane holds an `ArcSummary[]`. Columns are derived per-card via
+ * `deriveColumn(arc.sessions, arc.status)`.
  *
  * Renders a header (name + count + collapse toggle) plus a horizontally
  * scrollable row of KanbanColumns when expanded. Each column becomes a
@@ -11,11 +14,12 @@
  */
 
 import { ChevronDown, ChevronRight } from 'lucide-react'
-import type { ChainSummary } from '~/lib/types'
+import { deriveColumn, type KanbanColumn as KanbanColumnId } from '~/lib/arcs'
+import type { ArcSummary } from '~/lib/types'
 import { KanbanColumn } from './KanbanColumn'
 
-/** Fixed column order, matches ChainSummary['column']. */
-const COLUMNS: ReadonlyArray<ChainSummary['column']> = [
+/** Fixed column order, matches `lib/arcs.ts` `KanbanColumn` union. */
+const COLUMNS: ReadonlyArray<KanbanColumnId> = [
   'backlog',
   'research',
   'planning',
@@ -24,7 +28,7 @@ const COLUMNS: ReadonlyArray<ChainSummary['column']> = [
   'done',
 ]
 
-const COLUMN_LABELS: Record<ChainSummary['column'], string> = {
+const COLUMN_LABELS: Record<KanbanColumnId, string> = {
   backlog: 'Backlog',
   research: 'Research',
   planning: 'Planning',
@@ -35,7 +39,7 @@ const COLUMN_LABELS: Record<ChainSummary['column'], string> = {
 
 interface KanbanLaneProps {
   name: string
-  cards: ChainSummary[]
+  cards: ArcSummary[]
   collapsed: boolean
   onToggle: () => void
 }
@@ -58,7 +62,7 @@ export function KanbanLane({ name, cards, collapsed, onToggle }: KanbanLaneProps
       {collapsed ? null : (
         <div className="-mx-1 flex gap-3 overflow-x-auto px-1 pb-2 snap-x snap-mandatory md:snap-none">
           {COLUMNS.map((col) => {
-            const colCards = cards.filter((c) => c.column === col)
+            const colCards = cards.filter((arc) => deriveColumn(arc.sessions, arc.status) === col)
             return (
               <KanbanColumn
                 key={col}

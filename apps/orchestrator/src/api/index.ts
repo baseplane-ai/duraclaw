@@ -6,7 +6,6 @@ import { constantTimeEquals } from '~/agents/session-do/runner-link'
 import * as schema from '~/db/schema'
 import {
   agentSessions,
-  auditLog,
   featureFlags,
   projectMetadata,
   projects as projectsTable,
@@ -18,7 +17,6 @@ import {
 } from '~/db/schema'
 import { validateActionToken } from '~/lib/action-token'
 import { createAuth } from '~/lib/auth'
-import { broadcastChainRow } from '~/lib/broadcast-chain'
 import { broadcastSessionRow } from '~/lib/broadcast-session'
 import {
   fanoutSessionViewerChange,
@@ -26,14 +24,11 @@ import {
 } from '~/lib/broadcast-session-viewers'
 import { broadcastSyncedDelta } from '~/lib/broadcast-synced-delta'
 import { broadcastTabsSnapshot } from '~/lib/broadcast-tabs-snapshot'
-import { buildChainRowFromContext, type ChainBuildContext } from '~/lib/chains'
-import { checkoutWorktree } from '~/lib/checkout-worktree'
 import { chunkOps } from '~/lib/chunk-frame'
 import { createSession } from '~/lib/create-session'
 import {
   fetchGatewayFile as sharedFetchGatewayFile,
   fetchGatewayProjects as sharedFetchGatewayProjects,
-  getSpecStatus as sharedGetSpecStatus,
   resolveProjectPath as sharedResolveProjectPath,
 } from '~/lib/gateway-files'
 import { type PushPayload, sendPushNotification } from '~/lib/push'
@@ -41,26 +36,24 @@ import { sendFcmNotification } from '~/lib/push-fcm'
 import { bindWorktreeById, reserveFreshWorktree, rowToDto } from '~/lib/reserve-worktree'
 import type {
   AgentSessionRow,
-  ChainSummary,
   ContentBlock,
   ContextUsage,
   Env,
   KataSessionState,
   ProjectInfo,
-  SpecStatusResponse,
   UserPreferencesRow,
   UserTabRow,
-  VpStatusResponse,
 } from '~/lib/types'
 import { adminCodexModelsRoutes } from './admin-codex-models'
 import { adminGeminiModelsRoutes } from './admin-gemini-models'
 import { adminIdentitiesRoutes } from './admin-identities'
+import { arcsRoutes } from './arcs'
 import { authMiddleware } from './auth-middleware'
 import { authRoutes } from './auth-routes'
 import { getRequestSession } from './auth-session'
 import type { ApiAppEnv } from './context'
 import { runWorktreesJanitor } from './scheduled'
-import type { ReservedBy, SessionWorktreeParam, WorktreeRow } from './worktrees-types'
+import type { ReservedBy, SessionWorktreeParam } from './worktrees-types'
 
 interface CreateSessionBody {
   project?: string
@@ -339,7 +332,7 @@ function ghHeaders(env: ApiAppEnv['Bindings']): Record<string, string> {
  * at merge time — the issues endpoint returns both but GH tags PRs with a
  * `pull_request` sub-object.
  */
-async function fetchGithubIssues(
+async function _fetchGithubIssues(
   env: ApiAppEnv['Bindings'],
 ): Promise<{ issues: GhIssue[]; moreAvailable: boolean }> {
   const repo = env.GITHUB_REPO
@@ -379,7 +372,7 @@ async function fetchGithubIssues(
 }
 
 /** Fetch up to 300 PRs from the configured GH repo, same cache strategy as issues. */
-async function fetchGithubPulls(env: ApiAppEnv['Bindings']): Promise<GhPull[]> {
+async function _fetchGithubPulls(env: ApiAppEnv['Bindings']): Promise<GhPull[]> {
   const repo = env.GITHUB_REPO
   if (!repo) return []
 
@@ -404,15 +397,15 @@ async function fetchGithubPulls(env: ApiAppEnv['Bindings']): Promise<GhPull[]> {
   return all
 }
 
-// Chain-aggregation helpers (deriveIssueType / deriveColumn / findPrForIssue)
-// now live in ~/lib/chains. The /api/chains handler consumes them indirectly
-// via `buildChainRowFromContext` so the broadcast path shares the exact mapping.
+// Arc-aggregation helpers (deriveColumn / parseExternalRef / buildArcRow)
+// live in ~/lib/arcs. The /api/arcs handler consumes them indirectly via
+// `buildArcRowFromContext` so the broadcast path shares the exact mapping.
 
 // Gateway-file helpers (parseFrontmatter, fetchGatewayFile, listGatewayFiles,
 // resolveProjectPath) live in ~/lib/gateway-files. Only fetchGatewayFile is
 // still called inline below; it gets a thin alias so the rest of this file
 // can pass the Hono-typed env without a cast at every call site.
-const fetchGatewayFile = (env: ApiAppEnv['Bindings'], projectName: string, relPath: string) =>
+const _fetchGatewayFile = (env: ApiAppEnv['Bindings'], projectName: string, relPath: string) =>
   sharedFetchGatewayFile(env as unknown as Env, projectName, relPath)
 
 export function createApiApp() {
@@ -1303,6 +1296,12 @@ export function createApiApp() {
   // selects an identity via LRU; the gateway sets HOME from the
   // derived path (`${IDENTITY_HOME_BASE}/${name}`, GH#129).
   app.route('/api/admin/identities', adminIdentitiesRoutes())
+
+  // GH#116 P1.3: `/api/arcs` CRUD surface. Replaces `/api/chains` (the
+  // legacy chain-keyed routes were deleted in the same wave). Mounted
+  // after authMiddleware so each handler reads `c.get('userId')`
+  // directly. See `apps/orchestrator/src/api/arcs.ts`.
+  app.route('/api/arcs', arcsRoutes())
 
   // ── User settings (tabs) — direct D1 CRUD (B-API-2) ──────────────
 
@@ -3463,19 +3462,21 @@ export function createApiApp() {
     if (resolvedWorktreeId) {
       try {
         const now = new Date().toISOString()
-        // GH#115 review: inherit parent's agent/visibility/model/kataIssue
+        // GH#115 review: inherit parent's agent/visibility/model/arcId
         // so Codex / private parents don't get silently rewritten to
-        // claude+public on the fork UPSERT.
+        // claude+public on the fork UPSERT. GH#116: inherit parent's
+        // `arcId` (was: kataIssue) so the forked session lands in the
+        // same arc.
         await db
           .insert(agentSessions)
           .values({
             id: result.session_id,
             userId,
+            arcId: access.session.arcId,
             project: projectName,
             status: 'running',
             model: access.session.model ?? null,
             agent: access.session.agent ?? 'claude',
-            kataIssue: access.session.kataIssue ?? null,
             visibility: (access.session.visibility ?? 'public') as 'public' | 'private',
             createdAt: now,
             updatedAt: now,
@@ -3585,397 +3586,12 @@ export function createApiApp() {
     return c.json({ status: 'idle', ...result })
   })
 
-  // ── Chain worktree reservations (GH#16 Feature 3E / U2) ──────────
-  //
-  // Concurrency: D1's single-writer SQLite semantics + the `worktree`
-  // PRIMARY KEY on worktree_reservations make checkout safe without an
-  // explicit mutex. If a race slips through SELECT, INSERT throws a
-  // UNIQUE constraint error which we catch and translate into a 409
-  // with the winning reservation.
-
-  const FORCE_RELEASE_STALE_DAYS = 7
-  const FORCE_RELEASE_STALE_MS = FORCE_RELEASE_STALE_DAYS * 86_400_000
-
-  app.post('/api/chains/:issue/checkout', async (c) => {
-    const userId = c.get('userId')
-    const issueNumber = Number.parseInt(c.req.param('issue'), 10)
-    if (!Number.isFinite(issueNumber)) {
-      return c.json({ error: 'Invalid issue number' }, 400)
-    }
-
-    // GH#115 P1.4: legacy body fields (`worktree`, `modeAtCheckout`) are
-    // accepted for back-compat but ignored — the new helper keys on
-    // `worktreeId` derived from the chain's most-recent session, and the
-    // `mode` label is informational only.
-    const body = (await c.req.json().catch(() => null)) as {
-      worktree?: unknown
-      modeAtCheckout?: unknown
-    } | null
-    const modeAtCheckout =
-      body && typeof body.modeAtCheckout === 'string' && body.modeAtCheckout.length > 0
-        ? body.modeAtCheckout
-        : 'implementation'
-
-    const db = getDb(c.env)
-
-    // Resolve issueNumber -> worktreeId via the chain's most-recent
-    // session that has a worktreeId. Mirrors the resolution in
-    // `buildChainRow` (~/lib/chains.ts) so the checkout binds the
-    // already-allocated row instead of re-allocating from the pool.
-    const sessionRows = await db
-      .select({ worktreeId: agentSessions.worktreeId })
-      .from(agentSessions)
-      .where(eq(agentSessions.kataIssue, issueNumber))
-      .orderBy(desc(agentSessions.createdAt))
-    const sessionWithWt = sessionRows.find((s) => s.worktreeId)
-    const worktreeId = sessionWithWt?.worktreeId ?? null
-
-    if (!worktreeId) {
-      return c.json(
-        {
-          error: 'no_worktree_for_chain',
-          hint: 'Reserve via POST /api/worktrees first, or spawn a session with worktree:{kind:"fresh"}',
-        },
-        400,
-      )
-    }
-
-    const result = await checkoutWorktree(
-      db,
-      { worktreeId, mode: modeAtCheckout, reservedBy: { kind: 'arc', id: issueNumber } },
-      userId,
-    )
-
-    if (result.ok) {
-      // The reservation lives on `ChainSummary.worktreeReservation`;
-      // without this broadcast the board card's "checked out" badge
-      // and conflict detection lag behind the actual D1 state.
-      await broadcastChainRow(c.env, c.executionCtx, issueNumber, { actorUserId: userId })
-      return c.json({ reservation: result.reservation })
-    }
-    if (result.status === 409) {
-      return c.json({ conflict: result.conflict, message: result.message }, 409)
-    }
-    if (result.status === 404) {
-      return c.json({ error: result.error }, 404)
-    }
-    return c.json({ error: result.error }, 500)
-  })
-
-  app.post('/api/chains/:issue/release', async (c) => {
-    const userId = c.get('userId')
-    const issueNumber = Number.parseInt(c.req.param('issue'), 10)
-    if (!Number.isFinite(issueNumber)) {
-      return c.json({ error: 'Invalid issue number' }, 400)
-    }
-
-    // GH#115 P1.4: release flips the arc-bound row to `cleanup` instead
-    // of hard-deleting (the P1.7 janitor owns hard-delete after grace).
-    // Owner-only; non-owners must use /force-release (stale gate).
-    const db = getDb(c.env)
-    const targets = await db
-      .select()
-      .from(worktrees)
-      .where(
-        and(
-          sql`json_extract(${worktrees.reservedBy}, '$.kind') = 'arc'`,
-          sql`json_extract(${worktrees.reservedBy}, '$.id') = ${issueNumber}`,
-          isNull(worktrees.releasedAt),
-        ),
-      )
-    if (targets.length === 0) {
-      // Idempotent — no reservation means nothing to release.
-      return c.json({ released: true, count: 0 })
-    }
-
-    const nonOwned = targets.filter((r) => r.ownerId !== userId)
-    if (nonOwned.length > 0) {
-      return c.json({ error: 'not_owner', reservation: rowToDto(nonOwned[0]) }, 403)
-    }
-
-    const now = Date.now()
-    for (const r of targets) {
-      await db
-        .update(worktrees)
-        .set({ releasedAt: now, status: 'cleanup', lastTouchedAt: now })
-        .where(eq(worktrees.id, r.id))
-      await db.insert(auditLog).values({
-        action: 'reservation_released',
-        userId,
-        details: JSON.stringify({ issueNumber, worktreeId: r.id, path: r.path }),
-      })
-    }
-
-    // Reservation removal flips the chain card's badge — fanout the
-    // rebuilt summary so every connected board repaints.
-    await broadcastChainRow(c.env, c.executionCtx, issueNumber, { actorUserId: userId })
-
-    return c.json({ released: true, count: targets.length })
-  })
-
-  app.post('/api/chains/:issue/force-release', async (c) => {
-    const userId = c.get('userId')
-    const issueNumber = Number.parseInt(c.req.param('issue'), 10)
-    if (!Number.isFinite(issueNumber)) {
-      return c.json({ error: 'Invalid issue number' }, 400)
-    }
-
-    const body = (await c.req.json().catch(() => null)) as {
-      confirmation?: unknown
-      worktree?: unknown
-    } | null
-    if (!body || body.confirmation !== true) {
-      return c.json({ message: 'Missing confirmation' }, 400)
-    }
-    // GH#115 P1.4: legacy `worktree` (project-name) filter still accepted;
-    // applied as a path-suffix match against the new `worktrees.path`
-    // (`/data/projects/<name>`) so old clients stay wired.
-    const worktreeFilter = typeof body.worktree === 'string' ? body.worktree : undefined
-
-    const db = getDb(c.env)
-    const baseWhere = and(
-      sql`json_extract(${worktrees.reservedBy}, '$.kind') = 'arc'`,
-      sql`json_extract(${worktrees.reservedBy}, '$.id') = ${issueNumber}`,
-    )
-    const targets = worktreeFilter
-      ? await db
-          .select()
-          .from(worktrees)
-          .where(and(baseWhere, eq(worktrees.path, `/data/projects/${worktreeFilter}`)))
-      : await db.select().from(worktrees).where(baseWhere)
-
-    if (targets.length === 0) {
-      return c.json({ message: 'No reservation for this chain' }, 404)
-    }
-
-    const staleCutoff = Date.now() - FORCE_RELEASE_STALE_MS
-    for (const r of targets) {
-      const isStale = r.lastTouchedAt < staleCutoff
-      if (!isStale) {
-        return c.json(
-          {
-            message: 'Reservation not stale enough',
-            staleAfterDays: FORCE_RELEASE_STALE_DAYS,
-            lastActivity: new Date(r.lastTouchedAt).toISOString(),
-          },
-          403,
-        )
-      }
-    }
-
-    // All targets pass the gate — flip to cleanup + audit. Janitor (P1.7)
-    // owns hard-delete after grace.
-    const now = Date.now()
-    for (const r of targets) {
-      await db
-        .update(worktrees)
-        .set({ releasedAt: now, status: 'cleanup', lastTouchedAt: now })
-        .where(eq(worktrees.id, r.id))
-      await db.insert(auditLog).values({
-        action: 'force_release_worktree',
-        userId,
-        details: JSON.stringify({
-          issueNumber,
-          worktreeId: r.id,
-          path: r.path,
-          previousOwner: r.ownerId,
-          createdAt: r.createdAt,
-        }),
-      })
-    }
-
-    // Same rationale as `/release` — the chain card's reservation badge
-    // changes shape and every connected board needs to repaint.
-    await broadcastChainRow(c.env, c.executionCtx, issueNumber, { actorUserId: userId })
-
-    return c.json({ released: true, forced: true, count: targets.length })
-  })
-
-  // ── Chain list + precondition endpoints (GH#16 P3 U1) ────────────
-
-  app.get('/api/chains', async (c) => {
-    const userId = c.get('userId')
-    const db = getDb(c.env)
-
-    // Parse + validate stale filter early so we can 400 before doing work.
-    const staleParam = c.req.query('stale')
-    let staleCutoff: number | null = null
-    if (typeof staleParam === 'string' && staleParam.length > 0) {
-      const m = staleParam.match(/^(\d+)d$/)
-      if (!m) return c.json({ error: 'Invalid stale format — expected `{N}d`' }, 400)
-      const days = Number.parseInt(m[1], 10)
-      if (!Number.isFinite(days) || days <= 0) {
-        return c.json({ error: 'Invalid stale format — expected `{N}d` with N > 0' }, 400)
-      }
-      staleCutoff = Date.now() - days * 86_400_000
-    }
-
-    const mineFilter = c.req.query('mine') !== undefined
-    const laneFilter = c.req.query('lane')
-    const columnFilter = c.req.query('column')
-    const projectFilter = c.req.query('project')
-
-    // 1. Collect issue numbers from D1.
-    const d1IssueRows = await db
-      .selectDistinct({ kataIssue: agentSessions.kataIssue })
-      .from(agentSessions)
-      .where(sql`${agentSessions.kataIssue} IS NOT NULL`)
-    const d1IssueNumbers = new Set<number>()
-    for (const row of d1IssueRows) {
-      if (typeof row.kataIssue === 'number' && Number.isFinite(row.kataIssue)) {
-        d1IssueNumbers.add(row.kataIssue)
-      }
-    }
-
-    // 2. Fetch GH issues (cached).
-    const { issues: ghIssues, moreAvailable } = await fetchGithubIssues(c.env)
-    const ghIssueByNumber = new Map<number, GhIssue>()
-    for (const issue of ghIssues) {
-      // Filter out PRs — GH's /issues endpoint interleaves them.
-      if (issue.pull_request) continue
-      ghIssueByNumber.set(issue.number, issue)
-    }
-
-    // 3. Union of issue numbers.
-    const allIssueNumbers = new Set<number>([...d1IssueNumbers, ...ghIssueByNumber.keys()])
-
-    // Fetch PRs once for matching (also cached).
-    const pulls = await fetchGithubPulls(c.env)
-
-    // Pre-fetch all relevant sessions + reservations in two bulk queries to
-    // avoid N×M SELECTs.
-    const issueNumArray = Array.from(allIssueNumbers)
-    const allSessions = issueNumArray.length
-      ? ((await db
-          .select()
-          .from(agentSessions)
-          .where(inArray(agentSessions.kataIssue, issueNumArray))
-          .orderBy(asc(agentSessions.createdAt))) as AgentSessionRow[])
-      : []
-    const sessionsByIssue = new Map<number, AgentSessionRow[]>()
-    for (const s of allSessions) {
-      if (typeof s.kataIssue !== 'number') continue
-      const list = sessionsByIssue.get(s.kataIssue) ?? []
-      list.push(s)
-      sessionsByIssue.set(s.kataIssue, list)
-    }
-
-    // GH#115 P1.4: chain reservation is the worktrees row referenced by
-    // ANY session in the chain (all arc sessions share one FK). Bulk-
-    // fetch the unique non-null worktreeIds, then resolve per-issue.
-    const worktreeIds = Array.from(
-      new Set(allSessions.map((s) => s.worktreeId).filter((x): x is string => !!x)),
-    )
-    const allWorktrees = worktreeIds.length
-      ? await db.select().from(worktrees).where(inArray(worktrees.id, worktreeIds))
-      : []
-    const worktreeById = new Map(allWorktrees.map((w) => [w.id, w]))
-
-    const reservationByIssue = new Map<number, WorktreeRow | null>()
-    for (const issueNumber of allIssueNumbers) {
-      const sessions = sessionsByIssue.get(issueNumber) ?? []
-      const sessionWithWt = sessions.find((s) => s.worktreeId)
-      if (sessionWithWt?.worktreeId) {
-        const w = worktreeById.get(sessionWithWt.worktreeId)
-        reservationByIssue.set(issueNumber, w ? rowToDto(w) : null)
-      } else {
-        reservationByIssue.set(issueNumber, null)
-      }
-    }
-
-    // 4. Build ChainSummary[] via the shared `buildChainRowFromContext`
-    //    mapping so the broadcast path in SessionDO produces byte-identical
-    //    rows (same aggregation, same column derivation, same PR matching).
-    const buildCtx: ChainBuildContext = { ghIssueByNumber, pulls }
-    const chains: ChainSummary[] = []
-    for (const issueNumber of allIssueNumbers) {
-      const sessions = sessionsByIssue.get(issueNumber) ?? []
-      const reservation = reservationByIssue.get(issueNumber) ?? null
-
-      const mappedSessions = sessions.map((s) => ({
-        id: s.id,
-        kataMode: s.kataMode,
-        status: s.status,
-        lastActivity: s.lastActivity,
-        createdAt: s.createdAt,
-        project: s.project,
-      }))
-
-      const chain = buildChainRowFromContext(issueNumber, mappedSessions, reservation, buildCtx)
-      if (!chain) continue
-
-      // Preserve a reference to the underlying rows for filter logic — the
-      // mapped `sessions` on the chain object has user_id stripped, so
-      // owner-filter against the original rows.
-      if (mineFilter) {
-        const anyOwned = sessions.some((s) => s.userId === userId)
-        if (!anyOwned) continue
-      }
-      if (laneFilter && chain.issueType !== laneFilter) continue
-      if (columnFilter && chain.column !== columnFilter) continue
-      if (projectFilter) {
-        const hasProject = sessions.some((s) => s.project === projectFilter)
-        if (!hasProject) continue
-      }
-      if (staleCutoff !== null) {
-        const ts = new Date(chain.lastActivity).getTime()
-        if (!Number.isFinite(ts) || ts >= staleCutoff) continue
-      }
-
-      chains.push(chain)
-    }
-
-    // Sort by lastActivity DESC (empty strings sink to the bottom).
-    chains.sort((a, b) => {
-      const ta = a.lastActivity ? new Date(a.lastActivity).getTime() : -Infinity
-      const tb = b.lastActivity ? new Date(b.lastActivity).getTime() : -Infinity
-      return tb - ta
-    })
-
-    return c.json({ chains, more_issues_available: moreAvailable })
-  })
-
-  app.get('/api/chains/:issue/spec-status', async (c) => {
-    const issueNumber = Number.parseInt(c.req.param('issue'), 10)
-    if (!Number.isFinite(issueNumber)) {
-      return c.json({ error: 'Invalid issue number' }, 400)
-    }
-    const project = c.req.query('project')
-    if (!project) {
-      return c.json({ error: 'Missing required query param: project' }, 400)
-    }
-    // Single source of truth lives in `lib/gateway-files.ts:getSpecStatus`.
-    // Resolution order: frontmatter `github_issue:` first (canonical),
-    // then filename prefix `^0*<n>-.*\.md$` (legacy / leading-zero
-    // tolerant). See helper docs for cost characteristics.
-    const result = await sharedGetSpecStatus(c.env, project, issueNumber)
-    return c.json<SpecStatusResponse>(result)
-  })
-
-  app.get('/api/chains/:issue/vp-status', async (c) => {
-    const issueNumber = Number.parseInt(c.req.param('issue'), 10)
-    if (!Number.isFinite(issueNumber)) {
-      return c.json({ error: 'Invalid issue number' }, 400)
-    }
-    const project = c.req.query('project')
-    if (!project) {
-      return c.json({ error: 'Missing required query param: project' }, 400)
-    }
-
-    const relPath = `.kata/verification-evidence/vp-${issueNumber}.json`
-    const content = await fetchGatewayFile(c.env, project, relPath)
-    if (content === null) {
-      return c.json<VpStatusResponse>({ exists: false, passed: null, path: null })
-    }
-
-    try {
-      const parsed = JSON.parse(content) as { overallPassed?: unknown }
-      const passed = typeof parsed.overallPassed === 'boolean' ? parsed.overallPassed : null
-      return c.json<VpStatusResponse>({ exists: true, passed, path: relPath })
-    } catch {
-      return c.json<VpStatusResponse>({ exists: false, passed: null, path: null })
-    }
-  })
+  // GH#116: `/api/chains/*` was deleted in P3. Worktree-keyed checkout /
+  // release / force-release moved to `/api/worktrees/*` (live since
+  // #115). Arc list + spec-status + vp-status are served by `/api/arcs`
+  // (mounted above near the other sub-routers). Client-side hooks were
+  // renamed in P4a (`use-arc-checkout`, `use-arc-preconditions`,
+  // `arc-status-item`).
 
   app.post('/api/sessions/:id/answers', async (c) => {
     const userId = c.get('userId')

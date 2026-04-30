@@ -3,7 +3,7 @@
  */
 
 import { useLiveQuery } from '@tanstack/react-db'
-import { useCallback, useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ApiRetryBanner } from '~/components/api-retry-banner'
 import { DisconnectedBanner } from '~/components/disconnected-banner'
 import { StatusBar } from '~/components/status-bar'
@@ -17,6 +17,7 @@ import { useSession as useAuthSession } from '~/lib/auth-client'
 import { apiUrl } from '~/lib/platform'
 import type { SessionStatus } from '~/lib/types'
 import { useStatusBarStore } from '~/stores/status-bar'
+import { BranchFromHereDialog } from './BranchFromHereDialog'
 import { ChatThread } from './ChatThread'
 import { MessageInput } from './MessageInput'
 import type { UseCodingAgentResult } from './use-coding-agent'
@@ -114,6 +115,44 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
     [sendMessage],
   )
 
+  // GH#116 B16 — per-message "Branch from here" affordance. The dialog
+  // owns the fetch + navigation; this view owns "which turn was clicked"
+  // (drives the optimistic "Branching…" pill on the source row) and the
+  // open/close state. The affordance is suppressed until the session
+  // row's `arcId` has loaded — which it always has after the first
+  // `broadcastSessionRow` from the DO. Cold-start sessions before that
+  // first frame won't show the affordance.
+  const arcId = session?.arcId ?? null
+  const sessionMode = session?.mode ?? null
+  const sessionTitle = session?.title ?? null
+  const [branchDialogOpen, setBranchDialogOpen] = useState(false)
+  const [branchingFromTurnIndex, setBranchingFromTurnIndex] = useState<number | null>(null)
+
+  const handleBranchFromMessage = useCallback(
+    (turnIndex: number) => {
+      // Guard against double-open / overlapping dialogs.
+      if (branchDialogOpen) return
+      setBranchingFromTurnIndex(turnIndex)
+      setBranchDialogOpen(true)
+    },
+    [branchDialogOpen],
+  )
+
+  const handleBranchDialogOpenChange = useCallback((open: boolean) => {
+    setBranchDialogOpen(open)
+    // Clear the "Branching…" pill when the dialog closes for any reason
+    // (cancel / submit-success-then-navigate / submit-error). The pill is
+    // purely an optimistic UI artifact; on success the user navigates
+    // away to the new session, so the pill disappears with the unmount.
+    if (!open) setBranchingFromTurnIndex(null)
+  }, [])
+
+  // Only enable the affordance when we have all three identifiers the
+  // POST endpoint needs: a parent arcId, the source sessionId, and an
+  // assistant turn to branch from. (`turnIndex` is supplied by the
+  // ChatThread callback per row.)
+  const branchHandler = arcId ? handleBranchFromMessage : undefined
+
   // On mobile (Capacitor SQLite) the messages collection hydrates async,
   // so `messages.length === 0` briefly holds even for sessions with prior
   // turns — without this hint, ChatThread would flash the
@@ -181,9 +220,28 @@ export function AgentDetailView({ name: sessionId, agent }: AgentDetailViewProps
         onRewind={rewind}
         branchInfo={branchInfo}
         onBranchNavigate={navigateBranch}
+        onBranchFromMessage={branchHandler}
+        branchingFromTurnIndex={branchingFromTurnIndex}
         onSendSuggestion={handleSendSuggestion}
         expectsMessages={expectsMessages}
       />
+
+      {arcId && branchingFromTurnIndex !== null && (
+        <BranchFromHereDialog
+          open={branchDialogOpen}
+          onOpenChange={handleBranchDialogOpenChange}
+          arcId={arcId}
+          fromSessionId={sessionId}
+          // `branchArcImpl` slices `getHistory()` at `fromMessageSeq`
+          // (`history.slice(0, maxSeq)` — exclusive upper bound). To
+          // include the assistant turn the user clicked, pass
+          // `turnIndex + 1`. The messages array here mirrors
+          // `getHistory()`, so turnIndex maps 1:1 to the history index.
+          fromMessageSeq={branchingFromTurnIndex + 1}
+          mode={sessionMode}
+          parentArcTitle={sessionTitle}
+        />
+      )}
 
       <ApiRetryBanner />
       <DisconnectedBanner

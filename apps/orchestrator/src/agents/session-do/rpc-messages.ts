@@ -7,13 +7,13 @@ import { listSessions } from '~/lib/vps-client'
 import {
   buildAwaitingPart as buildAwaitingPartImpl,
   computeBranchInfoForUserTurn as computeBranchInfoForUserTurnImpl,
-  forkWithHistoryImpl,
 } from './branches'
 import {
   broadcastBranchInfo as broadcastBranchInfoImpl,
   broadcastMessages as broadcastMessagesImpl,
 } from './broadcast'
 import { claimSubmitId } from './history'
+import { rebindRunnerImpl } from './rebind-runner'
 import { sendToGateway, triggerGatewayDial as triggerGatewayDialImpl } from './runner-link'
 import { syncPromptToD1 } from './status'
 import type { SessionDOContext } from './types'
@@ -41,7 +41,7 @@ export interface SendMessageOpts {
 export interface SendMessageResult {
   ok: boolean
   error?: string
-  recoverable?: 'forkWithHistory'
+  recoverable?: 'rebindRunner'
   duplicate?: boolean
   id?: string
 }
@@ -163,11 +163,13 @@ export async function sendMessageImpl(
           console.warn(
             `[SessionDO:${ctx.ctx.id}] sendMessage: orphan runner ${orphan.session_id} holds runner_session_id ${sdk} — auto-forking with transcript`,
           )
-          // GH#115 P1.5: ctx.state.worktreeId is preserved across the
-          // fork — same DO/session, same clone reservation.
-          // forkWithHistoryImpl re-stamps worktree_path on the new
-          // triggerGatewayDial via runner-link's project_path read.
-          return forkWithHistoryImpl(ctx, content)
+          // GH#116 B8: orphan recovery via rebindRunner — same DO,
+          // same session row, mint a fresh runner_session_id, wrap the
+          // local transcript in <prior_conversation> for the new runner.
+          // ctx.state.worktreeId is preserved across the rebind (same
+          // DO/session, same clone reservation); runner-link re-stamps
+          // worktree_path on the new triggerGatewayDial.
+          return rebindRunnerImpl(ctx, { nextUserMessage: content })
         }
       } catch (err) {
         // Non-fatal: fall through to the dial attempt. If it then collides
@@ -209,7 +211,7 @@ export async function sendMessageImpl(
   }
 
   // Persist user message (only after orphan preflight so we don't have to
-  // roll it back on the auto-fork branch — forkWithHistory appends itself).
+  // roll it back on the auto-rebind branch — rebindRunner appends itself).
   ctx.do.turnCounter++
   const canonicalTurnId = `usr-${ctx.do.turnCounter}`
   const userMsgId = opts?.client_message_id ?? canonicalTurnId

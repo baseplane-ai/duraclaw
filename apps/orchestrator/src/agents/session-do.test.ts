@@ -3177,11 +3177,6 @@ describe('idle→running broadcasts status via updateState', () => {
     h.updateState({ status: 'running', gate: null, error: null })
   }
 
-  // forkWithHistory
-  function simulateForkWithHistory(h: ReturnType<typeof makeHarness>): void {
-    h.updateState({ status: 'running', gate: null, error: null })
-  }
-
   // resubmitMessage
   function simulateResubmitMessage(h: ReturnType<typeof makeHarness>): void {
     h.updateState({ status: 'running', gate: null, error: null })
@@ -3209,12 +3204,6 @@ describe('idle→running broadcasts status via updateState', () => {
   it('sendMessage isResumable: calls updateState (fresh-resume path)', () => {
     const h = makeHarness()
     simulateSendMessageIsResumable(h)
-    expect(h.calls).toEqual(['updateState'])
-  })
-
-  it('forkWithHistory: calls updateState (orphan auto-fork)', () => {
-    const h = makeHarness()
-    simulateForkWithHistory(h)
     expect(h.calls).toEqual(['updateState'])
   })
 

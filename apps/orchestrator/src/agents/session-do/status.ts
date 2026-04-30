@@ -3,7 +3,7 @@ import { eq } from 'drizzle-orm'
 import { agentSessions, worktrees } from '~/db/schema'
 import { broadcastSessionRow } from '~/lib/broadcast-session'
 import type { KataSessionState } from '~/lib/types'
-import { broadcastChainUpdate, broadcastStatusFrame, broadcastStatusToOwner } from './broadcast'
+import { broadcastArcUpdate, broadcastStatusFrame, broadcastStatusToOwner } from './broadcast'
 import type { SessionMeta } from './index'
 import { META_COLUMN_MAP, type SessionDOContext } from './types'
 
@@ -246,8 +246,10 @@ export async function syncCapabilitiesToD1(
 }
 
 /**
- * Consolidated kata write: one UPDATE for all kata columns
- * (kataMode, kataIssue, kataPhase, kataStateJson) + one broadcast.
+ * Consolidated kata write: UPDATE for `kataStateJson` only (GH#116:
+ * kataMode/kataIssue/kataPhase columns dropped — `mode` is written by
+ * createSession / advanceArc; the issue number is sourced from the
+ * arc's externalRef; phase has no column replacement) + one broadcast.
  * Also refreshes the worktree reservation activity and broadcasts the
  * chain row, mirroring `syncKataToD1`'s side effects.
  */
@@ -261,9 +263,6 @@ export async function syncKataAllToD1(
     await ctx.do.d1
       .update(agentSessions)
       .set({
-        kataMode: kataState?.currentMode ?? null,
-        kataIssue: kataState?.issueNumber ?? null,
-        kataPhase: kataState?.currentPhase ?? null,
         kataStateJson: kataState ? JSON.stringify(kataState) : null,
         messageSeq: ctx.do.messageSeq,
         updatedAt,
@@ -277,7 +276,7 @@ export async function syncKataAllToD1(
   // GH#115 P1.4: refresh `worktrees.lastTouchedAt` keyed by the session's
   // worktreeId (FK on agent_sessions). Drops the legacy
   // `(issueNumber, project)` join + `stale=false` write — staleness is
-  // derived in the chain projection (see `buildChainRowFromContext`).
+  // derived in the arc projection (see `buildArcRowFromContext`).
   if (kataState?.issueNumber != null && ctx.state.worktreeId) {
     try {
       await ctx.do.d1
@@ -289,7 +288,10 @@ export async function syncKataAllToD1(
     }
   }
 
-  broadcastChainUpdate(ctx, kataState?.issueNumber ?? null)
+  // GH#116 P1.3: arc update derives arcId from the session's D1 row;
+  // the legacy `kataState.issueNumber` parameter is no longer used —
+  // the arc ↔ session link is now the canonical pointer.
+  broadcastArcUpdate(ctx)
 }
 
 /**

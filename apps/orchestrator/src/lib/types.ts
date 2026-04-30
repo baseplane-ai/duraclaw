@@ -131,6 +131,9 @@ export interface Env {
 export interface AgentSessionRow {
   id: string
   userId: string
+  /** GH#116: parent arc FK (NOT NULL at the Drizzle/app layer; nullable
+   *  at the DB layer per Gotcha #12). Backfilled by migration 0032. */
+  arcId: string
   project: string
   status: string
   model: string | null
@@ -153,9 +156,12 @@ export interface AgentSessionRow {
   errorCode: string | null
   kataStateJson: string | null
   contextUsageJson: string | null
-  kataMode: string | null
-  kataIssue: number | null
-  kataPhase: string | null
+  /** GH#116: renamed from kataMode. Backfilled from kata_mode by
+   *  migration 0032. */
+  mode: string | null
+  /** GH#116: self-FK to agent_sessions.id; populated for advance/branch
+   *  successor sessions, NULL for root sessions. */
+  parentSessionId: string | null
   /** GH#115: FK into `worktrees(id)`. NULL for read-only modes (research,
    *  planning, freeform) and pre-115 sessions whose backfill couldn't
    *  resolve a row. */
@@ -234,9 +240,11 @@ export interface SessionViewerRow {
 }
 
 /**
- * GH#115 P4: chain-level worktree reservation projected onto the chain
- * summary wire shape. Mirrors the post-115 `worktrees(id)` row plus a
- * derived `stale` boolean for the kanban force-release UI gate.
+ * GH#115 P4: arc-level worktree reservation wire shape, retained for
+ * the WorktreeConflictModal + KanbanCard force-release UI gate.
+ * Mirrors the post-115 `worktrees(id)` row plus a derived `stale`
+ * boolean. The legacy "chain" name is kept on the type so existing
+ * imports keep resolving; rename in a future cleanup if desired.
  */
 export interface ChainWorktreeReservation {
   id: string
@@ -251,39 +259,52 @@ export interface ChainWorktreeReservation {
 }
 
 /**
- * Chain summary — one entry per kata-linked GitHub issue (GH#16 Feature 3D).
- * Response shape of `GET /api/chains`. Merges D1 session/reservation state
- * with GitHub issue metadata (cached 5min module-level). `column` is derived
- * by `deriveColumn()` from the latest qualifying session's kataMode plus the
- * issue's open/closed state.
+ * GH#116: arcs are the durable parent of every session. Response shape
+ * of `GET /api/arcs` and `GET /api/arcs/:id`. An arc is keyed by its
+ * text `id` (not by GitHub issue number), `externalRef` carries the
+ * optional issue / linear / plain-text reference, and `status` carries
+ * the arc lifecycle.
+ *
+ * `worktreeReservation` mirrors the post-#115 worktree row plus a
+ * derived `stale` flag — present when the arc has reserved a worktree,
+ * absent for read-only / arc-less arcs.
  */
-export interface ChainSummary {
-  issueNumber: number
-  issueTitle: string
-  issueType: 'enhancement' | 'bug' | 'other' | string
-  issueState: 'open' | 'closed'
-  column: 'backlog' | 'research' | 'planning' | 'implementation' | 'verify' | 'done'
+export type ArcSummary = {
+  id: string
+  title: string
+  externalRef: { provider: 'github' | 'linear' | 'plain'; id: number | string; url?: string } | null
+  status: 'draft' | 'open' | 'closed' | 'archived'
+  worktreeId?: string
+  parentArcId?: string
+  createdAt: string
+  updatedAt: string
+  closedAt?: string
   sessions: Array<{
     id: string
-    kataMode: string | null
+    mode: string | null
     status: string
     lastActivity: string | null
     createdAt: string
-    project: string
   }>
-  worktreeReservation: ChainWorktreeReservation | null
+  worktreeReservation?: {
+    worktree: string
+    heldSince: string
+    lastActivityAt: string
+    ownerId: string
+    stale: boolean
+  }
   prNumber?: number
-  lastActivity: string
+  lastActivity: string | null
 }
 
-/** Response envelope for `GET /api/chains/:issue/spec-status`. */
+/** Response envelope for `GET /api/arcs/:id/spec-status`. */
 export interface SpecStatusResponse {
   exists: boolean
   status?: string | null
   path?: string | null
 }
 
-/** Response envelope for `GET /api/chains/:issue/vp-status`. */
+/** Response envelope for `GET /api/arcs/:id/vp-status`. */
 export interface VpStatusResponse {
   exists: boolean
   passed?: boolean | null

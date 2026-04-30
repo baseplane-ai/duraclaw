@@ -4,8 +4,10 @@ import type {
   SyncedCollectionOp,
   SessionMessage as WireSessionMessage,
 } from '@duraclaw/shared-types'
+import { eq } from 'drizzle-orm'
+import { agentSessions } from '~/db/schema'
+import { buildArcRow } from '~/lib/arcs'
 import { broadcastSyncedDelta } from '~/lib/broadcast-synced-delta'
-import { buildChainRow } from '~/lib/chains'
 import type { GatewayEvent } from '~/lib/types'
 import type { SessionDOContext } from './types'
 
@@ -252,28 +254,40 @@ export function broadcastStatusToOwner(ctx: SessionDOContext): void {
 }
 
 /**
- * Rebuild the ChainSummary for `issueNumber` and broadcast the delta op
- * to the owning user's UserSettingsDO. Fire-and-forget via `waitUntil`
- * so D1 write → broadcast latency doesn't stack on the caller.
+ * Rebuild the ArcSummary for the session's parent arc and broadcast
+ * the delta op to the owning user's UserSettingsDO. Fire-and-forget
+ * via `waitUntil` so the D1 read → rebuild → broadcast latency does
+ * not stack on the caller.
+ *
+ * The arcId lives on the D1 `agent_sessions.arc_id` column
+ * (SessionMeta does not carry arcId — see `advance-arc.ts` for the
+ * same lookup pattern). When the lookup misses (orphan session,
+ * mid-migration row, arcId=null) the broadcast no-ops.
  */
-export function broadcastChainUpdate(ctx: SessionDOContext, issueNumber: number | null): void {
-  if (issueNumber == null || !Number.isFinite(issueNumber)) return
+export function broadcastArcUpdate(ctx: SessionDOContext): void {
   const userId = ctx.state.userId
   if (!userId) return
 
   ctx.ctx.waitUntil(
     (async () => {
       try {
-        const row = await buildChainRow(ctx.env, ctx.do.d1, userId, issueNumber)
+        const sessionId = ctx.do.name
+        const rows = await ctx.do.d1
+          .select({ arcId: agentSessions.arcId })
+          .from(agentSessions)
+          .where(eq(agentSessions.id, sessionId))
+          .limit(1)
+        const arcId = rows[0]?.arcId
+        if (!arcId) return
+
+        const row = await buildArcRow(ctx.env, ctx.do.d1, userId, arcId)
         if (row) {
-          await broadcastSyncedDelta(ctx.env, userId, 'chains', [{ type: 'update', value: row }])
+          await broadcastSyncedDelta(ctx.env, userId, 'arcs', [{ type: 'update', value: row }])
         } else {
-          await broadcastSyncedDelta(ctx.env, userId, 'chains', [
-            { type: 'delete', key: String(issueNumber) },
-          ])
+          await broadcastSyncedDelta(ctx.env, userId, 'arcs', [{ type: 'delete', key: arcId }])
         }
       } catch (err) {
-        console.error(`[SessionDO:${ctx.ctx.id}] broadcastChainUpdate failed:`, err)
+        console.error(`[SessionDO:${ctx.ctx.id}] broadcastArcUpdate failed:`, err)
       }
     })(),
   )

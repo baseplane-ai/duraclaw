@@ -454,9 +454,15 @@ describe('createSession — inherits project visibility (p2-inherit)', () => {
     const result = await createSession(env, 'user-A', { project: 'my-proj', prompt: 'hello' }, ctx)
 
     expect(result.ok).toBe(true)
-    expect(insertValues).toHaveLength(1)
-    expect((insertValues[0] as any).visibility).toBe('public')
-    expect((insertValues[0] as any).project).toBe('my-proj')
+    // GH#116: createSession now auto-creates an implicit arc first, then
+    // inserts the agent_sessions row. We assert on the session row only.
+    expect(insertValues).toHaveLength(2)
+    const sessionRow = insertValues.find(
+      (r): r is { project?: string } => typeof (r as any)?.project === 'string',
+    )
+    expect(sessionRow).toBeDefined()
+    expect((sessionRow as any).visibility).toBe('public')
+    expect((sessionRow as any).project).toBe('my-proj')
   })
 
   it('defaults visibility=public when the project row is missing', async () => {
@@ -489,7 +495,13 @@ describe('createSession — inherits project visibility (p2-inherit)', () => {
     )
 
     expect(result.ok).toBe(true)
-    expect((insertValues[0] as any).visibility).toBe('public')
+    // GH#116: implicit arc insert + session insert. Assert the session row.
+    expect(insertValues).toHaveLength(2)
+    const sessionRow = insertValues.find(
+      (r): r is { project?: string } => typeof (r as any)?.project === 'string',
+    )
+    expect(sessionRow).toBeDefined()
+    expect((sessionRow as any).visibility).toBe('public')
   })
 
   it('honors explicit visibility=private on the project row', async () => {
@@ -522,6 +534,12 @@ describe('createSession — inherits project visibility (p2-inherit)', () => {
     )
 
     expect(result.ok).toBe(true)
-    expect((insertValues[0] as any).visibility).toBe('private')
+    // GH#116: implicit arc insert + session insert. Assert the session row.
+    expect(insertValues).toHaveLength(2)
+    const sessionRow = insertValues.find(
+      (r): r is { project?: string } => typeof (r as any)?.project === 'string',
+    )
+    expect(sessionRow).toBeDefined()
+    expect((sessionRow as any).visibility).toBe('private')
   })
 })
