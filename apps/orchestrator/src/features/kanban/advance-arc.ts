@@ -3,15 +3,17 @@
  *
  * GH#116 P4a: replaces the legacy advanceChain flow. Calls
  * `POST /api/arcs/:id/sessions` (the advanceArc primitive — body
- * `{mode, prompt}`); the server picks the frontier session, closes it,
- * and mints a successor with the right `arcId` / `parentSessionId`
- * stamping. The client no longer aborts the active session itself.
+ * `{mode, prompt, project?}`); the server picks the frontier session,
+ * closes it, and mints a successor with the right `arcId` /
+ * `parentSessionId` stamping. The client no longer aborts the active
+ * session itself.
  *
  * The legacy `/api/chains/:issue/checkout` step is gone — worktree
  * reservation is now driven by the arc's `worktreeId` FK (set up via
  * `POST /api/worktrees` separately, or carried over by an existing
- * arc). Code-touching modes that need a worktree but don't have one
- * surface as a server-side 400 here; the caller toasts the error.
+ * arc). Backlog-bootstrap callers (an arc with zero sessions) may pass
+ * `projectOverride` so the server can mint the first session without a
+ * prior project to inherit.
  *
  * No collection mutations — the new session shows up via WS deltas
  * pushed against `arcsCollection` and `sessionsCollection`.
@@ -52,7 +54,11 @@ export function arcWorktreeLabel(arc: ArcSummary): string | null {
  * client just supplies `mode` (the new mode) and `prompt` (the
  * preamble / kata-enter line).
  */
-export async function advanceArc(arc: ArcSummary, nextMode: string): Promise<AdvanceArcResult> {
+export async function advanceArc(
+  arc: ArcSummary,
+  nextMode: string,
+  options?: { projectOverride?: string | null },
+): Promise<AdvanceArcResult> {
   // The kata enter prompt mirrors the legacy advance-chain helper —
   // the runner needs an explicit "enter <mode>" line so kata picks up
   // the new mode. For non-GH arcs we omit the `--issue=` flag.
@@ -62,12 +68,15 @@ export async function advanceArc(arc: ArcSummary, nextMode: string): Promise<Adv
       : null
   const prompt = issueId !== null ? `enter ${nextMode} --issue=${issueId}` : `enter ${nextMode}`
 
+  const body: { mode: string; prompt: string; project?: string } = { mode: nextMode, prompt }
+  if (options?.projectOverride) body.project = options.projectOverride
+
   try {
     const resp = await fetch(apiUrl(`/api/arcs/${arc.id}/sessions`), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ mode: nextMode, prompt }),
+      body: JSON.stringify(body),
     })
     if (!resp.ok) {
       const body = (await resp.json().catch(() => null)) as { error?: string } | null

@@ -138,13 +138,17 @@ export function KanbanCard({ arc }: KanbanCardProps) {
 
   const runAdvance = useCallback(async (): Promise<boolean> => {
     if (!nextMode) return false
-    // Backlog-bootstrap: arcs without a worktree reservation can't
-    // advance into a code-touching mode. The picker exists to nudge the
-    // user toward a separate `POST /api/worktrees` reserve step (P4b
-    // wiring). The server returns 400 `no_project_for_arc` here if the
-    // arc has no prior session and no worktree.
+    // Backlog-bootstrap: arcs with zero sessions don't have a prior
+    // session whose project the server can inherit, so the Advance
+    // modal renders a project picker and we forward the pick as
+    // `projectOverride`. For arcs that already have sessions we send
+    // no override — the server prefers `body.project` only when given,
+    // otherwise it inherits from the latest prior session. The server
+    // still returns 400 `no_project_for_arc` if both are missing.
     setPending(true)
-    const res = await advanceArc(arc, nextMode)
+    const res = await advanceArc(arc, nextMode, {
+      projectOverride: arc.sessions.length === 0 && pickedProject ? pickedProject : null,
+    })
     setPending(false)
     if (!res.ok) {
       toast.error(res.error ?? 'Failed to advance arc')
@@ -155,7 +159,7 @@ export function KanbanCard({ arc }: KanbanCardProps) {
     const projectLabel = arc.worktreeReservation?.worktree.split('/').pop()
     openTab(res.sessionId, { project: projectLabel ?? undefined })
     return true
-  }, [arc, nextMode, openTab])
+  }, [arc, nextMode, openTab, pickedProject])
 
   const handleConfirm = useCallback(async () => {
     await runAdvance()

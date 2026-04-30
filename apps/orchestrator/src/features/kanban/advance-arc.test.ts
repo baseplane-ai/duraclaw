@@ -72,6 +72,32 @@ describe('advanceArc', () => {
     if (!res.ok) expect(res.error).toBe('no_project_for_arc')
   })
 
+  it('forwards projectOverride as `project` in the body', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(jsonResponse(201, { sessionId: 'sid', arcId: 'arc_test' }))
+
+    await advanceArc(arc({ sessions: [] }), 'research', { projectOverride: 'duraclaw-dev4' })
+
+    const body = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string)
+    expect(body).toEqual({
+      mode: 'research',
+      prompt: 'enter research --issue=82',
+      project: 'duraclaw-dev4',
+    })
+  })
+
+  it('omits `project` from the body when projectOverride is null/empty', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(jsonResponse(201, { sessionId: 'sid', arcId: 'arc_test' }))
+
+    await advanceArc(arc(), 'research', { projectOverride: null })
+
+    const body = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string)
+    expect(body).not.toHaveProperty('project')
+  })
+
   it('returns error when response lacks sessionId', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(201, {}))
     const res = await advanceArc(arc(), 'research')

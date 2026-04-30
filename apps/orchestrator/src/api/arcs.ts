@@ -132,6 +132,7 @@ interface AdvanceArcBody {
   mode?: unknown
   prompt?: unknown
   agent?: unknown
+  project?: unknown
 }
 
 interface BranchArcBody {
@@ -479,12 +480,14 @@ export function arcsRoutes() {
 
     try {
       if (!frontier) {
-        // Mint directly — pick a project from any prior session, or
-        // fall back to ''. createSession requires `project`; arcs that
-        // have never spawned a session don't have a known project yet
-        // unless one is in body or in another field. The spec doesn't
-        // expose `project` on this body; rely on prior sessions.
-        const project = sessions[0]?.project ?? ''
+        // Mint directly — backlog-bootstrap callers (arcs with no
+        // sessions yet) pass `body.project` to seed the worktree;
+        // otherwise we inherit from the latest prior session. 400
+        // remains for the genuinely-empty case (no body.project AND
+        // no prior session to inherit from).
+        const bodyProject =
+          typeof body.project === 'string' && body.project.length > 0 ? body.project : null
+        const project = bodyProject ?? sessions[0]?.project ?? ''
         if (!project) {
           return c.json({ error: 'no_project_for_arc' }, 400)
         }
