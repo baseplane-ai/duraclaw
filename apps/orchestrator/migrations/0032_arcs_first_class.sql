@@ -42,9 +42,14 @@ CREATE TABLE arcs (
 --> statement-breakpoint
 
 -- 2. Expression unique index on externalRef (provider, id) — one arc
---    per GH issue per user. WHERE clause skips draft / orphan arcs.
+--    per GH issue per user. user_id is a leading key column so two
+--    different users can each own an arc for the same GH issue (the
+--    backfill mints one arc per (user_id, kata_issue) pair below);
+--    omitting user_id makes the backfill collide on the second user
+--    that ever opened the same issue. WHERE clause skips draft /
+--    orphan arcs (external_ref NULL).
 CREATE UNIQUE INDEX idx_arcs_external_ref
-  ON arcs(json_extract(external_ref, '$.provider'), json_extract(external_ref, '$.id'))
+  ON arcs(user_id, json_extract(external_ref, '$.provider'), json_extract(external_ref, '$.id'))
   WHERE external_ref IS NOT NULL;
 --> statement-breakpoint
 
