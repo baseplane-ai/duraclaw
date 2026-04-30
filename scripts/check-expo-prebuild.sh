@@ -59,13 +59,20 @@ do
   fi
 done
 
-# Verify the generated AndroidManifest.xml carries the new package id
-# (com.baseplane.duraclaw.rn). If the Expo config plugin chain misread
+# Verify the generated AndroidManifest.xml carries the package id
+# declared in app.json. If the Expo config plugin chain misread
 # app.json, the package would default to something else and the gate
-# should catch it.
+# should catch it. Reads the source of truth from app.json so the gate
+# tracks Decision-7 reversals (e.g. dropping .rn for in-place reuse of
+# the existing Firebase project) without manual edits here.
 MANIFEST="$ANDROID_DIR/app/src/main/AndroidManifest.xml"
-if ! grep -q 'com.baseplane.duraclaw.rn' "$ANDROID_DIR/app/build.gradle"; then
-  echo "ERROR: app/build.gradle missing com.baseplane.duraclaw.rn package id" >&2
+EXPECTED_PKG=$(node -e "console.log(require('./apps/mobile-expo/app.json').expo.android.package)")
+if [[ -z "$EXPECTED_PKG" ]]; then
+  echo "ERROR: could not read expo.android.package from apps/mobile-expo/app.json" >&2
+  exit 1
+fi
+if ! grep -q "$EXPECTED_PKG" "$ANDROID_DIR/app/build.gradle"; then
+  echo "ERROR: app/build.gradle missing expected package id ($EXPECTED_PKG)" >&2
   exit 1
 fi
 
