@@ -19,6 +19,9 @@ case "${1:-}" in
     ;;
 esac
 
+printf 'Checking migration prefix collisions vs canonical main...\n'
+bash "$repo_root/scripts/check-migration-collision.sh"
+
 printf 'Running Biome on staged JS/TS/JSON files...\n'
 staged_files="$(
   git diff --cached --name-only --diff-filter=ACMR |
