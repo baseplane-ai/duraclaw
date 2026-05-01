@@ -1,0 +1,31 @@
+name: migration-collision
+
+# Detects D1 migration prefix collisions on PRs. Pairs with the local
+# pre-commit hook (`scripts/check-migration-collision.sh`) — the hook
+# catches you-vs-shipped-main, this catches branch-vs-branch (two PRs
+# both adding the same prefix and only colliding when the second merges).
+#
+# To make this a required check, after the workflow has run on at least
+# one PR, an admin runs:
+#
+#   gh api -X PATCH \
+#     repos/baseplane-ai/duraclaw/branches/main/protection/required_status_checks \
+#     -f strict=true -F 'contexts[]=migration-collision / check'
+#
+# `strict=true` forces "branches up to date before merging", which makes
+# the check re-run against the latest base after rebase.
+
+on:
+  pull_request:
+    paths:
+      - 'apps/orchestrator/migrations/**'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check migration prefix collisions vs PR base
+        run: BASE_REF=origin/${{ github.base_ref }} bash scripts/check-migration-collision-ci.sh
