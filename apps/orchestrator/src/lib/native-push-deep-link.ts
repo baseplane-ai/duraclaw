@@ -34,7 +34,7 @@
  */
 
 import { lifecycleEventSource } from '~/lib/connection-manager/lifecycle'
-import { isNative } from '~/lib/platform'
+import { isExpoNative, isNative } from '~/lib/platform'
 
 type DeepLinkSubscriber = (sessionId: string) => void
 const subscribers = new Set<DeepLinkSubscriber>()
@@ -103,6 +103,21 @@ function fanoutPending(reason: string): boolean {
  * null if the URL is malformed, points elsewhere, or is cross-origin.
  */
 function extractSessionId(url: string): string | null {
+  // On Expo native there is no `window` but URL parsing still works
+  // because RN polyfills the WHATWG URL constructor. The same-origin
+  // guard is web-only — on native the URL is always interpreted
+  // relative to the app's deep-link scheme, not an HTTP origin.
+  if (isExpoNative()) {
+    let parsed: URL
+    try {
+      parsed = new URL(url, 'duraclaw://')
+    } catch {
+      return null
+    }
+    const session = parsed.searchParams.get('session')
+    return session && session.length > 0 ? session : null
+  }
+
   if (typeof window === 'undefined') return null
   let parsed: URL
   try {
@@ -123,6 +138,7 @@ function extractSessionId(url: string): string | null {
  * Idempotent. Safe to call eagerly from `bootstrap()`. No-op on web.
  */
 export async function initNativePushDeepLink(): Promise<void> {
+  if (isExpoNative()) return initExpoNativePushDeepLink()
   if (!isNative()) return
   if (initialized) return
   initialized = true
@@ -172,6 +188,86 @@ export async function initNativePushDeepLink(): Promise<void> {
     }
   } catch (err) {
     console.warn('[push] native deep-link setup failed:', err)
+  }
+}
+
+/**
+ * Expo native deep-link installer — replaces the Capacitor branch on
+ * Metro builds.
+ *
+ * Two channels (RN-Firebase analogues of Capacitor's
+ * pushNotificationActionPerformed):
+ *
+ *   1. Cold-start tap: `messaging().getInitialNotification()` returns
+ *      the notification that launched the app from a fully-killed
+ *      state. Must be called BEFORE React mount; the result drains
+ *      via `consumePendingDeepLink()` on first commit.
+ *
+ *   2. Background-tap (warm-start): `messaging().onNotificationOpenedApp()`
+ *      fires when the user taps a tray notification while the app is
+ *      backgrounded. Routes through the same `pendingDeepLink` slot.
+ *
+ *   3. Foreground messages: `messaging().onMessage()` fires when a
+ *      push arrives while the app is in the foreground. Currently we
+ *      don't render an in-app notification — the message is logged
+ *      and dropped (parity with the Capacitor `pushNotificationReceived`
+ *      handler which is also a no-op).
+ */
+async function initExpoNativePushDeepLink(): Promise<void> {
+  if (initialized) return
+  initialized = true
+
+  try {
+    // @vite-ignore: dynamic import is gated by isExpoNative() and resolves
+    // only on Metro builds. apps/orchestrator does not depend on
+    // @react-native-firebase/messaging directly — it lives in
+    // apps/mobile-expo's node_modules at runtime.
+    type MessagingFn = () => {
+      getInitialNotification: () => Promise<{ data?: { sessionId?: string } } | null>
+      onNotificationOpenedApp: (cb: (m: { data?: { sessionId?: string } }) => void) => () => void
+      onMessage: (cb: (m: { data?: Record<string, string> }) => void) => () => void
+    }
+    const messagingMod = (await import(
+      /* @vite-ignore */ '@react-native-firebase/messaging'
+    )) as unknown as MessagingFn | { default: MessagingFn }
+    const messaging: MessagingFn =
+      (messagingMod as { default?: MessagingFn }).default ?? (messagingMod as MessagingFn)
+
+    // Cold-start tap — drain on first call. Synchronous if the
+    // messaging native module already has the value cached; the
+    // promise typically resolves within ms of bridge ready.
+    const initial = await messaging().getInitialNotification()
+    if (initial?.data?.sessionId) {
+      pendingDeepLink = `/?session=${initial.data.sessionId}`
+      console.info(`[push] cold-start tap → pending deep-link: ${pendingDeepLink}`)
+    }
+
+    // Background-tap (warm-start)
+    messaging().onNotificationOpenedApp((remoteMessage) => {
+      const sessionId = (remoteMessage?.data?.sessionId ?? '') as string
+      if (!sessionId) return
+      pendingDeepLink = `/?session=${sessionId}`
+      console.info(
+        `[push] background tap → pending deep-link: ${pendingDeepLink} (subscribers=${subscribers.size})`,
+      )
+      fanoutPending('tap')
+    })
+
+    // Foreground message — for parity with Capacitor we currently log
+    // and drop. A future iteration could surface an in-app banner.
+    messaging().onMessage((remoteMessage) => {
+      console.info('[push] foreground message:', JSON.stringify(remoteMessage?.data ?? {}))
+    })
+
+    if (!lifecycleUnsub) {
+      lifecycleUnsub = lifecycleEventSource.subscribe((event) => {
+        if (event === 'foreground' || event === 'visible') {
+          fanoutPending(`lifecycle:${event}`)
+        }
+      })
+    }
+  } catch (err) {
+    console.warn('[push] expo-native deep-link setup failed:', err)
   }
 }
 

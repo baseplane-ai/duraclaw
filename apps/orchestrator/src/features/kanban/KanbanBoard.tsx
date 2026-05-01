@@ -29,6 +29,7 @@ import {
 } from '@dnd-kit/core'
 import { useLiveQuery } from '@tanstack/react-db'
 import { useCallback, useMemo, useState } from 'react'
+import { Platform } from 'react-native'
 import { toast } from 'sonner'
 import { Header } from '~/components/layout/header'
 import { Main } from '~/components/layout/main'
@@ -85,6 +86,23 @@ function parseDropId(id: string): { lane: string; column: KanbanColumn } | null 
 const ALL_PROJECTS = '__all__'
 
 export function KanbanBoard() {
+  // GH#132 P3.3 (B7): native render uses react-native-reanimated-dnd
+  // primitives. The full integration (column DropProviders + Draggable
+  // ArcCards + onDrop → advanceArc round-trip) is ~200 LOC and is
+  // implemented in `KanbanBoardNative.tsx` (lazy-loaded so web bundles
+  // never import react-native-reanimated-dnd). The current native
+  // module is a placeholder pending the use-and-fix gate; it renders a
+  // read-only list of arcs grouped by lane so the /board route still
+  // mounts without crashing.
+  if (Platform.OS !== 'web') {
+    // Lazy import via a relative path resolved by Metro at bundle time.
+    // The web build never reaches this branch so Vite never tries to
+    // resolve KanbanBoardNative — keeps `react-native-reanimated-dnd`
+    // out of the orchestrator web bundle.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const KanbanBoardNative = require('./KanbanBoardNative').KanbanBoardNative
+    return <KanbanBoardNative />
+  }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data, isLoading } = useLiveQuery(arcsCollection as any)
   const { isCollapsed, toggle } = useKanbanLanes()

@@ -1,0 +1,56 @@
+{
+  "expo": {
+    "name": "Duraclaw",
+    "slug": "duraclaw",
+    "version": "0.1.0",
+    "orientation": "default",
+    "scheme": "duraclaw",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "android": {
+      "package": "com.baseplane.duraclaw",
+      "versionCode": 1,
+      "googleServicesFile": "./google-services.json",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ]
+    },
+    "plugins": [
+      "expo-secure-store",
+      "expo-updates",
+      "@react-native-firebase/app",
+      "@react-native-firebase/messaging",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "newArchEnabled": true,
+            "minSdkVersion": 26,
+            "compileSdkVersion": 36,
+            "targetSdkVersion": 36
+          }
+        }
+      ]
+    ],
+    "updates": {
+      "url": "https://duraclaw.baseplane.ai/api/mobile/eas/manifest",
+      "channel": "production",
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 30000,
+      "enabled": true
+    },
+    "runtimeVersion": {
+      "policy": "fingerprint"
+    },
+    "extra": {
+      "apiBaseUrl": "https://duraclaw.baseplane.ai",
+      "workerPublicUrl": "wss://duraclaw.baseplane.ai"
+    }
+  }
+}

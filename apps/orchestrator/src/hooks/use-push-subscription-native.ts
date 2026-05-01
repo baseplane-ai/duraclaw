@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { apiUrl } from '~/lib/platform'
+import { apiUrl, isExpoNative } from '~/lib/platform'
 
 type Permission = 'prompt' | 'granted' | 'denied' | 'unsupported'
 
@@ -56,6 +56,63 @@ export function usePushSubscriptionNative() {
 
   useEffect(() => {
     let cleanup: (() => void) | null = null
+
+    // Expo native (Metro): @react-native-firebase/messaging instead of
+    // @capacitor/push-notifications. The on-token-refresh listener is
+    // the analogue of Capacitor's `registration` event; missing-FCM
+    // (no google-services.json) surfaces as a thrown error from
+    // getToken(), same fail-soft path as the Capacitor branch.
+    if (isExpoNative()) {
+      ;(async () => {
+        try {
+          type MessagingFn = () => {
+            onTokenRefresh: (cb: (token: string) => void | Promise<void>) => () => void
+            requestPermission: () => Promise<number>
+            getToken: () => Promise<string>
+          }
+          const messagingMod = (await import(
+            /* @vite-ignore */ '@react-native-firebase/messaging'
+          )) as unknown as MessagingFn | { default: MessagingFn }
+          const messaging: MessagingFn =
+            (messagingMod as { default?: MessagingFn }).default ?? (messagingMod as MessagingFn)
+
+          // Token refresh listener — fires when FCM rotates the token.
+          const refreshUnsub = messaging().onTokenRefresh(async (newToken) => {
+            console.info('[push] FCM token refresh, length:', newToken?.length)
+            setToken(newToken)
+            setIsSubscribed(true)
+            await postTokenToServer(newToken)
+          })
+          cleanup = () => refreshUnsub()
+
+          if (!autoSubscribeAttempted.current) {
+            autoSubscribeAttempted.current = true
+            // Android 13+ runtime permission. requestPermission returns
+            // an authorization status enum (0=notDetermined, 1=denied,
+            // 2=authorized, 3=provisional). We treat 2 and 3 as granted.
+            const authStatus = await messaging().requestPermission()
+            const granted = authStatus === 1 || authStatus === 2
+            setPermission(granted ? 'granted' : authStatus === 0 ? 'prompt' : 'denied')
+            if (granted) {
+              const fcmToken = await messaging().getToken()
+              if (fcmToken) {
+                setToken(fcmToken)
+                setIsSubscribed(true)
+                await postTokenToServer(fcmToken)
+              }
+            }
+          }
+        } catch (err) {
+          // FCM not configured (missing google-services.json) — fail gracefully
+          console.warn('[push] expo-native push setup failed:', err)
+          setPermission('unsupported')
+        }
+      })()
+      return () => {
+        cleanup?.()
+      }
+    }
+
     ;(async () => {
       try {
         const { PushNotifications } = await import('@capacitor/push-notifications')
@@ -103,6 +160,34 @@ export function usePushSubscriptionNative() {
   }, [])
 
   const subscribe = useCallback(async () => {
+    if (isExpoNative()) {
+      try {
+        type MessagingFn = () => {
+          requestPermission: () => Promise<number>
+          getToken: () => Promise<string>
+        }
+        const messagingMod = (await import(
+          /* @vite-ignore */ '@react-native-firebase/messaging'
+        )) as unknown as MessagingFn | { default: MessagingFn }
+        const messaging: MessagingFn =
+          (messagingMod as { default?: MessagingFn }).default ?? (messagingMod as MessagingFn)
+        const authStatus = await messaging().requestPermission()
+        const granted = authStatus === 1 || authStatus === 2
+        setPermission(granted ? 'granted' : 'denied')
+        if (!granted) return false
+        const fcmToken = await messaging().getToken()
+        if (fcmToken) {
+          setToken(fcmToken)
+          setIsSubscribed(true)
+          await postTokenToServer(fcmToken)
+        }
+        return true
+      } catch (err) {
+        console.warn('[push] expo-native registration failed:', err)
+        setPermission('unsupported')
+        return false
+      }
+    }
     try {
       const { PushNotifications } = await import('@capacitor/push-notifications')
       const status = await PushNotifications.requestPermissions()

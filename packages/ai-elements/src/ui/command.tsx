@@ -4,23 +4,35 @@ import type { DialogProps } from '@radix-ui/react-dialog'
 import { Command as CommandPrimitive } from 'cmdk'
 import { Search } from 'lucide-react'
 import * as React from 'react'
+import { Platform, View } from 'react-native'
 
 import { cn } from '../lib/utils'
 import { Dialog, DialogContent } from './dialog'
 
+// GH#132 P3.3 (B8): cmdk depends on web focus management primitives
+// (document.activeElement, focusin/focusout). Feature-gated per
+// Decision #11 — native renders an empty container; sub-components
+// (CommandInput etc.) are dropped because they're children of this
+// placeholder. A FlatList + TextInput native fallback is a deferred
+// follow-up issue.
 const Command = React.forwardRef<
   React.ElementRef<typeof CommandPrimitive>,
   React.ComponentPropsWithoutRef<typeof CommandPrimitive>
->(({ className, ...props }, ref) => (
-  <CommandPrimitive
-    ref={ref}
-    className={cn(
-      'flex h-full w-full flex-col overflow-hidden rounded-md bg-popover text-popover-foreground',
-      className,
-    )}
-    {...props}
-  />
-))
+>(({ className, ...props }, ref) => {
+  if (Platform.OS !== 'web') {
+    return <View accessibilityLabel="command palette (web only)" />
+  }
+  return (
+    <CommandPrimitive
+      ref={ref}
+      className={cn(
+        'flex h-full w-full flex-col overflow-hidden rounded-md bg-popover text-popover-foreground',
+        className,
+      )}
+      {...props}
+    />
+  )
+})
 Command.displayName = CommandPrimitive.displayName
 
 const CommandDialog = ({ children, ...props }: DialogProps) => {

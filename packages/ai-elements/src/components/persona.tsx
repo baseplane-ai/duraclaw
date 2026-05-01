@@ -10,6 +10,7 @@ import {
 } from '@rive-app/react-webgl2'
 import type { FC, ReactNode } from 'react'
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { Platform, View } from 'react-native'
 import { cn } from '../lib/utils'
 
 // Delays Rive initialization by one frame so that React Strict Mode's
@@ -181,6 +182,24 @@ export const Persona: FC<PersonaProps> = memo(
     onStop,
     className,
   }) => {
+    // GH#132 P3.3 (B8): Rive uses WebGL2 — no native renderer in scope
+    // for P3 (Decision #10). Render a static neutral avatar placeholder
+    // (~30 LOC equivalent) so persona-anchored UI doesn't shift layout.
+    if (Platform.OS !== 'web') {
+      const _ = state // mark as used; native placeholder is state-agnostic
+      return (
+        <View
+          accessibilityLabel="persona avatar"
+          style={{
+            backgroundColor: '#888',
+            borderRadius: 32,
+            height: 64,
+            width: 64,
+          }}
+        />
+      )
+    }
+
     const source = sources[variant]
 
     if (!source) {

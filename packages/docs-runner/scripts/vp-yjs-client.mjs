@@ -32,12 +32,12 @@
 //   hold SECS             Connect, hold the WS open SECS seconds.
 
 import { createHash } from 'node:crypto'
-import * as Y from 'yjs'
-import * as syncProtocol from 'y-protocols/sync'
-import * as awarenessProtocol from 'y-protocols/awareness'
-import * as encoding from 'lib0/encoding'
 import * as decoding from 'lib0/decoding'
+import * as encoding from 'lib0/encoding'
 import { WebSocket } from 'ws'
+import * as awarenessProtocol from 'y-protocols/awareness'
+import * as syncProtocol from 'y-protocols/sync'
+import * as Y from 'yjs'
 import { markdownToYDoc, yDocToMarkdown } from '../dist/index.js'
 
 const MSG_SYNC = 0
@@ -45,8 +45,13 @@ const MSG_AWARENESS = 1
 const FRAGMENT_NAME = 'document-store'
 const META_MAP_NAME = 'meta'
 
-function log(...a) { console.error('[yjs-client]', ...a) }
-function fail(msg) { console.error('[yjs-client][FAIL]', msg); process.exit(1) }
+function log(...a) {
+  console.error('[yjs-client]', ...a)
+}
+function fail(msg) {
+  console.error('[yjs-client][FAIL]', msg)
+  process.exit(1)
+}
 
 function deriveEntityId(projectId, relPath) {
   return createHash('sha256').update(`${projectId}:${relPath}`).digest('hex').slice(0, 16)
@@ -67,7 +72,9 @@ async function connect() {
   ws.binaryType = 'arraybuffer'
 
   let resolveSynced
-  const synced = new Promise((r) => { resolveSynced = r })
+  const synced = new Promise((r) => {
+    resolveSynced = r
+  })
 
   ws.on('open', () => {
     log('open — sending sync step 1')
@@ -78,7 +85,11 @@ async function connect() {
   })
 
   ws.on('message', (data) => {
-    const u8 = new Uint8Array(data instanceof ArrayBuffer ? data : data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength))
+    const u8 = new Uint8Array(
+      data instanceof ArrayBuffer
+        ? data
+        : data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength),
+    )
     const dec = decoding.createDecoder(u8)
     const messageType = decoding.readVarUint(dec)
     if (messageType === MSG_SYNC) {
@@ -97,8 +108,12 @@ async function connect() {
     }
   })
 
-  ws.on('close', (code, reason) => { log('close', { code, reason: reason?.toString?.() }) })
-  ws.on('error', (err) => { log('error', { message: err.message }) })
+  ws.on('close', (code, reason) => {
+    log('close', { code, reason: reason?.toString?.() })
+  })
+  ws.on('error', (err) => {
+    log('error', { message: err.message })
+  })
 
   await synced
   return { ws, ydoc, awareness }
@@ -121,7 +136,7 @@ async function main() {
 
   if (op === 'read') {
     const { ws, ydoc } = await connect()
-    process.stdout.write((await currentMarkdown(ydoc)) + '\n')
+    process.stdout.write(`${await currentMarkdown(ydoc)}\n`)
     ws.close()
     process.exit(0)
   }
@@ -130,7 +145,9 @@ async function main() {
     const { ws, ydoc } = await connect()
     const fragLen = ydoc.getXmlFragment(FRAGMENT_NAME).length
     const meta = ydoc.getMap(META_MAP_NAME)
-    process.stdout.write(JSON.stringify({ fragmentBlocks: fragLen, metaKeys: [...meta.keys()] }) + '\n')
+    process.stdout.write(
+      `${JSON.stringify({ fragmentBlocks: fragLen, metaKeys: [...meta.keys()] })}\n`,
+    )
     ws.close()
     process.exit(0)
   }
@@ -150,8 +167,8 @@ async function main() {
     ydoc.on('update', collect)
 
     const before = await currentMarkdown(ydoc)
-    const sep = before.endsWith('\n\n') ? '' : (before.endsWith('\n') ? '\n' : '\n\n')
-    const after = before + sep + text + '\n'
+    const sep = before.endsWith('\n\n') ? '' : before.endsWith('\n') ? '\n' : '\n\n'
+    const after = `${before + sep + text}\n`
     await markdownToYDoc(after, ydoc)
 
     ydoc.off('update', collect)

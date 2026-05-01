@@ -1,6 +1,6 @@
 import { adminClient } from 'better-auth/client/plugins'
 import { createAuthClient } from 'better-auth/react'
-import { apiBaseUrl, isNative } from './platform'
+import { apiBaseUrl, isExpoNative, isNative } from './platform'
 
 const baseURL =
   typeof window === 'undefined'
@@ -10,6 +10,15 @@ const baseURL =
 type ResolvedAuthClient = ReturnType<typeof createAuthClient>
 
 async function buildAuthClient(): Promise<ResolvedAuthClient> {
+  // Expo native (Metro): `@better-auth/expo` is plugin-shaped, not
+  // config-wrapper-shaped. The shim in `auth-client-expo.ts` hides the
+  // shape difference. Dynamic import keeps the plugin out of the Vite
+  // web/Capacitor bundles.
+  if (isExpoNative()) {
+    // @vite-ignore: gated by isExpoNative — never reached on Vite builds.
+    const { buildExpoAuthClient } = await import(/* @vite-ignore */ './auth-client-expo')
+    return (await buildExpoAuthClient(baseURL)) as unknown as ResolvedAuthClient
+  }
   if (isNative()) {
     // Dynamic import keeps better-auth-capacitor out of the web bundle —
     // the `if (isNative())` branch is dead-code-eliminated when

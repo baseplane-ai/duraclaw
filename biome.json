@@ -90,6 +90,40 @@
       }
     },
     {
+      "includes": [
+        "apps/orchestrator/src/native/**",
+        "apps/orchestrator/src/db/persistence-op-sqlite.ts",
+        "apps/orchestrator/src/lib/auth-client-expo.ts",
+        "apps/orchestrator/src/features/kanban/KanbanBoard.tsx",
+        "apps/orchestrator/src/features/kanban/KanbanBoardNative.tsx",
+        "apps/orchestrator/src/entry-rn.tsx",
+        "apps/orchestrator/src/lib/connection-manager/lifecycle.ts",
+        "apps/orchestrator/src/lib/native-push-deep-link.ts",
+        "apps/orchestrator/src/hooks/use-push-subscription-native.ts",
+        "packages/ai-elements/src/components/canvas.tsx",
+        "packages/ai-elements/src/components/jsx-preview.tsx",
+        "packages/ai-elements/src/components/persona.tsx",
+        "packages/ai-elements/src/components/audio-player.tsx",
+        "packages/ai-elements/src/components/conversation.tsx",
+        "packages/ai-elements/src/ui/command.tsx",
+        "packages/ai-elements/src/ui/carousel.tsx",
+        "packages/op-sqlite-tanstack-persistence/**"
+      ],
+      "linter": {
+        "rules": {
+          "correctness": {
+            "useHookAtTopLevel": "off"
+          },
+          "style": {
+            "noCommonJs": "off"
+          },
+          "suspicious": {
+            "noExplicitAny": "off"
+          }
+        }
+      }
+    },
+    {
       "includes": ["apps/orchestrator/src/**"],
       "linter": {
         "rules": {

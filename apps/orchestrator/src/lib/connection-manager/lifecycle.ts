@@ -1,4 +1,4 @@
-import { isNative } from '~/lib/platform'
+import { isExpoNative, isNative } from '~/lib/platform'
 
 export type LifecycleEvent =
   | 'foreground'
@@ -49,6 +49,12 @@ function emit(event: LifecycleEvent): void {
 }
 
 function install(): () => void {
+  // Expo native (Metro): no `window`/`document` — use AppState +
+  // @react-native-community/netinfo for the same six events.
+  if (isExpoNative()) {
+    return installExpoNative()
+  }
+
   if (typeof window === 'undefined') {
     // SSR: no-op teardown.
     return () => {}
@@ -138,6 +144,85 @@ function subscribe(fn: Listener): () => void {
     if (listeners.size === 0 && teardown) {
       teardown()
       teardown = null
+    }
+  }
+}
+
+/**
+ * Expo native installer — replaces the Capacitor branch on Metro builds.
+ *
+ *   foreground / background — `AppState.addEventListener('change', ...)`
+ *   online / offline        — `NetInfo.addEventListener(...)` + a
+ *                             one-shot `NetInfo.fetch()` seed (parity
+ *                             with the Capacitor `Network.getStatus()`
+ *                             seed: launch-while-offline must emit
+ *                             `offline` so the reconnect path arms on
+ *                             regain).
+ *   visible / hidden        — coalesced with foreground/background on
+ *                             native (no separate document.visibility
+ *                             concept). We emit foreground/background
+ *                             only; consumers that read `visible/hidden`
+ *                             on web treat them equivalently.
+ */
+function installExpoNative(): () => void {
+  let cancelled = false
+  const removers: Array<() => void> = []
+
+  ;(async () => {
+    try {
+      const [{ AppState }, NetInfoMod] = await Promise.all([
+        import('react-native'),
+        import(/* @vite-ignore */ '@react-native-community/netinfo'),
+      ])
+      if (cancelled) return
+
+      const NetInfo =
+        (
+          NetInfoMod as unknown as {
+            default?: {
+              addEventListener: (...a: unknown[]) => () => void
+              fetch: () => Promise<{ isConnected: boolean }>
+            }
+          }
+        ).default ??
+        (NetInfoMod as unknown as {
+          addEventListener: (...a: unknown[]) => () => void
+          fetch: () => Promise<{ isConnected: boolean }>
+        })
+
+      const appSub = AppState.addEventListener('change', (state) => {
+        emit(state === 'active' ? 'foreground' : 'background')
+      })
+      removers.push(() => appSub.remove())
+
+      const netUnsub = NetInfo.addEventListener((state: { isConnected: boolean }) => {
+        emit(state.isConnected ? 'online' : 'offline')
+      })
+      removers.push(() => netUnsub())
+
+      // Seed: NetInfo's listener does NOT fire on init. Without this,
+      // launching offline leaves the manager thinking we're online —
+      // no reconnect on regain. (Same shape as the Capacitor branch.)
+      try {
+        const state = await NetInfo.fetch()
+        if (cancelled) return
+        emit(state.isConnected ? 'online' : 'offline')
+      } catch (err) {
+        console.warn('[cm-lifecycle] NetInfo.fetch threw', err)
+      }
+    } catch (err) {
+      console.warn('[cm-lifecycle] expo-native lifecycle import failed', err)
+    }
+  })()
+
+  return () => {
+    cancelled = true
+    for (const r of removers) {
+      try {
+        r()
+      } catch {
+        // ignore
+      }
     }
   }
 }

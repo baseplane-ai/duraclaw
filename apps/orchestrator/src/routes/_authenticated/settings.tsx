@@ -464,9 +464,7 @@ function ProjectsSection() {
                     <div className="flex min-w-0 flex-1 items-center gap-2">
                       <span className="truncate font-mono">{p.name}</span>
                       <VisibilityBadge visibility={visibility} showLabel />
-                      <span className="text-xs text-muted-foreground">
-                        Owner: {ownerLabel}
-                      </span>
+                      <span className="text-xs text-muted-foreground">Owner: {ownerLabel}</span>
                     </div>
                     <div className="flex items-center gap-2">
                       {err && <span className="text-xs text-destructive">{err}</span>}

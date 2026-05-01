@@ -1169,6 +1169,104 @@ export function createApiApp() {
     return new Response(obj.body, { headers })
   })
 
+  // ── GH#132 P3.4: self-hosted EAS Update routes ───────────────────
+  //
+  // Two public routes that serve the expo-updates protocol against
+  // the duraclaw-mobile R2 bucket:
+  //
+  //   GET /api/mobile/eas/manifest?runtimeVersion=&platform=&channel=
+  //     Two-step read:
+  //       1. ota/expo/<runtimeVersion>/<platform>/<channel>/latest.json
+  //          → { updateId, createdAt }
+  //       2. ota/expo/<runtimeVersion>/<platform>/<updateId>/metadata.json
+  //          → manifest body (launchAsset + assets[] + metadata + extra)
+  //     Asset URLs in the metadata are rewritten to point at the
+  //     /api/mobile/eas/assets/* route below so they're same-origin
+  //     and authenticated by being bound to the bucket binding only.
+  //
+  //   GET /api/mobile/eas/assets/<key>
+  //     Streams the R2 object at <key> (must be a key under
+  //     ota/expo/...). No auth — same shape as /api/mobile/assets/*.
+  //
+  // Both registered BEFORE `app.use('/api/*', authMiddleware)` (parity
+  // with the existing /api/mobile/updates/manifest + /apk/latest +
+  // /assets/* routes) so an expired-session user can still fetch
+  // OTA updates. MOBILE_ASSETS R2 binding is optional: if unbound,
+  // 404 cleanly per spec hint (don't 500). Atomic-pointer convention
+  // (write per-update objects first, latest.json last) means a partial
+  // upload never breaks the manifest endpoint.
+  app.get('/api/mobile/eas/manifest', async (c) => {
+    if (!c.env.MOBILE_ASSETS) {
+      return c.text('No update available', 404)
+    }
+
+    const runtimeVersion = c.req.query('runtimeVersion')
+    const platform = c.req.query('platform') ?? 'android'
+    const channel = c.req.query('channel') ?? 'production'
+    if (!runtimeVersion) {
+      return c.text('runtimeVersion required', 400)
+    }
+    if (platform !== 'android' && platform !== 'ios') {
+      return c.text('unsupported platform', 400)
+    }
+
+    const pointerKey = `ota/expo/${runtimeVersion}/${platform}/${channel}/latest.json`
+    const ptrObj = await c.env.MOBILE_ASSETS.get(pointerKey)
+    if (!ptrObj) {
+      return c.text('No update available', 404)
+    }
+
+    let pointer: { updateId?: string; createdAt?: string }
+    try {
+      pointer = await ptrObj.json<{ updateId: string; createdAt: string }>()
+    } catch {
+      return c.text('Malformed pointer', 502)
+    }
+    if (!pointer.updateId) {
+      return c.text('Pointer missing updateId', 502)
+    }
+
+    const metaKey = `ota/expo/${runtimeVersion}/${platform}/${pointer.updateId}/metadata.json`
+    const metaObj = await c.env.MOBILE_ASSETS.get(metaKey)
+    if (!metaObj) {
+      // Pointer references an updateId whose metadata hasn't been
+      // uploaded yet — race between pointer-write and metadata-write
+      // is impossible per the build script's ordering, but stale
+      // pointers (manual cleanup, R2 lifecycle delete) should 404
+      // rather than 500.
+      return c.text('Stale pointer; metadata missing', 404)
+    }
+
+    let manifest: Record<string, unknown>
+    try {
+      manifest = (await metaObj.json()) as Record<string, unknown>
+    } catch {
+      return c.text('Malformed metadata', 502)
+    }
+
+    // expo-updates protocol headers — unset = client ignores update.
+    c.header('expo-protocol-version', '1')
+    c.header('expo-sfv-version', '0')
+    c.header('cache-control', 'private, max-age=0, must-revalidate')
+    return c.json(manifest)
+  })
+
+  app.get('/api/mobile/eas/assets/*', async (c) => {
+    if (!c.env.MOBILE_ASSETS) return c.body('Not found', 404)
+    const url = new URL(c.req.url)
+    const key = url.pathname.replace(/^\/api\/mobile\/eas\/assets\//, '')
+    if (!key?.startsWith('ota/expo/')) return c.body('Not found', 404)
+    const obj = await c.env.MOBILE_ASSETS.get(key)
+    if (!obj) return c.body('Not found', 404)
+    const headers = new Headers()
+    obj.writeHttpMetadata(headers)
+    headers.set('ETag', obj.httpEtag)
+    // Each asset is content-addressed by hash within the per-update
+    // path, so the path itself is immutable. Long cache safe.
+    headers.set('Cache-Control', 'public, max-age=31536000, immutable')
+    return new Response(obj.body, { headers })
+  })
+
   // ── Session media (R2-backed images) — GH#65 ─────────────────────
   // Streams image bytes from the SESSION_MEDIA R2 bucket. Placed before
   // authMiddleware so images render even when the session cookie is being

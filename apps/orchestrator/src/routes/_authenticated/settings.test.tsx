@@ -44,6 +44,7 @@ vi.mock('~/lib/auth-client', () => ({
 vi.mock('~/lib/platform', () => ({
   apiUrl: (p: string) => p,
   isNative: () => false,
+  isExpoNative: () => false,
 }))
 
 // Mock projectsCollection — the live query just needs to resolve; in the

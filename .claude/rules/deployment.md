@@ -5,21 +5,53 @@ triggers the pipeline that builds and ships both the orchestrator (CF
 Workers) and the agent-gateway (systemd on VPS). Do not run `pnpm ship`,
 `wrangler deploy`, or the gateway install script manually.
 
-**Infra-pipeline contract for mobile OTA** — the pipeline must (a)
-build the orchestrator with `VITE_APP_VERSION` stamped in, and (b)
-run `scripts/build-mobile-ota-bundle.sh` with `CLOUDFLARE_API_TOKEN` +
-`CLOUDFLARE_ACCOUNT_ID` in-env so the script uploads the zip + the
-`ota/version.json` pointer to the `duraclaw-mobile` R2 bucket. Without
-step (b) the OTA channel is dead — every native shell polls, sees no
-newer version, and stays on the bundle the APK shipped with.
+**Infra-pipeline contract for mobile OTA** — during the GH#132 P3
+sunset window the pipeline runs **two parallel OTA channels** against
+the same `duraclaw-mobile` R2 bucket (key namespaces don't overlap):
+
+  (a) Build the orchestrator with `VITE_APP_VERSION` stamped in.
+  (b) **Capacitor channel (sunsetting — `apps/mobile/`)**: run
+      `scripts/build-mobile-ota-bundle.sh` with `CLOUDFLARE_API_TOKEN`
+      + `CLOUDFLARE_ACCOUNT_ID` in-env so the script uploads the zip
+      + the `ota/version.json` pointer. Removed in the post-merge
+      cleanup follow-up.
+  (c) **Expo channel (GA — `apps/mobile-expo/`, GH#132 P3.4)**: run
+      `scripts/build-mobile-expo-ota.sh` with the same secrets so the
+      script `expo export`s the JS bundle + assets, uploads per-update
+      objects under `ota/expo/<runtimeVersion>/<platform>/<updateId>/`,
+      and atomically writes the channel pointer
+      `ota/expo/<runtimeVersion>/<platform>/<channel>/latest.json`
+      LAST. The pointer-last write order means a partial upload never
+      breaks the `/api/mobile/eas/manifest` route (Worker reads the
+      pointer first; missing pointer = "no update available" 404).
+
+Without (b) the legacy Capgo channel is dead. Without (c) the Expo
+channel is dead — every Expo APK polls `/api/mobile/eas/manifest`,
+sees no manifest, and stays on the bundle the APK shipped with.
+
+**Expo runtimeVersion strategy** — `'fingerprint'` (set in
+`apps/mobile-expo/app.json`). Bumping a native dep changes the
+fingerprint; the new fingerprint's manifest is uploaded only after a
+fresh APK is built and installed (otherwise old-runtime clients
+crash on the new bundle). Old runtime version's clients ignore the
+new manifest (the manifest endpoint returns 404 for their
+fingerprint), so they stay on their bundle until they install the
+new APK. JS-only changes (no native dep change) ship as
+same-fingerprint OTA updates.
 
 ```bash
 export APP_VERSION=$(git rev-parse --short HEAD)
 VITE_APP_VERSION="$APP_VERSION" \
   pnpm --filter @duraclaw/orchestrator build
-bash scripts/build-mobile-ota-bundle.sh   # emits zip + version.json locally
-# Infra pipeline uploads the zip + version.json to R2 (duraclaw-mobile bucket)
-# and then deploys the Worker.
+
+# Capacitor (sunsetting)
+bash scripts/build-mobile-ota-bundle.sh         # emits zip + version.json locally
+# Expo (GA)
+bash scripts/build-mobile-expo-ota.sh           # uploads per-update + pointer to R2
+
+# Infra pipeline uploads (b)'s zip + version.json to R2 and runs (c)
+# in-line via wrangler r2 object put (CLOUDFLARE_* env vars from secrets),
+# then deploys the Worker:
 wrangler deploy --cwd apps/orchestrator
 ```
 

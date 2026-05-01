@@ -16,7 +16,7 @@
 }
 
 .faded-bottom::after {
-  content: '';
+  content: "";
   pointer-events: none;
   position: absolute;
   inset-inline-start: 0;
