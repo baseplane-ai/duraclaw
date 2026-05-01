@@ -17,6 +17,12 @@
 //      delegated to a React hook that reads useSession() against the
 //      fully-resolved auth client.
 
+// MUST be the very first import: installs globalThis.crypto.getRandomValues
+// polyfill (Hermes has no crypto API by default; op-sqlite + many libs depend
+// on it). Imported before anything else so subsequent module evaluation can
+// rely on globalThis.crypto. Web/Vite gets the browser's native crypto and
+// this import is no-op-ish on web (the polyfill detects existing impl).
+import 'react-native-get-random-values'
 import '@expo/metro-runtime'
 import { useEffect, useState } from 'react'
 import { ActivityIndicator, AppRegistry, View } from 'react-native'

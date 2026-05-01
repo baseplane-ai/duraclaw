@@ -10,6 +10,33 @@ declare global {
   }
 }
 
+// On the Expo native build, `import.meta.env` is undefined at runtime
+// (babel-preset-expo's unstable_transformImportMeta replaces import.meta
+// with {}). Native env values live in app.json's `expo.extra` and are
+// read via expo-constants. This getter is duck-typed so the web/Vite
+// build never imports expo-constants — Vite's tree-shaker drops the
+// require call when isExpoNative() is build-time-false. (Required by
+// VP-2 cold-start; fixed during VP-11 verification of GH#132 P3.)
+function nativeExtra(): Record<string, string | undefined> {
+  if (Platform.OS === 'web') return {}
+  try {
+    // require (not import) so Vite's static analyser can prune it on web.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Constants = require('expo-constants').default
+    return (Constants?.expoConfig?.extra ?? {}) as Record<string, string | undefined>
+  } catch {
+    return {}
+  }
+}
+
+// Defensive accessor: on the Expo native build import.meta evaluates to
+// {} so import.meta.env is undefined. Falling back through ?? avoids a
+// runtime TypeError reading .VITE_*.
+function viteEnv(): Record<string, string | undefined> {
+  const env = (import.meta as { env?: Record<string, string | undefined> }).env
+  return env ?? {}
+}
+
 /**
  * Platform detection helpers for Capacitor vs web.
  *
@@ -32,7 +59,7 @@ declare global {
  */
 
 export function isNative(): boolean {
-  return import.meta.env.VITE_PLATFORM === 'capacitor'
+  return viteEnv().VITE_PLATFORM === 'capacitor'
 }
 
 /**
@@ -60,8 +87,14 @@ export function isExpoNative(): boolean {
 
 export function apiBaseUrl(): string {
   // Empty on web → relative URLs resolve against window.location.origin
-  // On native (Capacitor): the deployed Worker URL, set at build time.
-  return import.meta.env.VITE_API_BASE_URL ?? ''
+  // On native (Capacitor): the deployed Worker URL, set at build time
+  //   via Vite's VITE_API_BASE_URL.
+  // On native (Expo): read from app.json `expo.extra.apiBaseUrl` via
+  //   expo-constants — Vite's import.meta.env doesn't exist at runtime.
+  if (isExpoNative()) {
+    return nativeExtra().apiBaseUrl ?? ''
+  }
+  return viteEnv().VITE_API_BASE_URL ?? ''
 }
 
 /**
@@ -148,7 +181,9 @@ export async function installNativeFetchInterceptor(): Promise<void> {
 }
 
 export function wsBaseUrl(): string {
-  const url = import.meta.env.VITE_WORKER_PUBLIC_URL ?? ''
+  const url = isExpoNative()
+    ? (nativeExtra().workerPublicUrl ?? '')
+    : (viteEnv().VITE_WORKER_PUBLIC_URL ?? '')
   if (!url) return ''
   try {
     return new URL(url).host
