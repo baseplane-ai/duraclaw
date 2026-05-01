@@ -91,11 +91,19 @@ export const SchemaDisplayPath = ({ className, children, ...props }: SchemaDispl
     '<span class="text-blue-600 dark:text-blue-400">{$1}</span>',
   )
 
+  // `children` is `ReactNode` per HTMLAttributes — but
+  // dangerouslySetInnerHTML.__html only accepts `string | TrustedHTML`,
+  // so a numeric/JSX child wouldn't typecheck. Honour the override only
+  // when the caller passed a string; otherwise fall through to the
+  // auto-highlighted path. (Vercel ai-elements upstream relies on the
+  // older `@types/react` shape that typed __html as plain `string`.)
+  const html = typeof children === 'string' ? children : highlightedPath
+
   return (
     <span
       className={cn('font-mono text-sm', className)}
       // biome-ignore lint/security/noDangerouslySetInnerHtml: upstream component highlights path segments with spans
-      dangerouslySetInnerHTML={{ __html: children ?? highlightedPath }}
+      dangerouslySetInnerHTML={{ __html: html }}
       {...props}
     />
   )
