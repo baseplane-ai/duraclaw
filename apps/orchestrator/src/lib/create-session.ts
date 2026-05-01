@@ -199,7 +199,16 @@ export async function createSession(
     userId,
     arcId,
     project: params.project,
-    status: 'running',
+    // Seed `idle`, not `running`. Live status flows from the SessionDO over
+    // the user-stream WS (`broadcastStatusToOwner` → `session_status`
+    // collection → `useSessionStatus`); D1 `agent_sessions.status` is just a
+    // cold-start fallback for chrome surfaces (status bar, tab dot, sidebar)
+    // until the first DO frame lands. Post the ea01ca5 refactor, transition
+    // writes to D1 were dropped — D1 only ever holds the seed (here) and the
+    // result-time `idle` write. Seeding `running` poisoned the cold-start
+    // fallback and made every freshly-rendered surface flash "Running"
+    // before the runner had actually engaged.
+    status: 'idle',
     model: params.model ?? null,
     runnerSessionId: params.runner_session_id ?? null,
     createdAt: now,
@@ -246,7 +255,9 @@ export async function createSession(
           id: sessionId,
           userId,
           project: params.project,
-          status: 'running',
+          // Match the baseRow seed — see comment above. Live status comes
+          // from the DO push, not D1.
+          status: 'idle',
           model: baseRow.model,
           updatedAt: now,
           lastActivity: now,
@@ -258,9 +269,10 @@ export async function createSession(
   }
 
   // ── Now spawn the DO ─────────────────────────────────────────────────
-  // If this fails, the D1 row exists with status='running' but no runner.
-  // The next sendMessage will see no gateway conn and re-trigger spawn,
-  // or the reaper will eventually mark it idle — both are recoverable.
+  // If this fails, the D1 row exists with status='idle' but no runner.
+  // The next sendMessage will see no gateway conn and re-trigger spawn —
+  // recoverable. The error path below explicitly flips status to 'error'
+  // so the row doesn't stay benign-looking after a hard spawn failure.
   const createResponse = await sessionDO.fetch(
     new Request('https://session/create', {
       method: 'POST',
@@ -286,8 +298,9 @@ export async function createSession(
   )
 
   if (!createResponse.ok) {
-    // DO spawn failed — mark the D1 row as errored so it doesn't sit
-    // as a phantom 'running' session forever.
+    // DO spawn failed — mark the D1 row as errored so the cold-start
+    // fallback surfaces "Error" instead of the benign 'idle' seed
+    // (and the row doesn't sit as a phantom session forever).
     await db
       .update(agentSessions)
       .set({ status: 'error', updatedAt: new Date().toISOString() })
