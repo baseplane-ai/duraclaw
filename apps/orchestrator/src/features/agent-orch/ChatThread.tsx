@@ -730,9 +730,18 @@ const ChatMessageRow = memo(
     // Right-click context menu — only enabled for assistant messages and
     // when the parent has wired the callback (read-only / draft mounts
     // omit it). Suppresses the browser's native menu via preventDefault.
+    //
+    // Coarse pointers (touch devices) dispatch `contextmenu` from a long-
+    // press, which is the OS gesture for text selection. We bail out
+    // there WITHOUT preventDefault so the native selection toolbar still
+    // appears; mobile users reach "Branch from here" via the always-
+    // visible 3-dot DropdownMenu (see `pointer-coarse:opacity-100` below).
     const handleAssistantContextMenu = useCallback(
       (e: React.MouseEvent) => {
         if (!onBranchFromMessage) return
+        if (typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)').matches) {
+          return
+        }
         e.preventDefault()
         onBranchFromMessage(turnIndex)
       },
@@ -879,7 +888,7 @@ const ChatMessageRow = memo(
       const branchMenuRight = onRewind ? 'right-20' : 'right-2'
       const branchMenu = onBranchFromMessage ? (
         <div
-          className={`absolute ${branchMenuRight} top-2 opacity-0 transition-opacity group-hover:opacity-100`}
+          className={`absolute ${branchMenuRight} top-2 opacity-0 transition-opacity group-hover:opacity-100 pointer-coarse:opacity-100`}
         >
           <DropdownMenu>
             <DropdownMenuTrigger
