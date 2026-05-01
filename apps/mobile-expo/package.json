@@ -32,7 +32,7 @@
     "expo-updates": "55.0.21",
     "expo-web-browser": "55.0.14",
     "react": "19.0.0",
-    "react-native": "0.85.2",
+    "react-native": "0.83.6",
     "react-native-gesture-handler": "2.31.1",
     "react-native-reanimated": "4.3.0",
     "react-native-reanimated-dnd": "2.0.0",
