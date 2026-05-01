@@ -672,9 +672,9 @@ interface ChatMessageRowProps {
   onBranchNavigate?: (messageId: string, direction: 'prev' | 'next') => void
   /**
    * GH#116 B16 — when set, assistant messages render a hover-visible
-   * "Branch from here" affordance (3-dot menu + onContextMenu) that
-   * invokes this callback with the row's `turnIndex`. The parent owns
-   * the modal that drives `POST /api/arcs/:arcId/branch`.
+   * "Branch from here" affordance (3-dot menu) that invokes this
+   * callback with the row's `turnIndex`. The parent owns the modal
+   * that drives `POST /api/arcs/:arcId/branch`.
    */
   onBranchFromMessage?: (turnIndex: number) => void
   /**
@@ -726,27 +726,6 @@ const ChatMessageRow = memo(
     const handleBranchFromMessage = useCallback(() => {
       onBranchFromMessage?.(turnIndex)
     }, [onBranchFromMessage, turnIndex])
-
-    // Right-click context menu — only enabled for assistant messages and
-    // when the parent has wired the callback (read-only / draft mounts
-    // omit it). Suppresses the browser's native menu via preventDefault.
-    //
-    // Coarse pointers (touch devices) dispatch `contextmenu` from a long-
-    // press, which is the OS gesture for text selection. We bail out
-    // there WITHOUT preventDefault so the native selection toolbar still
-    // appears; mobile users reach "Branch from here" via the always-
-    // visible 3-dot DropdownMenu (see `pointer-coarse:opacity-100` below).
-    const handleAssistantContextMenu = useCallback(
-      (e: React.MouseEvent) => {
-        if (!onBranchFromMessage) return
-        if (typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)').matches) {
-          return
-        }
-        e.preventDefault()
-        onBranchFromMessage(turnIndex)
-      },
-      [onBranchFromMessage, turnIndex],
-    )
 
     const showBranchingPill =
       branchingFromTurnIndex !== undefined &&
@@ -912,18 +891,7 @@ const ChatMessageRow = memo(
         </div>
       ) : null
       return (
-        // biome-ignore lint/a11y/noStaticElementInteractions: onContextMenu is a passive enhancement; the 3-dot DropdownMenu is the keyboard/screen-reader path.
-        <div
-          key={msg.id}
-          className="group relative"
-          data-turn-index={turnIndex}
-          // Right-click on the assistant message wrapper opens the same
-          // branch dialog. Coexists with Radix DropdownMenu — its
-          // onContextMenu doesn't bubble out of the trigger button so the
-          // wrapper-level handler only fires when the user right-clicks
-          // outside the 3-dot button.
-          onContextMenu={onBranchFromMessage ? handleAssistantContextMenu : undefined}
-        >
+        <div key={msg.id} className="group relative" data-turn-index={turnIndex}>
           <div className="flex flex-col gap-2">{assistantNodes}</div>
           {branchMenu}
           {rewindButton}
