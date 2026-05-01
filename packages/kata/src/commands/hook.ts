@@ -32,6 +32,7 @@ import { isNativeTasksEnabled } from '../utils/tasks-check.js'
 import { getDriver } from '../drivers/index.js'
 import type { Driver } from '../drivers/types.js'
 import type { Gate } from '../validation/schemas.js'
+import { readCanonicalTask, writeCanonicalTask } from '../native-tasks/canonical-store.js'
 import { type PlaceholderContext, resolvePlaceholders } from './enter/placeholder.js'
 import { readNativeTaskFiles } from './enter/task-factory.js'
 import { parseTemplateYaml } from './enter/template.js'
@@ -1373,7 +1374,31 @@ export async function handlePostToolUse(input: Record<string, unknown>): Promise
     const toolName = (input.tool_name as string) ?? ''
     const toolInput = (input.tool_input as Record<string, unknown>) ?? {}
 
-    if (toolName === 'Edit' || toolName === 'Write' || toolName === 'NotebookEdit') {
+    if (toolName === 'TaskUpdate') {
+      // Sync TaskUpdate writes to the canonical store. Claude's TaskUpdate
+      // writes to the mirror at ~/.claude/tasks/{sid}/{id}.json, but the
+      // mirror can be cleared independently of session lifecycle (e.g. by
+      // /clear or Claude-internal cleanup of completed tasks). When that
+      // happens, the merge in readNativeTaskFiles sees an empty mirror,
+      // falls back to canonical, and reports the pre-update status —
+      // producing a permanent stop-hook loop where can-exit reports a
+      // task as still pending after it was marked completed.
+      // Synchronously copying the new status into canonical here keeps
+      // can-exit accurate regardless of mirror lifetime.
+      const taskId = toolInput.taskId as string | undefined
+      const newStatus = toolInput.status as string | undefined
+      const VALID_STATUSES = ['pending', 'in_progress', 'completed'] as const
+      type CanonicalStatus = (typeof VALID_STATUSES)[number]
+      if (taskId && newStatus && (VALID_STATUSES as readonly string[]).includes(newStatus)) {
+        const existing = readCanonicalTask(sessionId, taskId)
+        if (existing && existing.status !== newStatus) {
+          writeCanonicalTask(sessionId, {
+            ...existing,
+            status: newStatus as CanonicalStatus,
+          })
+        }
+      }
+    } else if (toolName === 'Edit' || toolName === 'Write' || toolName === 'NotebookEdit') {
       const filePath = toolInput.file_path as string | undefined
       if (filePath) {
         const gitRelative = toGitRelative(filePath)

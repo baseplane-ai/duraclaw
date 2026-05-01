@@ -1034,3 +1034,101 @@ describe('handleStopConditions run-end artifact', () => {
     expect(new Date(secondTs).getTime()).toBeGreaterThan(new Date(firstTs).getTime())
   })
 })
+
+describe('handlePostToolUse — TaskUpdate canonical sync', () => {
+  let tmpDir: string
+  const sessionId = '00000000-0000-0000-0000-000000000123'
+  const origEnv = process.env.CLAUDE_PROJECT_DIR
+
+  beforeEach(() => {
+    tmpDir = makeTmpDir()
+    mkdirSync(join(tmpDir, '.kata'), { recursive: true })
+    process.env.CLAUDE_PROJECT_DIR = tmpDir
+    writeSessionState(tmpDir, sessionId)
+    // Seed a canonical task in the in_progress state — simulates the
+    // post-`kata enter` baseline before Claude marks it completed.
+    const tasksDir = join(tmpDir, '.kata', 'sessions', sessionId, 'native-tasks')
+    mkdirSync(tasksDir, { recursive: true })
+    writeFileSync(
+      join(tasksDir, '3.json'),
+      JSON.stringify(
+        {
+          id: '3',
+          subject: 'P2: Close',
+          description: 'Invoke /kata-close',
+          activeForm: 'Closing',
+          status: 'in_progress',
+          blocks: [],
+          blockedBy: ['2'],
+          metadata: {},
+        },
+        null,
+        2,
+      ),
+    )
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+    if (origEnv !== undefined) {
+      process.env.CLAUDE_PROJECT_DIR = origEnv
+    } else {
+      delete process.env.CLAUDE_PROJECT_DIR
+    }
+  })
+
+  it('TaskUpdate(status:"completed") syncs to canonical so can-exit sees it after a mirror wipe', async () => {
+    const { handlePostToolUse } = await import('./hook.js')
+
+    await handlePostToolUse({
+      session_id: sessionId,
+      tool_name: 'TaskUpdate',
+      tool_input: { taskId: '3', status: 'completed' },
+    })
+
+    const taskPath = join(tmpDir, '.kata', 'sessions', sessionId, 'native-tasks', '3.json')
+    const task = JSON.parse(readFileSync(taskPath, 'utf-8')) as { status: string }
+    expect(task.status).toBe('completed')
+  })
+
+  it('ignores TaskUpdate with no status change (no-op write)', async () => {
+    const { handlePostToolUse } = await import('./hook.js')
+
+    await handlePostToolUse({
+      session_id: sessionId,
+      tool_name: 'TaskUpdate',
+      tool_input: { taskId: '3', status: 'in_progress' },
+    })
+
+    const taskPath = join(tmpDir, '.kata', 'sessions', sessionId, 'native-tasks', '3.json')
+    const task = JSON.parse(readFileSync(taskPath, 'utf-8')) as { status: string }
+    expect(task.status).toBe('in_progress')
+  })
+
+  it('ignores invalid status values (e.g. "deleted") — only canonical statuses written', async () => {
+    const { handlePostToolUse } = await import('./hook.js')
+
+    await handlePostToolUse({
+      session_id: sessionId,
+      tool_name: 'TaskUpdate',
+      tool_input: { taskId: '3', status: 'deleted' },
+    })
+
+    const taskPath = join(tmpDir, '.kata', 'sessions', sessionId, 'native-tasks', '3.json')
+    const task = JSON.parse(readFileSync(taskPath, 'utf-8')) as { status: string }
+    expect(task.status).toBe('in_progress')
+  })
+
+  it('ignores TaskUpdate for a taskId that does not exist in canonical', async () => {
+    const { handlePostToolUse } = await import('./hook.js')
+
+    await handlePostToolUse({
+      session_id: sessionId,
+      tool_name: 'TaskUpdate',
+      tool_input: { taskId: '99', status: 'completed' },
+    })
+
+    const tasksDir = join(tmpDir, '.kata', 'sessions', sessionId, 'native-tasks')
+    expect(existsSync(join(tasksDir, '99.json'))).toBe(false)
+  })
+})
