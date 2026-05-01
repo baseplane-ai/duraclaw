@@ -50,10 +50,20 @@ bash scripts/build-mobile-ota-bundle.sh         # emits zip + version.json local
 bash scripts/build-mobile-expo-ota.sh           # uploads per-update + pointer to R2
 
 # Infra pipeline uploads (b)'s zip + version.json to R2 and runs (c)
-# in-line via wrangler r2 object put (CLOUDFLARE_* env vars from secrets),
-# then deploys the Worker:
+# in-line via wrangler r2 object put (CLOUDFLARE_* env vars from secrets).
+# Apply pending D1 migrations BEFORE deploying the Worker so the
+# request-path schema is in sync with the code about to start serving.
+pnpm --filter @duraclaw/orchestrator db:migrate:remote
 wrangler deploy --cwd apps/orchestrator
 ```
+
+**D1 migrations are part of the deploy contract** — `wrangler deploy`
+does not run them, and `migrations/meta/_journal.json` is generated at
+codegen time so its presence on disk does not imply the migrations have
+been applied to remote D1. Skip this step and any newly-added column or
+table breaks every authed page-load with `D1_ERROR: no such table/column`.
+The apply is idempotent (wrangler tracks applied filenames in its own
+`d1_migrations` table) so re-running it on a no-op deploy is safe.
 
 **Infra-pipeline contract for the VPS gateway + runners** — the gateway
 (`packages/agent-gateway`) and its two spawn targets (`session-runner`,

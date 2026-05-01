@@ -47,6 +47,14 @@ export default defineConfig({
       // target and emits atomic CSS for primitives (View/Text/Pressable).
       'react-native': '@tamagui/react-native-web-lite',
     },
+    // Force a single React/react-dom copy across the bundle. Without
+    // this, Rollup can spill RNW (or its transitive CJS deps) into a
+    // shared `cjs-*.js` chunk that drags its own React resolution,
+    // producing a second React instance whose dispatcher is null at
+    // render time → `useState` of null on first render. Cheap insurance
+    // — the project only ever ships one react@major, so deduping is
+    // always safe.
+    dedupe: ['react', 'react-dom', 'react/jsx-runtime'],
   },
   // GH#131 P2: keep RNW polyfills out of the CF Worker bundle. Without
   // ssr.noExternal, Vite shares chunks containing RNW runtime bytes with
