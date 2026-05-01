@@ -896,7 +896,8 @@ export function SettingsScreen({ navigation }: ScreenProps) {
         </Pressable>
 
         <Text style={[text.small, { marginTop: 16, textAlign: 'center' }]}>
-          Fine-grained model / permission / FCM settings live on the web app.
+          Fine-grained model / permission / FCM settings live on the web app. Project visibility,
+          identity CRUD, and System sections are tracked for native ports in GH#162.
         </Text>
       </ScrollView>
     </View>
