@@ -36,6 +36,7 @@ import {
   TextInput,
   View,
 } from 'react-native'
+import { KanbanBoardNative } from '~/features/kanban/KanbanBoardNative'
 import { authClient } from '~/lib/auth-client'
 
 type ScreenProps = { route?: { params?: Record<string, unknown> } }
@@ -291,8 +292,14 @@ export function SessionDetailScreen({ route }: ScreenProps) {
 export function ArcDetailScreen({ route }: ScreenProps) {
   return <Stub label="Arc" params={route?.params} />
 }
+/**
+ * BoardScreen wraps the read-only `KanbanBoardNative` (existing — see
+ * `~/features/kanban/KanbanBoardNative.tsx`) so the Board tab mounts the
+ * real arc-list rendering instead of a stub. Drag-to-advance is still
+ * deferred (GH#157 §5, blocked on a native AdvanceConfirmModal).
+ */
 export function BoardScreen() {
-  return <Stub label="Board" />
+  return <KanbanBoardNative />
 }
 export function ProjectsScreen() {
   return <Stub label="Projects" />
