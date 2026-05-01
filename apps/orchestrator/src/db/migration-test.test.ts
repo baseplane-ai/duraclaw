@@ -1,5 +1,5 @@
 // GH#116 P1: vitest fixture that seeds pre-migration agent_sessions
-// rows, runs migration 0032_arcs_first_class.sql, and asserts the
+// rows, runs migration 0034_arcs_first_class.sql, and asserts the
 // post-migration shape matches the spec.
 //
 // Test infra rationale: this repo has no live D1 fixture (no
@@ -86,10 +86,10 @@ function applyMigration(db: SqlJsDatabase, migrationSql: string): void {
 }
 
 /**
- * Seed the minimum pre-migration schema needed for 0032 to apply
+ * Seed the minimum pre-migration schema needed for 0034 to apply
  * cleanly: users (FK target), worktrees (FK target — already present
  * post-#115), agent_sessions (the table being reshaped). Schema mirrors
- * the post-#115 state at the moment migration 0032 runs.
+ * the post-#115 state at the moment migration 0034 runs.
  */
 function seedPreMigrationSchema(db: SqlJsDatabase): void {
   db.run(`
@@ -114,7 +114,7 @@ function seedPreMigrationSchema(db: SqlJsDatabase): void {
       ownerId TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE
     );
   `)
-  // Pre-0032 agent_sessions shape: kata_mode/kata_issue/kata_phase
+  // Pre-0034 agent_sessions shape: kata_mode/kata_issue/kata_phase
   // present, worktreeId already added by #115's migration 0031, no
   // arc_id / mode / parent_session_id yet.
   db.run(`
@@ -221,8 +221,8 @@ function rows(db: SqlJsDatabase, sql: string): Array<Record<string, unknown>> {
   })
 }
 
-describe('migration 0032 — arcs first class', () => {
-  const migrationSql = readMigration('0032_arcs_first_class.sql')
+describe('migration 0034 — arcs first class', () => {
+  const migrationSql = readMigration('0034_arcs_first_class.sql')
   let db: SqlJsDatabase
 
   beforeEach(async () => {
