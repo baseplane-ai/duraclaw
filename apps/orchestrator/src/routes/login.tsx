@@ -1,10 +1,10 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
-import { toast } from 'sonner'
 import { Button } from '~/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '~/components/ui/card'
 import { Input } from '~/components/ui/input'
 import { authClient } from '~/lib/auth-client'
+import { toast } from '~/lib/toast'
 
 export const Route = createFileRoute('/login')({
   component: LoginPage,
@@ -26,7 +26,9 @@ function LoginPage() {
       const reason = sessionStorage.getItem('auth.redirect.reason')
       if (reason) {
         sessionStorage.removeItem('auth.redirect.reason')
-        toast(reason === 'expired' ? 'Session expired — please sign in again.' : 'Please sign in.')
+        toast.info(
+          reason === 'expired' ? 'Session expired — please sign in again.' : 'Please sign in.',
+        )
       }
     } catch {
       // sessionStorage may be unavailable (private mode, SSR) — silently skip

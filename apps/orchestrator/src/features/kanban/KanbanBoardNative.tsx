@@ -29,7 +29,6 @@
 import { useLiveQuery } from '@tanstack/react-db'
 import { useCallback, useMemo, useState } from 'react'
 import { Alert, ScrollView, StyleSheet, Text, View } from 'react-native'
-import { GestureHandlerRootView } from 'react-native-gesture-handler'
 import { Draggable, DraggableState, DropProvider, Droppable } from 'react-native-reanimated-dnd'
 import { arcsCollection } from '~/db/arcs-collection'
 import { projectsCollection } from '~/db/projects-collection'
@@ -148,50 +147,52 @@ export function KanbanBoardNative() {
     Alert.alert('Started', `Started ${nextMode} in arc '${arc.title}'`)
   }, [pendingAdvance, pickedProject])
 
+  // GestureHandlerRootView is mounted at the app root in entry-rn.tsx;
+  // DropProvider here is sufficient. (If gesture recognition starts
+  // misbehaving on Android — known unknown per GH#163 — fall back to
+  // wrapping the read-only KanbanBoardReadOnly without DropProvider.)
   return (
-    <GestureHandlerRootView style={styles.flex}>
-      <DropProvider>
-        <View style={styles.flex}>
-          <View style={styles.header}>
-            <Text style={styles.title}>Board</Text>
-            <Text style={styles.subtitle}>
-              {arcs.length} arc{arcs.length === 1 ? '' : 's'}
-              {isLoading ? ' · loading…' : ''}
-            </Text>
-          </View>
-
-          <ScrollView
-            contentContainerStyle={styles.boardContent}
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            style={styles.flex}
-          >
-            {COLUMNS.map((col) => (
-              <Column key={col} column={col} arcs={byColumn[col]} onDrop={(p) => onDrop(p, col)} />
-            ))}
-          </ScrollView>
-
-          {pendingAdvance ? (
-            <AdvanceConfirmModalNative
-              open
-              onOpenChange={(o) => {
-                if (!o) setPendingAdvance(null)
-              }}
-              arcTitle={pendingAdvance.arc.title}
-              currentMode={deriveColumn(pendingAdvance.arc.sessions, pendingAdvance.arc.status)}
-              nextMode={pendingAdvance.nextMode}
-              worktree={pendingAdvance.arc.worktreeReservation?.worktree.split('/').pop() ?? null}
-              worktreeReserved={!!pendingAdvance.arc.worktreeReservation}
-              projectOptions={pendingAdvance.arc.sessions.length === 0 ? projectOptions : undefined}
-              selectedProject={pickedProject || null}
-              onProjectChange={setPickedProject}
-              onConfirm={onConfirm}
-              pending={pending}
-            />
-          ) : null}
+    <DropProvider>
+      <View style={styles.flex}>
+        <View style={styles.header}>
+          <Text style={styles.title}>Board</Text>
+          <Text style={styles.subtitle}>
+            {arcs.length} arc{arcs.length === 1 ? '' : 's'}
+            {isLoading ? ' · loading…' : ''}
+          </Text>
         </View>
-      </DropProvider>
-    </GestureHandlerRootView>
+
+        <ScrollView
+          contentContainerStyle={styles.boardContent}
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.flex}
+        >
+          {COLUMNS.map((col) => (
+            <Column key={col} column={col} arcs={byColumn[col]} onDrop={(p) => onDrop(p, col)} />
+          ))}
+        </ScrollView>
+
+        {pendingAdvance ? (
+          <AdvanceConfirmModalNative
+            open
+            onOpenChange={(o) => {
+              if (!o) setPendingAdvance(null)
+            }}
+            arcTitle={pendingAdvance.arc.title}
+            currentMode={deriveColumn(pendingAdvance.arc.sessions, pendingAdvance.arc.status)}
+            nextMode={pendingAdvance.nextMode}
+            worktree={pendingAdvance.arc.worktreeReservation?.worktree.split('/').pop() ?? null}
+            worktreeReserved={!!pendingAdvance.arc.worktreeReservation}
+            projectOptions={pendingAdvance.arc.sessions.length === 0 ? projectOptions : undefined}
+            selectedProject={pickedProject || null}
+            onProjectChange={setPickedProject}
+            onConfirm={onConfirm}
+            pending={pending}
+          />
+        ) : null}
+      </View>
+    </DropProvider>
   )
 }
 

@@ -24,9 +24,12 @@ async function bootstrap() {
   // if accessed before this resolves.
   await Promise.all([dbReady, authClientReady])
 
-  // Patch window.fetch on Capacitor so every API call includes the bearer
-  // token from Preferences. Must run after authClientReady so the
-  // better-auth-capacitor module is loaded.
+  // Patch globalThis.fetch on native (Capacitor or Expo) so every API
+  // call includes the bearer token. On Capacitor: token from
+  // @capacitor/preferences via better-auth-capacitor/client. On Expo:
+  // token from expo-secure-store via auth-client-expo. Must run after
+  // authClientReady so both native modules (whichever is active) are
+  // resolved by the dispatcher.
   await installNativeFetchInterceptor()
 
   // Register the native push tap listener BEFORE React mounts so the

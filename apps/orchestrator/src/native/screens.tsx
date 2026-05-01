@@ -693,6 +693,8 @@ export function ProjectsScreen({ navigation }: ScreenProps) {
  * ProjectDocsScreen — the docs editor (BlockNote + Yjs CRDT) is deeply
  * DOM-coupled and not worth porting to RN. Surface a clear "use web"
  * message + the project context so the route is real, not a 404.
+ *
+ * Tracked: GH#161 (native port of BlockNote+Yjs docs editor).
  */
 export function ProjectDocsScreen({ route }: ScreenProps<{ projectId: string }>) {
   const projectId = route?.params?.projectId ?? '—'
@@ -704,7 +706,8 @@ export function ProjectDocsScreen({ route }: ScreenProps<{ projectId: string }>)
           <Text style={text.h3}>Open the docs editor on web</Text>
           <Text style={text.muted}>
             The collaborative docs editor (BlockNote + Yjs) hasn't been ported to native yet. Open
-            this project's docs from the desktop web app for full editing.
+            this project's docs from the desktop web app for full editing. Tracking native port in
+            GH#161.
           </Text>
           <Text style={text.small}>{`/projects/${projectId}/docs`}</Text>
         </View>
@@ -995,6 +998,10 @@ type AdminUserRow = {
  * AdminUsersScreen — read-only user list. The web page has CRUD
  * (create/promote/ban/delete via shadcn dialogs); native is read-only
  * for v1. Use the web app for admin actions.
+ *
+ * Settings admin sections (Projects visibility / Identities / System)
+ * are tracked separately in GH#162 — those don't have native equivalents
+ * yet and are accessed via web.
  */
 export function AdminUsersScreen({ navigation }: ScreenProps) {
   return (

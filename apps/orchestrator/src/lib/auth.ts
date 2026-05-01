@@ -1,3 +1,4 @@
+import { expo } from '@better-auth/expo'
 import { betterAuth } from 'better-auth'
 import { drizzleAdapter } from 'better-auth/adapters/drizzle'
 import { admin, bearer } from 'better-auth/plugins'
@@ -65,12 +66,27 @@ export function createAuth(
     // and enables bearer-token replay for Capacitor clients (which have no
     // cookie jar that survives WebView restarts). The `https://localhost`
     // origin (from androidScheme:'https') is added above in trustedOrigins.
+    // expo() does the same for Expo clients (`duraclaw://` scheme + bearer
+    // replay against expo-secure-store). Both plugins coexist during the
+    // Capacitor sunset window; capacitor() is removed in P4 cleanup once
+    // the dogfood user is fully on the Expo APK.
     // bearer() extracts session tokens from Set-Cookie into a
     // `set-auth-token` response header (+ Access-Control-Expose-Headers)
-    // so the Capacitor client can store the token. It also converts
+    // so the native clients can store the token. It also converts
     // incoming `Authorization: Bearer <token>` to session cookies for
     // server-side session lookup.
-    plugins: [admin(), bearer(), capacitor()],
+    //
+    // Type cast on expo(): @better-auth/expo's plugin shape transitively
+    // references types from `better-call` (a workspace dep two hops away
+    // via better-auth → better-call). Without the cast TS2742 fires —
+    // the inferred type of createAuth() cannot be named portably. The
+    // `as unknown as ReturnType<typeof capacitor>` cast forces TS to
+    // treat expo() as the same plugin shape as capacitor() (their `id`
+    // discriminants differ so a direct cast triggers TS2352 — the
+    // unknown step intentionally bypasses that overlap check). Both
+    // are Better Auth plugins with compatible runtime APIs; the lie is
+    // in the type, not the behaviour.
+    plugins: [admin(), bearer(), capacitor(), expo() as unknown as ReturnType<typeof capacitor>],
   })
 }
 
