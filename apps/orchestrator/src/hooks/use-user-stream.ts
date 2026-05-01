@@ -31,7 +31,7 @@ import { createPartySocketAdapter } from '~/lib/connection-manager/adapters/part
 import { connectionRegistry } from '~/lib/connection-manager/registry'
 import type { ManagedConnection } from '~/lib/connection-manager/types'
 import { logDelta } from '~/lib/delta-log'
-import { isNative, wsBaseUrl } from '~/lib/platform'
+import { isExpoNative, isNative, wsBaseUrl } from '~/lib/platform'
 import { attachWsDebug, wsHardFailEnabled } from '~/lib/ws-debug'
 
 type FrameHandler = (frame: SyncedCollectionFrame<unknown>) => void
@@ -67,6 +67,35 @@ let intentionalClose = false
 // any deltas missed during the close→open gap.
 let hadPriorSocket = false
 
+/**
+ * Read the bearer token used for the WS `_authToken` query param.
+ * Dispatches to the per-platform native auth client:
+ *   - Expo native → expo-secure-store via `getExpoAuthToken`
+ *   - Capacitor   → Capacitor Preferences via `getCapacitorAuthToken`
+ *   - Web         → never reached (callers gate on isNative/isExpoNative)
+ *
+ * Imports are dynamic + @vite-ignore so the web bundle never pulls in
+ * either native shim. The Expo branch comes first so the Expo APK
+ * never reaches the Capacitor stub from metro.config.js.
+ */
+async function fetchNativeAuthToken(): Promise<string | null> {
+  if (isExpoNative()) {
+    const { getExpoAuthToken } = (await import(/* @vite-ignore */ '~/lib/auth-client-expo')) as {
+      getExpoAuthToken: () => Promise<string | null>
+    }
+    return getExpoAuthToken()
+  }
+  if (isNative()) {
+    const { getCapacitorAuthToken } = (await import(
+      /* @vite-ignore */ 'better-auth-capacitor/client'
+    )) as {
+      getCapacitorAuthToken: (opts: { storagePrefix: string }) => Promise<string | null>
+    }
+    return getCapacitorAuthToken({ storagePrefix: 'better-auth' })
+  }
+  return null
+}
+
 function setStatus(next: ConnectionStatus) {
   if (status === next) return
   status = next
@@ -89,19 +118,25 @@ function openSocket(userId: string) {
     // the socket on its first close instead of looping through partysocket's
     // infinite auto-reconnect (see ~/lib/ws-debug.ts).
     ...(wsHardFailEnabled() ? { maxRetries: 0 } : {}),
-    // Capacitor WebView can't send cookies cross-origin (capacitor://localhost
-    // → dura.baseplane.ai) and WS upgrades can't attach custom headers, so
-    // native clients must pass the better-auth-capacitor bearer as a query
-    // param. server.ts hoists `_authToken` to `Authorization: Bearer` before
-    // dispatching `/parties/*`, so `getRequestSession` in UserSettingsDO
-    // accepts the upgrade instead of rejecting with 401 → close code 1000.
-    // Without this every connect attempt closes with `uptime=never-opened`
-    // and partysocket retries forever.
-    ...(isNative()
+    // Native clients (Capacitor WebView + Expo RN) can't attach a cookie or
+    // a custom Authorization header to a WS upgrade, so they must pass the
+    // bearer as the `_authToken` query param. server.ts hoists it to
+    // `Authorization: Bearer` before dispatching `/parties/*`, so
+    // `getRequestSession` in UserSettingsDO accepts the upgrade instead of
+    // rejecting with 401 → close code 1000. Without this every connect
+    // attempt closes with `uptime=never-opened` and partysocket retries
+    // forever.
+    //
+    // Token sources:
+    // - Capacitor build (isNative): better-auth-capacitor's
+    //   getCapacitorAuthToken reads from Capacitor Preferences.
+    // - Expo native (isExpoNative): auth-client-expo's getExpoAuthToken
+    //   reads from expo-secure-store under the same logical key.
+    // - Web: cookies handle auth, no query-param needed.
+    ...(isExpoNative() || isNative()
       ? {
           query: async (): Promise<Record<string, string>> => {
-            const { getCapacitorAuthToken } = await import('better-auth-capacitor/client')
-            const token = await getCapacitorAuthToken({ storagePrefix: 'better-auth' })
+            const token = await fetchNativeAuthToken()
             return token ? { _authToken: token } : {}
           },
         }
