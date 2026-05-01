@@ -32,6 +32,37 @@ config.resolver.nodeModulesPaths = [
 ]
 config.resolver.disableHierarchicalLookup = true
 
+// Capacitor-only modules that Metro statically bundles (because they
+// live in dead-code branches Metro doesn't tree-shake). They throw at
+// runtime if reached — but they never are, because db-instance.ts and
+// platform.ts test isExpoNative() first and return before reaching
+// the Capacitor fallback. Stub them so Metro's parser doesn't choke on
+// their internal Node-only dynamic imports (e.g. capacitor-sqlite-driver
+// uses `import(getNodeAsyncHooksSpecifier())` which Metro rejects).
+const NATIVE_STUB = path.resolve(projectRoot, 'native-stubs/empty.js')
+const CAPACITOR_STUBS = new Set([
+  '@tanstack/capacitor-db-sqlite-persistence',
+  'better-auth-capacitor',
+  'better-auth-capacitor/client',
+  '@capacitor/core',
+  '@capacitor/app',
+  '@capacitor/network',
+  '@capacitor/preferences',
+  '@capacitor/push-notifications',
+  '@capacitor-community/sqlite',
+  '@capgo/capacitor-updater',
+])
+const originalResolveRequest = config.resolver.resolveRequest
+config.resolver.resolveRequest = (context, moduleName, platform) => {
+  if (CAPACITOR_STUBS.has(moduleName)) {
+    return { type: 'sourceFile', filePath: NATIVE_STUB }
+  }
+  if (originalResolveRequest) {
+    return originalResolveRequest(context, moduleName, platform)
+  }
+  return context.resolveRequest(context, moduleName, platform)
+}
+
 // Allow .ts/.tsx in node_modules (some workspace deps publish source).
 config.resolver.sourceExts = [
   ...config.resolver.sourceExts.filter((ext) => ext !== 'svg'),
