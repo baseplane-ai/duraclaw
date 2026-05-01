@@ -85,6 +85,22 @@ export default defineConfig({
         '@react-native-community/netinfo',
         '@react-native-firebase/messaging',
         '@react-native-firebase/app',
+        // platform.ts:25 has `require('expo-constants').default` inside an
+        // `if (Platform.OS !== 'web')` branch. The comment in platform.ts
+        // claims Vite tree-shakes the require on web — that's true under
+        // the legacy Rollup pipeline, but Rolldown (Vite 8's default)
+        // walks the static import graph BEFORE DCE, so it follows
+        // expo-constants → expo → expo-modules-core and trips on
+        // expo-modules-core's `export declare class` declaration files
+        // (`SharedRef`, `SharedObject`, `EventEmitter`, `NativeModule`)
+        // which emit no runtime symbols. Externalising the whole expo
+        // chain leaves the require as a runtime lookup; the
+        // `Platform.OS === 'web'` early-return guarantees the require is
+        // never evaluated on the web build, so the unresolved external
+        // is unreachable.
+        'expo',
+        'expo-constants',
+        'expo-modules-core',
         'expo-secure-store',
         'expo-updates',
       ],
