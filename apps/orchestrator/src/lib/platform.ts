@@ -32,9 +32,28 @@ function nativeExtra(): Record<string, string | undefined> {
 // Defensive accessor: on the Expo native build import.meta evaluates to
 // {} so import.meta.env is undefined. Falling back through ?? avoids a
 // runtime TypeError reading .VITE_*.
+//
+// In vitest, `vi.stubEnv()` writes to `process.env` but does NOT
+// propagate to `import.meta.env` (only `BASE_URL`/`DEV`/`MODE`/`PROD`/
+// `SSR` exist there). To keep the env-stub-driven tests in
+// `platform.test.ts` honest without forcing every test author to write
+// to `import.meta.env` directly, we layer a process.env fallback on top
+// of import.meta.env. Order matters: import.meta.env wins so production
+// behaviour is unchanged; process.env only fills holes left by tests.
 function viteEnv(): Record<string, string | undefined> {
   const env = (import.meta as { env?: Record<string, string | undefined> }).env
-  return env ?? {}
+  if (env && Object.keys(env).some((k) => k.startsWith('VITE_'))) {
+    // Production / dev: import.meta.env has the real VITE_* values.
+    return env
+  }
+  // Test environment: import.meta.env is empty of VITE_* keys. Read
+  // from process.env where vi.stubEnv writes. Layer the standard Vite
+  // defaults underneath so `MODE` / `DEV` / etc. still resolve.
+  const proc = (typeof process !== 'undefined' ? process.env : {}) as Record<
+    string,
+    string | undefined
+  >
+  return { ...(env ?? {}), ...proc }
 }
 
 /**

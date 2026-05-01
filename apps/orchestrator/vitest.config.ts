@@ -34,6 +34,15 @@ export default defineConfig({
         __dirname,
         'src/__mocks__/virtual-pwa-register-react.ts',
       ),
+      // Mirror vite.config.ts: route `react-native` through Tamagui's
+      // RNW-lite subset. Without this alias, `import { Platform } from
+      // 'react-native'` resolves to real react-native in tests and
+      // Platform.OS is NOT 'web', which makes `isExpoNative()` return
+      // true and `apiBaseUrl()` / `wsBaseUrl()` read from expo-constants
+      // (empty in tests) instead of from the vi.stubEnv'd VITE_* values.
+      // GH#157: fixes 8 pre-existing platform.test.ts failures introduced
+      // when isExpoNative() was added in GH#132 P3.
+      'react-native': '@tamagui/react-native-web-lite',
     },
   },
 })
