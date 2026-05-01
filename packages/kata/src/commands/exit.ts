@@ -38,8 +38,16 @@ export async function exit(args: string[]): Promise<void> {
   const updated: SessionState = {
     ...state,
     previousMode: completedMode,
-    currentMode: 'default',
-    sessionType: 'default',
+    // No-mode sentinel: writeState's validateCurrentMode rejects any
+    // currentMode string that isn't registered in kata.yaml's modes:
+    // hash. The literal 'default' is never registered (and isn't meant
+    // to be — it's just "between modes"), so writing it would throw
+    // `Mode 'default' not registered in kata.yaml`. Use undefined, which
+    // the writer's null/undefined short-circuit accepts and which the
+    // hook readers (`state.currentMode === 'default' || !state.currentMode`)
+    // already collapse with the legacy 'default' sentinel.
+    currentMode: undefined,
+    sessionType: undefined,
     currentPhase: undefined,
     workflowCompletedAt: now,
     ...(completedMode && {
