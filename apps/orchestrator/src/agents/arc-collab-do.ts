@@ -13,6 +13,7 @@ import {
   editChatImpl,
   listChatForArc,
 } from './arc-collab-do/rpc-chat'
+import { listReactionsForArc, toggleReactionImpl } from './arc-collab-do/rpc-reactions'
 
 /**
  * Per-arc collaborative DO. One instance per arc ID. (GH#152 P1.3 B11.)
@@ -93,6 +94,26 @@ export class ArcCollabDO extends YServer {
         created_at INTEGER NOT NULL
       )
     `)
+
+    // GH#152 P1.4 B12: per-arc reactions on comments + chat. Composite
+    // PK enforces "one user one emoji per target" — toggling re-presses
+    // the same key. No D1 mirror; the DO row is the source of truth
+    // (reactions are high-frequency and ephemeral).
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS reactions (
+        target_kind TEXT NOT NULL CHECK(target_kind IN ('comment', 'chat')),
+        target_id   TEXT NOT NULL,
+        user_id     TEXT NOT NULL,
+        emoji       TEXT NOT NULL,
+        created_at  INTEGER NOT NULL,
+        PRIMARY KEY (target_kind, target_id, user_id, emoji)
+      )
+    `)
+
+    // Per-target rollup query — `SELECT … WHERE target_kind=? AND target_id=?`.
+    this.ctx.storage.sql.exec(
+      'CREATE INDEX IF NOT EXISTS idx_reactions_target ON reactions(target_kind, target_id)',
+    )
   }
 
   /** Build the live-reference context for the rpc-chat module. */
@@ -190,6 +211,15 @@ export class ArcCollabDO extends YServer {
         return await this.handleChatRoute(request, url)
       } catch (err) {
         console.error(`[ArcCollabDO:${this.ctx.id}] chat route unhandled:`, err)
+        return jsonResponse({ error: err instanceof Error ? err.message : String(err) }, 500)
+      }
+    }
+
+    if (path === '/reactions' || path.startsWith('/reactions/')) {
+      try {
+        return await this.handleReactionsRoute(request, url)
+      } catch (err) {
+        console.error(`[ArcCollabDO:${this.ctx.id}] reactions route unhandled:`, err)
         return jsonResponse({ error: err instanceof Error ? err.message : String(err) }, 500)
       }
     }
@@ -334,6 +364,69 @@ export class ArcCollabDO extends YServer {
       }
 
       const result = listChatForArc(ctx, { sinceCursor })
+      return jsonResponse(result, 200)
+    }
+
+    return jsonResponse({ error: 'method_not_allowed' }, 405)
+  }
+
+  /**
+   * GH#152 P1.4 B12: HTTP routes for per-arc reactions on comments + chat.
+   *
+   * Routes:
+   *   - `POST /reactions/toggle`  → toggleReactionImpl
+   *   - `GET  /reactions`         → listReactionsForArc
+   *
+   * Auth: same `resolveAuth` flow as chat. Body cap is 8 KB —
+   * reactions payloads are tiny (`{targetKind, targetId, emoji}`).
+   */
+  private async handleReactionsRoute(request: Request, url: URL): Promise<Response> {
+    const ctx = this.chatContext()
+
+    // POST /reactions/toggle — add / remove a reaction (idempotent toggle).
+    if (request.method === 'POST' && url.pathname === '/reactions/toggle') {
+      const cl = request.headers.get('content-length')
+      if (cl !== null) {
+        const bytes = Number(cl)
+        if (Number.isFinite(bytes) && bytes > 8 * 1024) {
+          return jsonResponse({ error: 'payload_too_large' }, 413)
+        }
+      }
+      const auth = await this.resolveAuth(request)
+      if (!auth.ok) return jsonResponse({ error: auth.error }, auth.status)
+
+      let raw: unknown
+      try {
+        raw = await request.json()
+      } catch {
+        return jsonResponse({ error: 'invalid_json' }, 400)
+      }
+      const body = raw as { targetKind?: unknown; targetId?: unknown; emoji?: unknown }
+      if (typeof body.targetKind !== 'string') {
+        return jsonResponse({ error: 'invalid_target_kind' }, 422)
+      }
+      if (typeof body.targetId !== 'string') {
+        return jsonResponse({ error: 'invalid_target_id' }, 422)
+      }
+      if (typeof body.emoji !== 'string') {
+        return jsonResponse({ error: 'invalid_emoji' }, 422)
+      }
+      const result = await toggleReactionImpl(ctx, {
+        targetKind: body.targetKind,
+        targetId: body.targetId,
+        emoji: body.emoji,
+        userId: auth.userId,
+      })
+      if (!result.ok) return jsonResponse({ error: result.error }, result.status)
+      return jsonResponse({ row: result.row, action: result.action }, result.status)
+    }
+
+    // GET /reactions — cold-load. Cursor is reserved for future use.
+    if (request.method === 'GET' && url.pathname === '/reactions') {
+      const auth = await this.resolveAuth(request)
+      if (!auth.ok) return jsonResponse({ error: auth.error }, auth.status)
+
+      const result = listReactionsForArc(ctx, {})
       return jsonResponse(result, 200)
     }
 

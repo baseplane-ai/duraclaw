@@ -1145,6 +1145,41 @@ export interface ChatMessageRow {
   deletedBy: string | null
 }
 
+/**
+ * GH#152 P1.4 B12: per-reaction row on the wire.
+ *
+ * Mirrors the `ArcCollabDO` `reactions` SQLite table. Carried as the
+ * `TRow` payload of a `SyncedCollectionFrame<ReactionRow>` on the
+ * `reactions:<arcId>` wire scope; same envelope shape as
+ * `chat:<arcId>` so the synced-collection client wiring is symmetric.
+ *
+ * Storage uses a composite primary key
+ * `(target_kind, target_id, user_id, emoji)` — one row per (target,
+ * user, emoji) so toggling re-presses the same key. The synthetic
+ * `id` field (`${targetKind}:${targetId}:${userId}:${emoji}`) is what
+ * TanStack DB uses as its single-string row key client-side; servers
+ * MUST build it consistently in `rowFromSql` and `toggleReactionImpl`.
+ */
+export interface ReactionRow {
+  /** Composite-key part: which surface owns the reaction. */
+  targetKind: 'comment' | 'chat'
+  /** Composite-key part: id of the comment / chat row reacted to. */
+  targetId: string
+  /** Composite-key part: user that pressed the reaction. */
+  userId: string
+  /** Composite-key part: the emoji glyph (max 16 chars on the wire). */
+  emoji: string
+  /** Epoch ms; matches SQLite `INTEGER` storage. */
+  createdAt: number
+  /**
+   * Synthetic single-string key for the SyncedCollection
+   * (`${targetKind}:${targetId}:${userId}:${emoji}`). The natural key
+   * is the composite tuple, but TanStack DB needs a single string per
+   * row.
+   */
+  id: string
+}
+
 // ── User Preferences ────────────────────────────────────────────────
 
 export interface UserPreferences {

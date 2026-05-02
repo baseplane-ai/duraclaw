@@ -3813,6 +3813,81 @@ export function createApiApp() {
     }
   })
 
+  // ── GH#152 P1.4 B12 — per-arc reactions forwarders ────────────────
+  //
+  // Thin REST → ArcCollabDO forwarders. The DO owns validation,
+  // persistence (composite-PK toggle), and the member-aware broadcast
+  // fanout on the `reactions:<arcId>` channel; this layer authenticates
+  // the caller, gates via `checkArcAccess`, and stamps `x-user-id` /
+  // `x-user-role`. Mirrors the chat forwarders' shape exactly.
+  app.post('/api/arcs/:id/reactions/toggle', async (c) => {
+    const arcId = c.req.param('id')
+    try {
+      const userId = c.get('userId')
+      const role = c.get('role') ?? 'user'
+      const db = getDb(c.env)
+      const verdict = await checkArcAccess(c.env, db, arcId, { userId, role })
+      if (!verdict.allowed) return c.json({ error: 'forbidden' }, 403)
+
+      const stub = c.env.ARC_COLLAB_DO.get(c.env.ARC_COLLAB_DO.idFromName(arcId))
+      const response = await stub.fetch(
+        new Request('https://arc-collab/reactions/toggle', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-user-id': userId,
+            'x-user-role': role,
+          },
+          body: await c.req.text(),
+        }),
+      )
+      const text = await response.text()
+      try {
+        const parsed = JSON.parse(text) as Record<string, unknown>
+        return c.json(parsed, response.status as 200 | 400 | 403 | 404 | 413 | 422 | 500)
+      } catch {
+        return c.json({ error: text || 'reaction toggle failed' }, response.status as 400 | 500)
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`[POST /api/arcs/${arcId}/reactions/toggle] unhandled:`, err)
+      return c.json({ error: msg }, 500)
+    }
+  })
+
+  app.get('/api/arcs/:id/reactions', async (c) => {
+    const arcId = c.req.param('id')
+    try {
+      const userId = c.get('userId')
+      const role = c.get('role') ?? 'user'
+      const db = getDb(c.env)
+      const verdict = await checkArcAccess(c.env, db, arcId, { userId, role })
+      if (!verdict.allowed) return c.json({ error: 'forbidden' }, 403)
+
+      const stub = c.env.ARC_COLLAB_DO.get(c.env.ARC_COLLAB_DO.idFromName(arcId))
+      const response = await stub.fetch(
+        new Request('https://arc-collab/reactions', {
+          method: 'GET',
+          headers: {
+            'x-user-id': userId,
+            'x-user-role': role,
+          },
+        }),
+      )
+      const text = await response.text()
+      try {
+        const parsed = JSON.parse(text) as Record<string, unknown>
+        return c.json(parsed, response.status as 200 | 400 | 403 | 404 | 500)
+      } catch {
+        return c.json({ error: text || 'reactions list failed' }, response.status as 400 | 500)
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`[GET /api/arcs/${arcId}/reactions] unhandled:`, err)
+      return c.json({ error: msg }, 500)
+    }
+  })
+
   app.delete('/api/sessions/:id/comments/:cid', async (c) => {
     const sessionId = c.req.param('id')
     const cid = c.req.param('cid')
