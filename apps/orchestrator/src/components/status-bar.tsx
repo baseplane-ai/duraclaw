@@ -278,7 +278,6 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
           </span>
         )}
       </div>
-      {worktreeInfo && <WorktreeStatusItem info={worktreeInfo} />}
       <span className="truncate text-muted-foreground">{model || '--'}</span>
       {session?.identityName && (
         <span
@@ -289,6 +288,7 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
           · @{session.identityName}
         </span>
       )}
+      {worktreeInfo && <WorktreeStatusItem info={worktreeInfo} />}
 
       {/* Row 2 (wraps on mobile): ctx + kata */}
       {contextUsage && <ContextBar contextUsage={contextUsage} />}
