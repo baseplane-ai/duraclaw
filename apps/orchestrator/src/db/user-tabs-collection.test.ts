@@ -21,12 +21,16 @@ import type { Transaction } from '@tanstack/db'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { UserTabRow } from '~/lib/types'
 
-// The collection module top-level-awaits dbReady; stub it to a resolved null
-// so the import doesn't hang. We also mock the @tanstack/db boundary so
+// GH#164: collection modules now read persistence synchronously via
+// `getResolvedPersistence()` (the legacy top-level-await of dbReady was
+// lifted to unblock Hermes). Stub both: dbReady for any code path still
+// awaiting it, getResolvedPersistence for the synchronous read inside
+// the lazy factory. We also mock the @tanstack/db boundary so
 // constructing the live `userTabsCollection` doesn't require a real
 // persistence layer or a query client.
 vi.mock('./db-instance', () => ({
   dbReady: Promise.resolve(null),
+  getResolvedPersistence: () => null,
   queryClient: { invalidateQueries: vi.fn() },
 }))
 

@@ -92,6 +92,10 @@ vi.mock('./db-instance', () => ({
   // wrap — we still assert it's invoked with the right shape in the
   // dedicated test below by toggling this.
   dbReady: Promise.resolve(null),
+  // GH#164: collection modules now read this synchronously instead of
+  // top-level-awaiting `dbReady`. Tests mock it to null to match the
+  // null-persistence branch above.
+  getResolvedPersistence: () => null,
   queryClient: { fetchQuery: vi.fn() },
 }))
 

@@ -18,10 +18,9 @@
 
 import type { ProjectInfo } from '@duraclaw/shared-types'
 import { apiUrl } from '~/lib/platform'
-import { dbReady } from './db-instance'
+import { getResolvedPersistence } from './db-instance'
+import { lazyCollection } from './lazy-collection'
 import { createSyncedCollection } from './synced-collection'
-
-const persistence = await dbReady
 
 function createProjectsCollection() {
   return createSyncedCollection<ProjectInfo, string>({
@@ -51,9 +50,13 @@ function createProjectsCollection() {
       return json.projects
     },
     getKey: (item) => item.name,
-    persistence,
+    persistence: getResolvedPersistence(),
     schemaVersion: 1,
   })
 }
 
-export const projectsCollection = createProjectsCollection()
+/**
+ * GH#164: lifted top-level await for Hermes. Lazy proxy resolves on
+ * first property access, which is always post-bootstrap.
+ */
+export const projectsCollection = lazyCollection(createProjectsCollection)

@@ -31,7 +31,7 @@ import {
   onSessionStreamReconnect,
   subscribeSessionStream,
 } from '~/features/agent-orch/use-coding-agent'
-import { dbReady } from './db-instance'
+import { getResolvedPersistence } from './db-instance'
 
 // Re-export with the existing local name so consumers keep their import
 // paths unchanged. The shared-types shape is structurally identical.
@@ -39,8 +39,6 @@ export type BranchInfoRow = SharedBranchInfoRow
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type BranchInfoCollection = any
-
-const persistence = await dbReady
 
 /** Memoise per-sessionId so useMemo(() => createBranchInfoCollection(id)) is stable. */
 const collectionsBySession = new Map<string, BranchInfoCollection>()
@@ -115,6 +113,10 @@ export function createBranchInfoCollection(sessionId: string): BranchInfoCollect
   const cached = collectionsBySession.get(sessionId)
   if (cached) return cached
 
+  // GH#164: read persistence synchronously from the resolved handle.
+  // Both entry points await `dbReady` before mounting React, so any
+  // call into this factory happens post-bootstrap.
+  const persistence = getResolvedPersistence()
   const options = branchInfoCollectionOptions(sessionId)
   const wrapped = persistence
     ? persistedCollectionOptions({

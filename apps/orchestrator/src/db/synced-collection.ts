@@ -59,7 +59,7 @@ export interface SyncedCollectionConfig<TRow extends object, TKey extends string
   onInsert?: (ctx: { transaction: Transaction<TRow> }) => Promise<unknown>
   onUpdate?: (ctx: { transaction: Transaction<TRow> }) => Promise<unknown>
   onDelete?: (ctx: { transaction: Transaction<TRow> }) => Promise<unknown>
-  /** OPFS / Capacitor SQLite persistence. Pass `await dbReady` from consumer. */
+  /** OPFS / Capacitor / op-sqlite persistence. Pass `getResolvedPersistence()` from consumer. */
   persistence?: AnyPersistence | null
   schemaVersion?: number
 }

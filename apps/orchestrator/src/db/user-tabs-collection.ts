@@ -15,12 +15,11 @@
 import type { Transaction } from '@tanstack/db'
 import { apiUrl } from '~/lib/platform'
 import type { UserTabRow } from '~/lib/types'
-import { dbReady } from './db-instance'
+import { getResolvedPersistence } from './db-instance'
+import { lazyCollection } from './lazy-collection'
 import { createSyncedCollection } from './synced-collection'
 
 export type TabRow = UserTabRow
-
-const persistence = await dbReady
 
 export async function userTabsOnInsert({ transaction }: { transaction: Transaction<UserTabRow> }) {
   for (const m of transaction.mutations) {
@@ -105,7 +104,7 @@ function createUserTabsCollection() {
       return json.tabs
     },
     getKey: (item) => item.id,
-    persistence,
+    persistence: getResolvedPersistence(),
     schemaVersion: 1,
 
     onInsert: userTabsOnInsert,
@@ -114,4 +113,8 @@ function createUserTabsCollection() {
   })
 }
 
-export const userTabsCollection = createUserTabsCollection()
+/**
+ * GH#164: lifted top-level await for Hermes. Lazy proxy resolves on
+ * first property access, which is always post-bootstrap.
+ */
+export const userTabsCollection = lazyCollection(createUserTabsCollection)

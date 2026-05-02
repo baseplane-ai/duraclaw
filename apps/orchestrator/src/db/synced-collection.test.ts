@@ -91,6 +91,8 @@ vi.mock('~/hooks/use-user-stream', () => ({
 vi.mock('./db-instance', () => ({
   queryClient: { invalidateQueries: mockInvalidateQueries },
   dbReady: Promise.resolve(null),
+  // GH#164: collection modules now read persistence synchronously.
+  getResolvedPersistence: () => null,
 }))
 
 // ── Helpers ──────────────────────────────────────────────────────────────
