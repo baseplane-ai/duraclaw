@@ -525,6 +525,131 @@ describe('migration 0036 — arc-collab ACL (per-arc visibility + members)', () 
   })
 })
 
+// ── GH#152 P1.3 WU-A — migration 0037 (chat_mirror) ────────────────────
+//
+// 0037 adds the D1 mirror table for per-arc team chat. The DO holds the
+// source-of-truth row; D1 mirrors are for cold-load + cross-arc surfaces.
+// Tested:
+//   - table created with the expected columns + nullability
+//   - the two indexes exist with the expected key columns
+//   - a round-trip INSERT + SELECT works under the FK constraints
+describe('migration 0037 — chat_mirror', () => {
+  const migration0034 = readMigration('0034_arcs_first_class.sql')
+  const migration0036 = readMigration('0036_arc_collab_acl.sql')
+  const migration0037 = readMigration('0037_chat_mirror.sql')
+  let db: SqlJsDatabase
+
+  beforeEach(async () => {
+    const SqlJs = await getSQL()
+    db = new SqlJs.Database()
+    seedPreMigrationSchema(db)
+    // FK enforcement is off by default in sql.js; the round-trip test
+    // turns it on explicitly so the FK columns are exercised.
+    db.run(`PRAGMA foreign_keys = ON;`)
+    // Need 0034 (arcs table for FK target) + 0036 (arc_members; harmless
+    // here but keeps the prefix order matching prod).
+    insertUser(db, 'user-1')
+    insertAgentSession(db, {
+      id: 'sess-anchor',
+      userId: 'user-1',
+      kataIssue: 1,
+      kataMode: 'research',
+    })
+    applyMigration(db, migration0034)
+    applyMigration(db, migration0036)
+  })
+
+  it('creates chat_mirror with the expected columns + nullability', () => {
+    applyMigration(db, migration0037)
+
+    const cols = rows(db, `PRAGMA table_info(chat_mirror)`)
+    const byName = Object.fromEntries(cols.map((c) => [c.name as string, c]))
+
+    // Required columns present.
+    for (const col of [
+      'id',
+      'arc_id',
+      'author_user_id',
+      'body',
+      'mentions',
+      'created_at',
+      'modified_at',
+      'edited_at',
+      'deleted_at',
+      'deleted_by',
+    ]) {
+      expect(byName[col]).toBeDefined()
+    }
+
+    // PK on id.
+    expect(byName.id!.pk).toBe(1)
+
+    // NOT NULL columns: id, arc_id, author_user_id, body, created_at, modified_at.
+    // (`pk` columns are inherently NOT NULL but PRAGMA still flags `notnull`.)
+    expect(byName.arc_id!.notnull).toBe(1)
+    expect(byName.author_user_id!.notnull).toBe(1)
+    expect(byName.body!.notnull).toBe(1)
+    expect(byName.created_at!.notnull).toBe(1)
+    expect(byName.modified_at!.notnull).toBe(1)
+
+    // Nullable columns: mentions, edited_at, deleted_at, deleted_by.
+    expect(byName.mentions!.notnull).toBe(0)
+    expect(byName.edited_at!.notnull).toBe(0)
+    expect(byName.deleted_at!.notnull).toBe(0)
+    expect(byName.deleted_by!.notnull).toBe(0)
+  })
+
+  it('creates the (arc_id, created_at) and (author_user_id) indexes', () => {
+    applyMigration(db, migration0037)
+
+    const idxList = rows(db, `PRAGMA index_list('chat_mirror')`)
+    const names = idxList.map((r) => r.name as string)
+    expect(names).toContain('idx_chat_mirror_arc_created')
+    expect(names).toContain('idx_chat_mirror_author')
+
+    const arcCreatedCols = rows(db, `PRAGMA index_info('idx_chat_mirror_arc_created')`)
+      .sort((a, b) => Number(a.seqno) - Number(b.seqno))
+      .map((r) => r.name as string)
+    expect(arcCreatedCols).toEqual(['arc_id', 'created_at'])
+
+    const authorCols = rows(db, `PRAGMA index_info('idx_chat_mirror_author')`).map(
+      (r) => r.name as string,
+    )
+    expect(authorCols).toEqual(['author_user_id'])
+  })
+
+  it('round-trip INSERT + SELECT works (with FKs satisfied)', () => {
+    applyMigration(db, migration0037)
+
+    // The seeded sess-anchor created an arc — grab its id.
+    const arcId = rows(db, `SELECT arc_id FROM agent_sessions WHERE id = 'sess-anchor' LIMIT 1`)[0]!
+      .arc_id as string
+
+    db.run(
+      `INSERT INTO chat_mirror(
+         id, arc_id, author_user_id, body, mentions,
+         created_at, modified_at, edited_at, deleted_at, deleted_by
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+      [
+        'chat-1',
+        arcId,
+        'user-1',
+        'hello team',
+        null,
+        '2026-05-02T00:00:00Z',
+        '2026-05-02T00:00:00Z',
+      ],
+    )
+
+    const got = rows(db, `SELECT id, arc_id, author_user_id, body FROM chat_mirror`)
+    expect(got).toHaveLength(1)
+    expect(got[0]!.id).toBe('chat-1')
+    expect(got[0]!.arc_id).toBe(arcId)
+    expect(got[0]!.author_user_id).toBe('user-1')
+    expect(got[0]!.body).toBe('hello team')
+  })
+})
+
 describe('migration 0038 — drops agent_sessions.visibility (precondition guard)', () => {
   const migration0034 = readMigration('0034_arcs_first_class.sql')
   const migration0036 = readMigration('0036_arc_collab_acl.sql')
