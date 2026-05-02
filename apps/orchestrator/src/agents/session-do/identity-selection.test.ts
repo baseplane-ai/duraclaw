@@ -83,8 +83,19 @@ function makeCtx(d1: FakeD1, identityHomeBase?: string) {
     env: { AUTH_DB: d1, IDENTITY_HOME_BASE: identityHomeBase },
     logEvent,
     ctx: { id: { toString: () => 'do-id-x' } },
+    do: { name: 'sess-test' },
   } as unknown as SessionDOContext
   return { ctx, logEvent }
+}
+
+/**
+ * Push a "no sticky identity" sentinel onto the FIFO. The sticky lookup
+ * does two `first()` calls — `agent_sessions` for `identity_name`, then
+ * `runner_identities` for the named row. Returning `null` for the first
+ * short-circuits the sticky path and the helper falls through to LRU.
+ */
+function pushNoSticky(d1: FakeD1) {
+  d1.firstQueue.push(null)
 }
 
 const baseCmd = {
@@ -100,6 +111,7 @@ describe('selectAndStampIdentity', () => {
 
   it('derives runner_home from IDENTITY_HOME_BASE + the LRU row name', async () => {
     const d1 = makeFakeD1()
+    pushNoSticky(d1)
     d1.firstQueue.push({ id: 'id-1', name: 'work1' })
     const { ctx } = makeCtx(d1, '/srv/runners')
 
@@ -108,15 +120,17 @@ describe('selectAndStampIdentity', () => {
     expect(next.runner_home).toBe('/srv/runners/work1')
     // Query asserts cooldown filter syntax — light sanity check that the
     // helper hit the right SQL, but the real coverage lives in the
-    // migration / a future D1 integration test.
-    expect(d1.calls[0].sql).toContain('cooldown_until < datetime')
-    expect(d1.calls[0].sql).toContain("status = 'available'")
+    // migration / a future D1 integration test. calls[0] is the sticky
+    // lookup against agent_sessions; calls[1] is the LRU SELECT.
+    expect(d1.calls[1].sql).toContain('cooldown_until < datetime')
+    expect(d1.calls[1].sql).toContain("status = 'available'")
     // GH#129: the SELECT must NOT pull the dropped home_path column.
-    expect(d1.calls[0].sql).not.toContain('home_path')
+    expect(d1.calls[1].sql).not.toContain('home_path')
   })
 
   it('falls back to /srv/duraclaw/homes when IDENTITY_HOME_BASE is unset', async () => {
     const d1 = makeFakeD1()
+    pushNoSticky(d1)
     d1.firstQueue.push({ id: 'id-2', name: 'work2' })
     const { ctx } = makeCtx(d1) // no IDENTITY_HOME_BASE
 
@@ -127,6 +141,7 @@ describe('selectAndStampIdentity', () => {
 
   it('strips a trailing slash from IDENTITY_HOME_BASE', async () => {
     const d1 = makeFakeD1()
+    pushNoSticky(d1)
     d1.firstQueue.push({ id: 'id-3', name: 'work3' })
     const { ctx } = makeCtx(d1, '/srv/runners/')
 
@@ -140,6 +155,7 @@ describe('selectAndStampIdentity', () => {
     // The helper just consumes whatever D1 hands it — assert no extra
     // client-side filtering layered on top.
     const d1 = makeFakeD1()
+    pushNoSticky(d1)
     d1.firstQueue.push({ id: 'id-expired', name: 'expired' })
     const { ctx } = makeCtx(d1, '/srv/runners')
 
@@ -150,7 +166,8 @@ describe('selectAndStampIdentity', () => {
 
   it('returns cmd unchanged when D1 has zero identities', async () => {
     const d1 = makeFakeD1()
-    // first() yields null
+    // sticky returns null, then LRU first() also yields null
+    pushNoSticky(d1)
     const { ctx, logEvent } = makeCtx(d1)
 
     const cmd = { ...baseCmd }
@@ -163,14 +180,16 @@ describe('selectAndStampIdentity', () => {
       'identity',
       expect.stringContaining('no identity available'),
     )
-    // No UPDATE issued when nothing is selected.
-    expect(d1.calls.length).toBe(1)
+    // sticky lookup + LRU SELECT, no UPDATE issued when nothing selected.
+    expect(d1.calls.length).toBe(2)
     // Mirror to D1 also skipped.
     expect(syncIdentityNameToD1).not.toHaveBeenCalled()
   })
 
   it('fails open and logs a warn when SELECT throws', async () => {
     const d1 = makeFakeD1()
+    // First first() call (sticky lookup) throws — outer catch in
+    // selectAndStampIdentity logs 'identity selection failed'.
     d1.firstThrows.push(new Error('D1 down'))
     const { ctx, logEvent } = makeCtx(d1)
 
@@ -189,14 +208,16 @@ describe('selectAndStampIdentity', () => {
 
   it('issues UPDATE last_used_at after a successful selection', async () => {
     const d1 = makeFakeD1()
+    pushNoSticky(d1)
     d1.firstQueue.push({ id: 'id-1', name: 'work1' })
     const { ctx } = makeCtx(d1, '/srv/runners')
 
     await selectAndStampIdentity(ctx, { ...baseCmd })
 
-    // calls[0] is the SELECT, calls[1] is the UPDATE.
-    expect(d1.calls.length).toBe(2)
-    const update = d1.calls[1]
+    // calls[0] sticky agent_sessions lookup, calls[1] LRU SELECT,
+    // calls[2] UPDATE.
+    expect(d1.calls.length).toBe(3)
+    const update = d1.calls[2]
     expect(update.sql).toMatch(/UPDATE\s+runner_identities/i)
     expect(update.sql).toContain('last_used_at')
     expect(update.binds).toEqual(['id-1'])
@@ -204,6 +225,7 @@ describe('selectAndStampIdentity', () => {
 
   it('logs a warn but does not fail the spawn when UPDATE last_used_at throws', async () => {
     const d1 = makeFakeD1()
+    pushNoSticky(d1)
     d1.firstQueue.push({ id: 'id-1', name: 'work1' })
     d1.runThrows.push(new Error('UPDATE failed'))
     const { ctx, logEvent } = makeCtx(d1, '/srv/runners')
@@ -222,6 +244,7 @@ describe('selectAndStampIdentity', () => {
 
   it('mirrors the selected identity name to D1 via syncIdentityNameToD1', async () => {
     const d1 = makeFakeD1()
+    pushNoSticky(d1)
     d1.firstQueue.push({ id: 'id-1', name: 'work1' })
     const { ctx } = makeCtx(d1, '/srv/runners')
 
@@ -233,6 +256,7 @@ describe('selectAndStampIdentity', () => {
 
   it('logs the selected identity name at info level with the derived HOME', async () => {
     const d1 = makeFakeD1()
+    pushNoSticky(d1)
     d1.firstQueue.push({ id: 'id-1', name: 'work1' })
     const { ctx, logEvent } = makeCtx(d1, '/srv/runners')
 
@@ -244,5 +268,47 @@ describe('selectAndStampIdentity', () => {
       'selected work1',
       expect.objectContaining({ identityId: 'id-1', homePath: '/srv/runners/work1' }),
     )
+  })
+
+  it('reuses the stamped identity (sticky) when its row is still available', async () => {
+    // Required so SDK resume context (~/.claude/projects/<P>/<sdk>.jsonl)
+    // stays under the same HOME across turns. Without this every turn 2
+    // hops to LRU and the SDK can't find the resume file.
+    const d1 = makeFakeD1()
+    // Sticky path: agent_sessions returns identity_name=work1, then
+    // runner_identities returns the work1 row as available.
+    d1.firstQueue.push({ identity_name: 'work1' })
+    d1.firstQueue.push({ id: 'id-1', name: 'work1' })
+    const { ctx, logEvent } = makeCtx(d1, '/srv/runners')
+
+    const next = await selectAndStampIdentity(ctx, { ...baseCmd })
+
+    expect(next.runner_home).toBe('/srv/runners/work1')
+    // Two SELECTs (sticky pair) + UPDATE — LRU SELECT skipped.
+    expect(d1.calls.length).toBe(3)
+    expect(d1.calls[0].sql).toMatch(/agent_sessions/i)
+    expect(d1.calls[1].sql).toMatch(/runner_identities/i)
+    expect(d1.calls[1].sql).toMatch(/WHERE name = \?/)
+    expect(d1.calls[1].binds).toEqual(['work1'])
+    expect(d1.calls[2].sql).toMatch(/UPDATE\s+runner_identities/i)
+    expect(logEvent).toHaveBeenCalledWith('info', 'identity', 'selected work1', expect.any(Object))
+  })
+
+  it('falls through to LRU when the stamped identity is on cooldown / disabled', async () => {
+    // The runner_identities sticky lookup filters on
+    // status='available' AND cooldown expired — D1 returns null when
+    // the stamped row is unavailable. Helper then falls through to LRU
+    // exactly like a fresh session.
+    const d1 = makeFakeD1()
+    d1.firstQueue.push({ identity_name: 'work1' }) // sticky stamped
+    d1.firstQueue.push(null) // but work1 is on cooldown / disabled
+    d1.firstQueue.push({ id: 'id-2', name: 'work2' }) // LRU picks work2
+    const { ctx } = makeCtx(d1, '/srv/runners')
+
+    const next = await selectAndStampIdentity(ctx, { ...baseCmd })
+
+    expect(next.runner_home).toBe('/srv/runners/work2')
+    // sticky agent_sessions + sticky runner_identities + LRU + UPDATE.
+    expect(d1.calls.length).toBe(4)
   })
 })

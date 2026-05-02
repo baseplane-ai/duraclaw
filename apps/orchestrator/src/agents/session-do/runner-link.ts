@@ -244,6 +244,47 @@ export async function findAvailableIdentity(
 }
 
 /**
+ * Return the identity already stamped on this session's `agent_sessions`
+ * row, but only if it's still selectable (status='available' and any
+ * cooldown has expired). Returns null when no identity is stamped yet
+ * (fresh session, first execute) or when the stamped one is currently
+ * on cooldown / disabled — in which case the caller falls through to
+ * LRU.
+ *
+ * This sticky behaviour is required because the SDK persists per-session
+ * resume context as a JSONL file under `<HOME>/.claude/projects/<encoded
+ * project path>/<sdk_session_id>.jsonl`. If a session is stamped to
+ * identity A on its first turn but turn 2 picks identity B via LRU,
+ * `query({ resume: <sdk_session_id> })` runs under B's HOME and the SDK
+ * cannot find the resume file → returns one error result, runner exits.
+ *
+ * The failover path in `handleRateLimit` flips the current identity's
+ * status to 'cooldown' before re-dialing, so this function naturally
+ * returns null on that path and LRU picks a fresh identity. No special
+ * "is this a failover" flag is needed.
+ */
+export async function findStickyIdentity(
+  ctx: SessionDOContext,
+): Promise<{ id: string; name: string } | null> {
+  const sessionRow = await ctx.env.AUTH_DB.prepare(
+    `SELECT identity_name FROM agent_sessions WHERE id = ?`,
+  )
+    .bind(ctx.do.name)
+    .first<{ identity_name: string | null }>()
+  const name = sessionRow?.identity_name
+  if (!name) return null
+  const row = await ctx.env.AUTH_DB.prepare(
+    `SELECT id, name FROM runner_identities
+       WHERE name = ?
+         AND status = 'available'
+         AND (cooldown_until IS NULL OR cooldown_until < datetime('now'))`,
+  )
+    .bind(name)
+    .first<{ id: string; name: string }>()
+  return row ?? null
+}
+
+/**
  * GH#129: default base directory that every runner identity's HOME
  * lives under. Matches the convention used by `setup-identity.sh` and
  * the prod cutover described in the GH#129 issue body. Override per
@@ -280,7 +321,8 @@ export async function selectAndStampIdentity<C extends ExecuteCommand | ResumeCo
   cmd: C,
 ): Promise<C> {
   try {
-    const row = await findAvailableIdentity(ctx)
+    const sticky = await findStickyIdentity(ctx)
+    const row = sticky ?? (await findAvailableIdentity(ctx))
 
     if (!row) {
       ctx.logEvent('info', 'identity', 'no identity available — using gateway default')
