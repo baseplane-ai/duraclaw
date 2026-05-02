@@ -53,7 +53,8 @@ import {
 } from '~/features/agent-orch/use-coding-agent'
 import { apiUrl } from '~/lib/platform'
 import type { SessionMessagePart } from '~/lib/types'
-import { dbReady } from './db-instance'
+import { getResolvedPersistence } from './db-instance'
+import { lazyCollection } from './lazy-collection'
 
 /** Message stored in the local cache with session context. */
 export interface CachedMessage {
@@ -81,8 +82,6 @@ export interface CachedMessage {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type MessagesCollection = any
-
-const persistence = await dbReady
 
 /** Memoise per-sessionId so useMemo(() => createMessagesCollection(id)) is stable. */
 const collectionsBySession = new Map<string, MessagesCollection>()
@@ -192,6 +191,10 @@ export function createMessagesCollection(sessionId: string): MessagesCollection 
   const cached = collectionsBySession.get(sessionId)
   if (cached) return cached
 
+  // GH#164: read persistence synchronously from the resolved handle.
+  // Both entry points await `dbReady` before mounting React, so any
+  // call into this factory happens post-bootstrap.
+  const persistence = getResolvedPersistence()
   const options = messagesCollectionOptions(sessionId)
   const wrapped = persistence
     ? persistedCollectionOptions({
@@ -211,8 +214,14 @@ export function createMessagesCollection(sessionId: string): MessagesCollection 
  * DEPRECATED — legacy singleton stub for any caller that hasn't migrated to
  * the factory yet. Forwards to `createMessagesCollection('__legacy__')`.
  * New code should call `createMessagesCollection(sessionId)` directly.
+ *
+ * GH#164: lazy-wrapped so the legacy singleton's construction is also
+ * deferred to first access (post-bootstrap), matching the other
+ * collection modules.
  */
-export const messagesCollection = createMessagesCollection('__legacy__')
+export const messagesCollection: MessagesCollection = lazyCollection(() =>
+  createMessagesCollection('__legacy__'),
+)
 
 /**
  * Compute the tail `(modifiedAt, id)` cursor for a messages collection —

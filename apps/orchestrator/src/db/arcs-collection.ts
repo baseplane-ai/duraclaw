@@ -26,10 +26,9 @@
 
 import { apiUrl } from '~/lib/platform'
 import type { ArcSummary } from '~/lib/types'
-import { dbReady } from './db-instance'
+import { getResolvedPersistence } from './db-instance'
+import { lazyCollection } from './lazy-collection'
 import { createSyncedCollection } from './synced-collection'
-
-const persistence = await dbReady
 
 function createArcsCollection() {
   return createSyncedCollection<ArcSummary, string>({
@@ -46,7 +45,7 @@ function createArcsCollection() {
       return json.arcs
     },
     getKey: (item) => item.id,
-    persistence,
+    persistence: getResolvedPersistence(),
     // GH#116: bump from chains-collection's schemaVersion=1 because the
     // OPFS persistence is per-collection-id and the id changed
     // (`chains` → `arcs`); a fresh start is correct here. Belt-and-
@@ -56,4 +55,8 @@ function createArcsCollection() {
   })
 }
 
-export const arcsCollection = createArcsCollection()
+/**
+ * GH#164: lifted top-level await for Hermes. Lazy proxy resolves on
+ * first property access, which is always post-bootstrap.
+ */
+export const arcsCollection = lazyCollection(createArcsCollection)

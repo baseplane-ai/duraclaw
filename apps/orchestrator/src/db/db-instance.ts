@@ -1,19 +1,35 @@
 /**
  * TanStackDB persistence instance with OPFS SQLite (web) or native SQLite
- * (Capacitor) backends.
+ * (op-sqlite on Expo / Capacitor SQLite on Capacitor) backends.
  *
  * - Capacitor branch: when `isNative()` is true, dynamically imports the
  *   Capacitor adapter so the native plugin is tree-shaken out of the web bundle.
+ * - Expo branch: when `isExpoNative()` is true, dynamically imports the
+ *   op-sqlite adapter (JSI-backed).
  * - OPFS detection: checks `navigator.storage?.getDirectory` existence
- * - Blocking: `dbReady` MUST be top-level-awaited by every collection module
- *   so `createCollection` always sees a non-null persistence on the OPFS path.
  * - SSR-safe: guards against `typeof navigator === 'undefined'`
  * - Console warning on fallback to memory-only storage
  *
- * NOTE: do NOT export a mutable `let persistence`. The original race had
- * `sessions-collection.ts` and `tabs-collection.ts` reading `persistence` at
- * module load — which was always `null` because `dbReady` had not resolved.
- * Result: OPFS cache silently disabled. See B-CLIENT-1.
+ * Bootstrap contract (post-GH#164):
+ *
+ *   Both `entry-client.tsx` (web) and `entry-rn.tsx` (native) `await
+ *   dbReady` BEFORE mounting React. Collection modules export lazy
+ *   proxies (`lazyCollection`) that defer construction to first
+ *   property access, and read `getResolvedPersistence()` (sync) inside
+ *   the lazy thunk. The thunk runs post-bootstrap, so persistence is
+ *   always resolved by then.
+ *
+ *   This replaces the prior TLA-at-module-scope pattern (`const
+ *   persistence = await dbReady` in every collection file). The TLA was
+ *   incompatible with Hermes (the React Native engine on Android
+ *   release builds), which cannot compile bundles containing
+ *   top-level await. See GH#164.
+ *
+ * NOTE: do NOT export a mutable `let persistence`. The original B-CLIENT-1
+ * race had collection modules reading `persistence` at module load — which
+ * was always `null` because `dbReady` had not resolved. The current shape
+ * (`getResolvedPersistence()` throws if called pre-resolution) makes the
+ * invariant violation a loud failure instead of a silent OPFS-disable.
  */
 
 import {
@@ -77,10 +93,40 @@ async function initPersistence(): Promise<Persistence | null> {
 
 /**
  * Resolved persistence handle (or null if OPFS unavailable).
- * Top-level await this in every collection module so createCollection
- * always sees a non-null persistence on the OPFS path.
+ *
+ * Both entry points (entry-client.tsx and entry-rn.tsx) `await dbReady`
+ * BEFORE mounting React, so by the time any collection is actually
+ * touched at runtime, this promise has resolved. Collection modules used
+ * to top-level-await this; that broke Hermes (the RN Android release
+ * engine, which cannot compile TLA — see GH#164). Now collection modules
+ * read the resolved value synchronously via `getResolvedPersistence()`
+ * inside their lazy initializer (see `lazy-collection.ts`).
  */
-export const dbReady: Promise<Persistence | null> = initPersistence()
+export const dbReady: Promise<Persistence | null> = initPersistence().then((p) => {
+  resolvedPersistence = p
+  dbReadySettled = true
+  return p
+})
+
+let resolvedPersistence: Persistence | null = null
+let dbReadySettled = false
+
+/**
+ * Synchronous accessor for the resolved persistence handle.
+ *
+ * Throws if called before `dbReady` resolves — collection modules MUST
+ * only read this from inside their lazy-init thunk, never at module-
+ * eval time. The lazy-collection helper guarantees first invocation is
+ * post-bootstrap (which awaits `dbReady`).
+ */
+export function getResolvedPersistence(): Persistence | null {
+  if (!dbReadySettled) {
+    throw new Error(
+      '[duraclaw-db] getResolvedPersistence() called before dbReady resolved — bootstrap order violation',
+    )
+  }
+  return resolvedPersistence
+}
 
 export async function getPersistence(): Promise<Persistence | null> {
   return dbReady

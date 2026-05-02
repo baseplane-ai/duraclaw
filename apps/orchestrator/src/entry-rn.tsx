@@ -26,6 +26,7 @@ import 'react-native-get-random-values'
 import '@expo/metro-runtime'
 import { useEffect, useState } from 'react'
 import { ActivityIndicator, AppRegistry, View } from 'react-native'
+import { GestureHandlerRootView } from 'react-native-gesture-handler'
 import { dbReady } from '~/db/db-instance'
 import { authClientReady, useSession } from '~/lib/auth-client'
 import { initNativePushDeepLink } from '~/lib/native-push-deep-link'
@@ -75,8 +76,24 @@ function RootApp() {
   const session = ready ? useSession() : null
   const isAuthenticated = Boolean((session as { data?: { user?: unknown } } | null)?.data?.user)
 
-  if (!ready) return <Splash />
-  return <NativeNavigationRoot isAuthenticated={isAuthenticated} />
+  if (!ready)
+    return (
+      <GestureHandlerRootView style={{ flex: 1 }}>
+        <Splash />
+      </GestureHandlerRootView>
+    )
+
+  // GestureHandlerRootView wraps the entire app per react-native-gesture-handler
+  // requirements — it installs at the root so any descendant gesture
+  // recogniser (kanban DnD via react-native-reanimated-dnd, future swipe
+  // navigators, etc.) shares one gesture coordinator. Without this at the
+  // top-level Pressables / scroll views inside Reanimated worklets can
+  // race against the navigator's own gesture system.
+  return (
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <NativeNavigationRoot isAuthenticated={isAuthenticated} />
+    </GestureHandlerRootView>
+  )
 }
 
 // AppRegistry.runApplication requires a DOM rootTag on web (RNW). On

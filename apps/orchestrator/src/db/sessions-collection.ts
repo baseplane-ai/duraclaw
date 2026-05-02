@@ -13,57 +13,65 @@
  */
 
 import type { SessionSummary } from '@duraclaw/shared-types'
-import { dbReady } from '~/db/db-instance'
+import { getResolvedPersistence } from '~/db/db-instance'
+import { lazyCollection } from '~/db/lazy-collection'
 import { createSyncedCollection } from '~/db/synced-collection'
 import { apiUrl } from '~/lib/platform'
 
-const persistence = await dbReady
+function buildSessionsCollection() {
+  return createSyncedCollection<SessionSummary, string>({
+    id: 'sessions',
+    queryKey: ['sessions'] as const,
+    syncFrameType: 'agent_sessions',
+    queryFn: async () => {
+      const resp = await fetch(apiUrl('/api/sessions'), { credentials: 'include' })
+      if (!resp.ok) throw new Error(`sessions fetch failed: ${resp.status}`)
+      const { sessions } = (await resp.json()) as { sessions: SessionSummary[] }
+      return sessions
+    },
+    getKey: (row) => row.id,
+    persistence: getResolvedPersistence(),
+    schemaVersion: 4, // GH#76 P4: removed lastEventTs field (TTL predicate retired)
 
-export const sessionsCollection = createSyncedCollection<SessionSummary, string>({
-  id: 'sessions',
-  queryKey: ['sessions'] as const,
-  syncFrameType: 'agent_sessions',
-  queryFn: async () => {
-    const resp = await fetch(apiUrl('/api/sessions'), { credentials: 'include' })
-    if (!resp.ok) throw new Error(`sessions fetch failed: ${resp.status}`)
-    const { sessions } = (await resp.json()) as { sessions: SessionSummary[] }
-    return sessions
-  },
-  getKey: (row) => row.id,
-  persistence,
-  schemaVersion: 4, // GH#76 P4: removed lastEventTs field (TTL predicate retired)
+    onInsert: async ({ transaction }) => {
+      for (const m of transaction.mutations) {
+        const resp = await fetch(apiUrl('/api/sessions'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify(m.modified),
+        })
+        if (!resp.ok) throw new Error(`Session insert failed: ${resp.status}`)
+      }
+    },
 
-  onInsert: async ({ transaction }) => {
-    for (const m of transaction.mutations) {
-      const resp = await fetch(apiUrl('/api/sessions'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify(m.modified),
-      })
-      if (!resp.ok) throw new Error(`Session insert failed: ${resp.status}`)
-    }
-  },
+    onUpdate: async ({ transaction }) => {
+      for (const m of transaction.mutations) {
+        const resp = await fetch(apiUrl(`/api/sessions/${m.key}`), {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify(m.changes),
+        })
+        if (!resp.ok) throw new Error(`Session update failed: ${resp.status}`)
+      }
+    },
 
-  onUpdate: async ({ transaction }) => {
-    for (const m of transaction.mutations) {
-      const resp = await fetch(apiUrl(`/api/sessions/${m.key}`), {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify(m.changes),
-      })
-      if (!resp.ok) throw new Error(`Session update failed: ${resp.status}`)
-    }
-  },
+    onDelete: async ({ transaction }) => {
+      for (const m of transaction.mutations) {
+        const resp = await fetch(apiUrl(`/api/sessions/${m.key}`), {
+          method: 'DELETE',
+          credentials: 'include',
+        })
+        if (!resp.ok) throw new Error(`Session delete failed: ${resp.status}`)
+      }
+    },
+  })
+}
 
-  onDelete: async ({ transaction }) => {
-    for (const m of transaction.mutations) {
-      const resp = await fetch(apiUrl(`/api/sessions/${m.key}`), {
-        method: 'DELETE',
-        credentials: 'include',
-      })
-      if (!resp.ok) throw new Error(`Session delete failed: ${resp.status}`)
-    }
-  },
-})
+/**
+ * GH#164: lifted top-level await for Hermes. Lazy proxy resolves on
+ * first property access, which is always post-bootstrap (entry-client
+ * and entry-rn await dbReady before mounting React).
+ */
+export const sessionsCollection = lazyCollection(buildSessionsCollection)

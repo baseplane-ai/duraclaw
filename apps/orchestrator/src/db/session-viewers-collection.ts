@@ -13,10 +13,9 @@
 
 import { apiUrl } from '~/lib/platform'
 import type { SessionViewerRow } from '~/lib/types'
-import { dbReady } from './db-instance'
+import { getResolvedPersistence } from './db-instance'
+import { lazyCollection } from './lazy-collection'
 import { createSyncedCollection } from './synced-collection'
-
-const persistence = await dbReady
 
 function createSessionViewersCollection() {
   return createSyncedCollection<SessionViewerRow, string>({
@@ -30,9 +29,13 @@ function createSessionViewersCollection() {
       return json.viewers
     },
     getKey: (item) => item.sessionId,
-    persistence,
+    persistence: getResolvedPersistence(),
     schemaVersion: 1,
   })
 }
 
-export const sessionViewersCollection = createSessionViewersCollection()
+/**
+ * GH#164: lifted top-level await for Hermes. Lazy proxy resolves on
+ * first property access, which is always post-bootstrap.
+ */
+export const sessionViewersCollection = lazyCollection(createSessionViewersCollection)

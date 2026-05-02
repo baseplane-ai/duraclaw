@@ -52,9 +52,19 @@ const CAPACITOR_STUBS = new Set([
   '@capacitor-community/sqlite',
   '@capgo/capacitor-updater',
 ])
+// Web-only modules that Metro statically bundles inside dead-code branches
+// it can't tree-shake. The `lib/toast.ts` cross-platform wrapper has a
+// synchronous `require('sonner')` gated by `Platform.OS === 'web'`; even
+// though that branch never runs on native, the parser still walks it and
+// the Hermes compiler chokes on sonner's bundled output. Stub it so Metro's
+// resolver returns the empty Proxy instead. Same pattern as CAPACITOR_STUBS.
+const WEB_ONLY_STUBS = new Set(['sonner'])
 const originalResolveRequest = config.resolver.resolveRequest
 config.resolver.resolveRequest = (context, moduleName, platform) => {
   if (CAPACITOR_STUBS.has(moduleName)) {
+    return { type: 'sourceFile', filePath: NATIVE_STUB }
+  }
+  if (WEB_ONLY_STUBS.has(moduleName)) {
     return { type: 'sourceFile', filePath: NATIVE_STUB }
   }
   if (originalResolveRequest) {

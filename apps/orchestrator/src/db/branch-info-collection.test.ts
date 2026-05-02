@@ -69,6 +69,8 @@ vi.mock('@tanstack/browser-db-sqlite-persistence', () => ({
 
 vi.mock('./db-instance', () => ({
   dbReady: Promise.resolve(null),
+  // GH#164: collection modules now read persistence synchronously.
+  getResolvedPersistence: () => null,
   queryClient: { invalidateQueries: vi.fn() },
 }))
 
