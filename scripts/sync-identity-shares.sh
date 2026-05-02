@@ -40,6 +40,12 @@ IDENTITY_HOME_BASE="${IDENTITY_HOME_BASE%/}"
 # Top-level entries under MAIN_HOME we never link from.
 TOP_BLACKLIST=(
   "duraclaw-homes"
+  # `.claude.json` is the Claude CLI's settings/state file; it contains
+  # `oauthAccount` + `userID` keyed to whichever Anthropic account
+  # logged in. Sharing it across identity HOMEs would make every HOME
+  # report the main user's account, which is wrong. Keep per-HOME —
+  # the CLI will repopulate on first use from `.credentials.json`.
+  ".claude.json"
 )
 
 # Entries under MAIN_HOME/.claude that must stay per-HOME.

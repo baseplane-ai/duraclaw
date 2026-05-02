@@ -142,6 +142,22 @@ if [[ "$DO_REGISTER" != "true" ]]; then
     fi
   fi
 
+  # Wire shared symlinks (gh, gcloud, gitconfig, .config/*, .claude tools,
+  # etc.) from the VPS user's HOME into this identity HOME. The only
+  # thing left per-HOME is `.claude/.credentials.json` — that's what
+  # gives each identity its own Anthropic rate-limit envelope. Default
+  # mode is non-destructive: never clobbers a real file (so any
+  # --copy-from settings.json above is preserved as a real file rather
+  # than replaced by the shared symlink).
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [[ -x "$SCRIPT_DIR/sync-identity-shares.sh" ]]; then
+    echo "[setup-identity] Wiring shared symlinks via sync-identity-shares.sh"
+    IDENTITY_HOME_BASE="$IDENTITY_HOME_BASE" \
+      "$SCRIPT_DIR/sync-identity-shares.sh" --name "$NAME"
+  else
+    echo "[setup-identity] sync-identity-shares.sh not found — skipping shared symlinks" >&2
+  fi
+
   echo ""
   echo "[setup-identity] HOME skeleton ready at $HOME_PATH"
   echo "[setup-identity] (derived from IDENTITY_HOME_BASE=$IDENTITY_HOME_BASE)"
