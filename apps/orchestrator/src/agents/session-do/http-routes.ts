@@ -1,5 +1,11 @@
+import { eq } from 'drizzle-orm'
+import { drizzle } from 'drizzle-orm/d1'
+import * as schema from '~/db/schema'
+import { agentSessions } from '~/db/schema'
+import { checkArcAccess } from '~/lib/arc-acl'
 import type { SpawnConfig } from '~/lib/types'
 import { handleRateLimit } from './resume-scheduler'
+import { addCommentImpl, deleteCommentImpl, editCommentImpl } from './rpc-comments'
 import { transcriptCountImpl } from './transcript'
 import type { SessionDOContext } from './types'
 
@@ -242,6 +248,21 @@ export async function handleHttpRequest(
     }
   }
 
+  // GH#152 P1.2 WU-B: per-message comment routes. Auth lives inline here
+  // (rather than in api/index.ts) per the WU-B spec: each route loads the
+  // session row, resolves arcId, runs checkArcAccess, and forwards to the
+  // matching rpc-comments impl. The Hono wrapper in api/index.ts is a thin
+  // forwarder that injects `x-user-id` + `x-user-role` headers — the DO is
+  // the policy-enforcement point.
+  //
+  // Pre-comment routes:
+  //   POST   /comments              — addCommentImpl
+  //   PATCH  /comments/:cid         — editCommentImpl
+  //   DELETE /comments/:cid         — deleteCommentImpl
+  if (url.pathname === '/comments' || url.pathname.startsWith('/comments/')) {
+    return handleCommentsRoute(ctx, request, url)
+  }
+
   // GH#119 P3: dev-only failover trigger for VP-3 verification. Synthesises
   // a `RateLimitEvent` with the optional `resets_at` from the request body
   // and routes it through the real failover handler — same identity-cooldown
@@ -437,4 +458,175 @@ export async function handleHttpRequest(
 
   // No route matched — caller should delegate to `super.onRequest`.
   return null
+}
+
+// ── GH#152 P1.2 WU-B: comments routes ────────────────────────────────
+
+const JSON_HEADERS = { 'Content-Type': 'application/json' } as const
+
+function jsonResponse(body: unknown, status: number): Response {
+  return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS })
+}
+
+/**
+ * Resolve `(arcId, callerRole)` for a session-scoped comment write.
+ * Loads the session row from D1 to get the parent arcId, then runs
+ * `checkArcAccess` against the authed userSession (sourced from the
+ * `x-user-id` / `x-user-role` headers stamped by the API forwarder).
+ *
+ * Admin override: callers with role='admin' get an explicit
+ * `callerRole='admin'` (not 'owner') so deleteCommentImpl can
+ * distinguish the moderation lane in audit logs (`deleted_by` is the
+ * userId either way).
+ */
+async function resolveCommentAuth(
+  ctx: SessionDOContext,
+  request: Request,
+): Promise<
+  | { ok: true; arcId: string; userId: string; callerRole: 'owner' | 'member' | 'admin' | null }
+  | { ok: false; status: number; error: string }
+> {
+  const userId = request.headers.get('x-user-id')
+  const role = request.headers.get('x-user-role') ?? 'user'
+  if (!userId) {
+    return { ok: false, status: 401, error: 'unauthenticated' }
+  }
+  const sessionId = ctx.do.name
+  const db = drizzle(ctx.env.AUTH_DB, { schema })
+  const sessionRows = await db
+    .select({ arcId: agentSessions.arcId })
+    .from(agentSessions)
+    .where(eq(agentSessions.id, sessionId))
+    .limit(1)
+  const arcId = sessionRows[0]?.arcId
+  if (!arcId) {
+    return { ok: false, status: 404, error: 'arc_not_found' }
+  }
+  const verdict = await checkArcAccess(ctx.env, db, arcId, { userId, role })
+  if (!verdict.allowed) {
+    return { ok: false, status: 403, error: 'forbidden' }
+  }
+  const callerRole: 'owner' | 'member' | 'admin' | null = role === 'admin' ? 'admin' : verdict.role
+  return { ok: true, arcId, userId, callerRole }
+}
+
+async function handleCommentsRoute(
+  ctx: SessionDOContext,
+  request: Request,
+  url: URL,
+): Promise<Response> {
+  // POST /comments
+  if (request.method === 'POST' && url.pathname === '/comments') {
+    try {
+      // Bound body size before JSON parse — symmetric with /messages.
+      const cl = request.headers.get('content-length')
+      if (cl !== null) {
+        const bytes = Number(cl)
+        if (Number.isFinite(bytes) && bytes > 64 * 1024) {
+          return jsonResponse({ error: 'payload_too_large' }, 413)
+        }
+      }
+      const auth = await resolveCommentAuth(ctx, request)
+      if (!auth.ok) return jsonResponse({ error: auth.error }, auth.status)
+
+      let rawBody: unknown
+      try {
+        rawBody = await request.json()
+      } catch {
+        return jsonResponse({ error: 'invalid_json' }, 400)
+      }
+      const body = rawBody as {
+        messageId?: unknown
+        parentCommentId?: unknown
+        body?: unknown
+        clientCommentId?: unknown
+      }
+      if (typeof body.messageId !== 'string' || body.messageId.length === 0) {
+        return jsonResponse({ error: 'messageId required' }, 422)
+      }
+      if (typeof body.body !== 'string') {
+        return jsonResponse({ error: 'body_required' }, 422)
+      }
+      if (typeof body.clientCommentId !== 'string' || body.clientCommentId.length === 0) {
+        return jsonResponse({ error: 'clientCommentId required' }, 422)
+      }
+      const parentCommentId =
+        typeof body.parentCommentId === 'string' && body.parentCommentId.length > 0
+          ? body.parentCommentId
+          : null
+
+      const result = await addCommentImpl(ctx, {
+        messageId: body.messageId,
+        parentCommentId,
+        body: body.body,
+        clientCommentId: body.clientCommentId,
+        senderId: auth.userId,
+      })
+      if (!result.ok) {
+        return jsonResponse({ error: result.error }, result.status)
+      }
+      return jsonResponse({ comment: result.comment }, result.status)
+    } catch (err) {
+      console.error(`[SessionDO:${ctx.ctx.id}] POST /comments unhandled:`, err)
+      return jsonResponse({ error: err instanceof Error ? err.message : String(err) }, 500)
+    }
+  }
+
+  // PATCH /comments/:cid
+  if (request.method === 'PATCH' && url.pathname.startsWith('/comments/')) {
+    try {
+      const commentId = url.pathname.slice('/comments/'.length)
+      if (!commentId) return jsonResponse({ error: 'commentId required' }, 400)
+      const auth = await resolveCommentAuth(ctx, request)
+      if (!auth.ok) return jsonResponse({ error: auth.error }, auth.status)
+
+      let rawBody: unknown
+      try {
+        rawBody = await request.json()
+      } catch {
+        return jsonResponse({ error: 'invalid_json' }, 400)
+      }
+      const body = rawBody as { body?: unknown }
+      if (typeof body.body !== 'string') {
+        return jsonResponse({ error: 'body_required' }, 422)
+      }
+      const result = editCommentImpl(ctx, {
+        commentId,
+        body: body.body,
+        senderId: auth.userId,
+      })
+      if (!result.ok) {
+        return jsonResponse({ error: result.error }, result.status)
+      }
+      return jsonResponse({ comment: result.comment }, result.status)
+    } catch (err) {
+      console.error(`[SessionDO:${ctx.ctx.id}] PATCH /comments unhandled:`, err)
+      return jsonResponse({ error: err instanceof Error ? err.message : String(err) }, 500)
+    }
+  }
+
+  // DELETE /comments/:cid
+  if (request.method === 'DELETE' && url.pathname.startsWith('/comments/')) {
+    try {
+      const commentId = url.pathname.slice('/comments/'.length)
+      if (!commentId) return jsonResponse({ error: 'commentId required' }, 400)
+      const auth = await resolveCommentAuth(ctx, request)
+      if (!auth.ok) return jsonResponse({ error: auth.error }, auth.status)
+
+      const result = deleteCommentImpl(ctx, {
+        commentId,
+        senderId: auth.userId,
+        callerRole: auth.callerRole,
+      })
+      if (!result.ok) {
+        return jsonResponse({ error: result.error }, result.status)
+      }
+      return jsonResponse({ comment: result.comment }, result.status)
+    } catch (err) {
+      console.error(`[SessionDO:${ctx.ctx.id}] DELETE /comments unhandled:`, err)
+      return jsonResponse({ error: err instanceof Error ? err.message : String(err) }, 500)
+    }
+  }
+
+  return jsonResponse({ error: 'method_not_allowed' }, 405)
 }

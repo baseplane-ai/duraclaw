@@ -1,5 +1,6 @@
 import type {
   BranchInfoRow,
+  CommentRow,
   SyncedCollectionFrame,
   SyncedCollectionOp,
   SessionMessage as WireSessionMessage,
@@ -203,6 +204,44 @@ export function broadcastBranchInfo(
   const frame: SyncedCollectionFrame<BranchInfoRow> = {
     type: 'synced-collection-delta',
     collection: `branchInfo:${ctx.do.name}`,
+    ops,
+    messageSeq: ctx.do.messageSeq,
+    sessionStatus: ctx.state.status,
+    ...(opts.targetClientId ? { targeted: true as const } : {}),
+  }
+  const data = JSON.stringify(frame)
+  if (opts.targetClientId) {
+    sendToClient(ctx, opts.targetClientId, data)
+  } else {
+    broadcastToClients(ctx, data)
+  }
+}
+
+/**
+ * GH#152 P1.2 WU-B: broadcast a comments `SyncedCollectionFrame`.
+ *
+ * Mirrors `broadcastMessages` exactly — bumps `messageSeq` on non-targeted
+ * sends, persists the seq, stamps the frame envelope, and delivers via
+ * `broadcastToClients` (or `sendToClient` for targeted replies). Wire
+ * scope is `comments:<sessionId>`; the same per-DO seq the messages
+ * stream uses, so gap-detection + cursor-replay come for free without
+ * a parallel infrastructure.
+ */
+export function broadcastComments(
+  ctx: SessionDOContext,
+  ops: SyncedCollectionOp<CommentRow>[],
+  opts: { targetClientId?: string } = {},
+): void {
+  if (ops.length === 0) return
+
+  if (!opts.targetClientId) {
+    ctx.do.messageSeq += 1
+    persistMessageSeq(ctx)
+  }
+
+  const frame: SyncedCollectionFrame<CommentRow> = {
+    type: 'synced-collection-delta',
+    collection: `comments:${ctx.do.name}`,
     ops,
     messageSeq: ctx.do.messageSeq,
     sessionStatus: ctx.state.status,

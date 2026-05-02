@@ -54,6 +54,20 @@ import {
 import { handleHttpRequest } from './http-routes'
 import { runHydration } from './hydration'
 import { rebindRunnerImpl } from './rebind-runner'
+import {
+  type AddCommentArgs,
+  type AddCommentResult,
+  addCommentImpl,
+  type DeleteCommentArgs,
+  type DeleteCommentResult,
+  deleteCommentImpl,
+  type EditCommentArgs,
+  type EditCommentResult,
+  editCommentImpl,
+  type ListCommentsArgs,
+  type ListCommentsResult,
+  listCommentsForMessage,
+} from './rpc-comments'
 import { resolveGateImpl } from './rpc-gates'
 import {
   abortImpl,
@@ -178,6 +192,15 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   recoveryGraceTimer: ReturnType<typeof setTimeout> | null = null
   /** Per-session monotonic seq for MessagesFrame broadcasts (#14 B1). Persisted in `session_meta.message_seq`. */
   messageSeq = 0
+  /**
+   * GH#152 P1.2 B8: in-memory set of message ids that are currently
+   * streaming. Used by `addCommentImpl` to reject 409 `message_streaming`
+   * while a partial assistant message is still being filled. WU-C will
+   * populate this from `gateway-event-handler.ts` on assistant
+   * stream-start / stop / finalize events; WU-B only declares the field
+   * (always empty at read time so the guard is currently a no-op).
+   */
+  streamingMessageIds: Set<string> = new Set()
   /** 5s trailing-edge debounce slot for context_usage D1 writes. */
   contextUsageDebounce: { timer: ReturnType<typeof setTimeout> | null; pending: string | null } = {
     timer: null,
@@ -500,5 +523,28 @@ export class SessionDO extends Agent<Env, SessionMeta> {
   @callable()
   async getKataStatus() {
     return getKataStatusImpl(this.moduleCtx)
+  }
+
+  // ── GH#152 P1.2 WU-B: comment RPCs ─────────────────────────────────
+  // Direct WS-RPC entrypoints. The HTTP routes in `http-routes.ts` are the
+  // primary write path for now (B6/B7/B9 wire shape); WU-D's optimistic-
+  // write hook may swap to these RPCs once `connection.state.userId`
+  // (B2 handshake) is the trusted source of `senderId` / `callerRole`.
+  // Until then, these stubs trust the caller-supplied attribution.
+  @callable()
+  async addComment(args: AddCommentArgs): Promise<AddCommentResult> {
+    return addCommentImpl(this.moduleCtx, args)
+  }
+  @callable()
+  async editComment(args: EditCommentArgs): Promise<EditCommentResult> {
+    return editCommentImpl(this.moduleCtx, args)
+  }
+  @callable()
+  async deleteComment(args: DeleteCommentArgs): Promise<DeleteCommentResult> {
+    return deleteCommentImpl(this.moduleCtx, args)
+  }
+  @callable()
+  async listCommentsForMessage(args: ListCommentsArgs): Promise<ListCommentsResult> {
+    return listCommentsForMessage(this.moduleCtx, args)
   }
 }
