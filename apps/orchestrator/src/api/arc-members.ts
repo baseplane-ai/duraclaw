@@ -33,6 +33,7 @@ import { Hono } from 'hono'
 import * as schema from '~/db/schema'
 import { arcInvitations, arcMembers, users } from '~/db/schema'
 import { checkArcAccess } from '~/lib/arc-acl'
+import { purgeArcMemberCache } from '~/lib/broadcast-arc-room'
 import type { Env } from '~/lib/types'
 import type { ApiAppEnv } from './context'
 
@@ -175,6 +176,10 @@ export function arcMembersRoutes() {
         addedBy: callerId,
       })
 
+      // GH#152 P1.3 WU-C: purge cached member list synchronously so
+      // the next chat broadcast for this arc reads the new member.
+      purgeArcMemberCache(arcId)
+
       return c.json({
         kind: 'added',
         member: {
@@ -268,6 +273,10 @@ export function arcMembersRoutes() {
       .delete(arcMembers)
       .where(and(eq(arcMembers.arcId, arcId), eq(arcMembers.userId, targetUserId)))
 
+    // GH#152 P1.3 WU-C: purge cached member list synchronously so
+    // the next chat broadcast no longer fans out to the removed user.
+    purgeArcMemberCache(arcId)
+
     return c.json({ removed: true, userId: targetUserId })
   })
 
@@ -324,6 +333,10 @@ export function arcMembersRoutes() {
       .where(eq(arcInvitations.token, token))
 
     await db.batch([insertOp, updateOp])
+
+    // GH#152 P1.3 WU-C: purge cached member list so subsequent chat
+    // broadcasts include the just-accepted invitee.
+    purgeArcMemberCache(invitation.arcId)
 
     return c.json({
       arcId: invitation.arcId,

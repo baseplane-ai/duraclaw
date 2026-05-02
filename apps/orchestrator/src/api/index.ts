@@ -3663,6 +3663,156 @@ export function createApiApp() {
     }
   })
 
+  // ── GH#152 P1.3 WU-C — per-arc team chat forwarders ───────────────
+  //
+  // Thin REST → ArcCollabDO forwarders. The DO at `apps/orchestrator/
+  // src/agents/arc-collab-do.ts` owns validation, persistence, and the
+  // member-aware broadcast fanout; this layer authenticates the caller,
+  // gates via `checkArcAccess`, locates the DO stub by arc id, and
+  // stamps the `x-user-id` / `x-user-role` headers the DO expects
+  // (parallel to the comments forwarders above).
+  app.post('/api/arcs/:id/chat', async (c) => {
+    const arcId = c.req.param('id')
+    try {
+      const userId = c.get('userId')
+      const role = c.get('role') ?? 'user'
+      const db = getDb(c.env)
+      const verdict = await checkArcAccess(c.env, db, arcId, { userId, role })
+      if (!verdict.allowed) return c.json({ error: 'forbidden' }, 403)
+
+      const stub = c.env.ARC_COLLAB_DO.get(c.env.ARC_COLLAB_DO.idFromName(arcId))
+      const response = await stub.fetch(
+        new Request('https://arc-collab/chat', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-user-id': userId,
+            'x-user-role': role,
+          },
+          body: await c.req.text(),
+        }),
+      )
+      const text = await response.text()
+      try {
+        const parsed = JSON.parse(text) as Record<string, unknown>
+        return c.json(parsed, response.status as 200 | 400 | 403 | 404 | 409 | 422 | 500)
+      } catch {
+        return c.json({ error: text || 'chat failed' }, response.status as 400 | 500)
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`[POST /api/arcs/${arcId}/chat] unhandled:`, err)
+      return c.json({ error: msg }, 500)
+    }
+  })
+
+  app.patch('/api/arcs/:id/chat/:cid', async (c) => {
+    const arcId = c.req.param('id')
+    const cid = c.req.param('cid')
+    try {
+      const userId = c.get('userId')
+      const role = c.get('role') ?? 'user'
+      const db = getDb(c.env)
+      const verdict = await checkArcAccess(c.env, db, arcId, { userId, role })
+      if (!verdict.allowed) return c.json({ error: 'forbidden' }, 403)
+
+      const stub = c.env.ARC_COLLAB_DO.get(c.env.ARC_COLLAB_DO.idFromName(arcId))
+      const response = await stub.fetch(
+        new Request(`https://arc-collab/chat/${encodeURIComponent(cid)}`, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-user-id': userId,
+            'x-user-role': role,
+          },
+          body: await c.req.text(),
+        }),
+      )
+      const text = await response.text()
+      try {
+        const parsed = JSON.parse(text) as Record<string, unknown>
+        return c.json(parsed, response.status as 200 | 400 | 403 | 404 | 410 | 422 | 500)
+      } catch {
+        return c.json({ error: text || 'chat edit failed' }, response.status as 400 | 500)
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`[PATCH /api/arcs/${arcId}/chat/${cid}] unhandled:`, err)
+      return c.json({ error: msg }, 500)
+    }
+  })
+
+  app.delete('/api/arcs/:id/chat/:cid', async (c) => {
+    const arcId = c.req.param('id')
+    const cid = c.req.param('cid')
+    try {
+      const userId = c.get('userId')
+      const role = c.get('role') ?? 'user'
+      const db = getDb(c.env)
+      const verdict = await checkArcAccess(c.env, db, arcId, { userId, role })
+      if (!verdict.allowed) return c.json({ error: 'forbidden' }, 403)
+
+      const stub = c.env.ARC_COLLAB_DO.get(c.env.ARC_COLLAB_DO.idFromName(arcId))
+      const response = await stub.fetch(
+        new Request(`https://arc-collab/chat/${encodeURIComponent(cid)}`, {
+          method: 'DELETE',
+          headers: {
+            'x-user-id': userId,
+            'x-user-role': role,
+          },
+        }),
+      )
+      const text = await response.text()
+      try {
+        const parsed = JSON.parse(text) as Record<string, unknown>
+        return c.json(parsed, response.status as 200 | 400 | 403 | 404 | 422 | 500)
+      } catch {
+        return c.json({ error: text || 'chat delete failed' }, response.status as 400 | 500)
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`[DELETE /api/arcs/${arcId}/chat/${cid}] unhandled:`, err)
+      return c.json({ error: msg }, 500)
+    }
+  })
+
+  app.get('/api/arcs/:id/chat', async (c) => {
+    const arcId = c.req.param('id')
+    try {
+      const userId = c.get('userId')
+      const role = c.get('role') ?? 'user'
+      const db = getDb(c.env)
+      const verdict = await checkArcAccess(c.env, db, arcId, { userId, role })
+      if (!verdict.allowed) return c.json({ error: 'forbidden' }, 403)
+
+      const sinceCursor = c.req.query('sinceCursor')
+      const fwdUrl = new URL('https://arc-collab/chat')
+      if (sinceCursor) fwdUrl.searchParams.set('sinceCursor', sinceCursor)
+
+      const stub = c.env.ARC_COLLAB_DO.get(c.env.ARC_COLLAB_DO.idFromName(arcId))
+      const response = await stub.fetch(
+        new Request(fwdUrl.toString(), {
+          method: 'GET',
+          headers: {
+            'x-user-id': userId,
+            'x-user-role': role,
+          },
+        }),
+      )
+      const text = await response.text()
+      try {
+        const parsed = JSON.parse(text) as Record<string, unknown>
+        return c.json(parsed, response.status as 200 | 400 | 403 | 404 | 500)
+      } catch {
+        return c.json({ error: text || 'chat list failed' }, response.status as 400 | 500)
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`[GET /api/arcs/${arcId}/chat] unhandled:`, err)
+      return c.json({ error: msg }, 500)
+    }
+  })
+
   app.delete('/api/sessions/:id/comments/:cid', async (c) => {
     const sessionId = c.req.param('id')
     const cid = c.req.param('cid')
