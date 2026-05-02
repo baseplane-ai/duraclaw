@@ -9,17 +9,19 @@ created: 2026-05-02
 updated: 2026-05-02
 phases:
   - id: p1
-    name: "Backend: Worker file-read route + gateway 5MB text bump"
+    name: "Backend: Worker file-read route + gateway /fs endpoint with allowlist"
     tasks:
-      - "Bump gateway text-MIME size cap to 5 MB while keeping binary at 1 MB (packages/agent-gateway/src/files.ts)"
-      - "Add Worker route GET /api/sessions/:id/file?path= with auth, /data/projects/* safety check, .. rejection, gateway proxy"
-      - "Wire Vitest coverage for the route — auth gate, path-safety (incl. ..), success body, 400, 404, 413, 502"
+      - "Add gateway endpoint GET /fs?path=<absolute> with allowlist (/data/projects/*, /tmp/*), .. rejection, MIME-aware size cap (5MB text, 1MB binary)"
+      - "Add Worker route GET /api/sessions/:id/file?path= with auth, allowlist check, .. rejection, gateway /fs proxy"
+      - "Wire Vitest coverage for the route — auth gate, path-safety (incl. .., out-of-allowlist), success body, 400, 404, 413, 502"
     test_cases:
       - "GET /api/sessions/<id>/file?path=/data/projects/<proj>/README.md returns 200 + text body with correct Content-Type"
+      - "Same call with path=/tmp/foo.log returns 200 + text body (tmp is in allowlist)"
       - "Same call with no auth cookie returns 401"
-      - "Same call with path=/etc/hosts returns 400 'path outside /data/projects/'"
+      - "Same call with path=/etc/hosts returns 400 'path not in allowlist'"
       - "Same call with path=/data/projects/foo/../../etc/passwd returns 400 'path traversal not allowed' (Worker rejects, never reaches gateway)"
-      - "Text file >1MB but <5MB returns 200; binary file >1MB returns 413"
+      - "Same call with path=/tmp/../etc/passwd returns 400 'path traversal not allowed'"
+      - "Text file >1MB but <5MB under /data/projects/ or /tmp/ returns 200; binary file >1MB returns 413"
       - "Gateway down → 502 with {ok:false, error:'gateway unreachable'}"
   - id: p2
     name: "Frontend: viewer Sheet + MIME→renderer dispatch"
@@ -179,33 +181,46 @@ When the assistant references a file path in its messages — e.g. ``"I've updat
 - **Trigger:** Authenticated `GET /api/sessions/:id/file?path=<absolute>` from the browser.
 - **Expected:**
   1. `getAccessibleSession(id, user)` validates session access — 401 / 404 on miss.
-  2. Validate `path` starts with `/data/projects/`. Reject otherwise → 400.
-  3. Extract `<project>/<rest>` from the path. Compute `relPath = rest`.
-  4. Proxy `GET <CC_GATEWAY_URL>/projects/<project>/files/<relPath>` with `Authorization: Bearer <CC_GATEWAY_API_TOKEN>`.
+  2. Validate `path` matches the allowlist: starts with `/data/projects/` OR `/tmp/`. Reject otherwise → 400.
+  3. Reject any `path` containing `..` segments → 400 `'path traversal not allowed'` (defense-in-depth, gateway is second line).
+  4. Proxy `GET <CC_GATEWAY_URL>/fs?path=<encoded-path>` with `Authorization: Bearer <CC_GATEWAY_API_TOKEN>`.
   5. Stream the gateway response back with `Content-Type` preserved, `Cache-Control: no-cache`, `ETag` derived from the gateway's response (if present) or a sha256 of the body.
-- **Verify:** `curl -b cookie http://localhost:43xxx/api/sessions/<id>/file?path=/data/projects/duraclaw-dev4/README.md` returns 200 + the file body with `Content-Type: text/markdown`.
+- **Verify:** `curl -b cookie http://localhost:43xxx/api/sessions/<id>/file?path=/data/projects/duraclaw-dev4/README.md` returns 200 + the file body with `Content-Type: text/markdown`. Same with `?path=/tmp/foo.log` returns 200.
 **Source:** new route in `apps/orchestrator/src/api/index.ts` (mount AFTER `authMiddleware` — distinct from `/api/sessions/media/*` which mounts before).
 
 #### API Layer
 - `GET /api/sessions/:id/file?path=<absolute-path>`
   - Auth: cookie session (Better Auth)
-  - Query: `path` (required, absolute under `/data/projects/`)
+  - Query: `path` (required, absolute under `/data/projects/` OR `/tmp/`, no `..` segments)
   - Response success: 200 + file body, `Content-Type` from gateway, `Cache-Control: no-cache`, `ETag`
   - Response errors:
-    - `400 { ok: false, error: 'invalid path', detail: 'must start with /data/projects/' }`
+    - `400 { ok: false, error: 'invalid path', detail: 'must start with /data/projects/ or /tmp/' }`
+    - `400 { ok: false, error: 'path traversal not allowed' }`
     - `401 { ok: false, error: 'unauthorized' }`
     - `404 { ok: false, error: 'session not found' }` or `'file not found'` (proxied from gateway)
     - `413 { ok: false, error: 'file too large', detail: 'limit: <bytes>' }`
     - `502 { ok: false, error: 'gateway unreachable' }`
 
-### B8: Gateway 5MB text-MIME cap
+### B8: Gateway `/fs` endpoint with allowlist + MIME-aware size cap
 
 **Core:**
-- **ID:** gateway-text-cap-bump
-- **Trigger:** `GET /projects/:name/files/*path` on the gateway returns a response whose detected MIME starts with `text/` or matches `application/json|xml|yaml|toml`.
-- **Expected:** Allow up to 5 MB for those MIMEs. Binary stays at 1 MB. MIME detection uses extension first, falls back to the existing path; magic-byte sniffing is **out of scope** for v1.
-- **Verify:** Place a 4 MB log file in a worktree, call `GET /projects/<name>/files/big.log` — returns 200 + body. Same with a 4 MB `.bin` returns 413.
-**Source:** modify `packages/agent-gateway/src/files.ts:9` (current 1 MB constant); add `TEXT_MAX_BYTES = 5 * 1024 * 1024`, `BINARY_MAX_BYTES = 1024 * 1024`.
+- **ID:** gateway-fs-endpoint
+- **Trigger:** Authenticated `GET /fs?path=<absolute>` on the gateway (Bearer `CC_GATEWAY_API_TOKEN`).
+- **Expected:**
+  1. Decode `path`; reject if missing → 400 `{ok:false,error:'path required'}`.
+  2. Validate `path` starts with `/data/projects/` OR `/tmp/`; reject otherwise → 400 `{ok:false,error:'path not in allowlist'}`.
+  3. Reject `..` segments → 400 (`safePath`-style check; second line of defense after the Worker).
+  4. `fs.stat(path)`; 404 if missing, 403 if not a regular file (directory, symlink, fifo).
+  5. Determine MIME from extension. If MIME starts with `text/` or matches `application/json|xml|yaml|toml`, cap at `TEXT_MAX_BYTES = 5 MB`. Else cap at `BINARY_MAX_BYTES = 1 MB`. Over cap → 413 `{ok:false,error:'file too large',detail:'limit: <bytes>'}`.
+  6. Stream file bytes back with `Content-Type` set, `ETag` from `<size>-<mtime_ms>`, `Last-Modified` from mtime.
+- **Verify:**
+  - `curl -H 'Authorization: Bearer $TOK' http://localhost:9877/fs?path=/data/projects/duraclaw-dev4/README.md` → 200 + body.
+  - `curl ... ?path=/tmp/test.log` → 200 + body (with a real file there).
+  - `curl ... ?path=/etc/hosts` → 400 `'path not in allowlist'`.
+  - `curl ... ?path=/data/projects/foo/../etc/passwd` → 400 `'path traversal not allowed'`.
+  - 4 MB text file → 200; 4 MB binary → 413; 6 MB text → 413.
+  - Existing `GET /projects/:name/files/*path` route is unchanged (still serves the file-tree UI on its own auth path).
+**Source:** new file `packages/agent-gateway/src/handlers-fs.ts` (or extend `files.ts`); register `path === '/fs' && method === 'GET'` in `server.ts:fetch()` block (lines 85-391, follow existing route-match style). Reuse existing `safePath` helper in `files.ts:36-42` for the `..` check, parameterized to accept either `/data/projects/<project>` or `/tmp` as the root.
 
 ### B9: Tool panel chip rendering for structured path fields
 
@@ -246,7 +261,8 @@ When the assistant references a file path in its messages — e.g. ``"I've updat
 - **react-pdf** — iframe fallback is sufficient for v1.
 - **Mobile-expo native client** — Capacitor sunsetting; SPA-only target.
 - **File-existence pre-validation index** — speculative chip rendering, viewer 404s on miss.
-- **Multi-tenant scoping** — viewer trusts any authenticated session-haver to read any file under `/data/projects/*`. Acceptable for current single-tenant deployment.
+- **Multi-tenant scoping** — viewer trusts any authenticated session-haver to read any file under `/data/projects/*` or `/tmp/*`. Acceptable for current single-tenant deployment.
+- **Allowlist beyond `/data/projects/` and `/tmp/`** — system paths like `/var/log/`, `/home/`, `/etc/` are not readable. Adding more roots (e.g. `/var/log/duraclaw/`) is a follow-up if a real need emerges; v1 ships with the two roots and clear extension points (the `ALLOWED_ROOTS` array).
 - **Streaming / chunked rendering for huge files** — 5 MB cap is the hard limit.
 - **External-editor open** (`vscode://`, `cursor://`) — placeholder in chip menu, disabled in v1.
 
@@ -273,16 +289,20 @@ These steps run on a freshly deployed branch, against a logged-in browser sessio
 4. Find an existing session id via the dashboard; export as `SID`.
 5. **B7-success**: `curl -b "duraclaw-session=$COOKIE" "http://localhost:43xxx/api/sessions/$SID/file?path=/data/projects/duraclaw-dev4/README.md"` — expect 200 + markdown body, `Content-Type: text/markdown`.
 6. **B7-401**: same call without `-b` — expect 401 + `{"ok":false,"error":"unauthorized"}`.
-7. **B7-400-out-of-tree**: `?path=/etc/hosts` — expect 400 + `{"ok":false,"error":"invalid path",...}`.
+7. **B7-400-out-of-allowlist**: `?path=/etc/hosts` — expect 400 + `{"ok":false,"error":"invalid path","detail":"must start with /data/projects/ or /tmp/"}`.
 8. **B7-400-traversal**: `?path=/data/projects/duraclaw-dev4/../../etc/passwd` — expect 400 + `{"ok":false,"error":"path traversal not allowed"}` from the Worker (gateway never receives the request — verify by tailing the gateway log and confirming no entry).
-9. **B7-404**: `?path=/data/projects/duraclaw-dev4/does-not-exist.txt` — expect 404.
-10. **B8-text-bump**: create a 4 MB text file in the worktree (`yes 'aaaa' | head -c 4194304 > /tmp/big.txt; cp /tmp/big.txt /data/projects/duraclaw-dev4/big.txt`), `?path=/data/projects/duraclaw-dev4/big.txt` — expect 200 + 4 MB body.
-11. **B8-binary-cap**: copy a 4 MB binary (`dd if=/dev/urandom of=/data/projects/duraclaw-dev4/big.bin bs=1M count=4`), `?path=...big.bin` — expect 413.
-12. **B7-413-text**: 6 MB text file, `?path=...` — expect 413.
+9. **B7-tmp-success**: `echo 'hello tmp' > /tmp/dura-vp-test.txt`, then `?path=/tmp/dura-vp-test.txt` — expect 200 + body `hello tmp\n`, `Content-Type: text/plain`.
+10. **B7-tmp-traversal**: `?path=/tmp/../etc/passwd` — expect 400 `'path traversal not allowed'`.
+11. **B7-404**: `?path=/data/projects/duraclaw-dev4/does-not-exist.txt` — expect 404.
+12. **B8-text-bump**: create a 4 MB text file (`yes 'aaaa' | head -c 4194304 > /data/projects/duraclaw-dev4/big.txt`), `?path=/data/projects/duraclaw-dev4/big.txt` — expect 200 + 4 MB body.
+13. **B8-text-bump-tmp**: same with `/tmp/big.txt` — expect 200 (allowlist applies symmetrically).
+14. **B8-binary-cap**: copy a 4 MB binary (`dd if=/dev/urandom of=/data/projects/duraclaw-dev4/big.bin bs=1M count=4`), `?path=...big.bin` — expect 413.
+15. **B7-413-text**: 6 MB text file, `?path=...` — expect 413.
+16. **B8-direct-gateway**: hit the gateway directly: `curl -H "Authorization: Bearer $CC_GATEWAY_API_TOKEN" "http://127.0.0.1:9877/fs?path=/data/projects/duraclaw-dev4/README.md"` — expect 200 + body. Same with `?path=/etc/hosts` → 400 (defense-in-depth check; gateway rejects even if Worker's check is bypassed).
 
 ### Frontend (B1-B6, B9, B10)
 
-13. **Seed an assistant message with controlled content.** Open the SessionDO's SQLite via wrangler:
+17. **Seed an assistant message with controlled content.** Open the SessionDO's SQLite via wrangler:
     ```bash
     wrangler d1 execute duraclaw-dev --local --command \
       "INSERT INTO messages (session_id, role, parts, created_at)
@@ -291,17 +311,18 @@ These steps run on a freshly deployed branch, against a logged-in browser sessio
                  unixepoch()*1000)"
     ```
     (For remote D1, drop `--local` and use `wrangler d1 execute duraclaw --remote`.) Refresh the session view in the browser.
-14. **B1-positive**: `apps/orchestrator/src/foo.tsx` renders as a chip (pill, monospace, file-type icon).
-15. **B1-negative**: `useState` renders as plain inline code (no chip).
-16. **B2 + B4**: click the chip — Sheet slides in from the right, ~45% width. Chat remains visible. Body shows TSX-highlighted code. URL gains `?file=/data/projects/duraclaw-dev4/apps/orchestrator/src/foo.tsx` (URL-encoded). Browser back closes the Sheet.
-17. **B6-missing**: in the URL `?file=/data/projects/duraclaw-dev4/missing.tsx` (or click a chip pointing at a non-existent file) — Sheet shows error card "File not found" + Download button.
-18. **B3-image**: have a tool emit `Read({file_path: "/data/projects/duraclaw-dev4/some-image.png"})`. Chip renders with thumbnail. Click → Sheet shows full image.
-19. **B5-pdf**: same with a `.pdf`. Chip renders without thumb (fallback icon). Click → iframe-rendered PDF.
-20. **B6-binary**: tool emits a path to a `.so` or `.wasm`. Click chip → error card "Cannot preview — binary file". Click "View as text" → CodeBlock with garbled or readable content depending on file.
-21. **B9-tool-panel**: open a session with a recent Read or Glob call. Inspect the tool block — `file_path` (Read) or `filenames[]` (Glob) render as chips inside the existing tool panel. Other fields stay as JSON.
-22. **B10-copy**: right-click a chip → menu → "Copy path" → paste into the address bar; the absolute path is there.
-23. **B1-thumb-lazy**: scroll a long message containing 20+ image-path chips. Open Network tab — image GETs only fire as chips scroll into the viewport.
-24. **B2-deep-link**: navigate to `?session=<id>&file=/data/projects/duraclaw-dev4/README.md` — Sheet auto-opens with the file.
+18. **B1-positive**: `apps/orchestrator/src/foo.tsx` renders as a chip (pill, monospace, file-type icon).
+19. **B1-negative**: `useState` renders as plain inline code (no chip).
+20. **B2 + B4**: click the chip — Sheet slides in from the right, ~45% width. Chat remains visible. Body shows TSX-highlighted code. URL gains `?file=/data/projects/duraclaw-dev4/apps/orchestrator/src/foo.tsx` (URL-encoded). Browser back closes the Sheet.
+21. **B6-missing**: in the URL `?file=/data/projects/duraclaw-dev4/missing.tsx` (or click a chip pointing at a non-existent file) — Sheet shows error card "File not found" + Download button.
+22. **B3-image**: have a tool emit `Read({file_path: "/data/projects/duraclaw-dev4/some-image.png"})`. Chip renders with thumbnail. Click → Sheet shows full image.
+23. **B5-pdf**: same with a `.pdf`. Chip renders without thumb (fallback icon). Click → iframe-rendered PDF.
+24. **B6-binary**: tool emits a path to a `.so` or `.wasm`. Click chip → error card "Cannot preview — binary file". Click "View as text" → CodeBlock with garbled or readable content depending on file.
+25. **B9-tool-panel**: open a session with a recent Read or Glob call. Inspect the tool block — `file_path` (Read) or `filenames[]` (Glob) render as chips inside the existing tool panel. Other fields stay as JSON.
+26. **B10-copy**: right-click a chip → menu → "Copy path" → paste into the address bar; the absolute path is there.
+27. **B1-thumb-lazy**: scroll a long message containing 20+ image-path chips. Open Network tab — image GETs only fire as chips scroll into the viewport.
+28. **B2-deep-link**: navigate to `?session=<id>&file=/data/projects/duraclaw-dev4/README.md` — Sheet auto-opens with the file.
+29. **B1-tmp-chip**: seed an assistant message with `Check \`/tmp/test-output.log\``. Chip renders, click opens viewer with the file content.
 
 ## Implementation Hints
 
@@ -349,31 +370,30 @@ const streamdownComponents: Components = { inlineCode: PathChipInlineCode }
 
 **2. Worker route skeleton (`apps/orchestrator/src/api/index.ts`)**
 ```typescript
+const PATH_ALLOWLIST = ['/data/projects/', '/tmp/']
+
 app.get('/api/sessions/:id/file', authMiddleware, async (c) => {
   const sessionId = c.req.param('id')
   const path = c.req.query('path')
-  if (!path?.startsWith('/data/projects/')) {
-    return c.json({ ok: false, error: 'invalid path', detail: 'must start with /data/projects/' }, 400)
+  if (!path) return c.json({ ok: false, error: 'invalid path', detail: 'path query required' }, 400)
+  if (!PATH_ALLOWLIST.some((p) => path.startsWith(p))) {
+    return c.json({ ok: false, error: 'invalid path', detail: 'must start with /data/projects/ or /tmp/' }, 400)
+  }
+  if (path.split('/').includes('..')) {
+    return c.json({ ok: false, error: 'path traversal not allowed' }, 400)
   }
   const session = await getAccessibleSession(c.env, sessionId, c.var.userId, c.var.role)
   if (!session.ok) return c.json({ ok: false, error: 'session not found' }, session.status as 401 | 404)
 
-  // Extract project name and relative path
-  const rest = path.slice('/data/projects/'.length)
-  const slashIdx = rest.indexOf('/')
-  if (slashIdx <= 0) return c.json({ ok: false, error: 'invalid path' }, 400)
-  const project = rest.slice(0, slashIdx)
-  const relPath = rest.slice(slashIdx + 1)
-
-  // Proxy to gateway
-  const url = `${c.env.CC_GATEWAY_URL}/projects/${encodeURIComponent(project)}/files/${relPath
-    .split('/').map(encodeURIComponent).join('/')}`
+  // Proxy directly — gateway's /fs endpoint takes the absolute path
+  const url = `${c.env.CC_GATEWAY_URL}/fs?path=${encodeURIComponent(path)}`
   const upstream = await fetch(url, {
     headers: { authorization: `Bearer ${c.env.CC_GATEWAY_API_TOKEN}` },
-  })
+  }).catch(() => null)
+  if (!upstream) return c.json({ ok: false, error: 'gateway unreachable' }, 502)
   if (!upstream.ok) {
     const body = await upstream.text().catch(() => '')
-    return c.body(body, upstream.status as 400 | 404 | 413 | 502, {
+    return c.body(body, upstream.status as 400 | 403 | 404 | 413, {
       'content-type': upstream.headers.get('content-type') ?? 'application/json',
     })
   }
@@ -386,24 +406,65 @@ app.get('/api/sessions/:id/file', authMiddleware, async (c) => {
 })
 ```
 
-**3. Gateway 5MB text bump (`packages/agent-gateway/src/files.ts`)**
+**3. Gateway `/fs` endpoint (`packages/agent-gateway/src/handlers-fs.ts`)**
 ```typescript
-// Replace the existing const MAX_FILE_SIZE = 1024 * 1024 (verify exact name in file before editing)
+import * as fs from 'node:fs/promises'
+import * as path from 'node:path'
+
+const ALLOWED_ROOTS = ['/data/projects', '/tmp']
 const TEXT_MAX_BYTES = 5 * 1024 * 1024
 const BINARY_MAX_BYTES = 1024 * 1024
-
 const TEXT_MIME_PREFIXES = ['text/', 'application/json', 'application/xml',
                             'application/yaml', 'application/toml',
                             'application/x-yaml', 'application/x-toml']
+
 function isTextMime(mime: string) {
   return TEXT_MIME_PREFIXES.some((p) => mime.startsWith(p))
 }
 
-// In handleFileContents:
-const stat = await fs.stat(absPath)
-const mime = mimeFromPath(absPath) // existing util
-const cap = isTextMime(mime) ? TEXT_MAX_BYTES : BINARY_MAX_BYTES
-if (stat.size > cap) return new Response(JSON.stringify({ ok: false, error: 'file too large', detail: `limit: ${cap}` }), { status: 413 })
+function isUnderAllowedRoot(absPath: string): boolean {
+  return ALLOWED_ROOTS.some(
+    (root) => absPath === root || absPath.startsWith(`${root}/`),
+  )
+}
+
+export async function handleFsRead(req: Request): Promise<Response> {
+  const url = new URL(req.url)
+  const requested = url.searchParams.get('path')
+  if (!requested) return jsonErr(400, 'path required')
+
+  // Resolve and second-line-of-defense .. check (Worker is first line)
+  const resolved = path.resolve(requested)
+  if (resolved !== requested) return jsonErr(400, 'path traversal not allowed')
+  if (!isUnderAllowedRoot(resolved)) return jsonErr(400, 'path not in allowlist')
+
+  let stat
+  try { stat = await fs.stat(resolved) } catch { return jsonErr(404, 'file not found') }
+  if (!stat.isFile()) return jsonErr(403, 'not a regular file')
+
+  const mime = mimeFromPath(resolved) // existing util in files.ts
+  const cap = isTextMime(mime) ? TEXT_MAX_BYTES : BINARY_MAX_BYTES
+  if (stat.size > cap) return jsonErr(413, 'file too large', `limit: ${cap}`)
+
+  const body = await fs.readFile(resolved)
+  return new Response(body, {
+    status: 200,
+    headers: {
+      'content-type': mime,
+      etag: `"${stat.size}-${stat.mtimeMs}"`,
+      'last-modified': stat.mtime.toUTCString(),
+    },
+  })
+}
+
+function jsonErr(status: number, error: string, detail?: string) {
+  return new Response(JSON.stringify({ ok: false, error, ...(detail ? { detail } : {}) }), {
+    status, headers: { 'content-type': 'application/json' },
+  })
+}
+
+// Wire in server.ts fetch():
+// if (req.method === 'GET' && url.pathname === '/fs') return handleFsRead(req)
 ```
 
 **4. PathChip with thumbnail lazy-load**
