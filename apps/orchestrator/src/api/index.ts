@@ -3581,6 +3581,124 @@ export function createApiApp() {
     }
   })
 
+  // ── GH#152 P1.2 WU-C — comments forwarders ─────────────────────────
+  //
+  // Thin REST → SessionDO forwarders. The DO at `apps/orchestrator/src/
+  // agents/session-do/http-routes.ts` owns validation, arc access checks,
+  // and persistence; this layer only authenticates the caller, locates
+  // the right DO stub, and stamps the `x-user-id` / `x-user-role` headers
+  // the DO expects (mirroring the `/messages` POST pattern above).
+  app.post('/api/sessions/:id/comments', async (c) => {
+    const sessionId = c.req.param('id')
+    try {
+      const userId = c.get('userId')
+      const role = c.get('role')
+      const access = await getAccessibleSession(c.env, sessionId, userId, role)
+      if (!access.ok) {
+        return c.json({ error: 'Session not found' }, 404)
+      }
+      const doId = getSessionDoId(c.env, access.session.id)
+      const sessionDO = c.env.SESSION_AGENT.get(doId)
+      const response = await sessionDO.fetch(
+        new Request('https://session/comments', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-partykit-room': access.session.id,
+            'x-user-id': userId,
+            'x-user-role': role ?? 'user',
+          },
+          body: await c.req.text(),
+        }),
+      )
+      const text = await response.text()
+      try {
+        const parsed = JSON.parse(text) as Record<string, unknown>
+        return c.json(parsed, response.status as 200 | 400 | 403 | 404 | 409 | 422 | 500)
+      } catch {
+        return c.json({ error: text || 'comment failed' }, response.status as 400 | 500)
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`[POST /api/sessions/${sessionId}/comments] unhandled:`, err)
+      return c.json({ error: msg }, 500)
+    }
+  })
+
+  app.patch('/api/sessions/:id/comments/:cid', async (c) => {
+    const sessionId = c.req.param('id')
+    const cid = c.req.param('cid')
+    try {
+      const userId = c.get('userId')
+      const role = c.get('role')
+      const access = await getAccessibleSession(c.env, sessionId, userId, role)
+      if (!access.ok) {
+        return c.json({ error: 'Session not found' }, 404)
+      }
+      const doId = getSessionDoId(c.env, access.session.id)
+      const sessionDO = c.env.SESSION_AGENT.get(doId)
+      const response = await sessionDO.fetch(
+        new Request(`https://session/comments/${encodeURIComponent(cid)}`, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-partykit-room': access.session.id,
+            'x-user-id': userId,
+            'x-user-role': role ?? 'user',
+          },
+          body: await c.req.text(),
+        }),
+      )
+      const text = await response.text()
+      try {
+        const parsed = JSON.parse(text) as Record<string, unknown>
+        return c.json(parsed, response.status as 200 | 400 | 403 | 404 | 409 | 422 | 500)
+      } catch {
+        return c.json({ error: text || 'comment edit failed' }, response.status as 400 | 500)
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`[PATCH /api/sessions/${sessionId}/comments/${cid}] unhandled:`, err)
+      return c.json({ error: msg }, 500)
+    }
+  })
+
+  app.delete('/api/sessions/:id/comments/:cid', async (c) => {
+    const sessionId = c.req.param('id')
+    const cid = c.req.param('cid')
+    try {
+      const userId = c.get('userId')
+      const role = c.get('role')
+      const access = await getAccessibleSession(c.env, sessionId, userId, role)
+      if (!access.ok) {
+        return c.json({ error: 'Session not found' }, 404)
+      }
+      const doId = getSessionDoId(c.env, access.session.id)
+      const sessionDO = c.env.SESSION_AGENT.get(doId)
+      const response = await sessionDO.fetch(
+        new Request(`https://session/comments/${encodeURIComponent(cid)}`, {
+          method: 'DELETE',
+          headers: {
+            'x-partykit-room': access.session.id,
+            'x-user-id': userId,
+            'x-user-role': role ?? 'user',
+          },
+        }),
+      )
+      const text = await response.text()
+      try {
+        const parsed = JSON.parse(text) as Record<string, unknown>
+        return c.json(parsed, response.status as 200 | 400 | 403 | 404 | 409 | 422 | 500)
+      } catch {
+        return c.json({ error: text || 'comment delete failed' }, response.status as 400 | 500)
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`[DELETE /api/sessions/${sessionId}/comments/${cid}] unhandled:`, err)
+      return c.json({ error: msg }, 500)
+    }
+  })
+
   // P3 B4: REST endpoint for context usage. Scaffolding only — consumer
   // migration (swapping the client's WS `context_usage` handler to poll this)
   // is deferred to a separate issue per spec Non-Goals.

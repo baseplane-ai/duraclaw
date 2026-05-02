@@ -12,7 +12,7 @@ import { generateActionToken } from '~/lib/action-token'
 import { broadcastSessionRow } from '~/lib/broadcast-session'
 import type { GatewayEvent } from '~/lib/types'
 import { advanceArcGate, advanceArcImpl } from './advance-arc'
-import { broadcastMessages as broadcastMessagesImpl } from './broadcast'
+import { broadcastMessages as broadcastMessagesImpl, broadcastToClients } from './broadcast'
 import { promoteToolPartToGate as promoteToolPartToGateImpl } from './gates'
 import { maybeReleaseWorktreeOnTerminal } from './maybe-release-worktree'
 import {
@@ -51,6 +51,58 @@ import {
  */
 function wireToSessionParts(wire: WireMessagePart[]): SessionMessagePart[] {
   return wire as unknown as SessionMessagePart[]
+}
+
+/**
+ * GH#152 P1.2 WU-C — comment-lock fanout.
+ *
+ * `comment_lock` / `comment_unlock` are tiny control frames (no
+ * SyncedCollection envelope, no messageSeq bump) that flag the
+ * client-side `addComment` input on/off for a specific assistant
+ * messageId while it is mid-stream. The single source of truth for the
+ * gate itself lives in `ctx.do.streamingMessageIds`; the broadcast just
+ * lets the client mirror that state without polling.
+ *
+ * Set semantics make `lockMessageStream` and `unlockMessageStream`
+ * idempotent — partial_assistant fires repeatedly per turn but only the
+ * first add is meaningful, and the terminal handlers (`assistant`,
+ * `result`, `stopped`, `error`) all funnel through the same delete +
+ * unlock path so any one of them cleans up safely.
+ */
+function lockMessageStream(ctx: SessionDOContext, messageId: string): void {
+  if (ctx.do.streamingMessageIds.has(messageId)) return
+  ctx.do.streamingMessageIds.add(messageId)
+  try {
+    broadcastToClients(ctx, JSON.stringify({ type: 'comment_lock', messageId }))
+  } catch (err) {
+    console.error(`[SessionDO:${ctx.ctx.id}] comment_lock broadcast failed:`, err)
+  }
+}
+
+function unlockMessageStream(ctx: SessionDOContext, messageId: string | null | undefined): void {
+  if (!messageId) return
+  if (!ctx.do.streamingMessageIds.has(messageId)) return
+  ctx.do.streamingMessageIds.delete(messageId)
+  try {
+    broadcastToClients(ctx, JSON.stringify({ type: 'comment_unlock', messageId }))
+  } catch (err) {
+    console.error(`[SessionDO:${ctx.ctx.id}] comment_unlock broadcast failed:`, err)
+  }
+}
+
+/**
+ * Drain every locked messageId — used by terminal events
+ * (`result`, `stopped`, `error`) where the runner is no longer
+ * producing tokens, so any still-locked stream is implicitly aborted.
+ * Each unlock fans out an individual `comment_unlock` frame so the
+ * client's lock map clears symmetrically with how it was filled.
+ */
+function unlockAllStreamingMessages(ctx: SessionDOContext): void {
+  if (ctx.do.streamingMessageIds.size === 0) return
+  const ids = [...ctx.do.streamingMessageIds]
+  for (const id of ids) {
+    unlockMessageStream(ctx, id)
+  }
 }
 
 /**
@@ -121,6 +173,11 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
         ? wireToSessionParts(event.parts)
         : partialAssistantToParts(event.content)
       const msgId = `msg-${self.turnCounter}`
+
+      // GH#152 P1.2 WU-C — lock comments on this assistant message for the
+      // duration of streaming. Idempotent on the Set; subsequent partials
+      // for the same msgId are a no-op.
+      lockMessageStream(ctx, msgId)
 
       if (!self.currentTurnMessageId) {
         self.currentTurnMessageId = msgId
@@ -302,6 +359,10 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
         broadcastMessagesImpl(ctx, [msg as unknown as WireSessionMessage])
       } catch (err) {
         console.error('[session-do] event persist failed', err)
+      } finally {
+        // GH#152 P1.2 WU-C — finalized assistant message: unlock comments.
+        // Runs in finally so a persist throw still releases the lock.
+        unlockMessageStream(ctx, msgId)
       }
       self.updateState({ num_turns: ctx.state.num_turns + 1 })
       break
@@ -498,6 +559,11 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
 
     case 'result': {
       self.clearAwaitingResponse()
+      // GH#152 P1.2 WU-C — terminal event: drain any still-locked
+      // assistant messageIds. Normally the `assistant` case has already
+      // unlocked the active turn; this is the safety net for adapters
+      // that skip a final assistant event or for orphaned partials.
+      unlockAllStreamingMessages(ctx)
       // GH#75 P1.2 B7 — REORDER GUARD: all per-message broadcast frames
       // for this turn MUST fire before we flip state to `idle`. If status
       // flips first the sidebar can resolve to idle while the final
@@ -680,6 +746,8 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
 
     case 'stopped': {
       self.clearAwaitingResponse()
+      // GH#152 P1.2 WU-C — terminal: release any locked streaming msgIds.
+      unlockAllStreamingMessages(ctx)
       // Finalize orphaned streaming parts
       if (self.currentTurnMessageId) {
         const existing = ctx.session.getMessage(self.currentTurnMessageId)
@@ -809,6 +877,8 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
 
     case 'error': {
       self.clearAwaitingResponse()
+      // GH#152 P1.2 WU-C — terminal: release any locked streaming msgIds.
+      unlockAllStreamingMessages(ctx)
       // Finalize orphaned streaming parts
       if (self.currentTurnMessageId) {
         const existing = ctx.session.getMessage(self.currentTurnMessageId)

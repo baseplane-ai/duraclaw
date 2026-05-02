@@ -68,6 +68,10 @@ function makeCtx() {
     name: 'sess-1',
     turnCounter: 0,
     currentTurnMessageId: null as string | null,
+    // GH#152 P1.2 WU-C — terminal `result` event drains this set on the
+    // real DO. Mocked here as a real Set so the unlock helper's `.size`
+    // / iteration calls don't NPE.
+    streamingMessageIds: new Set<string>(),
     clearAwaitingResponse: vi.fn(),
     safeAppendMessage: vi.fn(),
     safeUpdateMessage: vi.fn(),
