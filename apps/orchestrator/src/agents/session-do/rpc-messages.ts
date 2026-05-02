@@ -30,12 +30,14 @@ export interface SendMessageOpts {
   submitId?: string
   client_message_id?: string
   createdAt?: string
-  // Spec #68 B14 — accepted for forward-compat when shared sessions need to
-  // attribute turns to the sender. The column exists on the SDK-owned
-  // `assistant_messages` table (migration v11) but message persistence flows
-  // through `Session.appendMessage`, not direct SQL, so this is a no-op
-  // today. Plumbed now so the wire shape is stable when UI attribution lands.
+  // GH#68 B14 — sender attribution for shared sessions. Persisted by
+  // riding the JSON `content` column the SDK's `Session.appendMessage`
+  // serialises (no schema migration: `content` is opaque to the SDK and
+  // round-trips losslessly through `JSON.parse(row.content) as
+  // WireSessionMessage` on the client-replay path). `senderName` is
+  // frozen-at-write so the renderer needs no per-user lookup endpoint.
   senderId?: string
+  senderName?: string
 }
 
 export interface SendMessageResult {
@@ -215,12 +217,25 @@ export async function sendMessageImpl(
   ctx.do.turnCounter++
   const canonicalTurnId = `usr-${ctx.do.turnCounter}`
   const userMsgId = opts?.client_message_id ?? canonicalTurnId
-  const userMsg: SessionMessage & { canonical_turn_id?: string } = {
+  // GH#68 B14 — attach sender attribution to the message object before
+  // persistence. `Session.appendMessage` does `JSON.stringify(message)`
+  // into the SDK-owned `assistant_messages.content` column, so these
+  // fields ride through serialise → SQL → replay → client without any
+  // schema change. The client-side `JSON.parse(row.content)` in
+  // `replayMessagesFromCursor` (client-ws.ts) and the object-spread in
+  // `broadcastMessages` (broadcast.ts) both preserve unknown keys.
+  const userMsg: SessionMessage & {
+    canonical_turn_id?: string
+    senderId?: string
+    senderName?: string
+  } = {
     id: userMsgId,
     role: 'user',
     parts: [...contentToParts(content), buildAwaitingPartImpl('first_token')],
     createdAt: opts?.createdAt ? new Date(opts.createdAt) : new Date(),
     canonical_turn_id: canonicalTurnId,
+    ...(opts?.senderId ? { senderId: opts.senderId } : {}),
+    ...(opts?.senderName ? { senderName: opts.senderName } : {}),
   }
   try {
     await ctx.do.safeAppendMessage(userMsg)

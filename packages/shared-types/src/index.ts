@@ -1065,6 +1065,22 @@ export interface SessionMessage {
    * through the tiebreaker harmlessly).
    */
   seq?: number
+  /**
+   * GH#68 B14 — author attribution for shared sessions. Stamped by SessionDO
+   * on user-role turns from the authenticated `userId` of the POSTer; absent
+   * on assistant/tool/system rows and on legacy user rows that pre-date this
+   * field. Rides the JSON `content` column (no schema migration required —
+   * `Session.appendMessage` serialises the whole message; replay round-trips
+   * via `JSON.parse(row.content) as WireSessionMessage`).
+   */
+  senderId?: string
+  /**
+   * GH#68 B14 — frozen-at-write display name for the sender, looked up
+   * server-side from `users.name` so the client never needs a per-user
+   * lookup endpoint to render initials. Frozen-at-write means later renames
+   * do not propagate; acceptable for an attribution badge.
+   */
+  senderName?: string
 }
 
 export interface BranchInfoRow {

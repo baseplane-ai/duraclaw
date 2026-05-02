@@ -77,6 +77,15 @@ export interface CachedMessage {
    * as optimistic rows (id=`usr-client-<uuid>`) reconcile with server echoes.
    */
   canonical_turn_id?: string
+  /**
+   * GH#68 B14 — author attribution for shared sessions. `senderId` is the
+   * Better Auth `users.id` of whoever POSTed the user turn; `senderName` is
+   * frozen at write time so the renderer needs no per-user lookup endpoint.
+   * Both absent on assistant/tool/system rows and on user rows authored
+   * before the field landed (render falls back to no badge in that case).
+   */
+  senderId?: string
+  senderName?: string
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -3524,6 +3524,29 @@ export function createApiApp() {
         return c.json({ error: 'createdAt must be a valid ISO 8601 string' }, 400)
       }
 
+      // GH#68 B14 — frozen-at-write display name for the sender so the
+      // chat renderer can show initials without a per-user lookup
+      // endpoint. Tolerated as missing on lookup failure (defensive — D1
+      // hiccup must not block the message send); the renderer falls back
+      // to the senderId-derived initials when senderName is absent.
+      let senderName: string | undefined
+      try {
+        const db = getDb(c.env)
+        const row = (
+          await db
+            .select({ name: schema.users.name })
+            .from(schema.users)
+            .where(eq(schema.users.id, userId))
+            .limit(1)
+        )[0]
+        if (row?.name) senderName = row.name
+      } catch (err) {
+        console.warn(
+          `[POST /api/sessions/${sessionId}/messages] senderName lookup failed for ${userId}:`,
+          err,
+        )
+      }
+
       const doId = getSessionDoId(c.env, access.session.id)
       const sessionDO = c.env.SESSION_AGENT.get(doId)
       const response = await sessionDO.fetch(
@@ -3538,10 +3561,12 @@ export function createApiApp() {
             content: body.content,
             clientId: body.clientId,
             createdAt: body.createdAt,
-            // Spec #68 B14 — stamp the turn with the sender's user id so
-            // shared sessions can attribute user turns. The DO accepts
-            // this as an optional opt for future multi-user display.
+            // Spec #68 B14 — stamp the turn with sender attribution so
+            // multi-human sessions can label which user sent each turn.
+            // senderName is frozen-at-write; the DO persists both fields
+            // by riding them on the JSON `content` column.
             senderId: userId,
+            ...(senderName ? { senderName } : {}),
           }),
         }),
       )

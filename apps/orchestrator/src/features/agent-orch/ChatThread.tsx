@@ -58,7 +58,9 @@ import {
   SheetTitle,
 } from '~/components/ui/sheet'
 import { Skeleton } from '~/components/ui/skeleton'
+import { useSession } from '~/lib/auth-client'
 import type { AwaitingReason, AwaitingResponsePart } from '~/lib/awaiting-response'
+import { deriveInitials } from '~/lib/initials'
 import { getImagePartDataUrl, isImageTruncated } from '~/lib/message-parts'
 import type { GateResponse, SessionMessage, SessionMessagePart } from '~/lib/types'
 import { AwaitingBubble } from './AwaitingBubble'
@@ -712,6 +714,15 @@ const ChatMessageRow = memo(
     onBranchFromMessage,
     branchingFromTurnIndex,
   }: ChatMessageRowProps) {
+    // GH#68 B14 — viewer identity drives the "is this me?" check on user
+    // turns: own messages render unbadged (standard chat UX), other-human
+    // turns render an initials badge. Resolved via the better-auth client
+    // hook; on the rare loading frame `currentUserId` is undefined and
+    // every senderId-bearing message badges (preferable to flashing
+    // unbadged then re-rendering with badges).
+    const session = useSession() as { data?: { user?: { id?: string } } } | null
+    const currentUserId = session?.data?.user?.id
+
     const handleRewind = useCallback(() => {
       onRewind?.(turnIndex)
     }, [onRewind, turnIndex])
@@ -813,11 +824,42 @@ const ChatMessageRow = memo(
         const url = getImagePartDataUrl(p)
         return url ? [{ part: p, url, truncated: false }] : []
       })
+      // GH#68 B14 — sender attribution on multi-human sessions. Read via
+      // a local cast: ChatMessageRow's `msg` is typed against the SDK's
+      // `SessionMessage`, but the wire shape carries `senderId` /
+      // `senderName` (see WireSessionMessage). Badge only when:
+      //   - the message was attributed (senderId present), AND
+      //   - the sender is someone other than the viewer.
+      // Self-authored turns and legacy unattributed rows render clean.
+      const attribution = msg as SessionMessage & {
+        senderId?: string
+        senderName?: string
+      }
+      const showSenderBadge = Boolean(
+        attribution.senderId && attribution.senderId !== currentUserId,
+      )
+      const senderInitials = showSenderBadge
+        ? deriveInitials(attribution.senderName ?? attribution.senderId)
+        : null
       return (
         <div key={msg.id} className="group relative" data-turn-index={turnIndex}>
           <Message from="user">
             <MessageContent>
               <div className="flex min-w-0 flex-col gap-2">
+                {showSenderBadge && (
+                  <div
+                    className="flex items-center gap-1.5 text-[11px] text-muted-foreground"
+                    data-testid={`message-sender-${turnIndex}`}
+                    title={attribution.senderName ?? attribution.senderId}
+                  >
+                    <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-secondary-foreground/15 px-1 font-medium text-[9px] uppercase tracking-wide text-secondary-foreground">
+                      {senderInitials}
+                    </span>
+                    <span className="truncate">
+                      {attribution.senderName ?? attribution.senderId}
+                    </span>
+                  </div>
+                )}
                 {imageParts.length > 0 && (
                   <div className="flex flex-wrap gap-2">
                     {imageParts.map(({ url, truncated }, i) =>

@@ -194,6 +194,7 @@ export async function handleHttpRequest(
         clientId?: unknown
         createdAt?: unknown
         senderId?: unknown
+        senderName?: unknown
       }
       if (typeof body.content !== 'string' || body.content.length === 0) {
         return new Response(JSON.stringify({ error: 'content must be a non-empty string' }), {
@@ -217,6 +218,7 @@ export async function handleHttpRequest(
         client_message_id: body.clientId,
         createdAt: body.createdAt,
         ...(typeof body.senderId === 'string' ? { senderId: body.senderId } : {}),
+        ...(typeof body.senderName === 'string' ? { senderName: body.senderName } : {}),
       })
       if (!result.ok) {
         return new Response(JSON.stringify({ error: result.error ?? 'send failed' }), {
