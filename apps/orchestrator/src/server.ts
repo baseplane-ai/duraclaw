@@ -1,6 +1,7 @@
 import { eq } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import { routePartykitRequest } from 'partyserver'
+import { ArcCollabDO } from './agents/arc-collab-do'
 import { RepoDocumentDO } from './agents/repo-document-do'
 import { SessionCollabDOv2 } from './agents/session-collab-do'
 import { SessionCollabDO } from './agents/session-collab-do-legacy'
@@ -268,7 +269,14 @@ export default {
   scheduled,
 }
 
-export { RepoDocumentDO, SessionCollabDO, SessionCollabDOv2, SessionDO, UserSettingsDO }
+export {
+  ArcCollabDO,
+  RepoDocumentDO,
+  SessionCollabDO,
+  SessionCollabDOv2,
+  SessionDO,
+  UserSettingsDO,
+}
 
 // Stub: wrangler needs this class exported for the v5 deleted_classes
 // migration to apply. Once the migration has run on the infra pipeline's

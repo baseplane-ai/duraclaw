@@ -53,6 +53,13 @@ class_name = "SessionCollabDO"
 name = "REPO_DOCUMENT"
 class_name = "RepoDocumentDO"
 
+# Per-arc collaborative DO (GH#152 P1.3 B11). One DO per arc id; backs
+# per-arc team chat (`chat_messages` SQLite table) and the future Yjs
+# awareness layer (P1.6). WS upgrades + Hono forwarders land in WU-C.
+[[durable_objects.bindings]]
+name = "ARC_COLLAB_DO"
+class_name = "ArcCollabDO"
+
 # DO migrations — collapsed for fresh deploy on baseplane-ai account.
 # The old worker (on the codevibesmatter account) held the prior v1..v5 chain;
 # here we start at the final SQLite-backed shape.
@@ -107,6 +114,15 @@ new_sqlite_classes = ["SessionCollabDOv2"]
 [[migrations]]
 tag = "v7"
 new_sqlite_classes = ["RepoDocumentDO"]
+
+# v8: introduce ArcCollabDO for per-arc team chat (GH#152 P1.3 B11) +
+# the future Yjs awareness layer (P1.6). Hybrid DO: extends YServer
+# for the y-partyserver wire AND owns custom SQLite tables (chat_messages
+# at v8; reactions at a later DO migration). See
+# planning/specs/152-team-collab-chat-comments.md.
+[[migrations]]
+tag = "v8"
+new_sqlite_classes = ["ArcCollabDO"]
 
 # D1 database for auth — `c5b4d822` on Ben@baseplane.ai (account
 # `87bd3030`), where the infra pipeline deploys. Do NOT let wrangler

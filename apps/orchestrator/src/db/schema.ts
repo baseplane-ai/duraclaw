@@ -369,6 +369,46 @@ export const arcInvitations = sqliteTable('arc_invitations', {
   acceptedBy: text('accepted_by').references(() => users.id, { onDelete: 'set null' }),
 })
 
+/**
+ * GH#152 P1.3: D1 mirror of per-arc team chat. Source of truth lives
+ * inside the per-arc `ArcCollabDO` SQLite (`chat_messages` table); the
+ * D1 mirror exists for cold-load queries (latest N messages on first
+ * paint) and cross-arc surfaces ("all messages by user"). Writes
+ * happen on the orchestrator after the DO RPC succeeds; the DO is
+ * authoritative on conflict.
+ *
+ * Timestamp shape: the DO stores epoch-ms INTEGER (cursor-replay
+ * convention); the D1 mirror stores ISO 8601 TEXT to match the
+ * surrounding D1 norms (`agent_sessions`, `arcs`, `arc_members`).
+ * The mirror writer converts at the boundary.
+ */
+export const chatMirror = sqliteTable(
+  'chat_mirror',
+  {
+    id: text('id').primaryKey(),
+    arcId: text('arc_id')
+      .notNull()
+      .references(() => arcs.id, { onDelete: 'cascade' }),
+    authorUserId: text('author_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    body: text('body').notNull(),
+    /** JSON array of resolved user ids; null/empty until P1.5 wires the resolver. */
+    mentions: text('mentions'),
+    createdAt: text('created_at').notNull(),
+    modifiedAt: text('modified_at').notNull(),
+    editedAt: text('edited_at'),
+    deletedAt: text('deleted_at'),
+    deletedBy: text('deleted_by').references(() => users.id, { onDelete: 'set null' }),
+  },
+  (t) => ({
+    // Cold-load query: latest N chat messages per arc, newest first.
+    arcCreated: index('idx_chat_mirror_arc_created').on(t.arcId, t.createdAt),
+    // Future "all messages by user" surface.
+    byAuthor: index('idx_chat_mirror_author').on(t.authorUserId),
+  }),
+)
+
 export const userTabs = sqliteTable(
   'user_tabs',
   {

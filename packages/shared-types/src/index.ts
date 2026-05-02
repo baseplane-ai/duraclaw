@@ -1112,6 +1112,39 @@ export interface CommentRow {
   deletedBy: string | null
 }
 
+/**
+ * GH#152 P1.3 WU-A: per-arc team chat row on the wire.
+ *
+ * Mirrors the `ArcCollabDO` `chat_messages` table (DO migration v8).
+ * Carried as the `TRow` payload of a `SyncedCollectionFrame<ChatMessageRow>`
+ * on the `chat:<arcId>` wire scope (WU-C wires the broadcast); same
+ * envelope shape as `comments:<sessionId>` so gap-detection /
+ * cursor-replay come for free.
+ *
+ * Field-name casing matches `CommentRow` (camelCase on the wire). The
+ * server maps `snake_case` SQLite columns → camelCase at broadcast
+ * time. `mentions` carries resolved user ids; null/empty until P1.5
+ * wires the resolver.
+ */
+export interface ChatMessageRow {
+  id: string
+  arcId: string
+  authorUserId: string
+  body: string
+  /** Resolved user ids; null/empty until P1.5. */
+  mentions: string[] | null
+  /** Epoch ms; matches SQLite `INTEGER` storage. */
+  createdAt: number
+  /** Epoch ms; bumped on every edit / soft-delete. Unified-cursor key for replay. */
+  modifiedAt: number
+  /** Epoch ms of last edit, or `null` if never edited. UI shows "(edited)" when set. */
+  editedAt: number | null
+  /** Epoch ms of soft-delete, or `null` if not deleted. UI shows tombstone when set. */
+  deletedAt: number | null
+  /** User id who soft-deleted (author / arc owner / admin). `null` when not deleted. */
+  deletedBy: string | null
+}
+
 // ── User Preferences ────────────────────────────────────────────────
 
 export interface UserPreferences {

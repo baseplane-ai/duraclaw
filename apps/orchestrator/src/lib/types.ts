@@ -47,6 +47,8 @@ export interface Env {
   USER_SETTINGS: DurableObjectNamespace
   SESSION_COLLAB: DurableObjectNamespace
   REPO_DOCUMENT: DurableObjectNamespace
+  /** GH#152 P1.3: per-arc collab DO; backs team chat + future Yjs awareness. */
+  ARC_COLLAB_DO: DurableObjectNamespace
   /** Set to '1' via wrangler secret to short-circuit all non-/login traffic to a 503 maintenance page (#7 cutover). */
   MAINTENANCE_MODE?: string
   ASSETS: Fetcher
