@@ -5,6 +5,12 @@ import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { usePushSubscriptionWeb as usePushSubscription } from './use-push-subscription'
 
+// Note: `./use-push-subscription` re-exports `usePushSubscriptionNative`,
+// which dynamic-imports `@react-native-firebase/messaging` and
+// `@capacitor/push-notifications`. Vite's import-analysis would fail to
+// resolve the firebase package; vitest.config.ts aliases both to stubs
+// in `src/__mocks__/`.
+
 // Helpers to build mock subscription and registration
 function makeMockSubscription(endpoint = 'https://push.example.com/sub1') {
   return {
@@ -169,6 +175,59 @@ describe('usePushSubscription', () => {
       })
 
       expect(success).toBe(false)
+    })
+
+    it('populates error when VAPID key fetch returns 503', async () => {
+      ;(window.Notification as any).requestPermission = vi.fn().mockResolvedValue('granted')
+      vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 503 }))
+
+      const { result } = renderHook(() => usePushSubscription())
+
+      let success: boolean | undefined
+      await act(async () => {
+        success = await result.current.subscribe()
+      })
+
+      expect(success).toBe(false)
+      expect(result.current.error).toBeTruthy()
+      expect(result.current.error).toContain('503')
+    })
+
+    it('populates error when permission is denied', async () => {
+      ;(window.Notification as any).requestPermission = vi.fn().mockResolvedValue('denied')
+
+      const { result } = renderHook(() => usePushSubscription())
+
+      let success: boolean | undefined
+      await act(async () => {
+        success = await result.current.subscribe()
+      })
+
+      expect(success).toBe(false)
+      expect(result.current.error).toBeTruthy()
+    })
+
+    it('clears error at the start of a new subscribe attempt', async () => {
+      ;(window.Notification as any).requestPermission = vi
+        .fn()
+        .mockResolvedValueOnce('denied')
+        .mockResolvedValueOnce('granted')
+
+      const { result } = renderHook(() => usePushSubscription())
+
+      await act(async () => {
+        await result.current.subscribe()
+      })
+      expect(result.current.error).toBeTruthy()
+
+      // Make the second attempt succeed end-to-end
+      const newSub = makeMockSubscription()
+      mockPushManager.subscribe.mockResolvedValue(newSub)
+
+      await act(async () => {
+        await result.current.subscribe()
+      })
+      expect(result.current.error).toBeNull()
     })
 
     it('returns false when serviceWorker is unavailable', async () => {

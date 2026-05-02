@@ -34,6 +34,17 @@ export default defineConfig({
         __dirname,
         'src/__mocks__/virtual-pwa-register-react.ts',
       ),
+      // Native-only modules dynamic-imported by `use-push-subscription-native`.
+      // The orchestrator dep tree doesn't include the firebase RN package, so
+      // vite's import-analysis fails before tests run. Stub it.
+      '@react-native-firebase/messaging': path.resolve(
+        __dirname,
+        'src/__mocks__/react-native-firebase-messaging.ts',
+      ),
+      '@capacitor/push-notifications': path.resolve(
+        __dirname,
+        'src/__mocks__/capacitor-push-notifications.ts',
+      ),
     },
   },
 })

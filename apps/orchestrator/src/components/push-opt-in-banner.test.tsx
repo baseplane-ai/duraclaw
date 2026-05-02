@@ -21,6 +21,7 @@ let mockHookReturn = {
   isSubscribed: false,
   subscribe: mockSubscribe,
   unsubscribe: mockUnsubscribe,
+  error: null as string | null,
 }
 
 vi.mock('~/hooks/use-push-subscription', () => ({
@@ -38,6 +39,7 @@ describe('PushOptInBanner', () => {
       isSubscribed: false,
       subscribe: mockSubscribe,
       unsubscribe: mockUnsubscribe,
+      error: null,
     }
     mockSubscribe.mockReset()
     mockUnsubscribe.mockReset()

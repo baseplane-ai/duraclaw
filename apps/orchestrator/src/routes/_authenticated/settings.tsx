@@ -6,6 +6,7 @@ import { Header } from '~/components/layout/header'
 import { Main } from '~/components/layout/main'
 import { NotificationPreferences } from '~/components/notification-preferences'
 import { TransferOwnershipDialog } from '~/components/projects/TransferOwnershipDialog'
+import { PushSubscriptionStatus } from '~/components/push-subscription-status'
 import { Badge } from '~/components/ui/badge'
 import { Button } from '~/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '~/components/ui/card'
@@ -333,7 +334,8 @@ function NotificationsSection() {
         <CardTitle>Notifications</CardTitle>
         <CardDescription>Configure which events trigger push notifications.</CardDescription>
       </CardHeader>
-      <CardContent>
+      <CardContent className="flex flex-col gap-4">
+        <PushSubscriptionStatus />
         <NotificationPreferences />
       </CardContent>
     </Card>

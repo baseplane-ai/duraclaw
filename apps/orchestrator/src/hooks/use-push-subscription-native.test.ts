@@ -24,6 +24,12 @@ vi.mock('@capacitor/push-notifications', () => ({
   },
 }))
 
+// `@react-native-firebase/messaging` is dynamic-imported on the Expo
+// branch. The package is not in the orchestrator's dependency tree (it
+// lives only in the Expo shell), so vite's import-analysis would fail
+// without an alias — vitest.config.ts aliases it to a stub. Tests force
+// the Capacitor branch via `isExpoNative()` returning false anyway.
+
 import { usePushSubscriptionNative } from './use-push-subscription-native'
 
 describe('usePushSubscriptionNative', () => {
@@ -112,6 +118,41 @@ describe('usePushSubscriptionNative', () => {
     expect(success).toBe(false)
     expect(mockRegister).not.toHaveBeenCalled()
     expect(result.current.permission).toBe('denied')
+    expect(result.current.error).toBeTruthy()
+  })
+
+  it('surfaces error when subscribe() throws (e.g. FCM module unavailable)', async () => {
+    mockRequestPermissions.mockRejectedValue(new Error('FCM module not configured'))
+
+    const { result } = renderHook(() => usePushSubscriptionNative())
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    let success: boolean | undefined
+    await act(async () => {
+      success = await result.current.subscribe()
+    })
+
+    expect(success).toBe(false)
+    expect(result.current.permission).toBe('unsupported')
+    expect(result.current.error).toBeTruthy()
+    expect(result.current.error).toContain('FCM module not configured')
+  })
+
+  it('surfaces error when mount-time setup fails (FCM module unavailable)', async () => {
+    // checkPermissions throwing simulates FCM-not-configured during the
+    // auto-subscribe path inside the mount effect.
+    mockCheckPermissions.mockRejectedValue(new Error('module not configured'))
+
+    const { result } = renderHook(() => usePushSubscriptionNative())
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(result.current.permission).toBe('unsupported')
+    expect(result.current.error).toBeTruthy()
+    expect(result.current.error).toContain('module not configured')
   })
 
   it('registration listener POSTs token to /api/push/fcm-subscribe', async () => {

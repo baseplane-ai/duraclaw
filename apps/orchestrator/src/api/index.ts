@@ -2113,6 +2113,30 @@ export function createApiApp() {
     return c.body(null, 204)
   })
 
+  // Read-only subscription status for the current user across both web (VAPID)
+  // and FCM (Capacitor + Expo) tables. Used by the Settings page to show the
+  // truthful subscription state — replacing the cosmetic preference toggles
+  // that have no link to the dispatch path. See planning/specs/push-debug.
+  app.get('/api/push/status', async (c) => {
+    const userId = c.get('userId')
+    const webRows = await c.env.AUTH_DB.prepare(
+      'SELECT user_agent, created_at FROM push_subscriptions WHERE user_id = ? ORDER BY created_at DESC',
+    )
+      .bind(userId)
+      .all<{ user_agent: string | null; created_at: string }>()
+    const fcmRows = await c.env.AUTH_DB.prepare(
+      'SELECT platform, created_at FROM fcm_subscriptions WHERE user_id = ? ORDER BY created_at DESC',
+    )
+      .bind(userId)
+      .all<{ platform: string; created_at: string }>()
+    return c.json({
+      webSubscribed: webRows.results.length > 0,
+      fcmSubscribed: fcmRows.results.length > 0,
+      web: webRows.results,
+      fcm: fcmRows.results,
+    })
+  })
+
   /**
    * Debug endpoint — send a test push notification to all of the caller's
    * subscribed devices with an arbitrary session URL.

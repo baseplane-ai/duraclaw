@@ -10,6 +10,7 @@ export function usePushSubscriptionWeb() {
     return Notification.permission as PushPermissionState
   })
   const [isSubscribed, setIsSubscribed] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     // Check if already subscribed
@@ -21,16 +22,39 @@ export function usePushSubscriptionWeb() {
   }, [])
 
   const subscribe = useCallback(async () => {
-    if (!('Notification' in window) || !('serviceWorker' in navigator)) return false
+    setError(null)
+    if (!('Notification' in window) || !('serviceWorker' in navigator)) {
+      setError('Push notifications are not supported in this browser')
+      return false
+    }
 
-    const result = await Notification.requestPermission()
+    let result: NotificationPermission
+    try {
+      result = await Notification.requestPermission()
+    } catch (err) {
+      console.error('[push] requestPermission failed:', err)
+      setError('Unable to prompt for notification permission')
+      return false
+    }
     setPermission(result as PushPermissionState)
-    if (result !== 'granted') return false
+    if (result !== 'granted') {
+      setError(
+        result === 'denied'
+          ? 'Notifications blocked — enable in browser settings'
+          : 'Notification permission was not granted',
+      )
+      return false
+    }
 
     try {
       // Fetch VAPID public key
       const resp = await fetch(apiUrl('/api/push/vapid-key'))
-      if (!resp.ok) return false
+      if (!resp.ok) {
+        const msg = `VAPID key fetch failed (${resp.status})`
+        console.error('[push] subscribe failed:', msg)
+        setError(msg)
+        return false
+      }
       const { publicKey } = (await resp.json()) as { publicKey: string }
 
       // Convert base64url to Uint8Array
@@ -48,7 +72,7 @@ export function usePushSubscriptionWeb() {
       })
 
       const subJson = subscription.toJSON()
-      await fetch(apiUrl('/api/push/subscribe'), {
+      const postResp = await fetch(apiUrl('/api/push/subscribe'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -56,34 +80,48 @@ export function usePushSubscriptionWeb() {
           keys: subJson.keys,
         }),
       })
+      if (!postResp.ok) {
+        const msg = `Subscribe POST failed (${postResp.status})`
+        console.error('[push] subscribe failed:', msg)
+        setError(msg)
+        return false
+      }
 
       setIsSubscribed(true)
       return true
-    } catch {
+    } catch (err) {
+      console.error('[push] subscribe failed:', err)
+      setError(err instanceof Error ? err.message : 'Subscribe failed')
       return false
     }
   }, [])
 
   const unsubscribe = useCallback(async () => {
+    setError(null)
     if (!('serviceWorker' in navigator)) return
 
-    const reg = await navigator.serviceWorker.ready
-    const sub = await reg.pushManager.getSubscription()
-    if (!sub) return
+    try {
+      const reg = await navigator.serviceWorker.ready
+      const sub = await reg.pushManager.getSubscription()
+      if (!sub) return
 
-    const endpoint = sub.endpoint
-    await sub.unsubscribe()
+      const endpoint = sub.endpoint
+      await sub.unsubscribe()
 
-    await fetch(apiUrl('/api/push/unsubscribe'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ endpoint }),
-    })
+      await fetch(apiUrl('/api/push/unsubscribe'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ endpoint }),
+      })
 
-    setIsSubscribed(false)
+      setIsSubscribed(false)
+    } catch (err) {
+      console.error('[push] unsubscribe failed:', err)
+      setError(err instanceof Error ? err.message : 'Unsubscribe failed')
+    }
   }, [])
 
-  return { permission, isSubscribed, subscribe, unsubscribe }
+  return { permission, isSubscribed, subscribe, unsubscribe, error }
 }
 
 /**

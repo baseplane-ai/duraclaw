@@ -52,6 +52,7 @@ export function usePushSubscriptionNative() {
   const [permission, setPermission] = useState<Permission>('prompt')
   const [isSubscribed, setIsSubscribed] = useState(false)
   const [token, setToken] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
   const autoSubscribeAttempted = useRef(false)
 
   useEffect(() => {
@@ -106,6 +107,11 @@ export function usePushSubscriptionNative() {
           // FCM not configured (missing google-services.json) — fail gracefully
           console.warn('[push] expo-native push setup failed:', err)
           setPermission('unsupported')
+          setError(
+            err instanceof Error
+              ? `Native push setup failed: ${err.message}`
+              : 'Native push setup failed (FCM module unavailable)',
+          )
         }
       })()
       return () => {
@@ -127,6 +133,7 @@ export function usePushSubscriptionNative() {
         const errHandle = await PushNotifications.addListener('registrationError', (err) => {
           console.error('[push] registrationError:', JSON.stringify(err))
           setIsSubscribed(false)
+          setError('Push registration failed on device')
         })
 
         cleanup = () => {
@@ -152,6 +159,11 @@ export function usePushSubscriptionNative() {
         // FCM not configured — listeners can't be added, skip silently
         console.warn('[push] native push setup failed:', err)
         setPermission('unsupported')
+        setError(
+          err instanceof Error
+            ? `Native push setup failed: ${err.message}`
+            : 'Native push setup failed (FCM module unavailable)',
+        )
       }
     })()
     return () => {
@@ -160,6 +172,7 @@ export function usePushSubscriptionNative() {
   }, [])
 
   const subscribe = useCallback(async () => {
+    setError(null)
     if (isExpoNative()) {
       try {
         type MessagingFn = () => {
@@ -174,7 +187,10 @@ export function usePushSubscriptionNative() {
         const authStatus = await messaging().requestPermission()
         const granted = authStatus === 1 || authStatus === 2
         setPermission(granted ? 'granted' : 'denied')
-        if (!granted) return false
+        if (!granted) {
+          setError('Notification permission not granted')
+          return false
+        }
         const fcmToken = await messaging().getToken()
         if (fcmToken) {
           setToken(fcmToken)
@@ -185,6 +201,11 @@ export function usePushSubscriptionNative() {
       } catch (err) {
         console.warn('[push] expo-native registration failed:', err)
         setPermission('unsupported')
+        setError(
+          err instanceof Error
+            ? `Push registration failed: ${err.message}`
+            : 'Push registration failed (FCM module unavailable)',
+        )
         return false
       }
     }
@@ -192,18 +213,27 @@ export function usePushSubscriptionNative() {
       const { PushNotifications } = await import('@capacitor/push-notifications')
       const status = await PushNotifications.requestPermissions()
       setPermission(status.receive as Permission)
-      if (status.receive !== 'granted') return false
+      if (status.receive !== 'granted') {
+        setError('Notification permission not granted')
+        return false
+      }
       await PushNotifications.register()
       return true
     } catch (err) {
       // FCM not configured (missing google-services.json) — fail gracefully
       console.warn('[push] registration failed:', err)
       setPermission('unsupported')
+      setError(
+        err instanceof Error
+          ? `Push registration failed: ${err.message}`
+          : 'Push registration failed (FCM module unavailable)',
+      )
       return false
     }
   }, [])
 
   const unsubscribe = useCallback(async () => {
+    setError(null)
     if (!token) return
     try {
       await fetch(apiUrl('/api/push/fcm-unsubscribe'), {
@@ -211,12 +241,13 @@ export function usePushSubscriptionNative() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token }),
       })
-    } catch {
-      // ignore
+    } catch (err) {
+      console.error('[push] unsubscribe failed:', err)
+      setError(err instanceof Error ? err.message : 'Unsubscribe failed')
     }
     setIsSubscribed(false)
     setToken(null)
   }, [token])
 
-  return { permission, isSubscribed, subscribe, unsubscribe }
+  return { permission, isSubscribed, subscribe, unsubscribe, error }
 }
