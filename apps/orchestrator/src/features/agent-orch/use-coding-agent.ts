@@ -151,8 +151,21 @@ function toSessionMessage(row: CachedMessage): SessionMessage {
 type SessionFrameHandler = (frame: SyncedCollectionFrame<unknown>) => void
 type SessionReconnectHandler = () => void
 
+/**
+ * GH#152 P1.2 WU-D: top-level `comment_lock` / `comment_unlock` control
+ * frame surface. Mirrors the `subscribeSessionStream` shape but for
+ * non-`synced-collection-delta` frames. Driven by the same onMessage
+ * handler below; consumers (`useCommentActions.isMessageStreaming`)
+ * register a handler and maintain their own per-message lock map.
+ */
+export type SessionLockFrame =
+  | { type: 'comment_lock'; messageId: string }
+  | { type: 'comment_unlock'; messageId: string }
+type SessionLockHandler = (frame: SessionLockFrame) => void
+
 const sessionFrameHandlers = new Map<string, Set<SessionFrameHandler>>()
 const sessionReconnectHandlers = new Map<string, Set<SessionReconnectHandler>>()
+const sessionLockHandlers = new Map<string, Set<SessionLockHandler>>()
 
 /**
  * Pre-subscribe frame buffer. The messagesCollection's inner sync (which calls
@@ -171,6 +184,10 @@ const sessionReconnectHandlers = new Map<string, Set<SessionReconnectHandler>>()
 type BufferedFrame = { frame: SyncedCollectionFrame<unknown>; ts: number }
 const sessionFrameBuffer = new Map<string, BufferedFrame[]>()
 const FRAME_BUFFER_TTL_MS = 5000
+
+/** GH#152: late-subscriber buffer for `comment_lock` / `comment_unlock` frames. */
+type BufferedLockFrame = { frame: SessionLockFrame; ts: number }
+const sessionLockBuffer = new Map<string, BufferedLockFrame[]>()
 
 /**
  * Subscribe to every SyncedCollectionFrame delivered on `sessionId`'s WS.
@@ -234,6 +251,43 @@ export function onSessionStreamReconnect(
   }
 }
 
+/**
+ * GH#152 P1.2 WU-D: subscribe to `comment_lock` / `comment_unlock` frames
+ * for `sessionId`. Mirrors `subscribeSessionStream`'s late-subscriber
+ * buffer so a handler that registers after the first lock frame fires
+ * still observes it (subject to the 5s TTL).
+ */
+export function subscribeSessionLockFrame(
+  sessionId: string,
+  handler: SessionLockHandler,
+): () => void {
+  let set = sessionLockHandlers.get(sessionId)
+  if (!set) {
+    set = new Set()
+    sessionLockHandlers.set(sessionId, set)
+  }
+  set.add(handler)
+  const buffered = sessionLockBuffer.get(sessionId)
+  if (buffered && buffered.length > 0) {
+    sessionLockBuffer.delete(sessionId)
+    const now = Date.now()
+    for (const entry of buffered) {
+      if (now - entry.ts > FRAME_BUFFER_TTL_MS) continue
+      try {
+        handler(entry.frame)
+      } catch (err) {
+        console.warn('[session-stream] buffered lock handler threw', err)
+      }
+    }
+  }
+  return () => {
+    const cur = sessionLockHandlers.get(sessionId)
+    if (!cur) return
+    cur.delete(handler)
+    if (cur.size === 0) sessionLockHandlers.delete(sessionId)
+  }
+}
+
 // Internal dispatch helpers (not exported). Called by the useCodingAgent
 // hook's onMessage / reconnect-detection plumbing wired below.
 function dispatchSessionFrame(sessionId: string, frame: SyncedCollectionFrame<unknown>): void {
@@ -285,6 +339,28 @@ function dispatchSessionFrame(sessionId: string, frame: SyncedCollectionFrame<un
   }
 }
 
+function dispatchSessionLockFrame(sessionId: string, frame: SessionLockFrame): void {
+  const set = sessionLockHandlers.get(sessionId)
+  if (!set || set.size === 0) {
+    let q = sessionLockBuffer.get(sessionId)
+    if (!q) {
+      q = []
+      sessionLockBuffer.set(sessionId, q)
+    }
+    const now = Date.now()
+    while (q.length > 0 && now - q[0].ts > FRAME_BUFFER_TTL_MS) q.shift()
+    q.push({ frame, ts: now })
+    return
+  }
+  for (const h of set) {
+    try {
+      h(frame)
+    } catch (err) {
+      console.warn('[session-stream] lock handler threw', err)
+    }
+  }
+}
+
 function dispatchSessionReconnect(sessionId: string): void {
   const set = sessionReconnectHandlers.get(sessionId)
   if (!set || set.size === 0) return
@@ -302,6 +378,8 @@ export function __resetSessionStreamForTests(): void {
   sessionFrameHandlers.clear()
   sessionReconnectHandlers.clear()
   sessionFrameBuffer.clear()
+  sessionLockHandlers.clear()
+  sessionLockBuffer.clear()
 }
 
 /** Test-only dispatch — exercises the internal `dispatchSessionFrame` path. */
@@ -533,6 +611,19 @@ export function useCodingAgent(agentName: string): UseCodingAgentResult {
         if (parsed && parsed.type === 'gap') {
           logDelta('session', { agent: agentName, kind: 'gap-sentinel' })
           armSnapshotRequest()
+          return
+        }
+
+        // GH#152 P1.2 WU-D: top-level comment-lock control frames. Forward
+        // to the per-session lock subscriber set; do NOT touch lastSeq /
+        // pendingSnapshot — these are out-of-band control frames, not
+        // gap-detected delta frames.
+        if (
+          parsed &&
+          (parsed.type === 'comment_lock' || parsed.type === 'comment_unlock') &&
+          typeof parsed.messageId === 'string'
+        ) {
+          dispatchSessionLockFrame(agentName, parsed as SessionLockFrame)
           return
         }
 

@@ -31,6 +31,7 @@ import {
   FileIcon,
   GitBranchIcon,
   HistoryIcon,
+  MessageSquareIcon,
   MoreVerticalIcon,
 } from 'lucide-react'
 import {
@@ -61,8 +62,11 @@ import { Skeleton } from '~/components/ui/skeleton'
 import type { AwaitingReason, AwaitingResponsePart } from '~/lib/awaiting-response'
 import { getImagePartDataUrl, isImageTruncated } from '~/lib/message-parts'
 import type { GateResponse, SessionMessage, SessionMessagePart } from '~/lib/types'
+import { cn } from '~/lib/utils'
 import { AwaitingBubble } from './AwaitingBubble'
+import { CommentThread } from './CommentThread'
 import { GateResolver } from './GateResolver'
+import { useCommentsCountByMessage } from './use-comments-collection'
 
 function getToolName(part: SessionMessagePart): string {
   return part.toolName || (part.type || '').replace(/^tool-/, '')
@@ -671,6 +675,18 @@ interface ChatMessageRowProps {
   branch?: { current: number; total: number; siblings: string[] }
   onBranchNavigate?: (messageId: string, direction: 'prev' | 'next') => void
   /**
+   * GH#152 P1.2 WU-D — non-deleted comment count for this message id, looked
+   * up from `useCommentsCountByMessage` at the parent (`ChatThread`) so the
+   * memoised row only re-renders when its own count changes.
+   */
+  commentCount?: number
+  /**
+   * GH#152 P1.2 WU-D — opens the parent-owned `CommentThread` drawer
+   * targeting this row's message id. When omitted (no sessionId / readOnly
+   * pre-spawn drafts) the badge is suppressed.
+   */
+  onOpenComments?: (messageId: string) => void
+  /**
    * GH#116 B16 — when set, assistant messages render a hover-visible
    * "Branch from here" affordance (3-dot menu) that invokes this
    * callback with the row's `turnIndex`. The parent owns the modal
@@ -711,6 +727,8 @@ const ChatMessageRow = memo(
     onBranchNavigate,
     onBranchFromMessage,
     branchingFromTurnIndex,
+    commentCount = 0,
+    onOpenComments,
   }: ChatMessageRowProps) {
     const handleRewind = useCallback(() => {
       onRewind?.(turnIndex)
@@ -726,6 +744,40 @@ const ChatMessageRow = memo(
     const handleBranchFromMessage = useCallback(() => {
       onBranchFromMessage?.(turnIndex)
     }, [onBranchFromMessage, turnIndex])
+
+    const handleOpenComments = useCallback(() => {
+      onOpenComments?.(msg.id)
+    }, [onOpenComments, msg.id])
+
+    // GH#152 P1.2 WU-D — comments badge sits to the LEFT of the rewind
+    // button so it doesn't overlap. Always rendered when an open handler
+    // is present (count of 0 is fine — clicking opens an empty drawer
+    // with a composer). Badge anchors at right-16 when rewind exists, or
+    // right-2 when it doesn't; the branch-menu offset (below) shifts
+    // further left to clear both.
+    const commentsBadge = onOpenComments ? (
+      <button
+        key={`comments-${msg.id}`}
+        type="button"
+        onClick={handleOpenComments}
+        aria-label={
+          commentCount > 0
+            ? `${commentCount} comment${commentCount === 1 ? '' : 's'}`
+            : 'Add comment'
+        }
+        title="Comments"
+        data-testid={`comments-badge-${turnIndex}`}
+        className={cn(
+          'absolute top-2 flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground transition-opacity hover:bg-accent hover:text-foreground',
+          onRewind ? 'right-16' : 'right-2',
+          // Always show when there are comments; hover-reveal only when empty.
+          commentCount > 0 ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
+        )}
+      >
+        <MessageSquareIcon className="size-3" />
+        {commentCount > 0 && <span>{commentCount}</span>}
+      </button>
+    ) : null
 
     const showBranchingPill =
       branchingFromTurnIndex !== undefined &&
@@ -854,17 +906,27 @@ const ChatMessageRow = memo(
               </div>
             </MessageContent>
           </Message>
+          {commentsBadge}
           {rewindButton}
         </div>
       )
     }
 
     if (msg.role === 'assistant') {
-      // Branch menu sits to the LEFT of the rewind button when both are
-      // present, so they don't overlap. Without rewind (read-only or
-      // pre-spawn drafts) it's the sole top-right affordance and snaps
-      // back to right-2.
-      const branchMenuRight = onRewind ? 'right-20' : 'right-2'
+      // Branch menu sits LEFT of comments-badge LEFT of rewind, so the
+      // three top-right affordances don't overlap. Layout (right-anchored):
+      //   rewind         → right-2  (when present)
+      //   commentsBadge  → right-16 (when rewind present), else right-2
+      //   branchMenu     → right-32 (rewind+badge), right-16 (badge only),
+      //                    right-20 (rewind only), right-2 (neither)
+      const branchMenuRight =
+        onRewind && onOpenComments
+          ? 'right-32'
+          : onRewind
+            ? 'right-20'
+            : onOpenComments
+              ? 'right-16'
+              : 'right-2'
       const branchMenu = onBranchFromMessage ? (
         <div
           className={`absolute ${branchMenuRight} top-2 opacity-0 transition-opacity group-hover:opacity-100 pointer-coarse:opacity-100`}
@@ -894,6 +956,7 @@ const ChatMessageRow = memo(
         <div key={msg.id} className="group relative" data-turn-index={turnIndex}>
           <div className="flex flex-col gap-2">{assistantNodes}</div>
           {branchMenu}
+          {commentsBadge}
           {rewindButton}
           {showBranchingPill && (
             <div
@@ -923,7 +986,9 @@ const ChatMessageRow = memo(
       prev.branch !== next.branch ||
       prev.onBranchNavigate !== next.onBranchNavigate ||
       prev.onBranchFromMessage !== next.onBranchFromMessage ||
-      prev.branchingFromTurnIndex !== next.branchingFromTurnIndex
+      prev.branchingFromTurnIndex !== next.branchingFromTurnIndex ||
+      prev.commentCount !== next.commentCount ||
+      prev.onOpenComments !== next.onOpenComments
     ) {
       return false
     }
@@ -988,6 +1053,10 @@ interface VirtualizedMessageListProps {
   onBranchFromMessage?: (turnIndex: number) => void
   /** GH#116 B16 — see ChatMessageRowProps. */
   branchingFromTurnIndex?: number | null
+  /** GH#152 P1.2 WU-D — per-message comment counts (non-deleted). */
+  commentCounts?: Map<string, number>
+  /** GH#152 P1.2 WU-D — opens the parent-owned CommentThread drawer. */
+  onOpenComments?: (messageId: string) => void
   /**
    * Spec #80 B9 — when the tail user message carries an
    * `awaiting_response@pending` part, `ChatThread` surfaces the reason
@@ -1020,6 +1089,8 @@ function VirtualizedMessageList({
   onBranchNavigate,
   onBranchFromMessage,
   branchingFromTurnIndex,
+  commentCounts,
+  onOpenComments,
   awaitingReason,
   onMeasurementsSettled,
 }: VirtualizedMessageListProps) {
@@ -1192,6 +1263,8 @@ function VirtualizedMessageList({
                   onBranchNavigate={onBranchNavigate}
                   onBranchFromMessage={onBranchFromMessage}
                   branchingFromTurnIndex={branchingFromTurnIndex}
+                  commentCount={commentCounts?.get(msg.id) ?? 0}
+                  onOpenComments={onOpenComments}
                 />
               ) : null}
             </div>
@@ -1238,7 +1311,14 @@ function findAwaitingReason(messages: SessionMessage[]): AwaitingReason | undefi
   return awaiting?.reason ?? 'first_token'
 }
 
-export function ChatThread({
+/**
+ * GH#152 P1.2 WU-D — comments wiring is split into this sub-component
+ * (rather than calling the hook in `ChatThread` directly) so we only mount
+ * the comments collection when a sessionId is actually present. Pre-spawn
+ * draft sessions and read-only views without a sessionId render the list
+ * without the badge surface.
+ */
+function ChatThreadWithComments({
   sessionId,
   messages,
   isConnecting,
@@ -1251,7 +1331,74 @@ export function ChatThread({
   branchingFromTurnIndex,
   onSendSuggestion,
   expectsMessages = false,
-}: ChatThreadProps) {
+}: ChatThreadProps & { sessionId: string }) {
+  const commentCounts = useCommentsCountByMessage(sessionId)
+  const [openCommentMessageId, setOpenCommentMessageId] = useState<string | null>(null)
+  const handleOpenComments = useCallback((messageId: string) => {
+    setOpenCommentMessageId(messageId)
+  }, [])
+  const handleCommentSheetOpenChange = useCallback((open: boolean) => {
+    if (!open) setOpenCommentMessageId(null)
+  }, [])
+
+  return (
+    <>
+      <ChatThreadCore
+        sessionId={sessionId}
+        messages={messages}
+        isConnecting={isConnecting}
+        onResolveGate={onResolveGate}
+        readOnly={readOnly}
+        onRewind={onRewind}
+        branchInfo={branchInfo}
+        onBranchNavigate={onBranchNavigate}
+        onBranchFromMessage={onBranchFromMessage}
+        branchingFromTurnIndex={branchingFromTurnIndex}
+        onSendSuggestion={onSendSuggestion}
+        expectsMessages={expectsMessages}
+        commentCounts={commentCounts}
+        onOpenComments={handleOpenComments}
+      />
+      {openCommentMessageId && (
+        <CommentThread
+          sessionId={sessionId}
+          messageId={openCommentMessageId}
+          open={true}
+          onOpenChange={handleCommentSheetOpenChange}
+        />
+      )}
+    </>
+  )
+}
+
+export function ChatThread(props: ChatThreadProps) {
+  if (props.sessionId) {
+    return <ChatThreadWithComments {...props} sessionId={props.sessionId} />
+  }
+  return <ChatThreadCore {...props} />
+}
+
+interface ChatThreadCoreProps extends ChatThreadProps {
+  commentCounts?: Map<string, number>
+  onOpenComments?: (messageId: string) => void
+}
+
+function ChatThreadCore({
+  sessionId,
+  messages,
+  isConnecting,
+  onResolveGate,
+  readOnly,
+  onRewind,
+  branchInfo,
+  onBranchNavigate,
+  onBranchFromMessage,
+  branchingFromTurnIndex,
+  onSendSuggestion,
+  expectsMessages = false,
+  commentCounts,
+  onOpenComments,
+}: ChatThreadCoreProps) {
   const awaitingReason = useMemo(() => findAwaitingReason(messages), [messages])
 
   // Resize-anchor behavior for `<Conversation>`. Starts as `'instant'`
@@ -1336,6 +1483,8 @@ export function ChatThread({
           onBranchNavigate={onBranchNavigate}
           onBranchFromMessage={onBranchFromMessage}
           branchingFromTurnIndex={branchingFromTurnIndex}
+          commentCounts={commentCounts}
+          onOpenComments={onOpenComments}
           awaitingReason={awaitingReason}
           onMeasurementsSettled={handleMeasurementsSettled}
         />

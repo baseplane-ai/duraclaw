@@ -12,12 +12,10 @@
  * stamping in `broadcast.ts` (and the client's gap-detection +
  * cursor-replay) carries over with zero new infrastructure.
  *
- * Read-only at this layer (P1.2 WU-A). The optimistic write hook
- * (`onInsert` POSTing `/api/sessions/:sid/comments` with `clientCommentId`)
- * lands in P1.2 WU-D alongside the `use-comments-collection` hook —
- * keeping it out of the factory makes the cold-start path symmetric with
- * messages and avoids a half-wired POST surface before WU-B's RPC handlers
- * exist.
+ * Optimistic-add hook: P1.2 WU-D wires `onInsert` here so
+ * `use-comments-collection.ts`'s `addComment` can call
+ * `collection.insert(optimisticRow)` and let TanStack DB manage rollback
+ * on REST failure (mirror of `messages-collection.ts`'s pattern).
  */
 
 import type { CommentRow, SyncedCollectionFrame } from '@duraclaw/shared-types'
@@ -28,6 +26,7 @@ import {
   onSessionStreamReconnect,
   subscribeSessionStream,
 } from '~/features/agent-orch/use-coding-agent'
+import { apiUrl } from '~/lib/platform'
 import { dbReady } from './db-instance'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -92,6 +91,39 @@ export function commentsCollectionOptions(sessionId: string): CollectionConfig<C
     id: collectionName,
     getKey: (row) => row.id,
     sync: { sync },
+    onInsert: async ({ transaction }) => {
+      // GH#152 P1.2 WU-D: optimistic comment add. The hook layer in
+      // `use-comments-collection.ts` builds the optimistic CommentRow and
+      // calls `collection.insert(optimistic)`; this handler POSTs to the
+      // Hono forwarder and lets TanStack DB roll back on throw. The WS
+      // echo (broadcastComments → synced-collection-delta) reconciles the
+      // optimistic row in place via the upsert-by-key path above.
+      const row = transaction.mutations[0].modified as CommentRow
+      const resp = await fetch(apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/comments`), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          messageId: row.messageId,
+          body: row.body,
+          parentCommentId: row.parentCommentId,
+          clientCommentId: row.id,
+        }),
+      })
+      // 409 = server already accepted this clientCommentId (idempotent
+      // retry). The canonical row is in the DO's SQLite already and the
+      // echo will reconcile.
+      if (resp.status === 409) return
+      if (!resp.ok) {
+        let errMsg = `addComment ${resp.status}`
+        try {
+          const j = (await resp.json()) as { error?: string }
+          if (j?.error) errMsg = j.error
+        } catch {
+          // Non-JSON body; keep status-only message.
+        }
+        throw new Error(errMsg)
+      }
+    },
   }
 }
 
