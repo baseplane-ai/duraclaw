@@ -30,11 +30,15 @@ export interface SendMessageOpts {
   submitId?: string
   client_message_id?: string
   createdAt?: string
-  // Spec #68 B14 — accepted for forward-compat when shared sessions need to
-  // attribute turns to the sender. The column exists on the SDK-owned
-  // `assistant_messages` table (migration v11) but message persistence flows
-  // through `Session.appendMessage`, not direct SQL, so this is a no-op
-  // today. Plumbed now so the wire shape is stable when UI attribution lands.
+  // GH#152 P1 B25: the calling user's id (forwarded by the HTTP route from
+  // the Better Auth session via `x-user-id`). Stamped into
+  // `assistant_messages.sender_id` (DO migration v12) so the collab UI can
+  // render author attribution on user turns. Distinguishes user-origin
+  // (`<user uuid>`) from system/agent-origin (`'system'` — set by
+  // gateway-event-handler on streamed assistant writes). When this code
+  // path moves to a WS-RPC `sendMessage` call, the value would come from
+  // `connection.state.userId` (set by the WU-A/B handshake in
+  // `client-ws.ts`); the wire shape is unchanged.
   senderId?: string
 }
 
@@ -223,7 +227,11 @@ export async function sendMessageImpl(
     canonical_turn_id: canonicalTurnId,
   }
   try {
-    await ctx.do.safeAppendMessage(userMsg)
+    // GH#152 P1 B25: stamp sender_id from the authed user. Falls back to
+    // null when absent (system-injected / pre-handshake call), preserving
+    // backward compat. Per B24 the value lives only in `assistant_messages`
+    // for the collab UI — never flows into the SDK transcript.
+    await ctx.do.safeAppendMessage(userMsg, undefined, opts?.senderId ?? null)
     ctx.do.persistTurnState()
     // GH#38 P1.5 / B10: emit messages + branchInfo siblings back-to-back on
     // the same DO turn. broadcastBranchInfo no-ops when the new turn didn't

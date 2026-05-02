@@ -218,7 +218,12 @@ export const agentSessions = sqliteTable(
     // auto-reserve for code-touching modes. Backfilled from the prior
     // (kataIssue, project) tuple by migration 0027.
     worktreeId: text('worktreeId'),
-    visibility: text('visibility').notNull().default('public'),
+    // GH#152 P1: `visibility` was removed from this table at the
+    // Drizzle layer — visibility now lives on `arcs.visibility`. The
+    // physical column still exists in D1 until migration 0038 ships
+    // (expand-then-contract; see Gotcha #4 in spec line 953). Until
+    // then it is read-only at the app layer; new writes must target
+    // `arcs.visibility`.
   },
   (t) => ({
     runnerIdUnique: uniqueIndex('idx_agent_sessions_runner_id')
@@ -226,10 +231,6 @@ export const agentSessions = sqliteTable(
       .where(sql`${t.runnerSessionId} IS NOT NULL`),
     userLastActivity: index('idx_agent_sessions_user_last_activity').on(t.userId, t.lastActivity),
     userProject: index('idx_agent_sessions_user_project').on(t.userId, t.project),
-    visibilityLastActivity: index('idx_agent_sessions_visibility_last_activity').on(
-      t.visibility,
-      t.lastActivity,
-    ),
     // GH#116: partial unique on (arcId, mode) WHERE status IN
     // ('idle','pending','running') AND mode IS NOT NULL. Closes the
     // auto-advance idempotency race — two concurrent `stopped` events
@@ -289,6 +290,13 @@ export const arcs = sqliteTable(
     createdAt: text('created_at').notNull(),
     updatedAt: text('updated_at').notNull(),
     closedAt: text('closed_at'),
+    // GH#152 P1: arc visibility replaces the legacy
+    // `agent_sessions.visibility`. 'public' arcs are discoverable by
+    // any authed user; 'private' arcs are gated by `arc_members`.
+    // Backfilled from agent_sessions.visibility by migration 0036.
+    visibility: text('visibility', { enum: ['private', 'public'] })
+      .notNull()
+      .default('private'),
   },
   (t) => ({
     // Expression unique on the (provider, id) tuple inside externalRef
@@ -301,8 +309,65 @@ export const arcs = sqliteTable(
       )
       .where(sql`${t.externalRef} IS NOT NULL`),
     userStatusActivity: index('idx_arcs_user_status_lastactivity').on(t.userId, t.status),
+    // GH#152 P1: kanban + discoverability lookups by visibility+status.
+    visibilityStatus: index('idx_arcs_visibility_status').on(t.visibility, t.status),
   }),
 )
+
+/**
+ * GH#152 P1: per-arc ACL junction table. Composite PK (arcId, userId)
+ * so a user appears at most once per arc. `role` enum reserves an
+ * 'owner' slot (full mutation rights) above 'member' (read + post).
+ *
+ * `addedBy` is the granting user — kept for audit trail. Set NULL on
+ * granter deletion (the membership row stays valid; the audit column
+ * just loses its reference). The arcId/userId FKs cascade so removing
+ * an arc or a user cleans up membership rows.
+ */
+export const arcMembers = sqliteTable(
+  'arc_members',
+  {
+    arcId: text('arc_id')
+      .notNull()
+      .references(() => arcs.id, { onDelete: 'cascade' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    role: text('role', { enum: ['owner', 'member'] })
+      .notNull()
+      .default('member'),
+    addedAt: text('added_at').notNull(),
+    addedBy: text('added_by').references(() => users.id, { onDelete: 'set null' }),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.arcId, t.userId] }),
+    byUser: index('idx_arc_members_user').on(t.userId, t.arcId),
+  }),
+)
+
+/**
+ * GH#152 P1: pending email invitations into an arc. Token is the PK so
+ * the /invitations/<token>/accept route is a single-row lookup.
+ * Accepted invitations are kept (acceptedAt + acceptedBy) for audit;
+ * the partial index `idx_arc_invitations_arc` (defined in migration
+ * 0036, not declarable here because Drizzle's `index()` doesn't take a
+ * WHERE clause) excludes accepted rows from the per-arc pending list.
+ */
+export const arcInvitations = sqliteTable('arc_invitations', {
+  token: text('token').primaryKey(),
+  arcId: text('arc_id')
+    .notNull()
+    .references(() => arcs.id, { onDelete: 'cascade' }),
+  email: text('email').notNull(),
+  role: text('role').notNull().default('member'),
+  invitedBy: text('invited_by')
+    .notNull()
+    .references(() => users.id),
+  createdAt: text('created_at').notNull(),
+  expiresAt: text('expires_at').notNull(),
+  acceptedAt: text('accepted_at'),
+  acceptedBy: text('accepted_by').references(() => users.id, { onDelete: 'set null' }),
+})
 
 export const userTabs = sqliteTable(
   'user_tabs',

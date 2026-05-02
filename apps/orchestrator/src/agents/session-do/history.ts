@@ -97,11 +97,20 @@ export function claimSubmitId(
  * `modified_at = created_at` on the SDK-owned row so the unified
  * `replayMessagesFromCursor` cursor advances past freshly-appended rows
  * (v13 invariant — see migration v13 description).
+ *
+ * GH#152 P1 B25: optional `senderId` is stamped into the v12-shipped
+ * `assistant_messages.sender_id` column for authorship attribution. The
+ * Session SDK's `appendMessage` does not write this column itself
+ * (it has no concept of it), so we follow the same post-append UPDATE
+ * pattern used for `modified_at`. Pass `'system'` for runner/agent-origin
+ * writes and the user's id for browser-origin user turns. Omit for
+ * legacy / system-injected rows (column stays NULL).
  */
 export async function safeAppendMessage(
   ctx: SessionDOContext,
   msg: SessionMessage,
   parentId?: string | null,
+  senderId?: string | null,
 ): Promise<void> {
   await offloadOversizedImages(msg.parts, {
     sessionId: ctx.do.name,
@@ -122,6 +131,19 @@ export async function safeAppendMessage(
     )
   } catch {
     // Pre-v10 DO — column does not yet exist. Safe to ignore.
+  }
+  // GH#152 P1 B25: stamp sender_id (DO migration v12) when supplied.
+  // Best-effort — pre-v12 DOs silently no-op.
+  if (senderId !== undefined && senderId !== null) {
+    try {
+      ctx.sql.exec(
+        `UPDATE assistant_messages SET sender_id = ? WHERE id = ? AND session_id = ''`,
+        senderId,
+        msg.id,
+      )
+    } catch {
+      // Pre-v12 DO — column does not yet exist. Safe to ignore.
+    }
   }
   return result
 }

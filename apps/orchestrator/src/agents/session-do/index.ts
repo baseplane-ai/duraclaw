@@ -276,8 +276,12 @@ export class SessionDO extends Agent<Env, SessionMeta> {
 
   // ── Module-bound shims (called via ctx.do or external callers) ────
 
-  async safeAppendMessage(msg: SessionMessage, parentId?: string | null): Promise<void> {
-    return safeAppendMessageImpl(this.moduleCtx, msg, parentId)
+  async safeAppendMessage(
+    msg: SessionMessage,
+    parentId?: string | null,
+    senderId?: string | null,
+  ): Promise<void> {
+    return safeAppendMessageImpl(this.moduleCtx, msg, parentId, senderId)
   }
   safeUpdateMessage(msg: SessionMessage): void {
     safeUpdateMessageImpl(this.moduleCtx, msg)

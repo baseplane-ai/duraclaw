@@ -28,11 +28,11 @@
  * delta to the arc's owner.
  */
 
-import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, or, sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import { Hono } from 'hono'
 import * as schema from '~/db/schema'
-import { agentSessions, arcs, worktrees } from '~/db/schema'
+import { agentSessions, arcMembers, arcs, worktrees } from '~/db/schema'
 import {
   type ArcBuildContext,
   buildArcRow,
@@ -244,28 +244,31 @@ export function arcsRoutes() {
   })
 
   // ── GET /api/arcs ────────────────────────────────────────────────────────
-  // List arcs for the current user. Filters mirror today's `/api/chains`
-  // semantics where they make sense:
-  //   - `mine`     scopes to the caller (default — arcs are user-scoped
-  //                so this is effectively always-on; param accepted for
-  //                API compat with the chain shape).
-  //   - `lane`     filters by `externalRef.provider` (was: issue type).
+  // List arcs visible to the caller. Visibility (GH#152 P1) is a
+  // membership-or-public model:
+  //   - `lane=mine`   (default) → arcs the caller owns OR is a member
+  //                                of (via `arc_members`).
+  //   - `lane=public` → arcs with `visibility='public'` (discoverable
+  //                     to all authed users, regardless of ownership).
+  //   - `lane=all`    → union of `mine` + `public`.
+  //
+  // Other filters (preserved):
+  //   - `provider` filters by `externalRef.provider` (was: legacy
+  //                `lane`; renamed because `lane` now governs ACL).
   //   - `column`   filters by the kanban column derived from sessions.
   //   - `project`  filters to arcs that have at least one session in
   //                the named project.
   //   - `stale`    `{N}d` form — arcs whose lastActivity is older than N days.
   //   - `status`   comma-separated subset of {draft,open,closed,archived}
   //                or 'all'. Default: `draft,open` (the kanban board's
-  //                in-flight set). The board called this without a
-  //                filter and got closed/archived arcs leaking into
-  //                user lanes; the default now matches what the board
-  //                actually wants.
+  //                in-flight set).
   //
   // `more_issues_available` is preserved from the chain shape as a
   // pagination-overflow hint; it's always `false` here because we
   // don't truncate the per-user arc list.
   const ALL_ARC_STATUSES = ['draft', 'open', 'closed', 'archived'] as const
   const DEFAULT_ARC_STATUSES = new Set<string>(['draft', 'open'])
+  const VALID_LANES = new Set(['mine', 'public', 'all'])
 
   app.get('/', async (c) => {
     const userId = c.get('userId')
@@ -283,7 +286,19 @@ export function arcsRoutes() {
       staleCutoff = Date.now() - days * 86_400_000
     }
 
-    const laneFilter = c.req.query('lane')
+    // GH#152 P1: `lane` now governs visibility/ACL filtering. Default
+    // `mine` matches the legacy "your arcs" behaviour exactly (own +
+    // member-of); `public` discovers shared arcs; `all` is the union.
+    const laneParam = c.req.query('lane') ?? 'mine'
+    if (!VALID_LANES.has(laneParam)) {
+      return c.json(
+        { error: 'Invalid lane — expected one of mine|public|all', invalid: laneParam },
+        400,
+      )
+    }
+    const lane = laneParam as 'mine' | 'public' | 'all'
+
+    const providerFilter = c.req.query('provider')
     const columnFilter = c.req.query('column')
     const projectFilter = c.req.query('project')
 
@@ -314,8 +329,27 @@ export function arcsRoutes() {
       }
     }
 
-    // 1. Pull the caller's arcs.
-    const arcRows = await db.select().from(arcs).where(eq(arcs.userId, userId))
+    // 1. Pull arcs matching the lane's ACL clause.
+    //
+    // - `mine`   → owner OR EXISTS arc_members(arc_id, user_id)
+    // - `public` → visibility='public'
+    // - `all`    → owner OR EXISTS member OR visibility='public'
+    //
+    // The EXISTS subquery is keyed on the `idx_arc_members_user`
+    // (user_id, arc_id) index added in 0034 so it costs O(log N) per
+    // arc row evaluation.
+    const memberExists = sql`EXISTS (
+      SELECT 1 FROM ${arcMembers}
+      WHERE ${arcMembers.arcId} = ${arcs.id} AND ${arcMembers.userId} = ${userId}
+    )`
+    const aclWhere =
+      lane === 'public'
+        ? eq(arcs.visibility, 'public')
+        : lane === 'mine'
+          ? or(eq(arcs.userId, userId), memberExists)
+          : or(eq(arcs.userId, userId), memberExists, eq(arcs.visibility, 'public'))
+
+    const arcRows = await db.select().from(arcs).where(aclWhere)
     if (arcRows.length === 0) {
       return c.json({ arcs: [], more_issues_available: false })
     }
@@ -354,6 +388,21 @@ export function arcsRoutes() {
       : []
     const wtById = new Map(wtRows.map((w) => [w.id, w]))
 
+    // 3b. Bulk-fetch member counts (GH#152 P1). One GROUP BY query
+    //     across the visible arc set; absent arc ids implicitly count 0.
+    const memberCountRows = await db
+      .select({
+        arcId: arcMembers.arcId,
+        count: sql<number>`count(*)`,
+      })
+      .from(arcMembers)
+      .where(inArray(arcMembers.arcId, arcIds))
+      .groupBy(arcMembers.arcId)
+    const memberCountByArc = new Map<string, number>()
+    for (const r of memberCountRows) {
+      memberCountByArc.set(r.arcId, Number(r.count ?? 0))
+    }
+
     // 4. Build ArcSummary[] via the shared mapping. P1.3 leaves
     //    `prNumberByExternalRef` empty — the GH PR cache plumb-through
     //    is deferred (P3 will wire it).
@@ -362,14 +411,15 @@ export function arcsRoutes() {
     for (const arcRow of arcRows) {
       const sessions = sessionsByArc.get(arcRow.id) ?? []
       const reservation = arcRow.worktreeId ? (wtById.get(arcRow.worktreeId) ?? null) : null
-      const arc = buildArcRowFromContext(arcRow, sessions, reservation, buildCtx)
+      const memberCount = memberCountByArc.get(arcRow.id) ?? 0
+      const arc = buildArcRowFromContext(arcRow, sessions, reservation, buildCtx, memberCount)
 
       // Filter pass — applied to the projected ArcSummary so the column
       // filter sees the same value the client renders.
       if (!statusFilter.has(arc.status)) continue
-      if (laneFilter) {
+      if (providerFilter) {
         const provider = arc.externalRef?.provider ?? null
-        if (provider !== laneFilter) continue
+        if (provider !== providerFilter) continue
       }
       if (columnFilter) {
         const column = deriveColumn(arc.sessions, arc.status)

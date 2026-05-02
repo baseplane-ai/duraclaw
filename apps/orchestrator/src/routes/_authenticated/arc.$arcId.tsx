@@ -27,8 +27,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Header } from '~/components/layout/header'
 import { Main } from '~/components/layout/main'
 import { Badge } from '~/components/ui/badge'
+import { Button } from '~/components/ui/button'
 import { Skeleton } from '~/components/ui/skeleton'
 import { arcsCollection } from '~/db/arcs-collection'
+import { ArcMembersDialog } from '~/features/arc-orch/ArcMembersDialog'
 import { useTabSync } from '~/hooks/use-tab-sync'
 import { apiUrl } from '~/lib/platform'
 import type { ArcSummary } from '~/lib/types'
@@ -277,6 +279,10 @@ function ArcDetailRoute() {
     [navigate, openTab],
   )
 
+  // GH#152 P1 (WU-F): Members dialog state. Open/close from the
+  // header button below; dialog itself reads the live roster via REST.
+  const [membersOpen, setMembersOpen] = useState(false)
+
   // Loading skeleton — collection has not produced a snapshot yet.
   if (isLoading && !arc) {
     return (
@@ -340,10 +346,27 @@ function ArcDetailRoute() {
         <div className="flex flex-col gap-6">
           {/* Title + meta row */}
           <header className="flex flex-col gap-2">
-            <EditableTitle arcId={arc.id} initialTitle={arc.title} />
+            <div className="flex items-center justify-between gap-2">
+              <EditableTitle arcId={arc.id} initialTitle={arc.title} />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setMembersOpen(true)}
+                className="shrink-0"
+              >
+                Members
+                {typeof arc.memberCount === 'number' && arc.memberCount > 0 && (
+                  <span className="ms-1 text-xs text-muted-foreground">({arc.memberCount})</span>
+                )}
+              </Button>
+            </div>
             <div className="flex flex-wrap items-center gap-2">
               <Badge variant="outline" className="capitalize">
                 {arc.status}
+              </Badge>
+              <Badge variant="outline" className="capitalize">
+                {arc.visibility}
               </Badge>
               <ExternalRefBadge ref={arc.externalRef} />
               <WorktreeReservationBadge reservation={arc.worktreeReservation} />
@@ -390,6 +413,14 @@ function ArcDetailRoute() {
               )}
             </section>
           )}
+
+          {/* Members dialog (GH#152 P1 / WU-F) */}
+          <ArcMembersDialog
+            arcId={arc.id}
+            arcTitle={arc.title}
+            open={membersOpen}
+            onClose={() => setMembersOpen(false)}
+          />
 
           {/* Session timeline */}
           <section className="flex flex-col gap-2">

@@ -373,3 +373,193 @@ describe('migration 0034 — arcs first class', () => {
     expect(arc.worktree_id).toBe('wt-99')
   })
 })
+
+// ── GH#152 P1 — migration 0036 (expand) + 0038 (contract) ─────────────
+//
+// 0036 adds arc_members, arc_invitations, arcs.visibility, and
+// backfills visibility from agent_sessions.visibility ('public' wins
+// because MAX() on text puts 'public' before 'private' lexicographically
+// — actually wait: 'public' > 'private' lexically because 'p' < 'p',
+// then 'r' < 'u', so 'public' > 'private'. MAX() picks the larger →
+// 'public'. The migration relies on this ordering).
+//
+// 0038 drops agent_sessions.visibility — but only once 0036's backfill
+// is verified complete. We test the backfill-complete pre-condition
+// (`SELECT COUNT(*) FROM arcs WHERE visibility IS NULL` returns 0)
+// without actually running the destructive DROP.
+
+describe('migration 0036 — arc-collab ACL (per-arc visibility + members)', () => {
+  const migration0034 = readMigration('0034_arcs_first_class.sql')
+  const migration0036 = readMigration('0036_arc_collab_acl.sql')
+  let db: SqlJsDatabase
+
+  beforeEach(async () => {
+    const SqlJs = await getSQL()
+    db = new SqlJs.Database()
+    seedPreMigrationSchema(db)
+  })
+
+  it("backfills arcs.visibility='public' from any public agent_sessions row in that arc", () => {
+    insertUser(db, 'user-1')
+    // Two sessions same kataIssue → one arc; one session has
+    // visibility='public', the other 'private'. The MAX() backfill
+    // should pick 'public'.
+    db.run(
+      `INSERT INTO agent_sessions(
+         id, user_id, project, status, created_at, updated_at, last_activity,
+         kata_mode, kata_issue, kata_phase, prompt, visibility
+       ) VALUES ('sess-pub', 'user-1', 'duraclaw', 'idle',
+                 '2026-04-01', '2026-04-01', '2026-04-01',
+                 'research', 42, NULL, 'p', 'public')`,
+    )
+    db.run(
+      `INSERT INTO agent_sessions(
+         id, user_id, project, status, created_at, updated_at, last_activity,
+         kata_mode, kata_issue, kata_phase, prompt, visibility
+       ) VALUES ('sess-priv', 'user-1', 'duraclaw', 'idle',
+                 '2026-04-01', '2026-04-01', '2026-04-01',
+                 'planning', 42, NULL, 'p', 'private')`,
+    )
+
+    // 0034 first (creates arcs + arc_id FK).
+    applyMigration(db, migration0034)
+    // Then 0036.
+    applyMigration(db, migration0036)
+
+    // Both sessions belong to the same arc.
+    const sessRows = rows(
+      db,
+      `SELECT id, arc_id FROM agent_sessions WHERE id IN ('sess-pub','sess-priv')`,
+    )
+    expect(sessRows[0]!.arc_id).toBe(sessRows[1]!.arc_id)
+
+    // The arc's visibility is 'public' (MAX wins over 'private').
+    const arc = rows(db, `SELECT visibility FROM arcs WHERE id = '${sessRows[0]!.arc_id}'`)[0]
+    expect(arc!.visibility).toBe('public')
+  })
+
+  it('backfills owner membership: every existing arc has its userId user inserted as owner', () => {
+    insertUser(db, 'user-3')
+    db.run(
+      `INSERT INTO agent_sessions(
+         id, user_id, project, status, created_at, updated_at, last_activity,
+         kata_mode, kata_issue, kata_phase, prompt, visibility
+       ) VALUES ('sess-x', 'user-3', 'duraclaw', 'idle',
+                 '2026-04-01', '2026-04-01', '2026-04-01',
+                 'research', 7, NULL, 'p', 'private')`,
+    )
+
+    applyMigration(db, migration0034)
+    applyMigration(db, migration0036)
+
+    const arcId = rows(db, `SELECT arc_id FROM agent_sessions WHERE id='sess-x'`)[0]!
+      .arc_id as string
+
+    const owners = rows(
+      db,
+      `SELECT user_id, role, added_at, added_by FROM arc_members
+       WHERE arc_id='${arcId}' AND role='owner'`,
+    )
+    expect(owners).toHaveLength(1)
+    expect(owners[0]!.user_id).toBe('user-3')
+    // added_by is the user themselves (self-grant).
+    expect(owners[0]!.added_by).toBe('user-3')
+  })
+
+  it('arcs without sessions default to visibility=private (COALESCE branch)', () => {
+    // Arcs created post-0034 always have at least one session that
+    // anchors them. To simulate the COALESCE branch we manually insert
+    // an arc row AFTER 0034 but BEFORE 0036 with no sessions pointing
+    // at it. The 0036 backfill UPDATE will then hit the COALESCE
+    // fallback for that row.
+    insertUser(db, 'user-9')
+    applyMigration(db, migration0034)
+
+    db.run(
+      `INSERT INTO arcs(
+         id, user_id, title, external_ref, worktree_id, status,
+         parent_arc_id, created_at, updated_at, closed_at
+       ) VALUES (
+         'arc-empty', 'user-9', 'No sessions', NULL, NULL, 'draft',
+         NULL, '2026-04-01', '2026-04-01', NULL
+       )`,
+    )
+
+    applyMigration(db, migration0036)
+
+    const arc = rows(db, `SELECT visibility FROM arcs WHERE id='arc-empty'`)[0]
+    expect(arc!.visibility).toBe('private')
+  })
+
+  it('creates arc_members + arc_invitations tables with the correct columns', () => {
+    insertUser(db, 'user-1')
+    applyMigration(db, migration0034)
+    applyMigration(db, migration0036)
+
+    const memberCols = rows(db, `PRAGMA table_info(arc_members)`).map((r) => r.name as string)
+    expect(memberCols).toEqual(
+      expect.arrayContaining(['arc_id', 'user_id', 'role', 'added_at', 'added_by']),
+    )
+
+    const inviteCols = rows(db, `PRAGMA table_info(arc_invitations)`).map((r) => r.name as string)
+    expect(inviteCols).toEqual(
+      expect.arrayContaining([
+        'token',
+        'arc_id',
+        'email',
+        'role',
+        'invited_by',
+        'created_at',
+        'expires_at',
+        'accepted_at',
+        'accepted_by',
+      ]),
+    )
+
+    // arcs gained a visibility column; agent_sessions still has its
+    // own (expand-only — drop ships in 0038).
+    const arcCols = rows(db, `PRAGMA table_info(arcs)`).map((r) => r.name as string)
+    expect(arcCols).toContain('visibility')
+    const sessCols = rows(db, `PRAGMA table_info(agent_sessions)`).map((r) => r.name as string)
+    expect(sessCols).toContain('visibility')
+  })
+})
+
+describe('migration 0038 — drops agent_sessions.visibility (precondition guard)', () => {
+  const migration0034 = readMigration('0034_arcs_first_class.sql')
+  const migration0036 = readMigration('0036_arc_collab_acl.sql')
+  let db: SqlJsDatabase
+
+  beforeEach(async () => {
+    const SqlJs = await getSQL()
+    db = new SqlJs.Database()
+    seedPreMigrationSchema(db)
+  })
+
+  it('after 0036, the 0038 precondition (no NULL arcs.visibility) holds', () => {
+    insertUser(db, 'user-1')
+    db.run(
+      `INSERT INTO agent_sessions(
+         id, user_id, project, status, created_at, updated_at, last_activity,
+         kata_mode, kata_issue, kata_phase, prompt, visibility
+       ) VALUES ('sess-1', 'user-1', 'duraclaw', 'idle',
+                 '2026-04-01', '2026-04-01', '2026-04-01',
+                 'research', 11, NULL, 'p', 'public')`,
+    )
+    db.run(
+      `INSERT INTO agent_sessions(
+         id, user_id, project, status, created_at, updated_at, last_activity,
+         kata_mode, kata_issue, kata_phase, prompt, visibility
+       ) VALUES ('sess-2', 'user-1', 'duraclaw', 'idle',
+                 '2026-04-01', '2026-04-01', '2026-04-01',
+                 'planning', 12, NULL, 'p', 'private')`,
+    )
+
+    applyMigration(db, migration0034)
+    applyMigration(db, migration0036)
+
+    // The deploy precondition the 0038 header documents.
+    const nullCount = rows(db, `SELECT COUNT(*) AS n FROM arcs WHERE visibility IS NULL`)[0]!
+    expect(Number(nullCount.n)).toBe(0)
+  })
+})

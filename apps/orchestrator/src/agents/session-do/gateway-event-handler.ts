@@ -157,7 +157,10 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
             createdAt: new Date(),
           }
           try {
-            self.safeAppendMessage(msg)
+            // GH#152 P1 B25: assistant rows are runner/agent-origin; tag
+            // sender_id='system' so the collab UI can distinguish them
+            // from user-origin rows (which carry the user's uuid).
+            self.safeAppendMessage(msg, undefined, 'system')
             self.persistTurnState()
             broadcastMessagesImpl(ctx, [msg as unknown as WireSessionMessage])
           } catch (err) {
@@ -291,7 +294,8 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
           // No partial fired first — append from scratch. Parent defaults to
           // latestLeafRow(), which is the user row this assistant replies
           // to. See partial_assistant branch for the full rationale.
-          self.safeAppendMessage(msg)
+          // GH#152 P1 B25: tag sender_id='system' (runner/agent-origin).
+          self.safeAppendMessage(msg, undefined, 'system')
         }
         self.currentTurnMessageId = null
         self.persistTurnState()
@@ -527,7 +531,8 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
               parts: [{ type: 'text', text: `⚠ Error: ${event.result}` }],
               createdAt: new Date(),
             }
-            self.safeAppendMessage(errorMsg)
+            // GH#152 P1 B25: system-origin error notice.
+            self.safeAppendMessage(errorMsg, undefined, 'system')
             broadcastMessagesImpl(ctx, [errorMsg as unknown as WireSessionMessage])
           }
 
@@ -558,7 +563,8 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
                   parts: [{ type: 'text', text: event.result, state: 'done' }],
                   createdAt: new Date(),
                 }
-                self.safeAppendMessage(resultMsg)
+                // GH#152 P1 B25: SDK-result fallback assistant text.
+                self.safeAppendMessage(resultMsg, undefined, 'system')
                 broadcastMessagesImpl(ctx, [resultMsg as unknown as WireSessionMessage])
               }
             }
@@ -823,7 +829,8 @@ export function handleGatewayEvent(ctx: SessionDOContext, event: GatewayEvent): 
         parts: [{ type: 'text', text: `⚠ Error: ${event.error}` }],
         createdAt: new Date(),
       }
-      self.safeAppendMessage(errorMsg)
+      // GH#152 P1 B25: system-origin error message.
+      self.safeAppendMessage(errorMsg, undefined, 'system')
       broadcastMessagesImpl(ctx, [errorMsg as unknown as WireSessionMessage])
 
       // Transition to idle — session remains interactive and resumable via

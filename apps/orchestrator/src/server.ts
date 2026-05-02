@@ -12,16 +12,18 @@ import { getRequestSession } from './api/auth-session'
 import { scheduled } from './api/scheduled'
 import * as schema from './db/schema'
 import { agentSessions } from './db/schema'
+import { checkArcAccess } from './lib/arc-acl'
 import type { Env } from './lib/types'
 
 /**
- * Spec #68 B8 / B9 — shared ACL gate for WS upgrades.
+ * GH#152 P1 (B1) — ACL gate for WS upgrades scoped to a session.
  *
- * Returns `true` if the authenticated user may open a WS connection for
- * `sessionId` (owner, or session is public, or user is admin). Also
- * returns `true` when the session doesn't yet exist in D1 (race with
- * create) — the DO's own onConnect will reject if the session truly
- * doesn't exist, preserving the pre-existing race-friendly behaviour.
+ * Loads the session's `arcId` and delegates to `checkArcAccess`. If the
+ * session row is missing (race with create), returns `true` and lets
+ * the DO's own onConnect reject if the session truly doesn't exist —
+ * preserving the pre-existing race-friendly behaviour from the legacy
+ * `checkSessionAccess`. Admin + system-actor overrides live inside
+ * `checkArcAccess` itself.
  */
 async function checkSessionAccess(
   env: Env,
@@ -30,16 +32,25 @@ async function checkSessionAccess(
 ): Promise<boolean> {
   const db = drizzle(env.AUTH_DB, { schema })
   const rows = await db
-    .select({ userId: agentSessions.userId, visibility: agentSessions.visibility })
+    .select({ userId: agentSessions.userId, arcId: agentSessions.arcId })
     .from(agentSessions)
     .where(eq(agentSessions.id, sessionId))
     .limit(1)
   const sessionRow = rows[0]
   if (!sessionRow) return true
-  const isOwner = sessionRow.userId === authSession.userId || sessionRow.userId === 'system'
-  const isPublic = sessionRow.visibility === 'public'
-  const isAdmin = authSession.role === 'admin'
-  return isOwner || isPublic || isAdmin
+  // Legacy parity: orphan / discovery-side rows owned by the literal
+  // `'system'` sentinel always pass — same as the pre-152 path.
+  if (sessionRow.userId === 'system') return true
+  if (!sessionRow.arcId) {
+    // Pre-arc row (mid-migration / null arcId) — fall back to the
+    // owner-or-admin shape from before #152.
+    return sessionRow.userId === authSession.userId || authSession.role === 'admin'
+  }
+  const verdict = await checkArcAccess(env, db, sessionRow.arcId, {
+    userId: authSession.userId,
+    role: authSession.role,
+  })
+  return verdict.allowed
 }
 
 // Gateway + session-runner decoupling live on prod as of 2026-04-17 (#1).
@@ -164,6 +175,9 @@ export default {
       const headers = new Headers(request.headers)
       headers.set('x-partykit-room', sessionId)
       headers.set('x-user-id', authSession.userId)
+      // GH#152 B2: surface the user email so the DO onConnect can
+      // attribute writes (collab presence + future sender-attribution).
+      if (authSession.userEmail) headers.set('x-user-email', authSession.userEmail)
       return stub.fetch(new Request(request, { headers }))
     }
 
@@ -223,6 +237,10 @@ export default {
         const headers = new Headers(request.headers)
         headers.set('x-partykit-room', sessionId)
         headers.set('x-user-id', authSession.userId)
+        // GH#152 B2: surface the user email so the SessionDO onConnect
+        // can store it on `connection.state` for sender attribution
+        // (assistant_messages.sender_id, comments, chat).
+        if (authSession.userEmail) headers.set('x-user-email', authSession.userEmail)
         const wsRequest = new Request(request, { headers })
         return stub.fetch(wsRequest)
       } catch {

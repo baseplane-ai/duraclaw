@@ -1,7 +1,7 @@
 import { eq } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import * as schema from '~/db/schema'
-import { agentSessions, userPresence } from '~/db/schema'
+import { agentSessions, arcs, userPresence } from '~/db/schema'
 import { broadcastSyncedDelta } from '~/lib/broadcast-synced-delta'
 import type { Env } from '~/lib/types'
 
@@ -13,13 +13,20 @@ import type { Env } from '~/lib/types'
  *
  * - SELECTs the full row by id; returns if row is gone (cascade-delete race).
  * - Skips broadcast if `userId === 'system'` (orphan-session suppression).
- * - `visibility === 'public'`: queries `user_presence` for the set of
- *   currently-online users and fans out via `Promise.allSettled` so one
- *   dead DO doesn't abort the rest.
- * - `visibility === 'private'` (or missing): single-owner path.
+ * - Public arc (`arcs.visibility === 'public'`): queries `user_presence`
+ *   for the set of currently-online users and fans out via
+ *   `Promise.allSettled` so one dead DO doesn't abort the rest.
+ * - Private arc (or missing): single-owner path.
  * - Wraps the fanout call in `ctx.waitUntil` so the caller doesn't block.
  * - Errors are swallowed inside waitUntil; client self-heals via queryFn
  *   refetch on WS reconnect (see spec #37 B2 error-handling note).
+ *
+ * GH#152 P1: visibility moved from `agent_sessions.visibility` to
+ * `arcs.visibility`. We now load the parent arc by `row.arcId` and gate
+ * fanout on its visibility. The lookup is one extra D1 read per
+ * broadcast; in practice broadcasts are sub-Hz per session, so we don't
+ * cache. (If this ever becomes hot-path, mirror the `featureFlagCache`
+ * TTL pattern from `session-do/feature-flags.ts`.)
  */
 export async function broadcastSessionRow(
   env: Env,
@@ -33,7 +40,17 @@ export async function broadcastSessionRow(
   if (!row) return
   if (row.userId === 'system') return
 
-  if (row.visibility === 'public') {
+  let arcVisibility: 'private' | 'public' = 'private'
+  if (row.arcId) {
+    const arcRows = await db
+      .select({ visibility: arcs.visibility })
+      .from(arcs)
+      .where(eq(arcs.id, row.arcId))
+      .limit(1)
+    arcVisibility = arcRows[0]?.visibility ?? 'private'
+  }
+
+  if (arcVisibility === 'public') {
     const PUBLIC_FANOUT_CAP = 100
     const presenceRows = await db.select({ userId: userPresence.userId }).from(userPresence)
     const set = new Set<string>()

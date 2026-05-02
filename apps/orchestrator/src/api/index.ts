@@ -20,6 +20,7 @@ import {
   worktrees,
 } from '~/db/schema'
 import { validateActionToken } from '~/lib/action-token'
+import { checkArcAccess } from '~/lib/arc-acl'
 import { createAuth } from '~/lib/auth'
 import { broadcastSessionRow } from '~/lib/broadcast-session'
 import {
@@ -52,6 +53,7 @@ import type {
 import { adminCodexModelsRoutes } from './admin-codex-models'
 import { adminGeminiModelsRoutes } from './admin-gemini-models'
 import { adminIdentitiesRoutes } from './admin-identities'
+import { arcMembersRoutes } from './arc-members'
 import { arcsRoutes } from './arcs'
 import { authMiddleware } from './auth-middleware'
 import { authRoutes } from './auth-routes'
@@ -234,18 +236,30 @@ async function getHiddenProjects(env: ApiAppEnv['Bindings'], userId: string): Pr
 }
 
 /**
- * Spec #68 B4 — compose the WHERE fragment that scopes a session-list
- * query to what the caller is allowed to see.
+ * Spec #68 B4 (post-#152 P1) — compose the WHERE fragment that scopes a
+ * session-list query to what the caller is allowed to see.
  *   - admin + filter=all → no restriction (see everything)
  *   - filter=mine         → `user_id = :userId`
- *   - filter=all (default)→ `user_id = :userId OR visibility = 'public'`
- * Returns `undefined` when no restriction should be applied; callers
- * must skip `.where()` in that case or drop the scope from an `and(...)`.
+ *   - filter=all (default)→ owner OR member of the session's parent arc
+ *                            OR the parent arc is public
+ *
+ * Visibility moved off `agent_sessions` to `arcs.visibility` in #152.
+ * The "shared/public" case now requires a per-arc lookup; we express it
+ * as two EXISTS subqueries on `arc_members` and `arcs` joined by
+ * `agent_sessions.arc_id`. SQLite's planner pushes both into existence
+ * checks (no full-row hydration), and the indexes
+ * `idx_arc_members_user(user_id, arc_id)` + `idx_arcs_visibility_status`
+ * land on the right side. Returns `undefined` when no restriction
+ * should be applied.
  */
 function buildSessionScope(userId: string, role: string, filter: 'mine' | 'all'): SQL | undefined {
   if (role === 'admin' && filter === 'all') return undefined
   if (filter === 'mine') return eq(agentSessions.userId, userId)
-  return or(eq(agentSessions.userId, userId), eq(agentSessions.visibility, 'public'))
+  return or(
+    eq(agentSessions.userId, userId),
+    sql`EXISTS (SELECT 1 FROM arc_members WHERE arc_members.arc_id = ${agentSessions.arcId} AND arc_members.user_id = ${userId})`,
+    sql`EXISTS (SELECT 1 FROM arcs WHERE arcs.id = ${agentSessions.arcId} AND arcs.visibility = 'public')`,
+  )
 }
 
 /**
@@ -271,15 +285,24 @@ export async function getAccessibleSession(
   const row = rows[0]
   if (!row) return { ok: false, status: 404 }
 
+  // GH#152 P1: visibility moved from agent_sessions to arcs. Defer to
+  // checkArcAccess for the membership / public-arc / admin-override
+  // logic; preserve the legacy "system-actor session" carve-out at the
+  // session level since that path mirrors what the WS-upgrade gate
+  // does in server.ts.
   const isOwner = row.userId === userId || row.userId === 'system'
-  const isPublic = row.visibility === 'public'
-  const isAdmin = role === 'admin'
-
-  if (!isOwner && !isPublic && !isAdmin) {
-    return { ok: false, status: 404 }
+  if (isOwner || role === 'admin') {
+    return { ok: true, session: row as AgentSessionRow, isOwner }
   }
 
-  return { ok: true, session: row as AgentSessionRow, isOwner }
+  if (row.arcId) {
+    const verdict = await checkArcAccess(env as unknown as Env, db, row.arcId, { userId, role })
+    if (verdict.allowed) {
+      return { ok: true, session: row as AgentSessionRow, isOwner: false }
+    }
+  }
+
+  return { ok: false, status: 404 }
 }
 
 // ── GH#16 P3 Unit 1 — chain list + precondition helpers ────────────
@@ -1489,6 +1512,12 @@ export function createApiApp() {
   // directly. See `apps/orchestrator/src/api/arcs.ts`.
   app.route('/api/arcs', arcsRoutes())
 
+  // GH#152 P1 (B3): per-arc membership REST surface. Mounted at the
+  // same `/api/arcs` prefix — its routes (`/:id/members*`,
+  // `/invitations/:token/accept`) are disjoint from `arcsRoutes`'s, so
+  // both subapps coexist. See `apps/orchestrator/src/api/arc-members.ts`.
+  app.route('/api/arcs', arcMembersRoutes())
+
   // ── User settings (tabs) — direct D1 CRUD (B-API-2) ──────────────
 
   app.get('/api/user-settings/tabs', async (c) => {
@@ -2516,41 +2545,33 @@ export function createApiApp() {
   app.get('/api/sessions/shared', async (c) => {
     const userId = c.get('userId')
     const db = getDb(c.env)
+    // GH#152 P1: visibility moved from agent_sessions to arcs. List
+    // sessions whose parent arc is public and whose owner is not the
+    // caller. The EXISTS subquery on arcs(id, visibility) hits
+    // `idx_arcs_visibility_status`.
     const rows = await db
       .select()
       .from(agentSessions)
-      .where(and(eq(agentSessions.visibility, 'public'), ne(agentSessions.userId, userId)))
+      .where(
+        and(
+          ne(agentSessions.userId, userId),
+          sql`EXISTS (SELECT 1 FROM arcs WHERE arcs.id = ${agentSessions.arcId} AND arcs.visibility = 'public')`,
+        ),
+      )
       .orderBy(desc(agentSessions.lastActivity))
       .limit(200)
     const sessions = (rows as AgentSessionRow[]).map((r) => ({ ...r, isOwner: false }))
     return c.json({ sessions })
   })
 
+  // GH#152 P1: visibility moved from `agent_sessions` to `arcs`.
+  // The legacy per-session PATCH is forward-deprecated to a 410 so
+  // older clients get a clear "use the per-arc route" signal rather
+  // than a silent no-op. The replacement endpoint
+  // (`PATCH /api/arcs/:id/visibility`) lands in WU-C alongside the
+  // arc-members API surface.
   app.patch('/api/sessions/:id/visibility', async (c) => {
-    const role = c.get('role')
-    if (role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
-
-    const sessionId = c.req.param('id')
-    const body = (await c.req.json().catch(() => ({}))) as { visibility?: string }
-    if (body.visibility !== 'public' && body.visibility !== 'private') {
-      return c.json({ error: 'invalid_visibility' }, 400)
-    }
-
-    const db = getDb(c.env)
-    const existing = await db
-      .select()
-      .from(agentSessions)
-      .where(eq(agentSessions.id, sessionId))
-      .limit(1)
-    if (!existing[0]) return c.json({ error: 'Session not found' }, 404)
-
-    await db
-      .update(agentSessions)
-      .set({ visibility: body.visibility, updatedAt: new Date().toISOString() })
-      .where(eq(agentSessions.id, sessionId))
-
-    c.executionCtx.waitUntil(broadcastSessionRow(c.env, c.executionCtx, sessionId, 'update'))
-    return c.json({ ok: true, visibility: body.visibility })
+    return c.json({ error: 'route_moved', message: 'Use PATCH /api/arcs/:id/visibility' }, 410)
   })
 
   app.patch('/api/projects/:name/visibility', async (c) => {
@@ -3956,11 +3977,13 @@ export function createApiApp() {
     if (resolvedWorktreeId) {
       try {
         const now = new Date().toISOString()
-        // GH#115 review: inherit parent's agent/visibility/model/arcId
-        // so Codex / private parents don't get silently rewritten to
-        // claude+public on the fork UPSERT. GH#116: inherit parent's
-        // `arcId` (was: kataIssue) so the forked session lands in the
-        // same arc.
+        // GH#115 review: inherit parent's agent/model/arcId so Codex /
+        // private parents don't get silently rewritten on the fork
+        // UPSERT. GH#116: inherit parent's `arcId` (was: kataIssue) so
+        // the forked session lands in the same arc. GH#152 P1:
+        // visibility now lives on the parent arc — the fork inherits it
+        // implicitly via `arcId`, so we drop the per-session field from
+        // this insert.
         await db
           .insert(agentSessions)
           .values({
@@ -3971,7 +3994,6 @@ export function createApiApp() {
             status: 'running',
             model: access.session.model ?? null,
             agent: access.session.agent ?? 'claude',
-            visibility: (access.session.visibility ?? 'public') as 'public' | 'private',
             createdAt: now,
             updatedAt: now,
             lastActivity: now,

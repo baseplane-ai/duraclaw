@@ -256,6 +256,8 @@ export function ArcStatusItem({ kataState, kataIssue, sessionId }: ArcStatusItem
         title: '',
         externalRef: null,
         status: 'open',
+        visibility: 'private',
+        memberCount: 0,
         createdAt: '',
         updatedAt: '',
         sessions: [],

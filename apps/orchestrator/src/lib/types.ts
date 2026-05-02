@@ -166,7 +166,10 @@ export interface AgentSessionRow {
    *  planning, freeform) and pre-115 sessions whose backfill couldn't
    *  resolve a row. */
   worktreeId: string | null
-  visibility: 'public' | 'private'
+  // GH#152 P1: `visibility` removed from AgentSessionRow — visibility
+  // now lives on `arcs.visibility` (see ArcSummary). The physical
+  // column still exists in D1 until migration 0038 ships
+  // (expand-then-contract).
 }
 
 /**
@@ -274,6 +277,13 @@ export type ArcSummary = {
   title: string
   externalRef: { provider: 'github' | 'linear' | 'plain'; id: number | string; url?: string } | null
   status: 'draft' | 'open' | 'closed' | 'archived'
+  /** GH#152 P1: arc visibility replaces the legacy session-level field. */
+  visibility: 'private' | 'public'
+  /** GH#152 P1: count of rows in `arc_members` for this arc. Always
+   *  present on the wire (defaults to 0 when no membership rows exist /
+   *  caller hasn't computed it). The ArcMembersDialog uses it to
+   *  render the "N members" badge without a per-arc roster fetch. */
+  memberCount: number
   worktreeId?: string
   parentArcId?: string
   createdAt: string

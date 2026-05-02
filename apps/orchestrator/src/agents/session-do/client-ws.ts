@@ -48,6 +48,17 @@ export function logError(
 }
 
 /**
+ * Browser-connection state shape (GH#152 P1 B2). Stored via
+ * `connection.setState` after the WS upgrade attaches `x-user-id` /
+ * `x-user-email` headers. The broadcaster + comment/chat write paths
+ * read this for sender attribution.
+ */
+export interface SessionClientConnectionState {
+  userId: string | null
+  userEmail: string | null
+}
+
+/**
  * Inner onConnect — gateway-token validation + persistence vs browser fall-
  * through. Wrapped by the public `onConnect` shim which adds the
  * enter/exit observability logs.
@@ -90,8 +101,28 @@ function onConnectInner(
     return // No replay, no protocol messages
   }
 
-  // Browser connection: nothing to do here. The browser sends its first
-  // `subscribe:messages` frame on its own ticker — see onMessage below.
+  // Browser connection: stash the authed userId / userEmail on the
+  // connection state so the broadcaster + comment/chat write paths can
+  // attribute writes back to the calling user (GH#152 P1 B2). The
+  // server.ts WS upgrade handler set `x-user-id` / `x-user-email` from
+  // the Better Auth session before forwarding to the DO; if the headers
+  // are missing (e.g. discovery-side path) we still record nulls so the
+  // shape is uniform downstream.
+  const userId = connCtx.request.headers.get('x-user-id')
+  const userEmail = connCtx.request.headers.get('x-user-email')
+  const clientState: SessionClientConnectionState = {
+    userId: userId && userId.length > 0 ? userId : null,
+    userEmail: userEmail && userEmail.length > 0 ? userEmail : null,
+  }
+  try {
+    connection.setState(clientState)
+  } catch (err) {
+    // setState can be sensitive in the Agents SDK wrapper (see the
+    // gateway path's note above). Log and swallow — falling back to a
+    // null userId on the connection means downstream writers won't
+    // populate sender_id, but the WS itself stays alive.
+    logError(ctx, 'onConnect.setState', err, { connId: connection.id })
+  }
 }
 
 export function handleOnConnect(

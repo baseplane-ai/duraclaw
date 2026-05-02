@@ -3,6 +3,10 @@ import type { Env } from '~/lib/types'
 
 export interface RequestSession {
   userId: string
+  /** GH#152 P1: surfaced from Better Auth so WS-upgrade handlers can
+   *  attach the email alongside the userId for the DO `onConnect`
+   *  handshake (B2). May be `null` for legacy rows missing the field. */
+  userEmail: string | null
   role: string
   session: unknown
   user: unknown
@@ -24,6 +28,7 @@ export async function getRequestSession(
 
   return {
     userId,
+    userEmail: result?.user?.email ?? null,
     role: result?.user?.role ?? 'user',
     session: result.session ?? null,
     user: result.user ?? null,

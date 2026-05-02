@@ -21,10 +21,10 @@
  * here now.
  */
 
-import { and, asc, eq } from 'drizzle-orm'
+import { and, asc, eq, sql } from 'drizzle-orm'
 import type { drizzle } from 'drizzle-orm/d1'
 import type * as schema from '~/db/schema'
-import { agentSessions, arcs, worktrees } from '~/db/schema'
+import { agentSessions, arcMembers, arcs, worktrees } from '~/db/schema'
 import type { ArcSummary, Env } from '~/lib/types'
 
 type DrizzleDB = ReturnType<typeof drizzle<typeof schema>>
@@ -290,6 +290,7 @@ export function buildArcRowFromContext(
   sessionRows: Array<Pick<SessionRow, 'id' | 'mode' | 'status' | 'lastActivity' | 'createdAt'>>,
   reservation: WorktreeRow | null,
   ctx: ArcBuildContext,
+  memberCount = 0,
 ): ArcSummary {
   const externalRef = parseExternalRef(arcRow.externalRef ?? null)
 
@@ -344,6 +345,8 @@ export function buildArcRowFromContext(
     title: arcRow.title,
     externalRef,
     status: arcRow.status as ArcSummary['status'],
+    visibility: arcRow.visibility,
+    memberCount,
     ...(arcRow.worktreeId ? { worktreeId: arcRow.worktreeId } : {}),
     ...(arcRow.parentArcId ? { parentArcId: arcRow.parentArcId } : {}),
     createdAt: arcRow.createdAt,
@@ -407,10 +410,21 @@ export async function buildArcRow(
     reservation = wtRows[0] ?? null
   }
 
+  // GH#152 P1: lightweight `memberCount` for the wire shape. Single
+  // COUNT(*) per single-arc build — broadcaster + GET /api/arcs/:id
+  // pay this once per call, not per-session. Batch callers compute
+  // this themselves and pass via `buildArcRowFromContext`'s
+  // `memberCount` arg to avoid N+1.
+  const memberCountRows = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(arcMembers)
+    .where(eq(arcMembers.arcId, arcId))
+  const memberCount = Number(memberCountRows[0]?.count ?? 0)
+
   // Empty context — the /api/arcs API handler passes a populated map.
   // Single-arc broadcasts ship without a PR badge; the kanban list view
   // populates it from its batched GH cache.
   const ctx: ArcBuildContext = { prNumberByExternalRef: new Map() }
 
-  return buildArcRowFromContext(arcRow, sessionRows, reservation, ctx)
+  return buildArcRowFromContext(arcRow, sessionRows, reservation, ctx, memberCount)
 }
