@@ -280,6 +280,15 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
       </div>
       {worktreeInfo && <WorktreeStatusItem info={worktreeInfo} />}
       <span className="truncate text-muted-foreground">{model || '--'}</span>
+      {session?.identityName && (
+        <span
+          className="truncate text-muted-foreground"
+          title={`Anthropic identity (runner HOME): ${session.identityName}`}
+          data-testid="status-bar-identity"
+        >
+          · @{session.identityName}
+        </span>
+      )}
 
       {/* Row 2 (wraps on mobile): ctx + kata */}
       {contextUsage && <ContextBar contextUsage={contextUsage} />}
