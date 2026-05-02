@@ -420,4 +420,44 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 23,
+    description:
+      'GH#152 P1.2 B6/B7: Add comments table for per-message threaded annotations. One row per comment; soft-delete via deleted_at + deleted_by. Replies via self-FK parent_comment_id. Lives in the SessionDO of the message it anchors to (mirrors the assistant_messages colocation pattern from migrations v9-v13). Storage is segregated from assistant_messages (B24): comments never enter the SDK transcript path.',
+    up: (sql) => {
+      try {
+        sql.exec(`CREATE TABLE IF NOT EXISTS comments (
+          id TEXT PRIMARY KEY,
+          arc_id TEXT NOT NULL,
+          session_id TEXT NOT NULL,
+          message_id TEXT NOT NULL,
+          parent_comment_id TEXT,
+          author_user_id TEXT NOT NULL,
+          body TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          modified_at INTEGER NOT NULL,
+          edited_at INTEGER,
+          deleted_at INTEGER,
+          deleted_by TEXT
+        )`)
+        sql.exec(`CREATE INDEX IF NOT EXISTS idx_comments_session_message_created
+          ON comments (session_id, message_id, created_at)`)
+        sql.exec(`CREATE INDEX IF NOT EXISTS idx_comments_parent
+          ON comments (parent_comment_id)
+          WHERE parent_comment_id IS NOT NULL`)
+        sql.exec(`CREATE INDEX IF NOT EXISTS idx_comments_arc_modified_id
+          ON comments (arc_id, modified_at, id)`)
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (
+          !msg.toLowerCase().includes('duplicate column') &&
+          !msg.toLowerCase().includes('already exists') &&
+          !msg.toLowerCase().includes('no such table')
+        ) {
+          console.warn('[migration v23] unexpected error creating comments table', e)
+          throw e
+        }
+      }
+    },
+  },
 ]

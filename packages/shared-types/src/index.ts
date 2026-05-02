@@ -1075,6 +1075,43 @@ export interface BranchInfoRow {
   updatedAt: string
 }
 
+/**
+ * GH#152 P1.2 B6/B7: per-message comment row on the wire.
+ *
+ * Mirrors the SessionDO `comments` table (migration v23). Carried as the
+ * `TRow` payload of a `SyncedCollectionFrame<CommentRow>` on the
+ * `comments:<sessionId>` wire scope; same envelope shape as
+ * `messages:<sessionId>` so gap-detection / cursor-replay come for free.
+ *
+ * Field-name casing matches `SessionMessage` (camelCase on the wire). The
+ * server maps `snake_case` SQLite columns → camelCase at broadcast time,
+ * mirroring how `safeAppendMessage` shapes `WireSessionMessage`.
+ *
+ * Storage segregation (B24): comments live in their own table, never the
+ * SDK-owned `assistant_messages`, so transcript export and runner replay
+ * stay untouched.
+ */
+export interface CommentRow {
+  id: string
+  arcId: string
+  sessionId: string
+  messageId: string
+  /** Self-FK for replies. `null` for top-level comments. */
+  parentCommentId: string | null
+  authorUserId: string
+  body: string
+  /** Epoch ms; matches SQLite `INTEGER` storage. */
+  createdAt: number
+  /** Epoch ms; bumped on every edit / soft-delete. Unified-cursor key for replay. */
+  modifiedAt: number
+  /** Epoch ms of last edit, or `null` if never edited. UI shows "(edited)" when set. */
+  editedAt: number | null
+  /** Epoch ms of soft-delete, or `null` if not deleted. UI shows tombstone when set. */
+  deletedAt: number | null
+  /** User id who soft-deleted (author / arc owner / admin). `null` when not deleted. */
+  deletedBy: string | null
+}
+
 // ── User Preferences ────────────────────────────────────────────────
 
 export interface UserPreferences {
