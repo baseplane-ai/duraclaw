@@ -976,16 +976,6 @@ export class ClaudeRunner {
             },
             ctx,
           )
-        } else if (message.type === 'rate_limit_event') {
-          send(
-            ch,
-            {
-              type: 'rate_limit',
-              session_id: sessionId,
-              rate_limit_info: (message as any).rate_limit_info,
-            },
-            ctx,
-          )
         } else if (message.type === 'system' && (message as any).subtype === 'task_started') {
           send(
             ch,
