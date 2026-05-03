@@ -409,6 +409,73 @@ export const chatMirror = sqliteTable(
   }),
 )
 
+/**
+ * GH#152 P1.5 (WU-A): per-(user, arc) unread counters. Channels are
+ * tracked independently — `unread_comments` / `last_read_comments_at`
+ * for the comments tab, `unread_chat` / `last_read_chat_at` for the
+ * chat tab — so marking one channel read in the UI does not silence
+ * unread state on the other. Both counters are app-managed:
+ * incremented at write time in `addCommentImpl` / `addChatImpl`
+ * (WU-B), cleared by `POST /api/arcs/:id/read` (WU-B). Composite PK
+ * guarantees one row per (user, arc).
+ */
+export const arcUnread = sqliteTable(
+  'arc_unread',
+  {
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    arcId: text('arc_id')
+      .notNull()
+      .references(() => arcs.id, { onDelete: 'cascade' }),
+    unreadComments: integer('unread_comments').notNull().default(0),
+    unreadChat: integer('unread_chat').notNull().default(0),
+    lastReadCommentsAt: text('last_read_comments_at'),
+    lastReadChatAt: text('last_read_chat_at'),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.userId, t.arcId] }),
+  }),
+)
+
+/**
+ * GH#152 P1.5 (WU-A): @-mention inbox. One row per emitted mention,
+ * written by `addCommentImpl` / `addChatImpl` after `parseMentions`
+ * resolves the body against `arc_members`. `actorUserId` and
+ * `preview` are denormalized so the global Inbox view renders without
+ * a JOIN against `chat_mirror` or the comments table. `readAt` is
+ * cleared in bulk by `POST /api/arcs/:id/read` alongside the unread
+ * counter reset (WU-B).
+ */
+export const arcMentions = sqliteTable(
+  'arc_mentions',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    arcId: text('arc_id')
+      .notNull()
+      .references(() => arcs.id, { onDelete: 'cascade' }),
+    sourceKind: text('source_kind', { enum: ['comment', 'chat'] }).notNull(),
+    sourceId: text('source_id').notNull(),
+    actorUserId: text('actor_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    preview: text('preview').notNull(),
+    mentionTs: text('mention_ts').notNull(),
+    readAt: text('read_at'),
+  },
+  (t) => ({
+    // Inbox query: latest mentions for a user, newest first. The DESC
+    // ordering on mentionTs lives in the migration SQL; Drizzle's
+    // `index()` builder doesn't expose ordering, so this entry exists
+    // for documentation / future-introspection only.
+    byUserTs: index('idx_arc_mentions_user_ts').on(t.userId, t.mentionTs),
+    bySource: index('idx_arc_mentions_source').on(t.sourceKind, t.sourceId),
+  }),
+)
+
 export const userTabs = sqliteTable(
   'user_tabs',
   {
