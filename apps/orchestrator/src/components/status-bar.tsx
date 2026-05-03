@@ -140,16 +140,24 @@ function WsDot({ readyState, sessionId }: { readyState: number; sessionId: strin
   return (
     <Popover>
       <PopoverTrigger asChild>
+        {/* Hit target is the full button (min-size 32×32 ≈ touch min); the
+            visual dot stays at size-2 (8px) inside via the inner span so the
+            status bar density isn't disturbed. Negative -mx keeps the
+            extra padding from pushing neighbours sideways visually. */}
         <button
           type="button"
-          className={cn(
-            'size-2 cursor-pointer rounded-full ring-offset-background focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
-            readyState === 1 ? 'bg-green-500' : 'bg-yellow-500',
-          )}
+          className="-mx-2 inline-flex size-8 cursor-pointer items-center justify-center rounded ring-offset-background focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           aria-label={readyState === 1 ? 'WS connected' : 'WS reconnecting — tap for details'}
           title={readyState === 1 ? 'Connected' : 'Reconnecting…'}
           data-testid="ws-dot"
-        />
+        >
+          <span
+            className={cn(
+              'size-2 rounded-full',
+              readyState === 1 ? 'bg-green-500' : 'bg-yellow-500',
+            )}
+          />
+        </button>
       </PopoverTrigger>
       <PopoverContent
         align="start"
