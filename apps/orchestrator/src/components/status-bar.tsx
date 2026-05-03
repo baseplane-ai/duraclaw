@@ -7,8 +7,9 @@
 import type { ProjectInfo } from '@duraclaw/shared-types'
 import { useLiveQuery } from '@tanstack/react-db'
 import { GitBranchIcon } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { ArcStatusItem } from '~/components/arc-status-item'
+import { Popover, PopoverContent, PopoverTrigger } from '~/components/ui/popover'
 import { projectsCollection } from '~/db/projects-collection'
 import { useSessionLocalState, useSessionStatus } from '~/db/session-local-collection'
 import { useSession } from '~/hooks/use-sessions-collection'
@@ -16,20 +17,151 @@ import { deriveDisplayStateFromStatus } from '~/lib/display-state'
 import { parseJsonField } from '~/lib/json'
 import type { KataSessionState, PrInfo, SessionStatus } from '~/lib/types'
 import { cn } from '~/lib/utils'
+import { getWsDebugInfo, subscribeWsDebug, type WsDebugInfo } from '~/lib/ws-debug'
 import type { ContextUsage, WorktreeInfo } from '~/stores/status-bar'
 
-function WsDot({ readyState }: { readyState: number }) {
+function useWsDebugInfo(channel: string | null): WsDebugInfo | null {
+  return useSyncExternalStore(
+    (cb) => (channel ? subscribeWsDebug(channel, cb) : () => {}),
+    () => (channel ? getWsDebugInfo(channel) : null),
+    () => null,
+  )
+}
+
+function readyStateLabel(rs: number): string {
+  switch (rs) {
+    case 0:
+      return 'CONNECTING (0)'
+    case 1:
+      return 'OPEN (1)'
+    case 2:
+      return 'CLOSING (2)'
+    case 3:
+      return 'CLOSED (3)'
+    default:
+      return `unknown (${rs})`
+  }
+}
+
+function formatAge(ts: number | null, now: number): string {
+  if (!ts) return '—'
+  const ms = Math.max(0, now - ts)
+  if (ms < 1000) return `${ms}ms ago`
+  const s = Math.round(ms / 1000)
+  if (s < 60) return `${s}s ago`
+  const m = Math.round(s / 60)
+  return `${m}m ago`
+}
+
+function WsDebugRow({
+  label,
+  channel,
+  readyState,
+}: {
+  label: string
+  channel: string
+  readyState?: number
+}) {
+  const info = useWsDebugInfo(channel)
+  // Re-render every second so "Xs ago" stays fresh while the popover is open.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [])
+  return (
+    <div className="space-y-0.5 border-b pb-2 last:border-b-0 last:pb-0">
+      <div className="flex items-center gap-2 font-medium">
+        <span>{label}</span>
+        <span className="text-muted-foreground">{channel}</span>
+      </div>
+      {readyState !== undefined && (
+        <div>
+          <span className="text-muted-foreground">readyState: </span>
+          {readyStateLabel(readyState)}
+        </div>
+      )}
+      {info ? (
+        <>
+          {info.url && (
+            <div className="break-all">
+              <span className="text-muted-foreground">url: </span>
+              {info.url}
+            </div>
+          )}
+          <div>
+            <span className="text-muted-foreground">last open: </span>
+            {formatAge(info.lastOpenAt, now)}
+            <span className="text-muted-foreground"> · count: </span>
+            {info.openCount}
+          </div>
+          <div>
+            <span className="text-muted-foreground">last close: </span>
+            {info.lastCloseAt ? (
+              <>
+                code={info.lastCloseCode ?? '?'} reason=
+                {JSON.stringify(info.lastCloseReason ?? '')} wasClean=
+                {String(info.lastCloseWasClean ?? '?')} uptime=
+                {info.lastCloseUptimeMs == null ? 'never-opened' : `${info.lastCloseUptimeMs}ms`} ·{' '}
+                {formatAge(info.lastCloseAt, now)}
+              </>
+            ) : (
+              '—'
+            )}
+            <span className="text-muted-foreground"> · count: </span>
+            {info.closeCount}
+          </div>
+          <div>
+            <span className="text-muted-foreground">last error: </span>
+            {info.lastErrorAt ? formatAge(info.lastErrorAt, now) : '—'}
+            <span className="text-muted-foreground"> · count: </span>
+            {info.errorCount}
+          </div>
+        </>
+      ) : (
+        <div className="text-muted-foreground">no events captured yet</div>
+      )}
+    </div>
+  )
+}
+
+function WsDot({ readyState, sessionId }: { readyState: number; sessionId: string | null }) {
   // Any non-OPEN state (CONNECTING/CLOSING/CLOSED) is surfaced as yellow —
   // partysocket auto-reconnects, so a CLOSED state is transient and
   // functionally the same as CONNECTING from the user's perspective. The
   // dot is the only signal the UI shows for connection health; the status
   // label stays anchored to the session's actual status (running / idle /
   // waiting_gate), not the WS state.
+  //
+  // Tap-revealable diagnostic panel surfaces last close code / reason /
+  // uptime, so mobile users can self-diagnose "yellow dot that won't go
+  // green" without remote-debugging — `attachWsDebug` writes the info to
+  // a module-level store; this popover reads it.
   return (
-    <span
-      className={cn('size-2 rounded-full', readyState === 1 ? 'bg-green-500' : 'bg-yellow-500')}
-      title={readyState === 1 ? 'Connected' : 'Reconnecting…'}
-    />
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className={cn(
+            'size-2 cursor-pointer rounded-full ring-offset-background focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+            readyState === 1 ? 'bg-green-500' : 'bg-yellow-500',
+          )}
+          aria-label={readyState === 1 ? 'WS connected' : 'WS reconnecting — tap for details'}
+          title={readyState === 1 ? 'Connected' : 'Reconnecting…'}
+          data-testid="ws-dot"
+        />
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        side="top"
+        className="w-80 space-y-2 font-mono text-[11px] leading-tight"
+      >
+        {sessionId ? (
+          <WsDebugRow label="session" channel={`agent:${sessionId}`} readyState={readyState} />
+        ) : null}
+        <WsDebugRow label="user-stream" channel="user-stream" />
+      </PopoverContent>
+    </Popover>
   )
 }
 
@@ -265,7 +397,7 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
           the label in sync with the red/yellow/green dot instead of
           showing the stale server status (e.g. 'idle') next to a red dot. */}
       <div className="flex min-w-0 items-center gap-2">
-        <WsDot readyState={readyState} />
+        <WsDot readyState={readyState} sessionId={sessionId} />
         <span className="text-foreground">{display.label}</span>
         <span className="truncate text-muted-foreground">{project || '--'}</span>
         {/* Session title — migrated from tab bar as part of the dense-tab

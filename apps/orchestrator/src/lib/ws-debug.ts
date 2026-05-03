@@ -40,6 +40,8 @@ export function wsHardFailEnabled(): boolean {
 
 export function __resetWsDebugForTests(): void {
   cachedHardFail = null
+  wsDebugInfo.clear()
+  wsDebugListeners.clear()
 }
 
 interface MinimalWs {
@@ -50,12 +52,86 @@ interface MinimalWs {
 }
 
 /**
+ * Per-channel rolling diagnostic snapshot. Surfaced via `getWsDebugInfo` and
+ * `subscribeWsDebug` so the StatusBar can render the last close code/reason
+ * on tap — needed because mobile users can't see the `console.warn` lines
+ * `attachWsDebug` writes without remote-debugging the device.
+ */
+export interface WsDebugInfo {
+  channel: string
+  url: string | null
+  lastOpenAt: number | null
+  lastCloseAt: number | null
+  lastCloseCode: number | null
+  lastCloseReason: string | null
+  lastCloseWasClean: boolean | null
+  lastCloseUptimeMs: number | null
+  lastErrorAt: number | null
+  openCount: number
+  closeCount: number
+  errorCount: number
+}
+
+const wsDebugInfo = new Map<string, WsDebugInfo>()
+const wsDebugListeners = new Map<string, Set<() => void>>()
+
+function emptyInfo(channel: string): WsDebugInfo {
+  return {
+    channel,
+    url: null,
+    lastOpenAt: null,
+    lastCloseAt: null,
+    lastCloseCode: null,
+    lastCloseReason: null,
+    lastCloseWasClean: null,
+    lastCloseUptimeMs: null,
+    lastErrorAt: null,
+    openCount: 0,
+    closeCount: 0,
+    errorCount: 0,
+  }
+}
+
+function notify(channel: string): void {
+  const set = wsDebugListeners.get(channel)
+  if (!set) return
+  for (const cb of set) {
+    try {
+      cb()
+    } catch (err) {
+      console.warn('[ws-debug] listener threw', err)
+    }
+  }
+}
+
+export function getWsDebugInfo(channel: string): WsDebugInfo | null {
+  return wsDebugInfo.get(channel) ?? null
+}
+
+export function subscribeWsDebug(channel: string, cb: () => void): () => void {
+  let set = wsDebugListeners.get(channel)
+  if (!set) {
+    set = new Set()
+    wsDebugListeners.set(channel, set)
+  }
+  set.add(cb)
+  return () => {
+    const current = wsDebugListeners.get(channel)
+    if (!current) return
+    current.delete(cb)
+    if (current.size === 0) wsDebugListeners.delete(channel)
+  }
+}
+
+/**
  * Attach one-liner lifecycle logging to a PartySocket / WebSocket-like object.
  * Returns an unsubscribe fn that removes all three listeners.
  */
 export function attachWsDebug(channel: string, socket: MinimalWs): () => void {
   let openAt = 0
   const hardFail = wsHardFailEnabled()
+  const info = wsDebugInfo.get(channel) ?? emptyInfo(channel)
+  wsDebugInfo.set(channel, info)
 
   const onOpen = () => {
     openAt = Date.now()
@@ -63,20 +139,37 @@ export function attachWsDebug(channel: string, socket: MinimalWs): () => void {
     console.info(
       `[ws:${channel}] open url=${url}${hardFail ? ' (hard-fail mode: maxRetries=0)' : ''}`,
     )
+    info.url = socket.url ?? info.url
+    info.lastOpenAt = openAt
+    info.openCount += 1
+    notify(channel)
   }
   const onClose = (ev: Event) => {
     const ce = ev as CloseEvent
-    const uptime = openAt > 0 ? `${Date.now() - openAt}ms` : 'never-opened'
+    const uptimeMs = openAt > 0 ? Date.now() - openAt : null
+    const uptime = uptimeMs == null ? 'never-opened' : `${uptimeMs}ms`
     console.warn(
       `[ws:${channel}] close code=${ce.code} reason=${JSON.stringify(ce.reason ?? '')} wasClean=${ce.wasClean} uptime=${uptime} url=${socket.url ?? '(unknown)'}${hardFail ? ' (will NOT reconnect — hard-fail)' : ''}`,
     )
     openAt = 0
+    info.url = socket.url ?? info.url
+    info.lastCloseAt = Date.now()
+    info.lastCloseCode = ce.code ?? null
+    info.lastCloseReason = ce.reason ?? ''
+    info.lastCloseWasClean = ce.wasClean ?? null
+    info.lastCloseUptimeMs = uptimeMs
+    info.closeCount += 1
+    notify(channel)
   }
   const onError = (ev: Event) => {
     console.warn(
       `[ws:${channel}] error readyState=${socket.readyState ?? '?'} url=${socket.url ?? '(unknown)'}`,
       ev,
     )
+    info.url = socket.url ?? info.url
+    info.lastErrorAt = Date.now()
+    info.errorCount += 1
+    notify(channel)
   }
 
   socket.addEventListener('open', onOpen)
