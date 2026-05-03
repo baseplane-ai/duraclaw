@@ -6,12 +6,38 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
  * Models test infra on `result-rate-limit.test.ts` + `transcript.test.ts`:
  * a hand-rolled in-memory SQL fake that knows just enough of the query
  * shapes the impls issue. Keeps the suite Workers-harness-free.
+ *
+ * GH#152 P1.5 WU-E extension: an `addCommentImpl mentions integration`
+ * describe block at the bottom mocks `~/lib/parse-mentions` +
+ * `~/lib/collab-summary` and asserts the wire row carries the resolved
+ * mention list, the `mentions` SQL column gets the JSON-stringified
+ * payload, and the per-user fanout helpers are invoked under
+ * `ctx.waitUntil` (with `recordMentions` correctly gated on a non-empty
+ * resolved list while `incrementArcUnread` runs unconditionally).
  */
 
 vi.mock('./broadcast', () => ({
   broadcastComments: vi.fn(),
 }))
 
+// Default to a no-op parseMentions so the existing happy-path tests
+// (which don't care about mentions) keep passing without queuing fake
+// member rows. The mentions-integration describe block overrides this
+// per-test via `vi.mocked(parseMentions).mockResolvedValueOnce(...)`.
+vi.mock('~/lib/parse-mentions', () => ({
+  parseMentions: vi.fn(async () => ({ resolvedUserIds: [], unresolvedTokens: [] })),
+}))
+
+// collab-summary side effects are exercised in their own dedicated
+// suite — here we only need to confirm the impls invoke the helpers
+// with the right args, so stub them to no-op resolve.
+vi.mock('~/lib/collab-summary', () => ({
+  recordMentions: vi.fn(async () => undefined),
+  incrementArcUnread: vi.fn(async () => undefined),
+}))
+
+import { incrementArcUnread, recordMentions } from '~/lib/collab-summary'
+import { parseMentions } from '~/lib/parse-mentions'
 import { broadcastComments } from './broadcast'
 import {
   addCommentImpl,
@@ -29,6 +55,8 @@ interface CommentRow {
   parent_comment_id: string | null
   author_user_id: string
   body: string
+  /** GH#152 P1.5 WU-B: JSON-stringified resolved-user-id list, or null. */
+  mentions: string | null
   created_at: number
   modified_at: number
   edited_at: number | null
@@ -135,12 +163,22 @@ class FakeSql {
         parent_comment_id,
         author_user_id,
         body,
+        mentions: null,
         created_at,
         modified_at,
         edited_at: null,
         deleted_at: null,
         deleted_by: null,
       })
+      return iter<T>([])
+    }
+
+    // GH#152 P1.5 WU-B mentions UPDATE — fired only when parseMentions
+    // resolved at least one id.
+    if (/^UPDATE comments SET mentions = \? WHERE id = \?$/.test(q)) {
+      const [mentions, id] = bindings as [string, string]
+      const row = this.comments.find((r) => r.id === id)
+      if (row) row.mentions = mentions
       return iter<T>([])
     }
 
@@ -268,15 +306,41 @@ function createCtx(sql: FakeSql, opts: CtxOpts = {}): SessionDOContext {
     d1: { select: d1Select },
   }
 
-  return {
+  // Track waitUntil promises so mention-integration tests can flush
+  // them after addCommentImpl returns.
+  const waiters: Promise<unknown>[] = []
+  const ctxObj = {
+    id: { toString: () => 'do-id-x' },
+    waitUntil: (p: Promise<unknown>) => {
+      waiters.push(p)
+    },
+  }
+
+  const sessionCtx = {
     do: self,
     sql: sql as unknown as SqlStorage,
-    ctx: { id: { toString: () => 'do-id-x' } },
+    ctx: ctxObj,
+    env: { AUTH_DB: {} } as unknown,
   } as unknown as SessionDOContext
+
+  // Hang waiters off the returned object so tests can grab them via a
+  // simple `(ctx as any).__waiters` cast. Keeping it off the real
+  // SessionDOContext shape avoids polluting the production type.
+  ;(sessionCtx as unknown as { __waiters: Promise<unknown>[] }).__waiters = waiters
+  return sessionCtx
+}
+
+async function flushWaiters(ctx: SessionDOContext): Promise<void> {
+  const waiters = (ctx as unknown as { __waiters?: Promise<unknown>[] }).__waiters ?? []
+  await Promise.all(waiters)
 }
 
 beforeEach(() => {
   vi.mocked(broadcastComments).mockClear()
+  vi.mocked(parseMentions).mockClear()
+  vi.mocked(parseMentions).mockResolvedValue({ resolvedUserIds: [], unresolvedTokens: [] })
+  vi.mocked(recordMentions).mockClear()
+  vi.mocked(incrementArcUnread).mockClear()
 })
 
 describe('addCommentImpl', () => {
@@ -438,6 +502,7 @@ describe('editCommentImpl', () => {
       parent_comment_id: null,
       author_user_id: 'user-A',
       body: 'original',
+      mentions: null,
       created_at: 1000,
       modified_at: 1000,
       edited_at: null,
@@ -525,6 +590,7 @@ describe('deleteCommentImpl', () => {
       parent_comment_id: null,
       author_user_id: 'user-A',
       body: 'doomed',
+      mentions: null,
       created_at: 1000,
       modified_at: 1000,
       edited_at: null,
@@ -641,6 +707,7 @@ describe('listCommentsForMessage', () => {
         parent_comment_id: null,
         author_user_id: 'u',
         body: 'third',
+        mentions: null,
         created_at: 3000,
         modified_at: 3000,
         edited_at: null,
@@ -655,6 +722,7 @@ describe('listCommentsForMessage', () => {
         parent_comment_id: null,
         author_user_id: 'u',
         body: 'first',
+        mentions: null,
         created_at: 1000,
         modified_at: 1000,
         edited_at: null,
@@ -669,6 +737,7 @@ describe('listCommentsForMessage', () => {
         parent_comment_id: null,
         author_user_id: 'u',
         body: 'second',
+        mentions: null,
         created_at: 2000,
         modified_at: 2000,
         edited_at: null,
@@ -684,6 +753,7 @@ describe('listCommentsForMessage', () => {
         parent_comment_id: null,
         author_user_id: 'u',
         body: 'unrelated',
+        mentions: null,
         created_at: 500,
         modified_at: 500,
         edited_at: null,
@@ -701,5 +771,110 @@ describe('listCommentsForMessage', () => {
     const ctx = createCtx(sql)
     const res = listCommentsForMessage(ctx, { messageId: 'unknown-msg' })
     expect(res.comments).toEqual([])
+  })
+})
+
+// ── GH#152 P1.5 WU-E: addCommentImpl mentions integration ─────────────
+
+describe('addCommentImpl mentions integration', () => {
+  it('persists the resolved mention list on the row, broadcasts wire row with mentions, and fans out via waitUntil', async () => {
+    vi.mocked(parseMentions).mockResolvedValueOnce({
+      resolvedUserIds: ['userB', 'userC'],
+      unresolvedTokens: [],
+    })
+
+    const sql = new FakeSql()
+    sql.assistantMessages.push({ id: 'msg-1', session_id: '' })
+    const ctx = createCtx(sql)
+
+    const res = await addCommentImpl(ctx, {
+      messageId: 'msg-1',
+      body: 'hi @b @c please review',
+      clientCommentId: 'cmt-mentions-1',
+      senderId: 'userA',
+    })
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+
+    // Wire row carries the resolved ids verbatim.
+    expect(res.comment.mentions).toEqual(['userB', 'userC'])
+
+    // The persisted SQL row's `mentions` column is the JSON-encoded array.
+    const persisted = sql.comments.find((r) => r.id === 'cmt-mentions-1') as unknown as
+      | { mentions: string | null }
+      | undefined
+    expect(persisted).toBeDefined()
+    expect(persisted!.mentions).toBe(JSON.stringify(['userB', 'userC']))
+
+    // The broadcast op's value mirrors the wire row.
+    expect(broadcastComments).toHaveBeenCalledTimes(1)
+    const ops = vi.mocked(broadcastComments).mock.calls[0][1] as Array<{
+      type: string
+      value: { mentions: string[] | null }
+    }>
+    expect(ops[0].value.mentions).toEqual(['userB', 'userC'])
+
+    // recordMentions + incrementArcUnread are queued under waitUntil
+    // so the POST response is not blocked on D1 fanout latency. We
+    // flush the queued waiters here to confirm both helpers ran with
+    // the right args.
+    await flushWaiters(ctx)
+
+    // Both ran exactly once. recordMentions carries the resolved list
+    // + the body-derived preview; incrementArcUnread bumps the
+    // 'comments' channel for the author's arc.
+    expect(recordMentions).toHaveBeenCalledTimes(1)
+    const recordArgs = vi.mocked(recordMentions).mock.calls[0][2]
+    expect(recordArgs).toMatchObject({
+      arcId: 'arc-1',
+      sourceKind: 'comment',
+      sourceId: 'cmt-mentions-1',
+      actorUserId: 'userA',
+      preview: 'hi @b @c please review',
+      resolvedUserIds: ['userB', 'userC'],
+    })
+
+    expect(incrementArcUnread).toHaveBeenCalledTimes(1)
+    const unreadArgs = vi.mocked(incrementArcUnread).mock.calls[0]
+    // (env, ctx, arcId, channel, authorUserId)
+    expect(unreadArgs[2]).toBe('arc-1')
+    expect(unreadArgs[3]).toBe('comments')
+    expect(unreadArgs[4]).toBe('userA')
+  })
+
+  it('no resolved mentions → still bumps unread (unconditional) but skips recordMentions', async () => {
+    vi.mocked(parseMentions).mockResolvedValueOnce({
+      resolvedUserIds: [],
+      unresolvedTokens: ['ghost'],
+    })
+
+    const sql = new FakeSql()
+    sql.assistantMessages.push({ id: 'msg-1', session_id: '' })
+    const ctx = createCtx(sql)
+
+    const res = await addCommentImpl(ctx, {
+      messageId: 'msg-1',
+      body: 'no mentions here, just text',
+      clientCommentId: 'cmt-noresolve',
+      senderId: 'userA',
+    })
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+
+    // Wire row's mentions field is null when none resolved.
+    expect(res.comment.mentions).toBeNull()
+    // No JSON-encoded mentions column written.
+    const persisted = sql.comments.find((r) => r.id === 'cmt-noresolve') as unknown as
+      | { mentions: string | null }
+      | undefined
+    expect(persisted!.mentions).toBeNull()
+
+    await flushWaiters(ctx)
+
+    // recordMentions is gated on resolvedUserIds.length > 0 → not called.
+    expect(recordMentions).not.toHaveBeenCalled()
+    // incrementArcUnread runs unconditionally.
+    expect(incrementArcUnread).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(incrementArcUnread).mock.calls[0][3]).toBe('comments')
   })
 })

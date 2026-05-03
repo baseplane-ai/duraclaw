@@ -22,6 +22,21 @@ vi.mock('~/lib/broadcast-arc-room', () => ({
   broadcastArcRoom: vi.fn(async () => undefined),
 }))
 
+// Default to a no-op parseMentions so the existing tests (which don't
+// care about mentions) keep passing without queuing fake member rows.
+// The mentions-integration block at the bottom overrides per-test.
+vi.mock('~/lib/parse-mentions', () => ({
+  parseMentions: vi.fn(async () => ({ resolvedUserIds: [], unresolvedTokens: [] })),
+}))
+
+// Stub the collab-summary fanout helpers so the existing suite is not
+// blocked on D1 (the originals tried to drizzle().select() member rows
+// from an empty AUTH_DB stub, which surfaced as an unhandled rejection).
+vi.mock('~/lib/collab-summary', () => ({
+  recordMentions: vi.fn(async () => undefined),
+  incrementArcUnread: vi.fn(async () => undefined),
+}))
+
 // Chainable drizzle stub. Per-test override of the terminal resolver
 // via `__d1Resolver` so individual tests can force the mirror to throw.
 const d1State: { resolver: () => Promise<unknown> } = {
@@ -59,6 +74,8 @@ vi.mock('drizzle-orm/d1', () => {
 })
 
 import { broadcastArcRoom } from '~/lib/broadcast-arc-room'
+import { incrementArcUnread, recordMentions } from '~/lib/collab-summary'
+import { parseMentions } from '~/lib/parse-mentions'
 import {
   type ArcCollabDOContext,
   addChatImpl,
@@ -157,6 +174,15 @@ class FakeSql {
       return iter<T>([])
     }
 
+    // GH#152 P1.5 WU-B mentions UPDATE — fired only when parseMentions
+    // resolved at least one id.
+    if (/^UPDATE chat_messages SET mentions = \? WHERE id = \?$/.test(q)) {
+      const [mentions, id] = bindings as [string, string]
+      const row = this.chat.find((r) => r.id === id)
+      if (row) row.mentions = mentions
+      return iter<T>([])
+    }
+
     // UPDATE chat_messages SET body = ?, edited_at = ?, modified_at = ? WHERE id = ?
     if (
       /^UPDATE chat_messages SET body = \?, edited_at = \?, modified_at = \? WHERE id = \?$/.test(q)
@@ -240,7 +266,7 @@ interface CtxOpts {
 function createCtx(sql: FakeSql, opts: CtxOpts = {}): ArcCollabDOContext {
   const arcId = opts.arcId ?? 'arc-1'
   const waited: Promise<unknown>[] = []
-  return {
+  const ctx: ArcCollabDOContext = {
     do: { name: arcId },
     ctx: {
       id: { toString: () => 'do-id-x' } as unknown as DurableObjectId,
@@ -252,10 +278,23 @@ function createCtx(sql: FakeSql, opts: CtxOpts = {}): ArcCollabDOContext {
     env: { AUTH_DB: {} as unknown } as ArcCollabDOContext['env'],
     sql: sql as unknown as SqlStorage,
   }
+  // Surface the waiter list so mention-integration tests can flush
+  // them after addChatImpl returns.
+  ;(ctx as unknown as { __waiters: Promise<unknown>[] }).__waiters = waited
+  return ctx
+}
+
+async function flushWaiters(ctx: ArcCollabDOContext): Promise<void> {
+  const waiters = (ctx as unknown as { __waiters?: Promise<unknown>[] }).__waiters ?? []
+  await Promise.all(waiters)
 }
 
 beforeEach(() => {
   vi.mocked(broadcastArcRoom).mockClear()
+  vi.mocked(parseMentions).mockClear()
+  vi.mocked(parseMentions).mockResolvedValue({ resolvedUserIds: [], unresolvedTokens: [] })
+  vi.mocked(recordMentions).mockClear()
+  vi.mocked(incrementArcUnread).mockClear()
   d1State.resolver = () => Promise.resolve(undefined)
 })
 
@@ -599,5 +638,94 @@ describe('listChatForArc', () => {
     const ctx = createCtx(sql)
     const res = listChatForArc(ctx, { sinceCursor: null })
     expect(res.chat).toEqual([])
+  })
+})
+
+// ── GH#152 P1.5 WU-E: addChatImpl mentions integration ────────────────
+
+describe('addChatImpl mentions integration', () => {
+  it('persists the resolved mention list on the row, broadcasts wire row with mentions, and fans out via waitUntil', async () => {
+    vi.mocked(parseMentions).mockResolvedValueOnce({
+      resolvedUserIds: ['userB', 'userC'],
+      unresolvedTokens: [],
+    })
+
+    const sql = new FakeSql()
+    const ctx = createCtx(sql)
+
+    const res = await addChatImpl(ctx, {
+      body: 'hi @b @c please review',
+      clientChatId: 'chat-mentions-1',
+      senderId: 'userA',
+    })
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+
+    // Wire row carries the resolved ids verbatim.
+    expect(res.chat.mentions).toEqual(['userB', 'userC'])
+
+    // The persisted SQL row's `mentions` column is the JSON-encoded array.
+    const persisted = sql.chat.find((r) => r.id === 'chat-mentions-1')
+    expect(persisted).toBeDefined()
+    expect(persisted!.mentions).toBe(JSON.stringify(['userB', 'userC']))
+
+    // Broadcast op carries the mentions on the wire shape.
+    expect(broadcastArcRoom).toHaveBeenCalledTimes(1)
+    const ops = vi.mocked(broadcastArcRoom).mock.calls[0][4] as Array<{
+      type: string
+      value: { mentions: string[] | null }
+    }>
+    expect(ops[0].value.mentions).toEqual(['userB', 'userC'])
+
+    // recordMentions + incrementArcUnread are queued under waitUntil.
+    await flushWaiters(ctx)
+
+    expect(recordMentions).toHaveBeenCalledTimes(1)
+    const recordArgs = vi.mocked(recordMentions).mock.calls[0][2]
+    expect(recordArgs).toMatchObject({
+      arcId: 'arc-1',
+      sourceKind: 'chat',
+      sourceId: 'chat-mentions-1',
+      actorUserId: 'userA',
+      preview: 'hi @b @c please review',
+      resolvedUserIds: ['userB', 'userC'],
+    })
+
+    expect(incrementArcUnread).toHaveBeenCalledTimes(1)
+    const unreadArgs = vi.mocked(incrementArcUnread).mock.calls[0]
+    // (env, ctx, arcId, channel, authorUserId)
+    expect(unreadArgs[2]).toBe('arc-1')
+    expect(unreadArgs[3]).toBe('chat')
+    expect(unreadArgs[4]).toBe('userA')
+  })
+
+  it('no resolved mentions → still bumps unread (unconditional) but skips recordMentions', async () => {
+    vi.mocked(parseMentions).mockResolvedValueOnce({
+      resolvedUserIds: [],
+      unresolvedTokens: ['ghost'],
+    })
+
+    const sql = new FakeSql()
+    const ctx = createCtx(sql)
+
+    const res = await addChatImpl(ctx, {
+      body: 'no mentions here',
+      clientChatId: 'chat-noresolve',
+      senderId: 'userA',
+    })
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+
+    expect(res.chat.mentions).toBeNull()
+    const persisted = sql.chat.find((r) => r.id === 'chat-noresolve')
+    expect(persisted!.mentions).toBeNull()
+
+    await flushWaiters(ctx)
+
+    // recordMentions is gated on resolvedUserIds.length > 0 → not called.
+    expect(recordMentions).not.toHaveBeenCalled()
+    // incrementArcUnread runs unconditionally on the chat channel.
+    expect(incrementArcUnread).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(incrementArcUnread).mock.calls[0][3]).toBe('chat')
   })
 })

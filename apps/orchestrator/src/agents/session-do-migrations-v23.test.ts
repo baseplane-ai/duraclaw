@@ -76,8 +76,14 @@ describe('SESSION_DO_MIGRATIONS — v23 statement-level checks', () => {
     const sql = new FakeSql()
     sql.appliedVersions.add(23)
     runMigrations(sql, SESSION_DO_MIGRATIONS)
-    const commentStmts = sql.statements.filter((s) => /comments/i.test(s.query))
-    expect(commentStmts).toHaveLength(0)
+    // Filter scoped to v23's specific shapes (CREATE TABLE comments + the
+    // three CREATE INDEX statements). Later migrations may legitimately
+    // touch the `comments` table (e.g. v24's `ALTER TABLE comments ADD
+    // COLUMN mentions`) — those should still emit, just not v23's.
+    const v23Stmts = sql.statements.filter((s) =>
+      /CREATE\s+TABLE\s+comments\b|CREATE\s+INDEX\s+\w*comments?_/i.test(s.query),
+    )
+    expect(v23Stmts).toHaveLength(0)
   })
 })
 

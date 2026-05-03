@@ -650,6 +650,224 @@ describe('migration 0037 — chat_mirror', () => {
   })
 })
 
+// ── GH#152 P1.5 WU-E — migration 0039 (collab_summary) ────────────────
+//
+// 0039 introduces the per-(user, arc) unread counter table + the
+// per-user @-mention inbox table. Both are NEW tables (no backfill).
+// Tested:
+//   - both tables created with the expected columns + nullability
+//   - arc_unread has composite PK on (user_id, arc_id)
+//   - arc_mentions has the two indexes (user-ts, source) with the
+//     documented column lists
+//   - round-trip INSERT + SELECT works on both tables (FKs satisfied)
+//   - arc_mentions.source_kind CHECK constraint rejects values outside
+//     the ('comment','chat') enum
+describe('migration 0039 — collab_summary (arc_unread + arc_mentions)', () => {
+  const migration0034 = readMigration('0034_arcs_first_class.sql')
+  const migration0036 = readMigration('0036_arc_collab_acl.sql')
+  const migration0039 = readMigration('0039_collab_summary.sql')
+  let db: SqlJsDatabase
+
+  beforeEach(async () => {
+    const SqlJs = await getSQL()
+    db = new SqlJs.Database()
+    seedPreMigrationSchema(db)
+    db.run(`PRAGMA foreign_keys = ON;`)
+    // Need 0034 + 0036 so the FK target tables (users, arcs) exist.
+    insertUser(db, 'user-1')
+    insertAgentSession(db, {
+      id: 'sess-anchor',
+      userId: 'user-1',
+      kataIssue: 1,
+      kataMode: 'research',
+    })
+    applyMigration(db, migration0034)
+    applyMigration(db, migration0036)
+  })
+
+  it('creates arc_unread with the expected columns + nullability', () => {
+    applyMigration(db, migration0039)
+
+    const cols = rows(db, `PRAGMA table_info(arc_unread)`)
+    const byName = Object.fromEntries(cols.map((c) => [c.name as string, c]))
+
+    for (const col of [
+      'user_id',
+      'arc_id',
+      'unread_comments',
+      'unread_chat',
+      'last_read_comments_at',
+      'last_read_chat_at',
+    ]) {
+      expect(byName[col]).toBeDefined()
+    }
+    // NOT NULL columns.
+    expect(byName.user_id!.notnull).toBe(1)
+    expect(byName.arc_id!.notnull).toBe(1)
+    expect(byName.unread_comments!.notnull).toBe(1)
+    expect(byName.unread_chat!.notnull).toBe(1)
+    // Nullable timestamps.
+    expect(byName.last_read_comments_at!.notnull).toBe(0)
+    expect(byName.last_read_chat_at!.notnull).toBe(0)
+  })
+
+  it('arc_unread has composite PRIMARY KEY (user_id, arc_id)', () => {
+    applyMigration(db, migration0039)
+
+    // PRAGMA table_info reports `pk` as 1-based ordinal in the PK
+    // (0 for non-PK columns). For a composite PK on (user_id, arc_id)
+    // user_id should be pk=1, arc_id pk=2, others 0.
+    const cols = rows(db, `PRAGMA table_info(arc_unread)`)
+    const byName = Object.fromEntries(cols.map((c) => [c.name as string, c]))
+    expect(byName.user_id!.pk).toBe(1)
+    expect(byName.arc_id!.pk).toBe(2)
+    expect(byName.unread_comments!.pk).toBe(0)
+    expect(byName.unread_chat!.pk).toBe(0)
+  })
+
+  it('creates arc_mentions with the expected columns + nullability', () => {
+    applyMigration(db, migration0039)
+
+    const cols = rows(db, `PRAGMA table_info(arc_mentions)`)
+    const byName = Object.fromEntries(cols.map((c) => [c.name as string, c]))
+
+    for (const col of [
+      'id',
+      'user_id',
+      'arc_id',
+      'source_kind',
+      'source_id',
+      'actor_user_id',
+      'preview',
+      'mention_ts',
+      'read_at',
+    ]) {
+      expect(byName[col]).toBeDefined()
+    }
+    // PK on id.
+    expect(byName.id!.pk).toBe(1)
+    // NOT NULL columns.
+    expect(byName.user_id!.notnull).toBe(1)
+    expect(byName.arc_id!.notnull).toBe(1)
+    expect(byName.source_kind!.notnull).toBe(1)
+    expect(byName.source_id!.notnull).toBe(1)
+    expect(byName.actor_user_id!.notnull).toBe(1)
+    expect(byName.preview!.notnull).toBe(1)
+    expect(byName.mention_ts!.notnull).toBe(1)
+    // read_at is nullable (cleared in bulk on read).
+    expect(byName.read_at!.notnull).toBe(0)
+  })
+
+  it('creates the two arc_mentions indexes with the expected key columns', () => {
+    applyMigration(db, migration0039)
+
+    const idxList = rows(db, `PRAGMA index_list('arc_mentions')`)
+    const names = idxList.map((r) => r.name as string)
+    expect(names).toContain('idx_arc_mentions_user_ts')
+    expect(names).toContain('idx_arc_mentions_source')
+
+    const userTsCols = rows(db, `PRAGMA index_info('idx_arc_mentions_user_ts')`)
+      .sort((a, b) => Number(a.seqno) - Number(b.seqno))
+      .map((r) => r.name as string)
+    expect(userTsCols).toEqual(['user_id', 'mention_ts'])
+
+    const sourceCols = rows(db, `PRAGMA index_info('idx_arc_mentions_source')`)
+      .sort((a, b) => Number(a.seqno) - Number(b.seqno))
+      .map((r) => r.name as string)
+    expect(sourceCols).toEqual(['source_kind', 'source_id'])
+  })
+
+  it('round-trip INSERT + SELECT works on arc_unread (with FKs satisfied)', () => {
+    applyMigration(db, migration0039)
+
+    const arcId = rows(db, `SELECT arc_id FROM agent_sessions WHERE id = 'sess-anchor' LIMIT 1`)[0]!
+      .arc_id as string
+
+    db.run(
+      `INSERT INTO arc_unread (user_id, arc_id, unread_comments, unread_chat,
+                                last_read_comments_at, last_read_chat_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      ['user-1', arcId, 3, 5, '2026-05-02T00:00:00Z', null],
+    )
+
+    const got = rows(
+      db,
+      `SELECT * FROM arc_unread WHERE user_id = 'user-1' AND arc_id = ?`.replace('?', `'${arcId}'`),
+    )
+    expect(got).toHaveLength(1)
+    expect(got[0]).toMatchObject({
+      user_id: 'user-1',
+      arc_id: arcId,
+      unread_comments: 3,
+      unread_chat: 5,
+      last_read_comments_at: '2026-05-02T00:00:00Z',
+      last_read_chat_at: null,
+    })
+  })
+
+  it('round-trip INSERT + SELECT works on arc_mentions (with FKs satisfied)', () => {
+    applyMigration(db, migration0039)
+    insertUser(db, 'user-2') // mention target
+    const arcId = rows(db, `SELECT arc_id FROM agent_sessions WHERE id = 'sess-anchor' LIMIT 1`)[0]!
+      .arc_id as string
+
+    db.run(
+      `INSERT INTO arc_mentions (id, user_id, arc_id, source_kind, source_id,
+                                  actor_user_id, preview, mention_ts, read_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+      [
+        'mention-1',
+        'user-2',
+        arcId,
+        'comment',
+        'cmt-1',
+        'user-1',
+        'hello @user-2',
+        '2026-05-02T01:23:45Z',
+      ],
+    )
+
+    const got = rows(db, `SELECT * FROM arc_mentions WHERE id = 'mention-1'`)
+    expect(got).toHaveLength(1)
+    expect(got[0]).toMatchObject({
+      id: 'mention-1',
+      user_id: 'user-2',
+      arc_id: arcId,
+      source_kind: 'comment',
+      source_id: 'cmt-1',
+      actor_user_id: 'user-1',
+      preview: 'hello @user-2',
+      mention_ts: '2026-05-02T01:23:45Z',
+      read_at: null,
+    })
+  })
+
+  it("source_kind CHECK constraint rejects values outside ('comment','chat')", () => {
+    applyMigration(db, migration0039)
+    insertUser(db, 'user-2')
+    const arcId = rows(db, `SELECT arc_id FROM agent_sessions WHERE id = 'sess-anchor' LIMIT 1`)[0]!
+      .arc_id as string
+
+    expect(() =>
+      db.run(
+        `INSERT INTO arc_mentions (id, user_id, arc_id, source_kind, source_id,
+                                    actor_user_id, preview, mention_ts, read_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+        [
+          'mention-bad',
+          'user-2',
+          arcId,
+          'invalid',
+          'cmt-1',
+          'user-1',
+          'preview',
+          '2026-05-02T00:00:00Z',
+        ],
+      ),
+    ).toThrow(/CHECK constraint/i)
+  })
+})
+
 describe('migration 0038 — drops agent_sessions.visibility (precondition guard)', () => {
   const migration0034 = readMigration('0034_arcs_first_class.sql')
   const migration0036 = readMigration('0036_arc_collab_acl.sql')
