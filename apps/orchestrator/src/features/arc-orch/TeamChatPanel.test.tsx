@@ -40,6 +40,38 @@ vi.mock('~/features/arc-orch/use-arc-chat', () => ({
   }),
 }))
 
+// GH#152 P1.6: TeamChatPanel composer now binds to the arc's chat-draft
+// Y.Text via `useArcCollab`. Stub it here so the jsdom test harness
+// doesn't have to spin up y-partyserver / WebSockets. The returned
+// object reference is stable across renders so the composer's
+// `useEffect([chatDraft])` doesn't re-fire on every parent re-render
+// (which would clobber local textarea state via the observer).
+const stubChatDraft = {
+  toString: () => '',
+  length: 0,
+  doc: null as null,
+  delete: vi.fn(),
+  insert: vi.fn(),
+  observe: vi.fn(),
+  unobserve: vi.fn(),
+}
+const stubArcCollab = {
+  chatDraft: stubChatDraft,
+  notifyTyping: vi.fn(),
+  provider: null,
+  status: 'connecting' as const,
+}
+vi.mock('~/hooks/use-arc-collab', () => ({
+  useArcCollab: () => stubArcCollab,
+}))
+
+// The presence bar is exercised in its own test file; here we only
+// care about the chat-panel structure, so stub the bar to avoid pulling
+// useArcPresence + the session-collab hook into this jsdom run.
+vi.mock('~/components/arc-presence-bar', () => ({
+  ArcPresenceBar: () => null,
+}))
+
 vi.mock('sonner', () => ({
   toast: { error: vi.fn(), success: vi.fn() },
 }))

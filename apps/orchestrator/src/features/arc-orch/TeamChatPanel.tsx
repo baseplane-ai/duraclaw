@@ -15,7 +15,9 @@
 import type { ChatMessageRow } from '@duraclaw/shared-types'
 import { type FormEvent, type KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
+import { ArcPresenceBar } from '~/components/arc-presence-bar'
 import { Avatar, AvatarFallback } from '~/components/ui/avatar'
+import { useArcCollab } from '~/hooks/use-arc-collab'
 import { cn } from '~/lib/utils'
 import { ReactionsBar } from './ReactionsBar'
 import { useArcChat, useArcChatActions } from './use-arc-chat'
@@ -154,14 +156,58 @@ function ChatRowView({ arcId, message, currentUserId, onEdit, onDelete }: ChatRo
 }
 
 interface ComposerProps {
+  arcId: string
   disabled: boolean
   placeholder: string
   onSubmit: (body: string) => Promise<{ ok: boolean; error?: string }>
 }
 
-function Composer({ disabled, placeholder, onSubmit }: ComposerProps) {
-  const [text, setText] = useState('')
+/**
+ * Bind the composer's text to the arc's `chat-draft` Y.Text so reload-
+ * mid-typing doesn't lose work and multiple devices show the same draft
+ * (GH#152 P1.6 B16). Implementation is intentionally simple — every
+ * keystroke does `delete(0, length); insert(0, newText)`. A proper
+ * y-textarea binding would diff the change; not needed for an MVP
+ * composer where draft length is bounded and edits are user-driven.
+ */
+function Composer({ arcId, disabled, placeholder, onSubmit }: ComposerProps) {
+  const { chatDraft, notifyTyping } = useArcCollab({ arcId })
+  const [text, setText] = useState<string>(() => chatDraft.toString())
   const [busy, setBusy] = useState(false)
+
+  // Pull remote edits into the local controlled-input state. The
+  // observer fires for both local and remote changes; the equality guard
+  // makes the local round-trip a no-op (avoids React state thrash).
+  useEffect(() => {
+    const onChange = () => {
+      const next = chatDraft.toString()
+      setText((prev) => (prev === next ? prev : next))
+    }
+    chatDraft.observe(onChange)
+    // Sync once at mount in case the doc already had content.
+    onChange()
+    return () => {
+      chatDraft.unobserve(onChange)
+    }
+  }, [chatDraft])
+
+  const writeDraft = useCallback(
+    (next: string) => {
+      // Delete-then-insert in a single transaction so peers see one
+      // coherent replace rather than two separate edits.
+      const doc = chatDraft.doc
+      if (doc) {
+        doc.transact(() => {
+          if (chatDraft.length > 0) chatDraft.delete(0, chatDraft.length)
+          if (next.length > 0) chatDraft.insert(0, next)
+        })
+      } else {
+        if (chatDraft.length > 0) chatDraft.delete(0, chatDraft.length)
+        if (next.length > 0) chatDraft.insert(0, next)
+      }
+    },
+    [chatDraft],
+  )
 
   const submit = useCallback(async () => {
     const trimmed = text.trim()
@@ -173,8 +219,20 @@ function Composer({ disabled, placeholder, onSubmit }: ComposerProps) {
       toast.error(res.error ?? 'Failed to send message')
       return
     }
+    // Clear the shared draft on success — mirrored to peers via Y.Text.
+    writeDraft('')
     setText('')
-  }, [text, busy, disabled, onSubmit])
+  }, [text, busy, disabled, onSubmit, writeDraft])
+
+  const handleChange = useCallback(
+    (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+      const next = e.target.value
+      setText(next)
+      writeDraft(next)
+      notifyTyping()
+    },
+    [writeDraft, notifyTyping],
+  )
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -198,7 +256,7 @@ function Composer({ disabled, placeholder, onSubmit }: ComposerProps) {
     <form onSubmit={handleFormSubmit} className="flex flex-col gap-2 border-t border-border p-3">
       <textarea
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={handleChange}
         onKeyDown={handleKeyDown}
         placeholder={placeholder}
         disabled={disabled}
@@ -251,7 +309,10 @@ export function TeamChatPanel({ arcId, className }: TeamChatPanelProps) {
       data-team-chat-arc={arcId}
     >
       <div className="flex flex-col gap-0.5 border-b border-border bg-muted/50 px-3 py-2">
-        <div className="text-sm font-semibold text-foreground">Team chat</div>
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-sm font-semibold text-foreground">Team chat</div>
+          <ArcPresenceBar arcId={arcId} sessionId={null} />
+        </div>
         <div className="text-xs text-muted-foreground">Agent doesn’t see this</div>
       </div>
 
@@ -274,6 +335,7 @@ export function TeamChatPanel({ arcId, className }: TeamChatPanelProps) {
       </div>
 
       <Composer
+        arcId={arcId}
         disabled={currentUserId === null}
         placeholder={
           currentUserId === null ? 'Sign in to chat with your team…' : 'Message your team…'
