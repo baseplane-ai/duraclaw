@@ -17,6 +17,7 @@ import { type FormEvent, type KeyboardEvent, useCallback, useEffect, useRef, use
 import { toast } from 'sonner'
 import { Avatar, AvatarFallback } from '~/components/ui/avatar'
 import { cn } from '~/lib/utils'
+import { ReactionsBar } from './ReactionsBar'
 import { useArcChat, useArcChatActions } from './use-arc-chat'
 
 interface TeamChatPanelProps {
@@ -42,13 +43,14 @@ function initialOf(userId: string): string {
 }
 
 interface ChatRowViewProps {
+  arcId: string
   message: ChatMessageRow
   currentUserId: string | null
   onEdit: (chatId: string, body: string) => Promise<{ ok: boolean; error?: string }>
   onDelete: (chatId: string) => Promise<{ ok: boolean; error?: string }>
 }
 
-function ChatRowView({ message, currentUserId, onEdit, onDelete }: ChatRowViewProps) {
+function ChatRowView({ arcId, message, currentUserId, onEdit, onDelete }: ChatRowViewProps) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(message.body)
   const [saving, setSaving] = useState(false)
@@ -128,6 +130,9 @@ function ChatRowView({ message, currentUserId, onEdit, onDelete }: ChatRowViewPr
           </div>
         ) : (
           <div className="whitespace-pre-wrap break-words text-sm">{message.body}</div>
+        )}
+        {!isDeleted && !editing && (
+          <ReactionsBar arcId={arcId} targetKind="chat" targetId={message.id} />
         )}
         {!isDeleted && !editing && isMine && (
           <div className="flex items-center gap-3 text-xs text-muted-foreground">
@@ -257,6 +262,7 @@ export function TeamChatPanel({ arcId, className }: TeamChatPanelProps) {
           messages.map((m) => (
             <ChatRowView
               key={m.id}
+              arcId={arcId}
               message={m}
               currentUserId={currentUserId}
               onEdit={handleEdit}

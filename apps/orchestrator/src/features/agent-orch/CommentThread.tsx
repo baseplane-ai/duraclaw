@@ -18,6 +18,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from '~/components/ui/sheet'
+import { ReactionsBar } from '~/features/arc-orch/ReactionsBar'
 import { cn } from '~/lib/utils'
 import { useCommentActions, useCommentsForMessage } from './use-comments-collection'
 
@@ -135,6 +136,9 @@ function CommentRowView({
         </div>
       ) : (
         <div className="whitespace-pre-wrap break-words text-sm">{comment.body}</div>
+      )}
+      {!isDeleted && !editing && (
+        <ReactionsBar arcId={comment.arcId} targetKind="comment" targetId={comment.id} />
       )}
       {!isDeleted && !editing && (
         <div className="flex items-center gap-3 text-xs text-muted-foreground">
