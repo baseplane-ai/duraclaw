@@ -4,6 +4,8 @@ import { drizzle } from 'drizzle-orm/d1'
 import * as schema from '~/db/schema'
 import { chatMirror } from '~/db/schema'
 import { broadcastArcRoom } from '~/lib/broadcast-arc-room'
+import { incrementArcUnread, recordMentions } from '~/lib/collab-summary'
+import { parseMentions } from '~/lib/parse-mentions'
 import type { Env } from '~/lib/types'
 
 /**
@@ -237,12 +239,33 @@ export async function addChatImpl(
     console.warn(`[ArcCollabDO:${ctx.ctx.id}] submit_ids upkeep failed:`, err)
   }
 
+  // GH#152 P1.5 WU-B: resolve @-mentions, persist on the row, fan out
+  // unread + mentions inbox writes. parseMentions hits D1
+  // (arc_members ⋈ users); the inbox + counter writes are pushed under
+  // waitUntil so the chat POST returns fast.
+  let resolvedUserIds: string[] = []
+  try {
+    const result = await parseMentions(drizzle(ctx.env.AUTH_DB, { schema }), arcId, args.body)
+    resolvedUserIds = result.resolvedUserIds
+  } catch (err) {
+    console.warn(`[ArcCollabDO:${ctx.ctx.id}] parseMentions failed:`, err)
+  }
+
+  if (resolvedUserIds.length > 0) {
+    const mentionsJson = JSON.stringify(resolvedUserIds)
+    try {
+      ctx.sql.exec(`UPDATE chat_messages SET mentions = ? WHERE id = ?`, mentionsJson, id)
+    } catch (err) {
+      console.warn(`[ArcCollabDO:${ctx.ctx.id}] addChatImpl mentions UPDATE failed:`, err)
+    }
+  }
+
   const wire: ChatMessageRow = {
     id,
     arcId,
     authorUserId,
     body: args.body,
-    mentions: null,
+    mentions: resolvedUserIds.length > 0 ? resolvedUserIds : null,
     createdAt: now,
     modifiedAt: now,
     editedAt: null,
@@ -260,6 +283,23 @@ export async function addChatImpl(
   // Async D1 mirror — the DO row is the source of truth; mirror
   // failure must not break the broadcast.
   ctx.ctx.waitUntil(mirrorInsertToD1(ctx.env, wire))
+
+  // Async collab-summary fanout: inbox + per-user unread counter.
+  ctx.ctx.waitUntil(
+    (async () => {
+      if (resolvedUserIds.length > 0) {
+        await recordMentions(ctx.env, ctx.ctx, {
+          arcId,
+          sourceKind: 'chat',
+          sourceId: id,
+          actorUserId: authorUserId,
+          preview: args.body.slice(0, 160),
+          resolvedUserIds,
+        })
+      }
+      await incrementArcUnread(ctx.env, ctx.ctx, arcId, 'chat', authorUserId)
+    })(),
+  )
 
   return { ok: true, chat: wire, status: 200 }
 }

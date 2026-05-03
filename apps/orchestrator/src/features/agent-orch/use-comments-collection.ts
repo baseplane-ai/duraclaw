@@ -195,6 +195,10 @@ export function useCommentActions(sessionId: string): CommentActions {
         parentCommentId,
         authorUserId: currentUserId,
         body,
+        // GH#152 P1.5: server-resolved on the WS echo (parseMentions
+        // runs against arc_members on the SessionDO). Optimistic insert
+        // shows no mention chips until the round-trip lands.
+        mentions: null,
         createdAt: now,
         modifiedAt: now,
         editedAt: null,

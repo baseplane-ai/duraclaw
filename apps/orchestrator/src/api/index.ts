@@ -3888,6 +3888,111 @@ export function createApiApp() {
     }
   })
 
+  // ── GH#152 P1.5 WU-B — mark a per-(user, arc, channel) read ───────
+  //
+  // Body: `{kind: 'comments' | 'chat'}` — selects which counter to
+  // clear. Effect: zeroes `arc_unread.unread_<kind>`, stamps
+  // `last_read_<kind>_at = now`, and broadcasts the patched row on
+  // the caller's `arcUnread` SyncedCollection so the sidebar badge
+  // updates without a refetch. Mirrors the bulk-clear pattern noted
+  // in the arc_mentions header — the inbox-side mark-read is a
+  // future task; this route only touches the counter for now.
+  app.post('/api/arcs/:id/read', async (c) => {
+    const arcId = c.req.param('id')
+    try {
+      const userId = c.get('userId')
+      const role = c.get('role') ?? 'user'
+      if (!userId) return c.json({ error: 'unauth' }, 401)
+
+      const db = getDb(c.env)
+      const verdict = await checkArcAccess(c.env, db, arcId, { userId, role })
+      if (!verdict.allowed) return c.json({ error: 'forbidden' }, 403)
+
+      // Body OR query — caller convenience. Body wins when both are
+      // present so the test paths can hand-stamp without query
+      // string juggling.
+      let kind: 'comments' | 'chat' | undefined
+      try {
+        const body = (await c.req.json().catch(() => null)) as { kind?: unknown } | null
+        if (body && (body.kind === 'comments' || body.kind === 'chat')) {
+          kind = body.kind
+        }
+      } catch {
+        // Empty body is fine — fall through to query.
+      }
+      if (!kind) {
+        const q = c.req.query('kind')
+        if (q === 'comments' || q === 'chat') kind = q
+      }
+      if (!kind) {
+        return c.json({ error: 'invalid_kind', message: "kind must be 'comments' or 'chat'" }, 422)
+      }
+
+      const nowIso = new Date().toISOString()
+      const updateSql =
+        kind === 'comments'
+          ? `INSERT INTO arc_unread (user_id, arc_id, unread_comments, unread_chat,
+                                     last_read_comments_at, last_read_chat_at)
+             VALUES (?, ?, 0, 0, ?, NULL)
+             ON CONFLICT(user_id, arc_id) DO UPDATE
+               SET unread_comments = 0,
+                   last_read_comments_at = excluded.last_read_comments_at`
+          : `INSERT INTO arc_unread (user_id, arc_id, unread_comments, unread_chat,
+                                     last_read_comments_at, last_read_chat_at)
+             VALUES (?, ?, 0, 0, NULL, ?)
+             ON CONFLICT(user_id, arc_id) DO UPDATE
+               SET unread_chat = 0,
+                   last_read_chat_at = excluded.last_read_chat_at`
+
+      try {
+        await c.env.AUTH_DB.prepare(updateSql).bind(userId, arcId, nowIso).run()
+      } catch (err) {
+        console.error(`[POST /api/arcs/${arcId}/read] arc_unread upsert failed:`, err)
+        return c.json({ error: 'internal_error' }, 500)
+      }
+
+      const row = await c.env.AUTH_DB.prepare(
+        `SELECT unread_comments AS unreadComments,
+                unread_chat AS unreadChat,
+                last_read_comments_at AS lastReadCommentsAt,
+                last_read_chat_at AS lastReadChatAt
+           FROM arc_unread WHERE user_id = ? AND arc_id = ?`,
+      )
+        .bind(userId, arcId)
+        .first<{
+          unreadComments: number
+          unreadChat: number
+          lastReadCommentsAt: string | null
+          lastReadChatAt: string | null
+        }>()
+
+      if (row) {
+        c.executionCtx.waitUntil(
+          broadcastSyncedDelta(c.env, userId, 'arcUnread', [
+            {
+              type: 'update',
+              value: {
+                id: `${userId}:${arcId}`,
+                userId,
+                arcId,
+                unreadComments: row.unreadComments,
+                unreadChat: row.unreadChat,
+                lastReadCommentsAt: row.lastReadCommentsAt,
+                lastReadChatAt: row.lastReadChatAt,
+              },
+            },
+          ]),
+        )
+      }
+
+      return c.json({ ok: true })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`[POST /api/arcs/${arcId}/read] unhandled:`, err)
+      return c.json({ error: msg }, 500)
+    }
+  })
+
   app.delete('/api/sessions/:id/comments/:cid', async (c) => {
     const sessionId = c.req.param('id')
     const cid = c.req.param('cid')

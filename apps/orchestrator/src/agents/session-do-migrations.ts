@@ -460,4 +460,23 @@ export const SESSION_DO_MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 24,
+    description:
+      'GH#152 P1.5 WU-B: add `mentions` TEXT column to comments. Stores a JSON-stringified array of resolved user ids (parsed by `parseMentions` against arc_members). NULL means no resolved mentions; the `rowToWire` mapper parses it defensively (NULL / empty / malformed JSON → null). The `chat_messages` sibling column was already added by the ArcCollabDO P1.3 WU-A+B migration; the comments table catches up here.',
+    up: (sql) => {
+      try {
+        sql.exec(`ALTER TABLE comments ADD COLUMN mentions TEXT`)
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (
+          !msg.toLowerCase().includes('duplicate column') &&
+          !msg.toLowerCase().includes('no such table')
+        ) {
+          console.warn('[migration v24] unexpected error adding mentions column', e)
+          throw e
+        }
+      }
+    },
+  },
 ]

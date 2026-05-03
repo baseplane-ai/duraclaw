@@ -1,6 +1,10 @@
 import type { CommentRow } from '@duraclaw/shared-types'
 import { eq } from 'drizzle-orm'
+import { drizzle } from 'drizzle-orm/d1'
+import * as schema from '~/db/schema'
 import { agentSessions } from '~/db/schema'
+import { incrementArcUnread, recordMentions } from '~/lib/collab-summary'
+import { parseMentions } from '~/lib/parse-mentions'
 import { broadcastComments } from './broadcast'
 import type { SessionDOContext } from './types'
 
@@ -44,12 +48,26 @@ type CommentSqlRow = {
   parent_comment_id: string | null
   author_user_id: string
   body: string
+  /** JSON-serialised string[] of resolved user ids; null/empty until WU-B writes it. */
+  mentions: string | null
   created_at: number
   modified_at: number
   edited_at: number | null
   deleted_at: number | null
   deleted_by: string | null
   [key: string]: SqlStorageValue
+}
+
+function parseMentionsJson(raw: string | null): string[] | null {
+  if (raw === null || raw === '') return null
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return null
+    const ids = parsed.filter((v): v is string => typeof v === 'string')
+    return ids.length > 0 ? ids : null
+  } catch {
+    return null
+  }
 }
 
 function rowToWire(row: CommentSqlRow): CommentRow {
@@ -61,6 +79,7 @@ function rowToWire(row: CommentSqlRow): CommentRow {
     parentCommentId: row.parent_comment_id,
     authorUserId: row.author_user_id,
     body: row.body,
+    mentions: parseMentionsJson(row.mentions),
     createdAt: row.created_at,
     modifiedAt: row.modified_at,
     editedAt: row.edited_at,
@@ -73,7 +92,7 @@ function loadCommentById(ctx: SessionDOContext, commentId: string): CommentSqlRo
   const rows = [
     ...ctx.sql.exec<CommentSqlRow>(
       `SELECT id, arc_id, session_id, message_id, parent_comment_id, author_user_id,
-              body, created_at, modified_at, edited_at, deleted_at, deleted_by
+              body, mentions, created_at, modified_at, edited_at, deleted_at, deleted_by
        FROM comments WHERE id = ? LIMIT 1`,
       commentId,
     ),
@@ -208,9 +227,9 @@ export async function addCommentImpl(
   try {
     ctx.sql.exec(
       `INSERT INTO comments (id, arc_id, session_id, message_id, parent_comment_id,
-                             author_user_id, body, created_at, modified_at,
+                             author_user_id, body, mentions, created_at, modified_at,
                              edited_at, deleted_at, deleted_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, NULL, NULL)`,
       id,
       arcId,
       sessionId,
@@ -225,6 +244,44 @@ export async function addCommentImpl(
     console.error(`[SessionDO:${ctx.ctx.id}] addCommentImpl INSERT failed:`, err)
     return { ok: false, error: 'internal_error', status: 500 }
   }
+
+  // GH#152 P1.5 WU-B: resolve @-mentions, persist on the row, and fan
+  // out the unread + mentions inbox writes. parseMentions hits D1
+  // (arc_members ⋈ users); the mentions-table writes + arc_unread
+  // upserts are slow enough to push under waitUntil so the comment
+  // POST returns fast.
+  let resolvedUserIds: string[] = []
+  try {
+    const result = await parseMentions(drizzle(ctx.env.AUTH_DB, { schema }), arcId, args.body)
+    resolvedUserIds = result.resolvedUserIds
+  } catch (err) {
+    console.warn(`[SessionDO:${ctx.ctx.id}] parseMentions failed:`, err)
+  }
+
+  if (resolvedUserIds.length > 0) {
+    const mentionsJson = JSON.stringify(resolvedUserIds)
+    try {
+      ctx.sql.exec(`UPDATE comments SET mentions = ? WHERE id = ?`, mentionsJson, id)
+    } catch (err) {
+      console.warn(`[SessionDO:${ctx.ctx.id}] addCommentImpl mentions UPDATE failed:`, err)
+    }
+  }
+
+  ctx.ctx.waitUntil(
+    (async () => {
+      if (resolvedUserIds.length > 0) {
+        await recordMentions(ctx.env, ctx.ctx, {
+          arcId,
+          sourceKind: 'comment',
+          sourceId: id,
+          actorUserId: authorUserId,
+          preview: args.body.slice(0, 160),
+          resolvedUserIds,
+        })
+      }
+      await incrementArcUnread(ctx.env, ctx.ctx, arcId, 'comments', authorUserId)
+    })(),
+  )
 
   // Record the clientCommentId in submit_ids so a retry within 60s
   // short-circuits to the cached row. Mirrors claimSubmitId's prune step.
@@ -248,6 +305,7 @@ export async function addCommentImpl(
     parentCommentId,
     authorUserId,
     body: args.body,
+    mentions: resolvedUserIds.length > 0 ? resolvedUserIds : null,
     createdAt: now,
     modifiedAt: now,
     editedAt: null,
@@ -375,7 +433,7 @@ export function listCommentsForMessage(
   const rows = [
     ...ctx.sql.exec<CommentSqlRow>(
       `SELECT id, arc_id, session_id, message_id, parent_comment_id, author_user_id,
-              body, created_at, modified_at, edited_at, deleted_at, deleted_by
+              body, mentions, created_at, modified_at, edited_at, deleted_at, deleted_by
        FROM comments
        WHERE session_id = ? AND message_id = ?
        ORDER BY created_at ASC, id ASC`,

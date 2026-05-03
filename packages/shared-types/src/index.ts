@@ -1106,6 +1106,13 @@ export interface CommentRow {
   modifiedAt: number
   /** Epoch ms of last edit, or `null` if never edited. UI shows "(edited)" when set. */
   editedAt: number | null
+  /**
+   * Resolved user ids from the @-mention parser. Null until P1.5 (WU-B)
+   * wires `parseMentions` into `addCommentImpl`; persisted on the
+   * comments row's `mentions` column as JSON, parsed back to a string[]
+   * at broadcast time.
+   */
+  mentions: string[] | null
   /** Epoch ms of soft-delete, or `null` if not deleted. UI shows tombstone when set. */
   deletedAt: number | null
   /** User id who soft-deleted (author / arc owner / admin). `null` when not deleted. */
