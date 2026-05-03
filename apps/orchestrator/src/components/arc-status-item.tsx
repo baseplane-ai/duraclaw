@@ -27,6 +27,7 @@ import { useLiveQuery } from '@tanstack/react-db'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button } from '~/components/ui/button'
 import { arcsCollection } from '~/db/arcs-collection'
+import { useArcUnread } from '~/features/arc-orch/use-arc-unread'
 import { hasActiveSession } from '~/features/kanban/advance-arc'
 import { useArcAutoAdvance } from '~/hooks/use-arc-auto-advance'
 import { checkPrecondition, useNextModePrecondition } from '~/hooks/use-arc-preconditions'
@@ -186,6 +187,11 @@ export function ArcStatusItem({ kataState, kataIssue, sessionId }: ArcStatusItem
 
   const { enabled: autoAdvanceOn, toggle: onToggleAutoAdvance } = useArcAutoAdvance(kataIssue)
 
+  // GH#152 P1.5 WU-C: per-arc unread badge. `useArcUnread` returns
+  // zeros until the arc is resolved; hidden when 0.
+  const { unreadComments, unreadChat } = useArcUnread(arc?.id ?? '')
+  const unreadTotal = unreadComments + unreadChat
+
   const column = useMemo<KanbanColumn>(() => {
     if (!arc) return 'backlog'
     return deriveColumn(arc.sessions, arc.status)
@@ -314,6 +320,15 @@ export function ArcStatusItem({ kataState, kataIssue, sessionId }: ArcStatusItem
         data-testid="arc-status-item"
       >
         <span className="rounded bg-muted px-1.5 py-0.5 text-foreground">#{kataIssue}</span>
+        {unreadTotal > 0 && (
+          <span
+            className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] text-primary-foreground"
+            title={`${unreadTotal} unread`}
+            data-testid="arc-status-unread-badge"
+          >
+            {unreadTotal}
+          </span>
+        )}
         <span className="flex items-center gap-0.5">
           {rungs.map((r, idx) => {
             const isCurrent = r.state === 'current'

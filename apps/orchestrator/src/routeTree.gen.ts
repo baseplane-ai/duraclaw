@@ -13,6 +13,7 @@ import { Route as AuthenticatedAdminUsersRouteImport } from './routes/_authentic
 import { Route as AuthenticatedArcArcIdRouteImport } from './routes/_authenticated/arc.$arcId'
 import { Route as AuthenticatedBoardRouteImport } from './routes/_authenticated/board'
 import { Route as AuthenticatedDeploysRouteImport } from './routes/_authenticated/deploys'
+import { Route as AuthenticatedInboxRouteImport } from './routes/_authenticated/inbox'
 import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/index'
 import { Route as AuthenticatedProjectsRouteImport } from './routes/_authenticated/projects'
 import { Route as AuthenticatedProjectsProjectIdDocsRouteImport } from './routes/_authenticated/projects.$projectId.docs'
@@ -49,6 +50,11 @@ const AuthenticatedBoardRoute = AuthenticatedBoardRouteImport.update({
 const AuthenticatedDeploysRoute = AuthenticatedDeploysRouteImport.update({
   id: '/deploys',
   path: '/deploys',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
+const AuthenticatedInboxRoute = AuthenticatedInboxRouteImport.update({
+  id: '/inbox',
+  path: '/inbox',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
 const AuthenticatedProjectsRoute = AuthenticatedProjectsRouteImport.update({
@@ -88,6 +94,7 @@ export interface FileRoutesByFullPath {
   '/maintenance': typeof MaintenanceRoute
   '/board': typeof AuthenticatedBoardRoute
   '/deploys': typeof AuthenticatedDeploysRoute
+  '/inbox': typeof AuthenticatedInboxRoute
   '/projects': typeof AuthenticatedProjectsRoute
   '/settings': typeof AuthenticatedSettingsRoute
   '/admin/users': typeof AuthenticatedAdminUsersRoute
@@ -100,6 +107,7 @@ export interface FileRoutesByTo {
   '/maintenance': typeof MaintenanceRoute
   '/board': typeof AuthenticatedBoardRoute
   '/deploys': typeof AuthenticatedDeploysRoute
+  '/inbox': typeof AuthenticatedInboxRoute
   '/projects': typeof AuthenticatedProjectsRoute
   '/settings': typeof AuthenticatedSettingsRoute
   '/': typeof AuthenticatedIndexRoute
@@ -115,6 +123,7 @@ export interface FileRoutesById {
   '/maintenance': typeof MaintenanceRoute
   '/_authenticated/board': typeof AuthenticatedBoardRoute
   '/_authenticated/deploys': typeof AuthenticatedDeploysRoute
+  '/_authenticated/inbox': typeof AuthenticatedInboxRoute
   '/_authenticated/projects': typeof AuthenticatedProjectsRoute
   '/_authenticated/settings': typeof AuthenticatedSettingsRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
@@ -131,6 +140,7 @@ export interface FileRouteTypes {
     | '/maintenance'
     | '/board'
     | '/deploys'
+    | '/inbox'
     | '/projects'
     | '/settings'
     | '/admin/users'
@@ -143,6 +153,7 @@ export interface FileRouteTypes {
     | '/maintenance'
     | '/board'
     | '/deploys'
+    | '/inbox'
     | '/projects'
     | '/settings'
     | '/'
@@ -157,6 +168,7 @@ export interface FileRouteTypes {
     | '/maintenance'
     | '/_authenticated/board'
     | '/_authenticated/deploys'
+    | '/_authenticated/inbox'
     | '/_authenticated/projects'
     | '/_authenticated/settings'
     | '/_authenticated/'
@@ -216,6 +228,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedDeploysRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/inbox': {
+      id: '/_authenticated/inbox'
+      path: '/inbox'
+      fullPath: '/inbox'
+      preLoaderRoute: typeof AuthenticatedInboxRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/_authenticated/projects': {
       id: '/_authenticated/projects'
       path: '/projects'
@@ -264,6 +283,7 @@ declare module '@tanstack/react-router' {
 interface AuthenticatedRouteRouteChildren {
   AuthenticatedBoardRoute: typeof AuthenticatedBoardRoute
   AuthenticatedDeploysRoute: typeof AuthenticatedDeploysRoute
+  AuthenticatedInboxRoute: typeof AuthenticatedInboxRoute
   AuthenticatedProjectsRoute: typeof AuthenticatedProjectsRoute
   AuthenticatedSettingsRoute: typeof AuthenticatedSettingsRoute
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
@@ -276,6 +296,7 @@ interface AuthenticatedRouteRouteChildren {
 const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedBoardRoute: AuthenticatedBoardRoute,
   AuthenticatedDeploysRoute: AuthenticatedDeploysRoute,
+  AuthenticatedInboxRoute: AuthenticatedInboxRoute,
   AuthenticatedProjectsRoute: AuthenticatedProjectsRoute,
   AuthenticatedSettingsRoute: AuthenticatedSettingsRoute,
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,

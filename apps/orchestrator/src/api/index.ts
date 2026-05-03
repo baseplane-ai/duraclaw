@@ -3993,6 +3993,196 @@ export function createApiApp() {
     }
   })
 
+  // ── GH#152 P1.5 WU-C — cold-load endpoints for the per-user
+  // arcUnread / arcMentions SyncedCollections. Both are auth-gated by
+  // the session middleware (caller-scoped) and intentionally do NOT
+  // re-check arc ACLs row-by-row: an `arc_unread` / `arc_mentions`
+  // row only exists when the caller had membership at write time, and
+  // membership revocation does NOT retroactively rewrite history.
+  // Stale rows after a revocation are harmless (no body content
+  // beyond the denormalised preview already shown when the mention
+  // landed) and self-cleared on the next D1 cascade if the arc is
+  // deleted.
+
+  app.get('/api/inbox', async (c) => {
+    try {
+      const userId = c.get('userId')
+      if (!userId) return c.json({ error: 'unauth' }, 401)
+
+      // JOIN arcs to surface the title alongside the mention preview so
+      // the Inbox can render arc context without a second round-trip.
+      // The `arcTitle` column is currently consumed by the client-side
+      // renderer via `arcsCollection`, so we DON'T include it in the
+      // wire row to keep the row shape stable; if a future design
+      // surfaces it server-side, swap to `LEFT JOIN arcs` below.
+      const result = await c.env.AUTH_DB.prepare(
+        `SELECT id,
+                user_id        AS userId,
+                arc_id         AS arcId,
+                source_kind    AS sourceKind,
+                source_id      AS sourceId,
+                actor_user_id  AS actorUserId,
+                preview,
+                mention_ts     AS mentionTs,
+                read_at        AS readAt
+           FROM arc_mentions
+          WHERE user_id = ?
+          ORDER BY mention_ts DESC
+          LIMIT 200`,
+      )
+        .bind(userId)
+        .all<{
+          id: string
+          userId: string
+          arcId: string
+          sourceKind: 'comment' | 'chat'
+          sourceId: string
+          actorUserId: string
+          preview: string
+          mentionTs: string
+          readAt: string | null
+        }>()
+
+      return c.json({ rows: result.results ?? [] })
+    } catch (err) {
+      console.error('[GET /api/inbox] unhandled:', err)
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
+    }
+  })
+
+  app.post('/api/inbox/:mentionId/read', async (c) => {
+    const mentionId = c.req.param('mentionId')
+    try {
+      const userId = c.get('userId')
+      if (!userId) return c.json({ error: 'unauth' }, 401)
+
+      const existing = await c.env.AUTH_DB.prepare(
+        `SELECT user_id AS userId FROM arc_mentions WHERE id = ?`,
+      )
+        .bind(mentionId)
+        .first<{ userId: string }>()
+      if (!existing) return c.json({ error: 'not_found' }, 404)
+      if (existing.userId !== userId) return c.json({ error: 'forbidden' }, 403)
+
+      const nowIso = new Date().toISOString()
+      try {
+        await c.env.AUTH_DB.prepare(
+          `UPDATE arc_mentions SET read_at = ? WHERE id = ? AND read_at IS NULL`,
+        )
+          .bind(nowIso, mentionId)
+          .run()
+      } catch (err) {
+        console.error(`[POST /api/inbox/${mentionId}/read] update failed:`, err)
+        return c.json({ error: 'internal_error' }, 500)
+      }
+
+      const row = await c.env.AUTH_DB.prepare(
+        `SELECT id,
+                user_id        AS userId,
+                arc_id         AS arcId,
+                source_kind    AS sourceKind,
+                source_id      AS sourceId,
+                actor_user_id  AS actorUserId,
+                preview,
+                mention_ts     AS mentionTs,
+                read_at        AS readAt
+           FROM arc_mentions WHERE id = ?`,
+      )
+        .bind(mentionId)
+        .first<{
+          id: string
+          userId: string
+          arcId: string
+          sourceKind: 'comment' | 'chat'
+          sourceId: string
+          actorUserId: string
+          preview: string
+          mentionTs: string
+          readAt: string | null
+        }>()
+
+      if (row) {
+        c.executionCtx.waitUntil(
+          broadcastSyncedDelta(c.env, userId, 'arcMentions', [{ type: 'update', value: row }]),
+        )
+      }
+
+      return c.json({ ok: true })
+    } catch (err) {
+      console.error(`[POST /api/inbox/${mentionId}/read] unhandled:`, err)
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
+    }
+  })
+
+  app.post('/api/inbox/read-all', async (c) => {
+    try {
+      const userId = c.get('userId')
+      if (!userId) return c.json({ error: 'unauth' }, 401)
+
+      const nowIso = new Date().toISOString()
+
+      // Capture the ids being touched so we can fan a single bulk
+      // update frame on the caller's `arcMentions` channel — clients
+      // patch each row in place via the upsert-by-key path.
+      const before = await c.env.AUTH_DB.prepare(
+        `SELECT id FROM arc_mentions WHERE user_id = ? AND read_at IS NULL`,
+      )
+        .bind(userId)
+        .all<{ id: string }>()
+      const ids = (before.results ?? []).map((r) => r.id)
+      if (ids.length === 0) return c.json({ ok: true, updated: 0 })
+
+      try {
+        await c.env.AUTH_DB.prepare(
+          `UPDATE arc_mentions SET read_at = ? WHERE user_id = ? AND read_at IS NULL`,
+        )
+          .bind(nowIso, userId)
+          .run()
+      } catch (err) {
+        console.error('[POST /api/inbox/read-all] update failed:', err)
+        return c.json({ error: 'internal_error' }, 500)
+      }
+
+      // Re-read the patched rows so the broadcast carries the
+      // authoritative `readAt` stamp.
+      const placeholders = ids.map(() => '?').join(',')
+      const after = await c.env.AUTH_DB.prepare(
+        `SELECT id,
+                user_id        AS userId,
+                arc_id         AS arcId,
+                source_kind    AS sourceKind,
+                source_id      AS sourceId,
+                actor_user_id  AS actorUserId,
+                preview,
+                mention_ts     AS mentionTs,
+                read_at        AS readAt
+           FROM arc_mentions WHERE id IN (${placeholders})`,
+      )
+        .bind(...ids)
+        .all<{
+          id: string
+          userId: string
+          arcId: string
+          sourceKind: 'comment' | 'chat'
+          sourceId: string
+          actorUserId: string
+          preview: string
+          mentionTs: string
+          readAt: string | null
+        }>()
+
+      const ops = (after.results ?? []).map((value) => ({ type: 'update' as const, value }))
+      if (ops.length > 0) {
+        c.executionCtx.waitUntil(broadcastSyncedDelta(c.env, userId, 'arcMentions', ops))
+      }
+
+      return c.json({ ok: true, updated: ids.length })
+    } catch (err) {
+      console.error('[POST /api/inbox/read-all] unhandled:', err)
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
+    }
+  })
+
   app.delete('/api/sessions/:id/comments/:cid', async (c) => {
     const sessionId = c.req.param('id')
     const cid = c.req.param('cid')

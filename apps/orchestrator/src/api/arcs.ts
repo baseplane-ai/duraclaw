@@ -447,6 +447,55 @@ export function arcsRoutes() {
     return c.json({ arcs: out, more_issues_available: false })
   })
 
+  // ── GET /api/arcs/unread ─────────────────────────────────────────────────
+  // GH#152 P1.5 WU-C: cold-load for the per-user `arcUnread`
+  // SyncedCollection. Returns the caller's full unread snapshot —
+  // one row per (user, arc) the caller has touched. Bounded by the
+  // user's arc membership; no pagination needed in practice.
+  //
+  // MUST be registered BEFORE `/:id` so Hono's first-match routing
+  // doesn't capture `unread` as an arc id.
+  app.get('/unread', async (c) => {
+    try {
+      const userId = c.get('userId')
+      if (!userId) return c.json({ error: 'unauth' }, 401)
+
+      const result = await c.env.AUTH_DB.prepare(
+        `SELECT user_id           AS userId,
+                arc_id            AS arcId,
+                unread_comments   AS unreadComments,
+                unread_chat       AS unreadChat,
+                last_read_comments_at AS lastReadCommentsAt,
+                last_read_chat_at AS lastReadChatAt
+           FROM arc_unread
+          WHERE user_id = ?`,
+      )
+        .bind(userId)
+        .all<{
+          userId: string
+          arcId: string
+          unreadComments: number
+          unreadChat: number
+          lastReadCommentsAt: string | null
+          lastReadChatAt: string | null
+        }>()
+
+      const rows = (result.results ?? []).map((r) => ({
+        id: `${r.userId}:${r.arcId}`,
+        userId: r.userId,
+        arcId: r.arcId,
+        unreadComments: r.unreadComments,
+        unreadChat: r.unreadChat,
+        lastReadCommentsAt: r.lastReadCommentsAt,
+        lastReadChatAt: r.lastReadChatAt,
+      }))
+      return c.json({ rows })
+    } catch (err) {
+      console.error('[GET /api/arcs/unread] unhandled:', err)
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
+    }
+  })
+
   // ── GET /api/arcs/:id ────────────────────────────────────────────────────
   app.get('/:id', async (c) => {
     const userId = c.get('userId')
