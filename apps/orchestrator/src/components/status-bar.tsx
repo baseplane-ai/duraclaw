@@ -165,7 +165,7 @@ function WsDot({ readyState, sessionId }: { readyState: number; sessionId: strin
         className="w-80 space-y-2 font-mono text-[11px] leading-tight"
       >
         {sessionId ? (
-          <WsDebugRow label="session" channel={`agent:${sessionId}`} readyState={readyState} />
+          <WsDebugRow label="session" channel={`session:${sessionId}`} readyState={readyState} />
         ) : null}
         <WsDebugRow label="user-stream" channel="user-stream" />
       </PopoverContent>

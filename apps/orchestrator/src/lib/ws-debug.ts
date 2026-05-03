@@ -145,18 +145,39 @@ export function attachWsDebug(channel: string, socket: MinimalWs): () => void {
     notify(channel)
   }
   const onClose = (ev: Event) => {
-    const ce = ev as CloseEvent
+    // partysocket wraps the underlying browser CloseEvent: it dispatches its
+    // own Event whose `.reason` field is the actual native CloseEvent (with
+    // the real `.code` / `.wasClean`). Unwrap so we capture the meaningful
+    // values, falling back to the outer event when consumers attach to a
+    // raw WebSocket directly.
+    const outer = ev as CloseEvent & { reason?: unknown }
+    const inner =
+      outer.reason && typeof outer.reason === 'object'
+        ? (outer.reason as Partial<CloseEvent> & {
+            code?: number
+            wasClean?: boolean
+            reason?: string
+          })
+        : null
+    const code = inner?.code ?? (typeof outer.code === 'number' ? outer.code : null)
+    const reason =
+      typeof inner?.reason === 'string'
+        ? inner.reason
+        : typeof outer.reason === 'string'
+          ? outer.reason
+          : ''
+    const wasClean = inner?.wasClean ?? outer.wasClean ?? null
     const uptimeMs = openAt > 0 ? Date.now() - openAt : null
     const uptime = uptimeMs == null ? 'never-opened' : `${uptimeMs}ms`
     console.warn(
-      `[ws:${channel}] close code=${ce.code} reason=${JSON.stringify(ce.reason ?? '')} wasClean=${ce.wasClean} uptime=${uptime} url=${socket.url ?? '(unknown)'}${hardFail ? ' (will NOT reconnect — hard-fail)' : ''}`,
+      `[ws:${channel}] close code=${code ?? '?'} reason=${JSON.stringify(reason)} wasClean=${wasClean} uptime=${uptime} url=${socket.url ?? '(unknown)'}${hardFail ? ' (will NOT reconnect — hard-fail)' : ''}`,
     )
     openAt = 0
     info.url = socket.url ?? info.url
     info.lastCloseAt = Date.now()
-    info.lastCloseCode = ce.code ?? null
-    info.lastCloseReason = ce.reason ?? ''
-    info.lastCloseWasClean = ce.wasClean ?? null
+    info.lastCloseCode = code
+    info.lastCloseReason = reason
+    info.lastCloseWasClean = wasClean
     info.lastCloseUptimeMs = uptimeMs
     info.closeCount += 1
     notify(channel)
